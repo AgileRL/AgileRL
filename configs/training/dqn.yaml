@@ -8,6 +8,7 @@ INIT_HP:
     CHANNELS_LAST: false
     NUM_ENVS: 16               # No. parallel environments for training
     BATCH_SIZE: 64             # Batch size
+    CUDAGRAPHS: false           # Cudagraph optimizations
     LR: 0.001                  # Learning rate
     MAX_STEPS: 1_000_000       # Max no. steps
     TARGET_SCORE: 200.         # Early training stop at avg score of last 100 episodes
@@ -31,8 +32,6 @@ MUTATION_PARAMS:
     PARAMS_MUT: 0.2                        # Network parameters mutation
     ACT_MUT: 0.2                           # Activation layer mutation
     RL_HP_MUT: 0.2                         # Learning HP mutation
-    # Learning HPs to choose from
-    RL_HP_SELECTION: [lr, batch_size, learn_step]
     MUT_SD: 0.1                            # Mutation strength
     RAND_SEED: 42                          # Random seed
     # Define max and min limits for mutating RL hyperparams
@@ -44,5 +43,10 @@ MUTATION_PARAMS:
     MAX_LEARN_STEP: 10
 
 NET_CONFIG:
-    arch: mlp
-    hidden_size: [64, 64]
+    latent_dim: 64
+
+    encoder_config:
+        hidden_size: [64]
+
+    head_config:
+        hidden_size: [64]

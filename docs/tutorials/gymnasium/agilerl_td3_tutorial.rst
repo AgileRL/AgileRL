@@ -2,7 +2,7 @@
 
 
 Lunar Lander with TD3
-==========================
+=====================
 
 In this tutorial, we will be training and optimising the hyperparameters of a population of TD3 agents
 to beat the Gymnasium continuous lunar lander environment. AgileRL is a deep reinforcement learning
@@ -24,6 +24,7 @@ or not at all to safely navigate the lander to the landing pad without crashing.
 
 TD3 Overview
 ------------
+
 TD3 (twin-delayed deep deterministic policy gradient) is an off-policy actor-critic algorithm used
 to estimate the optimal policy function, which determines what actions an agent should take given the
 observed state of the environment. The agent does this by using a policy network (actor) to determine actions
@@ -48,13 +49,18 @@ Dependencies
     import gymnasium as gym
     import numpy as np
     import torch
+    from tqdm import trange
+
     from agilerl.algorithms.td3 import TD3
     from agilerl.components.replay_buffer import ReplayBuffer
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
     from agilerl.training.train_off_policy import train_off_policy
-    from agilerl.utils.utils import create_population, make_vect_envs
-    from tqdm import trange
+    from agilerl.utils.utils import (
+        create_population,
+        make_vect_envs,
+        observation_space_channels_to_first
+    )
 
 
 Defining Hyperparameters
@@ -108,8 +114,6 @@ Additionally, we also define our upper and lower limits for these hyperparameter
         "PARAMS_MUT": 0.2,  # Network parameters mutation
         "ACT_MUT": 0.2,  # Activation layer mutation
         "RL_HP_MUT": 0.2,  # Learning HP mutation
-        # Learning HPs to choose from
-        "RL_HP_SELECTION": ["lr", "batch_size", "learn_step"],
         "MUT_SD": 0.1,  # Mutation strength
         "RAND_SEED": 42,  # Random seed
         # Define max and min limits for mutating RL hyperparams
@@ -124,30 +128,18 @@ Additionally, we also define our upper and lower limits for these hyperparameter
 Create the Environment
 ----------------------
 In this particular tutorial, we will be focussing on the continuous lunar lander environment as TD3 can only be
-used with continuous action environments. The snippet below creates a vectorised environment and then assigns the
-correct values for ``state_dim`` and ``one_hot``, depending on whether the observation space is discrete or continuous.
+used with continuous action environments.
 
 .. code-block:: python
 
     num_envs=8
     env = make_vect_envs("LunarLanderContinuous-v2", num_envs=num_envs)  # Create environment
-    try:
-        state_dim = env.single_observation_space.n, # Discrete observation space
-        one_hot = True  # Requires one-hot encoding
-    except Exception:
-        state_dim = env.single_observation_space.shape  # Continuous observation space
-        one_hot = False  # Does not require one-hot encoding
-    try:
-        action_dim = env.single_action_space.n  # Discrete action space
-    except Exception:
-        action_dim = env.single_action_space.shape[0]  # Continuous action space
 
-    INIT_HP["MAX_ACTION"] = float(env.single_action_space.high[0])
-    INIT_HP["MIN_ACTION"] = float(env.single_action_space.low[0])
-
+    observation_space = env.single_observation_space
+    action_space = env.single_action_space
     if INIT_HP["CHANNELS_LAST"]:
         # Adjust dimensions for PyTorch API (C, H, W), for envs with RGB image states
-        state_dim = (state_dim[2], state_dim[0], state_dim[1])
+        observation_space = observation_space_channels_to_first(observation_space)
 
 
 Create a Population of Agents
@@ -163,16 +155,26 @@ population. The sequence of evolution (tournament selection followed by mutation
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Define the network configuration of a simple mlp with two hidden layers, each with 64 nodes
-    net_config = {"arch": "mlp", "hidden_size": [64, 64]}
+    net_config = {"head_config": {"hidden_size": [64, 64]}}
+
+    # Mutation config for RL hyperparameters
+    hp_config = HyperparameterConfig(
+        lr_actor = RLParameter(min=1e-4, max=1e-2),
+        lr_critic = RLParameter(min=1e-4, max=1e-2),
+        learn_step = RLParameter(min=1, max=16, dtype=int),
+        batch_size = RLParameter(
+            min=8, max=512, dtype=int
+            )
+    )
 
     # Define a population
     pop = create_population(
-        algo="TD3",  # Algorithm
-        state_dim=state_dim,  # State dimension
-        action_dim=action_dim,  # Action dimension
-        one_hot=one_hot,  # One-hot encoding
+        algo="TD3", # Algorithm
+        observation_space=observation_space,  # State dimension
+        action_space=action_space,  # Action dimension
         net_config=net_config,  # Network configuration
         INIT_HP=INIT_HP,  # Initial hyperparameters
+        hp_config=hp_config,  # RL hyperparameter configuration
         population_size=INIT_HP["POP_SIZE"],  # Population size
         num_envs=num_envs,
         device=device,
@@ -181,6 +183,7 @@ population. The sequence of evolution (tournament selection followed by mutation
 
 Experience Replay
 -----------------
+
 In order to efficiently train a population of RL agents, off-policy algorithms are able to share memory within populations.
 This reduces the exploration needed by an individual agent because it allows faster learning from the behaviour of other agents.
 For example, if you were able to watch a bunch of people attempt to solve a maze, you could learn from their mistakes and successes
@@ -202,6 +205,7 @@ by the class ``ReplayBuffer()``. During training it can be added to using the ``
 
 Creating Mutations and Tournament objects
 -----------------------------------------
+
 Tournament selection is used to select the agents from a population which will make up the next generation of agents. If
 elitism is used, the best agent from a population is automatically preserved and becomes a member of the next generation.
 Then, for each tournament, k individuals are randomly chosen, and the agent with the best evaluation fitness is preserved.
@@ -238,22 +242,13 @@ Tournament selection and mutation should be applied sequentially to fully evolve
 .. code-block:: python
 
     mutations = Mutations(
-        algo=INIT_HP["ALGO"],
         no_mutation=MUT_P["NO_MUT"],
         architecture=MUT_P["ARCH_MUT"],
         new_layer_prob=MUT_P["NEW_LAYER"],
         parameters=MUT_P["PARAMS_MUT"],
         activation=MUT_P["ACT_MUT"],
         rl_hp=MUT_P["RL_HP_MUT"],
-        rl_hp_selection=MUT_P["RL_HP_SELECTION"],
-        min_lr=MUT_P["MIN_LR"],
-        max_lr=MUT_P["MAX_LR"],
-        min_batch_size=MUT_P["MAX_BATCH_SIZE"],
-        max_batch_size=MUT_P["MAX_BATCH_SIZE"],
-        min_learn_step=MUT_P["MIN_LEARN_STEP"],
-        max_learn_step=MUT_P["MAX_LEARN_STEP"],
         mutation_sd=MUT_P["MUT_SD"],
-        arch=net_config["arch"],
         rand_seed=MUT_P["RAND_SEED"],
         device=device,
     )
@@ -263,7 +258,8 @@ Training and Saving an Agent
 ----------------------------
 
 Using AgileRL ``train_off_policy`` function
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
 The simplest way to train an AgileRL agent is to use one of the implemented AgileRL train functions.
 Given that TD3 is an off-policy algorithm, we can make use of the ``train_off_policy`` function. This
 training function will orchestrate the training and hyperparameter optimisation process, removing the
@@ -329,7 +325,7 @@ function and is an example of how we might choose to make use of a population of
 
             for idx_step in range(INIT_HP["EVO_STEPS"] // num_envs):
                 if INIT_HP["CHANNELS_LAST"]:
-                    state = np.moveaxis(state, [-1], [-3])
+                    state = obs_channels_to_first(state)
 
                 action = agent.get_action(state)  # Get next action from agent
 
@@ -355,7 +351,7 @@ function and is an example of how we might choose to make use of a population of
                         state,
                         action,
                         reward,
-                        np.moveaxis(next_state, [-1], [-3]),
+                        obs_channels_to_first(next_state),
                         terminated,
                         is_vectorised=True,
                     )
@@ -456,7 +452,7 @@ Test loop for inference
             for step in range(max_testing_steps):
                 # If your state is an RGB image
                 if INIT_HP["CHANNELS_LAST"]:
-                    state = np.moveaxis(state, [-1], [-3])
+                    state = obs_channels_to_first(state)
 
                 # Get next action from agent
                 action, *_ = td3.get_action(state, training=False)

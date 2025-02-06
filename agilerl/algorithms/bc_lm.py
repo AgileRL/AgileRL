@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 from agilerl.data.language_environment import Language_Observation, interact_environment
 from agilerl.data.rl_data import DataPoint, RL_Dataset
-from agilerl.networks.evolvable_gpt import EvolvableGPT
+from agilerl.modules.gpt import EvolvableGPT
 from agilerl.utils.sampling_utils import (
     always_terminate,
     map_all_kvs,
@@ -43,7 +43,7 @@ class BC_LM(nn.Module):
             max_layers=net_config["max_layers"],
             bias=net_config["bias"],
             device=self.device,
-        ).to(self.device)
+        )
         self.max_len = self.dataset.max_len
         self.h_dim = net_config["n_embd"]
         self.transition_weight = transition_weight
@@ -62,7 +62,9 @@ class BC_LM(nn.Module):
         # prefix_embs – b,t',d
         # prefix_attn_mask - b, t'
         if prefix_embs is None:
-            prefix_embs = torch.empty((tokens.shape[0], 0, self.h_dim)).to(self.device)
+            prefix_embs = torch.empty(
+                (tokens.shape[0], 0, self.h_dim), device=self.device
+            )
         set_pos_ids = prefix_attn_mask is not None
         if prefix_attn_mask is not None and attn_mask is not None:
             input_attn_mask = torch.cat((prefix_attn_mask, attn_mask), dim=1)
@@ -86,9 +88,9 @@ class BC_LM(nn.Module):
         return model_outputs, model_past_key_values
 
     def get_weights(self, tokens: torch.Tensor, action_idxs: torch.Tensor):
-        weights = torch.full(tokens.shape, self.transition_weight).to(self.device)
+        weights = torch.full(tokens.shape, self.transition_weight, device=self.device)
         if action_idxs.shape[1] == 0:
-            n = torch.zeros((tokens.shape[0],)).long().to(self.device)
+            n = torch.zeros((tokens.shape[0],), device=self.device).long()
         else:
             n = torch.argmax(action_idxs, dim=1) + 1
         for i in range(tokens.shape[0]):
@@ -96,7 +98,7 @@ class BC_LM(nn.Module):
                 weights[i],
                 dim=0,
                 index=action_idxs[i, : n[i]],
-                src=torch.full((n[i].item(),), 1.0).to(self.device),
+                src=torch.full((n[i].item(),), 1.0, device=self.device),
             )
         return weights
 
@@ -269,8 +271,8 @@ class BC_Policy:
             ),
             dialogue_kvs,
         )
-        log_probs = torch.full((dialogue_lens.shape[0],), 0.0).to(device)
-        termination_mask = torch.full((dialogue_lens.shape[0],), 1).to(device)
+        log_probs = torch.full((dialogue_lens.shape[0],), 0.0, device=device)
+        termination_mask = torch.full((dialogue_lens.shape[0],), 1, device=device)
         t = torch.min(dialogue_lens).int()
         while termination_mask.sum() > 0 and (t + prefix_t) < max_length:
             curr_token = tokens[:, t - 1].unsqueeze(1)
@@ -284,12 +286,12 @@ class BC_Policy:
                 termination_mask == 1, float("-inf"), 1e7
             )
             logits[
-                torch.arange(0, n).to(device),
-                torch.full((n,), 0).to(device),
+                torch.arange(0, n, device=device),
+                torch.full((n,), 0, device=device),
                 tokens[:, t],
             ] = logits[
-                torch.arange(0, n).to(device),
-                torch.full((n,), 0).to(device),
+                torch.arange(0, n, device=device),
+                torch.full((n,), 0, device=device),
                 tokens[:, t],
             ].masked_fill_(
                 t < dialogue_lens, 1e7
@@ -302,7 +304,7 @@ class BC_Policy:
             dialogue_kvs = update_kvs(
                 dialogue_kvs,
                 past_key_values,
-                torch.arange(0, n).to(device),
+                torch.arange(0, n, device=device),
                 (t + prefix_t) - 1,
             )
             for idx in range(n):
@@ -387,7 +389,7 @@ class BC_Policy:
         dialogue_kvs = past_key_values
         original_dialogue_lens = attn_mask.sum(dim=1)
         batch_indicator = torch.stack(
-            beam_width * [torch.arange(0, bsize).to(device)], dim=1
+            beam_width * [torch.arange(0, bsize, device=device)], dim=1
         )
         tokens = pad_sequence(
             torch.repeat_interleave(tokens, beam_width, dim=0),
@@ -409,8 +411,8 @@ class BC_Policy:
             ),
             dialogue_kvs,
         )
-        curr_scores = torch.zeros(bsize, beam_width).to(device)  # (batch, k)
-        termination_mask = torch.full((n,), 1).to(device)
+        curr_scores = torch.zeros(bsize, beam_width, device=device)  # (batch, k)
+        termination_mask = torch.full((n,), 1, device=device)
         t = torch.min(dialogue_lens).int()
         while termination_mask.sum() > 0 and (t + prefix_t) < max_length:
             curr_token = tokens[:, t - 1].unsqueeze(1)
@@ -424,12 +426,12 @@ class BC_Policy:
                 termination_mask == 1, float("-inf"), 1e7
             )
             logits[
-                torch.arange(0, n).to(device),
-                torch.full((n,), 0).to(device),
+                torch.arange(0, n, device=device),
+                torch.full((n,), 0, device=device),
                 tokens[:, t],
             ] = logits[
-                torch.arange(0, n).to(device),
-                torch.full((n,), 0).to(device),
+                torch.arange(0, n, device=device),
+                torch.full((n,), 0, device=device),
                 tokens[:, t],
             ].masked_fill_(
                 t < dialogue_lens, 1e7
@@ -478,7 +480,7 @@ class BC_Policy:
             dialogue_kvs = update_kvs(
                 dialogue_kvs,
                 fixed_dialogue_kvs,
-                torch.arange(0, n).to(device),
+                torch.arange(0, n, device=device),
                 (t + prefix_t) - 1,
             )
             dialogue_lens = dialogue_lens[
@@ -598,7 +600,7 @@ class BC_Evaluator:
 
 
 def to(item: Any, device: torch.device):
-    return map_pytree(lambda x: torch.tensor(x).to(device), item)
+    return map_pytree(lambda x: torch.tensor(x, device=device), item)
 
 
 def map_pytree(f: Callable[[Union[np.ndarray, torch.Tensor]], Any], item: Any):

@@ -1,37 +1,53 @@
-import os
+import time
 import warnings
 from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
+import gymnasium as gym
 import numpy as np
 import wandb
+from accelerate import Accelerator
 from tqdm import trange
+
+from agilerl.algorithms.core.base import RLAlgorithm
+from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.tournament import TournamentSelection
+from agilerl.utils.algo_utils import obs_channels_to_first
+from agilerl.utils.utils import (
+    init_wandb,
+    save_population_checkpoint,
+    tournament_selection_and_mutation,
+)
+
+InitDictType = Optional[Dict[str, Any]]
+PopulationType = List[RLAlgorithm]
 
 
 def train_on_policy(
-    env,
-    env_name,
-    algo,
-    pop,
-    INIT_HP=None,
-    MUT_P=None,
-    swap_channels=False,
-    max_steps=1000000,
-    evo_steps=10000,
-    eval_steps=None,
-    eval_loop=1,
-    target=None,
-    tournament=None,
-    mutation=None,
-    checkpoint=None,
-    checkpoint_path=None,
-    overwrite_checkpoints=False,
-    save_elite=False,
-    elite_path=None,
-    wb=False,
-    verbose=True,
-    accelerator=None,
-    wandb_api_key=None,
-):
+    env: gym.Env,
+    env_name: str,
+    algo: str,
+    pop: PopulationType,
+    INIT_HP: InitDictType = None,
+    MUT_P: InitDictType = None,
+    swap_channels: bool = False,
+    max_steps: int = 1000000,
+    evo_steps: int = 10000,
+    eval_steps: Optional[int] = None,
+    eval_loop: int = 1,
+    target: Optional[float] = None,
+    tournament: Optional[TournamentSelection] = None,
+    mutation: Optional[Mutations] = None,
+    checkpoint: Optional[int] = None,
+    checkpoint_path: Optional[str] = None,
+    overwrite_checkpoints: bool = False,
+    save_elite: bool = False,
+    elite_path: Optional[str] = None,
+    wb: bool = False,
+    verbose: bool = True,
+    accelerator: Optional[Accelerator] = None,
+    wandb_api_key: Optional[str] = None,
+) -> Tuple[PopulationType, List[List[float]]]:
     """The general on-policy RL training function. Returns trained population of agents
     and their fitnesses.
 
@@ -42,7 +58,7 @@ def train_on_policy(
     :param algo: RL algorithm name
     :type algo: str
     :param pop: Population of agents
-    :type pop: list[object]
+    :type pop: list[RLAlgorithm]
     :param INIT_HP: Dictionary containing initial hyperparameters, defaults to None
     :type INIT_HP: dict, optional
     :param MUT_P: Dictionary containing mutation parameters, defaults to None
@@ -84,6 +100,9 @@ def train_on_policy(
     :type accelerator: accelerate.Accelerator(), optional
     :param wandb_api_key: API key for Weights & Biases, defaults to None
     :type wandb_api_key: str, optional
+
+    :return: Trained population of agents and their fitnesses
+    :rtype: list[RLAlgorithm], list[list[float]]
     """
     assert isinstance(
         algo, str
@@ -112,47 +131,14 @@ def train_on_policy(
         )
 
     if wb:
-        if not hasattr(wandb, "api"):
-            if wandb_api_key is not None:
-                wandb.login(key=wandb_api_key)
-            else:
-                warnings.warn("Must login to wandb with API key.")
-
-        config_dict = {}
-        if INIT_HP is not None:
-            config_dict.update(INIT_HP)
-        if MUT_P is not None:
-            config_dict.update(MUT_P)
-
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
-            if accelerator.is_main_process:
-                wandb.init(
-                    # set the wandb project where this run will be logged
-                    project="AgileRL",
-                    name="{}-EvoHPO-{}-{}".format(
-                        env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
-                    ),
-                    # track hyperparameters and run metadata
-                    config=config_dict,
-                )
-            accelerator.wait_for_everyone()
-        else:
-            wandb.init(
-                # set the wandb project where this run will be logged
-                project="AgileRL",
-                name="{}-EvoHPO-{}-{}".format(
-                    env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
-                ),
-                # track hyperparameters and run metadata
-                config=config_dict,
-            )
-
-    if accelerator is not None:
-        accel_temp_models_path = f"models/{env_name}"
-        if accelerator.is_main_process:
-            if not os.path.exists(accel_temp_models_path):
-                os.makedirs(accel_temp_models_path)
+        init_wandb(
+            algo=algo,
+            env_name=env_name,
+            init_hyperparams=INIT_HP,
+            mutation_hyperparams=MUT_P,
+            wandb_api_key=wandb_api_key,
+            accelerator=accelerator,
+        )
 
     # Detect if environment is vectorised
     if hasattr(env, "num_envs"):
@@ -210,12 +196,13 @@ def train_on_policy(
         if accelerator is not None:
             accelerator.wait_for_everyone()
         pop_episode_scores = []
+        pop_fps = []
         for agent_idx, agent in enumerate(pop):  # Loop through population
             state, info = env.reset()  # Reset environment at start of episode
             scores = np.zeros(num_envs)
             completed_episode_scores = []
             steps = 0
-
+            start_time = time.time()
             for _ in range(-(evo_steps // -agent.learn_step)):
 
                 states = []
@@ -227,11 +214,11 @@ def train_on_policy(
                 truncs = []
 
                 learn_steps = 0
-
                 for idx_step in range(-(agent.learn_step // -num_envs)):
 
                     if swap_channels:
-                        state = np.moveaxis(state, [-1], [-3])
+                        state = obs_channels_to_first(state)
+
                     # Get next action from agent
                     action_mask = info.get("action_mask", None)
                     action, log_prob, _, value = agent.get_action(
@@ -242,6 +229,7 @@ def train_on_policy(
                         action = action[0]
                         log_prob = log_prob[0]
                         value = value[0]
+
                     next_state, reward, done, trunc, info = env.step(
                         action
                     )  # Act in environment
@@ -274,7 +262,7 @@ def train_on_policy(
                 pbar.update(learn_steps // len(pop))
 
                 if swap_channels:
-                    next_state = np.moveaxis(next_state, [-1], [-3])
+                    next_state = obs_channels_to_first(next_state)
 
                 experiences = (
                     states,
@@ -290,6 +278,8 @@ def train_on_policy(
                 pop_loss[agent_idx].append(loss)
 
             agent.steps[-1] += steps
+            fps = steps / (time.time() - start_time)
+            pop_fps.append(fps)
             pop_episode_scores.append(completed_episode_scores)
 
         # Evaluate population
@@ -316,6 +306,7 @@ def train_on_policy(
                     if accelerator is not None and accelerator.is_main_process
                     else total_steps
                 ),
+                "fps": np.mean(pop_fps),
                 "train/mean_score": np.mean(
                     [
                         mean_score
@@ -359,38 +350,16 @@ def train_on_policy(
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
-            if accelerator is not None:
-                accelerator.wait_for_everyone()
-                for model in pop:
-                    model.unwrap_models()
-                accelerator.wait_for_everyone()
-                if accelerator.is_main_process:
-                    elite, pop = tournament.select(pop)
-                    pop = mutation.mutation(pop)
-                    for pop_i, model in enumerate(pop):
-                        model.save_checkpoint(
-                            f"{accel_temp_models_path}/{algo}_{pop_i}.pt"
-                        )
-                accelerator.wait_for_everyone()
-                if not accelerator.is_main_process:
-                    for pop_i, model in enumerate(pop):
-                        model.load_checkpoint(
-                            f"{accel_temp_models_path}/{algo}_{pop_i}.pt"
-                        )
-                accelerator.wait_for_everyone()
-                for model in pop:
-                    model.wrap_models()
-            else:
-                elite, pop = tournament.select(pop)
-                pop = mutation.mutation(pop)
-
-            if save_elite:
-                elite_save_path = (
-                    elite_path.split(".pt")[0]
-                    if elite_path is not None
-                    else f"{env_name}-elite_{algo}"
-                )
-                elite.save_checkpoint(f"{elite_save_path}.pt")
+            pop = tournament_selection_and_mutation(
+                population=pop,
+                tournament=tournament,
+                mutation=mutation,
+                env_name=env_name,
+                algo=algo,
+                elite_path=elite_path,
+                save_elite=save_elite,
+                accelerator=accelerator,
+            )
 
         if verbose:
             fitness = ["%.2f" % fitness for fitness in fitnesses]
@@ -418,33 +387,12 @@ def train_on_policy(
         # Save model checkpoint
         if checkpoint is not None:
             if pop[0].steps[-1] // checkpoint > checkpoint_count:
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
-                    for model in pop:
-                        model.unwrap_models()
-                    accelerator.wait_for_everyone()
-                    if accelerator.is_main_process:
-                        for i, agent in enumerate(pop):
-                            current_checkpoint_path = (
-                                f"{save_path}_{i}.pt"
-                                if overwrite_checkpoints
-                                else f"{save_path}_{i}_{agent.steps[-1]}.pt"
-                            )
-                            agent.save_checkpoint(current_checkpoint_path)
-                        print("Saved checkpoint.")
-                    accelerator.wait_for_everyone()
-                    for model in pop:
-                        model.wrap_models()
-                    accelerator.wait_for_everyone()
-                else:
-                    for i, agent in enumerate(pop):
-                        current_checkpoint_path = (
-                            f"{save_path}_{i}.pt"
-                            if overwrite_checkpoints
-                            else f"{save_path}_{i}_{agent.steps[-1]}.pt"
-                        )
-                        agent.save_checkpoint(current_checkpoint_path)
-                    print("Saved checkpoint.")
+                save_population_checkpoint(
+                    population=pop,
+                    save_path=save_path,
+                    overwrite_checkpoints=overwrite_checkpoints,
+                    accelerator=accelerator,
+                )
                 checkpoint_count += 1
 
     if wb:

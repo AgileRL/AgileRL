@@ -608,12 +608,12 @@ Before we go any further in this tutorial, it would be helpful to define and set
 
       # Define the network configuration
       NET_CONFIG = {
-         "arch": "cnn",  # Network architecture
-         "hidden_size": [64, 64],  # Actor hidden size
-         "channel_size": [128],  # CNN channel size
-         "kernel_size": [4],  # CNN kernel size
-         "stride_size": [1],  # CNN stride size
-         "normalize": False,  # Normalize image from range [0,255] to [0,1]
+         "encoder_config": {
+            "channel_size": [128],  # CNN channel size
+            "kernel_size": [4],  # CNN kernel size
+            "stride_size": [1],  # CNN stride size
+         },
+         "head_config": {"hidden_size": [64, 64]},  # Network head hidden size
       }
 
       # Define the initial hyperparameters
@@ -644,14 +644,10 @@ Before we go any further in this tutorial, it would be helpful to define and set
       env.reset()
 
       # Configure the algo input arguments
-      state_dim = [
-         env.observation_space(agent)["observation"].shape for agent in env.agents
+      observation_spaces = [
+         env.observation_space(agent)["observation"] for agent in env.agents
       ]
-      one_hot = False
-      action_dim = [env.action_space(agent).n for agent in env.agents]
-      INIT_HP["DISCRETE_ACTIONS"] = True
-      INIT_HP["MAX_ACTION"] = None
-      INIT_HP["MIN_ACTION"] = None
+      action_spaces = [env.action_space(agent) for agent in env.agents]
 
       # Warp the environment in the curriculum learning wrapper
       env = CurriculumEnv(env, LESSON)
@@ -659,17 +655,26 @@ Before we go any further in this tutorial, it would be helpful to define and set
       # Pre-process dimensions for PyTorch layers
       # We only need to worry about the state dim of a single agent
       # We flatten the 6x7x2 observation as input to the agent"s neural network
-      state_dim = np.moveaxis(np.zeros(state_dim[0]), [-1], [-3]).shape
-      action_dim = action_dim[0]
+      observation_space = observation_space_channels_to_first(observation_spaces[0])
+      action_space = action_spaces[0]
+
+      # Mutation config for RL hyperparameters
+      hp_config = HyperparameterConfig(
+         lr = RLParameter(min=1e-4, max=1e-2),
+         batch_size = RLParameter(min=8, max=64, dtype=int),
+         learn_step = RLParameter(
+               min=1, max=120, dtype=int, grow_factor=1.5, shrink_factor=0.75
+               )
+      )
 
       # Create a population ready for evolutionary hyper-parameter optimisation
       pop = create_population(
          INIT_HP["ALGO"],
-         state_dim,
-         action_dim,
-         one_hot,
+         observation_space,
+         action_space,
          NET_CONFIG,
          INIT_HP,
+         hp_config,
          population_size=INIT_HP["POPULATION_SIZE"],
          device=device,
       )
@@ -692,27 +697,13 @@ Before we go any further in this tutorial, it would be helpful to define and set
 
       # Instantiate a mutations object (used for HPO)
       mutations = Mutations(
-         algo=INIT_HP["ALGO"],
          no_mutation=0.2,  # Probability of no mutation
          architecture=0,  # Probability of architecture mutation
          new_layer_prob=0.2,  # Probability of new layer mutation
          parameters=0.2,  # Probability of parameter mutation
          activation=0,  # Probability of activation function mutation
          rl_hp=0.2,  # Probability of RL hyperparameter mutation
-         rl_hp_selection=[
-               "lr",
-               "learn_step",
-               "batch_size",
-         ],  # RL hyperparams selected for mutation
          mutation_sd=0.1,  # Mutation strength
-         # Define search space for each hyperparameter
-         min_lr=0.0001,
-         max_lr=0.01,
-         min_learn_step=1,
-         max_learn_step=120,
-         min_batch_size=8,
-         max_batch_size=64,
-         arch=NET_CONFIG["arch"],  # MLP or CNN
          rand_seed=1,
          device=device,
       )
@@ -771,7 +762,7 @@ The observation space of Connect Four is (6, 7, 2), where the first two dimensio
          """
          state = observation["observation"]
          # Pre-process dimensions for PyTorch (N, C, H, W)
-         state = np.moveaxis(state, [-1], [-3])
+         state = obs_channels_to_first(state)
          if player == 1:
             # Swap pieces so that the agent always sees the board from the same perspective
             state[[0, 1], :, :] = state[[1, 0], :, :]
@@ -865,7 +856,7 @@ At regular intervals, we evaluate the performance, or 'fitness',  of the agents 
       # Training loop
       for idx_epi in pbar:
          turns_per_episode = []
-         train_actions_hist = [0] * action_dim
+         train_actions_hist = [0] * action_space.n
          for agent in pop:  # Loop through population
                for episode in range(episodes_per_epoch):
                   env.reset()  # Reset environment at start of episode
@@ -1090,7 +1081,7 @@ At regular intervals, we evaluate the performance, or 'fitness',  of the agents 
                # Evaluate population vs random actions
                fitnesses = []
                win_rates = []
-               eval_actions_hist = [0] * action_dim  # Eval actions histogram
+               eval_actions_hist = [0] * action_space.n  # Eval actions histogram
                eval_turns = 0  # Eval turns counter
                for agent in pop:
                   with torch.no_grad():

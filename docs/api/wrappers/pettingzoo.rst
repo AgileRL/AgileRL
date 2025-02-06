@@ -1,5 +1,5 @@
 Petting Zoo Wrapper
-==============
+===================
 
 Parameters
 ----------

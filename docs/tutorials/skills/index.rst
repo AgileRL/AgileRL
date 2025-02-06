@@ -68,8 +68,14 @@ Importing the following packages, functions and classes will enable us to run th
 
       from agilerl.algorithms.ppo import PPO
       from agilerl.training.train_on_policy import train_on_policy
-      from agilerl.utils.utils import create_population, make_skill_vect_envs, make_vect_envs
       from agilerl.wrappers.learning import Skill
+      from agilerl.utils.algo_utils import obs_channels_to_first
+      from agilerl.utils.utils import (
+         create_population,
+         make_skill_vect_envs,
+         make_vect_envs,
+         observation_space_channels_to_first
+      )
 
 
 Defining skills
@@ -218,15 +224,13 @@ Once the skills have been defined, training agents to solve them is very straigh
    .. code-block:: python
 
       NET_CONFIG = {
-         "arch": "mlp",  # Network architecture
-         "hidden_size": [64, 64],  # Actor hidden size
+         "encoder_config": {"hidden_size": [64, 64]}  # Actor encoder hidden size
       }
 
       INIT_HP = {
          "ENV_NAME": "LunarLander-v2",
          "ALGO": "PPO",
          "POPULATION_SIZE": 1,  # Population size
-         "DISCRETE_ACTIONS": True,  # Discrete action space
          "BATCH_SIZE": 128,  # Batch size
          "LR": 1e-3,  # Learning rate
          "LEARN_STEP": 128,  # Learning frequency
@@ -268,27 +272,15 @@ Once the skills have been defined, training agents to solve them is very straigh
                INIT_HP["ENV_NAME"], skills[skill], num_envs=1
          )  # Create environment
 
-         try:
-               state_dim = env.single_observation_space.n, # Discrete observation space
-               one_hot = True  # Requires one-hot encoding
-         except Exception:
-               state_dim = (
-                  env.single_observation_space.shape
-               )  # Continuous observation space
-               one_hot = False  # Does not require one-hot encoding
-         try:
-               action_dim = env.single_action_space.n  # Discrete action space
-         except Exception:
-               action_dim = env.single_action_space.shape[0]  # Continuous action space
-
+         observation_space = env.single_observation_space
+         action_space = env.single_action_space
          if INIT_HP["CHANNELS_LAST"]:
-               state_dim = (state_dim[2], state_dim[0], state_dim[1])
+               observation_space = observation_space_channels_to_first(observation_space)
 
          pop = create_population(
                algo="PPO",  # Algorithm
-               state_dim=state_dim,  # State dimension
-               action_dim=action_dim,  # Action dimension
-               one_hot=one_hot,  # One-hot encoding
+               observation_space=observation_space,  # Observation space
+               action_space=action_space,  # Action space
                net_config=NET_CONFIG,  # Network configuration
                INIT_HP=INIT_HP,  # Initial hyperparameters
                population_size=INIT_HP["POPULATION_SIZE"],  # Population size
@@ -352,25 +344,21 @@ Next we can define the variables we will need in our training loop.
 
       env = make_vect_envs(INIT_HP["ENV_NAME"], num_envs=1)  # Create environment
 
-      try:
-         state_dim = env.single_observation_space.n,  # Discrete observation space
-         one_hot = True  # Requires one-hot encoding
-      except Exception:
-         state_dim = env.single_observation_space.shape  # Continuous observation space
-         one_hot = False  # Does not require one-hot encoding
+      observation_space = env.single_observation_space
 
       action_dim = len(
          trained_skills
       )  # Selector will be trained to choose which trained skill to use
 
+      action_space = spaces.Discrete(action_dim)
+
       if INIT_HP["CHANNELS_LAST"]:
-         state_dim = (state_dim[2], state_dim[0], state_dim[1])
+         observation_space = observation_space_channels_to_first(observation_space)
 
       pop = create_population(
          algo="PPO",  # Algorithm
-         state_dim=state_dim,  # State dimension
-         action_dim=action_dim,  # Action dimension
-         one_hot=one_hot,  # One-hot encoding
+         observation_space=observation_space,  # Observation space
+         action_space=action_space,  # Action space
          net_config=NET_CONFIG,  # Network configuration
          INIT_HP=INIT_HP,  # Initial hyperparameters
          population_size=INIT_HP["POPULATION_SIZE"],  # Population size

@@ -3,11 +3,17 @@ import torch
 import torch.nn as nn
 import yaml
 
+from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_offline import train_offline
-from agilerl.utils.utils import create_population, make_vect_envs, print_hyperparams
+from agilerl.utils.utils import (
+    create_population,
+    make_vect_envs,
+    observation_space_channels_to_first,
+    print_hyperparams,
+)
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 # !Note: If you are running this demo without having installed agilerl,
@@ -48,19 +54,14 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     print(f"DEVICE: {device}")
 
     env = make_vect_envs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
-    try:
-        state_dim = env.single_observation_space.n
-        one_hot = True
-    except Exception:
-        state_dim = env.single_observation_space.shape
-        one_hot = False
-    try:
-        action_dim = env.single_action_space.n
-    except Exception:
-        action_dim = env.single_action_space.shape[0]
 
+    observation_space = env.single_observation_space
+    action_space = env.single_action_space
     if INIT_HP["CHANNELS_LAST"]:
-        state_dim = (state_dim[2], state_dim[0], state_dim[1])
+        observation_space = observation_space_channels_to_first(observation_space)
+
+    state_dim = RLAlgorithm.get_state_dim(observation_space)
+    action_dim = RLAlgorithm.get_action_dim(action_space)
 
     actor = BasicNetActor(state_dim[0], [32, 32], action_dim)
     actor_network = MakeEvolvable(
@@ -80,29 +81,25 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         INIT_HP["EVAL_LOOP"],
     )
     mutations = Mutations(
-        algo=INIT_HP["ALGO"],
         no_mutation=MUTATION_PARAMS["NO_MUT"],
         architecture=MUTATION_PARAMS["ARCH_MUT"],
         new_layer_prob=MUTATION_PARAMS["NEW_LAYER"],
         parameters=MUTATION_PARAMS["PARAMS_MUT"],
         activation=MUTATION_PARAMS["ACT_MUT"],
         rl_hp=MUTATION_PARAMS["RL_HP_MUT"],
-        rl_hp_selection=MUTATION_PARAMS["RL_HP_SELECTION"],
         mutation_sd=MUTATION_PARAMS["MUT_SD"],
         min_lr=MUTATION_PARAMS["MIN_LR"],
         max_lr=MUTATION_PARAMS["MAX_LR"],
         min_batch_size=MUTATION_PARAMS["MAX_BATCH_SIZE"],
         max_batch_size=MUTATION_PARAMS["MAX_BATCH_SIZE"],
-        arch=actor_network.arch,
         rand_seed=MUTATION_PARAMS["RAND_SEED"],
         device=device,
     )
 
     agent_pop = create_population(
         algo=INIT_HP["ALGO"],
-        state_dim=state_dim,
-        action_dim=action_dim,
-        one_hot=one_hot,
+        observation_space=observation_space,
+        action_space=action_space,
         net_config=NET_CONFIG,
         actor_network=actor_network,
         INIT_HP=INIT_HP,

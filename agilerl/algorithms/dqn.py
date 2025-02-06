@@ -1,31 +1,37 @@
-import copy
-import inspect
-import random
+import warnings
+from typing import Any, Dict, Optional
 
-import dill
 import numpy as np
 import torch
+import torch._dynamo
 import torch.nn as nn
 import torch.optim as optim
+from gymnasium import spaces
+from numpy.typing import ArrayLike
+from tensordict import TensorDict, from_module
+from tensordict.nn import CudaGraphModule
 
-from agilerl.networks.evolvable_cnn import EvolvableCNN
-from agilerl.networks.evolvable_mlp import EvolvableMLP
-from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer
-from agilerl.wrappers.make_evolvable import MakeEvolvable
+from agilerl.algorithms.core import RLAlgorithm
+from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.algorithms.core.wrappers import OptimizerWrapper
+from agilerl.modules.base import EvolvableModule
+from agilerl.networks.q_networks import QNetwork
+from agilerl.typing import ExperiencesType, GymEnvType, NumpyObsType, TorchObsType
+from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 
 
-class DQN:
+class DQN(RLAlgorithm):
     """The DQN algorithm class. DQN paper: https://arxiv.org/abs/1312.5602
 
-    :param state_dim: State observation dimension
-    :type state_dim: list[int]
-    :param action_dim: Action dimension
-    :type action_dim: int
-    :param one_hot: One-hot encoding, used with discrete observation spaces
-    :type one_hot: bool
+    :param observation_space: Observation space of the environment
+    :type observation_space: gymnasium.spaces.Space
+    :param action_space: Action space of the environment
+    :type action_space: gymnasium.spaces.Space
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
-    :param net_config: Network configuration, defaults to mlp with hidden size [64,64]
+    :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
+    :type hp_config: HyperparameterConfig, optional
+    :param net_config: Network configuration, defaults to None
     :type net_config: dict, optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
@@ -47,39 +53,46 @@ class DQN:
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
+    :param cudagraphs: Use CUDA graphs for optimization, defaults to False
+    :type cudagraphs: bool, optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
 
     def __init__(
         self,
-        state_dim,
-        action_dim,
-        one_hot,
-        index=0,
-        net_config={"arch": "mlp", "hidden_size": [64, 64]},
-        batch_size=64,
-        lr=1e-4,
-        learn_step=5,
-        gamma=0.99,
-        tau=1e-3,
-        mut=None,
-        double=False,
-        actor_network=None,
-        device="cpu",
-        accelerator=None,
-        wrap=True,
-    ):
-        assert isinstance(
-            state_dim, (list, tuple)
-        ), "State dimension must be a list or tuple."
-        assert isinstance(
-            action_dim, (int, np.integer)
-        ), "Action dimension must be an integer."
-        assert isinstance(
-            one_hot, bool
-        ), "One-hot encoding flag must be boolean value True or False."
-        assert isinstance(index, int), "Agent index must be an integer."
+        observation_space: spaces.Space,
+        action_space: spaces.Space,
+        index: int = 0,
+        hp_config: Optional[HyperparameterConfig] = None,
+        net_config: Optional[Dict[str, Any]] = None,
+        batch_size: int = 64,
+        lr: float = 1e-4,
+        learn_step: int = 5,
+        gamma: float = 0.99,
+        tau: float = 1e-3,
+        mut: Optional[str] = None,
+        double: bool = False,
+        normalize_images: bool = True,
+        actor_network: Optional[EvolvableModule] = None,
+        device: str = "cpu",
+        accelerator: Optional[Any] = None,
+        cudagraphs: bool = False,
+        wrap: bool = True,
+    ) -> None:
+        super().__init__(
+            observation_space,
+            action_space,
+            index=index,
+            hp_config=hp_config,
+            device=device,
+            accelerator=accelerator,
+            normalize_images=normalize_images,
+            name="DQN",
+        )
+
+        assert learn_step >= 1, "Learn step must be greater than or equal to one."
+        assert isinstance(learn_step, int), "Learn step rate must be an integer."
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
         assert isinstance(lr, float), "Learning rate must be a float."
@@ -96,232 +109,232 @@ class DQN:
             wrap, bool
         ), "Wrap models flag must be boolean value True or False."
 
-        self.algo = "DQN"
-        self.state_dim = state_dim
-        self.action_dim = action_dim
-        self.one_hot = one_hot
-        self.net_config = net_config
         self.batch_size = batch_size
         self.lr = lr
         self.learn_step = learn_step
         self.gamma = gamma
         self.tau = tau
         self.mut = mut
-        self.device = device
-        self.accelerator = accelerator
-        self.index = index
-        self.scores = []
-        self.fitness = []
-        self.steps = [0]
         self.double = double
-        self.actor_network = actor_network
+        self.net_config = net_config
+        self.cudagraphs = cudagraphs
+        self.capturable = cudagraphs
 
-        if self.actor_network is not None:
-            self.actor = actor_network
-            if isinstance(self.actor, (EvolvableMLP, EvolvableCNN)):
-                self.net_config = self.actor.net_config
-                self.actor_network = None
-            elif isinstance(self.actor, MakeEvolvable):
-                self.net_config = None
-                self.actor_network = actor_network
-            else:
-                assert (
-                    False
-                ), f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
+        if actor_network is not None:
+            if not isinstance(actor_network, EvolvableModule):
+                raise TypeError(
+                    f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
+                )
+
+            # Need to make deepcopies for target and detached networks
+            self.actor, self.actor_target = make_safe_deepcopies(
+                actor_network, actor_network
+            )
         else:
-            # model
-            assert isinstance(self.net_config, dict), "Net config must be a dictionary."
-            assert (
-                "arch" in self.net_config.keys()
-            ), "Net config must contain arch: 'mlp' or 'cnn'."
-            if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
-                assert (
-                    "hidden_size" in self.net_config.keys()
-                ), "Net config must contain hidden_size: int."
-                assert isinstance(
-                    self.net_config["hidden_size"], list
-                ), "Net config hidden_size must be a list."
-                assert (
-                    len(self.net_config["hidden_size"]) > 0
-                ), "Net config hidden_size must contain at least one element."
-                self.actor = EvolvableMLP(
-                    num_inputs=state_dim[0],
-                    num_outputs=action_dim,
+            net_config = {} if net_config is None else net_config
+
+            def create_actor():
+                return QNetwork(
+                    observation_space=observation_space,
+                    action_space=action_space,
                     device=self.device,
-                    accelerator=self.accelerator,
-                    **self.net_config,
+                    **net_config,
                 )
 
-            elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
-                for key in [
-                    "channel_size",
-                    "kernel_size",
-                    "stride_size",
-                    "hidden_size",
-                ]:
-                    assert (
-                        key in self.net_config.keys()
-                    ), f"Net config must contain {key}: int."
-                    assert isinstance(
-                        self.net_config[key], list
-                    ), f"Net config {key} must be a list."
-                    assert (
-                        len(self.net_config[key]) > 0
-                    ), f"Net config {key} must contain at least one element."
-                assert (
-                    "normalize" in self.net_config.keys()
-                ), "Net config must contain normalize: True or False."
-                assert isinstance(
-                    self.net_config["normalize"], bool
-                ), "Net config normalize must be boolean value True or False."
-                self.actor = EvolvableCNN(
-                    input_shape=state_dim,
-                    num_actions=action_dim,
-                    device=self.device,
-                    accelerator=self.accelerator,
-                    **self.net_config,
-                )
+            self.actor = create_actor()
+            self.actor_target = create_actor()
 
-        # Create the target network by copying the actor network
-        self.actor_target = copy.deepcopy(self.actor)
-        self.actor_target.load_state_dict(self.actor.state_dict())
-        self.optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
+        # Copy over actor weights to target
+        self.init_hook()
 
-        self.arch = (
-            self.net_config["arch"] if self.net_config is not None else self.actor.arch
+        # Initialize optimizer with OptimizerWrapper
+        self.optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=self.actor,
+            lr=self.lr,
+            optimizer_kwargs={"capturable": self.capturable},
         )
 
-        if self.accelerator is not None:
-            if wrap:
-                self.wrap_models()
-        else:
-            self.actor = self.actor.to(self.device)
-            self.actor_target = self.actor_target.to(self.device)
+        if self.accelerator is not None and wrap:
+            self.wrap_models()
 
         self.criterion = nn.MSELoss()
 
-    def get_action(self, state, epsilon=0, action_mask=None):
-        """Returns the next action to take in the environment.
-        Epsilon is the probability of taking a random action, used for exploration.
-        For epsilon-greedy behaviour, set epsilon to 0.
+        # torch.compile and cuda graph optimizations
+        if self.cudagraphs:
+            warnings.warn(
+                "CUDA graphs for DQN are implemented experimentally and may not work as expected."
+            )
+            self.update = torch.compile(self.update, mode=None)
+            self._get_action = torch.compile(
+                self._get_action, mode=None, fullgraph=True
+            )
+            self.update = CudaGraphModule(self.update)
+            self._get_action = CudaGraphModule(self._get_action)
 
-        :param state: State observation, or multiple observations in a batch
-        :type state: numpy.ndarray[float]
+        # Register DQN network groups and mutation hook
+        self.register_network_group(
+            NetworkGroup(eval=self.actor, shared=[self.actor_target], policy=True)
+        )
+        self.register_init_hook(self.init_hook)
+
+    def init_hook(self) -> None:
+        """Resets module parameters for the detached and target networks."""
+        self.param_vals: TensorDict = from_module(self.actor).detach()
+
+        # NOTE: This removes the target params from the computation graph which
+        # reduces memory overhead and speeds up training, however these won't
+        # appear in the modules parameters
+        self.target_params: TensorDict = self.param_vals.clone().lock_()
+        self.target_params.to_module(self.actor_target)
+
+    def get_action(
+        self,
+        obs: NumpyObsType,
+        epsilon: float = 0.0,
+        action_mask: Optional[ArrayLike] = None,
+    ) -> ArrayLike:
+        """Returns the next action to take in the environment.
+
+        :param obs: The current observation from the environment
+        :type obs: np.ndarray, dict[str, np.ndarray], tuple[np.ndarray]
         :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: numpy.ndarray, optional
         """
-        state = torch.from_numpy(state).float()
-        if self.accelerator is None:
-            state = state.to(self.device)
+        # Preprocess observations and convert inputs to torch tensors
+        torch_obs = self.preprocess_observation(obs)
+        device = self.device if self.accelerator is None else self.accelerator.device
+        epsilon = torch.tensor(epsilon, device=device)
+        if action_mask is not None:
+            action_mask = torch.as_tensor(action_mask, device=device)
         else:
-            state = state.to(self.accelerator.device)
-
-        if self.one_hot:
-
-            state = (
-                nn.functional.one_hot(state.long(), num_classes=self.state_dim[0])
-                .float()
-                .squeeze()
-            )
-
-        if (self.arch == "mlp" and len(state.size()) < 2) or (
-            self.arch == "cnn" and len(state.size()) < 4
-        ):
-            state = state.unsqueeze(0)
-
-        # epsilon-greedy
-        if random.random() < epsilon:
-            if action_mask is None:
-                action = np.random.randint(0, self.action_dim, size=len(state))
+            if isinstance(torch_obs, dict):
+                sample = next(iter(torch_obs.values()))
+                batch_size = sample.size(0)
             else:
-                action = np.argmax(
-                    (
-                        np.random.uniform(0, 1, (len(state), self.action_dim))
-                        * action_mask
-                    ),
-                    axis=1,
+                batch_size = torch_obs.size(0)
+
+            action_mask = torch.ones((batch_size, self.action_dim), device=device)
+
+        return self._get_action(torch_obs, epsilon, action_mask).cpu().numpy()
+
+    def _get_action(
+        self, obs: TorchObsType, epsilon: torch.Tensor, action_mask: torch.Tensor
+    ) -> torch.Tensor:
+        """Returns the next action to take in the environment.
+        Epsilon is the probability of taking a random action, used for exploration.
+        For greedy behaviour, set epsilon to 0.
+
+        :param obs: The current observation from the environment
+        :type obs: torch.Tensor, dict[str, torch.Tensor], tuple[torch.Tensor]
+        :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
+        :type epsilon: float, optional
+        :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
+        :type action_mask: numpy.ndarray, optional
+        """
+        with torch.no_grad():
+            q_values = self.actor(obs)
+
+        # Masked random actions
+        masked_random_values = torch.rand_like(q_values) * action_mask
+        masked_random_actions = torch.argmax(masked_random_values, dim=-1)
+
+        # Masked policy actions
+        masked_q_values = q_values.masked_fill((1 - action_mask).bool(), float("-inf"))
+        masked_policy_actions = torch.argmax(masked_q_values, dim=-1)
+
+        # actions_random = torch.randint_like(actions, n_act)
+        use_policy = (
+            torch.empty(masked_policy_actions.shape, device=q_values.device)
+            .uniform_()
+            .gt(epsilon)
+        )
+
+        # Recompute actions with masking
+        actions = torch.where(use_policy, masked_policy_actions, masked_random_actions)
+
+        return actions
+
+    def update(
+        self,
+        obs: TorchObsType,
+        actions: torch.Tensor,
+        rewards: torch.Tensor,
+        next_obs: TorchObsType,
+        dones: torch.Tensor,
+    ) -> torch.Tensor:
+        """Updates agent network parameters to learn from experiences.
+
+        :param obs: List of batched states
+        :type obs: torch.Tensor[float], dict[str, torch.Tensor[float]], tuple[torch.Tensor[float]]
+        :param actions: List of batched actions
+        :type actions: torch.Tensor[int]
+        :param rewards: List of batched rewards
+        :type rewards: torch.Tensor[float]
+        :param next_obs: List of batched next states
+        :type next_obs: torch.Tensor[float], dict[str, torch.Tensor[float]], tuple[torch.Tensor[float]]
+        :param dones: List of batched dones
+        :type dones: torch.Tensor[int]
+        """
+        with torch.no_grad():
+            if self.double:  # Double Q-learning
+                q_idx = self.actor(next_obs).argmax(dim=1).unsqueeze(1)
+                q_target = (
+                    self.actor_target(next_obs).gather(dim=1, index=q_idx).detach()
                 )
-
-        else:
-            self.actor.eval()
-            with torch.no_grad():
-                action_values = self.actor(state).cpu().data.numpy()
-            self.actor.train()
-
-            if action_mask is None:
-                action = np.argmax(action_values, axis=-1)
             else:
-                inv_mask = 1 - action_mask
-                masked_action_values = np.ma.array(action_values, mask=inv_mask)
-                action = np.argmax(masked_action_values, axis=-1)
+                q_target = self.actor_target(next_obs).max(axis=1)[0].unsqueeze(1)
 
-        return action
+            # target, if terminal then y_j = rewards
+            y_j = rewards + self.gamma * q_target * (1 - dones)
 
-    def learn(self, experiences):
+        # Compute Q-values for actions taken and loss
+        q_eval = self.actor(obs).gather(1, actions.long())
+        loss: torch.Tensor = self.criterion(q_eval, y_j)
+
+        # zero gradients, perform a backward pass, and update the weights
+        self.optimizer.zero_grad()
+        if self.accelerator is not None:
+            self.accelerator.backward(loss)
+        else:
+            loss.backward()
+
+        self.optimizer.step()
+        return loss.detach()
+
+    def learn(self, experiences: ExperiencesType) -> float:
         """Updates agent network parameters to learn from experiences.
 
         :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
         :type state: list[torch.Tensor[float]]
         """
         states, actions, rewards, next_states, dones = experiences
-        if self.accelerator is not None:
-            states = states.to(self.accelerator.device)
-            actions = actions.to(self.accelerator.device)
-            rewards = rewards.to(self.accelerator.device)
-            next_states = next_states.to(self.accelerator.device)
-            dones = dones.to(self.accelerator.device)
+        actions = actions.to(self.device)
+        rewards = rewards.to(self.device)
+        dones = dones.to(self.device)
 
-        if self.one_hot:
-            states = (
-                nn.functional.one_hot(states.long(), num_classes=self.state_dim[0])
-                .float()
-                .squeeze()
-            )
-            next_states = (
-                nn.functional.one_hot(next_states.long(), num_classes=self.state_dim[0])
-                .float()
-                .squeeze()
-            )
+        states = self.preprocess_observation(states)
+        next_states = self.preprocess_observation(next_states)
 
-        if self.double:  # Double Q-learning
-            q_idx = self.actor(next_states).argmax(dim=1).unsqueeze(1)
-            q_target = (
-                self.actor_target(next_states).gather(dim=1, index=q_idx).detach()
-            )
-        else:
-            q_target = (
-                self.actor_target(next_states).detach().max(axis=1)[0].unsqueeze(1)
-            )
-
-        # target, if terminal then y_j = rewards
-        y_j = rewards + self.gamma * q_target * (1 - dones)
-        q_eval = self.actor(states).gather(1, actions.long())
-
-        # loss backprop
-        loss = self.criterion(q_eval, y_j)
-        self.optimizer.zero_grad()
-        if self.accelerator is not None:
-            self.accelerator.backward(loss)
-        else:
-            loss.backward()
-        self.optimizer.step()
+        loss = self.update(states, actions, rewards, next_states, dones)
 
         # soft update target network
         self.soft_update()
         return loss.item()
 
-    def soft_update(self):
-        """Soft updates target network."""
-        for eval_param, target_param in zip(
-            self.actor.parameters(), self.actor_target.parameters()
-        ):
-            target_param.data.copy_(
-                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
-            )
+    def soft_update(self) -> None:
+        "Soft updates target network."
+        self.target_params.lerp_(self.param_vals, self.tau)
 
-    def test(self, env, swap_channels=False, max_steps=None, loop=1):
+    def test(
+        self,
+        env: GymEnvType,
+        swap_channels: bool = False,
+        max_steps: Optional[int] = None,
+        loop: int = 1,
+    ) -> float:
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
@@ -332,11 +345,14 @@ class DQN:
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean over these tests. Defaults to 1
         :type loop: int, optional
+
+        :return: Mean test score of agent in environment
+        :rtype: float
         """
         with torch.no_grad():
             rewards = []
             num_envs = env.num_envs if hasattr(env, "num_envs") else 1
-            for i in range(loop):
+            for _ in range(loop):
                 state, info = env.reset()
                 scores = np.zeros(num_envs)
                 completed_episode_scores = np.zeros(num_envs)
@@ -344,9 +360,12 @@ class DQN:
                 step = 0
                 while not np.all(finished):
                     if swap_channels:
-                        state = np.moveaxis(state, [-1], [-3])
+                        state = obs_channels_to_first(state)
+
                     action_mask = info.get("action_mask", None)
-                    action = self.get_action(state, epsilon=0, action_mask=action_mask)
+                    action = self.get_action(
+                        state, epsilon=0.0, action_mask=action_mask
+                    )
                     state, reward, done, trunc, info = env.step(action)
                     step += 1
                     scores += np.array(reward)
@@ -360,226 +379,3 @@ class DQN:
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
         return mean_fit
-
-    def clone(self, index=None, wrap=True):
-        """Returns cloned agent identical to self.
-
-        :param index: Index to keep track of agent for tournament selection and mutation, defaults to None
-        :type index: int, optional
-        """
-        input_args = self.inspect_attributes(input_args_only=True)
-        input_args["wrap"] = wrap
-        clone = type(self)(**input_args)
-
-        actor = self.actor.clone()
-        actor_target = self.actor_target.clone()
-        optimizer = optim.Adam(actor.parameters(), lr=clone.lr)
-        optimizer.load_state_dict(self.optimizer.state_dict())
-
-        if self.accelerator is not None:
-            if wrap:
-                (
-                    clone.actor,
-                    clone.actor_target,
-                    clone.optimizer,
-                ) = self.accelerator.prepare(actor, actor_target, optimizer)
-            else:
-                clone.actor, clone.actor_target, clone.optimizer = (
-                    actor,
-                    actor_target,
-                    optimizer,
-                )
-        else:
-            clone.actor = actor.to(self.device)
-            clone.actor_target = actor_target.to(self.device)
-            clone.optimizer = optimizer
-
-        for attribute in self.inspect_attributes().keys():
-            if hasattr(self, attribute) and hasattr(clone, attribute):
-                attr, clone_attr = getattr(self, attribute), getattr(clone, attribute)
-                if isinstance(attr, torch.Tensor) or isinstance(
-                    clone_attr, torch.Tensor
-                ):
-                    if not torch.equal(attr, clone_attr):
-                        setattr(
-                            clone, attribute, copy.deepcopy(getattr(self, attribute))
-                        )
-                else:
-                    if attr != clone_attr:
-                        setattr(
-                            clone, attribute, copy.deepcopy(getattr(self, attribute))
-                        )
-            else:
-                setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
-
-        if index is not None:
-            clone.index = index
-
-        return clone
-
-    def inspect_attributes(self, input_args_only=False):
-        # Get all attributes of the current object
-        attributes = inspect.getmembers(self, lambda a: not (inspect.isroutine(a)))
-        guarded_attributes = ["actor", "actor_target", "optimizer"]
-
-        # Exclude private and built-in attributes
-        attributes = [
-            a for a in attributes if not (a[0].startswith("__") and a[0].endswith("__"))
-        ]
-
-        if input_args_only:
-            constructor_params = inspect.signature(self.__init__).parameters.keys()
-            attributes = {
-                k: v
-                for k, v in attributes
-                if k not in guarded_attributes and k in constructor_params
-            }
-        else:
-            # Remove the algo specific guarded variables
-            attributes = {k: v for k, v in attributes if k not in guarded_attributes}
-
-        return attributes
-
-    def wrap_models(self):
-        if self.accelerator is not None:
-            self.actor, self.actor_target, self.optimizer = self.accelerator.prepare(
-                self.actor, self.actor_target, self.optimizer
-            )
-
-    def unwrap_models(self):
-        if self.accelerator is not None:
-            self.actor = self.accelerator.unwrap_model(self.actor)
-            self.actor_target = self.accelerator.unwrap_model(self.actor_target)
-            self.optimizer = unwrap_optimizer(self.optimizer, self.actor, lr=self.lr)
-
-    def save_checkpoint(self, path):
-        """Saves a checkpoint of agent properties and network weights to path.
-
-        :param path: Location to save checkpoint at
-        :type path: string
-        """
-
-        attribute_dict = self.inspect_attributes()
-
-        network_info = {
-            "actor_init_dict": self.actor.init_dict,
-            "actor_state_dict": self.actor.state_dict(),
-            "actor_target_init_dict": self.actor_target.init_dict,
-            "actor_target_state_dict": self.actor_target.state_dict(),
-            "optimizer_state_dict": self.optimizer.state_dict(),
-        }
-
-        attribute_dict.update(network_info)
-
-        torch.save(
-            attribute_dict,
-            path,
-            pickle_module=dill,
-        )
-
-    def load_checkpoint(self, path):
-        """Loads saved agent properties and network weights from checkpoint.
-
-        :param path: Location to load checkpoint from
-        :type path: string
-        """
-        network_info = [
-            "actor_state_dict",
-            "actor_target_state_dict",
-            "optimizer_state_dict",
-            "actor_init_dict",
-            "actor_target_init_dict",
-            "net_config",
-            "lr",
-        ]
-
-        checkpoint = torch.load(path, map_location=self.device, pickle_module=dill)
-        self.net_config = checkpoint["net_config"]
-        if self.net_config is not None:
-            self.arch = checkpoint["net_config"]["arch"]
-            if self.net_config["arch"] == "mlp":
-                network_class = EvolvableMLP
-            elif self.net_config["arch"] == "cnn":
-                network_class = EvolvableCNN
-        else:
-            network_class = MakeEvolvable
-
-        self.actor = network_class(**checkpoint["actor_init_dict"])
-        self.actor_target = network_class(**checkpoint["actor_target_init_dict"])
-
-        self.lr = checkpoint["lr"]
-        self.optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
-        self.actor.load_state_dict(checkpoint["actor_state_dict"])
-        self.actor_target.load_state_dict(checkpoint["actor_target_state_dict"])
-        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-
-        for attribute in checkpoint.keys():
-            if attribute not in network_info:
-                setattr(self, attribute, checkpoint[attribute])
-
-    @classmethod
-    def load(cls, path, device="cpu", accelerator=None):
-        """Creates agent with properties and network weights loaded from path.
-
-        :param path: Location to load checkpoint from
-        :type path: string
-        :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-        :type device: str, optional
-        :param accelerator: Accelerator for distributed computing, defaults to None
-        :type accelerator: accelerate.Accelerator(), optional
-        """
-        checkpoint = torch.load(path, map_location=device, pickle_module=dill)
-        checkpoint["actor_init_dict"]["device"] = device
-        checkpoint["actor_target_init_dict"]["device"] = device
-
-        actor_init_dict = chkpt_attribute_to_device(
-            checkpoint.pop("actor_init_dict"), device
-        )
-        actor_target_init_dict = chkpt_attribute_to_device(
-            checkpoint.pop("actor_target_init_dict"), device
-        )
-        actor_state_dict = chkpt_attribute_to_device(
-            checkpoint.pop("actor_state_dict"), device
-        )
-        actor_target_state_dict = chkpt_attribute_to_device(
-            checkpoint.pop("actor_target_state_dict"), device
-        )
-        optimizer_state_dict = chkpt_attribute_to_device(
-            checkpoint.pop("optimizer_state_dict"), device
-        )
-
-        checkpoint["device"] = device
-        checkpoint["accelerator"] = accelerator
-        checkpoint = chkpt_attribute_to_device(checkpoint, device)
-
-        constructor_params = inspect.signature(cls.__init__).parameters.keys()
-        class_init_dict = {
-            k: v for k, v in checkpoint.items() if k in constructor_params
-        }
-
-        if checkpoint["net_config"] is not None:
-            agent = cls(**class_init_dict)
-            agent.arch = checkpoint["net_config"]["arch"]
-            if agent.arch == "mlp":
-                agent.actor = EvolvableMLP(**actor_init_dict)
-                agent.actor_target = EvolvableMLP(**actor_target_init_dict)
-            elif agent.arch == "cnn":
-                agent.actor = EvolvableCNN(**actor_init_dict)
-                agent.actor_target = EvolvableCNN(**actor_target_init_dict)
-        else:
-            class_init_dict["actor_network"] = MakeEvolvable(**actor_init_dict)
-            agent = cls(**class_init_dict)
-            agent.actor_target = MakeEvolvable(**actor_target_init_dict)
-
-        agent.optimizer = optim.Adam(agent.actor.parameters(), lr=agent.lr)
-        agent.actor.load_state_dict(actor_state_dict)
-        agent.actor_target.load_state_dict(actor_target_state_dict)
-        agent.optimizer.load_state_dict(optimizer_state_dict)
-
-        if accelerator is not None:
-            agent.wrap_models()
-
-        for attribute in agent.inspect_attributes().keys():
-            setattr(agent, attribute, checkpoint[attribute])
-
-        return agent

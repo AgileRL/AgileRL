@@ -1,11 +1,14 @@
+import pandas as pd
 import torch
 import yaml
+from gymnasium import spaces
 from ucimlrepo import fetch_ucirepo
 
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.modules.mlp import EvolvableMLP
 from agilerl.training.train_bandits import train_bandits
 from agilerl.utils.utils import create_population, print_hyperparams
 from agilerl.wrappers.learning import BanditEnv
@@ -27,12 +30,11 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
 
     # Fetch data
     dataset = fetch_ucirepo(id=INIT_HP["UCI_REPO_ID"])
-    features = dataset.data.features
-    targets = dataset.data.targets
+    features: pd.DataFrame = dataset.data.features
+    targets: pd.DataFrame = dataset.data.targets
 
     env = BanditEnv(features, targets)  # Create environment
     context_dim = env.context_dim
-    action_dim = env.arms
 
     if INIT_HP["CHANNELS_LAST"]:
         context_dim = (context_dim[2], context_dim[0], context_dim[1])
@@ -48,22 +50,13 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         INIT_HP["EVAL_LOOP"],
     )
     mutations = Mutations(
-        algo=INIT_HP["ALGO"],
         no_mutation=MUTATION_PARAMS["NO_MUT"],
         architecture=MUTATION_PARAMS["ARCH_MUT"],
         new_layer_prob=MUTATION_PARAMS["NEW_LAYER"],
         parameters=MUTATION_PARAMS["PARAMS_MUT"],
         activation=MUTATION_PARAMS["ACT_MUT"],
         rl_hp=MUTATION_PARAMS["RL_HP_MUT"],
-        rl_hp_selection=MUTATION_PARAMS["RL_HP_SELECTION"],
         mutation_sd=MUTATION_PARAMS["MUT_SD"],
-        min_lr=MUTATION_PARAMS["MIN_LR"],
-        max_lr=MUTATION_PARAMS["MAX_LR"],
-        min_batch_size=MUTATION_PARAMS["MAX_BATCH_SIZE"],
-        max_batch_size=MUTATION_PARAMS["MAX_BATCH_SIZE"],
-        min_learn_step=MUTATION_PARAMS["MIN_LEARN_STEP"],
-        max_learn_step=MUTATION_PARAMS["MAX_LEARN_STEP"],
-        arch=NET_CONFIG["arch"],
         rand_seed=MUTATION_PARAMS["RAND_SEED"],
         device=device,
     )
@@ -74,20 +67,39 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
             num_outputs=1,
             layer_norm=False,
             device=device,
-            arch="mlp",
             hidden_size=[128],
         )
         NET_CONFIG = None
     else:
         actor = None
 
+    hp_config = HyperparameterConfig(
+        lr=RLParameter(min=MUTATION_PARAMS["MIN_LR"], max=MUTATION_PARAMS["MAX_LR"]),
+        batch_size=RLParameter(
+            min=MUTATION_PARAMS["MIN_BATCH_SIZE"],
+            max=MUTATION_PARAMS["MAX_BATCH_SIZE"],
+            dtype=int,
+        ),
+        learn_step=RLParameter(
+            min=MUTATION_PARAMS["MIN_LEARN_STEP"],
+            max=MUTATION_PARAMS["MAX_LEARN_STEP"],
+            dtype=int,
+            grow_factor=1.5,
+            shrink_factor=0.75,
+        ),
+    )
+
+    observation_space = spaces.Box(
+        low=features.values.min(), high=features.values.max()
+    )
+    action_space = spaces.Discrete(env.arms)
     agent_pop = create_population(
         algo=INIT_HP["ALGO"],
-        state_dim=context_dim,
-        action_dim=action_dim,
-        one_hot=None,
+        observation_space=observation_space,
+        action_space=action_space,
         net_config=NET_CONFIG,
         INIT_HP=INIT_HP,
+        hp_config=hp_config,
         actor_network=actor,
         population_size=INIT_HP["POP_SIZE"],
         device=device,

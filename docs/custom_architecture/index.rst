@@ -1,21 +1,123 @@
-Using Custom Architecture
-=========================
+.. _custom_network_architectures:
 
-In all other AgileRL tutorials, the networks used by the agents have been consistently defined with a network configuration
-dictionary. Alternatively, it is also possible for a user to define their own custom architecture and add evolvable
-functionality through the ``MakeEvolvable`` wrapper.
+Creating Custom Networks
+========================
+
+Creating Evolvable Networks from Scratch
+----------------------------------------
+
+In the implemented algorithms, we allow users to pass architecture configurations for common RL networks (made evolvable)
+that are available with the framework. We employ a similar philosophy to PyTorch in our way of processing the nested structure
+of complex custom architectures to keep track of the available architecture mutation methods in a neural network.
+
+1. :class:`EvolvableModule <agilerl.modules.base.EvolvableModule>`: This is the base class to define a custom module in AgileRL. It is a wrapper around PyTorch's
+``nn.Module`` class, allowing users to create complex networks with nested :class:`EvolvableModule <agilerl.modules.base.EvolvableModule>`'s that have different available
+architecture mutations. We provide e.g. ``EvolvableMLP``, ``EvolvableCNN``, and ``EvolvableMultiInput`` modules to process
+vector, image, and dictionary / tuple observations, respectively, into a desired number of outputs. Modules in AgileRL
+each have specific mutation methods (wrapped by a ``@mutation`` decorator to signal their nature) that allow us to dynamically
+change their architectures during training. :class:`EvolvableModule <agilerl.modules.base.EvolvableModule>` objects should implement a
+:meth:`recreate_network() <agilerl.modules.base.EvolvableModule.recreate_network>` method that recreates the network with the new architecture
+after a mutation method is applied. This method is called automatically after calling a method wrapped by the ``@mutation`` decorator.
+
+2. :class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>`: Abstracting neural networks for RL problems is hard because different observation spaces require different
+architectures. To address this, we provide a simple way of defining custom evolvable networks for RL algorithms through the
+:class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>` class, which inherits from :class:`EvolvableModule <agilerl.modules.base.EvolvableModule>`.
+Under the hood, any network inheriting from :class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>`  automatically creates an appropriate encoder from the passed observation space. Custom networks only need to
+specify a head that acts as a mapping from the latent space to a number of outputs (e.g. actions). AgileRL provides a variety of
+common networks used in RL algorithms:
+
+   -  ``QNetwork``: State-action value function (used in e.g. DQN).
+   -  ``RainbowQNetwork``: State-action value function that uses a dueling distributional architecture for the network head (used in Rainbow DQN).
+   -  ``ContinuousQNetwork``: State-action value function for continuous action spaces, which takes the actions as input with the observations.
+   -  ``ValueNetwork``: Outputs the scalar value of an observation (used in e.g. PPO).
+   -  ``DeterministicActor``: Outputs deterministic actions given an action space.
+   -  ``StochasticActor``: Outputs an appropriate PyTorch distribution over the given action space.
+
+.. note::
+  We impose that the different evolvable networks in an algorithm (e.g. actor and critic in PPO) share the same mutation methods. This
+  is done because we apply the same architecture mutations to all of the networks of an individual to reduce variance during training.
+  For this reason, we only allow mutation methods in :class:`EvolvableModule <agilerl.networks.base.EvolvableNetwork>` objects to come from the encoder and the head, assuming the same
+  modules are used in both. All of the implemented networks in AgileRL follow this structure.
+
+For simple use cases, it might be appropriate to create a network using ``EvolvableMLP`` or ``EvolvableCNN`` directly (depending on your
+environments observation space), and passing it in to the desired algorithm as the ``actor_network`` or ``critic_network`` argument.
+
+Please refer to the `RainbowQNetwork <Custom_networks_tutorials>`_ tutorial for an example of how to build a custom network using AgileRL.
+
+3. :class:`DummyEvolvable <agilerl.modules.dummy.DummyEvolvable>`: This is a wrapper that allows users to load a pre-trained model that is not an
+:class:`EvolvableModule <agilerl.modules.base.EvolvableModule>` and use it in an evolvable AgileRL algorithm. This disables architecture mutations but still
+allows for RL hyperparameter and weight mutations.
+
+Example Usage
+~~~~~~~~~~~~~
+
+.. code-block:: python
+
+    import torch
+    import torch.nn as nn
+
+    from sgilerl.algorithms import DQN
+    from agilerl.modules.dummy import DummyEvolvable
+
+    class BasicNetActorDQN(nn.Module):
+      def __init__(self, input_size, hidden_sizes, output_size):
+          super().__init__()
+          layers = []
+
+          # Add input layer
+          layers.append(nn.Linear(input_size, hidden_sizes[0]))
+          layers.append(nn.ReLU())  # Activation function
+
+          # Add hidden layers
+          for i in range(len(hidden_sizes) - 1):
+              layers.append(nn.Linear(hidden_sizes[i], hidden_sizes[i + 1]))
+              layers.append(nn.ReLU())  # Activation function
+
+          # Add output layer with a sigmoid activation
+          layers.append(nn.Linear(hidden_sizes[-1], output_size))
+
+          # Combine all layers into a sequential model
+          self.model = nn.Sequential(*layers)
+
+      def forward(self, x):
+          return self.model(x)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    actor_kwargs = {
+        "input_size": 4,  # Input size
+        "hidden_sizes": [64, 64],  # Hidden layer sizes
+        "output_size": 2  # Output size
+    }
+
+    actor = DummyEvolvable(BasicNetActor, actor_kwargs, device=device)
+
+    # Use the actor in an algorithm
+    observation_space = ...
+    action_space = ...
+    population = DQN.population(
+        size=4,
+        observation_space=observation_space,
+        action_space=action_space
+        actor_network=actor
+        )
 
 .. _createcustnet:
 
-Creating a Custom Evolvable Network
------------------------------------
+Integrating Architecture Mutations Into a Custom PyTorch Network
+----------------------------------------------------------------
 
-To create a custom evolvable network, firstly you need to define your network class, ensuring correct input and output
-dimensions. Below is an example of a simple multi-layer perceptron that can be used by a DQN agent to solve the Lunar
-Lander environment. The input size is set as the state dimensions and output size the action dimensions. It's worth noting
-that, during the model definition, it is imperative to employ the ``torch.nn`` module to define all layers instead
-of relying on functions from ``torch.nn.functional`` within the forward() method of the network. This is crucial as the
-forward hooks implemented will only be able to detect layers derived from ``nn.Module``.
+.. warning::
+  The following section pertains to the :class:`MakeEvolvable <agilerl.wrappers.make_evolvable.MakeEvolvable>` wrapper, which will be deprecated in a
+  future release. We recommend using the :class:`EvolvableModule <agilerl.modules.base.EvolvableModule>` and :class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>`
+  classes to create custom networks, or wrapping your ``nn.Module`` objects with :class:`DummyEvolvable <agilerl.modules.dummy.DummyEvolvable>`.
+
+For sequential architectures that users have already implemented using PyTorch, it is also possible to add
+evolvable functionality through the ``MakeEvolvable`` wrapper. Below is an example of a simple multi-layer
+perceptron that can be used by a DQN agent to solve the Lunar Lander environment. The input size is set as
+the state dimensions and output size the action dimensions. It's worth noting that, during the model definition,
+it is imperative to employ the ``torch.nn`` module to define all layers instead of relying on functions from
+``torch.nn.functional`` within the forward() method of the network. This is crucial as the forward hooks implemented
+will only be able to detect layers derived from ``nn.Module``.
 
 .. code-block:: python
 
@@ -44,62 +146,66 @@ the ``MakeEvolvable`` wrapper.
 
     from agilerl.wrappers.make_evolvable import MakeEvolvable
 
-    state_dim = env.single_observation_space.shape
-    action_dim = env.single_action_space.n
+    observation_space = env.single_observation_space
+    action_space = env.single_action_space
 
-    actor = MLPActor(state_dim[0], action_dim)
-    evolvable_actor = MakeEvolvable(actor,
-                                    input_tensor=torch.randn(state_dim[0]),
-                                    device=device)
+    actor = MLPActor(observation_space.shape[0], action_space.n)
+    evolvable_actor = MakeEvolvable(
+                        actor,
+                        input_tensor=torch.randn(observation_space.shape[0]),
+                        device=device
+                      )
 
-There are two further considerations to make when defining custom architecture. The first is when instantiating the
-``create_population`` object, you need to set ``net_config`` to ``None`` and ``actor_network`` to ``evolvable_actor``.
+When instantiating using ``create_population`` to generate a population of agents with a custom actor,
+you need to set ``actor_network`` to ``evolvable_actor``.
 
 .. code-block:: python
 
-    pop = create_population(algo="DQN",  # Algorithm
-                            state_dim=state_dim,  # State dimension
-                            action_dim=action_dim,  # Action dimension
-                            one_hot=one_hot,  # One-hot encoding
-                            net_config=None,  # Network configuration set as None
-                            actor_network=evolvable_actor, # Custom evolvable actor
-                            INIT_HP=INIT_HP,  # Initial hyperparameters
-                            population_size=INIT_HP["POPULATION_SIZE"],  # Population size
-                            device=device)
+    pop = create_population(
+            algo="DQN",                                  # Algorithm
+            observation_space=observation_space,         # Observation space
+            action_space=action_space,                   # Action space
+            actor_network=evolvable_actor,               # Custom evolvable actor
+            INIT_HP=INIT_HP,                             # Initial hyperparameters
+            population_size=INIT_HP["POPULATION_SIZE"],  # Population size
+            device=device
+          )
 
 If you are using an algorithm that also uses a single critic (PPO, DDPG), define the critic network and pass it into the
-``create_population`` class, again setting ``net_config`` to ``None``.
+``create_population`` class.
 
 .. code-block:: python
 
-    pop = create_population(algo="DDPG",  # Algorithm
-                            state_dim=state_dim,  # State dimension
-                            action_dim=action_dim,  # Action dimension
-                            one_hot=one_hot,  # One-hot encoding
-                            net_config=None,  # Network configuration set as None
-                            actor_network=evolvable_actor, # Custom evolvable actor
-                            critic_network=evolvable_critic, # Custom evolvable critic
-                            INIT_HP=INIT_HP,  # Initial hyperparameters
-                            population_size=INIT_HP["POPULATION_SIZE"],  # Population size
-                            device=device)
+    pop = create_population(
+            algo="PPO",                                  # Algorithm
+            observation_space=observation_space,         # Observation space
+            action_space=action_space,                   # Action space
+            actor_network=evolvable_actor,               # Custom evolvable actor
+            critic_network=evolvable_critic,             # Custom evolvable critic
+            INIT_HP=INIT_HP,                             # Initial hyperparameters
+            population_size=INIT_HP["POPULATION_SIZE"],  # Population size
+            device=device
+          )
 
 If the single agent algorithm has more than one critic (e.g. TD3), then pass the ``critic_network`` argument a list of two critics.
 
 .. code-block:: python
 
-    pop = create_population(algo="TD3",  # Algorithm
-                            state_dim=state_dim,  # State dimension
-                            action_dim=action_dim,  # Action dimension
-                            one_hot=one_hot,  # One-hot encoding
-                            net_config=None,  # Network configuration set as None
-                            actor_network=evolvable_actor, # Custom evolvable actor
-                            critic_network=[evolvable_critic_1, evolvable_critic_2], # Custom evolvable critic
-                            INIT_HP=INIT_HP,  # Initial hyperparameters
-                            population_size=INIT_HP["POPULATION_SIZE"],  # Population size
-                            device=device)
+    pop = create_population(
+            algo="TD3",                                           # Algorithm
+            observation_space=observation_space,                      # Observation space
+            action_space=action_space,                                # Action space
+            actor_network=evolvable_actor,                            # Custom evolvable actor
+            critic_network=[evolvable_critic_1, evolvable_critic_2],  # Custom evolvable critic
+            INIT_HP=INIT_HP,                                          # Initial hyperparameters
+            population_size=INIT_HP["POPULATION_SIZE"],               # Population size
+            device=device
+          )
+
 
 If you are using a multi-agent algorithm, define ``actor_network`` and ``critic_network`` as lists containing networks for each agent in the
-multi-agent environment. The example below outlines how this would work for a two agent environment.
+multi-agent environment. The example below outlines how this would work for a two agent environment (asumming you have initialised a multi-agent
+environment in the variable ``env``).
 
 .. code-block:: python
 
@@ -113,16 +219,18 @@ multi-agent environment. The example below outlines how this would work for a tw
                          [critic_2_network_1, critic_2_network_2]]
 
     # Instantiate the populations as follows
-    pop = create_population(algo="MADDPG",  # Algorithm
-                            state_dim=state_dim,  # State dimensions
-                            action_dim=action_dim,  # Action dimensions
-                            one_hot=one_hot,  # One-hot encoding
-                            net_config=None,  # Network configuration se t as None
-                            actor_network=evolvable_actors, # Custom evolvable actor
-                            critic_network=evolvable_critics, # Custom evolvable critic
-                            INIT_HP=INIT_HP,  # Initial hyperparameters
-                            population_size=INIT_HP["POPULATION_SIZE"],  # Population size
-                            device=device)
+    observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
+    action_spaces = [env.single_action_space(agent) for agent in env.agents]
+    pop = create_population(
+            algo="MADDPG",                                # Algorithm
+            observation_space=observation_spaces,         # Observation space
+            action_space=action_spaces,                   # Action space
+            actor_network=evolvable_actors,               # Custom evolvable actor
+            critic_network=evolvable_critics,             # Custom evolvable critic
+            INIT_HP=INIT_HP,                              # Initial hyperparameters
+            population_size=INIT_HP["POPULATION_SIZE"],   # Population size
+            device=device
+          )
 
 Finally, if you are using a multi-agent algorithm but need to use CNNs to account for RGB image states, there are a few extra considerations
 that need to be taken into account when defining your critic network. In MADDPG and MATD3, each agent consists of an actor and critic and each
@@ -227,13 +335,10 @@ To then make these two CNNs evolvable we pass them, along with input tensors int
                                    device=device)
 
 
-The only other consideration that needs to be made is when instantiating the ``Mutations`` class. The ``arch`` argument should be set
-as ``evolvable_actor.arch`` for single agent algorithms or ``evolvable_actors[0].arch`` for multi-agent algorithms.
-
 .. _comparch:
 
 Compatible Architecture
------------------------
+~~~~~~~~~~~~~~~~~~~~~~~
 
 At present, ``MakeEvolvable`` is currently compatible with PyTorch multi-layer perceptrons (MLPs) and convolutional neural networks (CNNs). The
 network architecture must also be sequential, that is, the output of one layer serves as the input to the next layer. Outlined below is a comprehensive
@@ -262,7 +367,7 @@ table of PyTorch layers that are currently supported by this wrapper:
 .. _compalgos:
 
 Compatible Algorithms
----------------------
+~~~~~~~~~~~~~~~~~~~~~
 
 The following table highlights which AgileRL algorithms are currently compatible with custom architecture:
 

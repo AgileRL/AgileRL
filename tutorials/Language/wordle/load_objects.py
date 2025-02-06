@@ -31,7 +31,7 @@ from agilerl.algorithms.ilql import (
     TopAdvantageNGrams,
 )
 from agilerl.data.rl_data import ConstantTokenReward, SepcifiedTokenReward
-from agilerl.networks.evolvable_gpt import EvolvableGPT
+from agilerl.modules.gpt import EvolvableGPT
 from agilerl.utils.ilql_utils import convert_path
 
 registry = {}

@@ -12,8 +12,10 @@ import torch
 from pettingzoo.atari import space_invaders_v2
 from tqdm import trange
 
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
-from agilerl.utils.utils import create_population
+from agilerl.utils.algo_utils import obs_channels_to_first
+from agilerl.utils.utils import create_population, observation_space_channels_to_first
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 if __name__ == "__main__":
@@ -21,12 +23,12 @@ if __name__ == "__main__":
 
     # Define the network configuration
     NET_CONFIG = {
-        "arch": "cnn",  # Network architecture
-        "hidden_size": [32, 32],  # Network hidden size
-        "channel_size": [32, 32],  # CNN channel size
-        "kernel_size": [3, 3],  # CNN kernel size
-        "stride_size": [2, 2],  # CNN stride size
-        "normalize": True,  # Normalize image from range [0,255] to [0,1]
+        "encoder_config": {
+            "channel_size": [32, 32],  # CNN channel size
+            "kernel_size": [3, 3],  # CNN kernel size
+            "stride_size": [2, 2],  # CNN stride size
+        },
+        "head_config": {"hidden_size": [32, 32]},  # Actor head hidden size
     }
 
     # Define the initial hyperparameters
@@ -64,45 +66,34 @@ if __name__ == "__main__":
     env.reset()
 
     # Configure the multi-agent algo input arguments
-    try:
-        state_dim = [env.single_observation_space(agent).n for agent in env.agents]
-        one_hot = True
-    except Exception:
-        state_dim = [env.single_observation_space(agent).shape for agent in env.agents]
-        one_hot = False
-    try:
-        action_dim = [env.single_action_space(agent).n for agent in env.agents]
-        INIT_HP["DISCRETE_ACTIONS"] = True
-        INIT_HP["MAX_ACTION"] = None
-        INIT_HP["MIN_ACTION"] = None
-    except Exception:
-        action_dim = [env.single_action_space(agent).shape[0] for agent in env.agents]
-        INIT_HP["DISCRETE_ACTIONS"] = False
-        INIT_HP["MAX_ACTION"] = [
-            env.single_action_space(agent).high for agent in env.agents
-        ]
-        INIT_HP["MIN_ACTION"] = [
-            env.single_action_space(agent).low for agent in env.agents
-        ]
-
-    # Pre-process image dimensions for pytorch convolutional layers
+    observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
+    action_spaces = [env.single_action_space(agent) for agent in env.agents]
     if INIT_HP["CHANNELS_LAST"]:
-        state_dim = [
-            (state_dim[2], state_dim[0], state_dim[1]) for state_dim in state_dim
+        observation_spaces = [
+            observation_space_channels_to_first(obs) for obs in observation_spaces
         ]
 
     # Append number of agents and agent IDs to the initial hyperparameter dictionary
-    INIT_HP["N_AGENTS"] = env.num_agents
     INIT_HP["AGENT_IDS"] = env.agents
+
+    # Mutation config for RL hyperparameters
+    hp_config = HyperparameterConfig(
+        lr_actor=RLParameter(min=1e-4, max=1e-2),
+        lr_critic=RLParameter(min=1e-4, max=1e-2),
+        batch_size=RLParameter(min=8, max=512, dtype=int),
+        learn_step=RLParameter(
+            min=20, max=200, dtype=int, grow_factor=1.5, shrink_factor=0.75
+        ),
+    )
 
     # Create a population ready for evolutionary hyper-parameter optimisation
     agent = create_population(
         INIT_HP["ALGO"],
-        state_dim,
-        action_dim,
-        one_hot,
+        observation_spaces,
+        action_spaces,
         NET_CONFIG,
         INIT_HP,
+        hp_config,
         population_size=INIT_HP["POPULATION_SIZE"],
         num_envs=num_envs,
         device=device,
@@ -137,7 +128,7 @@ if __name__ == "__main__":
         steps = 0
         if INIT_HP["CHANNELS_LAST"]:
             state = {
-                agent_id: np.moveaxis(s, [-1], [-3]) for agent_id, s in state.items()
+                agent_id: obs_channels_to_first(s) for agent_id, s in state.items()
             }
 
         for idx_step in range(training_steps // num_envs):
@@ -163,7 +154,7 @@ if __name__ == "__main__":
             # Image processing if necessary for the environment
             if INIT_HP["CHANNELS_LAST"]:
                 next_state = {
-                    agent_id: np.moveaxis(ns, [-1], [-3])
+                    agent_id: obs_channels_to_first(ns)
                     for agent_id, ns in next_state.items()
                 }
 

@@ -5,12 +5,16 @@ import torch
 import yaml
 from accelerate import Accelerator
 
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.training.train_multi_agent import train_multi_agent
-from agilerl.utils.utils import create_population, make_multi_agent_vect_envs
+from agilerl.utils.utils import (
+    create_population,
+    make_multi_agent_vect_envs,
+    observation_space_channels_to_first,
+)
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -19,7 +23,7 @@ from agilerl.utils.utils import create_population, make_multi_agent_vect_envs
 # sys.path.append('../')
 
 
-def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=False):
+def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("============ AgileRL Multi-agent benchmarking ============")
 
@@ -47,33 +51,13 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
 
     env.reset(seed=42)
     # Configure the multi-agent algo input arguments
-    try:
-        state_dims = [env.single_observation_space(agent).n for agent in env.agents]
-        one_hot = True
-    except Exception:
-        state_dims = [env.single_observation_space(agent).shape for agent in env.agents]
-        one_hot = False
-    try:
-        action_dims = [env.single_action_space(agent).n for agent in env.agents]
-        INIT_HP["DISCRETE_ACTIONS"] = True
-        INIT_HP["MAX_ACTION"] = None
-        INIT_HP["MIN_ACTION"] = None
-    except Exception:
-        action_dims = [env.single_action_space(agent).shape[0] for agent in env.agents]
-        INIT_HP["DISCRETE_ACTIONS"] = False
-        INIT_HP["MAX_ACTION"] = [
-            env.single_action_space(agent).high for agent in env.agents
-        ]
-        INIT_HP["MIN_ACTION"] = [
-            env.single_action_space(agent).low for agent in env.agents
-        ]
-
+    observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
+    action_spaces = [env.single_action_space(agent) for agent in env.agents]
     if INIT_HP["CHANNELS_LAST"]:
-        state_dims = [
-            (state_dim[2], state_dim[0], state_dim[1]) for state_dim in state_dims
+        observation_spaces = [
+            observation_space_channels_to_first(obs) for obs in observation_spaces
         ]
 
-    INIT_HP["N_AGENTS"] = env.num_agents
     INIT_HP["AGENT_IDS"] = [agent_id for agent_id in env.agents]
 
     field_names = ["state", "action", "reward", "next_state", "done"]
@@ -92,72 +76,49 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
     )
 
     mutations = Mutations(
-        algo=INIT_HP["ALGO"],
         no_mutation=MUTATION_PARAMS["NO_MUT"],
         architecture=MUTATION_PARAMS["ARCH_MUT"],
         new_layer_prob=MUTATION_PARAMS["NEW_LAYER"],
         parameters=MUTATION_PARAMS["PARAMS_MUT"],
         activation=MUTATION_PARAMS["ACT_MUT"],
         rl_hp=MUTATION_PARAMS["RL_HP_MUT"],
-        rl_hp_selection=MUTATION_PARAMS["RL_HP_SELECTION"],
         mutation_sd=MUTATION_PARAMS["MUT_SD"],
-        min_lr=MUTATION_PARAMS["MIN_LR"],
-        max_lr=MUTATION_PARAMS["MAX_LR"],
-        min_learn_step=MUTATION_PARAMS["MIN_LEARN_STEP"],
-        max_learn_step=MUTATION_PARAMS["MAX_LEARN_STEP"],
-        min_batch_size=MUTATION_PARAMS["MIN_BATCH_SIZE"],
-        max_batch_size=MUTATION_PARAMS["MAX_BATCH_SIZE"],
         agent_ids=INIT_HP["AGENT_IDS"],
-        arch=NET_CONFIG["arch"],
         rand_seed=MUTATION_PARAMS["RAND_SEED"],
         device=device,
         accelerator=accelerator,
     )
 
-    total_state_dims = sum(state_dim[0] for state_dim in state_dims)
-    total_action_dims = sum(action_dims)
-
-    if use_net:
-        ## Critic nets currently set-up for MATD3
-        actor = [
-            EvolvableMLP(
-                num_inputs=state_dim[0],
-                num_outputs=action_dim,
-                hidden_size=[64, 64],
-                mlp_activation="ReLU",
-                mlp_output_activation="Sigmoid",
-                device=device,
-            )
-            for state_dim, action_dim in zip(state_dims, action_dims)
-        ]
-        NET_CONFIG = None
-        critic = [
-            [
-                EvolvableMLP(
-                    num_inputs=total_state_dims + total_action_dims,
-                    num_outputs=1,
-                    device=device,
-                    hidden_size=[64, 64],
-                    mlp_activation="ReLU",
-                    mlp_output_activation=None,
-                )
-                for _ in range(INIT_HP["N_AGENTS"])
-            ]
-            for _ in range(2)
-        ]
-    else:
-        actor = None
-        critic = None
+    hp_config = HyperparameterConfig(
+        lr_actor=RLParameter(
+            min=MUTATION_PARAMS["MIN_LR"], max=MUTATION_PARAMS["MAX_LR"]
+        ),
+        lr_critic=RLParameter(
+            min=MUTATION_PARAMS["MIN_LR"], max=MUTATION_PARAMS["MAX_LR"]
+        ),
+        batch_size=RLParameter(
+            min=MUTATION_PARAMS["MIN_BATCH_SIZE"],
+            max=MUTATION_PARAMS["MAX_BATCH_SIZE"],
+            dtype=int,
+        ),
+        learn_step=RLParameter(
+            min=MUTATION_PARAMS["MIN_LEARN_STEP"],
+            max=MUTATION_PARAMS["MAX_LEARN_STEP"],
+            dtype=int,
+            grow_factor=1.5,
+            shrink_factor=0.75,
+        ),
+    )
 
     agent_pop = create_population(
         algo=INIT_HP["ALGO"],
-        state_dim=state_dims,
-        action_dim=action_dims,
-        one_hot=one_hot,
+        observation_space=observation_spaces,
+        action_space=action_spaces,
         net_config=NET_CONFIG,
         INIT_HP=INIT_HP,
-        actor_network=actor,
-        critic_network=critic,
+        hp_config=hp_config,
+        actor_network=None,
+        critic_network=None,
         population_size=INIT_HP["POP_SIZE"],
         num_envs=INIT_HP["NUM_ENVS"],
         device=device,
@@ -174,7 +135,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
         sum_scores=True,
         INIT_HP=INIT_HP,
         MUT_P=MUTATION_PARAMS,
-        net_config=NET_CONFIG,
         swap_channels=INIT_HP["CHANNELS_LAST"],
         max_steps=INIT_HP["MAX_STEPS"],
         evo_steps=INIT_HP["EVO_STEPS"],
@@ -199,4 +159,4 @@ if __name__ == "__main__":
     MUTATION_PARAMS = config["MUTATION_PARAMS"]
     NET_CONFIG = config["NET_CONFIG"]
     DISTRIBUTED_TRAINING = config["DISTRIBUTED_TRAINING"]
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=False)
+    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING)

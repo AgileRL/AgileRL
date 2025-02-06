@@ -32,7 +32,7 @@ INIT_HP:
     EVAL_STEPS:                # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
     LEARNING_DELAY: 1000       # Steps before learning
-    WANDB: false               # Log with Weights and Biases
+    WANDB: true               # Log with Weights and Biases
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation
@@ -41,8 +41,6 @@ MUTATION_PARAMS:
     PARAMS_MUT: 0.2                        # Network parameters mutation
     ACT_MUT: 0.2                           # Activation layer mutation
     RL_HP_MUT: 0.2                         # Learning HP mutation
-    # Learning HPs to choose from
-    RL_HP_SELECTION: [lr, batch_size, learn_step]
     MUT_SD: 0.1                            # Mutation strength
     RAND_SEED: 42                          # Random seed
     # Define max and min limits for mutating RL hyperparams
@@ -54,11 +52,18 @@ MUTATION_PARAMS:
     MAX_LEARN_STEP: 10
 
 NET_CONFIG:
-    arch: mlp
-    hidden_size: [128, 128]
-    mlp_activation: ReLU
-    mlp_output_activation: ReLU
-    min_hidden_layers: 1
-    max_hidden_layers: 3
-    min_mlp_nodes: 64
-    max_mlp_nodes: 500
+    latent_dim: 64
+
+    encoder_config:
+        hidden_size: [128]
+        activation: ReLU
+        min_mlp_nodes: 64
+        max_mlp_nodes: 500
+
+    head_config:
+        hidden_size: [128]
+        activation: ReLU
+        min_hidden_layers: 1
+        max_hidden_layers: 3
+        min_mlp_nodes: 64
+        max_mlp_nodes: 500

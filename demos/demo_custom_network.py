@@ -1,11 +1,13 @@
 import numpy as np
 import torch
 import torch.nn as nn
+from gymnasium import spaces
 from tqdm import trange
 
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import create_population, make_vect_envs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
@@ -54,31 +56,23 @@ if __name__ == "__main__":
     num_envs = 16
     env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
 
-    try:
-        state_dim = env.single_observation_space.n
-        one_hot = True
-    except Exception:
-        state_dim = env.single_observation_space.shape
-        one_hot = False
-    try:
-        action_dim = env.single_action_space.n
-    except Exception:
-        action_dim = env.single_action_space.shape[0]
-
     # Instantiate mlp and then make it evolvable
-    mlp = MLPActor(state_dim[0], [32, 32], action_dim)
+    observation_space = env.single_observation_space
+    action_space: spaces.Discrete = env.single_action_space
+    mlp = MLPActor(observation_space.shape[0], [32, 32], action_space.n)
     evolvable_mlp = MakeEvolvable(
         mlp,
-        input_tensor=torch.ones(state_dim),  # Example input tensor to the network
+        input_tensor=torch.ones(
+            observation_space.shape[0]
+        ),  # Example input tensor to the network
         device=device,
     )
 
     # Create a population of DQN agents
     pop = create_population(
         algo="DQN",  # Algorithm
-        state_dim=state_dim,  # State dimension
-        action_dim=action_dim,  # Action dimension
-        one_hot=one_hot,  # One-hot encoding
+        observation_space=env.observation_space,  # Observation space
+        action_space=env.action_space,  # Action space
         net_config=None,  # Network configuration set as None
         actor_network=evolvable_mlp,  # Custom evolvable actor
         INIT_HP=INIT_HP,  # Initial hyperparameters
@@ -112,7 +106,6 @@ if __name__ == "__main__":
         rl_hp=0.2,  # Learning HP mutation
         rl_hp_selection=["lr", "batch_size"],  # Learning HPs to choose from
         mutation_sd=0.1,  # Mutation strength
-        arch="mlp",  # Network architecture
         rand_seed=1,  # Random seed
         device=device,
     )
@@ -146,7 +139,7 @@ if __name__ == "__main__":
 
             for idx_step in range(evo_steps // num_envs):
                 if INIT_HP["CHANNELS_LAST"]:
-                    state = np.moveaxis(state, [-1], [-3])
+                    state = obs_channels_to_first(state)
 
                 action = agent.get_action(state, epsilon)  # Get next action from agent
                 epsilon = max(
@@ -172,7 +165,7 @@ if __name__ == "__main__":
                         state,
                         action,
                         reward,
-                        np.moveaxis(next_state, [-1], [-3]),
+                        obs_channels_to_first(next_state),
                         terminated,
                         is_vectorised=True,
                     )

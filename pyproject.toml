@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "agilerl"
-version = "1.0.31"
+version = "2.0.0"
 
 description = "AgileRL is a deep reinforcement learning library focused on improving RL development through RLOps."
 authors = ["Nick Ustaran-Anderegg <dev@agilerl.com>"]
@@ -32,7 +32,8 @@ redis = "^4.4.4"
 scipy = "^1.12.0"
 SuperSuit = "^3.9.0"
 termcolor = "^1.1.0"
-torch = "^2.3.1"
+torch = "^2.5.1"
+tensordict = "^0.6.2"
 tqdm = "^4.66.4"
 transformers = "^4.41.2"
 ucimlrepo = "^0.0.3"

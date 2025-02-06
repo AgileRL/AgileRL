@@ -22,7 +22,7 @@ INIT_HP:
     TAU: 0.001                  # For soft update of target parameters
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
-    POP_SIZE: 2                # Population size
+    POP_SIZE: 4                # Population size
     EVO_STEPS: 10_000           # Evolution frequency
     EVAL_STEPS:                # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
@@ -50,13 +50,21 @@ MUTATION_PARAMS:
     MAX_BATCH_SIZE: 2048
 
 NET_CONFIG:
-    arch: mlp
-    hidden_size: [64, 64]
-    min_hidden_layers: 1
-    max_hidden_layers: 3
-    min_mlp_nodes: 64
-    max_mlp_nodes: 500
-    mlp_output_activation: Sigmoid
-    mlp_activation: ReLU
+    latent_dim: 64
+
+    encoder_config:
+        hidden_size: [64]
+        activation: ReLU
+        min_mlp_nodes: 64
+        max_mlp_nodes: 500
+
+    head_config:
+        hidden_size: [64]
+        activation: ReLU
+        output_activation: Sigmoid
+        min_hidden_layers: 1
+        max_hidden_layers: 2
+        min_mlp_nodes: 64
+        max_mlp_nodes: 500
 
 DISTRIBUTED_TRAINING: false

@@ -28,7 +28,7 @@ Example distributed training loop:
     from agilerl.components.sampler import Sampler
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
-    from agilerl.utils.utils import create_population, make_vect_envs
+    from agilerl.utils.utils import create_population, make_vect_envs, observation_space_channels_to_first
     from accelerate import Accelerator
     import numpy as np
     import os
@@ -43,8 +43,7 @@ Example distributed training loop:
     accelerator.wait_for_everyone()
 
     NET_CONFIG = {
-        "arch": "mlp",  # Network architecture
-        "hidden_size": [32, 32],  # Actor hidden size
+        "head_config": {"hidden_size": [32, 32]},  # Actor head hidden size
     }
 
     INIT_HP = {
@@ -61,25 +60,25 @@ Example distributed training loop:
 
     num_envs = 8
     env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
-    try:
-        state_dim = env.single_observation_space.n, # Discrete observation space
-        one_hot = True  # Requires one-hot encoding
-    except Exception:
-        state_dim = env.single_observation_space.shape  # Continuous observation space
-        one_hot = False  # Does not require one-hot encoding
-    try:
-        action_dim = env.single_action_space.n  # Discrete action space
-    except Exception:
-        action_dim = env.single_action_space.shape[0]  # Continuous action space
+    observation_space = env.single_observation_space
+    action_space - env.single_action_space
 
-    if INIT_HP["CHANNELS_LAST"]:
-        state_dim = (state_dim[2], state_dim[0], state_dim[1])
+    if INIT_HP['CHANNELS_LAST']:
+        observation_space = observation_space_channels_to_first(observation_space)
+
+    # RL hyperparameter configuration for mutations
+    hp_config = HyperparameterConfig(
+        lr = RLParameter(min=1e-4, max=1e-2),
+        batch_size = RLParameter(min=8, max=64, dtype=int),
+        learn_step = RLParameter(
+            min=1, max=120, dtype=int, grow_factor=1.5, shrink_factor=0.75
+            )
+    )
 
     pop = create_population(
-        algo="DQN",  # Algorithm
-        state_dim=state_dim,  # State dimension
-        action_dim=action_dim,  # Action dimension
-        one_hot=one_hot,  # One-hot encoding
+        algo="DQN",  # RL algorithm
+        observation_space=observation_space,  # State dimension
+        action_space=action_space,  # Action dimension
         net_config=NET_CONFIG,  # Network configuration
         INIT_HP=INIT_HP,  # Initial hyperparameters
         population_size=INIT_HP["POP_SIZE"],  # Population size
@@ -107,19 +106,16 @@ Example distributed training loop:
     )
 
     mutations = Mutations(
-        algo="DQN",  # Algorithm
         no_mutation=0.4,  # No mutation
         architecture=0.2,  # Architecture mutation
         new_layer_prob=0.2,  # New layer mutation
         parameters=0.2,  # Network parameters mutation
         activation=0,  # Activation layer mutation
         rl_hp=0.2,  # Learning HP mutation
-        rl_hp_selection=["lr", "batch_size"],  # Learning HPs to choose from
-        mutation_sd=0.1,  # Mutation strength
-        arch=NET_CONFIG["arch"],  # Network architecture
+        mutation_sd=0.1,  # Mutation strength  # Network architecture
         rand_seed=1,  # Random seed
-        accelerator=accelerator,
-    )  # Accelerator)
+        accelerator=accelerator, # Accelerator
+    )
 
     max_steps = 200000  # Max steps
     learning_delay = 1000  # Steps before starting learning

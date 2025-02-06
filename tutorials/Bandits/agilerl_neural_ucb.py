@@ -6,9 +6,11 @@ Authors: Nick (https://github.com/nicku-a)
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from gymnasium import spaces
 from scipy.ndimage import gaussian_filter1d
 from ucimlrepo import fetch_ucirepo
 
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.utils.utils import create_population
 from agilerl.wrappers.learning import BanditEnv
@@ -16,10 +18,7 @@ from agilerl.wrappers.learning import BanditEnv
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    NET_CONFIG = {
-        "arch": "mlp",  # Network architecture
-        "hidden_size": [128],  # Actor hidden size
-    }
+    NET_CONFIG = {"encoder_config": {"hidden_size": [128]}}  # Actor head hidden size
 
     INIT_HP = {
         "POPULATION_SIZE": 1,  # Population size
@@ -42,13 +41,26 @@ if __name__ == "__main__":
     context_dim = env.context_dim
     action_dim = env.arms
 
+    # Mutation config for RL hyperparameters
+    hp_config = HyperparameterConfig(
+        lr=RLParameter(min=6.25e-5, max=1e-2),
+        batch_size=RLParameter(min=8, max=512, dtype=int),
+        learn_step=RLParameter(
+            min=1, max=10, dtype=int, grow_factor=1.5, shrink_factor=0.75
+        ),
+    )
+
+    observation_space = spaces.Box(
+        low=features.values.min(), high=features.values.max(), shape=context_dim
+    )
+    action_space = spaces.Discrete(action_dim)
     pop = create_population(
         algo="NeuralUCB",  # Algorithm
-        state_dim=context_dim,  # State dimension
-        action_dim=action_dim,  # Action dimension
-        one_hot=None,  # One-hot encoding
+        observation_space=observation_space,  # Observation space
+        action_space=action_space,  # Action space
         net_config=NET_CONFIG,  # Network configuration
         INIT_HP=INIT_HP,  # Initial hyperparameters
+        hp_config=hp_config,  # Hyperparameter configuration
         population_size=INIT_HP["POPULATION_SIZE"],  # Population size
         device=device,
     )

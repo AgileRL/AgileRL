@@ -3,7 +3,6 @@
 INIT_HP:
     ENV_NAME: LunarLander-v2   # Gym environment name
     ALGO: PPO                  # Algorithm
-    DISCRETE_ACTIONS: true     # Environment has discrete action space
     # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     CHANNELS_LAST: false
     NUM_ENVS: 16               # No. parallel environments for training
@@ -27,7 +26,7 @@ INIT_HP:
     EVO_STEPS: 20_480          # Evolution frequency
     EVAL_STEPS:                # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
-    WANDB: true                # Log with Weights and Biases
+    WANDB: false                # Log with Weights and Biases
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation
@@ -36,8 +35,6 @@ MUTATION_PARAMS:
     PARAMS_MUT: 0.2                        # Network parameters mutation
     ACT_MUT: 0.2                           # Activation layer mutation
     RL_HP_MUT: 0.2                         # Learning HP mutation
-    # Learning HPs to choose from
-    RL_HP_SELECTION: [lr, batch_size, learn_step]
     MUT_SD: 0.1                            # Mutation strength
     RAND_SEED: 42                          # Random seed
     MIN_LR: 0.0001                         # Define max and min limits for mutating RL hyperparams
@@ -48,10 +45,18 @@ MUTATION_PARAMS:
     MAX_LEARN_STEP: 8192
 
 NET_CONFIG:
-    arch: mlp
-    hidden_size: [64, 64]
-    mlp_activation: Tanh
-    min_hidden_layers: 1
-    max_hidden_layers: 3
-    min_mlp_nodes: 64
-    max_mlp_nodes: 500
+    latent_dim: 64
+
+    encoder_config:
+        hidden_size: [64]
+        activation: Tanh
+        min_mlp_nodes: 64
+        max_mlp_nodes: 500
+
+    head_config:
+        hidden_size: [64]
+        activation: Tanh
+        min_hidden_layers: 1
+        max_hidden_layers: 2
+        min_mlp_nodes: 64
+        max_mlp_nodes: 500

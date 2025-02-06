@@ -5,7 +5,12 @@ from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_offline import train_offline
-from agilerl.utils.utils import create_population, make_vect_envs, print_hyperparams
+from agilerl.utils.utils import (
+    create_population,
+    make_vect_envs,
+    observation_space_channels_to_first,
+    print_hyperparams,
+)
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -23,19 +28,11 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     accelerator.wait_for_everyone()
 
     env = make_vect_envs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
-    try:
-        state_dim = env.single_observation_space.n
-        one_hot = True
-    except Exception:
-        state_dim = env.single_observation_space.shape
-        one_hot = False
-    try:
-        action_dim = env.single_action_space.n
-    except Exception:
-        action_dim = env.single_action_space.shape[0]
 
+    observation_space = env.single_observation_space
+    action_space = env.single_action_space
     if INIT_HP["CHANNELS_LAST"]:
-        state_dim = (state_dim[2], state_dim[0], state_dim[1])
+        observation_space = observation_space_channels_to_first(observation_space)
 
     dataset = h5py.File(INIT_HP["DATASET"], "r")
 
@@ -48,29 +45,25 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         INIT_HP["EVAL_LOOP"],
     )
     mutations = Mutations(
-        algo=INIT_HP["ALGO"],
         no_mutation=MUTATION_PARAMS["NO_MUT"],
         architecture=MUTATION_PARAMS["ARCH_MUT"],
         new_layer_prob=MUTATION_PARAMS["NEW_LAYER"],
         parameters=MUTATION_PARAMS["PARAMS_MUT"],
         activation=MUTATION_PARAMS["ACT_MUT"],
         rl_hp=MUTATION_PARAMS["RL_HP_MUT"],
-        rl_hp_selection=MUTATION_PARAMS["RL_HP_SELECTION"],
         mutation_sd=MUTATION_PARAMS["MUT_SD"],
         min_lr=MUTATION_PARAMS["MIN_LR"],
         max_lr=MUTATION_PARAMS["MAX_LR"],
         min_batch_size=MUTATION_PARAMS["MAX_BATCH_SIZE"],
         max_batch_size=MUTATION_PARAMS["MAX_BATCH_SIZE"],
-        arch=NET_CONFIG["arch"],
         rand_seed=MUTATION_PARAMS["RAND_SEED"],
         accelerator=accelerator,
     )
 
     agent_pop = create_population(
         algo=INIT_HP["ALGO"],
-        state_dim=state_dim,
-        action_dim=action_dim,
-        one_hot=one_hot,
+        observation_space=observation_space,
+        action_space=action_space,
         net_config=NET_CONFIG,
         INIT_HP=INIT_HP,
         population_size=INIT_HP["POP_SIZE"],
@@ -145,8 +138,9 @@ if __name__ == "__main__":
     }
 
     NET_CONFIG = {
-        "arch": "mlp",  # Network architecture
-        "hidden_size": [32, 32],  # Actor hidden size
+        "encoder_config": {
+            "hidden_size": [32, 32],  # Actor hidden size
+        }
     }
 
     main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)

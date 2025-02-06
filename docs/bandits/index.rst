@@ -51,8 +51,7 @@ We can convert these labelled datasets into a bandit learning environment easily
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     NET_CONFIG = {
-        "arch": "mlp",  # Network architecture
-        "hidden_size": [128],  # Actor hidden size
+        "encoder_config": {"hidden_size": [128]},  # Encoder hidden size
     }
 
     INIT_HP = {
@@ -76,13 +75,22 @@ We can convert these labelled datasets into a bandit learning environment easily
     context_dim = env.context_dim
     action_dim = env.arms
 
+    # Mutation config for RL hyperparameters
+    hp_config = HyperparameterConfig(
+        lr = RLParameter(min=6.25e-5, max=1e-2),
+        batch_size = RLParameter(min=8, max=512, dtype=int),
+        learn_step = RLParameter(min=1, max=10, dtype=int, grow_factor=1.5, shrink_factor=0.75)
+    )
+
+    obs_space = spaces.Box(low=features.values.min(), high=features.values.max())
+    action_space = spaces.Discrete(action_dim)
     pop = create_population(
         algo="NeuralUCB",  # Algorithm
-        state_dim=context_dim,  # State dimension
-        action_dim=action_dim,  # Action dimension
-        one_hot=None,  # One-hot encoding
+        observation_space=obs_space,  # Observation space
+        action_space=action_space,  # Action space
         net_config=NET_CONFIG,  # Network configuration
         INIT_HP=INIT_HP,  # Initial hyperparameters
+        hp_config=hp_config,  # Hyperparameter configuration
         population_size=INIT_HP["POP_SIZE"],  # Population size
         device=device,
     )
@@ -108,63 +116,6 @@ During training it can be added to using the ``ReplayBuffer.save_to_memory()`` m
         device=device,
     )
 
-Tournament Selection
---------------------
-
-Tournament selection is used to select the agents from a population which will make up the next generation of agents. If elitism is used, the best agent from a population
-is automatically preserved and becomes a member of the next generation. Then, for each tournament, k individuals are randomly chosen, and the agent with the best evaluation
-fitness is preserved. This is repeated until the population for the next generation is full.
-
-The class ``TournamentSelection()`` defines the functions required for tournament selection. ``TournamentSelection.select()`` returns the best agent, and the new generation
-of agents.
-
-.. code-block:: python
-
-    from agilerl.hpo.tournament import TournamentSelection
-
-    tournament = TournamentSelection(
-        tournament_size=2,  # Tournament selection size
-        elitism=True,  # Elitism in tournament selection
-        population_size=INIT_HP["POP_SIZE"],  # Population size
-        eval_loop=1,  # Evaluate using last N fitness scores
-    )
-
-Mutation
---------
-
-Mutation is periodically used to explore the hyperparameter space, allowing different hyperparameter combinations to be trialled during training. If certain hyperparameters
-prove relatively beneficial to training, then that agent is more likely to be preserved in the next generation, and so those characteristics are more likely to remain in the
-population.
-
-The ``Mutations()`` class is used to mutate agents with pre-set probabilities. The available mutations currently implemented are:
-    * No mutation
-    * Network architecture mutation - adding layers or nodes. Trained weights are reused and new weights are initialized randomly.
-    * Network parameters mutation - mutating weights with Gaussian noise.
-    * Network activation layer mutation - change of activation layer.
-    * RL algorithm mutation - mutation of learning hyperparameter, such as learning rate or batch size.
-
-``Mutations.mutation()`` returns a mutated population.
-
-Tournament selection and mutation should be applied sequentially to fully evolve a population between evaluation and learning cycles.
-
-.. code-block:: python
-
-    from agilerl.hpo.mutation import Mutations
-
-    mutations = Mutations(
-        algo="NeuralUCB",  # Algorithm
-        no_mutation=0.4,  # No mutation
-        architecture=0.2,  # Architecture mutation
-        new_layer_prob=0.5,  # New layer mutation
-        parameters=0.2,  # Network parameters mutation
-        activation=0.2,  # Activation layer mutation
-        rl_hp=0.2,  # Learning HP mutation
-        rl_hp_selection=["lr", "batch_size"],  # Learning HPs to choose from
-        mutation_sd=0.1,  # Mutation strength
-        arch=NET_CONFIG["arch"],  # Network architecture
-        rand_seed=1,  # Random seed
-        device=device,
-    )
 
 Bandit Training Loop
 -----------------------
@@ -220,7 +171,6 @@ Alternatively, use a custom bandit training loop:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     NET_CONFIG = {
-        "arch": "mlp",  # Network architecture
         "hidden_size": [128],  # Actor hidden size
     }
 
@@ -245,11 +195,12 @@ Alternatively, use a custom bandit training loop:
     context_dim = env.context_dim
     action_dim = env.arms
 
+    obs_space = spaces.Box(low=features.values.min(), high=features.values.max())
+    action_space = spaces.Discrete(action_dim)
     pop = create_population(
         algo="NeuralUCB",  # Algorithm
-        state_dim=context_dim,  # State dimension
-        action_dim=action_dim,  # Action dimension
-        one_hot=None,  # One-hot encoding
+        observation_space=obs_space,  # Observation space
+        action_space=action_space,  # Action space
         net_config=NET_CONFIG,  # Network configuration
         INIT_HP=INIT_HP,  # Initial hyperparameters
         population_size=INIT_HP["POP_SIZE"],  # Population size
@@ -270,16 +221,13 @@ Alternatively, use a custom bandit training loop:
         eval_loop=1,  # Evaluate using last N fitness scores
     )
     mutations = Mutations(
-        algo="NeuralUCB",  # Algorithm
         no_mutation=0.4,  # No mutation
         architecture=0.2,  # Architecture mutation
         new_layer_prob=0.5,  # New layer mutation
         parameters=0.2,  # Network parameters mutation
         activation=0.2,  # Activation layer mutation
         rl_hp=0.2,  # Learning HP mutation
-        rl_hp_selection=["lr", "batch_size"],  # Learning HPs to choose from
-        mutation_sd=0.1,  # Mutation strength
-        arch=NET_CONFIG["arch"],  # Network architecture
+        mutation_sd=0.1,  # Mutation strength  # Network architecture
         rand_seed=1,  # Random seed
         device=device,
     )
@@ -314,7 +262,7 @@ Alternatively, use a custom bandit training loop:
             context = env.reset()  # Reset environment at start of episode
             for idx_step in range(episode_steps):
                 if INIT_HP["CHANNELS_LAST"]:
-                    context = np.moveaxis(context, [-1], [-3])
+                    context = obs_channels_to_first(context)
                 # Get next action from agent
                 action = agent.get_action(context)
                 next_context, reward = env.step(action)  # Act in environment

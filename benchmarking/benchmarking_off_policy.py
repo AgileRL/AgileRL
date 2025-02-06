@@ -1,12 +1,20 @@
 import torch
 import yaml
 
+from agilerl.algorithms.core.base import RLAlgorithm
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.modules.dummy import DummyEvolvable
 from agilerl.training.train_off_policy import train_off_policy
-from agilerl.utils.utils import create_population, make_vect_envs, print_hyperparams
+from agilerl.utils.utils import (
+    create_population,
+    make_vect_envs,
+    observation_space_channels_to_first,
+    print_hyperparams,
+)
+from benchmarking.networks import BasicNetActorDQN
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -17,28 +25,16 @@ from agilerl.utils.utils import create_population, make_vect_envs, print_hyperpa
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cpu")
     print("============ AgileRL ============")
     print(f"DEVICE: {device}")
 
     env = make_vect_envs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
 
-    try:
-        state_dim = (env.single_observation_space.n,)
-        one_hot = True
-    except Exception:
-        state_dim = env.single_observation_space.shape
-        one_hot = False
-    try:
-        action_dim = env.single_action_space.n
-    except Exception:
-        action_dim = env.single_action_space.shape[0]
-
+    observation_space = env.single_observation_space
+    action_space = env.single_action_space
     if INIT_HP["CHANNELS_LAST"]:
-        state_dim = (state_dim[2], state_dim[0], state_dim[1])
-
-    if INIT_HP["ALGO"] == "TD3":
-        max_action = float(env.single_action_space.high[0])
-        INIT_HP["MAX_ACTION"] = max_action
+        observation_space = observation_space_channels_to_first(observation_space)
 
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
@@ -51,64 +47,79 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
         INIT_HP["EVAL_LOOP"],
     )
     mutations = Mutations(
-        algo=INIT_HP["ALGO"],
         no_mutation=MUTATION_PARAMS["NO_MUT"],
         architecture=MUTATION_PARAMS["ARCH_MUT"],
         new_layer_prob=MUTATION_PARAMS["NEW_LAYER"],
         parameters=MUTATION_PARAMS["PARAMS_MUT"],
         activation=MUTATION_PARAMS["ACT_MUT"],
         rl_hp=MUTATION_PARAMS["RL_HP_MUT"],
-        rl_hp_selection=MUTATION_PARAMS["RL_HP_SELECTION"],
         mutation_sd=MUTATION_PARAMS["MUT_SD"],
-        min_lr=MUTATION_PARAMS["MIN_LR"],
-        max_lr=MUTATION_PARAMS["MAX_LR"],
-        min_batch_size=MUTATION_PARAMS["MAX_BATCH_SIZE"],
-        max_batch_size=MUTATION_PARAMS["MAX_BATCH_SIZE"],
-        min_learn_step=MUTATION_PARAMS["MIN_LEARN_STEP"],
-        max_learn_step=MUTATION_PARAMS["MAX_LEARN_STEP"],
-        arch=NET_CONFIG["arch"],
         rand_seed=MUTATION_PARAMS["RAND_SEED"],
         device=device,
     )
 
+    state_dim = RLAlgorithm.get_state_dim(observation_space)
+    action_dim = RLAlgorithm.get_action_dim(action_space)
     if use_net:
-        # Currently set up for TD3
-        actor = EvolvableMLP(
-            num_inputs=state_dim[0],
-            num_outputs=action_dim,
-            output_vanish=False,
-            init_layers=False,
-            layer_norm=False,
-            num_atoms=51,
-            support=torch.linspace(-200, 200, 51).to(device),
-            rainbow=True,
-            device=device,
-            hidden_size=[128, 128],
-            mlp_activation="ReLU",
-            mlp_output_activation="ReLU",
+        # Currently set up for DQN
+        actor_kwargs = dict(
+            input_size=state_dim[0],
+            hidden_sizes=[64, 64],
+            output_size=action_dim,
         )
-        NET_CONFIG = None
-        critic = [
-            EvolvableMLP(
-                num_inputs=state_dim[0] + action_dim,
-                num_outputs=1,
-                device=device,
-                hidden_size=[64, 64],
-                mlp_activation="ReLU",
-            )
-            for _ in range(2)
-        ]
+        actor = DummyEvolvable(BasicNetActorDQN, actor_kwargs, device=device)
+        critic = None
     else:
         actor = None
         critic = None
 
+    if INIT_HP["ALGO"] in ["DDPG", "TD3"]:
+        hp_config = HyperparameterConfig(
+            lr_actor=RLParameter(
+                min=MUTATION_PARAMS["MIN_LR"], max=MUTATION_PARAMS["MAX_LR"]
+            ),
+            lr_critic=RLParameter(
+                min=MUTATION_PARAMS["MIN_LR"], max=MUTATION_PARAMS["MAX_LR"]
+            ),
+            batch_size=RLParameter(
+                min=MUTATION_PARAMS["MIN_BATCH_SIZE"],
+                max=MUTATION_PARAMS["MAX_BATCH_SIZE"],
+                dtype=int,
+            ),
+            learn_step=RLParameter(
+                min=MUTATION_PARAMS["MIN_LEARN_STEP"],
+                max=MUTATION_PARAMS["MAX_LEARN_STEP"],
+                dtype=int,
+                grow_factor=1.5,
+                shrink_factor=0.75,
+            ),
+        )
+    else:
+        hp_config = HyperparameterConfig(
+            lr=RLParameter(
+                min=MUTATION_PARAMS["MIN_LR"], max=MUTATION_PARAMS["MAX_LR"]
+            ),
+            batch_size=RLParameter(
+                min=MUTATION_PARAMS["MIN_BATCH_SIZE"],
+                max=MUTATION_PARAMS["MAX_BATCH_SIZE"],
+                dtype=int,
+            ),
+            learn_step=RLParameter(
+                min=MUTATION_PARAMS["MIN_LEARN_STEP"],
+                max=MUTATION_PARAMS["MAX_LEARN_STEP"],
+                dtype=int,
+                grow_factor=1.5,
+                shrink_factor=0.75,
+            ),
+        )
+
     agent_pop = create_population(
         algo=INIT_HP["ALGO"],
-        state_dim=state_dim,
-        action_dim=action_dim,
-        one_hot=one_hot,
+        observation_space=observation_space,
+        action_space=action_space,
         net_config=NET_CONFIG,
         INIT_HP=INIT_HP,
+        hp_config=hp_config,
         actor_network=actor,
         critic_network=critic,
         population_size=INIT_HP["POP_SIZE"],
@@ -154,4 +165,4 @@ if __name__ == "__main__":
     INIT_HP = config["INIT_HP"]
     MUTATION_PARAMS = config["MUTATION_PARAMS"]
     NET_CONFIG = config["NET_CONFIG"]
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False)
+    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=True)

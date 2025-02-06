@@ -1365,6 +1365,7 @@ def check_policy_q_learning_with_probe_env(
     # Learn from experiences
     for _ in trange(learn_steps):
         experiences = memory.sample(agent.batch_size)
+
         # Learn according to agent's RL algorithm
         agent.learn(experiences)
 
@@ -1381,22 +1382,20 @@ def check_policy_q_learning_with_probe_env(
 
                 if q_values is not None:
                     action = prepare_ma_actions(sample_action, device)
-                    if agent.arch == "mlp":
-                        input_combined = torch.cat(
-                            list(state.values()) + list(action.values()), 1
-                        )
-                        predicted_q_values = (
-                            critic(input_combined).detach().cpu().numpy()[0]
-                        )
-                    else:
+
+                    # Stack states and actions
+                    if agent.is_image_space:
                         stacked_states = torch.stack(list(state.values()), dim=2)
-                        stacked_actions = torch.cat(list(action.values()), dim=1)
-                        predicted_q_values = (
-                            critic(stacked_states, stacked_actions)
-                            .detach()
-                            .cpu()
-                            .numpy()[0]
-                        )
+                    else:
+                        stacked_states = torch.cat(list(state.values()), dim=1)
+
+                    stacked_actions = torch.cat(list(action.values()), dim=1)
+                    predicted_q_values = (
+                        critic(stacked_states, stacked_actions)
+                        .detach()
+                        .cpu()
+                        .numpy()[0]
+                    )
                     # print("---")
                     # print(agent_id, "q", q_values[agent_id], predicted_q_values)
                     # assert np.allclose(q_values[agent_id], predicted_q_values, atol=0.1):
@@ -1406,17 +1405,10 @@ def check_policy_q_learning_with_probe_env(
                         print(agent_id, "q", q_values[agent_id], predicted_q_values)
 
                 if policy_values is not None:
-                    if agent.arch == "mlp":
-                        predicted_policy_values = (
-                            actor(state[agent_id]).detach().cpu().numpy()[0]
-                        )
-                    else:
-                        predicted_policy_values = (
-                            actor(state[agent_id].unsqueeze(2))
-                            .detach()
-                            .cpu()
-                            .numpy()[0]
-                        )
+                    predicted_policy_values = (
+                        actor(state[agent_id]).detach().cpu().numpy()[0]
+                    )
+
                     # print(agent_id, "pol", policy_values[agent_id], predicted_policy_values)
                     # assert np.allclose(policy_values[agent_id], predicted_policy_values, atol=0.1)
                     if not np.allclose(

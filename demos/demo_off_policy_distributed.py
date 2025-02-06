@@ -10,7 +10,11 @@ from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.utils.utils import create_population, make_vect_envs
+from agilerl.utils.utils import (
+    create_population,
+    make_vect_envs,
+    observation_space_channels_to_first,
+)
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -28,8 +32,9 @@ if __name__ == "__main__":
     accelerator.wait_for_everyone()
 
     NET_CONFIG = {
-        "arch": "mlp",  # Network architecture
-        "hidden_size": [32, 32],  # Actor hidden size
+        "encoder_config": {
+            "hidden_size": [32, 32],  # Actor hidden size
+        }
     }
 
     INIT_HP = {
@@ -46,25 +51,15 @@ if __name__ == "__main__":
 
     num_envs = 8
     env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
-    try:
-        state_dim = (env.single_observation_space.n,)  # Discrete observation space
-        one_hot = True  # Requires one-hot encoding
-    except Exception:
-        state_dim = env.single_observation_space.shape  # Continuous observation space
-        one_hot = False  # Does not require one-hot encoding
-    try:
-        action_dim = env.single_action_space.n  # Discrete action space
-    except Exception:
-        action_dim = env.single_action_space.shape[0]  # Continuous action space
-
+    observation_space = env.single_observation_space
+    action_space = env.single_action_space
     if INIT_HP["CHANNELS_LAST"]:
-        state_dim = (state_dim[2], state_dim[0], state_dim[1])
+        observation_space = observation_space_channels_to_first(observation_space)
 
     pop = create_population(
         algo="DQN",  # Algorithm
-        state_dim=state_dim,  # State dimension
-        action_dim=action_dim,  # Action dimension
-        one_hot=one_hot,  # One-hot encoding
+        observation_space=observation_space,  # Observation space
+        action_space=action_space,  # Action space
         net_config=NET_CONFIG,  # Network configuration
         INIT_HP=INIT_HP,  # Initial hyperparameters
         population_size=INIT_HP["POP_SIZE"],  # Population size
@@ -100,8 +95,7 @@ if __name__ == "__main__":
         activation=0,  # Activation layer mutation
         rl_hp=0.2,  # Learning HP mutation
         rl_hp_selection=["lr", "batch_size"],  # Learning HPs to choose from
-        mutation_sd=0.1,  # Mutation strength
-        arch=NET_CONFIG["arch"],  # Network architecture
+        mutation_sd=0.1,  # Mutation strength  # Network architecture
         rand_seed=1,  # Random seed
         accelerator=accelerator,
     )  # Accelerator)

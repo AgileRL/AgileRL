@@ -3,12 +3,14 @@ from datetime import datetime
 import numpy as np
 import torch
 import wandb
+from gymnasium import spaces
 from tqdm import trange
 from ucimlrepo import fetch_ucirepo
 
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import create_population
 from agilerl.wrappers.learning import BanditEnv
 
@@ -25,8 +27,9 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     NET_CONFIG = {
-        "arch": "mlp",  # Network architecture
-        "hidden_size": [128],  # Actor hidden size
+        "encoder_config": {
+            "encoder_config": {"hidden_size": [128]}  # Actor hidden size
+        }
     }
 
     INIT_HP = {
@@ -50,11 +53,14 @@ if __name__ == "__main__":
     context_dim = env.context_dim
     action_dim = env.arms
 
+    observation_space = spaces.Box(
+        low=features.values.min(), high=features.values.max()
+    )
+    action_space = spaces.Discrete(env.arms)
     pop = create_population(
         algo="NeuralUCB",  # Algorithm
-        state_dim=context_dim,  # State dimension
-        action_dim=action_dim,  # Action dimension
-        one_hot=None,  # One-hot encoding
+        observation_space=observation_space,  # State dimension
+        action_space=action_space,  # Action dimension
         net_config=NET_CONFIG,  # Network configuration
         INIT_HP=INIT_HP,  # Initial hyperparameters
         population_size=INIT_HP["POP_SIZE"],  # Population size
@@ -83,8 +89,7 @@ if __name__ == "__main__":
         activation=0.2,  # Activation layer mutation
         rl_hp=0.2,  # Learning HP mutation
         rl_hp_selection=["lr", "batch_size"],  # Learning HPs to choose from
-        mutation_sd=0.1,  # Mutation strength
-        arch=NET_CONFIG["arch"],  # Network architecture
+        mutation_sd=0.1,  # Mutation strength  # Network architecture
         rand_seed=1,  # Random seed
         device=device,
     )
@@ -119,7 +124,7 @@ if __name__ == "__main__":
             context = env.reset()  # Reset environment at start of episode
             for idx_step in range(episode_steps):
                 if INIT_HP["CHANNELS_LAST"]:
-                    context = np.moveaxis(context, [-1], [-3])
+                    context = obs_channels_to_first(context)
                 # Get next action from agent
                 action = agent.get_action(context)
                 next_context, reward = env.step(action)  # Act in environment

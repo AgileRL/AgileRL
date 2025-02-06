@@ -23,18 +23,17 @@ Tournament selection and mutation should be applied sequentially to fully evolve
 
   device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-  mutations = Mutations(algo='DQN',                           # Algorithm
-                        no_mutation=0.4,                      # No mutation
-                        architecture=0.2,                     # Architecture mutation
-                        new_layer_prob=0.2,                   # New layer mutation
-                        parameters=0.2,                       # Network parameters mutation
-                        activation=0,                         # Activation layer mutation
-                        rl_hp=0.2,                            # Learning HP mutation
-                        rl_hp_selection=['lr', 'batch_size'], # Learning HPs to choose from
-                        mutation_sd=0.1,                      # Mutation strength
-                        arch=NET_CONFIG['arch'],              # Network architecture
-                        rand_seed=1,                          # Random seed
-                        device=device)
+  mutations = Mutations(
+                no_mutation=0.4,                      # No mutation
+                architecture=0.2,                     # Architecture mutation
+                new_layer_prob=0.2,                   # New layer mutation
+                parameters=0.2,                       # Network parameters mutation
+                activation=0,                         # Activation layer mutation
+                rl_hp=0.2,                            # Learning HP mutation
+                mutation_sd=0.1,                      # Mutation strength
+                rand_seed=1,                          # Random seed
+                device=device
+              )
 
 
 Parameters
