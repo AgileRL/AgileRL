@@ -21,14 +21,6 @@ from tests.helper_functions import (
     generate_random_box_space,
 )
 
-
-# from pytest_mock import mocker
-@pytest.fixture(autouse=True)
-def cleanup():
-    yield  # Run the test first
-    torch.cuda.empty_cache()  # Free up GPU memory
-
-
 # Shared HP dict that can be used by any algorithm
 SHARED_INIT_HP = {
     "POPULATION_SIZE": 4,
@@ -350,6 +342,7 @@ def test_mutation_applies_random_mutations(algo, device, accelerator, init_pop):
     del population
     del mutated_population
 
+    torch.cuda.empty_cache()  # Free up GPU memory
 
 # The mutation method applies no mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
@@ -412,6 +405,8 @@ def test_mutation_applies_no_mutations(algo, device, accelerator, init_pop):
     del population
     del mutated_population
     del new_population
+
+    torch.cuda.empty_cache()  # Free up GPU memory
 
 
 # The mutation method applies no mutations to the population and returns the mutated population.
@@ -483,6 +478,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(device, accelerator, ini
     del mutated_population
     del new_population
 
+    torch.cuda.empty_cache()  # Free up GPU memory
+
 
 # The mutation method applies RL hyperparameter mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
@@ -549,6 +546,8 @@ def test_mutation_applies_rl_hp_mutations(
     del population
     del mutated_population
     del new_population
+
+    torch.cuda.empty_cache()  # Free up GPU memory
 
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
@@ -622,6 +621,8 @@ def test_mutation_applies_activation_mutations(
     del mutated_population
     del new_population
 
+    torch.cuda.empty_cache()  # Free up GPU memory
+
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
@@ -680,6 +681,8 @@ def test_mutation_applies_activation_mutations_no_skip(
     del population
     del mutated_population
     del new_population
+
+    torch.cuda.empty_cache()  # Free up GPU memory
 
 
 # The mutation method applies parameter mutations to the population and returns the mutated population.
@@ -781,6 +784,8 @@ def test_mutation_applies_parameter_mutations(algo, device, accelerator, init_po
     del mutated_population
     del new_population
 
+    torch.cuda.empty_cache()  # Free up GPU memory
+
 
 # The mutation method applies architecture mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
@@ -828,20 +833,6 @@ def test_mutation_applies_architecture_mutations(algo, device, accelerator, init
 
     mut_methods = population[0].actor.mutation_methods
     for mut_method in mut_methods:
-        population = init_pop
-
-        mutations = Mutations(
-            0,
-            1,
-            0.5,
-            0,
-            0,
-            0,
-            0.5,
-            device=device,
-            accelerator=accelerator,
-        )
-
         class DummyRNG:
             def choice(self, a, size=None, replace=True, p=None):
                 return [mut_method]
@@ -861,6 +852,8 @@ def test_mutation_applies_architecture_mutations(algo, device, accelerator, init
             assert old.index == individual.index
 
         assert_equal_state_dict(population, mutated_population)
+
+        torch.cuda.empty_cache()  # Free up GPU memory
 
     del mutations
     del population
@@ -958,6 +951,7 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
     del mutated_population
     del new_population
 
+    torch.cuda.empty_cache()  # Free up GPU memory
 
 #### Multi-agent algorithm mutations ####
 # The mutation method applies random mutations to the population and returns the mutated population.
@@ -1019,6 +1013,8 @@ def test_mutation_applies_random_mutations_multi_agent(
     del population
     del mutated_population
 
+    torch.cuda.empty_cache()  # Free up GPU memory
+
 
 # The mutation method applies no mutations to the population and returns the mutated population.
 @pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
@@ -1063,6 +1059,8 @@ def test_mutation_applies_no_mutations_multi_agent(algo, device, accelerator, in
     del population
     del mutated_population
 
+    torch.cuda.empty_cache()  # Free up GPU memory
+
 
 # The mutation method applies RL hyperparameter mutations to the population and returns the mutated population.
 @pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
@@ -1080,7 +1078,6 @@ def test_mutation_applies_rl_hp_mutations_multi_agent(
     algo, device, accelerator, init_pop, hp_config
 ):
     pre_training_mut = False
-
     population = init_pop
 
     mutations = Mutations(
@@ -1113,6 +1110,8 @@ def test_mutation_applies_rl_hp_mutations_multi_agent(
     del population
     del mutated_population
     del new_population
+
+    torch.cuda.empty_cache()  # Free up GPU memory
 
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
@@ -1170,6 +1169,8 @@ def test_mutation_applies_activation_mutations_multi_agent(
     del mutated_population
     del new_population
 
+    torch.cuda.empty_cache()  # Free up GPU memory
+
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
 @pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
@@ -1187,7 +1188,6 @@ def test_mutation_applies_activation_mutations_multi_agent_no_skip(
     algo, device, accelerator, init_pop
 ):
     pre_training_mut = False
-
     population = init_pop
 
     mutations = Mutations(
@@ -1224,6 +1224,8 @@ def test_mutation_applies_activation_mutations_multi_agent_no_skip(
     del population
     del mutated_population
     del new_population
+
+    torch.cuda.empty_cache()  # Free up GPU memory
 
 
 # The mutation method applies parameter mutations to the population and returns the mutated population.
@@ -1275,6 +1277,8 @@ def test_mutation_applies_parameter_mutations_multi_agent(
     del mutated_population
     del new_population
 
+    torch.cuda.empty_cache()  # Free up GPU memory
+
 
 # The mutation method applies architecture mutations to the population and returns the mutated population.
 @pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
@@ -1310,20 +1314,6 @@ def test_mutation_applies_architecture_mutations_multi_agent(
 
     mut_methods = population[0].actors[0].mutation_methods
     for mut_method in mut_methods:
-        population = init_pop
-
-        mutations = Mutations(
-            0,
-            1,
-            0.5,
-            0,
-            0,
-            0,
-            0.5,
-            device=device,
-            accelerator=accelerator,
-        )
-
         class DummyRNG:
             def choice(self, a, size=None, replace=True, p=None):
                 return [mut_method]
@@ -1334,6 +1324,8 @@ def test_mutation_applies_architecture_mutations_multi_agent(
         mutated_population = [
             mutations.architecture_mutate(agent) for agent in new_population
         ]
+
+        torch.cuda.empty_cache()  # Free up GPU memory
 
         assert len(mutated_population) == len(population)
         for old, individual in zip(population, mutated_population):
@@ -1364,7 +1356,7 @@ def test_mutation_applies_architecture_mutations_multi_agent(
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("hp_config", [None])
-@pytest.mark.parametrize("device", [torch.device("cpu")])
+@pytest.mark.parametrize("device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")])
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize(
     "mut_method",
@@ -1461,6 +1453,8 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
         mutations.architecture_mutate(agent) for agent in new_population
     ]
 
+    torch.cuda.empty_cache()  # Free up GPU memory
+
     assert len(mutated_population) == len(population)
     for old, individual in zip(population, mutated_population):
         assert individual.mut == "arch"
@@ -1474,6 +1468,7 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
     del population
     del mutated_population
     del new_population
+
 
 
 @pytest.mark.parametrize(
@@ -1524,3 +1519,5 @@ def test_reinit_opt(algo, init_pop):
     del mutations
     del population
     del new_population
+
+    torch.cuda.empty_cache()  # Free up GPU memory
