@@ -292,7 +292,7 @@ def test_mutation_no_options(device, init_pop):
     ],
 )
 @pytest.mark.parametrize(
-    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu"), "cpu"]
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
@@ -376,7 +376,7 @@ def test_mutation_applies_random_mutations(algo, device, accelerator, init_pop):
     ],
 )
 @pytest.mark.parametrize(
-    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu"), "cpu"]
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
@@ -441,7 +441,7 @@ def test_mutation_applies_no_mutations(device, accelerator, init_pop):
     ],
 )
 @pytest.mark.parametrize(
-    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu"), "cpu"]
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
@@ -513,7 +513,7 @@ def test_mutation_applies_no_mutations_pre_training_mut(device, accelerator, ini
     ],
 )
 @pytest.mark.parametrize(
-    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu"), "cpu"]
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
@@ -582,7 +582,7 @@ def test_mutation_applies_rl_hp_mutations(
     ],
 )
 @pytest.mark.parametrize(
-    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu"), "cpu"]
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
@@ -645,7 +645,7 @@ def test_mutation_applies_activation_mutations(
     "algo, action_space", [("DDPG", generate_random_box_space((4,), low=-1, high=1))]
 )
 @pytest.mark.parametrize(
-    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu"), "cpu"]
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
@@ -710,7 +710,7 @@ def test_mutation_applies_activation_mutations_no_skip(device, accelerator, init
     ],
 )
 @pytest.mark.parametrize(
-    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu"), "cpu"]
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
@@ -775,7 +775,7 @@ def test_mutation_applies_parameter_mutations(algo, device, accelerator, init_po
     ],
 )
 @pytest.mark.parametrize(
-    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu"), "cpu"]
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
@@ -838,7 +838,9 @@ def test_mutation_applies_architecture_mutations(algo, device, accelerator, init
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
 @pytest.mark.parametrize("hp_config", [None])
 @pytest.mark.parametrize("population_size", [1])
-@pytest.mark.parametrize("device", [torch.device("cpu")])
+@pytest.mark.parametrize(
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
+)
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=True)])
 @pytest.mark.parametrize(
     "mut_method",
@@ -933,7 +935,9 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
 @pytest.mark.parametrize("hp_config", [None])
 @pytest.mark.parametrize("population_size", [1])
-@pytest.mark.parametrize("device", [torch.device("cpu")])
+@pytest.mark.parametrize(
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
+)
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 def test_mutation_applies_random_mutations_multi_agent(
@@ -992,7 +996,9 @@ def test_mutation_applies_random_mutations_multi_agent(
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("hp_config", [None])
-@pytest.mark.parametrize("device", [torch.device("cpu")])
+@pytest.mark.parametrize(
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
+)
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 def test_mutation_applies_no_mutations_multi_agent(algo, device, accelerator, init_pop):
     pre_training_mut = False
@@ -1036,7 +1042,9 @@ def test_mutation_applies_no_mutations_multi_agent(algo, device, accelerator, in
 )
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
 @pytest.mark.parametrize("population_size", [1])
-@pytest.mark.parametrize("device", [torch.device("cpu")])
+@pytest.mark.parametrize(
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
+)
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 @pytest.mark.parametrize("hp_config", ["ac_hp_config"])
@@ -1095,7 +1103,9 @@ def test_mutation_applies_rl_hp_mutations_multi_agent(
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("hp_config", [None])
-@pytest.mark.parametrize("device", [torch.device("cpu")])
+@pytest.mark.parametrize(
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
+)
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 def test_mutation_applies_activation_mutations_multi_agent(
@@ -1149,7 +1159,9 @@ def test_mutation_applies_activation_mutations_multi_agent(
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("hp_config", [None])
-@pytest.mark.parametrize("device", [torch.device("cpu")])
+@pytest.mark.parametrize(
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
+)
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 def test_mutation_applies_activation_mutations_multi_agent_no_skip(
@@ -1209,7 +1221,9 @@ def test_mutation_applies_activation_mutations_multi_agent_no_skip(
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("hp_config", [None])
-@pytest.mark.parametrize("device", [torch.device("cpu")])
+@pytest.mark.parametrize(
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
+)
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 def test_mutation_applies_parameter_mutations_multi_agent(
@@ -1261,7 +1275,9 @@ def test_mutation_applies_parameter_mutations_multi_agent(
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("hp_config", [None])
-@pytest.mark.parametrize("device", [torch.device("cpu")])
+@pytest.mark.parametrize(
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
+)
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 def test_mutation_applies_architecture_mutations_multi_agent(
@@ -1454,7 +1470,9 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
         ("NeuralTS", generate_discrete_space(2)),
     ],
 )
-@pytest.mark.parametrize("device", [torch.device("cpu")])
+@pytest.mark.parametrize(
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
+)
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
 @pytest.mark.parametrize(
