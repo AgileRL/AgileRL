@@ -12,7 +12,8 @@
 [![Discord](https://dcbadge.vercel.app/api/server/eB8HyTA2ux?style=flat)](https://discord.gg/eB8HyTA2ux)
 [![Arena](./.github/badges/arena-github-badge.svg)](https://arena.agilerl.com)
 <br>
-<h3><i>✨ <b>NEW:</b> Train super-fast for free on <a href="https://arena.agilerl.com">Arena</a>, the RLOps platform from AgileRL ✨</i></h3>
+<h3><i>✨ <b>AgileRL 2.0 is here! Check out the latest powerful <a href=https://docs.agilerl.com/en/latest/get_started/agilerl2changes.html>updates</a>✨ </b></i></h3>
+<h3><i>🚀 <b>Train super-fast for free on <a href="https://arena.agilerl.com">Arena</a>, the RLOps platform from AgileRL 🚀</b></i></h3>
 </div>
 <br>
 

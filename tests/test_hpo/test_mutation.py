@@ -95,39 +95,56 @@ SHARED_INIT_HP_MA = {
     "DT": 0.01,
 }
 
-ACTOR_CRITIC_CONFIG = HyperparameterConfig(
-    lr_actor=RLParameter(min=1e-4, max=1e-2),
-    lr_critic=RLParameter(min=1e-4, max=1e-2),
-    batch_size=RLParameter(min=8, max=512, dtype=int),
-    learn_step=RLParameter(
-        min=20, max=200, dtype=int, grow_factor=1.5, shrink_factor=0.75
-    ),
-)
 
-DEFAULT_CONFIG = HyperparameterConfig(
-    lr=RLParameter(min=6.25e-5, max=1e-2),
-    batch_size=RLParameter(min=8, max=512, dtype=int),
-    learn_step=RLParameter(
-        min=1, max=10, dtype=int, grow_factor=1.5, shrink_factor=0.75
-    ),
-)
+@pytest.fixture
+def ac_hp_config():
+    return HyperparameterConfig(
+        lr_actor=RLParameter(min=1e-4, max=1e-2),
+        lr_critic=RLParameter(min=1e-4, max=1e-2),
+        batch_size=RLParameter(min=8, max=512, dtype=int),
+        learn_step=RLParameter(
+            min=20, max=200, dtype=int, grow_factor=1.5, shrink_factor=0.75
+        ),
+    )
 
-ENCODER_MLP_CONFIG = {"encoder_config": {"hidden_size": [4]}}
-ENCODER_CNN_CONFIG = {
-    "encoder_config": {
-        "channel_size": [3],
-        "kernel_size": [3],
-        "stride_size": [1],
+
+@pytest.fixture
+def default_hp_config():
+    return HyperparameterConfig(
+        lr=RLParameter(min=6.25e-5, max=1e-2),
+        batch_size=RLParameter(min=8, max=512, dtype=int),
+        learn_step=RLParameter(
+            min=1, max=10, dtype=int, grow_factor=1.5, shrink_factor=0.75
+        ),
+    )
+
+
+@pytest.fixture
+def encoder_mlp_config():
+    return {"encoder_config": {"hidden_size": [8]}}
+
+
+@pytest.fixture
+def encoder_cnn_config():
+    return {
+        "encoder_config": {
+            "channel_size": [3],
+            "kernel_size": [3],
+            "stride_size": [1],
+        }
     }
-}
-ENCODER_MULTI_INPUT_CONFIG = {
-    "encoder_config": {
-        "channel_size": [3],
-        "kernel_size": [3],
-        "stride_size": [1],
-        "hidden_size": [4],
+
+
+@pytest.fixture
+def encoder_multi_input_config():
+    return {
+        "encoder_config": {
+            "channel_size": [3],
+            "kernel_size": [3],
+            "stride_size": [1],
+            "hidden_size": [8],
+        }
     }
-}
 
 
 @pytest.fixture
@@ -141,13 +158,17 @@ def init_pop(
     device,
     accelerator,
     hp_config,
+    request,
 ):
+    if hp_config is not None:
+        hp_config = request.getfixturevalue(hp_config)
+
     return create_population(
         algo=algo,
         observation_space=observation_space,
         action_space=action_space,
-        hp_config=copy.deepcopy(hp_config),
-        net_config=copy.deepcopy(net_config),
+        hp_config=hp_config,
+        net_config=request.getfixturevalue(net_config),
         INIT_HP=INIT_HP,
         population_size=population_size,
         device=device,
@@ -222,34 +243,20 @@ def test_returns_regularize_weight():
 
 
 # Checks no mutations if all probabilities set to zero
+@pytest.mark.parametrize("algo", ["DQN"])
 @pytest.mark.parametrize(
-    "algo, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator, hp_config",
-    [
-        (
-            "DQN",
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            ENCODER_MLP_CONFIG,
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG,
-        )
-    ],
+    "observation_space, net_config",
+    [(generate_random_box_space((4,)), "encoder_mlp_config")],
 )
-def test_mutation_no_options(
-    algo,
-    observation_space,
-    action_space,
-    net_config,
-    INIT_HP,
-    population_size,
-    device,
-    accelerator,
-    hp_config,
-    init_pop,
-):
+@pytest.mark.parametrize("action_space", [generate_discrete_space(2)])
+@pytest.mark.parametrize(
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
+)
+@pytest.mark.parametrize("accelerator", [None])
+@pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
+@pytest.mark.parametrize("population_size", [1])
+@pytest.mark.parametrize("hp_config", ["default_hp_config"])
+def test_mutation_no_options(device, init_pop):
     pre_training_mut = True
 
     population = init_pop
@@ -274,28 +281,28 @@ def test_mutation_no_options(
 @pytest.mark.parametrize(
     "algo, hp_config, action_space",
     [
-        ("DQN", DEFAULT_CONFIG, generate_discrete_space(2)),
-        ("Rainbow DQN", DEFAULT_CONFIG, generate_discrete_space(2)),
-        ("DDPG", ACTOR_CRITIC_CONFIG, generate_random_box_space((4,), low=-1, high=1)),
-        ("TD3", ACTOR_CRITIC_CONFIG, generate_random_box_space((4,), low=-1, high=1)),
-        ("PPO", DEFAULT_CONFIG, generate_discrete_space(2)),
-        ("CQN", DEFAULT_CONFIG, generate_discrete_space(2)),
-        ("NeuralUCB", DEFAULT_CONFIG, generate_discrete_space(2)),
-        ("NeuralTS", DEFAULT_CONFIG, generate_discrete_space(2)),
+        ("DQN", "default_hp_config", generate_discrete_space(2)),
+        ("Rainbow DQN", "default_hp_config", generate_discrete_space(2)),
+        ("DDPG", "ac_hp_config", generate_random_box_space((4,), low=-1, high=1)),
+        ("TD3", "ac_hp_config", generate_random_box_space((4,), low=-1, high=1)),
+        ("PPO", "default_hp_config", generate_discrete_space(2)),
+        ("CQN", "default_hp_config", generate_discrete_space(2)),
+        ("NeuralUCB", "default_hp_config", generate_discrete_space(2)),
+        ("NeuralTS", "default_hp_config", generate_discrete_space(2)),
     ],
 )
 @pytest.mark.parametrize(
-    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu"), "cpu"]
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
 @pytest.mark.parametrize(
     "observation_space, net_config",
     [
-        (generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
-        (generate_random_box_space((3, 16, 16)), ENCODER_CNN_CONFIG),
-        (generate_dict_or_tuple_space(1, 1), ENCODER_MULTI_INPUT_CONFIG),
-        (generate_discrete_space(4), ENCODER_MLP_CONFIG),
+        (generate_random_box_space((4,)), "encoder_mlp_config"),
+        (generate_random_box_space((3, 16, 16)), "encoder_cnn_config"),
+        (generate_dict_or_tuple_space(1, 1), "encoder_multi_input_config"),
+        (generate_discrete_space(4), "encoder_mlp_config"),
     ],
 )
 @pytest.mark.parametrize("population_size", [1])
@@ -344,6 +351,7 @@ def test_mutation_applies_random_mutations(algo, device, accelerator, init_pop):
 
     torch.cuda.empty_cache()  # Free up GPU memory
 
+
 # The mutation method applies no mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
     "algo, action_space",
@@ -361,20 +369,20 @@ def test_mutation_applies_random_mutations(algo, device, accelerator, init_pop):
 @pytest.mark.parametrize(
     "observation_space, net_config",
     [
-        (generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
-        (generate_random_box_space((3, 16, 16)), ENCODER_CNN_CONFIG),
-        (generate_dict_or_tuple_space(1, 1), ENCODER_MULTI_INPUT_CONFIG),
-        (generate_discrete_space(4), ENCODER_MLP_CONFIG),
+        (generate_random_box_space((4,)), "encoder_mlp_config"),
+        (generate_random_box_space((3, 16, 16)), "encoder_cnn_config"),
+        (generate_dict_or_tuple_space(1, 1), "encoder_multi_input_config"),
+        (generate_discrete_space(4), "encoder_mlp_config"),
     ],
 )
 @pytest.mark.parametrize(
-    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu"), "cpu"]
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
 @pytest.mark.parametrize("hp_config", [None])
 @pytest.mark.parametrize("population_size", [1])
-def test_mutation_applies_no_mutations(algo, device, accelerator, init_pop):
+def test_mutation_applies_no_mutations(device, accelerator, init_pop):
     pre_training_mut = False
 
     population = init_pop
@@ -426,14 +434,14 @@ def test_mutation_applies_no_mutations(algo, device, accelerator, init_pop):
 @pytest.mark.parametrize(
     "observation_space, net_config",
     [
-        (generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
-        (generate_random_box_space((3, 16, 16)), ENCODER_CNN_CONFIG),
-        (generate_dict_or_tuple_space(1, 1), ENCODER_MULTI_INPUT_CONFIG),
-        (generate_discrete_space(4), ENCODER_MLP_CONFIG),
+        (generate_random_box_space((4,)), "encoder_mlp_config"),
+        (generate_random_box_space((3, 16, 16)), "encoder_cnn_config"),
+        (generate_dict_or_tuple_space(1, 1), "encoder_multi_input_config"),
+        (generate_discrete_space(4), "encoder_mlp_config"),
     ],
 )
 @pytest.mark.parametrize(
-    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu"), "cpu"]
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
@@ -485,36 +493,35 @@ def test_mutation_applies_no_mutations_pre_training_mut(device, accelerator, ini
 @pytest.mark.parametrize(
     "algo, hp_config, action_space",
     [
-        ("DQN", DEFAULT_CONFIG, generate_discrete_space(2)),
-        ("Rainbow DQN", DEFAULT_CONFIG, generate_discrete_space(2)),
-        ("DDPG", ACTOR_CRITIC_CONFIG, generate_random_box_space((4,), low=-1, high=1)),
-        ("TD3", ACTOR_CRITIC_CONFIG, generate_random_box_space((4,), low=-1, high=1)),
-        ("PPO", DEFAULT_CONFIG, generate_discrete_space(2)),
-        ("CQN", DEFAULT_CONFIG, generate_discrete_space(2)),
-        ("NeuralUCB", DEFAULT_CONFIG, generate_discrete_space(2)),
-        ("NeuralTS", DEFAULT_CONFIG, generate_discrete_space(2)),
+        ("DQN", "default_hp_config", generate_discrete_space(2)),
+        ("Rainbow DQN", "default_hp_config", generate_discrete_space(2)),
+        ("DDPG", "ac_hp_config", generate_random_box_space((4,), low=-1, high=1)),
+        ("TD3", "ac_hp_config", generate_random_box_space((4,), low=-1, high=1)),
+        ("PPO", "default_hp_config", generate_discrete_space(2)),
+        ("CQN", "default_hp_config", generate_discrete_space(2)),
+        ("NeuralUCB", "default_hp_config", generate_discrete_space(2)),
+        ("NeuralTS", "default_hp_config", generate_discrete_space(2)),
     ],
 )
 @pytest.mark.parametrize(
     "observation_space, net_config",
     [
-        (generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
-        (generate_random_box_space((3, 16, 16)), ENCODER_CNN_CONFIG),
-        (generate_dict_or_tuple_space(1, 1), ENCODER_MULTI_INPUT_CONFIG),
-        (generate_discrete_space(4), ENCODER_MLP_CONFIG),
+        (generate_random_box_space((4,)), "encoder_mlp_config"),
+        (generate_random_box_space((3, 16, 16)), "encoder_cnn_config"),
+        (generate_dict_or_tuple_space(1, 1), "encoder_multi_input_config"),
+        (generate_discrete_space(4), "encoder_mlp_config"),
     ],
 )
 @pytest.mark.parametrize(
-    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu"), "cpu"]
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
 @pytest.mark.parametrize("population_size", [1])
 def test_mutation_applies_rl_hp_mutations(
-    algo, device, accelerator, hp_config, init_pop
+    device, accelerator, hp_config, init_pop, request
 ):
     pre_training_mut = False
-
     population = init_pop
     mutations = Mutations(
         0,
@@ -527,6 +534,7 @@ def test_mutation_applies_rl_hp_mutations(
         device=device,
         accelerator=accelerator,
     )
+    hp_config = request.getfixturevalue(hp_config)
 
     new_population = [agent.clone(wrap=False) for agent in population]
     mutated_population = mutations.mutation(new_population, pre_training_mut)
@@ -567,24 +575,23 @@ def test_mutation_applies_rl_hp_mutations(
 @pytest.mark.parametrize(
     "observation_space, net_config",
     [
-        (generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
-        (generate_random_box_space((3, 16, 16)), ENCODER_CNN_CONFIG),
-        (generate_dict_or_tuple_space(1, 1), ENCODER_MULTI_INPUT_CONFIG),
-        (generate_discrete_space(4), ENCODER_MLP_CONFIG),
+        (generate_random_box_space((4,)), "encoder_mlp_config"),
+        (generate_random_box_space((3, 16, 16)), "encoder_cnn_config"),
+        (generate_dict_or_tuple_space(1, 1), "encoder_multi_input_config"),
+        (generate_discrete_space(4), "encoder_mlp_config"),
     ],
 )
 @pytest.mark.parametrize(
-    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu"), "cpu"]
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
 @pytest.mark.parametrize("hp_config", [None])
 @pytest.mark.parametrize("population_size", [1])
 def test_mutation_applies_activation_mutations(
-    algo, observation_space, device, accelerator, init_pop
+    observation_space, device, accelerator, init_pop
 ):
     pre_training_mut = False
-
     population = init_pop
 
     if isinstance(observation_space, spaces.Box) and len(observation_space.shape) == 3:
@@ -628,29 +635,25 @@ def test_mutation_applies_activation_mutations(
 @pytest.mark.parametrize(
     "observation_space, net_config",
     [
-        (generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
-        (generate_random_box_space((3, 16, 16)), ENCODER_CNN_CONFIG),
-        (generate_dict_or_tuple_space(1, 1), ENCODER_MULTI_INPUT_CONFIG),
-        (generate_discrete_space(4), ENCODER_MLP_CONFIG),
+        (generate_random_box_space((4,)), "encoder_mlp_config"),
+        (generate_random_box_space((3, 16, 16)), "encoder_cnn_config"),
+        (generate_dict_or_tuple_space(1, 1), "encoder_multi_input_config"),
+        (generate_discrete_space(4), "encoder_mlp_config"),
     ],
 )
 @pytest.mark.parametrize(
     "algo, action_space", [("DDPG", generate_random_box_space((4,), low=-1, high=1))]
 )
 @pytest.mark.parametrize(
-    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu"), "cpu"]
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
 @pytest.mark.parametrize("hp_config", [None])
 @pytest.mark.parametrize("population_size", [1])
-def test_mutation_applies_activation_mutations_no_skip(
-    algo, device, accelerator, init_pop
-):
+def test_mutation_applies_activation_mutations_no_skip(device, accelerator, init_pop):
     pre_training_mut = False
-
     population = init_pop
-
     mutations = Mutations(
         0,
         0,
@@ -687,66 +690,27 @@ def test_mutation_applies_activation_mutations_no_skip(
 
 # The mutation method applies parameter mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, action_space, observation_space, net_config",
+    "algo, action_space",
     [
-        (
-            "DQN",
-            generate_discrete_space(2),
-            generate_random_box_space((4,)),
-            ENCODER_MLP_CONFIG,
-        ),
-        (
-            "Rainbow DQN",
-            generate_discrete_space(2),
-            generate_random_box_space((4,)),
-            ENCODER_MLP_CONFIG,
-        ),
-        (
-            "DDPG",
-            generate_random_box_space((4,), low=-1, high=1),
-            generate_random_box_space((4,)),
-            ENCODER_MLP_CONFIG,
-        ),
-        (
-            "TD3",
-            generate_random_box_space((4,), low=-1, high=1),
-            generate_random_box_space((4,)),
-            ENCODER_MLP_CONFIG,
-        ),
-        (
-            "PPO",
-            generate_discrete_space(2),
-            generate_random_box_space((4,)),
-            ENCODER_MLP_CONFIG,
-        ),
-        (
-            "CQN",
-            generate_discrete_space(2),
-            generate_random_box_space((4,)),
-            ENCODER_MLP_CONFIG,
-        ),
-        (
-            "NeuralUCB",
-            generate_discrete_space(2),
-            generate_random_box_space((4,)),
-            ENCODER_MLP_CONFIG,
-        ),
-        (
-            "NeuralTS",
-            generate_discrete_space(2),
-            generate_random_box_space((4,)),
-            ENCODER_MLP_CONFIG,
-        ),
-        (
-            "ILQL",
-            generate_discrete_space(2),
-            generate_random_box_space((4,)),
-            ENCODER_MLP_CONFIG,
-        ),
+        ("DQN", generate_discrete_space(2)),
+        ("Rainbow DQN", generate_discrete_space(2)),
+        ("DDPG", generate_random_box_space((4,), low=-1, high=1)),
+        ("TD3", generate_random_box_space((4,), low=-1, high=1)),
+        ("PPO", generate_discrete_space(2)),
+        ("CQN", generate_discrete_space(2)),
+        ("NeuralUCB", generate_discrete_space(2)),
+        ("NeuralTS", generate_discrete_space(2)),
     ],
 )
 @pytest.mark.parametrize(
-    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu"), "cpu"]
+    "observation_space, net_config",
+    [
+        (generate_random_box_space((4,)), "encoder_mlp_config"),
+        (generate_random_box_space((3, 16, 16)), "encoder_cnn_config"),
+    ],
+)
+@pytest.mark.parametrize(
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
@@ -804,14 +768,14 @@ def test_mutation_applies_parameter_mutations(algo, device, accelerator, init_po
 @pytest.mark.parametrize(
     "observation_space, net_config",
     [
-        (generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
-        (generate_random_box_space((3, 16, 16)), ENCODER_CNN_CONFIG),
-        (generate_dict_or_tuple_space(1, 1), ENCODER_MULTI_INPUT_CONFIG),
-        (generate_discrete_space(4), ENCODER_MLP_CONFIG),
+        (generate_random_box_space((4,)), "encoder_mlp_config"),
+        (generate_random_box_space((3, 16, 16)), "encoder_cnn_config"),
+        (generate_dict_or_tuple_space(1, 1), "encoder_multi_input_config"),
+        (generate_discrete_space(4), "encoder_mlp_config"),
     ],
 )
 @pytest.mark.parametrize(
-    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu"), "cpu"]
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
@@ -833,6 +797,7 @@ def test_mutation_applies_architecture_mutations(algo, device, accelerator, init
 
     mut_methods = population[0].actor.mutation_methods
     for mut_method in mut_methods:
+
         class DummyRNG:
             def choice(self, a, size=None, replace=True, p=None):
                 return [mut_method]
@@ -865,7 +830,7 @@ def test_mutation_applies_architecture_mutations(algo, device, accelerator, init
 @pytest.mark.parametrize("algo", ["DDPG"])
 @pytest.mark.parametrize(
     "observation_space, net_config",
-    [(generate_random_box_space((4,)), ENCODER_MLP_CONFIG)],
+    [(generate_random_box_space((4,)), "encoder_mlp_config")],
 )
 @pytest.mark.parametrize(
     "action_space", [generate_random_box_space((2,), low=-1, high=1)]
@@ -873,7 +838,9 @@ def test_mutation_applies_architecture_mutations(algo, device, accelerator, init
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
 @pytest.mark.parametrize("hp_config", [None])
 @pytest.mark.parametrize("population_size", [1])
-@pytest.mark.parametrize("device", [torch.device("cpu")])
+@pytest.mark.parametrize(
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
+)
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=True)])
 @pytest.mark.parametrize(
     "mut_method",
@@ -953,21 +920,24 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
 
     torch.cuda.empty_cache()  # Free up GPU memory
 
+
 #### Multi-agent algorithm mutations ####
 # The mutation method applies random mutations to the population and returns the mutated population.
 @pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
 @pytest.mark.parametrize(
     "observation_space, net_config",
     [
-        (generate_multi_agent_box_spaces(2, shape=(4,)), ENCODER_MLP_CONFIG),
-        (generate_multi_agent_box_spaces(2, shape=(3, 16, 16)), ENCODER_CNN_CONFIG),
-        (gen_multi_agent_dict_or_tuple_spaces(2, 1, 1), ENCODER_MULTI_INPUT_CONFIG),
+        (generate_multi_agent_box_spaces(2, shape=(4,)), "encoder_mlp_config"),
+        (generate_multi_agent_box_spaces(2, shape=(3, 16, 16)), "encoder_cnn_config"),
+        (gen_multi_agent_dict_or_tuple_spaces(2, 1, 1), "encoder_multi_input_config"),
     ],
 )
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
 @pytest.mark.parametrize("hp_config", [None])
 @pytest.mark.parametrize("population_size", [1])
-@pytest.mark.parametrize("device", [torch.device("cpu")])
+@pytest.mark.parametrize(
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
+)
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 def test_mutation_applies_random_mutations_multi_agent(
@@ -1020,13 +990,15 @@ def test_mutation_applies_random_mutations_multi_agent(
 @pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
 @pytest.mark.parametrize(
     "observation_space, net_config",
-    [(generate_multi_agent_box_spaces(2, shape=(4,)), ENCODER_MLP_CONFIG)],
+    [(generate_multi_agent_box_spaces(2, shape=(4,)), "encoder_mlp_config")],
 )
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("hp_config", [None])
-@pytest.mark.parametrize("device", [torch.device("cpu")])
+@pytest.mark.parametrize(
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
+)
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 def test_mutation_applies_no_mutations_multi_agent(algo, device, accelerator, init_pop):
     pre_training_mut = False
@@ -1066,16 +1038,18 @@ def test_mutation_applies_no_mutations_multi_agent(algo, device, accelerator, in
 @pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
 @pytest.mark.parametrize(
     "observation_space, net_config",
-    [(generate_multi_agent_box_spaces(2, shape=(4,)), ENCODER_MLP_CONFIG)],
+    [(generate_multi_agent_box_spaces(2, shape=(4,)), "encoder_mlp_config")],
 )
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
 @pytest.mark.parametrize("population_size", [1])
-@pytest.mark.parametrize("device", [torch.device("cpu")])
+@pytest.mark.parametrize(
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
+)
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
-@pytest.mark.parametrize("hp_config", [ACTOR_CRITIC_CONFIG])
+@pytest.mark.parametrize("hp_config", ["ac_hp_config"])
 def test_mutation_applies_rl_hp_mutations_multi_agent(
-    algo, device, accelerator, init_pop, hp_config
+    device, accelerator, init_pop, hp_config, request
 ):
     pre_training_mut = False
     population = init_pop
@@ -1094,6 +1068,8 @@ def test_mutation_applies_rl_hp_mutations_multi_agent(
 
     new_population = [agent.clone(wrap=False) for agent in population]
     mutated_population = mutations.mutation(new_population, pre_training_mut)
+
+    hp_config = request.getfixturevalue(hp_config)
 
     assert len(mutated_population) == len(population)
     for old, individual in zip(population, mutated_population):
@@ -1119,15 +1095,17 @@ def test_mutation_applies_rl_hp_mutations_multi_agent(
 @pytest.mark.parametrize(
     "observation_space, net_config",
     [
-        (generate_multi_agent_box_spaces(2, shape=(4,)), ENCODER_MLP_CONFIG),
-        (generate_multi_agent_box_spaces(2, shape=(3, 16, 16)), ENCODER_CNN_CONFIG),
-        (gen_multi_agent_dict_or_tuple_spaces(2, 1, 1), ENCODER_MULTI_INPUT_CONFIG),
+        (generate_multi_agent_box_spaces(2, shape=(4,)), "encoder_mlp_config"),
+        (generate_multi_agent_box_spaces(2, shape=(3, 16, 16)), "encoder_cnn_config"),
+        (gen_multi_agent_dict_or_tuple_spaces(2, 1, 1), "encoder_multi_input_config"),
     ],
 )
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("hp_config", [None])
-@pytest.mark.parametrize("device", [torch.device("cpu")])
+@pytest.mark.parametrize(
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
+)
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 def test_mutation_applies_activation_mutations_multi_agent(
@@ -1176,12 +1154,14 @@ def test_mutation_applies_activation_mutations_multi_agent(
 @pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
 @pytest.mark.parametrize(
     "observation_space, net_config",
-    [(generate_multi_agent_box_spaces(2, shape=(4,)), ENCODER_MLP_CONFIG)],
+    [(generate_multi_agent_box_spaces(2, shape=(4,)), "encoder_mlp_config")],
 )
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("hp_config", [None])
-@pytest.mark.parametrize("device", [torch.device("cpu")])
+@pytest.mark.parametrize(
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
+)
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 def test_mutation_applies_activation_mutations_multi_agent_no_skip(
@@ -1233,15 +1213,17 @@ def test_mutation_applies_activation_mutations_multi_agent_no_skip(
 @pytest.mark.parametrize(
     "observation_space, net_config",
     [
-        (generate_multi_agent_box_spaces(2, shape=(4,)), ENCODER_MLP_CONFIG),
-        (generate_multi_agent_box_spaces(2, shape=(3, 16, 16)), ENCODER_CNN_CONFIG),
-        (gen_multi_agent_dict_or_tuple_spaces(2, 1, 1), ENCODER_MULTI_INPUT_CONFIG),
+        (generate_multi_agent_box_spaces(2, shape=(4,)), "encoder_mlp_config"),
+        (generate_multi_agent_box_spaces(2, shape=(3, 16, 16)), "encoder_cnn_config"),
+        (gen_multi_agent_dict_or_tuple_spaces(2, 1, 1), "encoder_multi_input_config"),
     ],
 )
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("hp_config", [None])
-@pytest.mark.parametrize("device", [torch.device("cpu")])
+@pytest.mark.parametrize(
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
+)
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 def test_mutation_applies_parameter_mutations_multi_agent(
@@ -1285,15 +1267,17 @@ def test_mutation_applies_parameter_mutations_multi_agent(
 @pytest.mark.parametrize(
     "observation_space, net_config",
     [
-        (generate_multi_agent_box_spaces(2, shape=(4,)), ENCODER_MLP_CONFIG),
-        (generate_multi_agent_box_spaces(2, shape=(3, 16, 16)), ENCODER_CNN_CONFIG),
-        (gen_multi_agent_dict_or_tuple_spaces(2, 1, 1), ENCODER_MULTI_INPUT_CONFIG),
+        (generate_multi_agent_box_spaces(2, shape=(4,)), "encoder_mlp_config"),
+        (generate_multi_agent_box_spaces(2, shape=(3, 16, 16)), "encoder_cnn_config"),
+        (gen_multi_agent_dict_or_tuple_spaces(2, 1, 1), "encoder_multi_input_config"),
     ],
 )
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("hp_config", [None])
-@pytest.mark.parametrize("device", [torch.device("cpu")])
+@pytest.mark.parametrize(
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
+)
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 def test_mutation_applies_architecture_mutations_multi_agent(
@@ -1314,6 +1298,7 @@ def test_mutation_applies_architecture_mutations_multi_agent(
 
     mut_methods = population[0].actors[0].mutation_methods
     for mut_method in mut_methods:
+
         class DummyRNG:
             def choice(self, a, size=None, replace=True, p=None):
                 return [mut_method]
@@ -1347,16 +1332,18 @@ def test_mutation_applies_architecture_mutations_multi_agent(
 @pytest.mark.parametrize(
     "observation_space, net_config",
     [
-        (generate_multi_agent_box_spaces(2, shape=(4,)), ENCODER_MLP_CONFIG),
-        (generate_multi_agent_box_spaces(2, shape=(3, 16, 16)), ENCODER_CNN_CONFIG),
-        (gen_multi_agent_dict_or_tuple_spaces(2, 1, 1), ENCODER_MULTI_INPUT_CONFIG),
+        (generate_multi_agent_box_spaces(2, shape=(4,)), "encoder_mlp_config"),
+        (generate_multi_agent_box_spaces(2, shape=(3, 16, 16)), "encoder_cnn_config"),
+        (gen_multi_agent_dict_or_tuple_spaces(2, 1, 1), "encoder_multi_input_config"),
     ],
 )
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("hp_config", [None])
-@pytest.mark.parametrize("device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")])
+@pytest.mark.parametrize(
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
+)
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize(
     "mut_method",
@@ -1470,7 +1457,6 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
     del new_population
 
 
-
 @pytest.mark.parametrize(
     "algo, action_space",
     [
@@ -1484,13 +1470,15 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
         ("NeuralTS", generate_discrete_space(2)),
     ],
 )
-@pytest.mark.parametrize("device", [torch.device("cpu")])
+@pytest.mark.parametrize(
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
+)
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
 @pytest.mark.parametrize(
     "observation_space, net_config",
     [
-        (generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
+        (generate_random_box_space((4,)), "encoder_mlp_config"),
     ],
 )
 @pytest.mark.parametrize("hp_config", [None])

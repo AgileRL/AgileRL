@@ -463,6 +463,7 @@ class EvolvableCNN(EvolvableModule):
         max_kernels = self.mut_kernel_size.calc_max_kernel_sizes(
             self.channel_size, self.stride_size, self.input_shape
         )
+        print(max_kernels)
         if (
             len(self.channel_size) < self.max_hidden_layers
             and not any(i <= 2 for i in self.cnn_output_size[-2:])

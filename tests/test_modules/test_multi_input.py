@@ -560,10 +560,17 @@ def test_remove_nodes(
 @pytest.mark.parametrize(
     "observation_space, channel_size, kernel_size, stride_size, hidden_size, num_outputs",
     [
-        (generate_dict_or_tuple_space(2, 3), [32], [3], [1], [128], 10),
         (
-            generate_dict_or_tuple_space(2, 3),
-            [8, 8, 8],
+            generate_dict_or_tuple_space(2, 3, image_shape=(3, 128, 128)),
+            [32],
+            [3],
+            [1],
+            [128],
+            10,
+        ),
+        (
+            generate_dict_or_tuple_space(2, 3, image_shape=(3, 128, 128)),
+            [3, 3, 3],
             [2, 2, 2],
             [2, 2, 2],
             [32, 32, 32],
@@ -589,6 +596,7 @@ def test_add_cnn_layer_simple(
         num_outputs=num_outputs,
         device=device,
     )
+    print(evolvable_composed)
     initial_channel_num = len(evolvable_composed.channel_size)
     initial_net = evolvable_composed.feature_net["image_1"]
     initial_net_dict = dict(initial_net.named_parameters())
