@@ -5,6 +5,7 @@ from .custom_components import GumbelSoftmax, NewGELU, NoisyLinear
 from .gpt import EvolvableGPT
 from .mlp import EvolvableMLP
 from .multi_input import EvolvableMultiInput
+from .simba import EvolvableSimBa
 
 __all__ = [
     "EvolvableModule",
@@ -16,6 +17,7 @@ __all__ = [
     "NewGELU",
     "EvolvableGPT",
     "EvolvableMLP",
+    "EvolvableSimBa",
     "EvolvableCNN",
     "EvolvableMultiInput",
 ]

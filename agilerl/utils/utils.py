@@ -27,6 +27,7 @@ from agilerl.modules.base import EvolvableModule
 from agilerl.typing import GymSpaceType, PopulationType
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
+SupportedObservationSpace = Union[spaces.Box, spaces.Discrete, spaces.Dict, spaces.Tuple]
 
 def make_vect_envs(
     env_name: Optional[str] = None,
@@ -94,14 +95,14 @@ def make_skill_vect_envs(
 
 
 def observation_space_channels_to_first(
-    observation_space: Union[spaces.Box, spaces.Dict],
-) -> spaces.Box:
-    """Swaps the channel order of an image observation space from [H, W, C] -> [C, H, W].
+    observation_space: SupportedObservationSpace,
+) -> SupportedObservationSpace:
+    """Swaps the channel order of an observation space from [H, W, C] -> [C, H, W].
 
     :param observation_space: Observation space
-    :type observation_space: spaces.Box
+    :type observation_space: spaces.Box, spaces.Dict, spaces.Tuple, spaces.Discrete
     :return: Observation space with swapped channels
-    :rtype: spaces.Box
+    :rtype: spaces.Box, spaces.Dict, spaces.Tuple, spaces.Discrete
     """
     if isinstance(observation_space, spaces.Dict):
         for key in observation_space.spaces.keys():
@@ -112,12 +113,21 @@ def observation_space_channels_to_first(
                 observation_space[key] = observation_space_channels_to_first(
                     observation_space[key]
                 )
-        return observation_space
+    elif isinstance(observation_space, spaces.Tuple):
+        observation_space = spaces.Tuple(
+            [
+                observation_space_channels_to_first(space)
+                if isinstance(space, spaces.Box) and len(space.shape) == 3
+                else space
+                for space in observation_space.spaces
+            ]
+        )
+    elif isinstance(observation_space, spaces.Box):
+        low = observation_space.low.transpose(2, 0, 1)
+        high = observation_space.high.transpose(2, 0, 1)
+        observation_space = spaces.Box(low=low, high=high, dtype=observation_space.dtype)
 
-    low = observation_space.low.transpose(2, 0, 1)
-    high = observation_space.high.transpose(2, 0, 1)
-    return spaces.Box(low=low, high=high, dtype=observation_space.dtype)
-
+    return observation_space
 
 def create_population(
     algo: str,

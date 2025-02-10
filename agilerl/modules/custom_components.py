@@ -145,3 +145,37 @@ class NewGELU(nn.Module):
                 )
             )
         )
+
+class SimbaResidualBlock(nn.Module):
+    """Creates a residual block designed to avoid overfitting in RL by inducing 
+    a simplicity bias. Assumes 
+    
+    Paper: https://arxiv.org/abs/2410.09754
+    
+    :param hidden_size: Hidden size of the residual block
+    :type hidden_size: int
+    :param device: Device, defaults to "cpu"
+    :type device
+    """
+    def __init__(
+            self,
+            hidden_size: int,
+            device: DeviceType = "cpu"
+            ) -> None:
+        super().__init__()
+        self.hidden_size = hidden_size
+
+        self.layer_norm = nn.LayerNorm(hidden_size, device=device)
+        self.linear1 = nn.Linear(hidden_size, hidden_size)
+        self.linear2 = nn.Linear(hidden_size, hidden_size)
+
+        # initialize weigts using he initialization
+        nn.init.kaiming_uniform_(self.linear1.weight)
+        nn.init.kaiming_uniform_(self.linear2.weight)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        res = x
+        x = self.layer_norm(x)
+        x = F.relu(self.linear1(x))
+        x = self.linear2(x)
+        return res + x

@@ -1,5 +1,5 @@
 from dataclasses import asdict
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Type
 
 import torch
 from gymnasium import spaces
@@ -213,6 +213,10 @@ class RainbowQNetwork(EvolvableNetwork):
 
         # Build value and advantage networks
         self.build_network_head(head_config)
+    
+    @classmethod
+    def with_simba(cls: Type["RainbowQNetwork"], *args, **kwargs) -> None:
+        raise NotImplementedError("SimBa is not supported for RainbowQNetwork.")
 
     def build_network_head(self, net_config: Dict[str, Any]) -> None:
         """Builds the value and advantage heads of the network based on the passed configuration.

@@ -10,7 +10,7 @@ from gymnasium import spaces
 from torch.optim import Optimizer
 
 from agilerl.modules.configs import CnnNetConfig, MlpNetConfig, MultiInputNetConfig
-from agilerl.modules.custom_components import GumbelSoftmax, NewGELU, NoisyLinear
+from agilerl.modules.custom_components import GumbelSoftmax, NewGELU, NoisyLinear, SimbaResidualBlock
 from agilerl.typing import ConfigType, DeviceType
 
 TupleorInt = Union[Tuple[int, ...], int]
@@ -546,4 +546,46 @@ def create_mlp(
     net_dict[f"{name}_activation_output"] = get_activation(
         activation_name=output_activation, new_gelu=new_gelu
     )
+    return nn.Sequential(net_dict)
+
+def create_simba(
+        input_size: int,
+        output_size: int,
+        hidden_size: int,
+        num_blocks: int,
+        output_activation: Optional[str] = None,
+        device: DeviceType = "cpu",
+        name: str = "simba",
+    ) -> nn.Sequential:
+    """Creates a number of SimBa residual blocks.
+     
+    Paper: https://arxiv.org/abs/2410.09754.
+    
+    :param hidden_dim: Number of hidden units.
+    :type hidden_dim: int
+    :param num_blocks: Number of residual blocks.
+    :type num_blocks: int
+    :param device: Device to use. Defaults to "cpu".
+    :type device: DeviceType, optional
+    :param name: Name of the network.
+    :type name: str, default "simba"
+
+    :return: Residual block.
+    :rtype: nn.Sequential
+    """
+    net_dict: Dict[str, nn.Module] = OrderedDict()
+
+    # Initial dense layer
+    net_dict[f"{name}_linear_layer_input"] = nn.Linear(input_size, hidden_size, device=device)
+    nn.init.orthogonal_(net_dict[f"{name}_linear_layer_input"].weight)
+    for l_no in range(1, num_blocks+1):
+        net_dict[f"{name}_residual_block_{str(l_no)}"] = SimbaResidualBlock(hidden_size, device=device)
+    
+    # Final layer norm and output dense
+    net_dict[f"{name}_layer_norm_output"] = nn.LayerNorm(hidden_size, device=device)
+    net_dict[f"{name}_linear_layer_output"] = nn.Linear(hidden_size, output_size, device=device)
+    nn.init.orthogonal_(net_dict[f"{name}_linear_layer_output"].weight)
+
+    net_dict[f"{name}_activation_output"] = get_activation(activation_name=output_activation)
+
     return nn.Sequential(net_dict)

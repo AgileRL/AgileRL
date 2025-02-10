@@ -1,20 +1,18 @@
 from dataclasses import asdict
-from typing import Any, Dict, Optional, TypeVar, Union
+from typing import Any, Dict, Optional, TypeVar, Union, Type
 
 import numpy as np
 import torch
 from gymnasium import spaces
 
 from agilerl.modules.base import EvolvableModule, ModuleMeta, mutation
-from agilerl.modules.cnn import EvolvableCNN
-from agilerl.modules.mlp import EvolvableMLP
-from agilerl.modules.multi_input import EvolvableMultiInput
+from agilerl.modules import EvolvableMLP, EvolvableSimBa, EvolvableCNN, EvolvableMultiInput
 from agilerl.protocols import MutationType
 from agilerl.typing import ConfigType, DeviceType, TorchObsType
 from agilerl.utils.evolvable_networks import get_default_encoder_config, is_image_space
 
 SelfEvolvableNetwork = TypeVar("SelfEvolvableNetwork", bound="EvolvableNetwork")
-SupportedEvolvable = Union[EvolvableMLP, EvolvableCNN, EvolvableMultiInput]
+SupportedEvolvable = Union[EvolvableMLP, EvolvableSimBa, EvolvableCNN, EvolvableMultiInput]
 
 
 def assert_correct_mlp_net_config(net_config: Dict[str, Any]) -> None:
@@ -33,6 +31,24 @@ def assert_correct_mlp_net_config(net_config: Dict[str, Any]) -> None:
         len(net_config["hidden_size"]) > 0
     ), "Net config hidden_size must contain at least one element."
 
+def assert_correct_simba_net_config(net_config: Dict[str, Any]) -> None:
+    """Asserts that the MLP network configuration is correct.
+
+    :param net_config: Configuration of the MLP network.
+    :type net_config: Dict[str, Any]
+    """
+    assert (
+        "hidden_size" in net_config.keys()
+    ), "Net config must contain hidden_size: int."
+    assert isinstance(
+        net_config["hidden_size"], int
+    ), "Net config hidden_size must be an integer."
+    assert (
+        "num_blocks" in net_config.keys()
+    ), "Net config must contain num_blocks: int."
+    assert isinstance(
+        net_config["num_blocks"], int
+    ), "Net config num_blocks must be an integer."
 
 def assert_correct_cnn_net_config(net_config: Dict[str, Any]) -> None:
     """Asserts that the CNN network configuration is correct.
@@ -129,6 +145,8 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     encoder: SupportedEvolvable
     head_net: SupportedEvolvable
 
+    _encoder_mlp_cls = EvolvableMLP
+
     def __init__(
         self,
         observation_space: spaces.Space,
@@ -207,6 +225,16 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         :rtype: str
         """
         return self.encoder.activation
+    
+    @classmethod
+    def with_simba(cls: Type[SelfEvolvableNetwork], *args, **kwargs) -> SelfEvolvableNetwork:
+        """Create a network with a SimBa head.
+
+        :return: Network with a SimBa head.
+        :rtype: SelfEvolvableNetwork
+        """
+        cls._encoder_mlp_cls = EvolvableSimBa
+        return cls(*args, **kwargs)
 
     def forward(self, x: TorchObsType) -> torch.Tensor:
         """Forward pass of the network.
@@ -245,7 +273,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
 
     def create_mlp(
         self, num_inputs: int, num_outputs: int, name: str, net_config: Dict[str, Any]
-    ) -> EvolvableMLP:
+    ) -> Union[EvolvableMLP, EvolvableSimBa]:
         """Builds the head of the network based on the passed configuration.
 
         :param num_inputs: Number of inputs to the network head.
@@ -374,9 +402,12 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                 **net_config,
             )
         else:
-            # assert_correct_mlp_net_config(net_config)
+            if self._encoder_mlp_cls is EvolvableSimBa:
+                assert_correct_simba_net_config(net_config)
+            else:
+                assert_correct_mlp_net_config(net_config)
 
-            encoder = EvolvableMLP(
+            encoder = self._encoder_mlp_cls(
                 num_inputs=spaces.flatdim(self.observation_space),
                 num_outputs=self.latent_dim,
                 device=self.device,

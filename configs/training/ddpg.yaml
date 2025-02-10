@@ -28,7 +28,7 @@ INIT_HP:
     EVAL_STEPS:                # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
     LEARNING_DELAY: 1000       # Steps before learning
-    WANDB: true               # Log with Weights and Biases
+    WANDB: false               # Log with Weights and Biases
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation
@@ -53,8 +53,9 @@ NET_CONFIG:
     latent_dim: 64
 
     encoder_config:
-        hidden_size: [64]
-        activation: ReLU
+        hidden_size: 64
+        num_blocks: 2
+        # activation: ReLU
         min_mlp_nodes: 64
         max_mlp_nodes: 500
 
