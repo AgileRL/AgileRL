@@ -215,7 +215,7 @@ class DDPG(RLAlgorithm):
             critic_net_config["head_config"] = critic_head_config
 
             def create_actor():
-                return DeterministicActor.with_simba(
+                return DeterministicActor(
                     observation_space=observation_space,
                     action_space=action_space,
                     device=device,
@@ -223,7 +223,7 @@ class DDPG(RLAlgorithm):
                 )
 
             def create_critic():
-                return ContinuousQNetwork.with_simba(
+                return ContinuousQNetwork(
                     observation_space=observation_space,
                     action_space=action_space,
                     device=device,

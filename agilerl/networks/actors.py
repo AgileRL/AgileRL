@@ -168,6 +168,7 @@ class DeterministicActor(EvolvableNetwork):
         max_latent_dim: int = 128,
         n_agents: Optional[int] = None,
         latent_dim: int = 32,
+        simba: bool = False,
         device: str = "cpu",
     ):
 
@@ -179,6 +180,7 @@ class DeterministicActor(EvolvableNetwork):
             max_latent_dim=max_latent_dim,
             n_agents=n_agents,
             latent_dim=latent_dim,
+            simba=simba,
             device=device,
         )
 
@@ -280,6 +282,7 @@ class StochasticActor(DeterministicActor):
         max_latent_dim: int = 128,
         n_agents: Optional[int] = None,
         latent_dim: int = 32,
+        simba: bool = False,
         device: str = "cpu",
     ):
 
@@ -292,6 +295,7 @@ class StochasticActor(DeterministicActor):
             max_latent_dim=max_latent_dim,
             n_agents=n_agents,
             latent_dim=latent_dim,
+            simba=simba,
             device=device,
         )
 

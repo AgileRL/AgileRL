@@ -1,4 +1,4 @@
-from typing import List, Optional, Dict
+from typing import Optional, Dict, Any
 
 import numpy as np
 import torch
@@ -77,6 +77,16 @@ class EvolvableSimBa(EvolvableModule):
             name=name
         )
 
+    @property
+    def net_config(self) -> Dict[str, Any]:
+        """Returns model configuration in dictionary."""
+        net_config = self.init_dict.copy()
+        for attr in ["num_inputs", "num_outputs", "device", "name"]:
+            if attr in net_config:
+                net_config.pop(attr)
+
+        return net_config
+
     def forward(self, x: ObservationType) -> torch.Tensor:
         """Returns output of neural network.
 
@@ -85,6 +95,12 @@ class EvolvableSimBa(EvolvableModule):
         :return: Neural network output
         :rtype: torch.Tensor
         """
+        if not isinstance(x, torch.Tensor):
+            x = torch.tensor(x, dtype=torch.float32, device=self.device)
+
+        if len(x.shape) == 1:
+            x = x.unsqueeze(0)
+
         return self.model(x)
     
     @mutation(MutationType.LAYER)

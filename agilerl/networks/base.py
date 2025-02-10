@@ -138,6 +138,8 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     :type encoder_mutations: bool
     :param latent_dim: Dimension of the latent space representation. Defaults to 32.
     :type latent_dim: int
+    :param simba: If True, use a SimBa network for the encoder for vector spaces. Defaults to False.
+    :type simba: bool
     :param device: Device to use for the network. Defaults to "cpu".
     :type device: DeviceType
     """
@@ -156,6 +158,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         max_latent_dim: int = 128,
         n_agents: Optional[int] = None,
         latent_dim: int = 32,
+        simba: bool = False,
         device: DeviceType = "cpu",
     ) -> None:
         super().__init__(device)
@@ -177,6 +180,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         self.min_latent_dim = min_latent_dim
         self.max_latent_dim = max_latent_dim
         self.device = device
+        self.simba = simba
 
         encoder_config = (
             encoder_config
@@ -226,16 +230,6 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         """
         return self.encoder.activation
     
-    @classmethod
-    def with_simba(cls: Type[SelfEvolvableNetwork], *args, **kwargs) -> SelfEvolvableNetwork:
-        """Create a network with a SimBa head.
-
-        :return: Network with a SimBa head.
-        :rtype: SelfEvolvableNetwork
-        """
-        cls._encoder_mlp_cls = EvolvableSimBa
-        return cls(*args, **kwargs)
-
     def forward(self, x: TorchObsType) -> torch.Tensor:
         """Forward pass of the network.
 
@@ -273,7 +267,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
 
     def create_mlp(
         self, num_inputs: int, num_outputs: int, name: str, net_config: Dict[str, Any]
-    ) -> Union[EvolvableMLP, EvolvableSimBa]:
+    ) -> EvolvableMLP:
         """Builds the head of the network based on the passed configuration.
 
         :param num_inputs: Number of inputs to the network head.
@@ -402,12 +396,14 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                 **net_config,
             )
         else:
-            if self._encoder_mlp_cls is EvolvableSimBa:
+            if self.simba:
                 assert_correct_simba_net_config(net_config)
+                encoder_mlp_cls = EvolvableSimBa
             else:
                 assert_correct_mlp_net_config(net_config)
+                encoder_mlp_cls = EvolvableMLP
 
-            encoder = self._encoder_mlp_cls(
+            encoder = encoder_mlp_cls(
                 num_inputs=spaces.flatdim(self.observation_space),
                 num_outputs=self.latent_dim,
                 device=self.device,

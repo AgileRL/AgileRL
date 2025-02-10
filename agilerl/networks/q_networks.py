@@ -50,6 +50,7 @@ class QNetwork(EvolvableNetwork):
         max_latent_dim: int = 128,
         n_agents: Optional[int] = None,
         latent_dim: int = 32,
+        simba: bool = False,
         device: str = "cpu",
     ):
 
@@ -61,6 +62,7 @@ class QNetwork(EvolvableNetwork):
             max_latent_dim=max_latent_dim,
             n_agents=n_agents,
             latent_dim=latent_dim,
+            simba=simba,
             device=device,
         )
 
@@ -213,10 +215,6 @@ class RainbowQNetwork(EvolvableNetwork):
 
         # Build value and advantage networks
         self.build_network_head(head_config)
-    
-    @classmethod
-    def with_simba(cls: Type["RainbowQNetwork"], *args, **kwargs) -> None:
-        raise NotImplementedError("SimBa is not supported for RainbowQNetwork.")
 
     def build_network_head(self, net_config: Dict[str, Any]) -> None:
         """Builds the value and advantage heads of the network based on the passed configuration.
@@ -306,6 +304,7 @@ class ContinuousQNetwork(EvolvableNetwork):
         max_latent_dim: int = 128,
         n_agents: Optional[int] = None,
         latent_dim: int = 32,
+        simba: bool = False,
         device: str = "cpu",
     ):
 
@@ -317,6 +316,7 @@ class ContinuousQNetwork(EvolvableNetwork):
             max_latent_dim=max_latent_dim,
             n_agents=n_agents,
             latent_dim=latent_dim,
+            simba=simba,
             device=device,
         )
 
