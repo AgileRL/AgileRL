@@ -513,7 +513,7 @@ def preprocess_observation(
     if isinstance(observation_space, spaces.Box):
         # Normalize images if applicable and specified
         if len(observation_space.shape) == 3 and normalize_images:
-            observation = observation.float() / 255.0
+            observation = observation.float() / observation_space.high
 
         space_shape = observation_space.shape
 
