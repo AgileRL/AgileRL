@@ -534,7 +534,11 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         for attr in dir(self):
             obj = getattr(self, attr)
             if is_evolvable(attr, obj):
-                evolvable_attrs[attr] = obj
+                if isinstance(obj, ModuleDict):
+                    for key, mod in obj.items():
+                        evolvable_attrs[key] = mod
+                else:
+                    evolvable_attrs[attr] = obj
 
         return evolvable_attrs
 

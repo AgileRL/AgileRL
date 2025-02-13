@@ -336,8 +336,6 @@ class PPO(RLAlgorithm):
         :type preprocess_obs: bool, optional
         """
         state = self.preprocess_observation(state)
-        # for k, v in state.items():
-        #     print(k, v.shape)
 
         if not grad:
             self.actor.eval()
