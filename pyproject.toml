@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "agilerl"
-version = "2.0.0"
+version = "2.0.1"
 
 description = "AgileRL is a deep reinforcement learning library focused on improving RL development through RLOps."
 authors = ["Nick Ustaran-Anderegg <dev@agilerl.com>"]

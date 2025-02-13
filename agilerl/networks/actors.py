@@ -115,7 +115,6 @@ class EvolvableDistribution(EvolvableWrapper):
                     if action_mask.dtype == np.object_ or isinstance(action_mask, list)
                     else action_mask
                 )
-
             action_mask = torch.as_tensor(
                 action_mask, dtype=torch.bool, device=self.device
             ).reshape(probs.shape)
