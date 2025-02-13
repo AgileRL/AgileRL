@@ -112,7 +112,7 @@ class EvolvableDistribution(EvolvableWrapper):
             if isinstance(action_mask, np.ndarray):
                 action_mask = (
                     np.stack(action_mask)
-                    if action_mask.dtype == np.object_
+                    if action_mask.dtype == np.object_ or isinstance(action_mask, list)
                     else action_mask
                 )
 

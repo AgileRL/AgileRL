@@ -251,7 +251,7 @@ class RainbowDQN(RLAlgorithm):
             # Need to stack if vectorized env
             action_mask = (
                 np.stack(action_mask)
-                if action_mask.dtype == np.object_
+                if action_mask.dtype == np.object_ or isinstance(action_mask, list)
                 else action_mask
             )
             inv_mask = 1 - action_mask
