@@ -192,7 +192,7 @@ class DQN(RLAlgorithm):
         self,
         obs: NumpyObsType,
         epsilon: float = 0.0,
-        action_mask: Optional[ArrayLike] = None,
+        action_mask: Optional[np.ndarray] = None,
     ) -> ArrayLike:
         """Returns the next action to take in the environment.
 
@@ -208,6 +208,12 @@ class DQN(RLAlgorithm):
         device = self.device if self.accelerator is None else self.accelerator.device
         epsilon = torch.tensor(epsilon, device=device)
         if action_mask is not None:
+            # Need to stack if vectorized env
+            action_mask = (
+                np.stack(action_mask)
+                if action_mask.dtype == np.object_ or isinstance(action_mask, list)
+                else action_mask
+            )
             action_mask = torch.as_tensor(action_mask, device=device)
         else:
             if isinstance(torch_obs, dict):

@@ -225,7 +225,7 @@ class RainbowDQN(RLAlgorithm):
     def get_action(
         self,
         state: ArrayLike,
-        action_mask: Optional[ArrayLike] = None,
+        action_mask: Optional[np.ndarray] = None,
         training: bool = True,
     ) -> ArrayLike:
         """Returns the next action to take in the environment.
@@ -248,6 +248,12 @@ class RainbowDQN(RLAlgorithm):
         if action_mask is None:
             action = np.argmax(action_values.cpu().data.numpy(), axis=-1)
         else:
+            # Need to stack if vectorized env
+            action_mask = (
+                np.stack(action_mask)
+                if action_mask.dtype == np.object_ or isinstance(action_mask, list)
+                else action_mask
+            )
             inv_mask = 1 - action_mask
             masked_action_values = np.ma.array(
                 action_values.cpu().data.numpy(), mask=inv_mask
