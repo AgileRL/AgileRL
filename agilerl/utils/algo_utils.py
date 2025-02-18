@@ -552,7 +552,7 @@ def preprocess_observation(
     return observation
 
 
-def normalize_images(
+def apply_image_normalization(
     observation: NumpyObsType, observation_space: spaces.Space
 ) -> NumpyObsType:
     """Normalize images using minmax scaling

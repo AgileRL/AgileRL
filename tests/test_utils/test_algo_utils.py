@@ -5,7 +5,7 @@ import torch.nn as nn
 from accelerate import Accelerator
 from gymnasium import spaces
 
-from agilerl.utils.algo_utils import normalize_images, unwrap_optimizer
+from agilerl.utils.algo_utils import apply_image_normalization, unwrap_optimizer
 
 
 @pytest.mark.parametrize("distributed", [(True), (False)])
@@ -45,7 +45,7 @@ def test_inf_in_high():
     obs = np.array([0.5, 0.5])
 
     with pytest.warns(UserWarning, match="np.inf detected in observation_space.high"):
-        result = normalize_images(obs, obs_space)
+        result = apply_image_normalization(obs, obs_space)
 
     np.testing.assert_array_equal(result, obs)
 
@@ -56,7 +56,7 @@ def test_neg_inf_in_low():
     obs = np.array([0.5, 0.5])
 
     with pytest.warns(UserWarning, match="-np.inf detected in observation_space.low"):
-        result = normalize_images(obs, obs_space)
+        result = apply_image_normalization(obs, obs_space)
 
     np.testing.assert_array_equal(result, obs)
 
@@ -66,7 +66,7 @@ def test_already_normalized():
     obs_space = spaces.Box(low=np.array([0, 0]), high=np.array([1, 1]))
     obs = np.array([0.5, 0.5])
 
-    result = normalize_images(obs, obs_space)
+    result = apply_image_normalization(obs, obs_space)
     np.testing.assert_array_equal(result, obs)
 
 
@@ -75,7 +75,7 @@ def test_normalization_needed():
     obs_space = spaces.Box(low=np.array([0, 0]), high=np.array([255, 255]))
     obs = np.array([127.5, 127.5])
 
-    result = normalize_images(obs, obs_space)
+    result = apply_image_normalization(obs, obs_space)
     expected = obs / 255.0  # Expected normalized values
     np.testing.assert_array_almost_equal(result, expected)
 
@@ -85,7 +85,7 @@ def test_multi_dimensional():
     obs_space = spaces.Box(low=np.zeros((2, 2)), high=np.ones((2, 2)) * 255)
     obs = np.ones((2, 2)) * 127.5
 
-    result = normalize_images(obs, obs_space)
+    result = apply_image_normalization(obs, obs_space)
     expected = obs / 255.0
     np.testing.assert_array_almost_equal(result, expected)
 
@@ -95,7 +95,7 @@ def test_different_ranges():
     obs_space = spaces.Box(low=np.array([0, -1]), high=np.array([255, 1]))
     obs = np.array([127.5, 0])
 
-    result = normalize_images(obs, obs_space)
+    result = apply_image_normalization(obs, obs_space)
     expected = np.array([127.5 / 255, 0.5])  # Each dimension normalized to its range
     np.testing.assert_array_almost_equal(result, expected)
 
