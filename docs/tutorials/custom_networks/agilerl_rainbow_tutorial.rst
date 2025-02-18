@@ -335,27 +335,6 @@ and uses our custom head. Since we have done most of the work in the head, the i
             # Build value and advantage networks
             self.build_network_head(head_config)
 
-        @property
-        def init_dict(self) -> Dict[str, Any]:
-            """Initializes the configuration of the Rainbow Q network.
-
-            :return: Configuration of the Rainbow Q network.
-            :rtype: Dict[str, Any]
-            """
-            return {
-                "observation_space": self.observation_space,
-                "action_space": self.action_space,
-                "support": self.support,
-                "num_atoms": self.num_atoms,
-                "encoder_config": self.encoder.net_config,
-                "head_config": self.head_net.net_config,
-                "min_latent_dim": self.min_latent_dim,
-                "max_latent_dim": self.max_latent_dim,
-                "n_agents": self.n_agents,
-                "latent_dim": self.latent_dim,
-                "device": self.device,
-            }
-
         def build_network_head(self, net_config: Dict[str, Any]) -> None:
             """Builds the value and advantage heads of the network based on the passed configuration.
 
@@ -451,17 +430,20 @@ Training the Rainbow DQN Agent
 ------------------------------
 
 Now that we have our custom network, we can define it with a specific architecture and pass it to the
-:class:`RainbowDQN <agilerl.algorithms.dqn_rainbow.RainbowDQN>` agent as the ``actor_network`` argument. The agent will automatically mutate the architecture
-of the network with the corresponding probability specified in the ``architecture`` argument of ::class:`Mutations <agilerl.hpo.mutation.Mutations>`.
+:class:`RainbowDQN <agilerl.algorithms.dqn_rainbow.RainbowDQN>` agent as the ``actor_network`` argument.
+The agent will automatically mutate the architecture of the network with the corresponding probability
+specified in the ``architecture`` argument of ::class:`Mutations <agilerl.hpo.mutation.Mutations>`.
+
+.. note::
+    As mentioned in :ref:`rainbow_tutorial`, we make use of the standard ``ReplayBuffer`` rather than the n-step
+    and prioritized experience buffers since we are training a population of agents and the latter two don't support
+    sharing experiences between individuals.
 
 End-to-end example
 ~~~~~~~~~~~~~~~~~~
 
 .. code-block:: python
 
-    import imageio
-    import gymnasium as gym
-    import numpy as np
     import torch
 
     from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
@@ -469,10 +451,7 @@ End-to-end example
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
     from agilerl.networks import RainbowQNetwork
-    from agilerl.components.replay_buffer import (
-        MultiStepReplayBuffer,
-        PrioritizedReplayBuffer,
-    )
+    from agilerl.components.replay_buffer import ReplayBuffer
     from agilerl.training.train_off_policy import train_off_policy
     from agilerl.utils.utils import make_vect_envs
 
@@ -492,10 +471,6 @@ End-to-end example
         "GAMMA": 0.99,  # Discount factor
         "MEMORY_SIZE": 100_000,  # Max memory buffer size
         "LEARN_STEP": 1,  # Learning frequency
-        "N_STEP": 3,  # Step number to calculate td error
-        "PER": True,  # Use prioritized experience replay buffer
-        "ALPHA": 0.6,  # Prioritized replay buffer parameter
-        "BETA": 0.4,  # Importance sampling coefficient
         "TAU": 0.001,  # For soft update of target parameters
         "PRIOR_EPS": 0.000001,  # Minimum priority for sampling
         "NUM_ATOMS": 51,  # Unit number of support
@@ -589,31 +564,17 @@ End-to-end example
         learn_step=INIT_HP["LEARN_STEP"],
         gamma=INIT_HP["GAMMA"],
         tau=INIT_HP["TAU"],
-        beta=INIT_HP["BETA"],
-        prior_eps=INIT_HP["PRIOR_EPS"],
         num_atoms=INIT_HP["NUM_ATOMS"],
         v_min=INIT_HP["V_MIN"],
         v_max=INIT_HP["V_MAX"],
-        n_step=INIT_HP["N_STEP"],
         device=device
     )
 
-    # Prioritised experience replay with N-step memory
-    field_names = ["state", "action", "reward", "next_state", "done"]
-    memory = PrioritizedReplayBuffer(
-        memory_size=INIT_HP["MEMORY_SIZE"],
-        field_names=field_names,
-        num_envs=num_envs,
-        alpha=INIT_HP["ALPHA"],
-        gamma=INIT_HP["GAMMA"],
-        device=device,
-    )
-    n_step_memory = MultiStepReplayBuffer(
-        memory_size=INIT_HP["MEMORY_SIZE"],
-        field_names=field_names,
-        num_envs=num_envs,
-        n_step=INIT_HP["N_STEP"],
-        gamma=INIT_HP["GAMMA"],
+    # Define the memory buffer
+    field_names = ["state", "action", "reward", "next_state", "terminated"]
+    memory = ReplayBuffer(
+        memory_size=INIT_HP['MEMORY_SIZE'],  # Max replay buffer size
+        field_names=field_names,  # Field names to store in memory
         device=device,
     )
 
@@ -621,12 +582,9 @@ End-to-end example
     trained_pop, pop_fitnesses = train_off_policy(
         env,
         "CartPole-v1",
-        "RainbowDQN",
+        "Rainbow DQN",
         agent_pop,
         memory=memory,
-        n_step_memory=n_step_memory,
-        n_step=True,
-        per=True,
         INIT_HP=INIT_HP,
         MUT_P=MUTATION_PARAMS,
         max_steps=INIT_HP["MAX_STEPS"],
@@ -637,5 +595,4 @@ End-to-end example
         target=INIT_HP["TARGET_SCORE"],
         tournament=tournament,
         mutation=mutations,
-        wb=INIT_HP["WANDB"],
     )
