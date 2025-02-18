@@ -207,7 +207,7 @@ class OptimizerWrapper:
 
     def load_state_dict(self, state_dict: StateDict) -> None:
         """
-        Load the state of the optimizer from the passed state dictionary.
+        Load the obs of the optimizer from the passed obs dictionary.
 
         :param state_dict: State dictionary of the optimizer.
         :type state_dict: Dict[str, Any]
@@ -215,19 +215,19 @@ class OptimizerWrapper:
         if self.multiagent:
             assert isinstance(state_dict, list) and len(state_dict) == len(
                 self.optimizer
-            ), "Expected a list of optimizer state dictionaries for multi-agent optimizers."
+            ), "Expected a list of optimizer obs dictionaries for multi-agent optimizers."
             optimizers: List[Optimizer] = self.optimizer
             for i, opt in enumerate(optimizers):
                 opt.load_state_dict(state_dict[i])
         else:
             assert isinstance(
                 state_dict, dict
-            ), "Expected a single optimizer state dictionary for single-agent optimizers."
+            ), "Expected a single optimizer obs dictionary for single-agent optimizers."
             self.optimizer.load_state_dict(state_dict)
 
     def state_dict(self) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
         """
-        Return the state of the optimizer as a dictionary.
+        Return the obs of the optimizer as a dictionary.
 
         :return: State dictionary of the optimizer.
         :rtype: Dict[str, Any]

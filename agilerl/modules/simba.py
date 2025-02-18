@@ -1,16 +1,18 @@
-from typing import Optional, Dict, Any
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
 
+from agilerl.modules.base import EvolvableModule, MutationType, mutation
 from agilerl.typing import ObservationType
-from agilerl.modules.base import mutation, MutationType, EvolvableModule
 from agilerl.utils.evolvable_networks import create_simba
 
+
 class EvolvableSimBa(EvolvableModule):
-    """Evolvable module that implements the architecture presented in 'SimBa: Simplicity 
-    Bias for Scaling Up Parameters in Deep Reinforcement Learning'. Designed to avoid 
-    overfitting by integrating components that induce a simplicity bias, guiding models toward simple and generalizable solutions.
+    """Evolvable module that implements the architecture presented in 'SimBa: Simplicity
+    Bias for Scaling Up Parameters in Deep Reinforcement Learning'. Designed to avoid
+    overfitting by integrating components that induce a simplicity bias, guiding models toward
+    simple and generalizable solutions.
 
     Paper: https://arxiv.org/abs/2410.09754
 
@@ -20,12 +22,12 @@ class EvolvableSimBa(EvolvableModule):
     :type num_outputs: int
     :param hidden_size: Hidden layer(s) size
     :type hidden_size: List[int]
-    :param num_blocks: Number of residual blocks that compose the network
-    :type num_blocks: int
     :param activation: Activation layer, defaults to 'ReLU'
     :type activation: str, optional
     :param output_activation: Output activation layer, defaults to None
     :type output_activation: str, optional
+    :param scale_factor: Scale factor for the network, defaults to 4
+    :type scale_factor: int, optional
     :param min_blocks: Minimum number of residual blocks that compose the network, defaults to 1
     :type min_blocks: int, optional
     :param max_blocks: Maximum number of residual blocks that compose the network, defaults to 4
@@ -44,23 +46,25 @@ class EvolvableSimBa(EvolvableModule):
         self,
         num_inputs: int,
         num_outputs: int,
-        hidden_size: int,
-        num_blocks: int,
+        hidden_size: List[int],
         output_activation: str = None,
+        scale_factor: int = 4,
         min_blocks: int = 1,
         max_blocks: int = 4,
         min_mlp_nodes: int = 16,
         max_mlp_nodes: int = 500,
         device: str = "cpu",
-        name: str = "simba"
+        name: str = "simba",
     ) -> None:
         super().__init__(device=device)
+
+        assert isinstance(scale_factor, int), "Scale factor must be an integer."
 
         self.num_inputs = num_inputs
         self.num_outputs = num_outputs
         self.hidden_size = hidden_size
-        self.num_blocks = num_blocks
         self.output_activation = output_activation
+        self.scale_factor = scale_factor
         self.min_blocks = min_blocks
         self.max_blocks = max_blocks
         self.min_mlp_nodes = min_mlp_nodes
@@ -71,10 +75,10 @@ class EvolvableSimBa(EvolvableModule):
             input_size=num_inputs,
             output_size=num_outputs,
             hidden_size=hidden_size,
-            num_blocks=num_blocks,
             output_activation=output_activation,
+            scale_factor=self.scale_factor,
             device=device,
-            name=name
+            name=name,
         )
 
     @property
@@ -102,14 +106,14 @@ class EvolvableSimBa(EvolvableModule):
             x = x.unsqueeze(0)
 
         return self.model(x)
-    
+
     @mutation(MutationType.LAYER)
     def add_block(self) -> None:
         """Adds a hidden layer to neural network. Falls back on add_node if
         max hidden layers reached."""
         # add layer to hyper params
-        if self.num_blocks < self.max_blocks:  # HARD LIMIT
-            self.num_blocks += 1
+        if len(self.hidden_size) < self.max_blocks:  # HARD LIMIT
+            self.hidden_size += [self.hidden_size[-1]]
         else:
             return self.add_node()
 
@@ -117,30 +121,41 @@ class EvolvableSimBa(EvolvableModule):
     def remove_block(self) -> None:
         """Removes a hidden layer from neural network. Falls back on remove_node if
         min hidden layers reached."""
-        if self.num_blocks > self.min_blocks:  # HARD LIMIT
-            self.hidden_size -= 1
+        if len(self.hidden_size) > self.min_blocks:  # HARD LIMIT
+            self.hidden_size = self.hidden_size[:-1]
         else:
             return self.add_node()
-    
-    @mutation(MutationType.NODE)
-    def add_node(self, numb_new_nodes: Optional[int] = None) -> Dict[str, int]:
-        """Adds nodes to residual blocks of the neural network.
 
-        :param numb_new_nodes: Number of nodes to add, defaults to None
+    @mutation(MutationType.NODE)
+    def add_node(
+        self, hidden_layer: Optional[int] = None, numb_new_nodes: Optional[int] = None
+    ) -> Dict[str, int]:
+        """Adds nodes to hidden layer of neural network.
+
+        :param hidden_layer: Depth of hidden layer to add nodes to, defaults to None
+        :type hidden_layer: int, optional
+        :param numb_new_nodes: Number of nodes to add to hidden layer, defaults to None
         :type numb_new_nodes: int, optional
         """
+        if hidden_layer is None:
+            hidden_layer = np.random.randint(0, len(self.hidden_size), 1)[0]
+        else:
+            hidden_layer = min(hidden_layer, len(self.hidden_size) - 1)
+
         if numb_new_nodes is None:
             numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
 
         if (
-            self.hidden_size + numb_new_nodes <= self.max_mlp_nodes
+            self.hidden_size[hidden_layer] + numb_new_nodes <= self.max_mlp_nodes
         ):  # HARD LIMIT
-            self.hidden_size += numb_new_nodes
+            self.hidden_size[hidden_layer] += numb_new_nodes
 
-        return {"numb_new_nodes": numb_new_nodes}
+        return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
 
     @mutation(MutationType.NODE)
-    def remove_node(self, numb_new_nodes: Optional[int] = None) -> Dict[str, int]:
+    def remove_node(
+        self, hidden_layer: Optional[int] = None, numb_new_nodes: Optional[int] = None
+    ) -> Dict[str, int]:
         """Removes nodes from hidden layer of neural network.
 
         :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None
@@ -148,15 +163,20 @@ class EvolvableSimBa(EvolvableModule):
         :param numb_new_nodes: Number of nodes to remove from hidden layer, defaults to None
         :type numb_new_nodes: int, optional
         """
+        if hidden_layer is None:
+            hidden_layer = np.random.randint(0, len(self.hidden_size), 1)[0]
+        else:
+            hidden_layer = min(hidden_layer, len(self.hidden_size) - 1)
+
         if numb_new_nodes is None:
             numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
 
         # HARD LIMIT
-        if self.hidden_size - numb_new_nodes > self.min_mlp_nodes:
-            self.hidden_size -= numb_new_nodes
+        if self.hidden_size[hidden_layer] - numb_new_nodes > self.min_mlp_nodes:
+            self.hidden_size[hidden_layer] -= numb_new_nodes
 
-        return {"numb_new_nodes": numb_new_nodes}
-    
+        return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
+
     def recreate_network(self) -> None:
         """Recreates neural networks.
 
@@ -167,10 +187,10 @@ class EvolvableSimBa(EvolvableModule):
             input_size=self.num_inputs,
             output_size=self.num_outputs,
             hidden_size=self.hidden_size,
-            num_blocks=self.num_blocks,
             output_activation=self.output_activation,
+            scale_factor=self.scale_factor,
             device=self.device,
-            name=self.name
+            name=self.name,
         )
 
         self.model = EvolvableModule.preserve_parameters(

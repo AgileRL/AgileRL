@@ -49,7 +49,7 @@ NET_CONFIG:
 
     encoder_config:
         hidden_size: [64]
-        activation: Tanh
+        # activation: Tanh
         min_mlp_nodes: 64
         max_mlp_nodes: 500
 

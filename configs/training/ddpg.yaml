@@ -54,8 +54,7 @@ NET_CONFIG:
     simba: true
 
     encoder_config:
-        hidden_size: 64
-        num_blocks: 1
+        hidden_size: [64]
         # activation: ReLU
         min_mlp_nodes: 64
         max_mlp_nodes: 500

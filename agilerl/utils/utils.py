@@ -6,28 +6,33 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from gymnasium import spaces
 
+import wandb
+from agilerl.algorithms import (
+    CQN,
+    DDPG,
+    DQN,
+    MADDPG,
+    MATD3,
+    PPO,
+    TD3,
+    NeuralTS,
+    NeuralUCB,
+    RainbowDQN,
+)
 from agilerl.algorithms.core.registry import HyperparameterConfig
-from agilerl.algorithms.cqn import CQN
-from agilerl.algorithms.ddpg import DDPG
-from agilerl.algorithms.dqn import DQN
-from agilerl.algorithms.dqn_rainbow import RainbowDQN
-from agilerl.algorithms.maddpg import MADDPG
-from agilerl.algorithms.matd3 import MATD3
-from agilerl.algorithms.neural_ts_bandit import NeuralTS
-from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
-from agilerl.algorithms.ppo import PPO
-from agilerl.algorithms.td3 import TD3
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules.base import EvolvableModule
 from agilerl.typing import GymSpaceType, PopulationType
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
-SupportedObservationSpace = Union[spaces.Box, spaces.Discrete, spaces.Dict, spaces.Tuple]
+SupportedObservationSpace = Union[
+    spaces.Box, spaces.Discrete, spaces.Dict, spaces.Tuple
+]
+
 
 def make_vect_envs(
     env_name: Optional[str] = None,
@@ -116,18 +121,23 @@ def observation_space_channels_to_first(
     elif isinstance(observation_space, spaces.Tuple):
         observation_space = spaces.Tuple(
             [
-                observation_space_channels_to_first(space)
-                if isinstance(space, spaces.Box) and len(space.shape) == 3
-                else space
+                (
+                    observation_space_channels_to_first(space)
+                    if isinstance(space, spaces.Box) and len(space.shape) == 3
+                    else space
+                )
                 for space in observation_space.spaces
             ]
         )
     elif isinstance(observation_space, spaces.Box):
         low = observation_space.low.transpose(2, 0, 1)
         high = observation_space.high.transpose(2, 0, 1)
-        observation_space = spaces.Box(low=low, high=high, dtype=observation_space.dtype)
+        observation_space = spaces.Box(
+            low=low, high=high, dtype=observation_space.dtype
+        )
 
     return observation_space
+
 
 def create_population(
     algo: str,
@@ -138,6 +148,8 @@ def create_population(
     hp_config: Optional[HyperparameterConfig] = None,
     actor_network: Optional[EvolvableModule] = None,
     critic_network: Optional[EvolvableModule] = None,
+    agent_wrapper: Optional[Callable] = None,
+    wrapper_kwargs: Optional[Dict[str, Any]] = None,
     population_size: int = 1,
     num_envs: int = 1,
     device: str = "cpu",

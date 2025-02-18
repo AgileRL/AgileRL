@@ -146,28 +146,31 @@ class NewGELU(nn.Module):
             )
         )
 
+
 class SimbaResidualBlock(nn.Module):
-    """Creates a residual block designed to avoid overfitting in RL by inducing 
+    """Creates a residual block designed to avoid overfitting in RL by inducing
     a simplicity bias.
-    
+
     Paper: https://arxiv.org/abs/2410.09754
-    
+
     :param hidden_size: Hidden size of the residual block
     :type hidden_size: int
+    :param scale_factor: Scale factor, defaults to 4
+    :type scale_factor: float
     :param device: Device, defaults to "cpu"
     :type device
     """
+
     def __init__(
-            self,
-            hidden_size: int,
-            device: DeviceType = "cpu"
-            ) -> None:
+        self, hidden_size: int, scale_factor: float = 4, device: DeviceType = "cpu"
+    ) -> None:
         super().__init__()
+
         self.hidden_size = hidden_size
 
         self.layer_norm = nn.LayerNorm(hidden_size, device=device)
-        self.linear1 = nn.Linear(hidden_size, hidden_size, device=device)
-        self.linear2 = nn.Linear(hidden_size, hidden_size, device=device)
+        self.linear1 = nn.Linear(hidden_size, hidden_size * scale_factor, device=device)
+        self.linear2 = nn.Linear(hidden_size * scale_factor, hidden_size, device=device)
 
         # initialize weigts using he initialization
         nn.init.kaiming_uniform_(self.linear1.weight)

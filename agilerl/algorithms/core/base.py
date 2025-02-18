@@ -36,6 +36,7 @@ from agilerl.protocols import (
     EvolvableModule,
 )
 from agilerl.typing import (
+    ActionType,
     DeviceType,
     GymSpaceType,
     NumpyObsType,
@@ -58,6 +59,7 @@ __all__ = ["EvolvableAlgorithm", "RLAlgorithm", "MultiAgentRLAlgorithm"]
 
 SelfEvolvableAlgorithm = TypeVar("SelfEvolvableAlgorithm", bound="EvolvableAlgorithm")
 SelfRLAlgorithm = TypeVar("SelfRLAlgorithm", bound="RLAlgorithm")
+MARLObservationType = Dict[str, ObservationType]
 
 
 class _RegistryMeta(type):
@@ -85,8 +87,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
     :param index: The index of the individual.
     :type index: int
-    :param learn_step: Learning frequency, defaults to 2048.
-    :type learn_step: int, optional
+    :param hp_config: Hyperparameter configuration for the algorithm, defaults to None.
+    :type hp_config: Optional[HyperparameterConfig], optional
     :param device: Device to run the algorithm on, defaults to "cpu".
     :type device: Union[str, torch.device], optional
     :param accelerator: Accelerator object for distributed computing, defaults to None.
@@ -132,6 +134,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         self.fitness = []
         self.steps = [0]
         self.registry = MutationRegistry(hp_config)
+        self.training = True
 
     @property
     def index(self) -> int:
@@ -166,12 +169,16 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         raise NotImplementedError
 
     @abstractmethod
-    def learn(self, experiences: Tuple[Iterable[ArrayLike], ...], **kwargs) -> None:
+    def learn(
+        self, experiences: Tuple[Iterable[ObservationType], ...], **kwargs
+    ) -> None:
         """Abstract method for learning the algorithm."""
         raise NotImplementedError
 
     @abstractmethod
-    def get_action(self, *args, **kwargs) -> Any:
+    def get_action(
+        self, obs: Union[ObservationType, MARLObservationType], *args, **kwargs
+    ) -> ActionType:
         """Abstract method for getting an action from the algorithm."""
         raise NotImplementedError
 
@@ -278,8 +285,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         super().__setattr__(name, value)
 
-    # NOTE: We could check for these things elsewhere and remove the need for a
-    # metacalass for the sake of simplicity
     def _registry_init(self) -> None:
         """Registers the networks, optimizers, and algorithm hyperparameters in the algorithm with
         the mutations registry. We also check that all of the evolvable networks and their respective
@@ -342,6 +347,14 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         # Only wrap the model if its part of the computation graph
         return self.accelerator.prepare(attr) if attr.state_dict() else attr
+
+    def set_training_mode(self, training: bool) -> None:
+        """Sets the training mode of the algorithm.
+
+        :param training: If True, set the algorithm to training mode.
+        :type training: bool
+        """
+        self.training = training
 
     def get_lr_names(self) -> List[str]:
         """Returns the learning rates of the algorithm."""
@@ -1166,6 +1179,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
                         torch.cat([obs[j][i] for j in range(self.n_agents)], dim=1)
                     )
             processed_obs = tuple(processed_obs)
+
         elif is_image_space(self.single_space):
             processed_obs = torch.stack(obs, dim=2)
         else:

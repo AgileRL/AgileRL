@@ -67,6 +67,9 @@ def get_architecture_mut_method(
             isinstance(offspring, eval[0].__class__) for offspring in eval
         ), "All offspring should be of the same type."
 
+        # NOTE: For multi-agent settings we apply the same architecture mutations to
+        # all agents. However, depending on use-case it might be beneficial to have agents
+        # with different architectures; please raise an issue if you would like this!
         eval = eval[0]
 
     return eval.sample_mutation_method(new_layer_prob, rng)
