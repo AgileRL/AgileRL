@@ -45,7 +45,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
     :param context: Context for multiprocessing
     """
 
-    def __init__(self, env_fns, experience_spec=None, copy=True, context=None):
+    def __init__(self, env_fns, copy=True, context=None):
 
         # Core class attributes
         self.env_fns = env_fns
@@ -64,30 +64,24 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         self.possible_agents = dummy_env.possible_agents
         self.copy = copy
 
-        if experience_spec is None:
-            self.experience_spec = PettingZooExperienceSpec(self.num_envs)
-        else:
-            self.experience_spec = experience_spec
-
-        self.experience_spec.detect_space_info(dummy_env)
-        del dummy_env
-        ctx = mp.get_context(context)
-
         self.action_space = self._get_action_space
         self.observation_space = self._get_observation_space
         self.single_action_space = self._get_single_action_space
         self.single_observation_space = self._get_single_observation_space
 
+        self._detect_space_info(dummy_env)
+        ctx = mp.get_context(context)
         # Create the shared memory for sharing observations between subprocesses
-        self._obs_buffer = SharedMemory(
-            num_envs=self.num_envs, exp_spec=self.experience_spec, context=ctx
+        self._obs_buffer = create_shared_memory(
+            num_envs=self.num_envs,
+            obs_spaces=self.single_observation_spaces,
+            context=ctx,
         )
         self.observations = Observations(
-            shared_memory=self._obs_buffer.shared_memory,
-            exp_spec=self.experience_spec,
+            shared_memory=self._obs_buffer,
+            obs_spaces=self.single_observation_spaces,
             num_envs=self.num_envs,
         )
-
         self.parent_pipes, self.processes = [], []
         self.error_queue = ctx.Queue()
 
@@ -103,12 +97,12 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
                         CloudpickleWrapper(env_fn),
                         child_pipe,
                         parent_pipe,
-                        self._obs_buffer.shared_memory,
+                        self._obs_buffer,
                         self.error_queue,
-                        self.experience_spec.observation_shapes,
-                        self.experience_spec.observation_widths,
-                        self.experience_spec.observation_dtypes,
-                        self.experience_spec.agents,
+                        self.observation_shapes,
+                        self.observation_widths,
+                        self.observation_dtypes,
+                        self.agents,
                     ),
                 )
                 self.parent_pipes.append(parent_pipe)
@@ -123,13 +117,85 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             self.possible_agents,
         )
 
+    def _detect_space_info(self, dummy_env):
+        self.metadata = (
+            dummy_env.metadata
+            if hasattr(dummy_env, "metadata")
+            else dummy_env.unwrapped.metadata
+        )
+        self.render_mode = (
+            dummy_env.render_mode
+            if hasattr(dummy_env, "render_mode")
+            else dummy_env.unwrapped.render_mode
+        )
+        self.possible_agents = dummy_env.possible_agents
+
+        try:
+            # Collect action space data
+            self.single_action_spaces = {
+                agent: dummy_env.action_space(agent)
+                for agent in dummy_env.possible_agents
+            }
+            self.action_spaces = {
+                agent: batch_space(self.single_action_spaces[agent], self.num_envs)
+                for agent in dummy_env.possible_agents
+            }
+
+            # Collect observation space data
+            self.single_observation_spaces = {
+                agent: dummy_env.observation_space(agent)
+                for agent in dummy_env.possible_agents
+            }
+
+            self.observation_dtypes = {
+                agent: dummy_env.observation_space(agent).dtype
+                for agent in dummy_env.possible_agents
+            }
+
+            self.observation_spaces = {
+                agent: batch_space(self.single_observation_spaces[agent], self.num_envs)
+                for agent in dummy_env.possible_agents
+            }
+
+            self.observation_shapes = {
+                agent: space.shape if space.shape != () else (1,)
+                for agent, space in self.single_observation_spaces.items()
+            }
+
+            # Width of each agents flattened observations
+            self.observation_widths = {
+                agent: int(np.prod(obs.shape))
+                for agent, obs in self.single_observation_spaces.items()
+            }
+            # Cumulative widths of the flattened observations
+            self.observation_boundaries = [0] + list(
+                accumulate(self.observation_widths.values(), operator.add)
+            )
+        except Exception as e:
+            raise ValueError(
+                "Unable to calculate observation dimensions from current observation space type."
+            ) from e
+
+        # Total width of all agents observations, flattened and concatenated
+        self.total_observation_width = int(
+            np.sum(list(self.observation_widths.values()))
+        )
+        dummy_env.reset()
+
+        # This is the gospel order of agents
+        self.agents = dummy_env.possible_agents[:]
+        self.agent_index_map = {agent: i for i, agent in enumerate(self.agents)}
+
+        dummy_env.close()
+        del dummy_env
+
     def _get_single_action_space(self, agent):
         """Get an agents single action space
 
         :param agent: Name of agent
         :type agent: str
         """
-        return self.experience_spec.single_action_space[agent]
+        return self.single_action_spaces[agent]
 
     def _get_action_space(self, agent):
         """Get an agents action space
@@ -137,7 +203,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         :param agent: Name of agent
         :type agent: str
         """
-        return self.experience_spec.action_space[agent]
+        return self.action_spaces[agent]
 
     def _get_single_observation_space(self, agent):
         """Get an agents single observation space
@@ -145,7 +211,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         :param agent: Name of agent
         :type agent: str
         """
-        return self.experience_spec.single_observation_space[agent]
+        return self.single_observation_spaces[agent]
 
     def _get_observation_space(self, agent):
         """Get an agents observation space
@@ -153,7 +219,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         :param agent: Name of agent
         :type agent: str
         """
-        return self.experience_spec.observation_space[agent]
+        return self.observation_spaces[agent]
 
     def reset(
         self,
@@ -569,92 +635,6 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             del self._obs_buffer
         if hasattr(self, "observations"):
             del self.observations
-        if hasattr(self, "experience_spec"):
-            del self.experience_spec
-
-
-class PettingZooExperienceSpec:
-    """Class for formatting experiences when being returned by a vectorized environment
-
-    :param num_envs: Number of environments to vectorize
-    :type num_envs: int
-    """
-
-    def __init__(self, num_envs):
-        self.num_envs = num_envs
-
-    def detect_space_info(self, dummy_env):
-
-        self.metadata = (
-            dummy_env.metadata
-            if hasattr(dummy_env, "metadata")
-            else dummy_env.unwrapped.metadata
-        )
-        self.render_mode = (
-            dummy_env.render_mode
-            if hasattr(dummy_env, "render_mode")
-            else dummy_env.unwrapped.render_mode
-        )
-        self.possible_agents = dummy_env.possible_agents
-
-        try:
-            # Collect action space data
-            self.single_action_space = {
-                agent: dummy_env.action_space(agent)
-                for agent in dummy_env.possible_agents
-            }
-            self.action_space = {
-                agent: batch_space(self.single_action_space[agent], self.num_envs)
-                for agent in dummy_env.possible_agents
-            }
-
-            # Collect observation space data
-            self.single_observation_space = {
-                agent: dummy_env.observation_space(agent)
-                for agent in dummy_env.possible_agents
-            }
-
-            self.observation_dtypes = {
-                agent: dummy_env.observation_space(agent).dtype
-                for agent in dummy_env.possible_agents
-            }
-
-            self.observation_space = {
-                agent: batch_space(self.single_observation_space[agent], self.num_envs)
-                for agent in dummy_env.possible_agents
-            }
-
-            self.observation_shapes = {
-                agent: space.shape if space.shape != () else (1,)
-                for agent, space in self.single_observation_space.items()
-            }
-
-            # Width of each agents flattened observations
-            self.observation_widths = {
-                agent: int(np.prod(obs.shape))
-                for agent, obs in self.single_observation_space.items()
-            }
-            # Cumulative widths of the flattened observations
-            self.observation_boundaries = [0] + list(
-                accumulate(self.observation_widths.values(), operator.add)
-            )
-        except Exception as e:
-            raise ValueError(
-                "Unable to calculate observation dimensions from current observation space type."
-            ) from e
-
-        # Total width of all agents observations, flattened and concatenated
-        self.total_observation_width = int(
-            np.sum(list(self.observation_widths.values()))
-        )
-        dummy_env.reset()
-
-        # This is the gospel order of agents
-        self.agents = dummy_env.possible_agents[:]
-        self.agent_index_map = {agent: i for i, agent in enumerate(self.agents)}
-
-        dummy_env.close()
-        del dummy_env
 
 
 class Observations:
@@ -663,50 +643,46 @@ class Observations:
 
     :param shared_memory: A RawArray that all envs write observations to.
     :type shared_memory: multiprocessing.RawArray
-    :param exp_spec: Experience specification
-    :type exp_spec: agilerl.vector.pz_async_vec_env.PettingZooExperienceSpec
+    :param obs_spaces: Dictionary of gymnasium observation spaces
+    :type obs_spaces: Dict[str, gymnasiums.spaces.Space]
     :param num_envs: Number of environments
     :type num_envs: int
 
     """
 
-    def __init__(self, shared_memory, exp_spec, num_envs):
-        self.exp_spec = exp_spec
+    def __init__(self, shared_memory, obs_spaces, num_envs):
         self.num_envs = num_envs
         self.shared_memory = shared_memory
-        self.obs_view = []
-        for shm, agent in zip(shared_memory, exp_spec.agents):
-            self.obs_view.append(
-                np.frombuffer(
-                    shm.get_obj(), dtype=exp_spec.single_observation_space[agent].dtype
-                )
+        self.obs_view = {}
+        self.agents = list(self.shared_memory.keys())
+        self.obs_spaces = obs_spaces
+        for agent, shm in shared_memory.items():
+            self.obs_view[agent] = np.frombuffer(
+                shm.get_obj(), dtype=self.obs_spaces[agent].dtype
             )
 
-    def __getitem__(self, key):
+    def __getitem__(self, agent):
         """
         Get agent observation given a key (agent_id)
         """
-        agent_idx = self.exp_spec.agent_index_map[key]
-        return self.obs_view[agent_idx].reshape(
-            (self.num_envs, *self.exp_spec.observation_shapes[key])
+        return self.obs_view[agent].reshape(
+            (self.num_envs, *self.obs_spaces[agent].shape)
         )
 
     def __str__(self):
-        """"""
-        my_dic = {agent: obs for agent, obs in zip(self.exp_spec.agents, self.obs_view)}
-        return f"{my_dic}"
+        return f"{self.obs_view}"
 
     def __repr__(self):
         return self.__str__()
 
     def __contains__(self, key):  # key is agent_id
-        return key in self.exp_spec.agent_index_map.keys()
+        return key in self.obs_view.keys()
 
     def __len__(self):
-        return len(self.exp_spec.agents)
+        return len(self.agents)
 
     def __iterate_kv(self):
-        for key in self.exp_spec.agents:
+        for key in self.obs_view:
             yield (key, self.__getitem__(key))
 
     def __iter__(self):
@@ -730,26 +706,16 @@ class Observations:
             return None
 
 
-class SharedMemory:
-    """Class to hold the shared memory object that each of the subprocesses will write their observation to.
-
-    :param num_envs: Number of environments to vectorize
-    :type num_envs: int
-    :param exp_spec: Experience specification
-    :type exp_spec: PettingZooExperienceSpec
-    :param context: Multiprocessing context
-    :type context: BaseContext
-
-    """
-
-    def __init__(self, num_envs, exp_spec, context):
-        self.shared_memory = []
-        for agent in exp_spec.agents:
-            shared_memory = context.Array(
-                exp_spec.single_observation_space[agent].dtype.char,
-                exp_spec.observation_widths[agent] * num_envs,
-            )
-            self.shared_memory.append(shared_memory)
+def create_shared_memory(num_envs, obs_spaces, context):
+    shared_memory = {}
+    for agent, obs in obs_spaces.items():
+        size = int(np.prod(obs.shape)) * num_envs
+        shm = context.Array(
+            obs.dtype.char,
+            size,
+        )
+        shared_memory[agent] = shm
+    return shared_memory
 
 
 def get_placeholder_value(agent, transition_name, observation_shapes=None):
@@ -801,25 +767,28 @@ def process_transition(transitions, observation_shapes, transition_names, agents
 
 
 def set_env_obs(index, observation, shared_memory, widths, dtypes):
-    """Set the observation for a given environment
-
-    :param index: Environment index
-    :type index: int
-    :param observation: Observation from env.step or env.reset
-    :type observation: Dict[str, np.ndarray]
-    :param shared_memory: Shared memory
-    :type shared_memory: mp.Array
-    :param widths: Flattened observation widths
-    :type widths: Dict[str, int]
-    :param dtypes: Observation dtypes
-    :type dtypes: Dict[str, np.dtype]
-    """
-    for agent_idx, (agent, obs) in enumerate(observation.items()):
-        dest = np.frombuffer(shared_memory[agent_idx].get_obj(), dtype=dtypes[agent])
-        np.copyto(
-            dest[index * widths[agent] : (index + 1) * widths[agent]],
-            np.asarray(obs, dtype=dtypes[agent]).flatten(),
-        )
+    for agent, obs in observation.items():
+        flat_obs = np.asarray(obs, dtype=dtypes[agent]).flatten()
+        if isinstance(shared_memory[agent], list):  # Chunked memory
+            start_idx = index * widths[agent]
+            for chunk in shared_memory[agent]:
+                chunk_size = len(np.frombuffer(chunk.get_obj(), dtype=dtypes[agent]))
+                if start_idx >= chunk_size:
+                    start_idx -= chunk_size
+                    continue
+                dest = np.frombuffer(chunk.get_obj(), dtype=dtypes[agent])
+                copy_size = min(chunk_size - start_idx, widths[agent])
+                np.copyto(dest[start_idx : start_idx + copy_size], flat_obs[:copy_size])
+                if copy_size < widths[agent]:
+                    flat_obs = flat_obs[copy_size:]
+                    start_idx = 0
+                else:
+                    break
+        else:
+            dest = np.frombuffer(shared_memory[agent].get_obj(), dtype=dtypes[agent])
+            np.copyto(
+                dest[index * widths[agent] : (index + 1) * widths[agent]], flat_obs
+            )
 
 
 def _async_worker(
@@ -859,6 +828,7 @@ def _async_worker(
     """
     env = env_fn()
     autoreset = False
+    observation = None
     parent_pipe.close()
 
     try:
@@ -878,6 +848,7 @@ def _async_worker(
                     observation_widths,
                     observation_dtypes,
                 )
+                observation = None
                 autoreset = False
                 pipe.send(((info), True))
             elif command == "step":
@@ -926,6 +897,7 @@ def _async_worker(
                     observation_widths,
                     observation_dtypes,
                 )
+                observation = None
                 pipe.send(((reward, terminated, truncated, info), True))
 
             elif command == "close":
