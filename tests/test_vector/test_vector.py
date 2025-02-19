@@ -27,10 +27,10 @@ from agilerl.vector.pz_async_vec_env import (  # PettingZooExperienceSpec,; Shar
     Observations,
     _async_worker,
     get_placeholder_value,
-    set_env_obs,
+    write_to_shared_memory,
 )
 from agilerl.vector.pz_vec_env import PettingZooVecEnv
-from tests.pz_vector_test_utils import CustomSpace, GenericTestEnv, term_env
+from tests.pz_vector_test_utils import GenericTestEnv, term_env
 
 
 class DummyRecv:
@@ -70,9 +70,6 @@ def test_create_async_pz_vector_env(env_fns):
     assert env.action_space
     assert env.single_observation_space
     assert env.observation_space
-    assert env.observation_widths
-    assert env.observation_boundaries
-    assert env.observation_shapes
     assert env.num_envs == 8
     for val in env._obs_buffer.values():
         assert isinstance(val, SynchronizedArray)
@@ -277,13 +274,10 @@ def test_env_order_preserved():
     env.parent_pipes[rand_env].send(("step", actions))
     env.parent_pipes[rand_env].recv()
     for agent in env.agents:
+        size = int(np.prod(env.single_observation_space(agent).shape))
         assert not np.array_equal(
-            env.observations.obs_view[agent][
-                rand_env
-                * env.observation_widths[agent] : (rand_env + 1)
-                * env.observation_widths[agent]
-            ],
-            np.zeros_like(env.observation_shapes[agent]),
+            env.observations.obs_view[agent][rand_env * size : (rand_env + 1) * size],
+            np.zeros_like(env.single_observation_space(agent).shape),
         )
     env.close()
 
@@ -334,17 +328,6 @@ def test_async_vector_subenv_error():
         envs.step({"agent_0": [0, 1, 2]})
 
     envs.close()
-
-
-def test_custom_space_error():
-    num_envs = 4
-    env_fns = [
-        lambda: GenericTestEnv(
-            action_space=CustomSpace(), observation_space=CustomSpace()
-        )
-    ] * num_envs
-    with pytest.raises(ValueError):
-        AsyncPettingZooVecEnv(env_fns)
 
 
 @pytest.mark.parametrize(
@@ -542,7 +525,7 @@ def test_get_placeholder_value(transition_name):
         output = get_placeholder_value(
             agent="speaker_0",
             transition_name=transition_name,
-            observation_shapes=env.observations,
+            obs_space=env._single_observation_spaces,
         )
         assert isinstance(output, np.ndarray)
     env.close()
@@ -634,9 +617,6 @@ def test_worker_reset():
             parent_pipe,
             vec_env._obs_buffer,
             queue,
-            vec_env.observation_shapes,
-            vec_env.observation_widths,
-            vec_env.observation_dtypes,
             vec_env.agents,
         ),
     )
@@ -676,9 +656,6 @@ def test_worker_step_simple():
             parent_pipe,
             vec_env._obs_buffer,
             queue,
-            vec_env.observation_shapes,
-            vec_env.observation_widths,
-            vec_env.observation_dtypes,
             vec_env.agents,
         ),
     )
@@ -742,9 +719,6 @@ def test_worker_step_autoreset():
             parent_pipe,
             vec_env._obs_buffer,
             queue,
-            vec_env.observation_shapes,
-            vec_env.observation_widths,
-            vec_env.observation_dtypes,
             vec_env.agents,
         ),
     )
@@ -789,9 +763,6 @@ def test_worker_runtime_error():
                 parent_pipe,
                 vec_env._obs_buffer,
                 queue,
-                vec_env.observation_shapes,
-                vec_env.observation_widths,
-                vec_env.observation_dtypes,
                 vec_env.agents,
             ),
         )
@@ -834,12 +805,8 @@ def test_observations_vector():
         == "{'speaker_0': array([0., 0., 0.], dtype=float32), 'listener_0': array([0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.], dtype=float32)}"
     ), vec_env.observations.__str__()
     ob = {"speaker_0": np.ones((1, 3)), "listener_0": np.ones((1, 11))}
-    set_env_obs(
-        0,
-        ob,
-        vec_env._obs_buffer,
-        vec_env.observation_widths,
-        vec_env.observation_dtypes,
+    write_to_shared_memory(
+        0, ob, vec_env._obs_buffer, vec_env._single_observation_spaces
     )
     assert "speaker_0" in vec_env.observations
     assert len(vec_env.observations) == 2
@@ -876,37 +843,53 @@ def test_observations_image():
     vec_env.close()
 
 
+dummy_action_spaces = {"agent_0": gym.spaces.Box(0, 1, (4,))}
+dummy_observation_spaces = {"agent_0": gym.spaces.Box(0, 1, (4,))}
+
+
 # Test for pz_vec_env.py
 def test_vec_env_reset():
-    vec_env = PettingZooVecEnv(3, ["agent_0"])
+    vec_env = PettingZooVecEnv(
+        3, dummy_observation_spaces, dummy_action_spaces, ["agent_0"]
+    )
     vec_env.reset()
 
 
 def test_vec_env_step():
-    vec_env = PettingZooVecEnv(3, ["agent_0"])
+    vec_env = PettingZooVecEnv(
+        3, dummy_observation_spaces, dummy_action_spaces, ["agent_0"]
+    )
     vec_env.step_async([])
     vec_env.step_wait()
 
 
 def test_vec_env_render():
-    vec_env = PettingZooVecEnv(3, ["agent_0"])
+    vec_env = PettingZooVecEnv(
+        3, dummy_observation_spaces, dummy_action_spaces, ["agent_0"]
+    )
     with pytest.raises(NotImplementedError):
         vec_env.render()
 
 
 def test_vec_env_closed():
-    vec_env = PettingZooVecEnv(3, ["agent_0"])
+    vec_env = PettingZooVecEnv(
+        3, dummy_observation_spaces, dummy_action_spaces, ["agent_0"]
+    )
     vec_env.closed = True
     vec_env.close()
 
 
 def test_vec_env_close_extras():
-    vec_env = PettingZooVecEnv(3, ["agent_0"])
+    vec_env = PettingZooVecEnv(
+        3, dummy_observation_spaces, dummy_action_spaces, ["agent_0"]
+    )
     vec_env.close_extras()
 
 
 def test_vec_env_unwrapped():
-    vec_env = PettingZooVecEnv(3, ["agent_0"])
+    vec_env = PettingZooVecEnv(
+        3, dummy_observation_spaces, dummy_action_spaces, ["agent_0"]
+    )
     vec_env.unwrapped
 
 

@@ -1,14 +1,12 @@
 """An async vector pettingzoo environment"""
 
 import multiprocessing as mp
-import operator
 import sys
 import time
 import traceback
 from collections import defaultdict
 from copy import deepcopy
 from enum import Enum
-from itertools import accumulate
 from typing import TypeVar
 
 import numpy as np
@@ -18,7 +16,7 @@ from gymnasium.error import (
     ClosedEnvironmentError,
     NoAsyncCallError,
 )
-from gymnasium.vector.utils import CloudpickleWrapper, batch_space, clear_mpi_env_vars
+from gymnasium.vector.utils import CloudpickleWrapper, clear_mpi_env_vars
 
 from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
@@ -46,8 +44,8 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
     """
 
     def __init__(self, env_fns, copy=True, context=None):
-
         # Core class attributes
+        ctx = mp.get_context(context)
         self.env_fns = env_fns
         self.num_envs = len(env_fns)
         dummy_env = env_fns[0]()
@@ -63,23 +61,32 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         )
         self.possible_agents = dummy_env.possible_agents
         self.copy = copy
+        self.agents = dummy_env.possible_agents[:]
+        action_spaces = {
+            agent: dummy_env.action_space(agent) for agent in dummy_env.possible_agents
+        }
+        observation_spaces = {
+            agent: dummy_env.observation_space(agent)
+            for agent in dummy_env.possible_agents
+        }
+        dummy_env.close()
+        del dummy_env
+        super().__init__(
+            len(env_fns),
+            observation_spaces,
+            action_spaces,
+            self.possible_agents,
+        )
 
-        self.action_space = self._get_action_space
-        self.observation_space = self._get_observation_space
-        self.single_action_space = self._get_single_action_space
-        self.single_observation_space = self._get_single_observation_space
-
-        self._detect_space_info(dummy_env)
-        ctx = mp.get_context(context)
         # Create the shared memory for sharing observations between subprocesses
         self._obs_buffer = create_shared_memory(
             num_envs=self.num_envs,
-            obs_spaces=self.single_observation_spaces,
+            obs_spaces=self._single_observation_spaces,
             context=ctx,
         )
         self.observations = Observations(
             shared_memory=self._obs_buffer,
-            obs_spaces=self.single_observation_spaces,
+            obs_spaces=self._single_observation_spaces,
             num_envs=self.num_envs,
         )
         self.parent_pipes, self.processes = [], []
@@ -99,9 +106,6 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
                         parent_pipe,
                         self._obs_buffer,
                         self.error_queue,
-                        self.observation_shapes,
-                        self.observation_widths,
-                        self.observation_dtypes,
                         self.agents,
                     ),
                 )
@@ -111,115 +115,6 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
                 process.start()
                 child_pipe.close()
         self._state = AsyncState.DEFAULT
-
-        super().__init__(
-            len(env_fns),
-            self.possible_agents,
-        )
-
-    def _detect_space_info(self, dummy_env):
-        self.metadata = (
-            dummy_env.metadata
-            if hasattr(dummy_env, "metadata")
-            else dummy_env.unwrapped.metadata
-        )
-        self.render_mode = (
-            dummy_env.render_mode
-            if hasattr(dummy_env, "render_mode")
-            else dummy_env.unwrapped.render_mode
-        )
-        self.possible_agents = dummy_env.possible_agents
-
-        try:
-            # Collect action space data
-            self.single_action_spaces = {
-                agent: dummy_env.action_space(agent)
-                for agent in dummy_env.possible_agents
-            }
-            self.action_spaces = {
-                agent: batch_space(self.single_action_spaces[agent], self.num_envs)
-                for agent in dummy_env.possible_agents
-            }
-
-            # Collect observation space data
-            self.single_observation_spaces = {
-                agent: dummy_env.observation_space(agent)
-                for agent in dummy_env.possible_agents
-            }
-
-            self.observation_dtypes = {
-                agent: dummy_env.observation_space(agent).dtype
-                for agent in dummy_env.possible_agents
-            }
-
-            self.observation_spaces = {
-                agent: batch_space(self.single_observation_spaces[agent], self.num_envs)
-                for agent in dummy_env.possible_agents
-            }
-
-            self.observation_shapes = {
-                agent: space.shape if space.shape != () else (1,)
-                for agent, space in self.single_observation_spaces.items()
-            }
-
-            # Width of each agents flattened observations
-            self.observation_widths = {
-                agent: int(np.prod(obs.shape))
-                for agent, obs in self.single_observation_spaces.items()
-            }
-            # Cumulative widths of the flattened observations
-            self.observation_boundaries = [0] + list(
-                accumulate(self.observation_widths.values(), operator.add)
-            )
-        except Exception as e:
-            raise ValueError(
-                "Unable to calculate observation dimensions from current observation space type."
-            ) from e
-
-        # Total width of all agents observations, flattened and concatenated
-        self.total_observation_width = int(
-            np.sum(list(self.observation_widths.values()))
-        )
-        dummy_env.reset()
-
-        # This is the gospel order of agents
-        self.agents = dummy_env.possible_agents[:]
-        self.agent_index_map = {agent: i for i, agent in enumerate(self.agents)}
-
-        dummy_env.close()
-        del dummy_env
-
-    def _get_single_action_space(self, agent):
-        """Get an agents single action space
-
-        :param agent: Name of agent
-        :type agent: str
-        """
-        return self.single_action_spaces[agent]
-
-    def _get_action_space(self, agent):
-        """Get an agents action space
-
-        :param agent: Name of agent
-        :type agent: str
-        """
-        return self.action_spaces[agent]
-
-    def _get_single_observation_space(self, agent):
-        """Get an agents single observation space
-
-        :param agent: Name of agent
-        :type agent: str
-        """
-        return self.single_observation_spaces[agent]
-
-    def _get_observation_space(self, agent):
-        """Get an agents observation space
-
-        :param agent: Name of agent
-        :type agent: str
-        """
-        return self.observation_spaces[agent]
 
     def reset(
         self,
@@ -635,6 +530,8 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             del self._obs_buffer
         if hasattr(self, "observations"):
             del self.observations
+        # if hasattr(self, "experience_spec"):
+        #     del self.experience_spec
 
 
 class Observations:
@@ -643,8 +540,8 @@ class Observations:
 
     :param shared_memory: A RawArray that all envs write observations to.
     :type shared_memory: multiprocessing.RawArray
-    :param obs_spaces: Dictionary of gymnasium observation spaces
-    :type obs_spaces: Dict[str, gymnasiums.spaces.Space]
+    :param exp_spec: Experience specification
+    :type exp_spec: agilerl.vector.pz_async_vec_env.PettingZooExperienceSpec
     :param num_envs: Number of environments
     :type num_envs: int
 
@@ -652,9 +549,8 @@ class Observations:
 
     def __init__(self, shared_memory, obs_spaces, num_envs):
         self.num_envs = num_envs
-        self.shared_memory = shared_memory
         self.obs_view = {}
-        self.agents = list(self.shared_memory.keys())
+        self.agents = list(shared_memory.keys())
         self.obs_spaces = obs_spaces
         for agent, shm in shared_memory.items():
             self.obs_view[agent] = np.frombuffer(
@@ -665,11 +561,14 @@ class Observations:
         """
         Get agent observation given a key (agent_id)
         """
+        # agent_idx = self.exp_spec.agent_index_map[key]
         return self.obs_view[agent].reshape(
             (self.num_envs, *self.obs_spaces[agent].shape)
         )
 
     def __str__(self):
+        """"""
+        # my_dic = {agent: obs for agent, obs in zip(self.exp_spec.agents, self.obs_view)}
         return f"{self.obs_view}"
 
     def __repr__(self):
@@ -708,25 +607,25 @@ class Observations:
 
 def create_shared_memory(num_envs, obs_spaces, context):
     shared_memory = {}
-    for agent, obs in obs_spaces.items():
-        size = int(np.prod(obs.shape)) * num_envs
+    for agent, obs_space in obs_spaces.items():
+        size = int(np.prod(obs_space.shape)) * num_envs
         shm = context.Array(
-            obs.dtype.char,
+            obs_space.dtype.char,
             size,
         )
         shared_memory[agent] = shm
     return shared_memory
 
 
-def get_placeholder_value(agent, transition_name, observation_shapes=None):
+def get_placeholder_value(agent, transition_name, obs_space=None):
     """When an agent is killed, used to obtain a placeholder value to return for associated experience.
 
     :param agent: Agent ID
     :type agent: str
     :param transition_name: Name of the transition
     :type transition_name: str
-    :param observations: Observations numpy array backed by RawArray, defaults to None
-    :type observations: agilerl.vector.pz_async_vec_env.Observations, optional
+    :param obs_space: Observation space dictionary
+    :type obs_space: Dict[str, gymnasium.spaces.Space]
     """
     match transition_name:
         case "reward":
@@ -738,35 +637,36 @@ def get_placeholder_value(agent, transition_name, observation_shapes=None):
         case "info":
             return {}
         case "observation":
-            return -np.ones_like(observation_shapes[agent])
+            return -np.ones_like(obs_space[agent].shape)
 
 
-def process_transition(transitions, observation_shapes, transition_names, agents):
+def process_transition(transitions, obs_space, transition_names, agents):
     """Process transition, adds in placeholder values for killed sub-agents
 
     :param transitions: Tuple of environment transition
     :type transitions: Tuple[Any]
-    :param observation_shapes: Observation shapes
-    :type observation_shapes: Dict[str, Tuple[int]]
+    :param obs_space: Observation space dictionary
+    :type obs_space: Dict[str, gymnasium.spaces.Space]
     :param transition_names: Names associated to transitions
     :type transition_names: List[str]
     :param agents: List of sub-agent names
     :type agents: List[str]
     """
+    assert len(transitions) == len(transition_names)
     transition_list = list(transitions)
     for transition, name in zip(transition_list, transition_names):
         transition = {
             agent: (
                 transition[agent]
                 if agent in transition.keys()
-                else get_placeholder_value(agent, name, observation_shapes)
+                else get_placeholder_value(agent, name, obs_space)
             )
             for agent in agents
         }
     return transition_list
 
 
-def set_env_obs(index, observation, shared_memory, widths, dtypes):
+def write_to_shared_memory(index, observation, shared_memory, obs_space):
     """Set the observation for a given environment
 
 
@@ -776,32 +676,20 @@ def set_env_obs(index, observation, shared_memory, widths, dtypes):
     :type observation: Dict[str, np.ndarray]
     :param shared_memory: Shared memory
     :type shared_memory: Dict[str, mp.Array]
-    :param widths: Flattened observation widths
-    :type widths: Dict[str, int]
-    :param dtypes: Observation dtypes
-    :type dtypes: Dict[str, np.dtype]
+    :param obs_space: Observation space dictionary
+    :type obs_space: Dict[str, gymnasium.spaces.Space]
     """
     for agent, obs in observation.items():
-        dest = np.frombuffer(shared_memory[agent].get_obj(), dtype=dtypes[agent])
+        size = int(np.prod(obs_space[agent].shape))
+        dtype = obs_space[agent].dtype
+        dest = np.frombuffer(shared_memory[agent].get_obj(), dtype=dtype)
         np.copyto(
-            dest[index * widths[agent] : (index + 1) * widths[agent]],
-            np.asarray(obs, dtype=dtypes[agent]).flatten(),
+            dest[index * size : (index + 1) * size],
+            np.asarray(obs, dtype=dtype).flatten(),
         )
-        del dest
 
 
-def _async_worker(
-    index,
-    env_fn,
-    pipe,
-    parent_pipe,
-    shared_memory,
-    error_queue,
-    observation_shapes,
-    observation_widths,
-    observation_dtypes,
-    agents,
-):
+def _async_worker(index, env_fn, pipe, parent_pipe, shared_memory, error_queue, agents):
     """
     :param index: Subprocess index
     :type index: int
@@ -811,8 +699,8 @@ def _async_worker(
     :type pipe: Connection
     :param parent_pipe: Parent pipe object
     :type parent_pipe: Connection
-    :param shared_memory: List of shared memories.
-    :type shared_memory: List[multiprocessing.Array]
+    :param shared_memory: Dict of shared memories.
+    :type shared_memory: Dict[str, multiprocessing.Array]
     :param error_queue: Queue object for collecting subprocess errors to communicate back to the main process
     :type error_queue: mp.Queue
     :param observation_shapes: Shapes of observations
@@ -825,78 +713,59 @@ def _async_worker(
     :type agents: str
 
     """
+
     env = env_fn()
-    autoreset = False
-    observation = None
+    observation_space = {agent: env.observation_space(agent) for agent in agents}
     parent_pipe.close()
 
     try:
         while True:
             command, data = pipe.recv()
             if command == "reset":
+                transition = env.reset(**data)
                 observation, info = process_transition(
-                    env.reset(**data),
-                    observation_shapes,
+                    transition,
+                    observation_space,
                     ["observation", "info"],
                     agents,
                 )
-                set_env_obs(
-                    index,
-                    observation,
-                    shared_memory,
-                    observation_widths,
-                    observation_dtypes,
+                write_to_shared_memory(
+                    index, observation, shared_memory, observation_space
                 )
-                observation = None
-                autoreset = False
                 pipe.send(((info), True))
             elif command == "step":
-                if autoreset:
-                    observation, info = process_transition(
-                        env.reset(), observation_shapes, ["observation", "info"], agents
+                data = {
+                    possible_agent: (
+                        np.array(data[idx]).squeeze()
+                        if not isinstance(data[idx], int)
+                        else data[idx]
                     )
-                    reward = {agent: 0 for agent in agents}
-                    terminated = {agent: False for agent in agents}
-                    truncated = {agent: False for agent in agents}
-                else:
-                    data = {
-                        possible_agent: (
-                            np.array(data[idx]).squeeze()
-                            if not isinstance(data[idx], int)
-                            else data[idx]
-                        )
-                        for idx, possible_agent in enumerate(agents)
-                    }
-                    transition = env.step(data)
-                    observation, reward, terminated, truncated, info = transition
-                    observation, reward, terminated, truncated, info = (
-                        process_transition(
-                            transition,
-                            observation_shapes,
-                            [
-                                "observation",
-                                "reward",
-                                "terminated",
-                                "truncated",
-                                "info",
-                            ],
-                            agents,
-                        )
-                    )
-                autoreset = all(
+                    for idx, possible_agent in enumerate(agents)
+                }
+                observation, reward, terminated, truncated, info = env.step(data)
+                transition = observation, reward, terminated, truncated, info
+                if all(
                     [
                         term | trunc
                         for term, trunc in zip(terminated.values(), truncated.values())
                     ]
+                ):
+                    observation, info = env.reset()
+                observation, reward, terminated, truncated, info = process_transition(
+                    transition,
+                    observation_space,
+                    [
+                        "observation",
+                        "reward",
+                        "terminated",
+                        "truncated",
+                        "info",
+                    ],
+                    agents,
                 )
-                set_env_obs(
-                    index,
-                    observation,
-                    shared_memory,
-                    observation_widths,
-                    observation_dtypes,
+                write_to_shared_memory(
+                    index, observation, shared_memory, observation_space
                 )
-                observation = None
                 pipe.send(((reward, terminated, truncated, info), True))
 
             elif command == "close":
