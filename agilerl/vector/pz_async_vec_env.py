@@ -767,28 +767,27 @@ def process_transition(transitions, observation_shapes, transition_names, agents
 
 
 def set_env_obs(index, observation, shared_memory, widths, dtypes):
+    """Set the observation for a given environment
+
+
+    :param index: Environment index
+    :type index: int
+    :param observation: Observation from env.step or env.reset
+    :type observation: Dict[str, np.ndarray]
+    :param shared_memory: Shared memory
+    :type shared_memory: Dict[str, mp.Array]
+    :param widths: Flattened observation widths
+    :type widths: Dict[str, int]
+    :param dtypes: Observation dtypes
+    :type dtypes: Dict[str, np.dtype]
+    """
     for agent, obs in observation.items():
-        flat_obs = np.asarray(obs, dtype=dtypes[agent]).flatten()
-        if isinstance(shared_memory[agent], list):  # Chunked memory
-            start_idx = index * widths[agent]
-            for chunk in shared_memory[agent]:
-                chunk_size = len(np.frombuffer(chunk.get_obj(), dtype=dtypes[agent]))
-                if start_idx >= chunk_size:
-                    start_idx -= chunk_size
-                    continue
-                dest = np.frombuffer(chunk.get_obj(), dtype=dtypes[agent])
-                copy_size = min(chunk_size - start_idx, widths[agent])
-                np.copyto(dest[start_idx : start_idx + copy_size], flat_obs[:copy_size])
-                if copy_size < widths[agent]:
-                    flat_obs = flat_obs[copy_size:]
-                    start_idx = 0
-                else:
-                    break
-        else:
-            dest = np.frombuffer(shared_memory[agent].get_obj(), dtype=dtypes[agent])
-            np.copyto(
-                dest[index * widths[agent] : (index + 1) * widths[agent]], flat_obs
-            )
+        dest = np.frombuffer(shared_memory[agent].get_obj(), dtype=dtypes[agent])
+        np.copyto(
+            dest[index * widths[agent] : (index + 1) * widths[agent]],
+            np.asarray(obs, dtype=dtypes[agent]).flatten(),
+        )
+        del dest
 
 
 def _async_worker(
