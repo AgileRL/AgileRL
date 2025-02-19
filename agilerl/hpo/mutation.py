@@ -801,7 +801,7 @@ class Mutations:
                 self._reinit_bandit_grads(individual, offsprings, old_exp_layer)
 
         self.reinit_opt(individual)  # Reinitialise optimizer
-        individual.mut = "arch"
+        individual.mut = mut_method
         return individual
 
     def _apply_arch_mutation(

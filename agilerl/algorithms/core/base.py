@@ -171,7 +171,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
     @abstractmethod
     def learn(
         self, experiences: Tuple[Iterable[ObservationType], ...], **kwargs
-    ) -> None:
+    ) -> Any:
         """Abstract method for learning the algorithm."""
         raise NotImplementedError
 

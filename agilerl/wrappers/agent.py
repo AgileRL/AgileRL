@@ -1,4 +1,6 @@
+from abc import ABC, abstractmethod
 from collections import OrderedDict
+from functools import partial
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -12,7 +14,7 @@ AgentType = Union[RLAlgorithm, MultiAgentRLAlgorithm]
 MARLObservationType = Dict[str, ObservationType]
 
 
-class AgentWrapper:
+class AgentWrapper(ABC):
     """Base class for all agent wrappers. Agent wrappers are used to apply an
     additional functionality to an ``EvolvableAlgorithm`` instance.
 
@@ -25,6 +27,13 @@ class AgentWrapper:
         self.observation_space = agent.observation_space
         self.action_space = agent.action_space
         self.multi_agent = isinstance(agent, MultiAgentRLAlgorithm)
+
+        # Wrap the agent's methods
+        self.agent_get_action = agent.get_action
+        self.agent_learn = agent.learn
+
+        self.agent.get_action = partial(self.get_action)
+        self.agent.learn = partial(self.learn)
 
     @property
     def training(self) -> bool:
@@ -44,6 +53,9 @@ class AgentWrapper:
         """
         return self.agent.device
 
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}({self.agent})"
+
     def __getattr__(self, name: str) -> Any:
         return getattr(self.agent, name)
 
@@ -53,59 +65,42 @@ class AgentWrapper:
         else:
             setattr(self.agent, name, value)
 
+    @abstractmethod
     def get_action(
-        self, obs: Union[ObservationType, MARLObservationType], **kwargs: Any
+        self,
+        obs: Union[ObservationType, MARLObservationType],
+        *args: Any,
+        **kwargs: Any,
     ) -> Any:
         """Returns the action from the agent.
 
         :param obs: Observation from the environment
         :type obs: Union[ObservationType, MARLObservationType]
+        :param args: Additional positional arguments
+        :type args: Any
         :param kwargs: Additional keyword arguments
         :type kwargs: Any
 
         :return: Action from the agent
         :rtype: Any
         """
-        return self.agent.get_action(obs, **kwargs)
+        raise NotImplementedError
 
-    def learn(self, experiences: ExperiencesType, **kwargs: Any) -> Any:
+    @abstractmethod
+    def learn(self, experiences: ExperiencesType, *args: Any, **kwargs: Any) -> Any:
         """Learns from the experiences.
 
         :param experiences: Experiences from the environment
         :type experiences: ExperiencesType
+        :param args: Additional positional arguments
+        :type args: Any
         :param kwargs: Additional keyword arguments
         :type kwargs: Any
 
         :return: Learning information
         :rtype: Any
         """
-        return self.agent.learn(experiences, **kwargs)
-
-
-### Running Mean and Standard Deviation Normalization ###
-
-
-def update_mean_var_count_from_moments(
-    mean: torch.Tensor,
-    var: torch.Tensor,
-    count: float,
-    batch_mean: torch.Tensor,
-    batch_var: torch.Tensor,
-    batch_count: int,
-) -> tuple[torch.Tensor, torch.Tensor, float]:
-    """Updates the mean, var, and count using previous and batch values."""
-
-    delta = batch_mean - mean
-    tot_count = count + batch_count
-
-    new_mean = mean + delta * batch_count / tot_count
-    m_a = var * count
-    m_b = batch_var * batch_count
-    M2 = m_a + m_b + (delta**2) * (count * batch_count / tot_count)
-    new_var = M2 / tot_count
-    new_count = tot_count
-
-    return new_mean, new_var, new_count
+        raise NotImplementedError
 
 
 class RunningMeanStd:
@@ -262,10 +257,12 @@ class RSNorm(AgentWrapper):
                     rms.var + rms.epsilon
                 ).sqrt()
         elif isinstance(self.obs_rms, tuple):
+            norm_observation = []
             for i, rms in enumerate(self.obs_rms):
-                observation[i] = (observation[i] - rms.mean) / (
-                    rms.var + rms.epsilon
-                ).sqrt()
+                norm_obs = (observation[i] - rms.mean) / (rms.var + rms.epsilon).sqrt()
+                norm_observation.append(norm_obs)
+
+            observation = tuple(norm_observation)
         else:
             observation = (observation - self.obs_rms.mean) / (
                 self.obs_rms.var + self.obs_rms.epsilon
@@ -316,7 +313,7 @@ class RSNorm(AgentWrapper):
         else:
             self._update_statistics(observation)
 
-    def get_action(self, obs: ObservationType, **kwargs: Any) -> Any:
+    def get_action(self, obs: ObservationType, *args: Any, **kwargs: Any) -> Any:
         """Returns the action from the agent after normalizing the observation.
 
         :param obs: Observation from the environment
@@ -332,13 +329,15 @@ class RSNorm(AgentWrapper):
             self.update_statistics(obs)
 
         obs = self.normalize_observation(obs)
-        return self.agent.get_action(obs, **kwargs)
+        return self.agent_get_action(obs, *args, **kwargs)
 
-    def learn(self, experiences: ExperiencesType, **kwargs: Any) -> Any:
+    def learn(self, experiences: ExperiencesType, *args: Any, **kwargs: Any) -> Any:
         """Learns from the experiences after normalizing the observations.
 
         :param experiences: Experiences from the environment
         :type experiences: ExperiencesType
+        :param args: Additional positional arguments
+        :type args: Any
         :param kwargs: Additional keyword arguments
         :type kwargs: Any
 
@@ -354,4 +353,4 @@ class RSNorm(AgentWrapper):
             self.normalize_observation(experiences[3]),  # Next state
             *experiences[4:],
         )
-        return self.agent.learn(experiences, **kwargs)
+        return self.agent_learn(experiences, *args, **kwargs)

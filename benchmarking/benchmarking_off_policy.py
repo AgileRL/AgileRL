@@ -14,6 +14,7 @@ from agilerl.utils.utils import (
     observation_space_channels_to_first,
     print_hyperparams,
 )
+from agilerl.wrappers.agent import RSNorm
 from benchmarking.networks import BasicNetActorDQN
 
 # !Note: If you are running this demo without having installed agilerl,
@@ -122,11 +123,14 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
         hp_config=hp_config,
         actor_network=actor,
         critic_network=critic,
+        agent_wrapper=RSNorm,
+        wrapper_kwargs={},
         population_size=INIT_HP["POP_SIZE"],
         num_envs=INIT_HP["NUM_ENVS"],
         device=device,
     )
 
+    print(agent_pop[0].actor)
     trained_pop, pop_fitnesses = train_off_policy(
         env,
         INIT_HP["ENV_NAME"],

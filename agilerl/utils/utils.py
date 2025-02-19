@@ -260,6 +260,12 @@ def create_population(
                 device=device,
                 accelerator=accelerator,
             )
+
+            agent = (
+                agent_wrapper(agent, **wrapper_kwargs)
+                if agent_wrapper is not None
+                else agent
+            )
             population.append(agent)
 
     elif algo == "PPO":
