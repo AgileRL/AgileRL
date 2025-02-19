@@ -24,10 +24,10 @@ INIT_HP:
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
     POP_SIZE: 4                # Population size
-    EVO_STEPS: 10_000          # Evolution frequency
+    EVO_STEPS: 15_000          # Evolution frequency
     EVAL_STEPS:                # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
-    LEARNING_DELAY: 10000       # Steps before learning
+    LEARNING_DELAY: 10_000       # Steps before learning
     WANDB: false               # Log with Weights and Biases
 
 MUTATION_PARAMS:
@@ -54,7 +54,8 @@ NET_CONFIG:
     simba: true
 
     encoder_config:
-        hidden_size: [128, 128]
+        hidden_size: 128 # [128, 128]
+        num_blocks: 2
         # activation: ReLU
         min_mlp_nodes: 64
         max_mlp_nodes: 500

@@ -557,7 +557,8 @@ def create_mlp(
 def create_simba(
     input_size: int,
     output_size: int,
-    hidden_size: List[int],
+    hidden_size: int,
+    num_blocks: int,
     output_activation: Optional[str] = None,
     scale_factor: float = 4.0,
     device: DeviceType = "cpu",
@@ -591,18 +592,18 @@ def create_simba(
 
     # Initial dense layer
     net_dict[f"{name}_linear_layer_input"] = nn.Linear(
-        input_size, hidden_size[0], device=device
+        input_size, hidden_size, device=device
     )
     nn.init.orthogonal_(net_dict[f"{name}_linear_layer_input"].weight)
-    for l_no in range(len(hidden_size)):
+    for l_no in range(1, num_blocks + 1):
         net_dict[f"{name}_residual_block_{str(l_no)}"] = SimbaResidualBlock(
-            hidden_size[l_no], scale_factor=scale_factor, device=device
+            hidden_size, scale_factor=scale_factor, device=device
         )
 
     # Final layer norm and output dense
-    net_dict[f"{name}_layer_norm_output"] = nn.LayerNorm(hidden_size[-1], device=device)
+    net_dict[f"{name}_layer_norm_output"] = nn.LayerNorm(hidden_size, device=device)
     net_dict[f"{name}_linear_layer_output"] = nn.Linear(
-        hidden_size[-1], output_size, device=device
+        hidden_size, output_size, device=device
     )
     nn.init.orthogonal_(net_dict[f"{name}_linear_layer_output"].weight)
 

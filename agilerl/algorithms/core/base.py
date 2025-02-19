@@ -82,6 +82,85 @@ class _RegistryMeta(type):
 class RegistryMeta(_RegistryMeta, ABCMeta): ...
 
 
+def get_checkpoint_dict(agent: SelfEvolvableAlgorithm) -> Dict[str, Any]:
+    """Returns a dictionary of the agent's attributes to save in a checkpoint.
+
+    :param agent: The agent to save.
+    :type agent: EvolvableAlgorithm
+
+    :return: A dictionary of the agent's attributes.
+    :rtype: dict[str, Any]
+    """
+    attribute_dict = EvolvableAlgorithm.inspect_attributes(agent)
+
+    # Extract info on evolvable modules and optimizers in the algorithm
+    network_info: Dict[str, Dict[str, Any]] = {"modules": {}, "optimizers": {}}
+    for attr in agent.evolvable_attributes():
+        obj: EvolvableAttributeType = getattr(agent, attr)
+        if isinstance(obj, OptimizerWrapper):
+            network_info["optimizers"].update(
+                {
+                    f"{attr}_cls": obj.optimizer_cls.__name__,
+                    f"{attr}_state_dict": obj.state_dict(),
+                    f"{attr}_networks": obj.network_names,
+                    f"{attr}_lr": obj.lr_name,
+                    f"{attr}_kwargs": obj.optimizer_kwargs,
+                    f"{attr}_multiagent": obj.multiagent,
+                }
+            )
+        elif isinstance(obj, (OptimizedModule, EvolvableModule)) or is_module_list(obj):
+            if is_module_list(obj):
+                obj_list = obj
+                obj_cls = [
+                    (
+                        m._orig_mod.__class__
+                        if isinstance(m, OptimizedModule)
+                        else m.__class__
+                    )
+                    for m in obj_list
+                ]
+                init_dict = [m.init_dict for m in obj_list]
+                state_dict = [remove_compile_prefix(m.state_dict()) for m in obj_list]
+            else:
+                obj_list = [obj]
+                obj_cls = (
+                    obj._orig_mod.__class__
+                    if isinstance(obj, OptimizedModule)
+                    else obj.__class__
+                )
+                init_dict = obj.init_dict
+                state_dict = remove_compile_prefix(obj.state_dict())
+
+            network_info["modules"].update(
+                {
+                    f"{attr}_cls": obj_cls,
+                    f"{attr}_init_dict": init_dict,
+                    f"{attr}_state_dict": state_dict,
+                }
+            )
+        else:
+            raise TypeError(
+                f"Something went wrong. Identified '{attr}' as an evolvable module "
+                f"when it is of type {type(obj)}."
+            )
+
+    network_attr_names = [
+        name for name in agent.evolvable_attributes(networks_only=True)
+    ]
+    optimizer_attr_names = [
+        name
+        for name in agent.evolvable_attributes()
+        if isinstance(getattr(agent, name), OptimizerWrapper)
+    ]
+
+    network_info["network_names"] = network_attr_names
+    network_info["optimizer_names"] = optimizer_attr_names
+    attribute_dict["network_info"] = network_info
+
+    attribute_dict.pop("accelerator", None)
+    return attribute_dict
+
+
 class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
     """Base object for all algorithms in the AgileRL framework.
 
@@ -240,6 +319,100 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             raise AttributeError(
                 f"Can't access action dimensions for {type(action_space)} spaces."
             )
+
+    @staticmethod
+    def inspect_attributes(
+        agent: SelfEvolvableAlgorithm, input_args_only: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Inspect and retrieve the attributes of the current object, excluding attributes related to the
+        underlying evolvable networks (i.e. `EvolvableModule`, `torch.optim.Optimizer`) and with
+        an option to include only the attributes that are input arguments to the constructor.
+
+        :param input_args_only: If True, only include attributes that are input arguments to the constructor.
+                                Defaults to False.
+        :type input_args_only: bool
+        :return: A dictionary of attribute names and their values.
+        :rtype: dict[str, Any]
+        """
+        # Get all attributes of the current object
+        attributes = inspect.getmembers(agent, lambda a: not isroutine(a))
+
+        # Exclude attributes that are EvolvableModule or Optimizer objects (also check for nested
+        # module-related attributes for multi-agent algorithms)
+        exclude = list(agent.evolvable_attributes().keys())
+        exclude += [attr for attr, val in attributes if isinstance(val, TensorDict)]
+
+        # Exclude private and built-in attributes
+        attributes = [
+            a for a in attributes if not (a[0].startswith("_") or a[0].endswith("_"))
+        ]
+
+        # If input_args_only is True, only include attributes that are
+        # input arguments to the constructor
+        if input_args_only:
+            constructor_params = inspect.signature(agent.__init__).parameters.keys()
+            attributes = {
+                k: v
+                for k, v in attributes
+                if k not in exclude and k in constructor_params
+            }
+        else:
+            # Remove the algo specific guarded variables (if specified)
+            attributes = {k: v for k, v in attributes if k not in exclude}
+
+        return attributes
+
+    @staticmethod
+    def copy_attributes(
+        agent: SelfEvolvableAlgorithm, clone: SelfEvolvableAlgorithm
+    ) -> SelfEvolvableAlgorithm:
+        """Copies the non-evolvable attributes of the algorithm to a clone.
+
+        :param clone: The clone of the algorithm.
+        :type clone: SelfEvolvableAlgorithm
+
+        :return: The clone of the algorithm.
+        :rtype: SelfEvolvableAlgorithm
+        """
+        for attribute in EvolvableAlgorithm.inspect_attributes(agent).keys():
+            if hasattr(agent, attribute) and hasattr(clone, attribute):
+                attr, clone_attr = getattr(agent, attribute), getattr(clone, attribute)
+
+                # NOTE: Here we handle the case where the individual is wrapped by an
+                # AgentWrapper object, which includes the agent itself and functools.partial
+                # objects as attributes.
+                if callable(attr) or isinstance(attr, EvolvableAlgorithm):
+                    continue
+                elif isinstance(attr, torch.Tensor) or isinstance(
+                    clone_attr, torch.Tensor
+                ):
+                    if not torch.equal(attr, clone_attr):
+                        try:
+                            setattr(
+                                clone,
+                                attribute,
+                                copy.deepcopy(getattr(agent, attribute)),
+                            )
+                        except RuntimeError:
+                            # If the tensor is not a leaf tensor, we need to clone it using torch.clone
+                            setattr(
+                                clone, attribute, torch.clone(getattr(agent, attribute))
+                            )
+
+                elif isinstance(attr, np.ndarray) or isinstance(clone_attr, np.ndarray):
+                    if not np.array_equal(attr, clone_attr):
+                        setattr(
+                            clone, attribute, copy.deepcopy(getattr(agent, attribute))
+                        )
+                elif isinstance(attr, list) or isinstance(clone_attr, list):
+                    setattr(clone, attribute, [copy.deepcopy(el) for el in attr])
+                elif attr != clone_attr:
+                    setattr(clone, attribute, copy.deepcopy(getattr(agent, attribute)))
+            else:
+                setattr(clone, attribute, copy.deepcopy(getattr(agent, attribute)))
+
+        return clone
 
     @classmethod
     def population(
@@ -434,46 +607,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         return evolvable_attrs
 
-    def inspect_attributes(self, input_args_only: bool = False) -> Dict[str, Any]:
-        """
-        Inspect and retrieve the attributes of the current object, excluding attributes related to the
-        underlying evolvable networks (i.e. `EvolvableModule`, `torch.optim.Optimizer`) and with
-        an option to include only the attributes that are input arguments to the constructor.
-
-        :param input_args_only: If True, only include attributes that are input arguments to the constructor.
-                                Defaults to False.
-        :type input_args_only: bool
-        :return: A dictionary of attribute names and their values.
-        :rtype: dict[str, Any]
-        """
-        # Get all attributes of the current object
-        attributes = inspect.getmembers(self, lambda a: not isroutine(a))
-
-        # Exclude attributes that are EvolvableModule or Optimizer objects (also check for nested
-        # module-related attributes for multi-agent algorithms)
-        exclude = list(self.evolvable_attributes().keys())
-        exclude += [attr for attr, val in attributes if isinstance(val, TensorDict)]
-
-        # Exclude private and built-in attributes
-        attributes = [
-            a for a in attributes if not (a[0].startswith("_") or a[0].endswith("_"))
-        ]
-
-        # If input_args_only is True, only include attributes that are
-        # input arguments to the constructor
-        if input_args_only:
-            constructor_params = inspect.signature(self.__init__).parameters.keys()
-            attributes = {
-                k: v
-                for k, v in attributes
-                if k not in exclude and k in constructor_params
-            }
-        else:
-            # Remove the algo specific guarded variables (if specified)
-            attributes = {k: v for k, v in attributes if k not in exclude}
-
-        return attributes
-
     def wrap_models(self) -> None:
         """Wraps the models in the algorithm with the accelerator."""
         if self.accelerator is None:
@@ -512,7 +645,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :rtype: EvolvableAlgorithm
         """
         # Make copy using input arguments
-        input_args = self.inspect_attributes(input_args_only=True)
+        input_args = EvolvableAlgorithm.inspect_attributes(self, input_args_only=True)
         input_args["wrap"] = wrap
         clone = type(self)(**input_args)
 
@@ -559,36 +692,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             clone.recompile()
 
         # Copy non-evolvable attributes back to clone
-        for attribute in self.inspect_attributes().keys():
-            if hasattr(self, attribute) and hasattr(clone, attribute):
-                attr, clone_attr = getattr(self, attribute), getattr(clone, attribute)
-                if isinstance(attr, torch.Tensor) or isinstance(
-                    clone_attr, torch.Tensor
-                ):
-                    if not torch.equal(attr, clone_attr):
-                        try:
-                            setattr(
-                                clone,
-                                attribute,
-                                copy.deepcopy(getattr(self, attribute)),
-                            )
-                        except RuntimeError:
-                            # If the tensor is not a leaf tensor, we need to clone it using torch.clone
-                            setattr(
-                                clone, attribute, torch.clone(getattr(self, attribute))
-                            )
-
-                elif isinstance(attr, np.ndarray) or isinstance(clone_attr, np.ndarray):
-                    if not np.array_equal(attr, clone_attr):
-                        setattr(
-                            clone, attribute, copy.deepcopy(getattr(self, attribute))
-                        )
-                elif isinstance(attr, list) or isinstance(clone_attr, list):
-                    setattr(clone, attribute, [copy.deepcopy(el) for el in attr])
-                elif attr != clone_attr:
-                    setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
-            else:
-                setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
+        clone = EvolvableAlgorithm.copy_attributes(self, clone)
 
         if index is not None:
             clone.index = index
@@ -598,6 +702,18 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             getattr(clone, hook)()
 
         return clone
+
+    def save_checkpoint(self, path: str) -> None:
+        """Saves a checkpoint of agent properties and network weights to path.
+
+        :param path: Location to save checkpoint at
+        :type path: string
+        """
+        torch.save(
+            get_checkpoint_dict(self),
+            path,
+            pickle_module=dill,
+        )
 
     def load_checkpoint(self, path: str) -> None:
         """Loads saved agent properties and network weights from checkpoint.
@@ -673,6 +789,13 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             optimizer.load_state_dict(opt_dict[f"{name}_state_dict"])
             setattr(self, name, optimizer)
 
+        # Check loaded registry is consistent with the algorithm
+        if checkpoint["registry"] != self.registry:
+            raise ValueError(
+                "Loaded registry does not match the algorithm's registry. Please make "
+                "sure you are loading the checkpoint with the correct algorithm."
+            )
+
         # Load other attributes
         checkpoint.pop("network_info")
         for attribute in checkpoint.keys():
@@ -689,89 +812,14 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         for hook in self.registry.hooks:
             getattr(self, hook)()
 
-    def save_checkpoint(self, path: str) -> None:
-        """Saves a checkpoint of agent properties and network weights to path.
-
-        :param path: Location to save checkpoint at
-        :type path: string
-        """
-        attribute_dict = self.inspect_attributes()
-
-        # Extract info on evolvable modules and optimizers in the algorithm
-        network_info: Dict[str, Dict[str, Any]] = {"modules": {}, "optimizers": {}}
-        for attr in self.evolvable_attributes():
-            obj: EvolvableAttributeType = getattr(self, attr)
-            if isinstance(obj, OptimizerWrapper):
-                network_info["optimizers"].update(
-                    {
-                        f"{attr}_cls": obj.optimizer_cls.__name__,
-                        f"{attr}_state_dict": obj.state_dict(),
-                        f"{attr}_networks": obj.network_names,
-                        f"{attr}_lr": obj.lr_name,
-                        f"{attr}_kwargs": obj.optimizer_kwargs,
-                        f"{attr}_multiagent": obj.multiagent,
-                    }
-                )
-            elif isinstance(obj, (OptimizedModule, EvolvableModule)) or is_module_list(
-                obj
-            ):
-                if is_module_list(obj):
-                    obj_list = obj
-                    obj_cls = [
-                        (
-                            m._orig_mod.__class__
-                            if isinstance(m, OptimizedModule)
-                            else m.__class__
-                        )
-                        for m in obj_list
-                    ]
-                    init_dict = [m.init_dict for m in obj_list]
-                    state_dict = [
-                        remove_compile_prefix(m.state_dict()) for m in obj_list
-                    ]
-                else:
-                    obj_list = [obj]
-                    obj_cls = (
-                        obj._orig_mod.__class__
-                        if isinstance(obj, OptimizedModule)
-                        else obj.__class__
-                    )
-                    init_dict = obj.init_dict
-                    state_dict = remove_compile_prefix(obj.state_dict())
-
-                network_info["modules"].update(
-                    {
-                        f"{attr}_cls": obj_cls,
-                        f"{attr}_init_dict": init_dict,
-                        f"{attr}_state_dict": state_dict,
-                    }
-                )
-            else:
-                raise TypeError(
-                    f"Something went wrong. Identified '{attr}' as an evolvable module "
-                    f"when it is of type {type(obj)}."
-                )
-
-        network_attr_names = [
-            name for name in self.evolvable_attributes(networks_only=True)
-        ]
-        optimizer_attr_names = [
-            name
-            for name in self.evolvable_attributes()
-            if isinstance(getattr(self, name), OptimizerWrapper)
-        ]
-
-        network_info["network_names"] = network_attr_names
-        network_info["optimizer_names"] = optimizer_attr_names
-        attribute_dict["network_info"] = network_info
-
-        # Save checkpoint
-        attribute_dict.pop("accelerator", None)
-        torch.save(
-            attribute_dict,
-            path,
-            pickle_module=dill,
-        )
+        # Check for agent wrapper
+        wrapper_cls = checkpoint.get("wrapper_cls")
+        if wrapper_cls is not None:
+            init_dict = checkpoint.get("wrapper_init_dict")
+            wrapper_attributes = checkpoint.get("wrapper_attrs")
+            self = wrapper_cls(self, **init_dict)
+            for attr in wrapper_attributes:
+                setattr(self, attr, wrapper_attributes[attr])
 
     @classmethod
     def load(
@@ -896,7 +944,15 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         for name, optimizer in loaded_optimizers.items():
             setattr(self, name, optimizer)
 
-        for attribute in self.inspect_attributes().keys():
+        # Check loaded registry is consistent with the algorithm
+        if checkpoint["registry"] != self.registry:
+            raise ValueError(
+                "Loaded registry does not match the algorithm's registry. Please make "
+                "sure you are loading the checkpoint with the correct algorithm."
+            )
+
+        # Assign other attributes to the algorithm
+        for attribute in EvolvableAlgorithm.inspect_attributes(self).keys():
             setattr(self, attribute, checkpoint[attribute])
 
         # Wrap models / compile if necessary
@@ -909,6 +965,15 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         # Run init hooks
         for hook in self.registry.hooks:
             getattr(self, hook)()
+
+        # Check for agent wrapper
+        wrapper_cls = checkpoint.get("wrapper_cls")
+        if wrapper_cls is not None:
+            init_dict = checkpoint.get("wrapper_init_dict")
+            wrapper_attributes = checkpoint.get("wrapper_attrs")
+            self = wrapper_cls(self, **init_dict)
+            for attr in wrapper_attributes:
+                setattr(self, attr, wrapper_attributes[attr])
 
         return self
 

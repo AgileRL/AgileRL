@@ -240,10 +240,10 @@ class DDPG(RLAlgorithm):
 
         # Optimizers
         self.actor_optimizer = OptimizerWrapper(
-            optim.AdamW, networks=self.actor, lr=lr_actor
+            optim.Adam, networks=self.actor, lr=lr_actor
         )
         self.critic_optimizer = OptimizerWrapper(
-            optim.AdamW, networks=self.critic, lr=lr_critic
+            optim.Adam, networks=self.critic, lr=lr_critic
         )
 
         if self.accelerator is not None and wrap:

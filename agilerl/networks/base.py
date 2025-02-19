@@ -39,6 +39,24 @@ def assert_correct_mlp_net_config(net_config: Dict[str, Any]) -> None:
     ), "Net config hidden_size must contain at least one element."
 
 
+def assert_correct_simba_net_config(net_config: Dict[str, Any]) -> None:
+    """Asserts that the MLP network configuration is correct.
+
+    :param net_config: Configuration of the MLP network.
+    :type net_config: Dict[str, Any]
+    """
+    assert (
+        "hidden_size" in net_config.keys()
+    ), "Net config must contain hidden_size: int."
+    assert isinstance(
+        net_config["hidden_size"], int
+    ), "Net config hidden_size must be an integer."
+    assert "num_blocks" in net_config.keys(), "Net config must contain num_blocks: int."
+    assert isinstance(
+        net_config["num_blocks"], int
+    ), "Net config num_blocks must be an integer."
+
+
 def assert_correct_cnn_net_config(net_config: Dict[str, Any]) -> None:
     """Asserts that the CNN network configuration is correct.
 
@@ -385,8 +403,12 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                 **net_config,
             )
         else:
-            assert_correct_mlp_net_config(net_config)
-            encoder_mlp_cls = EvolvableSimBa if self.simba else EvolvableMLP
+            if self.simba:
+                assert_correct_simba_net_config(net_config)
+                encoder_mlp_cls = EvolvableSimBa
+            else:
+                assert_correct_mlp_net_config(net_config)
+                encoder_mlp_cls = EvolvableMLP
 
             encoder = encoder_mlp_cls(
                 num_inputs=spaces.flatdim(self.observation_space),

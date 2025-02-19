@@ -1,17 +1,24 @@
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from functools import partial
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, TypeVar, Union
 
+import dill
 import torch
 from gymnasium import spaces
 
-from agilerl.algorithms.core import MultiAgentRLAlgorithm, RLAlgorithm
+from agilerl.algorithms.core import (
+    EvolvableAlgorithm,
+    MultiAgentRLAlgorithm,
+    RLAlgorithm,
+)
+from agilerl.algorithms.core.base import get_checkpoint_dict
 from agilerl.typing import DeviceType, ExperiencesType, ObservationType
 from agilerl.utils.algo_utils import obs_to_tensor
 
 AgentType = Union[RLAlgorithm, MultiAgentRLAlgorithm]
 MARLObservationType = Dict[str, ObservationType]
+SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound="AgentWrapper")
 
 
 class AgentWrapper(ABC):
@@ -57,13 +64,76 @@ class AgentWrapper(ABC):
         return f"{self.__class__.__name__}({self.agent})"
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(self.agent, name)
+        """Get attribute of the wrapper.
+
+        :param name: The name of the attribute.
+        :type name: str
+        :return: The attribute of the network.
+        :rtype: Any
+        """
+        try:
+            return super().__getattribute__(name)
+        except AttributeError:
+            return getattr(self.agent, name)
 
     def __setattr__(self, name: str, value: Any) -> None:
-        if name == "agent":
+        if name == "agent" or not hasattr(self, "agent"):
             super().__setattr__(name, value)
+        elif hasattr(self.agent, name):
+            object.__setattr__(self.agent, name, value)
         else:
-            setattr(self.agent, name, value)
+            super().__setattr__(name, value)
+
+    def clone(
+        self: SelfAgentWrapper, index: Optional[int] = None, wrap: bool = True
+    ) -> SelfAgentWrapper:
+        """Clones the wrapper with the underlying agent.
+
+        :param index: Index of the agent in a population, defaults to None
+        :type index: Optional[int], optional
+        :param wrap: If True, wrap the models in the clone with the accelerator, defaults to False
+        :type wrap: bool, optional
+
+        :return: Cloned agent wrapper
+        :rtype: SelfAgentWrapper
+        """
+        agent_clone = self.agent.clone(index, wrap)
+
+        input_args = EvolvableAlgorithm.inspect_attributes(self, input_args_only=True)
+        input_args.pop("agent", None)
+
+        clone = self.__class__(agent_clone, **input_args)
+        clone = EvolvableAlgorithm.copy_attributes(self, clone)
+        return clone
+
+    def save_checkpoint(self, path: str) -> None:
+        """Saves a checkpoint of agent properties and network weights to path.
+
+        :param path: Location to save checkpoint at
+        :type path: string
+        """
+        checkpoint = get_checkpoint_dict(self.agent)
+
+        # Need to remove the learn and get_action methods since they are not serializable
+        checkpoint.pop("learn")
+        checkpoint.pop("get_action")
+
+        # Add wrapper attributes to checkpoint
+        checkpoint["wrapper_cls"] = self.__class__
+        checkpoint["wrapper_init_dict"] = EvolvableAlgorithm.inspect_attributes(
+            self, input_args_only=True
+        )
+        checkpoint["wrapper_attrs"] = EvolvableAlgorithm.inspect_attributes(self)
+
+        checkpoint["wrapper_init_dict"].pop("agent")
+        checkpoint["wrapper_attrs"].pop("agent")
+
+        # Save checkpoint
+        torch.save(
+            checkpoint,
+            path,
+            pickle_module=dill,
+        )
 
     @abstractmethod
     def get_action(
@@ -252,10 +322,13 @@ class RSNorm(AgentWrapper):
         :rtype: ObservationType
         """
         if isinstance(self.obs_rms, dict):
+            norm_observation = {}
             for key, rms in self.obs_rms.items():
-                observation[key] = (observation[key] - rms.mean) / (
+                norm_observation[key] = (observation[key] - rms.mean) / (
                     rms.var + rms.epsilon
                 ).sqrt()
+
+            observation = norm_observation
         elif isinstance(self.obs_rms, tuple):
             norm_observation = []
             for i, rms in enumerate(self.obs_rms):
