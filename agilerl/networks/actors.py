@@ -105,19 +105,26 @@ class EvolvableDistribution(EvolvableWrapper):
         :return: Distribution over the action space.
         :rtype: Distribution
         """
-        logits = self.wrapped(latent)
+        probs = self.wrapped(latent)
 
         if action_mask is not None and isinstance(self.action_space, spaces.Discrete):
+            # Safe to assume the action masks will always be NumPy arrays
+            if isinstance(action_mask, np.ndarray):
+                action_mask = (
+                    np.stack(action_mask)
+                    if action_mask.dtype == np.object_ or isinstance(action_mask, list)
+                    else action_mask
+                )
             action_mask = torch.as_tensor(
                 action_mask, dtype=torch.bool, device=self.device
-            ).reshape(logits.shape)
-            logits = torch.where(
+            ).reshape(probs.shape)
+            probs = torch.where(
                 action_mask,
-                logits,
-                torch.tensor(0.0, dtype=logits.dtype, device=self.device),
+                probs,
+                torch.tensor(0.0, dtype=probs.dtype, device=self.device),
             )
 
-        return self.get_distribution(logits, self.log_std)
+        return self.get_distribution(probs, self.log_std)
 
     def clone(self) -> "EvolvableDistribution":
         """Clones the distribution.

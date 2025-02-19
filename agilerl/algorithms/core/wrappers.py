@@ -137,9 +137,10 @@ class OptimizerWrapper:
 
     def __getattr__(self, name: str):
         try:
-            return super().__getattr__(name)
+            return object.__getattribute__(self, name)
         except AttributeError:
-            return getattr(self.optimizer, name)
+            opt = object.__getattribute__(self, "optimizer")
+            return getattr(opt, name)
 
     def _infer_parent_container(self) -> EvolvableAlgorithm:
         """
