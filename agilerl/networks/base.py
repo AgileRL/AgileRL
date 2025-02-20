@@ -1,5 +1,5 @@
 from dataclasses import asdict
-from typing import Any, Dict, Optional, TypeVar, Union
+from typing import Any, Dict, Optional, Type, TypeVar, Union
 
 import numpy as np
 import torch
@@ -154,11 +154,10 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     encoder: SupportedEvolvable
     head_net: SupportedEvolvable
 
-    _encoder_mlp_cls = EvolvableMLP
-
     def __init__(
         self,
         observation_space: spaces.Space,
+        encoder_cls: Optional[Type[EvolvableModule]] = None,
         encoder_config: Optional[ConfigType] = None,
         action_space: Optional[spaces.Space] = None,
         min_latent_dim: int = 8,
@@ -173,7 +172,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         if encoder_config is None:
             encoder_config = get_default_encoder_config(observation_space)
 
-        # For multi-agent settings, we use a depth corresponding to that of the
+        # NOTE: For multi-agent settings, we use a depth corresponding to that of the
         # sample input for the kernel of the first layer of CNN-based networks
         if n_agents is not None and "kernel_size" in encoder_config.keys():
             encoder_config = EvolvableNetwork.modify_multi_agent_config(
@@ -186,6 +185,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         self.latent_dim = latent_dim
         self.min_latent_dim = min_latent_dim
         self.max_latent_dim = max_latent_dim
+        self.encoder_cls = encoder_cls
         self.device = device
         self.simba = simba
 
@@ -201,7 +201,10 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             activation = encoder_config.get("activation", "ReLU")
             encoder_config["output_activation"] = activation
 
-        self.encoder = self._build_encoder(encoder_config)
+        if encoder_cls is not None:
+            self.encoder = encoder_cls(**encoder_config)
+        else:
+            self.encoder = self._build_encoder(encoder_config)
 
         # NOTE: We disable layer mutations for the encoder since this usually adds a lot
         # of variance to the optimization process
@@ -214,7 +217,11 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         :return: Initial dictionary for the network.
         :rtype: Dict[str, Any]
         """
-        return self.encoder.net_config
+        return (
+            self.encoder.net_config
+            if self.encoder_cls is None
+            else self.encoder.init_dict
+        )
 
     @property
     def head_config(self) -> Dict[str, Any]:

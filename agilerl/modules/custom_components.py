@@ -147,9 +147,58 @@ class NewGELU(nn.Module):
         )
 
 
+class ResidualBlock(nn.Module):
+    """Creates a residual block.
+
+    :param in_channels: Number of input channels
+    :type in_channels: int
+    :param scale_factor: Scale factor, defaults to 4
+    :type scale_factor: int
+    :param device: Device, defaults to "cpu"
+    :type device: str
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        kernel_size: int,
+        stride_size: int,
+        scale_factor: int = 4,
+        device: str = "cpu",
+    ) -> None:
+        super().__init__()
+        hidden_channels = in_channels * scale_factor
+
+        self.conv1 = nn.Conv2d(
+            in_channels,
+            hidden_channels,
+            kernel_size=kernel_size,
+            stride=stride_size,
+            device=device,
+        )
+        self.conv2 = nn.Conv2d(
+            hidden_channels,
+            in_channels,
+            kernel_size=kernel_size,
+            stride=stride_size,
+            device=device,
+        )
+        self.bn1 = nn.BatchNorm2d(hidden_channels, device=device)
+        self.bn2 = nn.BatchNorm2d(in_channels, device=device)
+
+        nn.init.kaiming_uniform_(self.conv1.weight)
+        nn.init.kaiming_uniform_(self.conv2.weight)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        res = x
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = self.bn2(self.conv2(x))
+        return res + x
+
+
 class SimbaResidualBlock(nn.Module):
     """Creates a residual block designed to avoid overfitting in RL by inducing
-    a simplicity bias.
+    a simplicity bias through skip connections.
 
     Paper: https://arxiv.org/abs/2410.09754
 

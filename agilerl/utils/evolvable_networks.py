@@ -14,6 +14,7 @@ from agilerl.modules.custom_components import (
     GumbelSoftmax,
     NewGELU,
     NoisyLinear,
+    ResidualBlock,
     SimbaResidualBlock,
 )
 from agilerl.typing import ConfigType, DeviceType
@@ -610,5 +611,40 @@ def create_simba(
     net_dict[f"{name}_activation_output"] = get_activation(
         activation_name=output_activation
     )
+
+    return nn.Sequential(net_dict)
+
+
+def create_resnet(
+    input_channels: int,
+    channel_size: int,
+    kernel_size: int,
+    stride_size: int,
+    num_blocks: int,
+    scale_factor: int = 4,
+    device: str = "cpu",
+    name: str = "resnet",
+):
+    """Creates a number of SimBa residual blocks for image-based inputs."""
+    net_dict = OrderedDict()
+
+    # Initial convolutional layer
+    net_dict[f"{name}_conv_input"] = nn.Conv2d(
+        input_channels,
+        channel_size,
+        kernel_size=kernel_size,
+        stride_size=stride_size,
+        device=device,
+    )
+    nn.init.kaiming_uniform_(net_dict[f"{name}_conv_input"].weight)
+
+    for l_no in range(1, num_blocks + 1):
+        net_dict[f"{name}_residual_block_{l_no}"] = ResidualBlock(
+            channel_size,
+            kernel_size,
+            stride_size,
+            scale_factor=scale_factor,
+            device=device,
+        )
 
     return nn.Sequential(net_dict)
