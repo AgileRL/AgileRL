@@ -49,7 +49,7 @@ def assert_correct_simba_net_config(net_config: Dict[str, Any]) -> None:
         "hidden_size" in net_config.keys()
     ), "Net config must contain hidden_size: int."
     assert isinstance(
-        net_config["hidden_size"], int
+        net_config["hidden_size"], (int, np.int64)
     ), "Net config hidden_size must be an integer."
     assert "num_blocks" in net_config.keys(), "Net config must contain num_blocks: int."
     assert isinstance(

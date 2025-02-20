@@ -21,7 +21,7 @@ class EvolvableSimBa(EvolvableModule):
     :param num_outputs: Output layer dimension
     :type num_outputs: int
     :param hidden_size: Hidden layer(s) size
-    :type hidden_size: List[int]
+    :type hidden_size: int
     :param num_blocks: Number of residual blocks that compose the network
     :type num_blocks: int
     :param output_activation: Output activation layer, defaults to None
@@ -125,7 +125,7 @@ class EvolvableSimBa(EvolvableModule):
         """Removes a hidden layer from neural network. Falls back on remove_node if
         min hidden layers reached."""
         if self.num_blocks > self.min_blocks:  # HARD LIMIT
-            self.hidden_size -= 1
+            self.num_blocks -= 1
         else:
             return self.add_node()
 

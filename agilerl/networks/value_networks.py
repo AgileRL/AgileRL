@@ -59,9 +59,7 @@ class ValueNetwork(EvolvableNetwork):
         )
 
         if head_config is None:
-            head_config = asdict(MlpNetConfig(
-                hidden_size=[16], output_activation=None
-            ))
+            head_config = asdict(MlpNetConfig(hidden_size=[16], output_activation=None))
 
         # Build the network head
         self.build_network_head(head_config)

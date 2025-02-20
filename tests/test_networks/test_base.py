@@ -71,6 +71,7 @@ class CustomNetwork(EvolvableNetwork):
             max_latent_dim,
             n_agents,
             latent_dim,
+            False,
             device,
         )
 

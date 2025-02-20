@@ -15,7 +15,7 @@ INIT_HP:
     LR_ACTOR: 0.0003           # Actor learning rate
     LR_CRITIC: 0.0003           # Critic learning rate
     MAX_STEPS: 1_000_000       # Max no. steps
-    TARGET_SCORE: 200.         # Early training stop at avg score of last 100 episodes
+    TARGET_SCORE: 10_000         # Early training stop at avg score of last 100 episodes
     GAMMA: 0.99                # Discount factor
     MEMORY_SIZE: 100_000       # Max memory buffer size
     POLICY_FREQ: 2             # Policy update frequency
@@ -51,10 +51,12 @@ MUTATION_PARAMS:
 
 NET_CONFIG:
     latent_dim: 64
+    simba: true
 
     encoder_config:
-        hidden_size: [128, 128]
-        activation: ReLU
+        hidden_size: 128 # [128, 128]
+        num_blocks: 2
+        # activation: ReLU
         min_mlp_nodes: 64
         max_mlp_nodes: 500
 

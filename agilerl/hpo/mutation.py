@@ -93,6 +93,7 @@ def get_offspring_eval_modules(
     for group in registry.groups:
         eval_module: OffspringType = getattr(individual, group.eval)
 
+        # Clone the offspring prior to applying mutations
         offspring = (
             [mod.clone() for mod in eval_module]
             if isinstance(eval_module, list)
@@ -801,7 +802,11 @@ class Mutations:
                 self._reinit_bandit_grads(individual, offsprings, old_exp_layer)
 
         self.reinit_opt(individual)  # Reinitialise optimizer
-        individual.mut = mut_method
+        individual.mut = (
+            applied_mutations[0]
+            if isinstance(applied_mutations, list)
+            else applied_mutations
+        )
         return individual
 
     def _apply_arch_mutation(

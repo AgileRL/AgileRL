@@ -1,5 +1,3 @@
-import copy
-
 import numpy as np
 import pytest
 import torch
@@ -333,6 +331,7 @@ def test_mutation_applies_random_mutations(algo, device, accelerator, init_pop):
     assert len(mutated_population) == len(population)
     assert mutated_population[0].mut == "None"  # Satisfies mutate_elite=False condition
     for individual in mutated_population:
+        policy = getattr(individual, individual.registry.policy)
         assert individual.mut in [
             "None",
             "batch_size",
@@ -342,7 +341,7 @@ def test_mutation_applies_random_mutations(algo, device, accelerator, init_pop):
             "learn_step",
             "act",
             "param",
-            "arch",
+            policy.last_mutation_attr,
         ]
 
     del mutations
@@ -811,7 +810,8 @@ def test_mutation_applies_architecture_mutations(algo, device, accelerator, init
 
         assert len(mutated_population) == len(population)
         for old, individual in zip(population, mutated_population):
-            assert individual.mut == "arch"
+            policy = getattr(individual, individual.registry.policy)
+            assert individual.mut == policy.last_mutation_attr
             # Due to randomness and constraints on size, sometimes architectures are not different
             # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
             assert old.index == individual.index
@@ -879,9 +879,11 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
 
     for individual in population:
         individual.actor = EvolvableBERT([12], [12], device=device)
-        individual.actor_target = copy.deepcopy(individual.actor)
+        individual.actor_target = EvolvableBERT([12], [12], device=device)
+        individual.actor_target.load_state_dict(individual.actor.state_dict())
         individual.critic = EvolvableBERT([12], [12], device=device)
-        individual.critic_target = copy.deepcopy(individual.critic)
+        individual.critic_target = EvolvableBERT([12], [12], device=device)
+        individual.critic_target.load_state_dict(individual.critic.state_dict())
 
         individual.actor_optimizer = OptimizerWrapper(
             torch.optim.Adam,
@@ -906,7 +908,8 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
 
     assert len(mutated_population) == len(population)
     for old, individual in zip(population, mutated_population):
-        assert individual.mut == "arch"
+        policy = getattr(individual, individual.registry.policy)
+        assert individual.mut == policy.last_mutation_attr
         # Due to randomness and constraints on size, sometimes architectures are not different
         # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
         assert old.index == individual.index
@@ -967,6 +970,7 @@ def test_mutation_applies_random_mutations_multi_agent(
 
     assert len(mutated_population) == len(population)
     for individual in mutated_population:
+        policy = getattr(individual, individual.registry.policy)
         assert individual.mut in [
             "None",
             "batch_size",
@@ -976,7 +980,7 @@ def test_mutation_applies_random_mutations_multi_agent(
             "learn_step",
             "act",
             "param",
-            "arch",
+            policy[0].last_mutation_attr,
         ]
 
     del mutations
@@ -1314,7 +1318,8 @@ def test_mutation_applies_architecture_mutations_multi_agent(
 
         assert len(mutated_population) == len(population)
         for old, individual in zip(population, mutated_population):
-            assert individual.mut == "arch"
+            policy = getattr(individual, individual.registry.policy)
+            assert individual.mut == policy[0].last_mutation_attr
             # Due to randomness and constraints on size, sometimes architectures are not different
             # assert str(old.actors[0].state_dict()) != str(individual.actors[0].state_dict())
             assert old.index == individual.index
@@ -1382,10 +1387,14 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
 
     for individual in population:
         individual.actors = [EvolvableBERT([12], [12], device=device)]
-        individual.actor_targets = copy.deepcopy(individual.actors)
+        individual.actor_targets = [EvolvableBERT([12], [12], device=device)]
+        individual.actor_targets[0].load_state_dict(individual.actors[0].state_dict())
         if algo == "MADDPG":
             individual.critics = [EvolvableBERT([12], [12], device=device)]
-            individual.critic_targets = copy.deepcopy(individual.critics)
+            individual.critic_targets = [EvolvableBERT([12], [12], device=device)]
+            individual.critic_targets[0].load_state_dict(
+                individual.critics[0].state_dict()
+            )
 
             individual.actor_optimizers = OptimizerWrapper(
                 torch.optim.Adam,
@@ -1406,9 +1415,15 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
 
         else:
             individual.critics_1 = [EvolvableBERT([12], [12], device=device)]
-            individual.critic_targets_1 = copy.deepcopy(individual.critics_1)
+            individual.critic_targets_1 = [EvolvableBERT([12], [12], device=device)]
+            individual.critic_targets_1[0].load_state_dict(
+                individual.critics_1[0].state_dict()
+            )
             individual.critics_2 = [EvolvableBERT([12], [12], device=device)]
-            individual.critic_targets_2 = copy.deepcopy(individual.critics_2)
+            individual.critic_targets_2 = [EvolvableBERT([12], [12], device=device)]
+            individual.critic_targets_2[0].load_state_dict(
+                individual.critics_2[0].state_dict()
+            )
             individual.actor_optimizers = OptimizerWrapper(
                 torch.optim.Adam,
                 individual.actors,
@@ -1444,7 +1459,8 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
 
     assert len(mutated_population) == len(population)
     for old, individual in zip(population, mutated_population):
-        assert individual.mut == "arch"
+        policy = getattr(individual, individual.registry.policy)
+        assert individual.mut == policy[0].last_mutation_attr
         # Due to randomness and constraints on size, sometimes architectures are not different
         # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
         assert old.index == individual.index

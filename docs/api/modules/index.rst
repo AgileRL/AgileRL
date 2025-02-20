@@ -16,6 +16,7 @@ We are constantly adding more neural network architectures, with a view to add r
    mlp
    cnn
    multi_input
+   simba
    dummy
    gpt
    bert

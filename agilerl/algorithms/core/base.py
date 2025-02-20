@@ -31,6 +31,7 @@ from agilerl.algorithms.core.registry import (
 )
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.protocols import (
+    AgentWrapper,
     EvolvableAttributeDict,
     EvolvableAttributeType,
     EvolvableModule,
@@ -59,6 +60,7 @@ __all__ = ["EvolvableAlgorithm", "RLAlgorithm", "MultiAgentRLAlgorithm"]
 
 SelfEvolvableAlgorithm = TypeVar("SelfEvolvableAlgorithm", bound="EvolvableAlgorithm")
 SelfRLAlgorithm = TypeVar("SelfRLAlgorithm", bound="RLAlgorithm")
+SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound="AgentWrapper")
 MARLObservationType = Dict[str, ObservationType]
 
 
@@ -381,7 +383,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
                 # NOTE: Here we handle the case where the individual is wrapped by an
                 # AgentWrapper object, which includes the agent itself and functools.partial
-                # objects as attributes.
+                # objects as attributes that shouldn't be copied
                 if callable(attr) or isinstance(attr, EvolvableAlgorithm):
                     continue
                 elif isinstance(attr, torch.Tensor) or isinstance(
@@ -420,8 +422,10 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         size: int,
         observation_space: GymSpaceType,
         action_space: GymSpaceType,
+        wrapper_cls: Type[SelfAgentWrapper] = None,
+        wrapper_kwargs: Dict[str, Any] = {},
         **kwargs,
-    ) -> List[SelfEvolvableAlgorithm]:
+    ) -> List[Union[SelfEvolvableAlgorithm, SelfAgentWrapper]]:
         """Creates a population of algorithms.
 
         :param size: The size of the population.
@@ -430,6 +434,15 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :return: A list of algorithms.
         :rtype: List[SelfEvolvableAlgorithm].
         """
+        if wrapper_cls is not None:
+            return [
+                wrapper_cls(
+                    cls(observation_space, action_space, index=i, **kwargs),
+                    **wrapper_kwargs,
+                )
+                for i in range(size)
+            ]
+
         return [
             cls(observation_space, action_space, index=i, **kwargs) for i in range(size)
         ]
@@ -811,15 +824,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         # Init hooks
         for hook in self.registry.hooks:
             getattr(self, hook)()
-
-        # Check for agent wrapper
-        wrapper_cls = checkpoint.get("wrapper_cls")
-        if wrapper_cls is not None:
-            init_dict = checkpoint.get("wrapper_init_dict")
-            wrapper_attributes = checkpoint.get("wrapper_attrs")
-            self = wrapper_cls(self, **init_dict)
-            for attr in wrapper_attributes:
-                setattr(self, attr, wrapper_attributes[attr])
 
     @classmethod
     def load(

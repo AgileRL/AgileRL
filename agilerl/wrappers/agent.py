@@ -23,7 +23,8 @@ SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound="AgentWrapper")
 
 class AgentWrapper(ABC):
     """Base class for all agent wrappers. Agent wrappers are used to apply an
-    additional functionality to an ``EvolvableAlgorithm`` instance.
+    additional functionality to the ``get_action()`` and ``learn()`` methods of
+    an ``EvolvableAlgorithm`` instance.
 
     :param agent: Agent to be wrapped
     :type agent: EvolvableAlgorithm
@@ -135,6 +136,21 @@ class AgentWrapper(ABC):
             pickle_module=dill,
         )
 
+    def load_checkpoint(self, path: str) -> None:
+        """Loads a checkpoint of agent properties and network weights from path.
+
+        :param path: Location to load checkpoint from
+        :type path: string
+        """
+        checkpoint = torch.load(path, pickle_module=dill)
+
+        # Load agent properties and network weights
+        self.agent.load_checkpoint(path)
+
+        # Load wrapper attributes
+        for key, value in checkpoint["wrapper_attrs"].items():
+            setattr(self, key, value)
+
     @abstractmethod
     def get_action(
         self,
@@ -242,9 +258,11 @@ class RSNorm(AgentWrapper):
     The normalization statistics are only updated when the agent is in training mode. This can be
     disabled during inference through ``agent.set_training_mode(False)``.
 
-    .. note::
-        For a population of agents, each individual has its own normalization statistics. Ideally
-        this should be shared across all agents, but this is not implemented yet.
+    .. warning::
+        This wrapper is currently only supported for off-policy algorithms since it relies on
+        passed experiences to be formatted as a tuple of PyTorch tensors. Currently
+        AgileRL does not use a Buffer class to store experiences for on-policy algorithms, albeit this
+        will be released in a soon-to-come update!
 
     :param agent: Agent to be wrapped
     :type agent: RLAlgorithm, MultiAgentRLAlgorithm

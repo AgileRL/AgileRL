@@ -1,5 +1,5 @@
 from dataclasses import asdict
-from typing import Any, Dict, Optional, Type
+from typing import Any, Dict, Optional
 
 import torch
 from gymnasium import spaces

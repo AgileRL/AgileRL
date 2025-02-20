@@ -1,11 +1,17 @@
+import os
 from unittest.mock import MagicMock
 
+import dill
 import pytest
 import torch
+from accelerate import Accelerator
 from gymnasium import spaces
 
+from agilerl.algorithms import DDPG
 from agilerl.algorithms.core import MultiAgentRLAlgorithm, RLAlgorithm
+from agilerl.modules import EvolvableMLP
 from agilerl.wrappers.agent import RSNorm
+from tests.helper_functions import generate_random_box_space
 
 
 @pytest.fixture
@@ -248,4 +254,208 @@ def test_normalize_observation_multi_agent(setup_rs_norm_multi_agent):
     assert torch.allclose(normalized_obs["agent_2"], expected_obs["agent_2"], atol=1e-2)
 
 
-# TODO: Write tests to make sure clone, save_checkpoint, load_checkpoint, and load work as expected
+# Clones the agent and returns an identical agent.
+def test_clone_returns_identical_agent():
+    observation_space = generate_random_box_space(shape=(4,))
+    action_space = generate_random_box_space(shape=(2,))
+
+    ddpg_norm = RSNorm(DDPG(observation_space, action_space))
+    ddpg = ddpg_norm.agent
+    ddpg.fitness = [200, 200, 200]
+    ddpg.scores = [94, 94, 94]
+    ddpg.steps = [2500]
+    ddpg.tensor_attribute = torch.randn(1)
+    clone = ddpg_norm.clone()
+    clone_agent = clone.agent
+
+    assert clone_agent.observation_space == ddpg.observation_space
+    assert clone_agent.action_space == ddpg.action_space
+    assert clone_agent.batch_size == ddpg.batch_size
+    assert clone_agent.lr_actor == ddpg.lr_actor
+    assert clone_agent.lr_critic == ddpg.lr_critic
+    assert clone_agent.learn_step == ddpg.learn_step
+    assert clone_agent.gamma == ddpg.gamma
+    assert clone_agent.tau == ddpg.tau
+    assert clone_agent.mut == ddpg.mut
+    assert clone_agent.device == ddpg.device
+    assert clone_agent.accelerator == ddpg.accelerator
+    assert str(clone_agent.actor.state_dict()) == str(ddpg.actor.state_dict())
+    assert str(clone_agent.actor_target.state_dict()) == str(
+        ddpg.actor_target.state_dict()
+    )
+    assert str(clone_agent.critic.state_dict()) == str(ddpg.critic.state_dict())
+    assert str(clone_agent.critic_target.state_dict()) == str(
+        ddpg.critic_target.state_dict()
+    )
+    assert str(clone_agent.actor_optimizer.state_dict()) == str(
+        ddpg.actor_optimizer.state_dict()
+    )
+    assert str(clone_agent.critic_optimizer.state_dict()) == str(
+        ddpg.critic_optimizer.state_dict()
+    )
+    assert clone_agent.fitness == ddpg.fitness
+    assert clone_agent.steps == ddpg.steps
+    assert clone_agent.scores == ddpg.scores
+    assert clone_agent.tensor_attribute == ddpg.tensor_attribute
+
+    accelerator = Accelerator()
+    ddpg_norm = RSNorm(DDPG(observation_space, action_space, accelerator=accelerator))
+    ddpg = ddpg_norm.agent
+    clone = ddpg_norm.clone()
+    clone_agent = clone.agent
+
+    assert clone_agent.observation_space == ddpg.observation_space
+    assert clone_agent.action_space == ddpg.action_space
+    assert clone_agent.batch_size == ddpg.batch_size
+    assert clone_agent.lr_actor == ddpg.lr_actor
+    assert clone_agent.lr_critic == ddpg.lr_critic
+    assert clone_agent.learn_step == ddpg.learn_step
+    assert clone_agent.gamma == ddpg.gamma
+    assert clone_agent.tau == ddpg.tau
+    assert clone_agent.mut == ddpg.mut
+    assert clone_agent.device == ddpg.device
+    assert clone_agent.accelerator == ddpg.accelerator
+    assert str(clone_agent.actor.state_dict()) == str(ddpg.actor.state_dict())
+    assert str(clone_agent.actor_target.state_dict()) == str(
+        ddpg.actor_target.state_dict()
+    )
+    assert str(clone_agent.critic.state_dict()) == str(ddpg.critic.state_dict())
+    assert str(clone_agent.critic_target.state_dict()) == str(
+        ddpg.critic_target.state_dict()
+    )
+    assert str(clone_agent.actor_optimizer.state_dict()) == str(
+        ddpg.actor_optimizer.state_dict()
+    )
+    assert str(clone_agent.critic_optimizer.state_dict()) == str(
+        ddpg.critic_optimizer.state_dict()
+    )
+    assert clone_agent.fitness == ddpg.fitness
+    assert clone_agent.steps == ddpg.steps
+    assert clone_agent.scores == ddpg.scores
+
+    accelerator = Accelerator()
+    ddpg_norm = RSNorm(
+        DDPG(observation_space, action_space, accelerator=accelerator, wrap=False)
+    )
+    ddpg = ddpg_norm.agent
+    clone = ddpg_norm.clone(wrap=False)
+    clone_agent = clone.agent
+
+    assert clone_agent.observation_space == ddpg.observation_space
+    assert clone_agent.action_space == ddpg.action_space
+    assert clone_agent.batch_size == ddpg.batch_size
+    assert clone_agent.lr_actor == ddpg.lr_actor
+    assert clone_agent.lr_critic == ddpg.lr_critic
+    assert clone_agent.learn_step == ddpg.learn_step
+    assert clone_agent.gamma == ddpg.gamma
+    assert clone_agent.tau == ddpg.tau
+    assert clone_agent.mut == ddpg.mut
+    assert clone_agent.device == ddpg.device
+    assert clone_agent.accelerator == ddpg.accelerator
+    print(clone_agent.wrap, ddpg.wrap)
+    print("1 = ", clone_agent.actor.state_dict())
+    print("\n\n2 = ", ddpg.actor.state_dict())
+    assert str(clone_agent.actor.state_dict()) == str(ddpg.actor.state_dict())
+    assert str(clone_agent.actor_target.state_dict()) == str(
+        ddpg.actor_target.state_dict()
+    )
+    assert str(clone_agent.critic.state_dict()) == str(ddpg.critic.state_dict())
+    assert str(clone_agent.critic_target.state_dict()) == str(
+        ddpg.critic_target.state_dict()
+    )
+    assert str(clone_agent.actor_optimizer.state_dict()) == str(
+        ddpg.actor_optimizer.state_dict()
+    )
+    assert str(clone_agent.critic_optimizer.state_dict()) == str(
+        ddpg.critic_optimizer.state_dict()
+    )
+    assert clone_agent.fitness == ddpg.fitness
+    assert clone_agent.steps == ddpg.steps
+    assert clone_agent.scores == ddpg.scores
+
+
+def test_save_load_checkpoint(tmp_path):
+    observation_space = generate_random_box_space(shape=(4,))
+    action_space = generate_random_box_space(shape=(2,))
+
+    ddpg_norm = RSNorm(DDPG(observation_space, action_space))
+    checkpoint_path = os.path.join(tmp_path, "checkpoint.pth")
+    ddpg_norm.save_checkpoint(checkpoint_path)
+
+    # Load the saved checkpoint file
+    checkpoint = torch.load(checkpoint_path, pickle_module=dill)
+
+    # Check if the loaded checkpoint has the correct keys
+    assert "wrapper_cls" in checkpoint
+    assert "wrapper_init_dict" in checkpoint
+    assert "wrapper_attrs" in checkpoint
+    assert "actor_init_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_state_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_target_init_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_target_state_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
+    assert "critic_init_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_state_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_target_init_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_target_state_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
+    assert "batch_size" in checkpoint
+    assert "lr_actor" in checkpoint
+    assert "lr_critic" in checkpoint
+    assert "learn_step" in checkpoint
+    assert "gamma" in checkpoint
+    assert "tau" in checkpoint
+    assert "mut" in checkpoint
+    assert "index" in checkpoint
+    assert "scores" in checkpoint
+    assert "fitness" in checkpoint
+    assert "steps" in checkpoint
+
+    # load_checkpoint
+    loaded_agent = RSNorm(DDPG(observation_space, action_space))
+    print(checkpoint_path)
+    loaded_agent.load_checkpoint(checkpoint_path)
+    ddpg = ddpg_norm.agent
+
+    assert isinstance(loaded_agent, RSNorm)
+    # Check if properties and weights are loaded correctly
+    assert isinstance(ddpg.actor.encoder, EvolvableMLP)
+    assert isinstance(ddpg.actor_target.encoder, EvolvableMLP)
+    assert isinstance(ddpg.critic.encoder, EvolvableMLP)
+    assert isinstance(ddpg.critic_target.encoder, EvolvableMLP)
+    assert ddpg.lr_actor == 1e-4
+    assert ddpg.lr_critic == 1e-3
+    assert str(ddpg.actor.state_dict()) == str(ddpg.actor_target.state_dict())
+    assert str(ddpg.critic.state_dict()) == str(ddpg.critic_target.state_dict())
+    assert ddpg.batch_size == 64
+    assert ddpg.learn_step == 5
+    assert ddpg.gamma == 0.99
+    assert ddpg.tau == 1e-3
+    assert ddpg.mut is None
+    assert ddpg.index == 0
+    assert ddpg.scores == []
+    assert ddpg.fitness == []
+    assert ddpg.steps == [0]
+
+    loaded_agent = DDPG.load(checkpoint_path)
+    ddpg = loaded_agent.agent
+
+    assert isinstance(loaded_agent, RSNorm)
+    # Check if properties and weights are loaded correctly
+    assert isinstance(ddpg.actor.encoder, EvolvableMLP)
+    assert isinstance(ddpg.actor_target.encoder, EvolvableMLP)
+    assert isinstance(ddpg.critic.encoder, EvolvableMLP)
+    assert isinstance(ddpg.critic_target.encoder, EvolvableMLP)
+    assert ddpg.lr_actor == 1e-4
+    assert ddpg.lr_critic == 1e-3
+    assert str(ddpg.actor.state_dict()) == str(ddpg.actor_target.state_dict())
+    assert str(ddpg.critic.state_dict()) == str(ddpg.critic_target.state_dict())
+    assert ddpg.batch_size == 64
+    assert ddpg.learn_step == 5
+    assert ddpg.gamma == 0.99
+    assert ddpg.tau == 1e-3
+    assert ddpg.mut is None
+    assert ddpg.index == 0
+    assert ddpg.scores == []
+    assert ddpg.fitness == []
+    assert ddpg.steps == [0]
