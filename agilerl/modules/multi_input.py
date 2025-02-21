@@ -212,7 +212,7 @@ class EvolvableMultiInput(EvolvableModule):
         )
 
         # Calculate total feature dimension for final MLP
-        image_features_dim = sum(
+        self.image_features_dim = sum(
             [
                 self.latent_dim
                 for subspace in self.observation_space.spaces.values()
@@ -220,10 +220,10 @@ class EvolvableMultiInput(EvolvableModule):
             ]
         )
 
-        vector_features_dim = (
+        self.vector_features_dim = (
             self.latent_dim if self.vector_space_mlp else vector_input_dim
         )
-        features_dim = image_features_dim + vector_features_dim
+        features_dim = self.image_features_dim + self.vector_features_dim
 
         # Final dense layer to convert feature encodings to desired num_outputs
         self.final_dense = nn.Linear(features_dim, num_outputs, device=device)
@@ -460,12 +460,17 @@ class EvolvableMultiInput(EvolvableModule):
                 x[key] = torch.tensor(obs, device=self.device, dtype=torch.float32)
 
         # Extract features from image spaces
-        image_features = [
-            self.feature_net[key](x[key])
-            for key in x.keys()
-            if key in self.feature_net.keys()
-        ]
-        image_features = torch.cat(image_features, dim=1)
+        if self.image_features_dim > 0:
+            image_features = [
+                self.feature_net[key](x[key])
+                for key in x.keys()
+                if key in self.feature_net.keys()
+            ]
+            image_features = torch.cat(image_features, dim=1)
+
+        # Handle case where there are no image subspaces
+        else:
+            image_features = torch.tensor([], device=self.device)
 
         # Extract raw features from vector spaces
         vector_inputs = []
