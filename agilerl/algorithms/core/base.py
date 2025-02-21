@@ -56,17 +56,17 @@ from agilerl.utils.algo_utils import (
 )
 from agilerl.utils.evolvable_networks import is_image_space
 
-__all__ = ["EvolvableAlgorithm", "RLAlgorithm", "MultiAgentRLAlgorithm"]
-
 SelfEvolvableAlgorithm = TypeVar("SelfEvolvableAlgorithm", bound="EvolvableAlgorithm")
 SelfRLAlgorithm = TypeVar("SelfRLAlgorithm", bound="RLAlgorithm")
 SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound="AgentWrapper")
+EvolvableModuleType = Union[EvolvableModule, OptimizedModule]
+EvolvableAttrType = Union[EvolvableModuleType, List[EvolvableModuleType]]
 MARLObservationType = Dict[str, ObservationType]
 
 
 class _RegistryMeta(type):
-    """Metaclass to wrap registry information after algorithm is done
-    initializing with specified network groups and optimizers."""
+    """Metaclass used to check that the registry of an AgileRL algorithm has been initialized
+    correctly to effectively perform mutations during training."""
 
     def __call__(
         cls: Type[SelfEvolvableAlgorithm], *args, **kwargs
@@ -75,8 +75,8 @@ class _RegistryMeta(type):
         instance: SelfEvolvableAlgorithm = super().__call__(*args, **kwargs)
 
         # Call the base class post_init_hook after all initialization
-        if isinstance(instance, cls) and hasattr(instance, "_registry_init"):
-            instance._registry_init()
+        if isinstance(instance, cls) and hasattr(instance, "_registry_init_checks"):
+            instance._registry_init_checks()
 
         return instance
 
@@ -163,12 +163,38 @@ def get_checkpoint_dict(agent: SelfEvolvableAlgorithm) -> Dict[str, Any]:
     return attribute_dict
 
 
+def assert_consistent_architecture_mutations(
+    eval_networks: List[Union[EvolvableModule, List[EvolvableModule]]],
+) -> None:
+    """Checks that all the registered evaluation networks have the same architecture mutation methods.
+
+    :param eval_networks: The evaluation networks in the algorithm.
+    :type eval_networks: List[Union[EvolvableModule, List[EvolvableModule]]]
+    """
+    # Get the mutation methods for the first network
+    first_network = eval_networks[0]
+    if not isinstance(first_network, list):
+        first_network = [first_network]
+
+    for i, networks in enumerate(
+        zip(*[net if isinstance(net, list) else [net] for net in eval_networks[1:]])
+    ):
+        for network in networks:
+            # Check that the architecture mutation methods are the same
+            if network.mutation_methods != first_network[i].mutation_methods:
+                raise AttributeError(
+                    "All the registered evaluation networks in the algorithm must have the same "
+                    "architecture mutation methods. Please ensure that the architecture mutation "
+                    "methods are consistent across all the evaluation networks."
+                )
+
+
 class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
     """Base object for all algorithms in the AgileRL framework.
 
     :param index: The index of the individual.
     :type index: int
-    :param hp_config: Hyperparameter configuration for the algorithm, defaults to None.
+    :param hp_config: RL hyperparameters to mutate during training, defaults to None.
     :type hp_config: Optional[HyperparameterConfig], optional
     :param device: Device to run the algorithm on, defaults to "cpu".
     :type device: Union[str, torch.device], optional
@@ -331,9 +357,12 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         underlying evolvable networks (i.e. `EvolvableModule`, `torch.optim.Optimizer`) and with
         an option to include only the attributes that are input arguments to the constructor.
 
+        :param agent: The agent to inspect.
+        :type agent: EvolvableAlgorithm
         :param input_args_only: If True, only include attributes that are input arguments to the constructor.
                                 Defaults to False.
         :type input_args_only: bool
+
         :return: A dictionary of attribute names and their values.
         :rtype: dict[str, Any]
         """
@@ -371,6 +400,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
     ) -> SelfEvolvableAlgorithm:
         """Copies the non-evolvable attributes of the algorithm to a clone.
 
+        :param agent: The algorithm to copy.
+        :type agent: SelfEvolvableAlgorithm
         :param clone: The clone of the algorithm.
         :type clone: SelfEvolvableAlgorithm
 
@@ -430,6 +461,16 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         :param size: The size of the population.
         :type size: int.
+        :param observation_space: The observation space of the environment.
+        :type observation_space: spaces.Space.
+        :param action_space: The action space of the environment.
+        :type action_space: spaces.Space.
+        :param wrapper_cls: The wrapper class to use for the algorithms, defaults to None.
+        :type wrapper_cls: Optional[Type[SelfAgentWrapper]], optional.
+        :param wrapper_kwargs: The keyword arguments to pass to the wrapper class, defaults to {}.
+        :type wrapper_kwargs: Dict[str, Any], optional.
+        :param kwargs: The keyword arguments to pass to the algorithm.
+        :type kwargs: Dict[str, Any].
 
         :return: A list of algorithms.
         :rtype: List[SelfEvolvableAlgorithm].
@@ -471,17 +512,25 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         super().__setattr__(name, value)
 
-    def _registry_init(self) -> None:
-        """Registers the networks, optimizers, and algorithm hyperparameters in the algorithm with
-        the mutations registry. We also check that all of the evolvable networks and their respective
-        optimizers have been registered with the algorithm, and that the user-specified hyperparameters
-        to mutate have been set as attributes in the algorithm."""
+    def _registry_init_checks(self) -> None:
+        """Checks that the registry of the algorithm has been initialized correctly to effectively
+        perform mutations during training. This includes checks for:
 
+        1. The registry has been initialized with network groups.
+        2. All the inspected evolvable attributes can be found in the registry.
+        3. One of the network groups relates to a policy.
+        4. All the hyperparameters to mutate have been set as attributes in the algorithm.
+        5. All of the registered evaluation networks have the same architecture mutation methods.
+        """
+        # Check that the registry has been initialized with network groups (necessary to effectively
+        # perform mutations throughout training)
         if not self.registry.groups:
             raise AttributeError(
                 "No network groups have been registered in the algorithms __init__ method. "
                 "Please register NetworkGroup objects specifying all of the evaluation and "
-                "shared/target networks through the `register_network_group()` method."
+                "shared/target networks through the `register_network_group()` method. "
+                "Please refer to the documentation for more information on how to create custom "
+                "RL algorithms with AgileRL: https://docs.agilerl.com/en/latest/custom_algorithms/index.html"
             )
 
         # Check that all the inspected evolvable attributes can be found in the registry
@@ -500,8 +549,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         if not any(group.policy for group in self.registry.groups):
             raise AttributeError(
                 "No network group has been registered as a policy (i.e. the network used to "
-                "select actions) in the registry. Please register a NetworkGroup object "
-                "specifying the policy network."
+                "select actions) in the registry. Please specify policy=True for the NetworkGroup object "
+                "corresponding to the policy."
             )
 
         # Check that all the hyperparameters to mutate have been set as attributes in the algorithm
@@ -512,6 +561,13 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                         f"Hyperparameter {hp} was found in the mutations configuration but has "
                         "not been set as an attribute in the algorithm."
                     )
+
+        # Check that all of the registered evaluation networks have the same architecture mutation methods
+        # NOTE: This is necessary because we sample architecture mutations from the policy network and
+        # subsequently apply the same mutation to the other eval networks in the algorithm e.g. critics, etc.
+        eval_networks = [getattr(self, group.eval) for group in self.registry.groups]
+        if len(eval_networks) > 1:
+            assert_consistent_architecture_mutations(eval_networks)
 
     def _wrap_attr(self, attr: EvolvableAttributeType) -> EvolvableModule:
         """Wraps the model with the accelerator.
@@ -991,12 +1047,14 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
     :type action_space: spaces.Space
     :param index: The index of the individual.
     :type index: int
-    :param learn_step: Learning frequency, defaults to 2048.
-    :type learn_step: int, optional
+    :param hp_config: RL hyperparameters to mutate during training, defaults to None.
+    :type hp_config: Optional[HyperparameterConfig], optional
     :param device: Device to run the algorithm on, defaults to "cpu".
     :type device: Union[str, torch.device], optional
     :param accelerator: Accelerator object for distributed computing, defaults to None.
     :type accelerator: Optional[Accelerator], optional
+    :param torch_compiler: The torch compiler mode to use, defaults to None.
+    :type torch_compiler: Optional[Any], optional
     :param normalize_images: If True, normalize images, defaults to True.
     :type normalize_images: bool, optional
     :param name: Name of the algorithm, defaults to the class name.
@@ -1093,16 +1151,16 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
     :type agent_ids: List[int]
     :param index: The index of the individual in the population.
     :type index: int.
-    :param learn_step: Learning frequency, defaults to 2048
-    :type learn_step: int, optional
+    :param hp_config: RL hyperparameters to mutate during training, defaults to None.
+    :type hp_config: Optional[HyperparameterConfig], optional
     :param device: Device to run the algorithm on, defaults to "cpu"
     :type device: str, optional
     :param accelerator: Accelerator object for distributed computing, defaults to None
     :type accelerator: Optional[Accelerator], optional
-    :param normalize_images: If True, normalize images, defaults to True
-    :type normalize_images: bool, optional
     :param torch_compiler: The torch compiler mode to use, defaults to None
     :type torch_compiler: Optional[Any], optional
+    :param normalize_images: If True, normalize images, defaults to True
+    :type normalize_images: bool, optional
     :param name: Name of the algorithm, defaults to the class name
     :type name: Optional[str], optional
     """
@@ -1111,7 +1169,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         self,
         observation_spaces: Iterable[spaces.Space],
         action_spaces: Iterable[spaces.Space],
-        agent_ids: Iterable[int],
+        agent_ids: Iterable[str],
         index: int,
         hp_config: Optional[HyperparameterConfig] = None,
         device: Union[str, torch.device] = "cpu",

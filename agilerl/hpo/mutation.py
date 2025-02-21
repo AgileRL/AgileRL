@@ -68,8 +68,8 @@ def get_architecture_mut_method(
         ), "All offspring should be of the same type."
 
         # NOTE: For multi-agent settings we apply the same architecture mutations to
-        # all agents. However, depending on use-case it might be beneficial to have agents
-        # with different architectures; please raise an issue if you would like this!
+        # all agents. This assumes all agents are modules with the same architecture
+        # mutation methods, which is probably unreasonable for a lot of use-cases...
         eval = eval[0]
 
     return eval.sample_mutation_method(new_layer_prob, rng)

@@ -53,6 +53,7 @@ class OptimizerWrapper(Protocol):
 class EvolvableModule(Protocol):
     init_dict: Dict[str, Any]
     device: DeviceType
+    mutation_methods: List[str]
     layer_mutation_methods: List[str]
     node_mutation_methods: List[str]
     last_mutation_attr: str

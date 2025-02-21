@@ -36,7 +36,7 @@ def multi_input_config():
 
 
 class DummyRLAlgorithm(RLAlgorithm):
-    def __init__(self, *args, lr=True, **kwargs):
+    def __init__(self, *args, n_critics: int = 0, lr=True, **kwargs):
         super().__init__(*args, **kwargs)
 
         num_outputs = (
@@ -44,35 +44,49 @@ class DummyRLAlgorithm(RLAlgorithm):
             if isinstance(self.action_space, spaces.Discrete)
             else self.action_space.shape[0]
         )
-        if is_image_space(self.observation_space):
-            self.dummy_actor = EvolvableCNN(
-                self.observation_space.shape,
-                num_outputs,
-                channel_size=[3],
-                kernel_size=[3],
-                stride_size=[1],
-            )
-        elif isinstance(self.observation_space, (spaces.Box, spaces.Discrete)):
-            num_inputs = (
-                self.observation_space.shape[0]
-                if isinstance(self.observation_space, spaces.Box)
-                else self.observation_space.n
-            )
-            self.dummy_actor = EvolvableMLP(num_inputs, num_outputs, hidden_size=[8])
-        elif isinstance(self.observation_space, (spaces.Dict, spaces.Tuple)):
-            self.dummy_actor = EvolvableMultiInput(
-                self.observation_space,
-                num_outputs,
-                hidden_size=[8],
-                channel_size=[3],
-                kernel_size=[3],
-                stride_size=[1],
-            )
+
+        def create_net():
+            if is_image_space(self.observation_space):
+                return EvolvableCNN(
+                    self.observation_space.shape,
+                    num_outputs,
+                    channel_size=[3],
+                    kernel_size=[3],
+                    stride_size=[1],
+                )
+            elif isinstance(self.observation_space, (spaces.Box, spaces.Discrete)):
+                num_inputs = (
+                    self.observation_space.shape[0]
+                    if isinstance(self.observation_space, spaces.Box)
+                    else self.observation_space.n
+                )
+                return EvolvableMLP(num_inputs, num_outputs, hidden_size=[8])
+            elif isinstance(self.observation_space, (spaces.Dict, spaces.Tuple)):
+                return EvolvableMultiInput(
+                    self.observation_space,
+                    num_outputs,
+                    hidden_size=[8],
+                    channel_size=[3],
+                    kernel_size=[3],
+                    stride_size=[1],
+                )
 
         self.lr = 0.1
+        self.dummy_actor = create_net()
         self.dummy_optimizer = OptimizerWrapper(optim.Adam, self.dummy_actor, self.lr)
-
         self.register_network_group(NetworkGroup(eval=self.dummy_actor, policy=True))
+
+        for i in range(n_critics):
+            setattr(self, f"dummy_critic_{i}", create_net())
+
+            dummy_optimizer = OptimizerWrapper(
+                optim.Adam, getattr(self, f"dummy_critic_{i}"), self.lr
+            )
+            setattr(self, f"dummy_critic_optimizer_{i}", dummy_optimizer)
+
+            self.register_network_group(
+                NetworkGroup(eval=getattr(self, f"dummy_critic_{i}"))
+            )
 
     def get_action(self, *args, **kwargs):
         return
@@ -85,10 +99,10 @@ class DummyRLAlgorithm(RLAlgorithm):
 
 
 class DummyMARLAlgorithm(MultiAgentRLAlgorithm):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, n_critics: int = 0, **kwargs):
         super().__init__(*args, **kwargs)
 
-        def create_actor(idx):
+        def create_net(idx):
             obs_space = self.observation_spaces[idx]
             action_space = self.action_spaces[idx]
             num_outputs = (
@@ -121,15 +135,30 @@ class DummyMARLAlgorithm(MultiAgentRLAlgorithm):
                     stride_size=[1],
                 )
 
-        self.dummy_actors = [create_actor(idx) for idx in range(self.n_agents)]
+        self.dummy_actors = [create_net(idx) for idx in range(self.n_agents)]
         self.lr = 0.1
-        self.dummy_optimizer = OptimizerWrapper(
+        self.actor_optimizer = OptimizerWrapper(
             optim.Adam, self.dummy_actors, self.lr, multiagent=True
         )
-
         self.register_network_group(
             NetworkGroup(eval=self.dummy_actors, policy=True, multiagent=True)
         )
+
+        for i in range(n_critics):
+            setattr(
+                self,
+                f"dummy_critic_{i}",
+                [create_net(idx) for idx in range(self.n_agents)],
+            )
+
+            dummy_optimizer = OptimizerWrapper(
+                optim.Adam, getattr(self, f"dummy_critic_{i}"), self.lr, multiagent=True
+            )
+            setattr(self, f"dummy_critic_optimizer_{i}", dummy_optimizer)
+
+            self.register_network_group(
+                NetworkGroup(eval=getattr(self, f"dummy_critic_{i}"), multiagent=True)
+            )
 
     def get_action(self, *args, **kwargs):
         return
@@ -141,6 +170,7 @@ class DummyMARLAlgorithm(MultiAgentRLAlgorithm):
         return
 
 
+@pytest.mark.parametrize("n_critics", [0, 1, 2])
 @pytest.mark.parametrize(
     "observation_space",
     [
@@ -158,17 +188,23 @@ class DummyMARLAlgorithm(MultiAgentRLAlgorithm):
         # generate_multidiscrete_space(2, 2)
     ],
 )
-def test_initialise_single_agent(observation_space, action_space):
-    agent = DummyRLAlgorithm(observation_space, action_space, index=0)
+def test_initialise_single_agent(n_critics, observation_space, action_space):
+    agent = DummyRLAlgorithm(
+        observation_space, action_space, n_critics=n_critics, index=0
+    )
     assert agent is not None
 
 
+@pytest.mark.parametrize("n_critics", [0, 1, 2])
 @pytest.mark.parametrize(
     "observation_space",
     [
+        # Same arch mutations for different agents
         generate_multi_agent_box_spaces(2, (2,)),
         generate_multi_agent_discrete_spaces(2, 4),
         gen_multi_agent_dict_or_tuple_spaces(2, 2, 2),
+        # Different arch mutations for different agents
+        [generate_random_box_space((2,)), generate_random_box_space((4, 32, 32))],
     ],
 )
 @pytest.mark.parametrize(
@@ -178,9 +214,13 @@ def test_initialise_single_agent(observation_space, action_space):
         generate_multi_agent_box_spaces(2, (2,)),
     ],
 )
-def test_initialise_multi_agent(observation_space, action_space):
+def test_initialise_multi_agent(n_critics, observation_space, action_space):
     agent = DummyMARLAlgorithm(
-        observation_space, action_space, agent_ids=["agent1", "agent2"], index=0
+        observation_space,
+        action_space,
+        agent_ids=["agent1", "agent2"],
+        n_critics=n_critics,
+        index=0,
     )
     assert agent is not None
 
