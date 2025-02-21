@@ -171,7 +171,6 @@ class EvolvableMLP(EvolvableModule):
         """Returns output layer of neural network."""
         return getattr(self.model, f"{self.name}_linear_layer_output")
 
-    @mutation(MutationType.ACTIVATION)
     def change_activation(self, activation: str, output: bool = False) -> None:
         """Set the activation function for the network.
 

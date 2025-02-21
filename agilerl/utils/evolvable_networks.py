@@ -625,7 +625,7 @@ def create_resnet(
     device: str = "cpu",
     name: str = "resnet",
 ):
-    """Creates a number of SimBa residual blocks for image-based inputs."""
+    """Creates a number of residual blocks for image-based inputs."""
     net_dict = OrderedDict()
 
     # Initial convolutional layer
@@ -633,18 +633,19 @@ def create_resnet(
         input_channels,
         channel_size,
         kernel_size=kernel_size,
-        stride_size=stride_size,
+        stride=stride_size,
+        padding=(kernel_size - 1) // 2,
+        bias=False,
         device=device,
     )
     nn.init.kaiming_uniform_(net_dict[f"{name}_conv_input"].weight)
 
     for l_no in range(1, num_blocks + 1):
         net_dict[f"{name}_residual_block_{l_no}"] = ResidualBlock(
-            channel_size,
-            kernel_size,
-            stride_size,
+            in_channels=channel_size,
+            kernel_size=kernel_size,
             scale_factor=scale_factor,
             device=device,
         )
 
-    return nn.Sequential(net_dict)
+    return net_dict

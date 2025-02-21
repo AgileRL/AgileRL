@@ -1,5 +1,5 @@
 from dataclasses import asdict
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Type
 
 import torch
 from gymnasium import spaces
@@ -44,6 +44,7 @@ class QNetwork(EvolvableNetwork):
         self,
         observation_space: spaces.Space,
         action_space: spaces.Discrete,
+        encoder_cls: Optional[Type[EvolvableModule]] = None,
         encoder_config: Optional[ConfigType] = None,
         head_config: Optional[ConfigType] = None,
         min_latent_dim: int = 8,
@@ -53,11 +54,11 @@ class QNetwork(EvolvableNetwork):
         simba: bool = False,
         device: str = "cpu",
     ):
-
         super().__init__(
             observation_space,
-            encoder_config=encoder_config,
             action_space=action_space,
+            encoder_cls=encoder_cls,
+            encoder_config=encoder_config,
             min_latent_dim=min_latent_dim,
             max_latent_dim=max_latent_dim,
             n_agents=n_agents,
