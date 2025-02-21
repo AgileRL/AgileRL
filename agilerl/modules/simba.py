@@ -110,6 +110,30 @@ class EvolvableSimBa(EvolvableModule):
 
         return self.model(x)
 
+    def get_output_dense(self) -> torch.nn.Module:
+        """Returns output layer of neural network."""
+        return getattr(self.model, f"{self.name}_linear_layer_output")
+
+    def init_weights_gaussian(
+        self, std_coeff: float = 4, output_coeff: float = 4
+    ) -> None:
+        """Initialise weights of neural network using Gaussian distribution."""
+        EvolvableModule.init_weights_gaussian(self.model, std_coeff=std_coeff)
+
+        # Output layer is initialised with std_coeff=2
+        output_layer = self.get_output_dense()
+        EvolvableModule.init_weights_gaussian(output_layer, std_coeff=output_coeff)
+
+    @mutation(MutationType.ACTIVATION)
+    def change_activation(self, activation: str, output: bool = False) -> None:
+        """The SimBa architecture uses ReLU activations by default and this
+        shouldn't be changed during training.
+
+        :return: Activation function
+        :rtype: str
+        """
+        return
+
     @mutation(MutationType.LAYER)
     def add_block(self) -> None:
         """Adds a hidden layer to neural network. Falls back on add_node if

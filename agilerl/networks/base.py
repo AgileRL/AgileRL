@@ -171,7 +171,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         super().__init__(device)
 
         if encoder_config is None:
-            encoder_config = get_default_encoder_config(observation_space)
+            encoder_config = get_default_encoder_config(observation_space, simba=simba)
 
         # For multi-agent settings, we use a depth corresponding to that of the
         # sample input for the kernel of the first layer of CNN-based networks

@@ -233,6 +233,7 @@ class MADDPG(MultiAgentRLAlgorithm):
             )
         else:
             net_config = {} if net_config is None else net_config
+            simba = net_config.get("simba", False)
             critic_net_config = copy.deepcopy(net_config)
 
             encoder_config = net_config.get("encoder_config", None)
@@ -252,8 +253,10 @@ class MADDPG(MultiAgentRLAlgorithm):
                 critic_head_config = MlpNetConfig(hidden_size=[64])
 
             if encoder_config is None:
-                encoder_config = get_default_encoder_config(self.single_space)
-                critic_encoder_config = get_default_encoder_config(self.single_space)
+                encoder_config = get_default_encoder_config(self.single_space, simba)
+                critic_encoder_config = get_default_encoder_config(
+                    self.single_space, simba
+                )
 
             # For image spaces we need to give a sample input tensor to
             # build networks with Conv3d blocks appropriately

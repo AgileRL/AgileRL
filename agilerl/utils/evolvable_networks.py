@@ -9,7 +9,12 @@ from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 from torch.optim import Optimizer
 
-from agilerl.modules.configs import CnnNetConfig, MlpNetConfig, MultiInputNetConfig
+from agilerl.modules.configs import (
+    CnnNetConfig,
+    MlpNetConfig,
+    MultiInputNetConfig,
+    SimBaNetConfig,
+)
 from agilerl.modules.custom_components import (
     GumbelSoftmax,
     NewGELU,
@@ -43,7 +48,9 @@ def tuple_to_dict_space(observation_space: spaces.Tuple) -> spaces.Dict:
     return spaces.Dict(dict_space)
 
 
-def get_default_encoder_config(observation_space: spaces.Space) -> ConfigType:
+def get_default_encoder_config(
+    observation_space: spaces.Space, simba: bool = False
+) -> ConfigType:
     """Get the default configuration for the encoder network based on the observation space.
 
     :param observation_space: Observation space of the environment.
@@ -67,6 +74,9 @@ def get_default_encoder_config(observation_space: spaces.Space) -> ConfigType:
             output_activation=None,
         )
     else:
+        if simba:
+            return SimBaNetConfig(hidden_size=128, num_blocks=2)
+
         return MlpNetConfig(hidden_size=[16, 16], output_activation=None)
 
 
