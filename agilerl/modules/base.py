@@ -251,6 +251,10 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         return self.get_init_dict()
 
     @property
+    def net_config(self) -> Dict[str, Any]:
+        return self.get_init_dict()
+
+    @property
     def mutation_methods(self) -> List[str]:
         return self.layer_mutation_methods + self.node_mutation_methods
 

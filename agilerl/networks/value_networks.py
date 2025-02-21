@@ -1,5 +1,5 @@
 from dataclasses import asdict
-from typing import Optional
+from typing import Optional, Type, Union
 
 import torch
 from gymnasium import spaces
@@ -17,6 +17,9 @@ class ValueNetwork(EvolvableNetwork):
 
     :param observation_space: Observation space of the environment.
     :type observation_space: spaces.Space
+    :param encoder_cls: Encoder class to use for the network. Defaults to None, whereby it is
+        automatically built using an AgileRL module according the observation space.
+    :type encoder_cls: Optional[Union[str, Type[EvolvableModule]]]
     :param encoder_config: Configuration of the encoder.
     :type encoder_config: ConfigType
     :param head_config: Configuration of the head.
@@ -36,6 +39,7 @@ class ValueNetwork(EvolvableNetwork):
     def __init__(
         self,
         observation_space: spaces.Space,
+        encoder_cls: Optional[Union[str, Type[EvolvableModule]]] = None,
         encoder_config: Optional[ConfigType] = None,
         head_config: Optional[ConfigType] = None,
         min_latent_dim: int = 8,
@@ -48,6 +52,7 @@ class ValueNetwork(EvolvableNetwork):
 
         super().__init__(
             observation_space,
+            encoder_cls=encoder_cls,
             encoder_config=encoder_config,
             action_space=None,
             min_latent_dim=min_latent_dim,

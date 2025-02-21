@@ -1,9 +1,11 @@
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
+import numpy as np
 import torch
 import torch.nn as nn
 
-from agilerl.modules.base import EvolvableModule
+from agilerl.modules import EvolvableCNN
+from agilerl.modules.base import EvolvableModule, MutationType, mutation
 from agilerl.typing import DeviceType, ObservationType
 from agilerl.utils.evolvable_networks import create_resnet, get_activation
 
@@ -99,6 +101,16 @@ class EvolvableResNet(EvolvableModule):
 
         return net_config
 
+    def change_activation(self, activation: str, output: bool = False) -> None:
+        """We currently do not support changing the activation function of the ResNet.
+
+        :param activation: Activation function to use.
+        :type activation: str
+        :param output: Flag indicating whether to set the output activation function, defaults to False
+        :type output: bool, optional
+        """
+        return
+
     def create_resnet(
         self,
         input_shape: List[int],
@@ -173,3 +185,88 @@ class EvolvableResNet(EvolvableModule):
             x = x.unsqueeze(0)
 
         return self.model(x)
+
+    @mutation(MutationType.LAYER)
+    def add_block(self) -> None:
+        """Adds a hidden layer to neural network. Falls back on ``add_channel()`` if
+        max hidden layers reached."""
+        # add layer to hyper params
+        if self.num_blocks < self.max_blocks:  # HARD LIMIT
+            self.num_blocks += 1
+        else:
+            return self.add_channel()
+
+    @mutation(MutationType.LAYER, shrink_params=True)
+    def remove_block(self) -> None:
+        """Removes a hidden layer from neural network. Falls back on ``add_channel()`` if
+        min hidden layers reached."""
+        if self.num_blocks > self.min_blocks:  # HARD LIMIT
+            self.num_blocks -= 1
+        else:
+            return self.add_channel()
+
+    @mutation(MutationType.NODE)
+    def add_channel(
+        self,
+        numb_new_channels: Optional[int] = None,
+    ) -> Dict[str, int]:
+        """Remove channel from hidden layer of convolutional neural network.
+
+        :param numb_new_channels: Number of channels to add to hidden layer, defaults to None
+        :type numb_new_channels: int, optional
+        :return: Dictionary containing the hidden layer and number of new channels
+        :rtype: Dict[str, Union[int, None]]
+        """
+        if numb_new_channels is None:
+            numb_new_channels = np.random.choice([8, 16, 32], 1)[0]
+
+        # HARD LIMIT
+        if self.channel_size + numb_new_channels < self.max_channel_size:
+            self.channel_size += numb_new_channels
+
+        return {"numb_new_channels": numb_new_channels}
+
+    @mutation(MutationType.NODE, shrink_params=True)
+    def remove_channel(
+        self,
+        numb_new_channels: Optional[int] = None,
+    ) -> Dict[str, int]:
+        """Remove channel from hidden layer of convolutional neural network.
+
+        :param numb_new_channels: Number of channels to add to hidden layer, defaults to None
+        :type numb_new_channels: int, optional
+        :return: Dictionary containing the hidden layer and number of new channels
+        :rtype: Dict[str, Union[int, None]]
+        """
+        if numb_new_channels is None:
+            numb_new_channels = np.random.choice([8, 16, 32], 1)[0]
+
+        # HARD LIMIT
+        if self.channel_size - numb_new_channels > self.min_channel_size:
+            self.channel_size -= numb_new_channels
+
+        return {"numb_new_channels": numb_new_channels}
+
+    def recreate_network(self, shrink_params: bool = False) -> None:
+        """Recreates neural networks.
+
+        :param shrink_params: Flag indicating whether to shrink the parameters, defaults to False
+        :type shrink_params: bool, optional
+        """
+        # Create model with new architecture
+        model = self.create_resnet(
+            input_shape=self.input_shape,
+            channel_size=self.channel_size,
+            kernel_size=self.kernel_size,
+            stride_size=self.stride_size,
+            num_blocks=self.num_blocks,
+            scale_factor=self.scale_factor,
+        )
+
+        # Copy parameters from old model to new model
+        preserve_params_fn = (
+            EvolvableCNN.shrink_preserve_parameters
+            if shrink_params
+            else EvolvableModule.preserve_parameters
+        )
+        self.model = preserve_params_fn(old_net=self.model, new_net=model)

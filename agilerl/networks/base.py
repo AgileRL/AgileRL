@@ -9,6 +9,7 @@ from agilerl.modules import (
     EvolvableCNN,
     EvolvableMLP,
     EvolvableMultiInput,
+    EvolvableResNet,
     EvolvableSimBa,
 )
 from agilerl.modules.base import EvolvableModule, ModuleMeta, mutation
@@ -17,8 +18,8 @@ from agilerl.typing import ConfigType, DeviceType, TorchObsType
 from agilerl.utils.evolvable_networks import get_default_encoder_config, is_image_space
 
 SelfEvolvableNetwork = TypeVar("SelfEvolvableNetwork", bound="EvolvableNetwork")
-SupportedEvolvable = Union[
-    EvolvableMLP, EvolvableSimBa, EvolvableCNN, EvolvableMultiInput
+DefaultEncoderType = Union[
+    EvolvableCNN, EvolvableMLP, EvolvableMultiInput, EvolvableSimBa
 ]
 
 
@@ -122,14 +123,17 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     evolvable modules, inheriting the mutation methods of any underlying evolvable module.
 
     .. note::
-        Currently, evolvable networks should only have the encoder (which is automatically
-        built from the observation space) and a 'head_net' attribute that processes the latent
-        encodings into the desired number of outputs as evolvable components. For example, in RainbowQNetwork,
-        we disable mutations for the advantage net and apply the same mutations to it as the 'value'
-        net, which is the network head in this case. Users should follow the same philosophy.
+        Currently, evolvable networks should only have the encoder (which, if not specified by the user,
+        is automatically built from the observation space) and a 'head_net' attribute that processes the
+        latent encodings into the desired number of outputs as evolvable components. For example, in
+        ``RainbowQNetwork``, we disable mutations for the advantage net and apply the same mutations to it
+        as the 'value' net, which is the network head in this case. Users should follow the same philosophy.
 
     :param observation_space: Observation space of the environment.
     :type observation_space: spaces.Space
+    :param encoder_cls: Encoder class to use for the network. Defaults to None, whereby it is
+        automatically built using an AgileRL module according the observation space.
+    :type encoder_cls: Optional[Union[str, Type[EvolvableModule]]]
     :param encoder_config: Configuration of the encoder. Defaults to None.
     :type encoder_config: Optional[ConfigType]
     :param action_space: Action space of the environment. Defaults to None.
@@ -151,13 +155,18 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     :type device: DeviceType
     """
 
-    encoder: SupportedEvolvable
-    head_net: SupportedEvolvable
+    encoder: EvolvableModule
+    head_net: EvolvableModule
+
+    # Custom encoder aliases
+    _encoder_aliases: Dict[str, Type[EvolvableModule]] = {
+        "ResNet": EvolvableResNet,
+    }
 
     def __init__(
         self,
         observation_space: spaces.Space,
-        encoder_cls: Optional[Type[EvolvableModule]] = None,
+        encoder_cls: Optional[Union[str, Type[EvolvableModule]]] = None,
         encoder_config: Optional[ConfigType] = None,
         action_space: Optional[spaces.Space] = None,
         min_latent_dim: int = 8,
@@ -202,7 +211,11 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             encoder_config["output_activation"] = activation
 
         if encoder_cls is not None:
-            self.encoder = encoder_cls(**encoder_config)
+            if isinstance(encoder_cls, str):
+                self.encoder_cls = self._encoder_aliases[encoder_cls]
+            elif not issubclass(encoder_cls, EvolvableModule):
+                raise TypeError("Encoder class must be a subclass of EvolvableModule.")
+            self.encoder = self.encoder_cls(**encoder_config)
         else:
             self.encoder = self._build_encoder(encoder_config)
 
@@ -304,7 +317,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             **net_config,
         )
 
-    def modules(self) -> Dict[str, SupportedEvolvable]:
+    def modules(self) -> Dict[str, EvolvableModule]:
         """Modules of the network.
 
         :return: Modules of the network.
@@ -383,7 +396,16 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
 
         return {"numb_new_nodes": numb_new_nodes}
 
-    def _build_encoder(self, net_config: Dict[str, Any]) -> SupportedEvolvable:
+    def recreate_encoder(self: SelfEvolvableNetwork) -> None:
+        """Recreate the encoder of the network."""
+        if self.encoder_cls is not None:
+            encoder = self.encoder_cls(**self.encoder.init_dict)
+        else:
+            encoder = self._build_encoder(self.encoder.net_config)
+
+        self.encoder = EvolvableModule.preserve_parameters(self.encoder, encoder)
+
+    def _build_encoder(self, net_config: Dict[str, Any]) -> DefaultEncoderType:
         """Builds the encoder for the network based on the environments observation space.
 
         :return: Encoder module.

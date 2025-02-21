@@ -1,5 +1,5 @@
 from dataclasses import asdict
-from typing import Any, Dict, Optional, Type
+from typing import Any, Dict, Optional, Type, Union
 
 import torch
 from gymnasium import spaces
@@ -23,6 +23,9 @@ class QNetwork(EvolvableNetwork):
     :type observation_space: spaces.Space
     :param action_space: Action space of the environment
     :type action_space: DiscreteSpace
+    :param encoder_cls: Encoder class to use for the network. Defaults to None, whereby it is
+        automatically built using an AgileRL module according the observation space.
+    :type encoder_cls: Optional[Union[str, Type[EvolvableModule]]]
     :param encoder_config: Configuration of the encoder network.
     :type encoder_config: ConfigType
     :param head_config: Configuration of the network MLP head.
@@ -44,7 +47,7 @@ class QNetwork(EvolvableNetwork):
         self,
         observation_space: spaces.Space,
         action_space: spaces.Discrete,
-        encoder_cls: Optional[Type[EvolvableModule]] = None,
+        encoder_cls: Optional[Union[str, Type[EvolvableModule]]] = None,
         encoder_config: Optional[ConfigType] = None,
         head_config: Optional[ConfigType] = None,
         min_latent_dim: int = 8,
@@ -105,7 +108,8 @@ class QNetwork(EvolvableNetwork):
 
     def recreate_network(self) -> None:
         """Recreates the network"""
-        encoder = self._build_encoder(self.encoder.net_config)
+        self.recreate_encoder()
+
         head_net = self.create_mlp(
             num_inputs=self.latent_dim,
             num_outputs=self.num_actions,
@@ -113,7 +117,6 @@ class QNetwork(EvolvableNetwork):
             net_config=self.head_net.net_config,
         )
 
-        self.encoder = EvolvableModule.preserve_parameters(self.encoder, encoder)
         self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net)
 
 
@@ -127,6 +130,9 @@ class RainbowQNetwork(EvolvableNetwork):
     :type observation_space: spaces.Space
     :param action_space: Action space of the environment
     :type action_space: DiscreteSpace
+    :param encoder_cls: Encoder class to use for the network. Defaults to None, whereby it is
+        automatically built using an AgileRL module according the observation space.
+    :type encoder_cls: Optional[Union[str, Type[EvolvableModule]]]
     :param encoder_config: Configuration of the encoder network.
     :type encoder_config: ConfigType
     :param support: Support for the distributional value function.
@@ -251,8 +257,8 @@ class RainbowQNetwork(EvolvableNetwork):
         return self.head_net(latent, q=q, log=log)
 
     def recreate_network(self) -> None:
-        """Recreates the network"""
-        encoder = self._build_encoder(self.encoder.net_config)
+        """Recreates the network."""
+        self.recreate_encoder()
 
         head_net = DuelingDistributionalMLP(
             num_inputs=self.latent_dim,
@@ -263,7 +269,6 @@ class RainbowQNetwork(EvolvableNetwork):
             **self.head_net.net_config
         )
 
-        self.encoder = EvolvableModule.preserve_parameters(self.encoder, encoder)
         self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net)
 
 
@@ -278,6 +283,9 @@ class ContinuousQNetwork(EvolvableNetwork):
     :type observation_space: spaces.Space
     :param action_space: Action space of the environment
     :type action_space: spaces.Box
+    :param encoder_cls: Encoder class to use for the network. Defaults to None, whereby it is
+        automatically built using an AgileRL module according the observation space.
+    :type encoder_cls: Optional[Union[str, Type[EvolvableModule]]]
     :param encoder_config: Configuration of the encoder network.
     :type encoder_config: ConfigType
     :param head_config: Configuration of the network MLP head.
@@ -299,6 +307,7 @@ class ContinuousQNetwork(EvolvableNetwork):
         self,
         observation_space: spaces.Space,
         action_space: spaces.Box,
+        encoder_cls: Optional[Type[EvolvableModule]] = None,
         encoder_config: Optional[ConfigType] = None,
         head_config: Optional[ConfigType] = None,
         min_latent_dim: int = 8,
@@ -311,6 +320,7 @@ class ContinuousQNetwork(EvolvableNetwork):
 
         super().__init__(
             observation_space,
+            encoder_cls=encoder_cls,
             encoder_config=encoder_config,
             action_space=action_space,
             min_latent_dim=min_latent_dim,
@@ -363,8 +373,9 @@ class ContinuousQNetwork(EvolvableNetwork):
         return self.head_net(x)
 
     def recreate_network(self) -> None:
-        """Recreates the network"""
-        encoder = self._build_encoder(self.encoder.net_config)
+        """Recreates the network."""
+        self.recreate_encoder()
+
         head_net = self.create_mlp(
             num_inputs=self.latent_dim + self.num_actions,
             num_outputs=1,
@@ -372,5 +383,4 @@ class ContinuousQNetwork(EvolvableNetwork):
             net_config=self.head_net.net_config,
         )
 
-        self.encoder = EvolvableModule.preserve_parameters(self.encoder, encoder)
         self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net)
