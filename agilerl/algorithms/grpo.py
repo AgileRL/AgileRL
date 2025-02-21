@@ -1,23 +1,16 @@
-from typing import Any, Callable, List, Optional, Tuple, Union
+from typing import Any, Optional, Tuple, Union
 
 import numpy as np
 import torch
 import torch.optim as optim
 from gymnasium import spaces
-from torch.nn.utils import clip_grad_norm_
+from transformers import GenerationConfig
 
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.base import EvolvableModule
 from agilerl.typing import ExperiencesType, GymEnvType
-from agilerl.utils.algo_utils import (
-    flatten_experiences,
-    get_experiences_samples,
-    is_vectorized_experiences,
-    obs_channels_to_first,
-    stack_experiences,
-)
 
 
 class GRPO(RLAlgorithm):
@@ -68,7 +61,7 @@ class GRPO(RLAlgorithm):
         observation_space: spaces.Space,
         action_space: spaces.Space,
         actor_network: EvolvableModule,
-        reward_fns: List[Callable[..., float]],
+        pad_token_id: int,
         hp_config: Optional[HyperparameterConfig] = None,
         index: int = 0,
         batch_size: int = 64,
@@ -78,6 +71,8 @@ class GRPO(RLAlgorithm):
         clip_coef: float = 0.2,
         update_epochs: int = 4,
         group_size: int = 10,
+        temperature: float = 0.9,
+        max_sequence_length: int = 512,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
@@ -123,6 +118,13 @@ class GRPO(RLAlgorithm):
             group_size  # What if we assume that group size == num_envs ???
         )
 
+        self.generation_config = GenerationConfig(
+            do_sample=True,
+            temperature=temperature,
+            max_new_tokens=max_sequence_length,
+            pad_token_id=pad_token_id,
+        )
+
         if actor_network is not None:
             if not isinstance(actor_network, EvolvableModule):
                 raise TypeError(
@@ -144,12 +146,11 @@ class GRPO(RLAlgorithm):
         # Register network groups for mutations
         self.register_network_group(NetworkGroup(eval=self.actor, policy=True))
 
+        # Create a Generation config e.g. self.generation_config = GenerationConfig
+
     def get_action(
         self,
         state: np.ndarray,
-        action: Optional[torch.Tensor] = None,
-        grad: bool = False,
-        action_mask: Optional[np.ndarray] = None,
     ) -> Tuple[
         Union[np.ndarray, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor
     ]:
@@ -166,54 +167,13 @@ class GRPO(RLAlgorithm):
         :param preprocess_obs: Flag to preprocess observations, defaults to True
         :type preprocess_obs: bool, optional
         """
-        state = self.preprocess_observation(state)
 
-        if not grad:
-            self.actor.eval()
-            with torch.no_grad():
-                action_dist = self.actor(state, action_mask=action_mask)
-        else:
-            self.actor.train()
-            action_dist = self.actor(state, action_mask=action_mask)
-
-        if not isinstance(action_dist, torch.distributions.Distribution):
-            raise ValueError(
-                f"Expected action_dist to be a torch.distributions.Distribution, got {type(action_dist)}."
-            )
-
-        return_tensors = True
-        if action is None:
-            # Collect a group of samples from the policy
-            action = action_dist.sample(sample_shape=torch.Size([self.group_size]))
-            return_tensors = False
-        else:
-            action = action.to(self.device)
-
-        # Determines action log prob of all samples in the group
-        action_logprob = action_dist.log_prob(action)
-
-        # Commented this out as will affect grpo, why was this included initially in ppo??
-        # if len(action_logprob.shape) > 1:
-        #     action_logprob = action_logprob.sum(dim=1)
-
-        if return_tensors:
-            return (
-                (
-                    self.scale_to_action_space(action, convert_to_torch=True)
-                    if not self.discrete_actions
-                    else action
-                ),
-                action_logprob,
-            )
-        else:
-            return (
-                (
-                    self.scale_to_action_space(action.cpu().data.numpy())
-                    if not self.discrete_actions
-                    else action.cpu().data.numpy()
-                ),
-                action_logprob.cpu().data.numpy(),
-            )
+        # Update the reference model
+        # Duplicate the prompt group_size times
+        # Use the generation config to generate (n = group_size) answers
+        # No need to tokenize as the environment will take care of tokenization
+        #
+        pass
 
     def learn(self, experiences: ExperiencesType) -> float:
         """Updates agent network parameters to learn from experiences.
@@ -221,117 +181,11 @@ class GRPO(RLAlgorithm):
         :param experience: List of batched states, actions, log_probs, rewards, dones, values, next_state in that order.
         :type experience: Tuple[Union[numpy.ndarray, Dict[str, numpy.ndarray]], ...]
         """
-        (states, actions, log_probs, rewards, dones, values, next_state) = (
-            stack_experiences(*experiences)
-        )
 
-        # Bootstrapping returns using GAE advantage estimation
-        dones = dones.long()
-
-        # rewards of length self.group_size
-        advantages = (rewards - np.mean(rewards)) / np.std(rewards)
-
-        # Flatten experiences from (batch_size, num_envs, ...) to (batch_size*num_envs, ...)
-        # after checking if experiences are vectorized
-        experiences = (states, actions, log_probs, advantages, values)
-        if is_vectorized_experiences(*experiences):
-            experiences = flatten_experiences(*experiences)
-
-        # Move experiences to algo device
-        experiences = self.to_device(*experiences)
-
-        (
-            states,
-            actions,
-            log_probs,
-            advantages,
-            returns,
-            values,
-        ) = experiences
-
-        num_samples = returns.size(0)
-        batch_idxs = np.arange(num_samples)
-        clipfracs = []
-        mean_loss = 0
-        for epoch in range(self.update_epochs):
-            np.random.shuffle(batch_idxs)
-            for start in range(0, num_samples, self.batch_size):
-                minibatch_idxs = batch_idxs[start : start + self.batch_size]
-                (
-                    batch_states,
-                    batch_actions,
-                    batch_log_probs,
-                    batch_advantages,
-                    batch_returns,
-                    batch_values,
-                ) = get_experiences_samples(minibatch_idxs, *experiences)
-
-                batch_actions = batch_actions.squeeze()
-                batch_returns = batch_returns.squeeze()
-                batch_log_probs = batch_log_probs.squeeze()
-                batch_advantages = batch_advantages.squeeze()
-                batch_values = batch_values.squeeze()
-
-                if len(minibatch_idxs) > 1:
-                    _, log_prob, entropy, value = self.get_action(
-                        state=batch_states, action=batch_actions, grad=True
-                    )
-
-                    logratio = log_prob - batch_log_probs
-                    ratio = logratio.exp()
-
-                    with torch.no_grad():
-                        approx_kl = ((ratio - 1) - logratio).mean()
-                        clipfracs += [
-                            ((ratio - 1.0).abs() > self.clip_coef).float().mean().item()
-                        ]
-
-                    minibatch_advs = batch_advantages
-                    minibatch_advs = (minibatch_advs - minibatch_advs.mean()) / (
-                        minibatch_advs.std() + 1e-8
-                    )
-
-                    # Policy loss
-                    pg_loss1 = -minibatch_advs * ratio
-                    pg_loss2 = -minibatch_advs * torch.clamp(
-                        ratio, 1 - self.clip_coef, 1 + self.clip_coef
-                    )
-                    pg_loss = torch.max(pg_loss1, pg_loss2).mean()
-
-                    # Value loss
-                    value = value.view(-1)
-                    v_loss_unclipped = (value - batch_returns) ** 2
-                    v_clipped = batch_values + torch.clamp(
-                        value - batch_values, -self.clip_coef, self.clip_coef
-                    )
-
-                    v_loss_clipped = (v_clipped - batch_returns) ** 2
-                    v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
-                    v_loss = 0.5 * v_loss_max.mean()
-
-                    entropy_loss = entropy.mean()
-                    loss = (
-                        pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
-                    )
-
-                    # actor + critic loss backprop
-                    self.optimizer.zero_grad()
-                    if self.accelerator is not None:
-                        self.accelerator.backward(loss)
-                    else:
-                        loss.backward()
-
-                    clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
-                    self.optimizer.step()
-
-                    mean_loss += loss.item()
-
-            if self.target_kl is not None:
-                if approx_kl > self.target_kl:
-                    break
-
-        mean_loss /= num_samples * self.update_epochs
-        return mean_loss
+        # Calculate the advantage
+        # for each experience, perform the GRPO loss update
+        # Do we want to do one experience at a time or a batch of experiences at a time?
+        pass
 
     def test(
         self,
@@ -354,31 +208,10 @@ class GRPO(RLAlgorithm):
         :return: Mean test score of agent in environment
         :rtype: float
         """
-        with torch.no_grad():
-            rewards = []
-            num_envs = env.num_envs if hasattr(env, "num_envs") else 1
-            for i in range(loop):
-                state, info = env.reset()
-                scores = np.zeros(num_envs)
-                completed_episode_scores = np.zeros(num_envs)
-                finished = np.zeros(num_envs)
-                step = 0
-                while not np.all(finished):
-                    if swap_channels:
-                        state = obs_channels_to_first(state)
+        with env.eval():
+            # Eval training loop
+            pass
 
-                    action_mask = info.get("action_mask", None)
-                    action, _, _, _ = self.get_action(state, action_mask=action_mask)
-                    state, reward, done, trunc, info = env.step(action)
-                    step += 1
-                    scores += np.array(reward)
-                    for idx, (d, t) in enumerate(zip(done, trunc)):
-                        if (
-                            d or t or (max_steps is not None and step == max_steps)
-                        ) and not finished[idx]:
-                            completed_episode_scores[idx] = scores[idx]
-                            finished[idx] = 1
-                rewards.append(np.mean(completed_episode_scores))
-        mean_fit = np.mean(rewards)
-        self.fitness.append(mean_fit)
-        return mean_fit
+    def _calculate_advantage(): ...
+
+    def _grpo_loss(): ...
