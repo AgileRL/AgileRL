@@ -767,67 +767,6 @@ class Mutations:
 
         return network
 
-    def classic_parameter_mutation_v0(
-        self, network: EvolvableModule
-    ) -> EvolvableModule:
-        """Returns network with mutated weights.
-
-        :param network: Neural network to mutate
-        :type network: EvolvableModule
-        """
-        # Function to mutate network weights with Gaussian noise
-        mut_strength = self.mutation_sd
-        num_mutation_frac = 0.1
-        super_mut_strength = 10
-        super_mut_prob = 0.05
-        reset_prob = super_mut_prob + 0.05
-
-        model_params = network.state_dict()
-
-        potential_keys = []
-        for i, key in enumerate(model_params):  # Mutate each param
-            if "norm" not in key:
-                W = model_params[key]
-                if len(W.shape) == 2:  # Weights, no bias
-                    potential_keys.append(key)
-
-        how_many = self.rng.integers(1, len(potential_keys) + 1, 1)[0]
-        chosen_keys = self.rng.choice(potential_keys, how_many, replace=False)
-
-        for key in chosen_keys:
-            # References to the variable keys
-            W = model_params[key]
-            num_weights = W.shape[0] * W.shape[1]
-            # Number of mutation instances
-            num_mutations = fastrand.pcg32bounded(
-                int(np.ceil(num_mutation_frac * num_weights))
-            )
-            for _ in range(num_mutations):
-                ind_dim1 = fastrand.pcg32bounded(W.shape[0])
-                ind_dim2 = fastrand.pcg32bounded(W.shape[-1])
-                random_num = self.rng.uniform(0, 1)
-
-                if random_num < super_mut_prob:  # Super Mutation probability
-                    W[ind_dim1, ind_dim2] += self.rng.normal(
-                        0, np.abs(super_mut_strength * W[ind_dim1, ind_dim2].item())
-                    )
-                elif random_num < reset_prob:  # Reset probability
-                    W[ind_dim1, ind_dim2] = self.rng.normal(0, 1)
-                else:  # mutauion even normal
-                    W[ind_dim1, ind_dim2] += self.rng.normal(
-                        0, np.abs(mut_strength * W[ind_dim1, ind_dim2].item())
-                    )
-
-                # Regularization hard limit
-                W[ind_dim1, ind_dim2] = self.regularize_weight(
-                    W[ind_dim1, ind_dim2].item(), 1000000
-                )
-
-        if self.accelerator is None:
-            network = network.to(self.device)
-
-        return network
-
     def architecture_mutate(
         self, individual: SelfEvolvableAlgorithm
     ) -> SelfEvolvableAlgorithm:
