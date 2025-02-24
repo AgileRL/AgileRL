@@ -31,6 +31,11 @@ class NetConfig:
     def get(self, key: str, default: Any = None) -> Any:
         return getattr(self, key, default)
 
+    def pop(self, key: str, default: Any = None) -> Any:
+        attr = getattr(self, key, default)
+        delattr(self, key)
+        return attr
+
     def keys(self) -> List[str]:
         return list(self.__dataclass_fields__.keys())
 
@@ -70,6 +75,31 @@ class MlpNetConfig(NetConfig):
                 self.min_mlp_nodes <= nodes and nodes <= self.max_mlp_nodes
                 for nodes in self.hidden_size
             ]
+        ), "Nodes must be within min_nodes and max_nodes."
+
+
+@dataclass
+class SimBaNetConfig(NetConfig):
+    hidden_size: int
+    num_blocks: int
+    output_activation: Optional[str] = field(default=None)
+    min_blocks: int = field(default=1)
+    max_blocks: int = field(default=4)
+    min_mlp_nodes: int = field(default=16)
+    max_mlp_nodes: int = field(default=500)
+
+    def __post_init__(self):
+        assert (
+            self.num_blocks >= self.min_blocks
+        ), "Number of residual blocks must be greater than min_blocks."
+
+        assert (
+            self.num_blocks <= self.max_blocks
+        ), "Number of residual blocks must be less than max_blocks."
+
+        assert (
+            self.min_mlp_nodes <= self.hidden_size
+            and self.hidden_size <= self.max_mlp_nodes
         ), "Nodes must be within min_nodes and max_nodes."
 
 

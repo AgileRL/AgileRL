@@ -251,6 +251,10 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         return self.get_init_dict()
 
     @property
+    def net_config(self) -> Dict[str, Any]:
+        return self.get_init_dict()
+
+    @property
     def mutation_methods(self) -> List[str]:
         return self.layer_mutation_methods + self.node_mutation_methods
 
@@ -638,8 +642,13 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
 
 
 class EvolvableWrapper(EvolvableModule):
-    """Wrapper class for evolvable neural networks. It takes in an EvolvableModule and
-    inherits its mutation methods as class methods."""
+    """Wrapper class for evolvable neural networks. Can be used to provide some
+    additional functionality to an EvolvableModule while maintaining its mutation methods
+    at the top-level.
+
+    :param module: The evolvable module.
+    :type module: EvolvableModule
+    """
 
     def __init__(self, module: EvolvableModule) -> None:
         super().__init__(module.device)
@@ -700,9 +709,8 @@ class EvolvableWrapper(EvolvableModule):
 
 
 class ModuleDict(EvolvableModule, nn.ModuleDict):
-    """Analogous to nn.ModuleDict, but allows for the recursive inheritance of the
-    mutation methods of underlying evolvable modules.
-    """
+    """Analogous to ``nn.ModuleDict``, but allows for the recursive inheritance of the
+    mutation methods of underlying evolvable modules."""
 
     @property
     def layer_mutation_methods(self) -> List[str]:

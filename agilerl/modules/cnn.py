@@ -284,7 +284,6 @@ class EvolvableCNN(EvolvableModule):
             kernel_size=self.mut_kernel_size.sizes,
             stride_size=stride_size,
             sample_input=sample_input,
-            name=self.name,
         )
 
     @property
@@ -364,9 +363,6 @@ class EvolvableCNN(EvolvableModule):
         :type activation: str
         :param output: Flag indicating whether to set the output activation function, defaults to False
         :type output: bool, optional
-
-        :return: Activation function
-        :rtype: str
         """
         if output:
             self.output_activation = activation
@@ -381,7 +377,6 @@ class EvolvableCNN(EvolvableModule):
         kernel_size: List[KernelSizeType],
         stride_size: List[int],
         sample_input: torch.Tensor,
-        name: str,
     ) -> nn.Sequential:
         """
         Creates and returns a convolutional neural network.
@@ -409,7 +404,7 @@ class EvolvableCNN(EvolvableModule):
             channel_size=channel_size,
             kernel_size=kernel_size,
             stride_size=stride_size,
-            name=name,
+            name=self.name,
             init_layers=self.init_layers,
             layer_norm=self.layer_norm,
             activation_fn=self.activation,
@@ -418,15 +413,17 @@ class EvolvableCNN(EvolvableModule):
 
         # Flatten image encodings and pass through a final linear layer
         pre_flatten_output = nn.Sequential(net_dict)(sample_input)
-        net_dict[f"{name}_flatten"] = nn.Flatten()
+        net_dict[f"{self.name}_flatten"] = nn.Flatten()
         with torch.no_grad():
             cnn_output = nn.Sequential(net_dict)(sample_input)
             flattened_size = cnn_output.shape[1]
 
-        net_dict[f"{name}_linear_output"] = nn.Linear(
+        net_dict[f"{self.name}_linear_output"] = nn.Linear(
             flattened_size, self.num_outputs, device=self.device
         )
-        net_dict[f"{name}_output_activation"] = get_activation(self.output_activation)
+        net_dict[f"{self.name}_output_activation"] = get_activation(
+            self.output_activation
+        )
 
         self.cnn_output_size = pre_flatten_output.shape
 
@@ -597,7 +594,6 @@ class EvolvableCNN(EvolvableModule):
             kernel_size=self.mut_kernel_size.sizes,
             stride_size=self.stride_size,
             sample_input=sample_input,
-            name=self.name,
         )
 
         # Copy parameters from old model to new model

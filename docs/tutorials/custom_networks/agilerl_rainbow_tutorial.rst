@@ -1,7 +1,7 @@
 .. _rainbow_dqn_tutorial:
 
-Building a Dueling Distributional Q Network Using AgileRL
-=========================================================
+Building a Dueling Distributional Q Network
+===========================================
 
 .. note::
     Here we go through the process we followed to develop the network in the :class:`RainbowDQN <agilerl.algorithms.dqn_rainbow.RainbowDQN>` agent.
@@ -217,7 +217,7 @@ Below we show our implementation of our custom head with a distributional duelin
 
 
 Creating a Custom Evolvable Network
-------------------------------------------------------------------------------------
+------------------------------------
 
 Now that we have our custom head, we can create a custom network that inherits from :class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>`
 and uses our custom head. Since we have done most of the work in the head, the implementation is quite simple and analogous to the

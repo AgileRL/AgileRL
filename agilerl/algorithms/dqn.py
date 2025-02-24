@@ -16,7 +16,7 @@ from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.q_networks import QNetwork
-from agilerl.typing import ExperiencesType, GymEnvType, NumpyObsType, TorchObsType
+from agilerl.typing import ExperiencesType, GymEnvType, ObservationType, TorchObsType
 from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 
 
@@ -190,7 +190,7 @@ class DQN(RLAlgorithm):
 
     def get_action(
         self,
-        obs: NumpyObsType,
+        obs: ObservationType,
         epsilon: float = 0.0,
         action_mask: Optional[np.ndarray] = None,
     ) -> ArrayLike:
@@ -314,7 +314,7 @@ class DQN(RLAlgorithm):
         """Updates agent network parameters to learn from experiences.
 
         :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
-        :type state: list[torch.Tensor[float]]
+        :type obs: list[torch.Tensor[float]]
         """
         states, actions, rewards, next_states, dones = experiences
         actions = actions.to(self.device)
@@ -355,24 +355,23 @@ class DQN(RLAlgorithm):
         :return: Mean test score of agent in environment
         :rtype: float
         """
+        self.set_training_mode(False)
         with torch.no_grad():
             rewards = []
             num_envs = env.num_envs if hasattr(env, "num_envs") else 1
             for _ in range(loop):
-                state, info = env.reset()
+                obs, info = env.reset()
                 scores = np.zeros(num_envs)
                 completed_episode_scores = np.zeros(num_envs)
                 finished = np.zeros(num_envs)
                 step = 0
                 while not np.all(finished):
                     if swap_channels:
-                        state = obs_channels_to_first(state)
+                        obs = obs_channels_to_first(obs)
 
                     action_mask = info.get("action_mask", None)
-                    action = self.get_action(
-                        state, epsilon=0.0, action_mask=action_mask
-                    )
-                    state, reward, done, trunc, info = env.step(action)
+                    action = self.get_action(obs, epsilon=0.0, action_mask=action_mask)
+                    obs, reward, done, trunc, info = env.step(action)
                     step += 1
                     scores += np.array(reward)
                     for idx, (d, t) in enumerate(zip(done, trunc)):

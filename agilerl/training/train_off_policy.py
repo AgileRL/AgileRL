@@ -434,6 +434,7 @@ def train_off_policy(
                     ), np.mean(critic_losses)
                 else:
                     mean_loss = np.mean(losses)
+
                 pop_loss[agent_idx].append(mean_loss)
 
         if algo in ["DQN"]:

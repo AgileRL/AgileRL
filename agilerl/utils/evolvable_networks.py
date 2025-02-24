@@ -9,8 +9,19 @@ from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 from torch.optim import Optimizer
 
-from agilerl.modules.configs import CnnNetConfig, MlpNetConfig, MultiInputNetConfig
-from agilerl.modules.custom_components import GumbelSoftmax, NewGELU, NoisyLinear
+from agilerl.modules.configs import (
+    CnnNetConfig,
+    MlpNetConfig,
+    MultiInputNetConfig,
+    SimBaNetConfig,
+)
+from agilerl.modules.custom_components import (
+    GumbelSoftmax,
+    NewGELU,
+    NoisyLinear,
+    ResidualBlock,
+    SimbaResidualBlock,
+)
 from agilerl.typing import ConfigType, DeviceType
 
 TupleorInt = Union[Tuple[int, ...], int]
@@ -38,7 +49,9 @@ def tuple_to_dict_space(observation_space: spaces.Tuple) -> spaces.Dict:
     return spaces.Dict(dict_space)
 
 
-def get_default_encoder_config(observation_space: spaces.Space) -> ConfigType:
+def get_default_encoder_config(
+    observation_space: spaces.Space, simba: bool = False
+) -> ConfigType:
     """Get the default configuration for the encoder network based on the observation space.
 
     :param observation_space: Observation space of the environment.
@@ -62,6 +75,9 @@ def get_default_encoder_config(observation_space: spaces.Space) -> ConfigType:
             output_activation=None,
         )
     else:
+        if simba:
+            return SimBaNetConfig(hidden_size=128, num_blocks=2)
+
         return MlpNetConfig(hidden_size=[16, 16], output_activation=None)
 
 
@@ -547,3 +563,99 @@ def create_mlp(
         activation_name=output_activation, new_gelu=new_gelu
     )
     return nn.Sequential(net_dict)
+
+
+def create_simba(
+    input_size: int,
+    output_size: int,
+    hidden_size: int,
+    num_blocks: int,
+    output_activation: Optional[str] = None,
+    scale_factor: float = 4.0,
+    device: DeviceType = "cpu",
+    name: str = "simba",
+) -> nn.Sequential:
+    """Creates a number of SimBa residual blocks.
+
+    Paper: https://arxiv.org/abs/2410.09754.
+
+    :param input_size: Number of input features.
+    :type input_size: int
+    :param output_size: Number of output features.
+    :type output_size: int
+    :param hidden_size: Number of hidden units.
+    :type hidden_size: int
+    :param num_blocks: Number of residual blocks.
+    :type num_blocks: int
+    :param output_activation: Activation function for output layer.
+    :type output_activation: Optional[str]
+    :param scale_factor: Scale factor for the hidden layer.
+    :type scale_factor: float, optional
+    :param device: Device to use. Defaults to "cpu".
+    :type device: DeviceType, optional
+    :param name: Name of the network.
+    :type name: str, default "simba"
+
+    :return: Residual block.
+    :rtype: nn.Sequential
+    """
+    net_dict: Dict[str, nn.Module] = OrderedDict()
+
+    # Initial dense layer
+    net_dict[f"{name}_linear_layer_input"] = nn.Linear(
+        input_size, hidden_size, device=device
+    )
+    nn.init.orthogonal_(net_dict[f"{name}_linear_layer_input"].weight)
+    for l_no in range(1, num_blocks + 1):
+        net_dict[f"{name}_residual_block_{str(l_no)}"] = SimbaResidualBlock(
+            hidden_size, scale_factor=scale_factor, device=device
+        )
+
+    # Final layer norm and output dense
+    net_dict[f"{name}_layer_norm_output"] = nn.LayerNorm(hidden_size, device=device)
+    net_dict[f"{name}_linear_layer_output"] = nn.Linear(
+        hidden_size, output_size, device=device
+    )
+    nn.init.orthogonal_(net_dict[f"{name}_linear_layer_output"].weight)
+
+    net_dict[f"{name}_activation_output"] = get_activation(
+        activation_name=output_activation
+    )
+
+    return nn.Sequential(net_dict)
+
+
+def create_resnet(
+    input_channels: int,
+    channel_size: int,
+    kernel_size: int,
+    stride_size: int,
+    num_blocks: int,
+    scale_factor: int = 4,
+    device: str = "cpu",
+    name: str = "resnet",
+):
+    """Creates a number of residual blocks for image-based inputs."""
+    net_dict = OrderedDict()
+
+    # Initial convolutional layer
+    net_dict[f"{name}_conv_input"] = nn.Conv2d(
+        input_channels,
+        channel_size,
+        kernel_size=kernel_size,
+        stride=stride_size,
+        padding=(kernel_size - 1) // 2,
+        bias=False,
+        device=device,
+    )
+    nn.init.kaiming_uniform_(net_dict[f"{name}_conv_input"].weight)
+
+    for l_no in range(1, num_blocks + 1):
+        net_dict[f"{name}_residual_block_{l_no}"] = ResidualBlock(
+            in_channels=channel_size,
+            kernel_size=kernel_size,
+            scale_factor=scale_factor,
+            device=device,
+        )
+
+    return net_dict

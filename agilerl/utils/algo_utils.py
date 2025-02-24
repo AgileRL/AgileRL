@@ -21,6 +21,7 @@ from agilerl.typing import (
     MaybeObsList,
     NetworkType,
     NumpyObsType,
+    ObservationType,
     OptimizerType,
     TorchObsType,
 )
@@ -409,9 +410,11 @@ def obs_channels_to_first(observation: NumpyObsType) -> NumpyObsType:
         raise TypeError(f"Expected np.ndarray or dict, got {type(observation)}")
 
 
-def obs_to_tensor(obs: NumpyObsType, device: Union[str, torch.device]) -> TorchObsType:
+def obs_to_tensor(
+    obs: ObservationType, device: Union[str, torch.device]
+) -> TorchObsType:
     """
-    Moves the observation to the given device.
+    Moves the observation to the given device as a PyTorch tensor.
 
     :param obs:
     :type obs: NumpyObsType

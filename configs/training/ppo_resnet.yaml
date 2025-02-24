@@ -1,12 +1,12 @@
 ---
 # Define initial hyperparameters
 INIT_HP:
-    ENV_NAME: LunarLander-v2   # Gym environment name
+    ENV_NAME: ALE/Assault-v5   # Gym environment name
     ALGO: PPO                  # Algorithm
     # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-    CHANNELS_LAST: false
+    CHANNELS_LAST: true
     NUM_ENVS: 16               # No. parallel environments for training
-    BATCH_SIZE: 128            # Batch size
+    BATCH_SIZE: 256            # Batch size
     LR: 0.001                  # Learning rate
     LEARN_STEP: 2048           # Learning frequency
     MAX_STEPS: 1_000_000       # Max no. steps
@@ -39,19 +39,25 @@ MUTATION_PARAMS:
     RAND_SEED: 42                          # Random seed
     MIN_LR: 0.0001                         # Define max and min limits for mutating RL hyperparams
     MAX_LR: 0.01
-    MIN_BATCH_SIZE: 8
+    MIN_BATCH_SIZE: 126
     MAX_BATCH_SIZE: 1024
     MIN_LEARN_STEP: 256
     MAX_LEARN_STEP: 8192
 
 NET_CONFIG:
     latent_dim: 64
+    encoder_cls: ResNet
 
     encoder_config:
-        hidden_size: [64]
-        # activation: Tanh
-        min_mlp_nodes: 64
-        max_mlp_nodes: 500
+        input_shape: [3, 210, 160]
+        num_outputs: 32
+        channel_size: 16
+        kernel_size: 3
+        stride_size: 1
+        num_blocks: 1
+        output_activation: ReLU
+        min_channel_size: 16
+        max_channel_size: 128
 
     head_config:
         hidden_size: [64]
