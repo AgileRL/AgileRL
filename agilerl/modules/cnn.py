@@ -284,7 +284,6 @@ class EvolvableCNN(EvolvableModule):
             kernel_size=self.mut_kernel_size.sizes,
             stride_size=stride_size,
             sample_input=sample_input,
-            name=self.name,
         )
 
     @property

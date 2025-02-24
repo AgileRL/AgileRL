@@ -12,8 +12,8 @@ from agilerl.typing import ConfigType, TorchObsType
 
 class ValueNetwork(EvolvableNetwork):
     """Value functions are used in reinforcement learning to estimate the expected value of a state.
-    Therefore, for any given observation, we predict a single scalar value that represents
-    the discounted return from that state.
+    For any given observation, we predict a single scalar value that represents
+    the discounted return from that state. Used in e.g. PPO.
 
     :param observation_space: Observation space of the environment.
     :type observation_space: spaces.Space
@@ -101,8 +101,9 @@ class ValueNetwork(EvolvableNetwork):
         return self.head_net(self.encoder(x))
 
     def recreate_network(self) -> None:
-        """Recreates the network"""
-        encoder = self._build_encoder(self.encoder.net_config)
+        """Recreates the network."""
+        self.recreate_encoder()
+
         head_net = self.create_mlp(
             num_inputs=self.latent_dim,
             num_outputs=1,
@@ -110,8 +111,4 @@ class ValueNetwork(EvolvableNetwork):
             net_config=self.head_net.net_config,
         )
 
-        self.encoder = EvolvableModule.preserve_parameters(self.encoder, encoder)
         self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net)
-
-
-# TODO: Implement DistributionalValueNetwork

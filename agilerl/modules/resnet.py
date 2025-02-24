@@ -67,6 +67,10 @@ class EvolvableResNet(EvolvableModule):
         super().__init__(device=device)
 
         assert isinstance(scale_factor, int), "Scale factor must be an integer."
+        assert isinstance(num_blocks, int), "Number of blocks must be an integer."
+        assert isinstance(channel_size, int), "Channel size must be an integer."
+        assert num_outputs >= 1, "Number of blocks must be greater than or equal to 1."
+        assert num_blocks >= 1, "Number of blocks must be greater than or equal to 1."
 
         self.input_shape = input_shape
         self.num_outputs = num_outputs

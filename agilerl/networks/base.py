@@ -1,3 +1,5 @@
+import inspect
+import warnings
 from dataclasses import asdict
 from typing import Any, Dict, Optional, Type, TypeVar, Union
 
@@ -215,6 +217,20 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                 self.encoder_cls = self._encoder_aliases[encoder_cls]
             elif not issubclass(encoder_cls, EvolvableModule):
                 raise TypeError("Encoder class must be a subclass of EvolvableModule.")
+
+            # Check if encoder config contains `num_outputs` as input argument, in which
+            # case we can enable latent space mutations. Otherwise, we disable them.
+            input_args = inspect.getfullargspec(self.encoder_cls.__init__).args
+            if "num_outputs" not in input_args:
+                warnings.warn(
+                    "Custom encoder does not contain `num_outputs` as an input argument. "
+                    "Disabling latent space mutations. Make sure to set the number of "
+                    "outputs to the latent dimension in the encoder configuration."
+                )
+                self.filter_mutation_methods("latent")
+            else:
+                encoder_config["num_outputs"] = self.latent_dim
+
             self.encoder = self.encoder_cls(**encoder_config)
         else:
             self.encoder = self._build_encoder(encoder_config)
@@ -399,7 +415,10 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     def recreate_encoder(self: SelfEvolvableNetwork) -> None:
         """Recreate the encoder of the network."""
         if self.encoder_cls is not None:
-            encoder = self.encoder_cls(**self.encoder.init_dict)
+            # Need to change `num_outputs` to the latent dimension after a mutation
+            init_dict = self.encoder.init_dict
+            init_dict["num_outputs"] = self.latent_dim
+            encoder = self.encoder_cls(**init_dict)
         else:
             encoder = self._build_encoder(self.encoder.net_config)
 

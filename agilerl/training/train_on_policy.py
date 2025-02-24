@@ -187,9 +187,8 @@ def train_on_policy(
     checkpoint_count = 0
 
     # Pre-training mutation
-    if accelerator is None:
-        if mutation is not None:
-            pop = mutation.mutation(pop, pre_training_mut=True)
+    if accelerator is None and mutation is not None:
+        pop = mutation.mutation(pop, pre_training_mut=True)
 
     # RL training loop
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
