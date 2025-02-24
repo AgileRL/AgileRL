@@ -231,26 +231,6 @@ def test_constructor_initializes_attributes():
     del mutations
 
 
-# Can regularize weight
-def test_returns_regularize_weight():
-    mutations = Mutations(0, 0, 0, 0, 0, 0, 0.1)
-
-    weight = 10
-    mag = 5
-    result = mutations.regularize_weight(weight, mag)
-    assert result == mag
-
-    weight = -10
-    mag = 5
-    result = mutations.regularize_weight(weight, mag)
-    assert result == -mag
-
-    weight = 5
-    mag = 5
-    result = mutations.regularize_weight(weight, mag)
-    assert result == weight
-
-
 # Checks no mutations if all probabilities set to zero
 @pytest.mark.parametrize("algo", ["DQN"])
 @pytest.mark.parametrize(
@@ -826,6 +806,23 @@ def test_mutation_applies_parameter_mutations(algo, device, accelerator, init_po
         # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
         assert old.index == individual.index
 
+        # Compare state dictionaries of the actor (or network)
+        policy_name = old.registry.policy
+        old_policy = getattr(old, policy_name)
+        new_policy = getattr(individual, policy_name)
+        old_sd = old_policy.state_dict()
+        new_sd = new_policy.state_dict()
+        mutation_found = False
+        for key in old_sd.keys():
+            if "norm" in key:  # Skip normalization layers
+                continue
+            diff_norm = (old_sd[key] - new_sd[key]).norm().item()
+            if diff_norm > 1e-6:
+                mutation_found = True
+                break
+
+        assert mutation_found, f"Mutation not applied for agent index {old.index}"
+
     del mutations
     del population
     del mutated_population
@@ -1341,6 +1338,23 @@ def test_mutation_applies_parameter_mutations_multi_agent(
         # Due to randomness, sometimes parameters are not different
         # assert str(old.actors[0].state_dict()) != str(individual.actors[0].state_dict())
         assert old.index == individual.index
+
+        # Compare state dictionaries of the actor (or network)
+        policy_name = old.registry.policy
+        old_policy = getattr(old, policy_name)
+        new_policy = getattr(individual, policy_name)
+        old_sd = old_policy[0].state_dict()
+        new_sd = new_policy[0].state_dict()
+        mutation_found = False
+        for key in old_sd.keys():
+            if "norm" in key:  # Skip normalization layers
+                continue
+            diff_norm = (old_sd[key] - new_sd[key]).norm().item()
+            if diff_norm > 1e-6:
+                mutation_found = True
+                break
+
+        assert mutation_found, f"Mutation not applied for agent index {old.index}"
 
     del mutations
     del population

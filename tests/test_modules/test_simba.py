@@ -87,6 +87,19 @@ def test_recreate_network():
     assert model.model is not initial_model
 
 
+def test_clone():
+    model = EvolvableSimBa(
+        num_inputs=10, num_outputs=2, hidden_size=64, num_blocks=3, device="cpu"
+    )
+    clone = model.clone()
+    assert clone is not model
+    assert clone.num_inputs == model.num_inputs
+    assert clone.num_outputs == model.num_outputs
+    assert clone.hidden_size == model.hidden_size
+    assert clone.num_blocks == model.num_blocks
+    assert str(clone.state_dict()) == str(model.state_dict())
+
+
 @pytest.fixture
 def observation_space():
     return spaces.Box(low=-1.0, high=1.0, shape=(10,))
