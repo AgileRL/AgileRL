@@ -9,11 +9,17 @@ from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 from torch.optim import Optimizer
 
-from agilerl.modules.configs import CnnNetConfig, MlpNetConfig, MultiInputNetConfig
+from agilerl.modules.configs import (
+    CnnNetConfig,
+    MlpNetConfig,
+    MultiInputNetConfig,
+    SimBaNetConfig,
+)
 from agilerl.modules.custom_components import (
     GumbelSoftmax,
     NewGELU,
     NoisyLinear,
+    ResidualBlock,
     SimbaResidualBlock,
 )
 from agilerl.typing import ConfigType, DeviceType
@@ -43,7 +49,9 @@ def tuple_to_dict_space(observation_space: spaces.Tuple) -> spaces.Dict:
     return spaces.Dict(dict_space)
 
 
-def get_default_encoder_config(observation_space: spaces.Space) -> ConfigType:
+def get_default_encoder_config(
+    observation_space: spaces.Space, simba: bool = False
+) -> ConfigType:
     """Get the default configuration for the encoder network based on the observation space.
 
     :param observation_space: Observation space of the environment.
@@ -67,6 +75,9 @@ def get_default_encoder_config(observation_space: spaces.Space) -> ConfigType:
             output_activation=None,
         )
     else:
+        if simba:
+            return SimBaNetConfig(hidden_size=128, num_blocks=2)
+
         return MlpNetConfig(hidden_size=[16, 16], output_activation=None)
 
 
@@ -612,3 +623,39 @@ def create_simba(
     )
 
     return nn.Sequential(net_dict)
+
+
+def create_resnet(
+    input_channels: int,
+    channel_size: int,
+    kernel_size: int,
+    stride_size: int,
+    num_blocks: int,
+    scale_factor: int = 4,
+    device: str = "cpu",
+    name: str = "resnet",
+):
+    """Creates a number of residual blocks for image-based inputs."""
+    net_dict = OrderedDict()
+
+    # Initial convolutional layer
+    net_dict[f"{name}_conv_input"] = nn.Conv2d(
+        input_channels,
+        channel_size,
+        kernel_size=kernel_size,
+        stride=stride_size,
+        padding=(kernel_size - 1) // 2,
+        bias=False,
+        device=device,
+    )
+    nn.init.kaiming_uniform_(net_dict[f"{name}_conv_input"].weight)
+
+    for l_no in range(1, num_blocks + 1):
+        net_dict[f"{name}_residual_block_{l_no}"] = ResidualBlock(
+            in_channels=channel_size,
+            kernel_size=kernel_size,
+            scale_factor=scale_factor,
+            device=device,
+        )
+
+    return net_dict

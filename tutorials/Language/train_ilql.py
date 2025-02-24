@@ -4,13 +4,13 @@ from collections import deque
 from functools import partial
 
 import torch
+import wandb
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from torch.utils.data.dataset import IterableDataset
 from tqdm import tqdm
 from wordle.load_objects import load_item
 
-import wandb
 from agilerl.data.rl_data import Iterable_RL_Dataset
 from agilerl.data.torch_datasets import GeneralDataset, GeneralIterDataset
 from agilerl.utils.ilql_utils import add_system_configs, convert_path

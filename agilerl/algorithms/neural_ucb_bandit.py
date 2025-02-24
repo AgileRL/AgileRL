@@ -127,14 +127,17 @@ class NeuralUCB(RLAlgorithm):
             self.actor = make_safe_deepcopies(actor_network)
         else:
             net_config = {} if net_config is None else net_config
+            simba = net_config.get("simba", False)
             encoder_config = (
-                get_default_encoder_config(observation_space)
+                get_default_encoder_config(observation_space, simba)
                 if net_config.get("encoder_config") is None
                 else net_config["encoder_config"]
             )
-            encoder_config["layer_norm"] = (
-                False  # Layer norm is not used in the original implementation
-            )
+
+            if not simba:
+                encoder_config["layer_norm"] = (
+                    False  # Layer norm is not used in the original implementation
+                )
 
             net_config["encoder_config"] = encoder_config
 

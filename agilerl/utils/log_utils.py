@@ -1,9 +1,8 @@
 import json
 
 import torch
-from flatten_dict import flatten, unflatten
-
 import wandb
+from flatten_dict import flatten, unflatten
 
 
 class DistributeCombineLogs:

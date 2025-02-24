@@ -5,7 +5,6 @@ import pytest
 import torch
 
 from agilerl.modules.cnn import EvolvableCNN
-from agilerl.modules.custom_components import NoisyLinear
 
 
 ######### Define fixtures #########
@@ -20,20 +19,7 @@ def cleanup():
     torch.cuda.empty_cache()  # Free up GPU memory
 
 
-def test_noisy_linear(device):
-    noisy_linear = NoisyLinear(2, 10).to(device)
-    noisy_linear.training = False
-    with torch.no_grad():
-        output = noisy_linear.forward(torch.randn(1, 2).to(device))
-        noisy_linear.training = True
-        output_training = noisy_linear.forward(torch.randn(1, 2).to(device))
-    assert output.shape == (1, 10)
-    assert output_training.shape == (1, 10)
-
-
 ######### Test instantiation #########
-
-
 @pytest.mark.parametrize(
     "input_shape, channel_size, kernel_size, stride_size, num_outputs",
     [

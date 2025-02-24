@@ -171,7 +171,6 @@ class EvolvableMLP(EvolvableModule):
         """Returns output layer of neural network."""
         return getattr(self.model, f"{self.name}_linear_layer_output")
 
-    @mutation(MutationType.ACTIVATION)
     def change_activation(self, activation: str, output: bool = False) -> None:
         """Set the activation function for the network.
 
@@ -179,9 +178,6 @@ class EvolvableMLP(EvolvableModule):
         :type activation: str
         :param output: Flag indicating whether to set the output activation function, defaults to False
         :type output: bool, optional
-
-        :return: Activation function
-        :rtype: str
         """
         if output:
             self.output_activation = activation
@@ -191,7 +187,7 @@ class EvolvableMLP(EvolvableModule):
 
     @mutation(MutationType.LAYER)
     def add_layer(self) -> None:
-        """Adds a hidden layer to neural network. Falls back on add_node if
+        """Adds a hidden layer to neural network. Falls back on ``add_node()`` if
         max hidden layers reached."""
         # add layer to hyper params
         if len(self.hidden_size) < self.max_hidden_layers:  # HARD LIMIT
@@ -201,7 +197,7 @@ class EvolvableMLP(EvolvableModule):
 
     @mutation(MutationType.LAYER)
     def remove_layer(self) -> None:
-        """Removes a hidden layer from neural network. Falls back on remove_node if
+        """Removes a hidden layer from neural network. Falls back on ``add_node()`` if
         min hidden layers reached."""
         if len(self.hidden_size) > self.min_hidden_layers:  # HARD LIMIT
             self.hidden_size = self.hidden_size[:-1]

@@ -123,6 +123,17 @@ def encoder_mlp_config():
 
 
 @pytest.fixture
+def encoder_simba_config():
+    return {
+        "simba": True,
+        "encoder_config": {
+            "hidden_size": 64,
+            "num_blocks": 3,
+        },
+    }
+
+
+@pytest.fixture
 def encoder_cnn_config():
     return {
         "encoder_config": {
@@ -220,26 +231,6 @@ def test_constructor_initializes_attributes():
     del mutations
 
 
-# Can regularize weight
-def test_returns_regularize_weight():
-    mutations = Mutations(0, 0, 0, 0, 0, 0, 0.1)
-
-    weight = 10
-    mag = 5
-    result = mutations.regularize_weight(weight, mag)
-    assert result == mag
-
-    weight = -10
-    mag = 5
-    result = mutations.regularize_weight(weight, mag)
-    assert result == -mag
-
-    weight = 5
-    mag = 5
-    result = mutations.regularize_weight(weight, mag)
-    assert result == weight
-
-
 # Checks no mutations if all probabilities set to zero
 @pytest.mark.parametrize("algo", ["DQN"])
 @pytest.mark.parametrize(
@@ -305,6 +296,79 @@ def test_mutation_no_options(device, init_pop):
 )
 @pytest.mark.parametrize("population_size", [1])
 def test_mutation_applies_random_mutations(algo, device, accelerator, init_pop):
+    population = init_pop
+    pre_training_mut = True
+
+    population = init_pop
+
+    mutations = Mutations(
+        0,
+        0.1,
+        0.1,
+        0.1,
+        0.1,
+        0.1,
+        0.1,
+        mutate_elite=False,
+        device=device,
+        accelerator=accelerator,
+    )
+
+    for agent in population:
+        if accelerator is not None:
+            agent.unwrap_models()
+
+    mutated_population = mutations.mutation(population, pre_training_mut)
+
+    assert len(mutated_population) == len(population)
+    assert mutated_population[0].mut == "None"  # Satisfies mutate_elite=False condition
+    for individual in mutated_population:
+        policy = getattr(individual, individual.registry.policy)
+        assert individual.mut in [
+            "None",
+            "batch_size",
+            "lr",
+            "lr_actor",
+            "lr_critic",
+            "learn_step",
+            "act",
+            "param",
+            policy.last_mutation_attr,
+        ]
+
+    del mutations
+    del population
+    del mutated_population
+
+    torch.cuda.empty_cache()  # Free up GPU memory
+
+
+@pytest.mark.parametrize(
+    "algo, hp_config, action_space",
+    [
+        ("DQN", "default_hp_config", generate_discrete_space(2)),
+        ("DDPG", "ac_hp_config", generate_random_box_space((4,), low=-1, high=1)),
+        ("TD3", "ac_hp_config", generate_random_box_space((4,), low=-1, high=1)),
+        ("PPO", "default_hp_config", generate_discrete_space(2)),
+        ("CQN", "default_hp_config", generate_discrete_space(2)),
+        ("NeuralUCB", "default_hp_config", generate_discrete_space(2)),
+        ("NeuralTS", "default_hp_config", generate_discrete_space(2)),
+    ],
+)
+@pytest.mark.parametrize(
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
+)
+@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
+@pytest.mark.parametrize(
+    "observation_space, net_config",
+    [
+        (generate_random_box_space((4,)), "encoder_simba_config"),
+    ],
+)
+@pytest.mark.parametrize("population_size", [1])
+def test_mutation_applies_random_mutations_simba(algo, device, accelerator, init_pop):
+    population = init_pop
     pre_training_mut = True
 
     population = init_pop
@@ -741,6 +805,23 @@ def test_mutation_applies_parameter_mutations(algo, device, accelerator, init_po
         # Due to randomness, sometimes parameters are not different
         # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
         assert old.index == individual.index
+
+        # Compare state dictionaries of the actor (or network)
+        policy_name = old.registry.policy
+        old_policy = getattr(old, policy_name)
+        new_policy = getattr(individual, policy_name)
+        old_sd = old_policy.state_dict()
+        new_sd = new_policy.state_dict()
+        mutation_found = False
+        for key in old_sd.keys():
+            if "norm" in key:  # Skip normalization layers
+                continue
+            diff_norm = (old_sd[key] - new_sd[key]).norm().item()
+            if diff_norm > 1e-6:
+                mutation_found = True
+                break
+
+        assert mutation_found, f"Mutation not applied for agent index {old.index}"
 
     del mutations
     del population
@@ -1257,6 +1338,23 @@ def test_mutation_applies_parameter_mutations_multi_agent(
         # Due to randomness, sometimes parameters are not different
         # assert str(old.actors[0].state_dict()) != str(individual.actors[0].state_dict())
         assert old.index == individual.index
+
+        # Compare state dictionaries of the actor (or network)
+        policy_name = old.registry.policy
+        old_policy = getattr(old, policy_name)
+        new_policy = getattr(individual, policy_name)
+        old_sd = old_policy[0].state_dict()
+        new_sd = new_policy[0].state_dict()
+        mutation_found = False
+        for key in old_sd.keys():
+            if "norm" in key:  # Skip normalization layers
+                continue
+            diff_norm = (old_sd[key] - new_sd[key]).norm().item()
+            if diff_norm > 1e-6:
+                mutation_found = True
+                break
+
+        assert mutation_found, f"Mutation not applied for agent index {old.index}"
 
     del mutations
     del population

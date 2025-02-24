@@ -147,9 +147,81 @@ class NewGELU(nn.Module):
         )
 
 
+class ResidualBlock(nn.Module):
+    """Residual block with support for even and odd kernel sizes.
+
+    :param in_channels: Number of input channels.
+    :type in_channels: int
+    :param kernel_size: Size of the convolutional kernel.
+    :type kernel_size: int
+    :param stride: Stride of the convolution. If >1, applies downsampling.
+    :type stride: int
+    :param scale_factor: Expansion factor for the hidden layer.
+    :type scale_factor: int, optional (default=4)
+    :param device: Device for computation.
+    :type device: str, optional (default="cpu")
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        kernel_size: int,
+        scale_factor: int = 4,
+        device: str = "cpu",
+    ) -> None:
+        super().__init__()
+
+        hidden_channels = in_channels * scale_factor
+
+        self.conv1 = nn.Conv2d(
+            in_channels,
+            hidden_channels,
+            kernel_size=kernel_size,
+            padding=0,
+            bias=False,
+            device=device,
+        )
+        self.bn1 = nn.BatchNorm2d(hidden_channels, device=device)
+
+        self.conv2 = nn.Conv2d(
+            hidden_channels,
+            in_channels,
+            kernel_size=kernel_size,
+            padding=0,
+            bias=False,
+            device=device,
+        )
+        self.bn2 = nn.BatchNorm2d(in_channels, device=device)
+
+        # Weight initialization
+        nn.init.kaiming_uniform_(self.conv1.weight, nonlinearity="relu")
+        nn.init.kaiming_uniform_(self.conv2.weight, nonlinearity="relu")
+
+    def asymmetric_padding(self, x: torch.Tensor, kernel_size: int) -> torch.Tensor:
+        """Applies asymmetric padding for even kernel sizes."""
+        pad_l = (kernel_size - 1) // 2  # Floor
+        pad_r = kernel_size // 2  # Ceiling
+        return F.pad(x, (pad_l, pad_r, pad_l, pad_r), mode="replicate")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        res = x
+
+        x = self.asymmetric_padding(
+            x, kernel_size=self.conv1.kernel_size[0]
+        )  # Apply manual padding
+        x = F.relu(self.bn1(self.conv1(x)))
+
+        x = self.asymmetric_padding(
+            x, kernel_size=self.conv2.kernel_size[0]
+        )  # Apply manual padding
+        x = self.bn2(self.conv2(x))
+
+        return F.relu(res + x)  # Apply ReLU after summing the residual
+
+
 class SimbaResidualBlock(nn.Module):
     """Creates a residual block designed to avoid overfitting in RL by inducing
-    a simplicity bias.
+    a simplicity bias through skip connections.
 
     Paper: https://arxiv.org/abs/2410.09754
 
