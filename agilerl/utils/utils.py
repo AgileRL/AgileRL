@@ -22,6 +22,7 @@ from agilerl.algorithms import (
     NeuralUCB,
     RainbowDQN,
 )
+from agilerl.algorithms.core import EvolvableAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -711,7 +712,9 @@ def print_hyperparams(pop: PopulationType) -> None:
     for agent in pop:
         print(
             "Agent ID: {}    Mean 5 Fitness: {:.2f}    Attributes: {}".format(
-                agent.index, np.mean(agent.fitness[-5:]), agent.inspect_attributes()
+                agent.index,
+                np.mean(agent.fitness[-5:]),
+                EvolvableAlgorithm.inspect_attributes(agent),
             )
         )
 
