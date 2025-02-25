@@ -1,5 +1,6 @@
 # This file contains utility functions for tuning
 from collections import OrderedDict
+from dataclasses import asdict
 from typing import Dict, Iterable, List, Literal, Optional, Tuple, Union
 
 import numpy as np
@@ -50,35 +51,41 @@ def tuple_to_dict_space(observation_space: spaces.Tuple) -> spaces.Dict:
 
 
 def get_default_encoder_config(
-    observation_space: spaces.Space, simba: bool = False
+    observation_space: spaces.Space, simba: bool = False, as_dict: bool = False
 ) -> ConfigType:
     """Get the default configuration for the encoder network based on the observation space.
 
     :param observation_space: Observation space of the environment.
     :type observation_space: spaces.Space
+    :param simba: Whether to use EvolvableSimBa rather than EvolvableMLP for vector
+    observations. Defaults to False.
+    :type simba: bool, optional
+    :param as_dict: Whether to return the configuration as a dictionary. Defaults to False.
+    :type as_dict: bool, optional
 
     :return: Default configuration for the encoder network.
     :rtype: Dict[str, Any]
     """
     if isinstance(observation_space, (spaces.Dict, spaces.Tuple)):
-        return MultiInputNetConfig(
+        config = MultiInputNetConfig(
             channel_size=[16, 16],
             kernel_size=[3, 3],
             stride_size=[1, 1],
             output_activation=None,
         )
     elif is_image_space(observation_space):
-        return CnnNetConfig(
+        config = CnnNetConfig(
             channel_size=[16, 16],
             kernel_size=[3, 3],
             stride_size=[1, 1],
             output_activation=None,
         )
+    elif simba:
+        config = SimBaNetConfig(hidden_size=128, num_blocks=2)
     else:
-        if simba:
-            return SimBaNetConfig(hidden_size=128, num_blocks=2)
+        config = MlpNetConfig(hidden_size=[16, 16], output_activation=None)
 
-        return MlpNetConfig(hidden_size=[16, 16], output_activation=None)
+    return config if not as_dict else asdict(config)
 
 
 def unwrap_optimizer(

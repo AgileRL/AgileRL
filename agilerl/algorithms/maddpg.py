@@ -8,13 +8,11 @@ import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
 
-from agilerl.algorithms.core import MultiAgentRLAlgorithm
+from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.modules.base import EvolvableModule
+from agilerl.modules import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
-from agilerl.networks.actors import DeterministicActor
-from agilerl.networks.q_networks import ContinuousQNetwork
+from agilerl.networks import ContinuousQNetwork, DeterministicActor
 from agilerl.typing import (
     ArrayDict,
     ArrayLike,
@@ -27,6 +25,7 @@ from agilerl.typing import (
 from agilerl.utils.algo_utils import (
     concatenate_spaces,
     contains_image_space,
+    is_image_space,
     key_in_nested_dict,
     make_safe_deepcopies,
     multi_agent_sample_tensor_from_space,
@@ -253,10 +252,30 @@ class MADDPG(MultiAgentRLAlgorithm):
                 critic_head_config = MlpNetConfig(hidden_size=[64])
 
             if encoder_config is None:
-                encoder_config = get_default_encoder_config(self.single_space, simba)
-                critic_encoder_config = get_default_encoder_config(
-                    self.single_space, simba
-                )
+                encoder_configs = []
+                for agent_id in self.agent_ids:
+                    agent_space = self.observation_spaces[agent_id]
+                    encoder_config = get_default_encoder_config(
+                        agent_space, simba, as_dict=True
+                    )
+                    critic_encoder_config = encoder_config.copy()
+
+                    if is_image_space(agent_space):
+                        encoder_config["sample_input"] = (
+                            multi_agent_sample_tensor_from_space(
+                                self.single_space, self.n_agents, device=self.device
+                            )
+                        )
+                        critic_encoder_config["sample_input"] = (
+                            multi_agent_sample_tensor_from_space(
+                                self.single_space,
+                                self.n_agents,
+                                device=self.device,
+                                critic=True,
+                            )
+                        )
+
+                    encoder_configs.append(encoder_config)
 
             # For image spaces we need to give a sample input tensor to
             # build networks with Conv3d blocks appropriately
@@ -279,17 +298,17 @@ class MADDPG(MultiAgentRLAlgorithm):
             critic_net_config["encoder_config"] = critic_encoder_config
             critic_net_config["head_config"] = critic_head_config
 
-            def create_actor(idx):
+            def create_actor(agent_id: str) -> DeterministicActor:
                 return DeterministicActor(
-                    self.observation_spaces[idx],
-                    self.action_spaces[idx],
+                    self.observation_space[agent_id],
+                    self.action_space[agent_id],
                     n_agents=self.n_agents,
                     device=self.device,
                     **copy.deepcopy(net_config),
                 )
 
             # NOTE: Critic uses observations + actions of all agents to predict Q-value
-            def create_critic():
+            def create_critic() -> ContinuousQNetwork:
                 return ContinuousQNetwork(
                     observation_space=concatenate_spaces(observation_spaces),
                     action_space=concatenate_spaces(action_spaces),
@@ -298,14 +317,15 @@ class MADDPG(MultiAgentRLAlgorithm):
                     **copy.deepcopy(critic_net_config),
                 )
 
-            self.actors = [create_actor(idx) for idx in range(self.n_agents)]
+            self.actors = [create_actor(agent_id) for agent_id in self.agent_ids]
             self.critics = [create_critic() for _ in range(self.n_agents)]
-            self.actor_targets = [create_actor(idx) for idx in range(self.n_agents)]
+            self.actor_targets = [create_actor(agent_id) for agent_id in self.agent_ids]
             self.critic_targets = [create_critic() for _ in range(self.n_agents)]
 
         # Initialise target network parameters
         for actor, actor_target in zip(self.actors, self.actor_targets):
             actor_target.load_state_dict(actor.state_dict())
+
         for critic, critic_target in zip(self.critics, self.critic_targets):
             critic_target.load_state_dict(critic.state_dict())
 

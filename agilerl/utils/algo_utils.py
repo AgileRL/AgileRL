@@ -65,6 +65,10 @@ def multi_agent_sample_tensor_from_space(
 ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
     """Gets the sample tensor from an observation space for multi-agent settings.
 
+    .. note::
+        We assume that multi-agent settings with image spaces have the same shape for the image
+        spaces of different agents.
+
     :param space: Observation space
     :type space: spaces.Space
     :param n_agents: Number of agents

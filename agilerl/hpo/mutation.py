@@ -48,29 +48,26 @@ def set_global_seed(seed: Optional[int]) -> None:
 
 def get_architecture_mut_method(
     eval: OffspringType, new_layer_prob: float, rng: Generator
-) -> str:
-    """Get the mutation method and its return type of the individual.
+) -> Union[str, List[str]]:
+    """Sample a mutation method from an offspring. In multi-agent settings, where 'eval' is
+    a list of `EvolvableModule` instances (one for each agent), we sample a separate mutation
+    for each agent.
 
-    :param individual: The individual to inspect
-    :type individual: EvolvableAlgorithm
+    :param eval: The offspring to sample the mutation method from
+    :type eval: OffspringType
     :param new_layer_prob: Relative probability of new layer mutation (type of architecture mutation)
     :type new_layer_prob: float
     :param rng: Random number generator
     :type rng: Generator
-    :return: The mutation methods name
-    :rtype: str
-    """
-    # All of the offsprings should be the same EvolvableModule type, so we can
-    # just sample the mutation method from the first offspring
-    if isinstance(eval, list):
-        assert all(
-            isinstance(offspring, eval[0].__class__) for offspring in eval
-        ), "All offspring should be of the same type."
 
-        # NOTE: For multi-agent settings we apply the same architecture mutations to
-        # all agents. This assumes all agents are modules with the same architecture
-        # mutation methods, which is probably unreasonable for a lot of use-cases...
-        eval = eval[0]
+    :return: The mutation methods name. In multi-agent settings, this is a list of mutation method names.
+    :rtype: Union[str, List[str]]
+    """
+    if isinstance(eval, list):
+        return [
+            agent_eval.sample_mutation_method(new_layer_prob, rng)
+            for agent_eval in eval
+        ]
 
     return eval.sample_mutation_method(new_layer_prob, rng)
 
@@ -800,6 +797,7 @@ class Mutations:
             policy_offspring, self.new_layer_prob, self.rng
         )
 
+        print(mut_method)
         applied_mutations, mut_dict = self._apply_arch_mutation(
             policy_offspring, mut_method
         )
@@ -838,11 +836,9 @@ class Mutations:
         :param networks: The networks to apply the mutation to
         :type networks: OffspringType
         :param mut_method: The mutation method to apply
-        :type mut_method: str
-        :param ret_type: The return type of the mutation method
-        :type ret_type: Type
-        :param mut_dict: The mutation dictionary, defaults to None
-        :type mut_dict: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]], optional
+        :type mut_method: Union[Optional[str], List[Optional[str]]]
+        :param applied_mut_dict: The mutation dictionary to apply
+        :type applied_mut_dict: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]
 
         :return: The mutation method name and the mutation dictionary
         :rtype: Tuple[Union[str, List[str]], MutationReturnType]
@@ -860,6 +856,7 @@ class Mutations:
             mut_dict = []
             applied_muts = []
             for i, net in enumerate(networks):
+                print(f"Applying {mut_method[i]} to {i}")
                 _to_apply = mut_method[i]
                 if _to_apply is None:
                     mut_dict.append({})

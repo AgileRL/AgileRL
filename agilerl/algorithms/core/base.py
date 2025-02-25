@@ -625,7 +625,11 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             getattr(self, hook)()
 
     def get_policy(self) -> EvolvableModule:
-        """Returns the policy network of the algorithm."""
+        """Returns the policy network of the algorithm.
+
+        :return: The policy network.
+        :rtype: EvolvableModule
+        """
         for group in self.registry.groups:
             if group.policy:
                 return getattr(self, group.eval)
@@ -1138,6 +1142,19 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
             on_device.append(exp)
 
         return on_device
+
+
+"""
+NEXT STEPS
+----------
+- Now that we can create networks with architecture mutations more flexibly, we can move towards more general
+multi-agent networks.
+
+- We can
+
+
+
+"""
 
 
 class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
