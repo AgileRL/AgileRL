@@ -1,3 +1,4 @@
+import copy
 from typing import Any, Optional, Tuple, Union
 
 import numpy as np
@@ -5,6 +6,7 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 from gymnasium import spaces
+from torch.nn.utils import clip_grad_norm_
 from transformers import GenerationConfig
 
 from agilerl.algorithms.core import RLAlgorithm
@@ -70,10 +72,11 @@ class GRPO(RLAlgorithm):
         lr: float = 2e-5,
         mut: Optional[str] = None,
         clip_coef: float = 0.2,
+        max_grad_norm: float = 1.0,
         update_epochs: int = 4,
         group_size: int = 5,
         temperature: float = 0.9,
-        max_sequence_length: int = 512,
+        calc_position_embeddings: bool = True,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
@@ -118,14 +121,16 @@ class GRPO(RLAlgorithm):
         self.group_size = (
             group_size  # What if we assume that group size == num_envs ???
         )
+        self.beta = beta
         self.pad_token_id = pad_token_id
-
+        self.calc_position_embeddings = calc_position_embeddings
         self.generation_config = GenerationConfig(
             do_sample=True,
             temperature=temperature,
-            max_new_tokens=max_sequence_length,
+            max_new_tokens=action_space.shape[0],
             pad_token_id=pad_token_id,
         )
+        self.max_grad_norm = max_grad_norm
 
         if actor_network is not None:
             if not isinstance(actor_network, EvolvableModule):
@@ -133,6 +138,11 @@ class GRPO(RLAlgorithm):
                     f"Passed actor network is of type {type(actor_network)}, but must be of type EvolvableModule."
                 )
             self.actor = actor_network.to(self.device)
+            self.reference_actor = copy.deepcopy(self.actor)
+            self.reference_actor.eval()
+            self.actor.module.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )
 
         else:
             raise ValueError(
@@ -149,11 +159,12 @@ class GRPO(RLAlgorithm):
 
         # Register network groups for mutations
         self.register_network_group(NetworkGroup(eval=self.actor, policy=True))
-
-        # Create a Generation config e.g. self.generation_config = GenerationConfig
+        self.register_network_group(
+            NetworkGroup(eval=self.reference_actor, policy=True)
+        )
 
     def get_action(
-        self, states: torch.Tensor, return_logits: bool = True
+        self, states: torch.Tensor
     ) -> Tuple[
         Union[np.ndarray, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor
     ]:
@@ -171,40 +182,22 @@ class GRPO(RLAlgorithm):
         :type preprocess_obs: bool, optional
         """
 
-        # Update the reference model
-        # Duplicate the prompt group_size times
-        # Use the generation config to generate (n = group_size) answers
-        # No need to tokenize as the environment will take care of tokenization
-        import time
-
+        self.actor.eval()
         with torch.no_grad():
-            self.actor.eval()
             action_masks = []
             completion_ids = []
-            completion_logprobs = []
-            timing = []
-            i = 0
             for state in states:
-                # print("Epoch", i)
-                # assert False
                 state["input_ids"] = (
                     state["input_ids"].repeat(self.group_size, 1).to(self.device)
                 )
-                # print(state["input_ids"].shape)
                 state["attention_mask"] = (
                     state["attention_mask"].repeat(self.group_size, 1).to(self.device)
                 )
-                t = time.time()
-                completion = self.actor.generate(
+                completion_id = self.actor.generate(
                     **state,
                     generation_config=self.generation_config,
-                    output_scores=return_logits,
-                    return_dict_in_generate=return_logits,
                 )
-                timing.append(time.time() - t)
-                completion_ids.append(completion_id := completion.sequences)
-                print([len(score) for score in completion.scores])
-                completion_logprobs.append(F.log_softmax(completion.scores))
+                completion_ids.append(completion_id)
                 action_mask = torch.zeros_like(
                     completion_id, dtype=torch.bool, device=self.device
                 )
@@ -212,9 +205,7 @@ class GRPO(RLAlgorithm):
                 action_mask[completion_id == self.pad_token_id] = False
                 action_mask = action_mask[:, 1:]
                 action_masks.append(action_mask)
-                i += 1
-        # print(timing)
-        return completion_ids, completion_logprobs, action_mask
+        return completion_ids, action_masks
 
     def learn(self, experiences: ExperiencesType) -> float:
         """Updates agent network parameters to learn from experiences.
@@ -222,11 +213,42 @@ class GRPO(RLAlgorithm):
         :param experience: List of batched states, actions, log_probs, rewards, dones, values, next_state in that order.
         :type experience: Tuple[Union[numpy.ndarray, Dict[str, numpy.ndarray]], ...]
         """
-
+        torch.cuda.empty_cache()
         # Calculate the advantage
         # for each experience, perform the GRPO loss update
         # Do we want to do one experience at a time or a batch of experiences at a time?
-        pass
+        completion_ids, action_masks, rewards = experiences
+        advantages = self._calculate_advantage(rewards).to(self.device)
+        reference_log_probs = [
+            self._get_logprobs(ids, use_reference=True) for ids in completion_ids
+        ]
+        old_log_probs = [
+            self._get_logprobs(ids, use_reference=False) for ids in completion_ids
+        ]
+        mean_loss, mean_kl, mean_grad_norm = 0, 0, 0
+        self.actor.train()
+        # Backprop
+        for idx, (ids, action_mask) in enumerate(zip(completion_ids, action_masks)):
+            log_probs = self._get_logprobs(ids, use_reference=False)
+            loss, kl = self._grpo_loss(
+                action_mask,
+                log_probs,
+                old_log_probs[idx],
+                reference_log_probs[idx],
+                advantages[idx],
+            )
+            self.optimizer.zero_grad()
+            loss.backward()
+            mean_grad_norm += clip_grad_norm_(
+                self.actor.parameters(), self.max_grad_norm
+            )
+            self.optimizer.step()
+            mean_loss += loss.item()
+            mean_kl += kl.item()
+        mean_loss /= len(completion_ids)
+        mean_kl /= len(completion_ids)
+        mean_grad_norm /= len(completion_ids)
+        return mean_loss, mean_kl, mean_grad_norm
 
     def test(
         self,
@@ -253,6 +275,54 @@ class GRPO(RLAlgorithm):
             # Eval training loop
             pass
 
-    def _calculate_advantage(): ...
+    def _calculate_advantage(
+        self, rewards: torch.Tensor, eps: float = 1e-8
+    ) -> torch.Tensor:
+        # Reward is of shape (batch_size, group size)
+        # Calc the advantage for each group, i.e. along the 1st dimension
+        return (rewards - rewards.mean(dim=1).unsqueeze(0).T) / (
+            rewards.std(dim=1).unsqueeze(0).T + eps
+        )
 
-    def _grpo_loss(): ...
+    def _calculate_kl_divergence(
+        self, log_probs: torch.Tensor, reference_log_probs: torch.Tensor
+    ) -> torch.Tensor:
+        return (
+            torch.exp(reference_log_probs - log_probs)
+            - (reference_log_probs - log_probs)
+            - 1
+        )
+
+    def _grpo_loss(
+        self, mask, log_probs, old_log_probs, reference_log_probs, advantages
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        kl = self._calculate_kl_divergence(log_probs, reference_log_probs)
+        log_probs_ratio = torch.exp(log_probs - old_log_probs) * advantages.unsqueeze(1)
+        clipped_log_probs_ratio = log_probs_ratio.clamp(
+            1 - self.clip_coef, 1 + self.clip_coef
+        )
+        loss = -torch.min(log_probs_ratio, clipped_log_probs_ratio) + self.beta * kl
+        loss = (loss * mask).sum(dim=-1) / mask.sum(dim=-1)
+        return loss.mean(), kl.mean()
+
+    def _get_logprobs(
+        self, ids: torch.Tensor, use_reference: bool = False
+    ) -> torch.Tensor:
+        policy = self.reference_actor if use_reference else self.actor
+        attention_mask = ids != self.pad_token_id
+        model_kwargs = {
+            "input_ids": ids,
+            "attention_mask": attention_mask,
+            "use_cache": False,
+        }
+        if self.calc_position_embeddings:
+            position_ids = attention_mask.long().cumsum(dim=-1) - 1
+            position_ids.masked_fill_(mask=(attention_mask == 0), value=1)
+            model_kwargs |= {"position_ids": position_ids}
+        logits = policy.forward(**model_kwargs).logits
+        log_probs = (
+            F.log_softmax(logits[:, :-1], dim=-1)
+            .gather(dim=-1, index=ids[:, 1:].unsqueeze(-1))
+            .squeeze(-1)
+        )
+        return log_probs

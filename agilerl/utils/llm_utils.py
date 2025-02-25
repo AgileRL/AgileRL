@@ -21,7 +21,7 @@ def format_reward(completion: str) -> float:
     """Reward function that checks if the completion has a specific format."""
     pattern = r"^<think>.*?</think>\s*<answer>.*?</answer>$"
     pattern_match = re.match(pattern, completion)
-    return 1.0 if pattern_match else 0.0
+    return 1.0 if pattern_match else -1.0
 
 
 def accuracy_reward(completion: str, solution: str) -> float:
@@ -36,16 +36,13 @@ def accuracy_reward(completion: str, solution: str) -> float:
     pattern = r"\d+\.\d+|\d+/\d+|\d+"
     nums = re.findall(pattern, completion)
     if len(nums) == 0:
-        return 0.0
+        return -1.0
     answer = nums[-1]
-    return float(answer == correct_answer)
+    return 3 if (answer == correct_answer) else -3
 
 
 def reward_function(completion: str, solution: str) -> float:
-    format_reward_value = format_reward(completion)
-    if not format_reward_value:
-        return format_reward_value
-    return accuracy_reward(completion, solution)
+    return accuracy_reward(completion, solution) + format_reward(completion)
 
 
 class HuggingFaceGym(gym.Env):
@@ -55,6 +52,8 @@ class HuggingFaceGym(gym.Env):
         tokenizer: AutoTokenizer,
         reward_fn: Callable[..., float],
         system_prompt: str = REASONING_SYSTEM_PROMPT,
+        max_answer_tokens: int = 512,
+        batch_size: int = 8,
     ) -> None:
         self.name = dataset_name
         self.reward_fn = reward_fn
@@ -64,19 +63,24 @@ class HuggingFaceGym(gym.Env):
         self.train_dataset = raw_dataset["train"]
         self.test_dataset = raw_dataset["test"]
         self.train_dataloader = DataLoader(
-            self.train_dataset, batch_size=8, shuffle=True
+            self.train_dataset, batch_size=batch_size, shuffle=True
         )
         self.test_dataloader = DataLoader(
-            self.test_dataset, batch_size=8, shuffle=False
+            self.test_dataset, batch_size=batch_size, shuffle=False
         )
         self.dataloader = iter(self.train_dataloader)
         self.reset_called = False
 
+        self.observation_space = gym.spaces.Box(low=0, high=tokenizer.vocab_size - 1)
+        self.action_space = gym.spaces.Box(
+            low=0, high=tokenizer.vocab_size - 1, shape=(max_answer_tokens,)
+        )
+
     def step(
         self, completions: torch.Tensor
-    ) -> Tuple[List[BatchEncoding], List[float]]:
+    ) -> Tuple[List[BatchEncoding], torch.Tensor]:
         self.reset_called = False
-        rewards = self._decode_and_evalutate(completions)
+        rewards = self._decode_and_evaluate(completions)
         new_tokenized_prompts = self._get_next_batch()
         self.last_tokenized_prompts = new_tokenized_prompts
         return new_tokenized_prompts, rewards
@@ -98,9 +102,10 @@ class HuggingFaceGym(gym.Env):
         for idx, (group_completion, answer) in enumerate(
             zip(completions, self.answers)
         ):  # Vectorize this in the future
-            # group completion is the group of completions produced from a single prompt
             decoded_group_completion = self.tokenizer.batch_decode(
-                group_completion[:, self.last_tokenized_prompts[idx].shape[1], :],
+                group_completion[
+                    :, self.last_tokenized_prompts[idx]["input_ids"].shape[1] :
+                ],
                 skip_special_tokens=True,
             )
             rewards = [
@@ -109,9 +114,7 @@ class HuggingFaceGym(gym.Env):
             ]
             total_rewards.append(rewards)
         # Shape of the returned tensor is (batch_size X group_size)
-        return torch.tensor(
-            total_rewards
-        )  # Should this be numpy to align with gymnasium --> makes more sense for it to be torch really
+        return torch.tensor(total_rewards)
 
     def _get_next_batch(self) -> List[BatchEncoding]:
         batch = next(iter(self.dataloader))
@@ -128,6 +131,9 @@ class HuggingFaceGym(gym.Env):
         self.dataloader = self.test_dataloader
         yield
         self.dataloader = self.train_dataloader
+
+    def __len__(self):
+        return len(self.train_dataloader)
 
 
 def apply_chat_template(

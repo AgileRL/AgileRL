@@ -34,7 +34,7 @@ def finetune_llm(
     bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
 
     pbar = trange(
-        (max_steps := env.length),
+        (max_steps := len(env)),
         unit="step",
         bar_format=bar_format,
         ascii=True,
@@ -48,19 +48,20 @@ def finetune_llm(
 
         # Obtain answers for the batch of prompts (prompt_batch x group_size), the log probs here are the reference log probs
         # ATM its a list of length prompt_batch, each with a batch of sequence ids of size=group_size
-        completions, log_probs = agent.get_action(prompts)
-        prompts, rewards = env.step(
-            completions
+        completion_ids, action_masks = agent.get_action(prompts)
+        next_prompts, rewards = env.step(
+            completion_ids
         )  # Use the reward function stored in env.step to calculate reward of the each answer from the group
-        log_probs.append(log_probs)
         experiences = (
-            prompts,
+            completion_ids,
+            action_masks,
             rewards,
-            log_probs,
         )
-        loss, kl = agent.learn(experiences)
+        loss, kl, grad_norm = agent.learn(experiences)
+        prompts = next_prompts
+        print({"Loss": loss, "KL-divergence": kl, "Grad-norm": grad_norm})
         if wb:
-            wandb.log({"Loss": loss, "KL-divergence": kl})
+            wandb.log({"Loss": loss, "KL-divergence": kl, "Grad-norm": grad_norm})
         if (
             checkpoint_path is not None
             and checkpoint_interval is not None
