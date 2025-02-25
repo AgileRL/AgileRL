@@ -1,6 +1,8 @@
-from typing import Any
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
+
+from agilerl.typing import ActionType
 
 
 class PettingZooVecEnv:
@@ -16,18 +18,22 @@ class PettingZooVecEnv:
     :type possible_agents: list[str]
     """
 
-    metadata: dict[str, Any] = {}
-    render_mode: str | None = None
+    metadata: Dict[str, Any] = {}
+    render_mode: Optional[str] = None
     closed: bool = False
 
     num_envs: int
+    agents: List[str]
+    num_agents: int
 
-    def __init__(self, num_envs, possible_agents):
+    def __init__(self, num_envs: int, possible_agents: List[str]):
         self.num_envs = num_envs
         self.agents = possible_agents
         self.num_agents = len(self.agents)
 
-    def reset(self, seed=None, options=None):
+    def reset(
+        self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """
         Reset all the environments and return two dictionaries of batched observations and infos.
 
@@ -38,7 +44,7 @@ class PettingZooVecEnv:
         """
         pass
 
-    def step_async(self, actions):
+    def step_async(self, actions: List[List[ActionType]]) -> None:
         """
         Tell all the environments to start taking a step
         with the given actions.
@@ -51,13 +57,15 @@ class PettingZooVecEnv:
         """
         pass
 
-    def step_wait(self):
+    def step_wait(self) -> Union[Dict[str, np.ndarray], Dict[str, Any]]:
         """
         Wait for the step taken with step_async().
         """
         pass
 
-    def step(self, actions):
+    def step(
+        self, actions: Dict[str, np.ndarray]
+    ) -> Union[Dict[str, np.ndarray], Dict[str, Any]]:
         """Take an action for each parallel environment
 
         :param actions: Dictionary of vectorized actions for each agent.
@@ -78,13 +86,13 @@ class PettingZooVecEnv:
         self.step_async(passed_actions_list)
         return self.step_wait()
 
-    def render(self):
+    def render(self) -> Any:
         """Returns the rendered frames from the parallel environments."""
         raise NotImplementedError(
             f"{self.__str__()} render function is not implemented."
         )
 
-    def close(self, **kwargs):
+    def close(self, **kwargs: Any) -> None:
         """
         Clean up the environments' resources.
         """
@@ -94,11 +102,11 @@ class PettingZooVecEnv:
         self.close_extras(**kwargs)
         self.closed = True
 
-    def close_extras(self, **kwargs: Any):
+    def close_extras(self, **kwargs: Any) -> None:
         """Clean up the extra resources e.g. beyond what's in this base class."""
         pass
 
     @property
-    def unwrapped(self):
+    def unwrapped(self) -> "PettingZooVecEnv":
         """Return the base environment."""
         return self

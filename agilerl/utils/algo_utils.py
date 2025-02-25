@@ -517,7 +517,8 @@ def preprocess_observation(
     if isinstance(observation_space, spaces.Box):
         # Normalize images if applicable and specified
         if len(observation_space.shape) == 3 and normalize_images:
-            observation = normalize_images(observation, observation_space)
+            observation = observation / 255.0
+
         space_shape = observation_space.shape
 
     elif isinstance(observation_space, spaces.Discrete):

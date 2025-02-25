@@ -9,6 +9,7 @@ from multiprocessing.sharedctypes import SynchronizedArray
 from unittest.mock import patch
 
 import gymnasium as gym
+import gymnasium.spaces as spaces
 import numpy as np
 import pytest
 from gymnasium.error import (
@@ -18,6 +19,7 @@ from gymnasium.error import (
 )
 from gymnasium.spaces import Box, Discrete, MultiDiscrete
 from gymnasium.vector.utils import CloudpickleWrapper
+from pettingzoo import ParallelEnv
 from pettingzoo.mpe import simple_speaker_listener_v4
 from pettingzoo.sisl import pursuit_v4
 
@@ -59,6 +61,17 @@ def actions_to_list_helper(actions):
 # @pytest.fixture
 # def pz_experience_spec():
 #     return PettingZooExperienceSpec(8)
+
+
+@pytest.fixture(autouse=True)
+def clean_process_fixture():
+    """Fixture to ensure processes are cleaned up between tests"""
+    # Before each test
+    yield
+    # After each test - forcibly terminate any stray processes
+    for p in mp.active_children():
+        p.terminate()
+        p.join(timeout=1.0)
 
 
 @pytest.mark.parametrize(
@@ -839,7 +852,7 @@ def test_observations_vector():
         ob,
         vec_env._obs_buffer,
         vec_env.observation_widths,
-        vec_env.observation_dtypes,
+        # vec_env.observation_dtypes,
     )
     assert "speaker_0" in vec_env.observations
     assert len(vec_env.observations) == 2
@@ -863,6 +876,7 @@ def test_observations_vector():
         str(next(iter(vec_env.observations)))
         == "('speaker_0', array([[1., 1., 1.]], dtype=float32))"
     )
+    vec_env.close()
 
 
 def test_observations_image():
@@ -923,3 +937,1257 @@ def test_delete_async_pz_vec_env():
     env.__del__()
     for p in processes:
         assert not p.is_alive()
+
+
+class DictSpaceTestEnv(ParallelEnv):
+    """Test environment with dictionary observation spaces"""
+
+    metadata = {"render_modes": ["human", "rgb_array"], "name": "dict_space_test_v0"}
+
+    def __init__(self, render_mode=None):
+        self.possible_agents = ["agent_0", "agent_1"]
+        self.agents = self.possible_agents.copy()
+        self.render_mode = render_mode
+
+    def reset(self, seed=None, options=None):
+        self.agents = self.possible_agents.copy()
+        observations = {
+            "agent_0": {
+                "position": np.array([0.1, 0.2, 0.3], dtype=np.float32),
+                "velocity": np.array([0.01, 0.02], dtype=np.float32),
+            },
+            "agent_1": {
+                "position": np.array([0.4, 0.5, 0.6], dtype=np.float32),
+                "velocity": np.array([0.03, 0.04], dtype=np.float32),
+            },
+        }
+        infos = {agent: {} for agent in self.agents}
+        return observations, infos
+
+    def step(self, actions):
+        observations = {
+            "agent_0": {
+                "position": np.array([0.2, 0.3, 0.4], dtype=np.float32),
+                "velocity": np.array([0.02, 0.03], dtype=np.float32),
+            },
+            "agent_1": {
+                "position": np.array([0.5, 0.6, 0.7], dtype=np.float32),
+                "velocity": np.array([0.04, 0.05], dtype=np.float32),
+            },
+        }
+        rewards = {agent: 1.0 for agent in self.agents}
+        terminations = {agent: False for agent in self.agents}
+        truncations = {agent: False for agent in self.agents}
+        infos = {agent: {} for agent in self.agents}
+        return observations, rewards, terminations, truncations, infos
+
+    def observation_space(self, agent):
+        return spaces.Dict(
+            {
+                "position": Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
+                "velocity": Box(low=-0.1, high=0.1, shape=(2,), dtype=np.float32),
+            }
+        )
+
+    def action_space(self, agent):
+        return Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
+
+    def render(self):
+        if self.render_mode == "rgb_array":
+            return np.ones((64, 64, 3), dtype=np.uint8)
+        return None
+
+    def close(self):
+        pass
+
+
+class TupleSpaceTestEnv(ParallelEnv):
+    """Test environment with tuple observation spaces"""
+
+    metadata = {"render_modes": ["human", "rgb_array"], "name": "tuple_space_test_v0"}
+
+    def __init__(self, render_mode=None):
+        self.possible_agents = ["agent_0", "agent_1"]
+        self.agents = self.possible_agents.copy()
+        self.render_mode = render_mode
+
+    def reset(self, seed=None, options=None):
+        self.agents = self.possible_agents.copy()
+        observations = {
+            "agent_0": (
+                np.array([0.1, 0.2, 0.3], dtype=np.float32),
+                np.array([0.01, 0.02], dtype=np.float32),
+            ),
+            "agent_1": (
+                np.array([0.4, 0.5, 0.6], dtype=np.float32),
+                np.array([0.03, 0.04], dtype=np.float32),
+            ),
+        }
+        infos = {agent: {} for agent in self.agents}
+        return observations, infos
+
+    def step(self, actions):
+        observations = {
+            "agent_0": (
+                np.array([0.2, 0.3, 0.4], dtype=np.float32),
+                np.array([0.02, 0.03], dtype=np.float32),
+            ),
+            "agent_1": (
+                np.array([0.5, 0.6, 0.7], dtype=np.float32),
+                np.array([0.04, 0.05], dtype=np.float32),
+            ),
+        }
+        rewards = {agent: 1.0 for agent in self.agents}
+        terminations = {agent: False for agent in self.agents}
+        truncations = {agent: False for agent in self.agents}
+        infos = {agent: {} for agent in self.agents}
+        return observations, rewards, terminations, truncations, infos
+
+    def observation_space(self, agent):
+        return spaces.Tuple(
+            (
+                Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
+                Box(low=-0.1, high=0.1, shape=(2,), dtype=np.float32),
+            )
+        )
+
+    def action_space(self, agent):
+        return Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
+
+    def render(self):
+        if self.render_mode == "rgb_array":
+            return np.ones((64, 64, 3), dtype=np.uint8)
+        return None
+
+    def close(self):
+        pass
+
+
+# Tests for Dictionary Observation Spaces
+
+
+@pytest.mark.parametrize("env_fns", [[lambda: DictSpaceTestEnv() for _ in range(8)]])
+def test_create_async_pz_vector_env_dict_space(env_fns):
+    env = AsyncPettingZooVecEnv(env_fns)
+    assert env.single_action_space
+    assert env.action_space
+    assert env.single_observation_space
+    assert env.observation_space
+    assert env.observation_widths
+    assert env.observation_boundaries
+    assert env.observation_shapes
+    assert env.num_envs == 8
+
+    # Test dictionary-specific properties
+    for agent in env.possible_agents:
+        assert isinstance(env.single_observation_space(agent), spaces.Dict)
+        assert isinstance(env.observation_shapes[agent], dict)
+        assert "position" in env.observation_shapes[agent]
+        assert "velocity" in env.observation_shapes[agent]
+        assert env.observation_shapes[agent]["position"] == (3,)
+        assert env.observation_shapes[agent]["velocity"] == (2,)
+
+    for val in env._obs_buffer.values():
+        assert isinstance(val, SynchronizedArray)
+    assert isinstance(env.observations, Observations)
+    assert env.processes
+    env.reset()
+    env.close()
+
+
+@pytest.mark.parametrize("seed", [1, None])
+@pytest.mark.parametrize("env_fns", [[lambda: DictSpaceTestEnv() for _ in range(8)]])
+def test_reset_async_pz_vector_env_dict_space(seed, env_fns):
+    env = AsyncPettingZooVecEnv(env_fns)
+    agents = env.possible_agents[:]
+    observations, infos = env.reset(seed=seed)
+
+    for agent in agents:
+        assert isinstance(env.observation_space(agent), spaces.Dict)
+        assert isinstance(observations[agent], dict)
+
+        # Check position
+        assert "position" in observations[agent]
+        assert observations[agent]["position"].dtype == np.float32
+        assert observations[agent]["position"].shape == (8, 3)
+
+        # Check velocity
+        assert "velocity" in observations[agent]
+        assert observations[agent]["velocity"].dtype == np.float32
+        assert observations[agent]["velocity"].shape == (8, 2)
+
+    assert isinstance(infos, dict)
+    assert set(agents).issubset(set(infos.keys()))
+    env.close()
+
+
+@pytest.mark.parametrize(
+    "env_fns",
+    [[lambda: DictSpaceTestEnv(render_mode="rgb_array") for _ in range(8)]],
+)
+def test_render_async_pz_vector_env_dict_space(env_fns):
+    env = AsyncPettingZooVecEnv(env_fns)
+    assert env.render_mode == "rgb_array"
+
+    env.reset()
+    rendered_frames = env.render()
+    assert isinstance(rendered_frames, tuple)
+    assert len(rendered_frames) == env.num_envs
+    assert all(isinstance(frame, np.ndarray) for frame in rendered_frames)
+    env.close()
+
+
+@pytest.mark.parametrize("env_fns", [[lambda: DictSpaceTestEnv() for _ in range(4)]])
+def test_step_async_pz_vector_env_dict_space(env_fns):
+    try:
+        env = AsyncPettingZooVecEnv(env_fns)
+        env.reset()
+
+        actions = {agent: env.action_space(agent).sample() for agent in env.agents}
+        observations, rewards, terminations, truncations, _ = env.step(actions)
+
+        for agent in env.agents:
+            assert isinstance(env.observation_space(agent), spaces.Dict)
+
+            # Check position
+            assert "position" in observations[agent]
+            assert observations[agent]["position"].dtype == np.float32
+            assert observations[agent]["position"].shape == (4, 3)
+
+            # Check velocity
+            assert "velocity" in observations[agent]
+            assert observations[agent]["velocity"].dtype == np.float32
+            assert observations[agent]["velocity"].shape == (4, 2)
+
+            # Check rewards, terminations, truncations
+            assert isinstance(rewards[agent], np.ndarray)
+            assert rewards[agent].ndim == 1
+            assert rewards[agent].size == 4
+
+            assert isinstance(terminations[agent], np.ndarray)
+            assert terminations[agent].dtype == np.bool_
+            assert terminations[agent].ndim == 1
+            assert terminations[agent].size == 4
+
+            assert isinstance(truncations[agent], np.ndarray)
+            assert truncations[agent].dtype == np.bool_
+            assert truncations[agent].ndim == 1
+            assert truncations[agent].size == 4
+
+        env.close()
+    except Exception as e:
+        env.close()
+        raise e
+
+
+# Tests for spaces.Tuple Observation Spaces
+
+
+@pytest.mark.parametrize("env_fns", [[lambda: TupleSpaceTestEnv() for _ in range(8)]])
+def test_create_async_pz_vector_env_tuple_space(env_fns):
+    env = AsyncPettingZooVecEnv(env_fns)
+    assert env.single_action_space
+    assert env.action_space
+    assert env.single_observation_space
+    assert env.observation_space
+    assert env.observation_widths
+    assert env.observation_boundaries
+    assert env.observation_shapes
+    assert env.num_envs == 8
+
+    # Test tuple-specific properties
+    for agent in env.possible_agents:
+        assert isinstance(env.single_observation_space(agent), spaces.Tuple)
+        assert isinstance(env.observation_shapes[agent], list)
+        assert len(env.observation_shapes[agent]) == 2
+        assert env.observation_shapes[agent][0] == (3,)
+        assert env.observation_shapes[agent][1] == (2,)
+
+    for val in env._obs_buffer.values():
+        assert isinstance(val, SynchronizedArray)
+    assert isinstance(env.observations, Observations)
+    assert env.processes
+    env.reset()
+    env.close()
+
+
+@pytest.mark.parametrize("seed", [1, None])
+@pytest.mark.parametrize("env_fns", [[lambda: TupleSpaceTestEnv() for _ in range(8)]])
+def test_reset_async_pz_vector_env_tuple_space(seed, env_fns):
+    env = AsyncPettingZooVecEnv(env_fns)
+    agents = env.possible_agents[:]
+    observations, infos = env.reset(seed=seed)
+
+    for agent in agents:
+        assert isinstance(env.observation_space(agent), spaces.Tuple)
+        assert isinstance(observations[agent], tuple)
+        assert len(observations[agent]) == 2
+
+        # Check first element (position)
+        assert observations[agent][0].dtype == np.float32
+        assert observations[agent][0].shape == (8, 3)
+
+        # Check second element (velocity)
+        assert observations[agent][1].dtype == np.float32
+        assert observations[agent][1].shape == (8, 2)
+
+    assert isinstance(infos, dict)
+    assert set(agents).issubset(set(infos.keys()))
+    env.close()
+
+
+@pytest.mark.parametrize(
+    "env_fns",
+    [[lambda: TupleSpaceTestEnv(render_mode="rgb_array") for _ in range(8)]],
+)
+def test_render_async_pz_vector_env_tuple_space(env_fns):
+    env = AsyncPettingZooVecEnv(env_fns)
+    assert env.render_mode == "rgb_array"
+
+    env.reset()
+    rendered_frames = env.render()
+    assert isinstance(rendered_frames, tuple)
+    assert len(rendered_frames) == env.num_envs
+    assert all(isinstance(frame, np.ndarray) for frame in rendered_frames)
+    env.close()
+
+
+@pytest.mark.parametrize("env_fns", [[lambda: TupleSpaceTestEnv() for _ in range(4)]])
+def test_step_async_pz_vector_env_tuple_space(env_fns):
+    try:
+        env = AsyncPettingZooVecEnv(env_fns)
+        env.reset()
+
+        actions = {agent: env.action_space(agent).sample() for agent in env.agents}
+        observations, rewards, terminations, truncations, _ = env.step(actions)
+
+        for agent in env.agents:
+            assert isinstance(env.observation_space(agent), spaces.Tuple)
+            assert isinstance(observations[agent], tuple)
+            assert len(observations[agent]) == 2
+
+            # Check first element (position)
+            assert observations[agent][0].dtype == np.float32
+            assert observations[agent][0].shape == (4, 3)
+
+            # Check second element (velocity)
+            assert observations[agent][1].dtype == np.float32
+            assert observations[agent][1].shape == (4, 2)
+
+            # Check rewards, terminations, truncations
+            assert isinstance(rewards[agent], np.ndarray)
+            assert rewards[agent].ndim == 1
+            assert rewards[agent].size == 4
+
+            assert isinstance(terminations[agent], np.ndarray)
+            assert terminations[agent].dtype == np.bool_
+            assert terminations[agent].ndim == 1
+            assert terminations[agent].size == 4
+
+            assert isinstance(truncations[agent], np.ndarray)
+            assert truncations[agent].dtype == np.bool_
+            assert truncations[agent].ndim == 1
+            assert truncations[agent].size == 4
+
+        env.close()
+    except Exception as e:
+        env.close()
+        raise e
+
+
+@pytest.mark.parametrize(
+    "env_fns",
+    [[lambda: TupleSpaceTestEnv(render_mode="rgb_array") for _ in range(4)]],
+)
+def test_call_async_pz_vector_env_tuple_space(env_fns):
+    env = AsyncPettingZooVecEnv(env_fns)
+    env.reset()
+
+    images = env.call("render")
+    max_num_agents = env.call("possible_agents")
+    env.close()
+
+    assert isinstance(images, tuple)
+    assert len(images) == 4
+    for i in range(4):
+        assert images[i].shape[-1] == 3
+        assert isinstance(images[i], np.ndarray)
+
+    assert isinstance(max_num_agents, tuple)
+    assert len(max_num_agents) == 4
+
+
+@pytest.mark.parametrize(
+    "env_fns",
+    [[lambda: DictSpaceTestEnv(render_mode="rgb_array") for _ in range(4)]],
+)
+def test_call_async_pz_vector_env_dict_space(env_fns):
+    env = AsyncPettingZooVecEnv(env_fns)
+    env.reset()
+
+    images = env.call("render")
+    max_num_agents = env.call("possible_agents")
+    env.close()
+
+    assert isinstance(images, tuple)
+    assert len(images) == 4
+    for i in range(4):
+        assert images[i].shape[-1] == 3
+        assert isinstance(images[i], np.ndarray)
+
+    assert isinstance(max_num_agents, tuple)
+    assert len(max_num_agents) == 4
+
+
+@pytest.mark.parametrize(
+    "env_fns",
+    [[lambda: DictSpaceTestEnv() for _ in range(2)]],
+)
+def test_get_attr_async_pz_vector_env_dict_space(env_fns):
+    env = AsyncPettingZooVecEnv(env_fns)
+    env.set_attr("test_attribute", [1, 2])
+    test_attribute = env.get_attr("test_attribute")
+    assert test_attribute == (1, 2)
+    env.close()
+
+
+@pytest.mark.parametrize(
+    "env_fns",
+    [[lambda: TupleSpaceTestEnv() for _ in range(2)]],
+)
+def test_get_attr_async_pz_vector_env_tuple_space(env_fns):
+    env = AsyncPettingZooVecEnv(env_fns)
+    env.set_attr("test_attribute", [1, 2])
+    test_attribute = env.get_attr("test_attribute")
+    assert test_attribute == (1, 2)
+    env.close()
+
+
+@pytest.mark.parametrize(
+    "env_fns",
+    [[lambda: DictSpaceTestEnv() for _ in range(1)]],
+)
+def test_set_attr_make_values_list_dict_space(env_fns):
+    env = AsyncPettingZooVecEnv(env_fns)
+    env.set_attr(name="test", values=1)
+    assert env.call("test")[0] == 1
+    env.close()
+
+
+@pytest.mark.parametrize(
+    "env_fns",
+    [[lambda: TupleSpaceTestEnv() for _ in range(1)]],
+)
+def test_set_attr_make_values_list_tuple_space(env_fns):
+    env = AsyncPettingZooVecEnv(env_fns)
+    env.set_attr(name="test", values=1)
+    assert env.call("test")[0] == 1
+    env.close()
+
+
+# Test placeholder values for dict and tuple spaces
+def test_get_placeholder_value_dict_space():
+    observation_shapes = {"agent_0": {"position": (3,), "velocity": (2,)}}
+
+    placeholder = get_placeholder_value("agent_0", "observation", observation_shapes)
+    assert isinstance(placeholder, dict)
+    assert "position" in placeholder
+    assert "velocity" in placeholder
+    assert placeholder["position"].shape == (3,)
+    assert placeholder["velocity"].shape == (2,)
+    assert np.all(placeholder["position"] == -1)
+    assert np.all(placeholder["velocity"] == -1)
+
+
+def test_get_placeholder_value_tuple_space():
+    observation_shapes = {"agent_0": [(3,), (2,)]}
+
+    placeholder = get_placeholder_value("agent_0", "observation", observation_shapes)
+    assert isinstance(placeholder, tuple)
+    assert len(placeholder) == 2
+    assert placeholder[0].shape == (3,)
+    assert placeholder[1].shape == (2,)
+    assert np.all(placeholder[0] == -1)
+    assert np.all(placeholder[1] == -1)
+
+
+def test_worker_dict_space():
+    """Test worker function with Dict observation spaces"""
+    num_envs = 1
+    env_fns = [lambda: DictSpaceTestEnv() for _ in range(num_envs)]
+
+    vec_env = AsyncPettingZooVecEnv(env_fns)
+    vec_env.reset()
+
+    actions = {agent: vec_env.action_space(agent).sample() for agent in vec_env.agents}
+    vec_env.close()
+    actions = actions_to_list_helper(actions)
+    parent_pipe, child_pipe = mp.Pipe()
+    queue = mp.Queue()
+    p = Process(
+        target=_async_worker,
+        args=(
+            0,
+            CloudpickleWrapper(env_fns[0]),
+            child_pipe,
+            parent_pipe,
+            vec_env._obs_buffer,
+            queue,
+            vec_env.observation_shapes,
+            vec_env.observation_widths,
+            vec_env.observation_dtypes,
+            vec_env.agents,
+        ),
+    )
+    p.start()
+    child_pipe.close()
+
+    # Reset the environment before stepping
+    parent_pipe.send(("reset", {}))
+    results, success = parent_pipe.recv()
+    assert success
+
+    # Step the environment
+    parent_pipe.send(("step", actions[0]))
+    results, success = parent_pipe.recv()
+    assert success
+
+    rewards, term, trunc, _ = results
+
+    # Check observation structure
+    for agent in vec_env.agents:
+        assert isinstance(vec_env.observation_space(agent), spaces.Dict)
+
+    # Check rewards
+    assert isinstance(rewards["agent_0"], float)
+
+    # Check termination/truncation
+    assert isinstance(term["agent_0"], bool)
+    assert isinstance(trunc["agent_0"], bool)
+
+    parent_pipe.close()
+    p.terminate()
+    p.join()
+
+
+def test_worker_tuple_space():
+    """Test worker function with Tuple observation spaces"""
+    num_envs = 1
+    env_fns = [lambda: TupleSpaceTestEnv() for _ in range(num_envs)]
+
+    vec_env = AsyncPettingZooVecEnv(env_fns)
+    vec_env.reset()
+
+    actions = {agent: vec_env.action_space(agent).sample() for agent in vec_env.agents}
+    vec_env.close()
+    actions = actions_to_list_helper(actions)
+    parent_pipe, child_pipe = mp.Pipe()
+    queue = mp.Queue()
+    p = Process(
+        target=_async_worker,
+        args=(
+            0,
+            CloudpickleWrapper(env_fns[0]),
+            child_pipe,
+            parent_pipe,
+            vec_env._obs_buffer,
+            queue,
+            vec_env.observation_shapes,
+            vec_env.observation_widths,
+            vec_env.observation_dtypes,
+            vec_env.agents,
+        ),
+    )
+    p.start()
+    child_pipe.close()
+
+    # Reset the environment before stepping
+    parent_pipe.send(("reset", {}))
+    results, success = parent_pipe.recv()
+    assert success
+
+    # Step the environment
+    parent_pipe.send(("step", actions[0]))
+    results, success = parent_pipe.recv()
+    assert success
+
+    rewards, term, trunc, _ = results
+
+    # Check observation structure
+    for agent in vec_env.agents:
+        assert isinstance(vec_env.observation_space(agent), spaces.Tuple)
+
+    # Check rewards
+    assert isinstance(rewards["agent_0"], float)
+
+    # Check termination/truncation
+    assert isinstance(term["agent_0"], bool)
+    assert isinstance(trunc["agent_0"], bool)
+
+    parent_pipe.close()
+    p.terminate()
+    p.join()
+
+
+def test_add_info_dict_space():
+    """Test _add_info with dictionary values in info"""
+    info_list = [
+        {"agent_0": {"metrics": {"distance": 1.5, "energy": 0.5}}},
+        {"agent_0": {"metrics": {"distance": 2.0, "energy": 0.3}}},
+    ]
+    env_fns = [lambda: DictSpaceTestEnv() for _ in range(2)]
+    env = AsyncPettingZooVecEnv(env_fns)
+    vector_infos = {}
+
+    for i, info in enumerate(info_list):
+        vector_infos = env._add_info(vector_infos, info, i)
+
+    assert "agent_0" in vector_infos
+    assert "metrics" in vector_infos["agent_0"]
+    assert "distance" in vector_infos["agent_0"]["metrics"]
+    assert vector_infos["agent_0"]["metrics"]["distance"][0] == 1.5
+    assert vector_infos["agent_0"]["metrics"]["distance"][1] == 2.0
+
+    env.close()
+
+
+def test_observations_dict_buffer():
+    """Test Observations class with dictionary spaces"""
+    num_envs = 2
+    env_fns = [lambda: DictSpaceTestEnv() for _ in range(num_envs)]
+    env = AsyncPettingZooVecEnv(env_fns)
+
+    # Test reset to ensure Observations class is working
+    observations, _ = env.reset()
+
+    for agent in env.agents:
+        # Check that observations are properly structured
+        assert isinstance(observations[agent], dict)
+        assert "position" in observations[agent]
+        assert "velocity" in observations[agent]
+
+        # Check shapes
+        assert observations[agent]["position"].shape == (num_envs, 3)
+        assert observations[agent]["velocity"].shape == (num_envs, 2)
+
+    # Check the string representation
+    obs_string = str(env.observations)
+    assert "position" in obs_string
+    assert "velocity" in obs_string
+
+    env.close()
+
+
+def test_observations_tuple_buffer():
+    """Test Observations class with tuple spaces"""
+    num_envs = 2
+    env_fns = [lambda: TupleSpaceTestEnv() for _ in range(num_envs)]
+    env = AsyncPettingZooVecEnv(env_fns)
+
+    # Test reset to ensure Observations class is working
+    observations, _ = env.reset()
+
+    for agent in env.agents:
+        # Check that observations are properly structured
+        assert isinstance(observations[agent], tuple)
+        assert len(observations[agent]) == 2
+
+        # Check shapes
+        assert observations[agent][0].shape == (num_envs, 3)
+        assert observations[agent][1].shape == (num_envs, 2)
+
+    # Check the string representation
+    obs_string = str(env.observations)
+    assert "agent_0" in obs_string
+    assert "agent_1" in obs_string
+
+    env.close()
+
+
+class ComplexDictSpaceTestEnv(ParallelEnv):
+    """Test environment with dictionary observation spaces containing both vector and image data"""
+
+    metadata = {
+        "render_modes": ["human", "rgb_array"],
+        "name": "complex_dict_space_test_v0",
+    }
+
+    def __init__(self, render_mode=None):
+        self.possible_agents = ["agent_0", "agent_1"]
+        self.agents = self.possible_agents.copy()
+        self.render_mode = render_mode
+
+    def reset(self, seed=None, options=None):
+        self.agents = self.possible_agents.copy()
+        observations = {
+            "agent_0": {
+                "position": np.array([0.1, 0.2, 0.3], dtype=np.float32),
+                "velocity": np.array([0.01, 0.02], dtype=np.float32),
+                "image": np.ones((16, 16, 3), dtype=np.uint8) * 100,
+            },
+            "agent_1": {
+                "position": np.array([0.4, 0.5, 0.6], dtype=np.float32),
+                "velocity": np.array([0.03, 0.04], dtype=np.float32),
+                "image": np.ones((16, 16, 3), dtype=np.uint8) * 200,
+            },
+        }
+        infos = {agent: {} for agent in self.agents}
+        return observations, infos
+
+    def step(self, actions):
+        observations = {
+            "agent_0": {
+                "position": np.array([0.2, 0.3, 0.4], dtype=np.float32),
+                "velocity": np.array([0.02, 0.03], dtype=np.float32),
+                "image": np.ones((16, 16, 3), dtype=np.uint8) * 150,
+            },
+            "agent_1": {
+                "position": np.array([0.5, 0.6, 0.7], dtype=np.float32),
+                "velocity": np.array([0.04, 0.05], dtype=np.float32),
+                "image": np.ones((16, 16, 3), dtype=np.uint8) * 250,
+            },
+        }
+        rewards = {agent: 1.0 for agent in self.agents}
+        terminations = {agent: False for agent in self.agents}
+        truncations = {agent: False for agent in self.agents}
+        infos = {agent: {} for agent in self.agents}
+        return observations, rewards, terminations, truncations, infos
+
+    def observation_space(self, agent):
+        return spaces.Dict(
+            {
+                "position": Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
+                "velocity": Box(low=-0.1, high=0.1, shape=(2,), dtype=np.float32),
+                "image": Box(low=0, high=255, shape=(16, 16, 3), dtype=np.uint8),
+            }
+        )
+
+    def action_space(self, agent):
+        return Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
+
+    def render(self):
+        if self.render_mode == "rgb_array":
+            return np.ones((64, 64, 3), dtype=np.uint8)
+        return None
+
+    def close(self):
+        pass
+
+
+class ComplexTupleSpaceTestEnv(ParallelEnv):
+    """Test environment with tuple observation spaces containing both vector and image data"""
+
+    metadata = {
+        "render_modes": ["human", "rgb_array"],
+        "name": "complex_tuple_space_test_v0",
+    }
+
+    def __init__(self, render_mode=None):
+        self.possible_agents = ["agent_0", "agent_1"]
+        self.agents = self.possible_agents.copy()
+        self.render_mode = render_mode
+
+    def reset(self, seed=None, options=None):
+        self.agents = self.possible_agents.copy()
+        observations = {
+            "agent_0": (
+                np.array([0.1, 0.2, 0.3], dtype=np.float32),
+                np.array([0.01, 0.02], dtype=np.float32),
+                np.ones((16, 16, 3), dtype=np.uint8) * 100,
+            ),
+            "agent_1": (
+                np.array([0.4, 0.5, 0.6], dtype=np.float32),
+                np.array([0.03, 0.04], dtype=np.float32),
+                np.ones((16, 16, 3), dtype=np.uint8) * 200,
+            ),
+        }
+        infos = {agent: {} for agent in self.agents}
+        return observations, infos
+
+    def step(self, actions):
+        observations = {
+            "agent_0": (
+                np.array([0.2, 0.3, 0.4], dtype=np.float32),
+                np.array([0.02, 0.03], dtype=np.float32),
+                np.ones((16, 16, 3), dtype=np.uint8) * 150,
+            ),
+            "agent_1": (
+                np.array([0.5, 0.6, 0.7], dtype=np.float32),
+                np.array([0.04, 0.05], dtype=np.float32),
+                np.ones((16, 16, 3), dtype=np.uint8) * 250,
+            ),
+        }
+        rewards = {agent: 1.0 for agent in self.agents}
+        terminations = {agent: False for agent in self.agents}
+        truncations = {agent: False for agent in self.agents}
+        infos = {agent: {} for agent in self.agents}
+        return observations, rewards, terminations, truncations, infos
+
+    def observation_space(self, agent):
+        return spaces.Tuple(
+            (
+                Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
+                Box(low=-0.1, high=0.1, shape=(2,), dtype=np.float32),
+                Box(low=0, high=255, shape=(16, 16, 3), dtype=np.uint8),
+            )
+        )
+
+    def action_space(self, agent):
+        return Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
+
+    def render(self):
+        if self.render_mode == "rgb_array":
+            return np.ones((64, 64, 3), dtype=np.uint8)
+        return None
+
+    def close(self):
+        pass
+
+
+# Tests for Complex Dict Space (vector + image)
+@pytest.mark.parametrize(
+    "env_fns", [[lambda: ComplexDictSpaceTestEnv() for _ in range(4)]]
+)
+def test_create_async_pz_vector_env_complex_dict_space(env_fns):
+    env = AsyncPettingZooVecEnv(env_fns)
+    assert env.single_action_space
+    assert env.action_space
+    assert env.single_observation_space
+    assert env.observation_space
+    assert env.observation_widths
+    assert env.observation_boundaries
+    assert env.observation_shapes
+    assert env.num_envs == 4
+
+    # Test dictionary-specific properties
+    for agent in env.possible_agents:
+        assert isinstance(env.single_observation_space(agent), spaces.Dict)
+        assert isinstance(env.observation_shapes[agent], dict)
+
+        # Check vector parts
+        assert "position" in env.observation_shapes[agent]
+        assert "velocity" in env.observation_shapes[agent]
+        assert env.observation_shapes[agent]["position"] == (3,)
+        assert env.observation_shapes[agent]["velocity"] == (2,)
+
+        # Check image part
+        assert "image" in env.observation_shapes[agent]
+        assert env.observation_shapes[agent]["image"] == (16, 16, 3)
+
+    for val in env._obs_buffer.values():
+        assert isinstance(val, SynchronizedArray)
+    assert isinstance(env.observations, Observations)
+    assert env.processes
+    env.reset()
+    env.close()
+
+
+@pytest.mark.parametrize("seed", [1, None])
+@pytest.mark.parametrize(
+    "env_fns", [[lambda: ComplexDictSpaceTestEnv() for _ in range(4)]]
+)
+def test_reset_async_pz_vector_env_complex_dict_space(seed, env_fns):
+    env = AsyncPettingZooVecEnv(env_fns)
+    agents = env.possible_agents[:]
+    observations, infos = env.reset(seed=seed)
+
+    for agent in agents:
+        assert isinstance(env.observation_space(agent), spaces.Dict)
+        assert isinstance(observations[agent], dict)
+
+        # Check position
+        assert "position" in observations[agent]
+        assert observations[agent]["position"].dtype == np.float32
+        assert observations[agent]["position"].shape == (4, 3)
+
+        # Check velocity
+        assert "velocity" in observations[agent]
+        assert observations[agent]["velocity"].dtype == np.float32
+        assert observations[agent]["velocity"].shape == (4, 2)
+
+        # Check image
+        assert "image" in observations[agent]
+        assert observations[agent]["image"].shape == (4, 16, 16, 3)
+
+    assert isinstance(infos, dict)
+    assert set(agents).issubset(set(infos.keys()))
+    env.close()
+
+
+@pytest.mark.parametrize(
+    "env_fns", [[lambda: ComplexDictSpaceTestEnv() for _ in range(3)]]
+)
+def test_step_async_pz_vector_env_complex_dict_space(env_fns):
+    try:
+        env = AsyncPettingZooVecEnv(env_fns)
+        env.reset()
+
+        actions = {agent: env.action_space(agent).sample() for agent in env.agents}
+        observations, rewards, terminations, truncations, _ = env.step(actions)
+
+        for agent in env.agents:
+            assert isinstance(env.observation_space(agent), spaces.Dict)
+
+            # Check position
+            assert "position" in observations[agent]
+            assert observations[agent]["position"].dtype == np.float32
+            assert observations[agent]["position"].shape == (3, 3)
+
+            # Check velocity
+            assert "velocity" in observations[agent]
+            assert observations[agent]["velocity"].dtype == np.float32
+            assert observations[agent]["velocity"].shape == (3, 2)
+
+            # Check image
+            assert "image" in observations[agent]
+            assert observations[agent]["image"].shape == (3, 16, 16, 3)
+
+            # Check rewards, terminations, truncations
+            assert isinstance(rewards[agent], np.ndarray)
+            assert rewards[agent].ndim == 1
+            assert rewards[agent].size == 3
+
+            assert isinstance(terminations[agent], np.ndarray)
+            assert terminations[agent].dtype == np.bool_
+            assert terminations[agent].ndim == 1
+            assert terminations[agent].size == 3
+
+            assert isinstance(truncations[agent], np.ndarray)
+            assert truncations[agent].dtype == np.bool_
+            assert truncations[agent].ndim == 1
+            assert truncations[agent].size == 3
+
+        env.close()
+    except Exception as e:
+        env.close()
+        raise e
+
+
+# Tests for Complex Tuple Space (vector + image)
+@pytest.mark.parametrize(
+    "env_fns", [[lambda: ComplexTupleSpaceTestEnv() for _ in range(4)]]
+)
+def test_create_async_pz_vector_env_complex_tuple_space(env_fns):
+    env = AsyncPettingZooVecEnv(env_fns)
+    assert env.single_action_space
+    assert env.action_space
+    assert env.single_observation_space
+    assert env.observation_space
+    assert env.observation_widths
+    assert env.observation_boundaries
+    assert env.observation_shapes
+    assert env.num_envs == 4
+
+    # Test tuple-specific properties
+    for agent in env.possible_agents:
+        assert isinstance(env.single_observation_space(agent), spaces.Tuple)
+        assert isinstance(env.observation_shapes[agent], list)
+        assert len(env.observation_shapes[agent]) == 3
+
+        # Check vector parts
+        assert env.observation_shapes[agent][0] == (3,)
+        assert env.observation_shapes[agent][1] == (2,)
+
+        # Check image part
+        assert env.observation_shapes[agent][2] == (16, 16, 3)
+
+    for val in env._obs_buffer.values():
+        assert isinstance(val, SynchronizedArray)
+    assert isinstance(env.observations, Observations)
+    assert env.processes
+    env.reset()
+    env.close()
+
+
+@pytest.mark.parametrize("seed", [1, None])
+@pytest.mark.parametrize(
+    "env_fns", [[lambda: ComplexTupleSpaceTestEnv() for _ in range(4)]]
+)
+def test_reset_async_pz_vector_env_complex_tuple_space(seed, env_fns):
+    env = AsyncPettingZooVecEnv(env_fns)
+    agents = env.possible_agents[:]
+    observations, infos = env.reset(seed=seed)
+
+    for agent in agents:
+        assert isinstance(env.observation_space(agent), spaces.Tuple)
+        assert isinstance(observations[agent], tuple)
+        assert len(observations[agent]) == 3
+
+        # Check first element (position)
+        assert observations[agent][0].dtype == np.float32
+        assert observations[agent][0].shape == (4, 3)
+
+        # Check second element (velocity)
+        assert observations[agent][1].dtype == np.float32
+        assert observations[agent][1].shape == (4, 2)
+
+        # Check third element (image)
+        assert observations[agent][2].shape == (4, 16, 16, 3)
+
+    assert isinstance(infos, dict)
+    assert set(agents).issubset(set(infos.keys()))
+    env.close()
+
+
+@pytest.mark.parametrize(
+    "env_fns", [[lambda: ComplexTupleSpaceTestEnv() for _ in range(3)]]
+)
+def test_step_async_pz_vector_env_complex_tuple_space(env_fns):
+    try:
+        env = AsyncPettingZooVecEnv(env_fns)
+        env.reset()
+
+        actions = {agent: env.action_space(agent).sample() for agent in env.agents}
+        observations, rewards, terminations, truncations, _ = env.step(actions)
+
+        for agent in env.agents:
+            assert isinstance(env.observation_space(agent), spaces.Tuple)
+            assert isinstance(observations[agent], tuple)
+            assert len(observations[agent]) == 3
+
+            # Check first element (position)
+            assert observations[agent][0].dtype == np.float32
+            assert observations[agent][0].shape == (3, 3)
+
+            # Check second element (velocity)
+            assert observations[agent][1].dtype == np.float32
+            assert observations[agent][1].shape == (3, 2)
+
+            # Check third element (image)
+            assert observations[agent][2].shape == (3, 16, 16, 3)
+
+            # Check rewards, terminations, truncations
+            assert isinstance(rewards[agent], np.ndarray)
+            assert rewards[agent].ndim == 1
+            assert rewards[agent].size == 3
+
+            assert isinstance(terminations[agent], np.ndarray)
+            assert terminations[agent].dtype == np.bool_
+            assert terminations[agent].ndim == 1
+            assert terminations[agent].size == 3
+
+            assert isinstance(truncations[agent], np.ndarray)
+            assert truncations[agent].dtype == np.bool_
+            assert truncations[agent].ndim == 1
+            assert truncations[agent].size == 3
+
+        env.close()
+    except Exception as e:
+        env.close()
+        raise e
+
+
+@pytest.mark.parametrize(
+    "env_fns",
+    [[lambda: ComplexTupleSpaceTestEnv(render_mode="rgb_array") for _ in range(4)]],
+)
+def test_render_async_pz_vector_env_complex_tuple_space(env_fns):
+    env = AsyncPettingZooVecEnv(env_fns)
+    assert env.render_mode == "rgb_array"
+
+    env.reset()
+    rendered_frames = env.render()
+    assert isinstance(rendered_frames, tuple)
+    assert len(rendered_frames) == env.num_envs
+    assert all(isinstance(frame, np.ndarray) for frame in rendered_frames)
+    env.close()
+
+
+@pytest.mark.parametrize(
+    "env_fns",
+    [[lambda: ComplexDictSpaceTestEnv(render_mode="rgb_array") for _ in range(4)]],
+)
+def test_render_async_pz_vector_env_complex_dict_space(env_fns):
+    env = AsyncPettingZooVecEnv(env_fns)
+    assert env.render_mode == "rgb_array"
+
+    env.reset()
+    rendered_frames = env.render()
+    assert isinstance(rendered_frames, tuple)
+    assert len(rendered_frames) == env.num_envs
+    assert all(isinstance(frame, np.ndarray) for frame in rendered_frames)
+    env.close()
+
+
+@pytest.mark.parametrize(
+    "env_fns",
+    [[lambda: ComplexTupleSpaceTestEnv(render_mode="rgb_array") for _ in range(4)]],
+)
+def test_call_async_pz_vector_env_complex_tuple_space(env_fns):
+    env = AsyncPettingZooVecEnv(env_fns)
+    env.reset()
+
+    images = env.call("render")
+    max_num_agents = env.call("possible_agents")
+    assert images
+    assert max_num_agents
+    env.close()
+
+
+@pytest.mark.parametrize(
+    "env_fns",
+    [[lambda: ComplexDictSpaceTestEnv(render_mode="rgb_array") for _ in range(4)]],
+)
+def test_call_async_pz_vector_env_complex_dict_space(env_fns):
+    env = AsyncPettingZooVecEnv(env_fns)
+    env.reset()
+
+    images = env.call("render")
+    max_num_agents = env.call("possible_agents")
+    assert images
+    assert max_num_agents
+    env.close()
+
+
+def test_place_holder_value_complex_dict_space():
+    """Test getting placeholder value for complex dictionary space"""
+    obs_shapes = {"agent_0": {"position": (3,), "velocity": (2,), "image": (16, 16, 3)}}
+
+    placeholder = get_placeholder_value("agent_0", "observation", obs_shapes)
+    assert isinstance(placeholder, dict)
+    assert "position" in placeholder
+    assert "velocity" in placeholder
+    assert "image" in placeholder
+
+    assert placeholder["position"].shape == (3,)
+    assert placeholder["velocity"].shape == (2,)
+    assert placeholder["image"].shape == (16, 16, 3)
+
+    assert np.all(placeholder["position"] == -1)
+    assert np.all(placeholder["velocity"] == -1)
+    assert np.all(placeholder["image"] == -1)
+
+
+def test_place_holder_value_complex_tuple_space():
+    """Test getting placeholder value for complex tuple space"""
+    obs_shapes = {"agent_0": [(3,), (2,), (16, 16, 3)]}
+
+    placeholder = get_placeholder_value("agent_0", "observation", obs_shapes)
+    assert isinstance(placeholder, tuple)
+    assert len(placeholder) == 3
+
+    assert placeholder[0].shape == (3,)
+    assert placeholder[1].shape == (2,)
+    assert placeholder[2].shape == (16, 16, 3)
+
+    assert np.all(placeholder[0] == -1)
+    assert np.all(placeholder[1] == -1)
+    assert np.all(placeholder[2] == -1)
+
+
+def test_worker_complex_dict_space():
+    """Test worker function with complex Dict observation spaces"""
+    num_envs = 1
+    env_fns = [lambda: ComplexDictSpaceTestEnv() for _ in range(num_envs)]
+
+    vec_env = AsyncPettingZooVecEnv(env_fns)
+    vec_env.reset()
+
+    actions = {agent: vec_env.action_space(agent).sample() for agent in vec_env.agents}
+    vec_env.close()
+    actions = actions_to_list_helper(actions)
+    parent_pipe, child_pipe = mp.Pipe()
+    queue = mp.Queue()
+    p = Process(
+        target=_async_worker,
+        args=(
+            0,
+            CloudpickleWrapper(env_fns[0]),
+            child_pipe,
+            parent_pipe,
+            vec_env._obs_buffer,
+            queue,
+            vec_env.observation_shapes,
+            vec_env.observation_widths,
+            vec_env.observation_dtypes,
+            vec_env.agents,
+        ),
+    )
+    p.start()
+    child_pipe.close()
+
+    # Reset the environment before stepping
+    parent_pipe.send(("reset", {}))
+    results, success = parent_pipe.recv()
+    assert success
+
+    # Step the environment
+    parent_pipe.send(("step", actions[0]))
+    results, success = parent_pipe.recv()
+    assert success
+
+    rewards, term, trunc, _ = results
+
+    # Check observation structure
+    for agent in vec_env.agents:
+        assert isinstance(vec_env.observation_space(agent), spaces.Dict)
+
+    # Check rewards
+    assert isinstance(rewards["agent_0"], float)
+
+    # Check termination/truncation
+    assert isinstance(term["agent_0"], bool)
+    assert isinstance(trunc["agent_0"], bool)
+
+    parent_pipe.close()
+    p.terminate()
+    p.join()
+
+
+def test_worker_complex_tuple_space():
+    """Test worker function with complex Tuple observation spaces"""
+    num_envs = 1
+    env_fns = [lambda: ComplexTupleSpaceTestEnv() for _ in range(num_envs)]
+
+    vec_env = AsyncPettingZooVecEnv(env_fns)
+    vec_env.reset()
+
+    actions = {agent: vec_env.action_space(agent).sample() for agent in vec_env.agents}
+    vec_env.close()
+    actions = actions_to_list_helper(actions)
+    parent_pipe, child_pipe = mp.Pipe()
+    queue = mp.Queue()
+    p = Process(
+        target=_async_worker,
+        args=(
+            0,
+            CloudpickleWrapper(env_fns[0]),
+            child_pipe,
+            parent_pipe,
+            vec_env._obs_buffer,
+            queue,
+            vec_env.observation_shapes,
+            vec_env.observation_widths,
+            vec_env.observation_dtypes,
+            vec_env.agents,
+        ),
+    )
+    p.start()
+    child_pipe.close()
+
+    # Reset the environment before stepping
+    parent_pipe.send(("reset", {}))
+    results, success = parent_pipe.recv()
+    assert success
+
+    # Step the environment
+    parent_pipe.send(("step", actions[0]))
+    results, success = parent_pipe.recv()
+    assert success
+
+    rewards, term, trunc, _ = results
+
+    # Check observation structure
+    for agent in vec_env.agents:
+        assert isinstance(vec_env.observation_space(agent), spaces.Tuple)
+
+    # Check rewards
+    assert isinstance(rewards["agent_0"], float)
+
+    # Check termination/truncation
+    assert isinstance(term["agent_0"], bool)
+    assert isinstance(trunc["agent_0"], bool)
+
+    parent_pipe.close()
+    p.terminate()
+    p.join()
