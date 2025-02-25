@@ -23,10 +23,13 @@ ArrayDict = Dict[str, np.ndarray]
 ArrayTuple = Tuple[ArrayLike, ...]
 NetConfigType = Dict[str, Any]
 KernelSizeType = Union[int, Tuple[int, ...]]
-GymSpaceType = Union[spaces.Space, List[spaces.Space]]
+SupportedGymSpaces = Union[
+    spaces.Box, spaces.Discrete, spaces.MultiDiscrete, spaces.Dict, spaces.Tuple
+]
+GymSpaceType = Union[SupportedGymSpaces, List[SupportedGymSpaces]]
 GymEnvType = Union[str, gym.Env, gym.vector.VectorEnv]
 
-NumpyObsType = Union[ArrayLike, ArrayDict, ArrayTuple]
+NumpyObsType = Union[np.ndarray, ArrayDict, ArrayTuple]
 TorchObsType = Union[torch.Tensor, TensorDict, TensorTuple]
 ObservationType = Union[NumpyObsType, TorchObsType]
 ActionType = Union[int, float, ArrayLike, torch.Tensor]

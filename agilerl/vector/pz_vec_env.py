@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
+from gymnasium.spaces import Space
 from gymnasium.vector.utils import batch_space
 
 from agilerl.typing import ActionType
@@ -15,6 +16,10 @@ class PettingZooVecEnv:
 
     :param num_envs: Number of environments to vectorize
     :type num_envs: int
+    :param observation_spaces: Dictionary of observation spaces
+    :type observation_spaces: dict[str, gymnasium.spaces.Space]
+    :param action_spaces: List of action spaces
+    :type action_spaces: list[gymnasium.spaces.Space]
     :param possible_agents: List of possible agents
     :type possible_agents: list[str]
     """
@@ -26,7 +31,13 @@ class PettingZooVecEnv:
     agents: List[str]
     num_agents: int
 
-    def __init__(self, num_envs, observation_spaces, action_spaces, possible_agents):
+    def __init__(
+        self,
+        num_envs: int,
+        observation_spaces: Dict[str, Space],
+        action_spaces: List[Space],
+        possible_agents: List[str],
+    ):
         self.num_envs = num_envs
         self.agents = possible_agents
         self.num_agents = len(self.agents)
