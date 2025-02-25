@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
+from gymnasium.vector.utils import batch_space
 
 from agilerl.typing import ActionType
 
@@ -21,15 +22,28 @@ class PettingZooVecEnv:
     metadata: Dict[str, Any] = {}
     render_mode: Optional[str] = None
     closed: bool = False
-
     num_envs: int
     agents: List[str]
     num_agents: int
 
-    def __init__(self, num_envs: int, possible_agents: List[str]):
+    def __init__(self, num_envs, observation_spaces, action_spaces, possible_agents):
         self.num_envs = num_envs
         self.agents = possible_agents
         self.num_agents = len(self.agents)
+        self._single_observation_spaces = observation_spaces
+        self._single_action_spaces = action_spaces
+        self._observation_spaces = {
+            agent: batch_space(space, self.num_envs)
+            for agent, space in observation_spaces.items()
+        }
+        self._action_spaces = {
+            agent: batch_space(space, self.num_envs)
+            for agent, space in action_spaces.items()
+        }
+        self.action_space = self._get_action_space
+        self.observation_space = self._get_observation_space
+        self.single_action_space = self._get_single_action_space
+        self.single_observation_space = self._get_single_observation_space
 
     def reset(
         self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None
@@ -110,3 +124,35 @@ class PettingZooVecEnv:
     def unwrapped(self) -> "PettingZooVecEnv":
         """Return the base environment."""
         return self
+
+    def _get_single_action_space(self, agent):
+        """Get an agents single action space
+
+        :param agent: Name of agent
+        :type agent: str
+        """
+        return self._single_action_spaces[agent]
+
+    def _get_action_space(self, agent):
+        """Get an agents action space
+
+        :param agent: Name of agent
+        :type agent: str
+        """
+        return self._action_spaces[agent]
+
+    def _get_single_observation_space(self, agent):
+        """Get an agents single observation space
+
+        :param agent: Name of agent
+        :type agent: str
+        """
+        return self._single_observation_spaces[agent]
+
+    def _get_observation_space(self, agent):
+        """Get an agents observation space
+
+        :param agent: Name of agent
+        :type agent: str
+        """
+        return self._observation_spaces[agent]
