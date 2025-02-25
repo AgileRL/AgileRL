@@ -326,6 +326,14 @@ class MutationRegistry:
         )
         return f"Network Groups:\n{groups_str}\n\nOptimizers:\n{optimizers_str}"
 
+    def __eq__(self, other: "MutationRegistry") -> bool:
+        return (
+            self.hp_config == other.hp_config
+            and self.groups == other.groups
+            and self.optimizers == other.optimizers
+            and self.hooks == other.hooks
+        )
+
     @property
     def optimizer_networks(self) -> Dict[str, List[str]]:
         """Get a dictionary of optimizer names and the network attribute names that they update.

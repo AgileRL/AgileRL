@@ -1,10 +1,10 @@
 from dataclasses import asdict
-from typing import Optional
+from typing import Optional, Type, Union
 
 import torch
 from gymnasium import spaces
 
-from agilerl.modules.base import EvolvableModule
+from agilerl.modules import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.typing import ConfigType, TorchObsType
@@ -12,11 +12,14 @@ from agilerl.typing import ConfigType, TorchObsType
 
 class ValueNetwork(EvolvableNetwork):
     """Value functions are used in reinforcement learning to estimate the expected value of a state.
-    Therefore, for any given observation, we predict a single scalar value that represents
-    the discounted return from that state.
+    For any given observation, we predict a single scalar value that represents
+    the discounted return from that state. Used in e.g. PPO.
 
     :param observation_space: Observation space of the environment.
     :type observation_space: spaces.Space
+    :param encoder_cls: Encoder class to use for the network. Defaults to None, whereby it is
+        automatically built using an AgileRL module according the observation space.
+    :type encoder_cls: Optional[Union[str, Type[EvolvableModule]]]
     :param encoder_config: Configuration of the encoder.
     :type encoder_config: ConfigType
     :param head_config: Configuration of the head.
@@ -36,23 +39,27 @@ class ValueNetwork(EvolvableNetwork):
     def __init__(
         self,
         observation_space: spaces.Space,
+        encoder_cls: Optional[Union[str, Type[EvolvableModule]]] = None,
         encoder_config: Optional[ConfigType] = None,
         head_config: Optional[ConfigType] = None,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
         n_agents: Optional[int] = None,
         latent_dim: int = 32,
+        simba: bool = False,
         device: str = "cpu",
     ):
 
         super().__init__(
             observation_space,
+            encoder_cls=encoder_cls,
             encoder_config=encoder_config,
             action_space=None,
             min_latent_dim=min_latent_dim,
             max_latent_dim=max_latent_dim,
             n_agents=n_agents,
             latent_dim=latent_dim,
+            simba=simba,
             device=device,
         )
 
@@ -94,8 +101,9 @@ class ValueNetwork(EvolvableNetwork):
         return self.head_net(self.encoder(x))
 
     def recreate_network(self) -> None:
-        """Recreates the network"""
-        encoder = self._build_encoder(self.encoder.net_config)
+        """Recreates the network."""
+        self.recreate_encoder()
+
         head_net = self.create_mlp(
             num_inputs=self.latent_dim,
             num_outputs=1,
@@ -103,8 +111,4 @@ class ValueNetwork(EvolvableNetwork):
             net_config=self.head_net.net_config,
         )
 
-        self.encoder = EvolvableModule.preserve_parameters(self.encoder, encoder)
         self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net)
-
-
-# TODO: Implement DistributionalValueNetwork

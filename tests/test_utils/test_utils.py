@@ -5,14 +5,17 @@ import numpy as np
 from gymnasium import spaces
 from pettingzoo.mpe import simple_speaker_listener_v4
 
-from agilerl.algorithms.cqn import CQN
-from agilerl.algorithms.ddpg import DDPG
-from agilerl.algorithms.dqn import DQN
-from agilerl.algorithms.dqn_rainbow import RainbowDQN
-from agilerl.algorithms.maddpg import MADDPG
-from agilerl.algorithms.matd3 import MATD3
-from agilerl.algorithms.ppo import PPO
-from agilerl.algorithms.td3 import TD3
+from agilerl.algorithms import (
+    CQN,
+    DDPG,
+    DQN,
+    MADDPG,
+    MATD3,
+    PPO,
+    TD3,
+    RainbowDQN,
+)
+from agilerl.algorithms.core import EvolvableAlgorithm
 from agilerl.utils.utils import (
     calculate_vectorized_scores,
     create_population,
@@ -261,7 +264,9 @@ def test_prints_hyperparams():
     pop[0].batch_size = 32
 
     expected_output = "Agent ID: {}    Mean 5 Fitness: {:.2f}    Attributes: {}".format(
-        pop[0].index, np.mean(pop[0].fitness[-5:]), pop[0].inspect_attributes()
+        pop[0].index,
+        np.mean(pop[0].fitness[-5:]),
+        EvolvableAlgorithm.inspect_attributes(pop[0]),
     )
 
     with patch("builtins.print") as mock_print:

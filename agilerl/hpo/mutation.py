@@ -67,6 +67,9 @@ def get_architecture_mut_method(
             isinstance(offspring, eval[0].__class__) for offspring in eval
         ), "All offspring should be of the same type."
 
+        # NOTE: For multi-agent settings we apply the same architecture mutations to
+        # all agents. However, depending on use-case it might be beneficial to have agents
+        # with different architectures; please raise an issue if you would like this!
         eval = eval[0]
 
     return eval.sample_mutation_method(new_layer_prob, rng)
@@ -90,6 +93,7 @@ def get_offspring_eval_modules(
     for group in registry.groups:
         eval_module: OffspringType = getattr(individual, group.eval)
 
+        # Clone the offspring prior to applying mutations
         offspring = (
             [mod.clone() for mod in eval_module]
             if isinstance(eval_module, list)
@@ -670,78 +674,96 @@ class Mutations:
         individual.mut = "param"
         return individual
 
-    def regularize_weight(self, weight: float, mag: float) -> float:
-        """Regularize the weight to be within the specified magnitude.
-
-        :param weight: The weight to be regularized
-        :type weight: float
-        :param mag: The magnitude limit
-        :type mag: float
-        :return: The regularized weight
-        :rtype: float
-        """
-        if weight > mag:
-            weight = mag
-        if weight < -mag:
-            weight = -mag
-        return weight
-
     def classic_parameter_mutation(self, network: EvolvableModule) -> EvolvableModule:
-        """Returns network with mutated weights.
-
-        :param network: Neural network to mutate
-        :type network: EvolvableModule
         """
-        # Function to mutate network weights with Gaussian noise
+        Returns network with mutated weights, with a vectorized inner loop for efficiency.
+
+        :param network: Neural network to mutate.
+        :type network: EvolvableModule
+        :return: Mutated network.
+        :rtype: EvolvableModule
+        """
+        # Parameters controlling mutation strength and probabilities
         mut_strength = self.mutation_sd
         num_mutation_frac = 0.1
         super_mut_strength = 10
         super_mut_prob = 0.05
         reset_prob = super_mut_prob + 0.05
+        mag_limit = 1000000
 
         model_params = network.state_dict()
 
-        potential_keys = []
-        for i, key in enumerate(model_params):  # Mutate each param
-            if "norm" not in key:
-                W = model_params[key]
-                if len(W.shape) == 2:  # Weights, no bias
-                    potential_keys.append(key)
+        # Collect keys corresponding to weight matrices (ignoring normalization params)
+        potential_keys = [
+            key
+            for key in model_params
+            if "norm" not in key and len(model_params[key].shape) == 2
+        ]
 
-        how_many = self.rng.integers(1, len(potential_keys) + 1, 1)[0]
+        # Randomly choose a subset of keys to mutate
+        how_many = int(self.rng.integers(1, len(potential_keys) + 1))
         chosen_keys = self.rng.choice(potential_keys, how_many, replace=False)
 
         for key in chosen_keys:
-            # References to the variable keys
             W = model_params[key]
             num_weights = W.shape[0] * W.shape[1]
-            # Number of mutation instances
-            num_mutations = fastrand.pcg32bounded(
-                int(np.ceil(num_mutation_frac * num_weights))
+            num_mutations = int(np.ceil(num_mutation_frac * num_weights))
+            if num_mutations < 1:
+                continue
+
+            # Vectorized generation of random indices (for rows and columns)
+            rows = self.rng.integers(0, W.shape[0], size=num_mutations)
+            cols = self.rng.integers(0, W.shape[1], size=num_mutations)
+            rand_vals = self.rng.uniform(0, 1, size=num_mutations)
+
+            # Convert indices and random values to torch tensors on the same device as W
+            rows_tensor = torch.tensor(rows, dtype=torch.long, device=W.device)
+            cols_tensor = torch.tensor(cols, dtype=torch.long, device=W.device)
+            rand_vals_tensor = torch.tensor(rand_vals, dtype=W.dtype, device=W.device)
+
+            # Get current weight values at the selected indices
+            current_vals = W[rows_tensor, cols_tensor]
+            new_vals = current_vals.clone()
+
+            # Create masks for the different mutation types
+            mask_super = rand_vals_tensor < super_mut_prob
+            mask_reset = (rand_vals_tensor >= super_mut_prob) & (
+                rand_vals_tensor < reset_prob
             )
-            for _ in range(num_mutations):
-                ind_dim1 = fastrand.pcg32bounded(W.shape[0])
-                ind_dim2 = fastrand.pcg32bounded(W.shape[-1])
-                random_num = self.rng.uniform(0, 1)
+            mask_normal = rand_vals_tensor >= reset_prob
 
-                if random_num < super_mut_prob:  # Super Mutation probability
-                    W[ind_dim1, ind_dim2] += self.rng.normal(
-                        0, np.abs(super_mut_strength * W[ind_dim1, ind_dim2].item())
-                    )
-                elif random_num < reset_prob:  # Reset probability
-                    W[ind_dim1, ind_dim2] = self.rng.normal(0, 1)
-                else:  # mutauion even normal
-                    W[ind_dim1, ind_dim2] += self.rng.normal(
-                        0, np.abs(mut_strength * W[ind_dim1, ind_dim2].item())
-                    )
-
-                # Regularization hard limit
-                W[ind_dim1, ind_dim2] = self.regularize_weight(
-                    W[ind_dim1, ind_dim2].item(), 1000000
+            # Super mutation: add noise with std proportional to the absolute current value times super_mut_strength
+            if mask_super.sum() > 0:
+                std_super = (super_mut_strength * current_vals[mask_super]).abs()
+                noise_super = torch.normal(
+                    mean=torch.zeros_like(std_super), std=std_super
                 )
+                new_vals[mask_super] = current_vals[mask_super] + noise_super
 
-        if self.accelerator is None:
-            network = network.to(self.device)
+            # Reset mutation: completely reset the weight using N(0, 1)
+            if mask_reset.sum() > 0:
+                noise_reset = torch.normal(
+                    mean=torch.zeros(mask_reset.sum(), device=W.device),
+                    std=torch.ones(mask_reset.sum(), device=W.device),
+                )
+                new_vals[mask_reset] = noise_reset
+
+            # Normal mutation: add noise with std proportional to the absolute current value times mut_strength
+            if mask_normal.sum() > 0:
+                std_normal = (mut_strength * current_vals[mask_normal]).abs()
+                noise_normal = torch.normal(
+                    mean=torch.zeros_like(std_normal), std=std_normal
+                )
+                new_vals[mask_normal] = current_vals[mask_normal] + noise_normal
+
+            # Integrate regularization by clamping all mutated values at once.
+            # This is equivalent to your regularize_weight function.
+            new_vals = new_vals.clamp(min=-mag_limit, max=mag_limit)
+
+            # Write the mutated, clamped values back to the weight tensor
+            W[rows_tensor, cols_tensor] = new_vals
+            if self.accelerator is None:
+                network = network.to(self.device)
 
         return network
 
@@ -798,7 +820,11 @@ class Mutations:
                 self._reinit_bandit_grads(individual, offsprings, old_exp_layer)
 
         self.reinit_opt(individual)  # Reinitialise optimizer
-        individual.mut = "arch"
+        individual.mut = (
+            applied_mutations[0]
+            if isinstance(applied_mutations, list)
+            else applied_mutations
+        )
         return individual
 
     def _apply_arch_mutation(

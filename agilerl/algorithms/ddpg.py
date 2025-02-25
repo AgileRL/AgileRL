@@ -20,7 +20,7 @@ from agilerl.typing import (
     ArrayOrTensor,
     ExperiencesType,
     GymEnvType,
-    NumpyObsType,
+    ObservationType,
 )
 from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 
@@ -322,20 +322,20 @@ class DDPG(RLAlgorithm):
             / (pre_scaled_max - pre_scaled_min)
         ).clip(min_action, max_action)
 
-    def get_action(self, state: NumpyObsType, training: bool = True) -> ArrayOrTensor:
+    def get_action(self, obs: ObservationType, training: bool = True) -> ArrayOrTensor:
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
 
-        :param state: Environment observation, or multiple observations in a batch
-        :type state: numpy.ndarray[float]
+        :param obs: Environment observation, or multiple observations in a batch
+        :type obs: numpy.ndarray[float]
         :param training: Agent is training, use exploration noise, defaults to True
         :type training: bool, optional
         """
-        state = self.preprocess_observation(state)
+        obs = self.preprocess_observation(obs)
         self.actor.eval()
         with torch.no_grad():
-            action_values: torch.Tensor = self.actor(state)
+            action_values: torch.Tensor = self.actor(obs)
 
         self.actor.train()
         action = self.scale_to_action_space(action_values.cpu().data.numpy())
@@ -524,20 +524,21 @@ class DDPG(RLAlgorithm):
         :return: Mean test score
         :rtype: float
         """
+        self.set_training_mode(False)
         with torch.no_grad():
             rewards = []
             num_envs = env.num_envs if hasattr(env, "num_envs") else 1
             for i in range(loop):
-                state, _ = env.reset()
+                obs, _ = env.reset()
                 scores = np.zeros(num_envs)
                 completed_episode_scores = np.zeros(num_envs)
                 finished = np.zeros(num_envs)
                 step = 0
                 while not np.all(finished):
                     if swap_channels:
-                        state = obs_channels_to_first(state)
-                    action = self.get_action(state, training=False)
-                    state, reward, done, trunc, _ = env.step(action)
+                        obs = obs_channels_to_first(obs)
+                    action = self.get_action(obs, training=False)
+                    obs, reward, done, trunc, _ = env.step(action)
                     step += 1
                     scores += np.array(reward)
                     for idx, (d, t) in enumerate(zip(done, trunc)):

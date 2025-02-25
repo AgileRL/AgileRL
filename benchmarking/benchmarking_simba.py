@@ -1,12 +1,10 @@
 import torch
 import yaml
 
-from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.modules.dummy import DummyEvolvable
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.utils.utils import (
     create_population,
@@ -14,7 +12,7 @@ from agilerl.utils.utils import (
     observation_space_channels_to_first,
     print_hyperparams,
 )
-from benchmarking.networks import BasicNetActorDQN
+from agilerl.wrappers.agent import RSNorm
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -23,7 +21,7 @@ from benchmarking.networks import BasicNetActorDQN
 # sys.path.append('../')
 
 
-def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
+def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -59,60 +57,26 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
         device=device,
     )
 
-    state_dim = RLAlgorithm.get_state_dim(observation_space)
-    action_dim = RLAlgorithm.get_action_dim(action_space)
-    if use_net:
-        # Currently set up for DQN
-        actor_kwargs = dict(
-            input_size=state_dim[0],
-            hidden_sizes=[64, 64],
-            output_size=action_dim,
-        )
-        actor = DummyEvolvable(BasicNetActorDQN, actor_kwargs, device=device)
-        critic = None
-    else:
-        actor = None
-        critic = None
-
-    if INIT_HP["ALGO"] in ["DDPG", "TD3"]:
-        hp_config = HyperparameterConfig(
-            lr_actor=RLParameter(
-                min=MUTATION_PARAMS["MIN_LR"], max=MUTATION_PARAMS["MAX_LR"]
-            ),
-            lr_critic=RLParameter(
-                min=MUTATION_PARAMS["MIN_LR"], max=MUTATION_PARAMS["MAX_LR"]
-            ),
-            batch_size=RLParameter(
-                min=MUTATION_PARAMS["MIN_BATCH_SIZE"],
-                max=MUTATION_PARAMS["MAX_BATCH_SIZE"],
-                dtype=int,
-            ),
-            learn_step=RLParameter(
-                min=MUTATION_PARAMS["MIN_LEARN_STEP"],
-                max=MUTATION_PARAMS["MAX_LEARN_STEP"],
-                dtype=int,
-                grow_factor=1.5,
-                shrink_factor=0.75,
-            ),
-        )
-    else:
-        hp_config = HyperparameterConfig(
-            lr=RLParameter(
-                min=MUTATION_PARAMS["MIN_LR"], max=MUTATION_PARAMS["MAX_LR"]
-            ),
-            batch_size=RLParameter(
-                min=MUTATION_PARAMS["MIN_BATCH_SIZE"],
-                max=MUTATION_PARAMS["MAX_BATCH_SIZE"],
-                dtype=int,
-            ),
-            learn_step=RLParameter(
-                min=MUTATION_PARAMS["MIN_LEARN_STEP"],
-                max=MUTATION_PARAMS["MAX_LEARN_STEP"],
-                dtype=int,
-                grow_factor=1.5,
-                shrink_factor=0.75,
-            ),
-        )
+    hp_config = HyperparameterConfig(
+        lr_actor=RLParameter(
+            min=MUTATION_PARAMS["MIN_LR"], max=MUTATION_PARAMS["MAX_LR"]
+        ),
+        lr_critic=RLParameter(
+            min=MUTATION_PARAMS["MIN_LR"], max=MUTATION_PARAMS["MAX_LR"]
+        ),
+        batch_size=RLParameter(
+            min=MUTATION_PARAMS["MIN_BATCH_SIZE"],
+            max=MUTATION_PARAMS["MAX_BATCH_SIZE"],
+            dtype=int,
+        ),
+        learn_step=RLParameter(
+            min=MUTATION_PARAMS["MIN_LEARN_STEP"],
+            max=MUTATION_PARAMS["MAX_LEARN_STEP"],
+            dtype=int,
+            grow_factor=1.5,
+            shrink_factor=0.75,
+        ),
+    )
 
     agent_pop = create_population(
         algo=INIT_HP["ALGO"],
@@ -121,8 +85,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
         net_config=NET_CONFIG,
         INIT_HP=INIT_HP,
         hp_config=hp_config,
-        actor_network=actor,
-        critic_network=critic,
+        agent_wrapper=RSNorm,
+        wrapper_kwargs={},
         population_size=INIT_HP["POP_SIZE"],
         num_envs=INIT_HP["NUM_ENVS"],
         device=device,
@@ -161,9 +125,9 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
 
 
 if __name__ == "__main__":
-    with open("configs/training/ddpg.yaml") as file:
+    with open("configs/training/ddpg_simba.yaml") as file:
         config = yaml.safe_load(file)
     INIT_HP = config["INIT_HP"]
     MUTATION_PARAMS = config["MUTATION_PARAMS"]
     NET_CONFIG = config["NET_CONFIG"]
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False)
+    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
