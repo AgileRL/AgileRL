@@ -2,6 +2,7 @@ from typing import Any, Optional, Tuple, Union
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import torch.optim as optim
 from gymnasium import spaces
 from transformers import GenerationConfig
@@ -70,7 +71,7 @@ class GRPO(RLAlgorithm):
         mut: Optional[str] = None,
         clip_coef: float = 0.2,
         update_epochs: int = 4,
-        group_size: int = 10,
+        group_size: int = 5,
         temperature: float = 0.9,
         max_sequence_length: int = 512,
         device: str = "cpu",
@@ -117,6 +118,7 @@ class GRPO(RLAlgorithm):
         self.group_size = (
             group_size  # What if we assume that group size == num_envs ???
         )
+        self.pad_token_id = pad_token_id
 
         self.generation_config = GenerationConfig(
             do_sample=True,
@@ -130,7 +132,7 @@ class GRPO(RLAlgorithm):
                 raise TypeError(
                     f"Passed actor network is of type {type(actor_network)}, but must be of type EvolvableModule."
                 )
-            self.actor = actor_network
+            self.actor = actor_network.to(self.device)
 
         else:
             raise ValueError(
@@ -138,7 +140,9 @@ class GRPO(RLAlgorithm):
             )
 
         # Use optim.W for LLM fine-tuning
-        self.optimizer = OptimizerWrapper(optim.W, networks=[self.actor], lr=self.lr)
+        self.optimizer = OptimizerWrapper(
+            optim.AdamW, networks=[self.actor], lr=self.lr
+        )
 
         if self.accelerator is not None and wrap:
             self.wrap_models()
@@ -149,8 +153,7 @@ class GRPO(RLAlgorithm):
         # Create a Generation config e.g. self.generation_config = GenerationConfig
 
     def get_action(
-        self,
-        state: np.ndarray,
+        self, states: torch.Tensor, return_logits: bool = True
     ) -> Tuple[
         Union[np.ndarray, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor
     ]:
@@ -172,8 +175,46 @@ class GRPO(RLAlgorithm):
         # Duplicate the prompt group_size times
         # Use the generation config to generate (n = group_size) answers
         # No need to tokenize as the environment will take care of tokenization
-        #
-        pass
+        import time
+
+        with torch.no_grad():
+            self.actor.eval()
+            action_masks = []
+            completion_ids = []
+            completion_logprobs = []
+            timing = []
+            i = 0
+            for state in states:
+                # print("Epoch", i)
+                # assert False
+                state["input_ids"] = (
+                    state["input_ids"].repeat(self.group_size, 1).to(self.device)
+                )
+                # print(state["input_ids"].shape)
+                state["attention_mask"] = (
+                    state["attention_mask"].repeat(self.group_size, 1).to(self.device)
+                )
+                t = time.time()
+                completion = self.actor.generate(
+                    **state,
+                    generation_config=self.generation_config,
+                    output_scores=return_logits,
+                    return_dict_in_generate=return_logits,
+                )
+                timing.append(time.time() - t)
+                completion_ids.append(completion_id := completion.sequences)
+                print([len(score) for score in completion.scores])
+                completion_logprobs.append(F.log_softmax(completion.scores))
+                action_mask = torch.zeros_like(
+                    completion_id, dtype=torch.bool, device=self.device
+                )
+                action_mask[:, state["input_ids"].shape[1] :] = True
+                action_mask[completion_id == self.pad_token_id] = False
+                action_mask = action_mask[:, 1:]
+                action_masks.append(action_mask)
+                i += 1
+        # print(timing)
+        return completion_ids, completion_logprobs, action_mask
 
     def learn(self, experiences: ExperiencesType) -> float:
         """Updates agent network parameters to learn from experiences.

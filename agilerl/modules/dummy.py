@@ -51,3 +51,6 @@ class DummyEvolvable(EvolvableModule):
 
     def forward(self, obs: ObservationType) -> torch.Tensor:
         return self.module(obs)
+
+    def generate(self, *args, **kwargs):
+        return self.module.generate(*args, **kwargs)

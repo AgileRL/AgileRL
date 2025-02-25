@@ -1,6 +1,6 @@
 import re
 from contextlib import contextmanager
-from typing import Callable, Generator, List, Tuple
+from typing import Any, Callable, Dict, Generator, List, Tuple
 
 import gymnasium as gym
 import torch
@@ -17,23 +17,35 @@ REASONING_SYSTEM_PROMPT = (
 )
 
 
-def format_reward(completions):
+def format_reward(completion: str) -> float:
     """Reward function that checks if the completion has a specific format."""
     pattern = r"^<think>.*?</think>\s*<answer>.*?</answer>$"
-    completion_contents = [completion[0]["content"] for completion in completions]
-    matches = [re.match(pattern, content) for content in completion_contents]
-    return [1.0 if match else 0.0 for match in matches]
+    pattern_match = re.match(pattern, completion)
+    return 1.0 if pattern_match else 0.0
 
 
-def accuracy_reward(completion, solution):
+def accuracy_reward(completion: str, solution: str) -> float:
     """Reward function that checks if the completion is the same as the ground truth."""
-    pattern = re.compile(r"#### (\-?[0-9\.\,]+)")
-    match_found = pattern.search(completion)
-    if match_found:
-        match_str = match_found.group(1).strip()
-        match_str = match_str.replace(",", "")
 
-    return 0.0
+    # Obtain numerical answer
+    pattern = re.compile(r"#### (\-?[0-9\.\,]+)")
+    correct_answer = pattern.search(solution)
+    correct_answer = correct_answer.group(1).strip()
+
+    # Obtain our models answer
+    pattern = r"\d+\.\d+|\d+/\d+|\d+"
+    nums = re.findall(pattern, completion)
+    if len(nums) == 0:
+        return 0.0
+    answer = nums[-1]
+    return float(answer == correct_answer)
+
+
+def reward_function(completion: str, solution: str) -> float:
+    format_reward_value = format_reward(completion)
+    if not format_reward_value:
+        return format_reward_value
+    return accuracy_reward(completion, solution)
 
 
 class HuggingFaceGym(gym.Env):
@@ -48,7 +60,7 @@ class HuggingFaceGym(gym.Env):
         self.reward_fn = reward_fn
         self.system_prompt = system_prompt
         self.tokenizer = tokenizer
-        raw_dataset = load_dataset("openai/gsm8k", "main")
+        raw_dataset = load_dataset(dataset_name, "main")
         self.train_dataset = raw_dataset["train"]
         self.test_dataset = raw_dataset["test"]
         self.train_dataloader = DataLoader(
@@ -63,14 +75,13 @@ class HuggingFaceGym(gym.Env):
     def step(
         self, completions: torch.Tensor
     ) -> Tuple[List[BatchEncoding], List[float]]:
-        """"""
         self.reset_called = False
         rewards = self._decode_and_evalutate(completions)
         new_tokenized_prompts = self._get_next_batch()
         self.last_tokenized_prompts = new_tokenized_prompts
         return new_tokenized_prompts, rewards
 
-    def reset(self):
+    def reset(self) -> Tuple[List[BatchEncoding], Dict[str, Any]]:
         if self.reset_called:
             raise RuntimeError(
                 "env.reset() cannot be called more than once sequentially, it must follow with env.step()."
@@ -81,15 +92,20 @@ class HuggingFaceGym(gym.Env):
         self.last_tokenized_prompts = new_tokenized_prompts
         return new_tokenized_prompts, self.info
 
-    def _decode_and_evaluate(self, completions: List[torch.Tensor]):
-        # This is for a batch of completions (prompt_batch x group_size)
+    def _decode_and_evaluate(self, completions: List[torch.Tensor]) -> torch.Tensor:
+        # This is for a batch of completions (prompt_batch x group_size), List of tensors of length batch size, each tensor is a group of answers
         total_rewards = []
-        for group_completion, answer in zip(
-            completions, self.answers
+        for idx, (group_completion, answer) in enumerate(
+            zip(completions, self.answers)
         ):  # Vectorize this in the future
             # group completion is the group of completions produced from a single prompt
+            decoded_group_completion = self.tokenizer.batch_decode(
+                group_completion[:, self.last_tokenized_prompts[idx].shape[1], :],
+                skip_special_tokens=True,
+            )
             rewards = [
-                self.reward_fn(completion, answer) for completion in group_completion
+                self.reward_fn(completion, answer)
+                for completion in decoded_group_completion
             ]
             total_rewards.append(rewards)
         # Shape of the returned tensor is (batch_size X group_size)
@@ -111,7 +127,7 @@ class HuggingFaceGym(gym.Env):
     def eval(self) -> Generator[None, None, None]:
         self.dataloader = self.test_dataloader
         yield
-        self.test_dataloader = self.train_dataloader
+        self.dataloader = self.train_dataloader
 
 
 def apply_chat_template(
