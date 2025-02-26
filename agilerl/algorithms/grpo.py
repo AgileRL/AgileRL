@@ -164,7 +164,7 @@ class GRPO(RLAlgorithm):
         )
 
     def get_action(
-        self, states: torch.Tensor
+        self, states: torch.Tensor, training: bool = True
     ) -> Tuple[
         Union[np.ndarray, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor
     ]:
@@ -182,16 +182,18 @@ class GRPO(RLAlgorithm):
         :type preprocess_obs: bool, optional
         """
 
+        group_size = self.group_size if training else 1
+
         self.actor.eval()
         with torch.no_grad():
             action_masks = []
             completion_ids = []
             for state in states:
                 state["input_ids"] = (
-                    state["input_ids"].repeat(self.group_size, 1).to(self.device)
+                    state["input_ids"].repeat(group_size, 1).to(self.device)
                 )
                 state["attention_mask"] = (
-                    state["attention_mask"].repeat(self.group_size, 1).to(self.device)
+                    state["attention_mask"].repeat(group_size, 1).to(self.device)
                 )
                 completion_id = self.actor.generate(
                     **state,
@@ -253,9 +255,7 @@ class GRPO(RLAlgorithm):
     def test(
         self,
         env: GymEnvType,
-        swap_channels: bool = False,
-        max_steps: Optional[int] = None,
-        loop: int = 3,
+        loop: int = 1,
     ) -> float:
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
@@ -272,8 +272,17 @@ class GRPO(RLAlgorithm):
         :rtype: float
         """
         with env.eval():
+            prompts, _ = env.reset()
             # Eval training loop
-            pass
+            rewards = []
+            for _ in range(loop):
+                completion_ids, _ = self.get_action(prompts, training=False)
+                next_prompts, reward = env.step(completion_ids)
+                prompts = next_prompts
+                rewards.append(reward)
+        mean_fit = np.mean(rewards)
+        self.fitness.append(mean_fit)
+        return mean_fit
 
     def _calculate_advantage(
         self, rewards: torch.Tensor, eps: float = 1e-8

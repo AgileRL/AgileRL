@@ -75,6 +75,7 @@ class HuggingFaceGym(gym.Env):
         self.action_space = gym.spaces.Box(
             low=0, high=tokenizer.vocab_size - 1, shape=(max_answer_tokens,)
         )
+        self.eval_mode = False
 
     def step(
         self, completions: torch.Tensor
@@ -99,6 +100,8 @@ class HuggingFaceGym(gym.Env):
     def _decode_and_evaluate(self, completions: List[torch.Tensor]) -> torch.Tensor:
         # This is for a batch of completions (prompt_batch x group_size), List of tensors of length batch size, each tensor is a group of answers
         total_rewards = []
+        if self.eval_mode:
+            decoded_completions = []
         for idx, (group_completion, answer) in enumerate(
             zip(completions, self.answers)
         ):  # Vectorize this in the future
@@ -108,29 +111,40 @@ class HuggingFaceGym(gym.Env):
                 ],
                 skip_special_tokens=True,
             )
+            if self.eval_mode:
+                decoded_completions.append(decoded_group_completion)
             rewards = [
                 self.reward_fn(completion, answer)
                 for completion in decoded_group_completion
             ]
             total_rewards.append(rewards)
         # Shape of the returned tensor is (batch_size X group_size)
+        if self.eval_mode:
+            for idx, answer in enumerate(decoded_completions):
+                print(f"Question: {self.questions[idx]}")
+                print(f"Answer: {answer}")
+                print(f"Correct answer: {self.answers[idx]}")
+                print(f"Rewards: {total_rewards[idx]}")
+                print("\n")
         return torch.tensor(total_rewards)
 
     def _get_next_batch(self) -> List[BatchEncoding]:
         batch = next(iter(self.dataloader))
-        questions = batch["question"]
+        self.questions = batch["question"]
         self.answers = batch["answer"]
         tokenized_prompts = [
             apply_chat_template(question, self.system_prompt, self.tokenizer)
-            for question in questions
+            for question in self.questions
         ]
         return tokenized_prompts
 
     @contextmanager
     def eval(self) -> Generator[None, None, None]:
         self.dataloader = self.test_dataloader
+        self.eval_mode = True
         yield
         self.dataloader = self.train_dataloader
+        self.eval_mode = False
 
     def __len__(self):
         return len(self.train_dataloader)
