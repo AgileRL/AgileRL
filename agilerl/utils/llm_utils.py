@@ -18,15 +18,28 @@ REASONING_SYSTEM_PROMPT = (
 
 
 def format_reward(completion: str) -> float:
-    """Reward function that checks if the completion has a specific format."""
+    """Reward function that checks if the completion has a specific format.
+
+    :param completion: Prompt completion to be evaluated.
+    :type completion: str
+    :return: Reward for the format of the completion.
+    :rtype: float
+    """
     pattern = r"^<think>.*?</think>\s*<answer>.*?</answer>$"
     pattern_match = re.match(pattern, completion)
     return 1.0 if pattern_match else -1.0
 
 
 def accuracy_reward(completion: str, solution: str) -> float:
-    """Reward function that checks if the completion is the same as the ground truth."""
+    """Reward function that checks if the completion is the same as the ground truth.
 
+    :param completion: Prompt completion to be evaluated.
+    :type completion: str
+    :param solution: Ground truth solution.
+    :type solution: str
+    :return: Reward for the accuracy of the completion.
+    :rtype: float
+    """
     # Obtain numerical answer
     pattern = re.compile(r"#### (\-?[0-9\.\,]+)")
     correct_answer = pattern.search(solution)
@@ -42,6 +55,15 @@ def accuracy_reward(completion: str, solution: str) -> float:
 
 
 def reward_function(completion: str, solution: str) -> float:
+    """Reward function that combines the format and accuracy rewards.
+
+    :param completion: Prompt completion to be evaluated.
+    :type completion: str
+    :param solution: Ground truth solution.
+    :type solution: str
+    :return: Combined reward for the completion.
+    :rtype: float
+    """
     return accuracy_reward(completion, solution) + format_reward(completion)
 
 
