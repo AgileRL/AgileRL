@@ -12,7 +12,7 @@
 [![Discord](https://dcbadge.vercel.app/api/server/eB8HyTA2ux?style=flat)](https://discord.gg/eB8HyTA2ux)
 [![Arena](./.github/badges/arena-github-badge.svg)](https://arena.agilerl.com)
 <br>
-<h3><i>✨ <b>AgileRL 2.0 is here! Check out the latest powerful <a href=https://docs.agilerl.com/en/latest/get_started/agilerl2changes.html>updates</a>✨ </b></i></h3>
+<h3><i>✨ <b>AgileRL 2.1 is here! Check out the latest powerful <a href=https://docs.agilerl.com/en/latest/get_started/agilerl2changes.html>updates</a>✨ </b></i></h3>
 <h3><i>🚀 <b>Train super-fast for free on <a href="https://arena.agilerl.com">Arena</a>, the RLOps platform from AgileRL 🚀</b></i></h3>
 </div>
 <br>
@@ -50,12 +50,6 @@ git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
 pip install -e .
 ```
 
-Demo:
-```bash
-cd demos
-python demo_off_policy.py
-```
-
 ## Benchmarks
 
 Reinforcement learning algorithms and libraries are usually benchmarked once the optimal hyperparameters for training are known, but it often takes hundreds or thousands of experiments to discover these. This is unrealistic and does not reflect the true, total time taken for training. What if we could remove the need to conduct all these prior experiments?
@@ -74,12 +68,16 @@ AgileRL also supports multi-agent reinforcement learning using the Petting Zoo-s
 </p>
 
 ## Tutorials
-We are in the process of creating tutorials on how to use AgileRL and train agents on a variety of tasks.
 
-Currently, we have [tutorials for single-agent tasks](https://docs.agilerl.com/en/latest/tutorials/gymnasium/index.html)
-that will guide you through the process of training both on and off-policy agents to beat a variety of Gymnasium environments. Additionally, we have [multi-agent tutorials](https://docs.agilerl.com/en/latest/tutorials/pettingzoo/index.html) that make use of PettingZoo environments such as training DQN to play Connect Four with curriculum learning and self-play, and also for multi-agent tasks in MPE environments. The [tutorial on using hierarchical curriculum learning](https://docs.agilerl.com/en/latest/tutorials/skills/index.html) shows how to teach agents Skills and combine them to achieve an end goal. There are also [tutorials for contextual multi-arm bandits](https://docs.agilerl.com/en/latest/tutorials/bandits/index.html), which learn to make the correct decision in environments that only have one timestep.
+We are constantly updating our tutorials to showcase the latest features of AgileRL and how users can leverage our evolutionary HPO to achieve 10x faster hyperparameter optimization. Please see the available tutorials below.
 
-The demo files in ``demos`` also provide examples on how to train agents using AgileRL, and more information can be found in our <a href="https://docs.agilerl.com">documentation</a>.
+| Tutorial Type | Description |
+|---------------|-------------|
+| [Single-agent tasks](https://docs.agilerl.com/en/latest/tutorials/gymnasium/index.html) | Guides for training both on and off-policy agents to beat a variety of Gymnasium environments. |
+| [Multi-agent tasks](https://docs.agilerl.com/en/latest/tutorials/pettingzoo/index.html) | Use of PettingZoo environments such as training DQN to play Connect Four with curriculum learning and self-play, and for multi-agent tasks in MPE environments. |
+| [Hierarchical curriculum learning](https://docs.agilerl.com/en/latest/tutorials/skills/index.html) | Shows how to teach agents Skills and combine them to achieve an end goal. |
+| [Contextual multi-arm bandits](https://docs.agilerl.com/en/latest/tutorials/bandits/index.html) | Learn to make the correct decision in environments that only have one timestep. |
+| [Custom Modules & Networks](https://docs.agilerl.com/en/latest/tutorials/custom_networks/index.html) | Learn how to create custom evolvable modules and networks for RL algorithms. |
 
 ## Evolvable algorithms (more coming soon!)
 
