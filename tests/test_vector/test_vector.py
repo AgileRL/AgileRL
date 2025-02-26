@@ -23,6 +23,7 @@ from pettingzoo import ParallelEnv
 from pettingzoo.mpe import simple_speaker_listener_v4
 from pettingzoo.sisl import pursuit_v4
 
+from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.vector.pz_async_vec_env import (  # PettingZooExperienceSpec,; SharedMemory,
     AsyncPettingZooVecEnv,
     AsyncState,
@@ -47,6 +48,270 @@ class DummyRecv:
             return "close", None
         else:
             return self.cmd, self.data
+
+
+class DictSpaceTestEnv(ParallelEnv):
+    """Test environment with dictionary observation spaces"""
+
+    metadata = {"render_modes": ["human", "rgb_array"], "name": "dict_space_test_v0"}
+
+    def __init__(self, render_mode=None):
+        self.possible_agents = ["agent_0", "agent_1"]
+        self.agents = self.possible_agents.copy()
+        self.render_mode = render_mode
+
+    def reset(self, seed=None, options=None):
+        self.agents = self.possible_agents.copy()
+        observations = {
+            "agent_0": {
+                "position": np.array([0.1, 0.2, 0.3], dtype=np.float32),
+                "velocity": np.array([0.01, 0.02], dtype=np.float32),
+            },
+            "agent_1": {
+                "position": np.array([0.4, 0.5, 0.6], dtype=np.float32),
+                "velocity": np.array([0.03, 0.04], dtype=np.float32),
+            },
+        }
+        infos = {agent: {} for agent in self.agents}
+        return observations, infos
+
+    def step(self, actions):
+        observations = {
+            "agent_0": {
+                "position": np.array([0.2, 0.3, 0.4], dtype=np.float32),
+                "velocity": np.array([0.02, 0.03], dtype=np.float32),
+            },
+            "agent_1": {
+                "position": np.array([0.5, 0.6, 0.7], dtype=np.float32),
+                "velocity": np.array([0.04, 0.05], dtype=np.float32),
+            },
+        }
+        rewards = {agent: 1.0 for agent in self.agents}
+        terminations = {agent: False for agent in self.agents}
+        truncations = {agent: False for agent in self.agents}
+        infos = {agent: {} for agent in self.agents}
+        return observations, rewards, terminations, truncations, infos
+
+    def observation_space(self, agent):
+        return spaces.Dict(
+            {
+                "position": Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
+                "velocity": Box(low=-0.1, high=0.1, shape=(2,), dtype=np.float32),
+            }
+        )
+
+    def action_space(self, agent):
+        return Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
+
+    def render(self):
+        if self.render_mode == "rgb_array":
+            return np.ones((64, 64, 3), dtype=np.uint8)
+        return None
+
+    def close(self):
+        pass
+
+
+class TupleSpaceTestEnv(ParallelEnv):
+    """Test environment with tuple observation spaces"""
+
+    metadata = {"render_modes": ["human", "rgb_array"], "name": "tuple_space_test_v0"}
+
+    def __init__(self, render_mode=None):
+        self.possible_agents = ["agent_0", "agent_1"]
+        self.agents = self.possible_agents.copy()
+        self.render_mode = render_mode
+
+    def reset(self, seed=None, options=None):
+        self.agents = self.possible_agents.copy()
+        observations = {
+            "agent_0": (
+                np.array([0.1, 0.2, 0.3], dtype=np.float32),
+                np.array([0.01, 0.02], dtype=np.float32),
+            ),
+            "agent_1": (
+                np.array([0.4, 0.5, 0.6], dtype=np.float32),
+                np.array([0.03, 0.04], dtype=np.float32),
+            ),
+        }
+        infos = {agent: {} for agent in self.agents}
+        return observations, infos
+
+    def step(self, actions):
+        observations = {
+            "agent_0": (
+                np.array([0.2, 0.3, 0.4], dtype=np.float32),
+                np.array([0.02, 0.03], dtype=np.float32),
+            ),
+            "agent_1": (
+                np.array([0.5, 0.6, 0.7], dtype=np.float32),
+                np.array([0.04, 0.05], dtype=np.float32),
+            ),
+        }
+        rewards = {agent: 1.0 for agent in self.agents}
+        terminations = {agent: False for agent in self.agents}
+        truncations = {agent: False for agent in self.agents}
+        infos = {agent: {} for agent in self.agents}
+        return observations, rewards, terminations, truncations, infos
+
+    def observation_space(self, agent):
+        return spaces.Tuple(
+            (
+                Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
+                Box(low=-0.1, high=0.1, shape=(2,), dtype=np.float32),
+            )
+        )
+
+    def action_space(self, agent):
+        return Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
+
+    def render(self):
+        if self.render_mode == "rgb_array":
+            return np.ones((64, 64, 3), dtype=np.uint8)
+        return None
+
+    def close(self):
+        pass
+
+
+class ComplexDictSpaceTestEnv(ParallelEnv):
+    """Test environment with dictionary observation spaces containing both vector and image data"""
+
+    metadata = {
+        "render_modes": ["human", "rgb_array"],
+        "name": "complex_dict_space_test_v0",
+    }
+
+    def __init__(self, render_mode=None):
+        self.possible_agents = ["agent_0", "agent_1"]
+        self.agents = self.possible_agents.copy()
+        self.render_mode = render_mode
+
+    def reset(self, seed=None, options=None):
+        self.agents = self.possible_agents.copy()
+        observations = {
+            "agent_0": {
+                "position": np.array([0.1, 0.2, 0.3], dtype=np.float32),
+                "velocity": np.array([0.01, 0.02], dtype=np.float32),
+                "image": np.ones((16, 16, 3), dtype=np.uint8) * 100,
+            },
+            "agent_1": {
+                "position": np.array([0.4, 0.5, 0.6], dtype=np.float32),
+                "velocity": np.array([0.03, 0.04], dtype=np.float32),
+                "image": np.ones((16, 16, 3), dtype=np.uint8) * 200,
+            },
+        }
+        infos = {agent: {} for agent in self.agents}
+        return observations, infos
+
+    def step(self, actions):
+        observations = {
+            "agent_0": {
+                "position": np.array([0.2, 0.3, 0.4], dtype=np.float32),
+                "velocity": np.array([0.02, 0.03], dtype=np.float32),
+                "image": np.ones((16, 16, 3), dtype=np.uint8) * 150,
+            },
+            "agent_1": {
+                "position": np.array([0.5, 0.6, 0.7], dtype=np.float32),
+                "velocity": np.array([0.04, 0.05], dtype=np.float32),
+                "image": np.ones((16, 16, 3), dtype=np.uint8) * 250,
+            },
+        }
+        rewards = {agent: 1.0 for agent in self.agents}
+        terminations = {agent: False for agent in self.agents}
+        truncations = {agent: False for agent in self.agents}
+        infos = {agent: {} for agent in self.agents}
+        return observations, rewards, terminations, truncations, infos
+
+    def observation_space(self, agent):
+        return spaces.Dict(
+            {
+                "position": Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
+                "velocity": Box(low=-0.1, high=0.1, shape=(2,), dtype=np.float32),
+                "image": Box(low=0, high=255, shape=(16, 16, 3), dtype=np.uint8),
+            }
+        )
+
+    def action_space(self, agent):
+        return Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
+
+    def render(self):
+        if self.render_mode == "rgb_array":
+            return np.ones((64, 64, 3), dtype=np.uint8)
+        return None
+
+    def close(self):
+        pass
+
+
+class ComplexTupleSpaceTestEnv(ParallelEnv):
+    """Test environment with tuple observation spaces containing both vector and image data"""
+
+    metadata = {
+        "render_modes": ["human", "rgb_array"],
+        "name": "complex_tuple_space_test_v0",
+    }
+
+    def __init__(self, render_mode=None):
+        self.possible_agents = ["agent_0", "agent_1"]
+        self.agents = self.possible_agents.copy()
+        self.render_mode = render_mode
+
+    def reset(self, seed=None, options=None):
+        self.agents = self.possible_agents.copy()
+        observations = {
+            "agent_0": (
+                np.array([0.1, 0.2, 0.3], dtype=np.float32),
+                np.array([0.01, 0.02], dtype=np.float32),
+                np.ones((16, 16, 3), dtype=np.uint8) * 100,
+            ),
+            "agent_1": (
+                np.array([0.4, 0.5, 0.6], dtype=np.float32),
+                np.array([0.03, 0.04], dtype=np.float32),
+                np.ones((16, 16, 3), dtype=np.uint8) * 200,
+            ),
+        }
+        infos = {agent: {} for agent in self.agents}
+        return observations, infos
+
+    def step(self, actions):
+        observations = {
+            "agent_0": (
+                np.array([0.2, 0.3, 0.4], dtype=np.float32),
+                np.array([0.02, 0.03], dtype=np.float32),
+                np.ones((16, 16, 3), dtype=np.uint8) * 150,
+            ),
+            "agent_1": (
+                np.array([0.5, 0.6, 0.7], dtype=np.float32),
+                np.array([0.04, 0.05], dtype=np.float32),
+                np.ones((16, 16, 3), dtype=np.uint8) * 250,
+            ),
+        }
+        rewards = {agent: 1.0 for agent in self.agents}
+        terminations = {agent: False for agent in self.agents}
+        truncations = {agent: False for agent in self.agents}
+        infos = {agent: {} for agent in self.agents}
+        return observations, rewards, terminations, truncations, infos
+
+    def observation_space(self, agent):
+        return spaces.Tuple(
+            (
+                Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
+                Box(low=-0.1, high=0.1, shape=(2,), dtype=np.float32),
+                Box(low=0, high=255, shape=(16, 16, 3), dtype=np.uint8),
+            )
+        )
+
+    def action_space(self, agent):
+        return Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
+
+    def render(self):
+        if self.render_mode == "rgb_array":
+            return np.ones((64, 64, 3), dtype=np.uint8)
+        return None
+
+    def close(self):
+        pass
 
 
 def actions_to_list_helper(actions):
@@ -538,7 +803,7 @@ def test_get_placeholder_value(transition_name):
         output = get_placeholder_value(
             agent="speaker_0",
             transition_name=transition_name,
-            obs_space=env._single_observation_spaces,
+            obs_spaces=env._single_observation_spaces,
         )
         assert isinstance(output, np.ndarray)
     env.close()
@@ -851,10 +1116,92 @@ def test_observations_image():
     env_fns = [lambda: pursuit_v4.parallel_env() for _ in range(num_envs)]
     vec_env = AsyncPettingZooVecEnv(env_fns)
 
+    # Reset the environment to initialize observations
+    vec_env.reset()
+
+    # Create a test observation with known values
+    test_obs = {
+        agent: np.ones((1, 7, 7, 3), dtype=np.uint8) * 255 for agent in vec_env.agents
+    }
+
+    # Write the test observation to shared memory
+    write_to_shared_memory(
+        0, test_obs, vec_env._obs_buffer, vec_env._single_observation_spaces
+    )
+
+    # Check if the values were correctly written to shared memory
     for agent in vec_env.agents:
         assert isinstance(vec_env.observations[agent], np.ndarray)
         assert vec_env.observations[agent].shape == (1, 7, 7, 3)
+        assert np.all(vec_env.observations[agent] == 255)
+
     vec_env.close()
+
+
+def test_write_to_shared_memory_dict_image():
+    """Test writing dictionary observations with images to shared memory"""
+    env_fns = [lambda: ComplexDictSpaceTestEnv() for _ in range(1)]
+    env = AsyncPettingZooVecEnv(env_fns)
+
+    # Create test observation
+    test_obs = {
+        "agent_0": {
+            "position": np.ones((3,), dtype=np.float32),
+            "velocity": np.ones((2,), dtype=np.float32) * 2,
+            "image": np.ones((16, 16, 3), dtype=np.uint8) * 100,
+        },
+        "agent_1": {
+            "position": np.ones((3,), dtype=np.float32) * 3,
+            "velocity": np.ones((2,), dtype=np.float32) * 4,
+            "image": np.ones((16, 16, 3), dtype=np.uint8) * 200,
+        },
+    }
+
+    # Write to shared memory
+    write_to_shared_memory(0, test_obs, env._obs_buffer, env._single_observation_spaces)
+
+    # Check if values were correctly written
+    for agent in env.agents:
+        assert np.allclose(
+            env.observations[agent]["position"][0], test_obs[agent]["position"]
+        )
+        assert np.allclose(
+            env.observations[agent]["velocity"][0], test_obs[agent]["velocity"]
+        )
+        assert np.all(env.observations[agent]["image"][0] == test_obs[agent]["image"])
+
+    env.close()
+
+
+def test_write_to_shared_memory_tuple_image():
+    """Test writing tuple observations with images to shared memory"""
+    env_fns = [lambda: ComplexTupleSpaceTestEnv() for _ in range(1)]
+    env = AsyncPettingZooVecEnv(env_fns)
+
+    # Create test observation
+    test_obs = {
+        "agent_0": (
+            np.ones((3,), dtype=np.float32),
+            np.ones((2,), dtype=np.float32) * 2,
+            np.ones((16, 16, 3), dtype=np.uint8) * 100,
+        ),
+        "agent_1": (
+            np.ones((3,), dtype=np.float32) * 3,
+            np.ones((2,), dtype=np.float32) * 4,
+            np.ones((16, 16, 3), dtype=np.uint8) * 200,
+        ),
+    }
+
+    # Write to shared memory
+    write_to_shared_memory(0, test_obs, env._obs_buffer, env._single_observation_spaces)
+
+    # Check if values were correctly written
+    for agent in env.agents:
+        assert np.allclose(env.observations[agent][0][0], test_obs[agent][0])
+        assert np.allclose(env.observations[agent][1][0], test_obs[agent][1])
+        assert np.all(env.observations[agent][2][0] == test_obs[agent][2])
+
+    env.close()
 
 
 dummy_action_spaces = {"agent_0": gym.spaces.Box(0, 1, (4,))}
@@ -920,270 +1267,6 @@ def test_delete_async_pz_vec_env():
     env.__del__()
     for p in processes:
         assert not p.is_alive()
-
-
-class DictSpaceTestEnv(ParallelEnv):
-    """Test environment with dictionary observation spaces"""
-
-    metadata = {"render_modes": ["human", "rgb_array"], "name": "dict_space_test_v0"}
-
-    def __init__(self, render_mode=None):
-        self.possible_agents = ["agent_0", "agent_1"]
-        self.agents = self.possible_agents.copy()
-        self.render_mode = render_mode
-
-    def reset(self, seed=None, options=None):
-        self.agents = self.possible_agents.copy()
-        observations = {
-            "agent_0": {
-                "position": np.array([0.1, 0.2, 0.3], dtype=np.float32),
-                "velocity": np.array([0.01, 0.02], dtype=np.float32),
-            },
-            "agent_1": {
-                "position": np.array([0.4, 0.5, 0.6], dtype=np.float32),
-                "velocity": np.array([0.03, 0.04], dtype=np.float32),
-            },
-        }
-        infos = {agent: {} for agent in self.agents}
-        return observations, infos
-
-    def step(self, actions):
-        observations = {
-            "agent_0": {
-                "position": np.array([0.2, 0.3, 0.4], dtype=np.float32),
-                "velocity": np.array([0.02, 0.03], dtype=np.float32),
-            },
-            "agent_1": {
-                "position": np.array([0.5, 0.6, 0.7], dtype=np.float32),
-                "velocity": np.array([0.04, 0.05], dtype=np.float32),
-            },
-        }
-        rewards = {agent: 1.0 for agent in self.agents}
-        terminations = {agent: False for agent in self.agents}
-        truncations = {agent: False for agent in self.agents}
-        infos = {agent: {} for agent in self.agents}
-        return observations, rewards, terminations, truncations, infos
-
-    def observation_space(self, agent):
-        return spaces.Dict(
-            {
-                "position": Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
-                "velocity": Box(low=-0.1, high=0.1, shape=(2,), dtype=np.float32),
-            }
-        )
-
-    def action_space(self, agent):
-        return Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
-
-    def render(self):
-        if self.render_mode == "rgb_array":
-            return np.ones((64, 64, 3), dtype=np.uint8)
-        return None
-
-    def close(self):
-        pass
-
-
-class TupleSpaceTestEnv(ParallelEnv):
-    """Test environment with tuple observation spaces"""
-
-    metadata = {"render_modes": ["human", "rgb_array"], "name": "tuple_space_test_v0"}
-
-    def __init__(self, render_mode=None):
-        self.possible_agents = ["agent_0", "agent_1"]
-        self.agents = self.possible_agents.copy()
-        self.render_mode = render_mode
-
-    def reset(self, seed=None, options=None):
-        self.agents = self.possible_agents.copy()
-        observations = {
-            "agent_0": (
-                np.array([0.1, 0.2, 0.3], dtype=np.float32),
-                np.array([0.01, 0.02], dtype=np.float32),
-            ),
-            "agent_1": (
-                np.array([0.4, 0.5, 0.6], dtype=np.float32),
-                np.array([0.03, 0.04], dtype=np.float32),
-            ),
-        }
-        infos = {agent: {} for agent in self.agents}
-        return observations, infos
-
-    def step(self, actions):
-        observations = {
-            "agent_0": (
-                np.array([0.2, 0.3, 0.4], dtype=np.float32),
-                np.array([0.02, 0.03], dtype=np.float32),
-            ),
-            "agent_1": (
-                np.array([0.5, 0.6, 0.7], dtype=np.float32),
-                np.array([0.04, 0.05], dtype=np.float32),
-            ),
-        }
-        rewards = {agent: 1.0 for agent in self.agents}
-        terminations = {agent: False for agent in self.agents}
-        truncations = {agent: False for agent in self.agents}
-        infos = {agent: {} for agent in self.agents}
-        return observations, rewards, terminations, truncations, infos
-
-    def observation_space(self, agent):
-        return spaces.Tuple(
-            (
-                Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
-                Box(low=-0.1, high=0.1, shape=(2,), dtype=np.float32),
-            )
-        )
-
-    def action_space(self, agent):
-        return Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
-
-    def render(self):
-        if self.render_mode == "rgb_array":
-            return np.ones((64, 64, 3), dtype=np.uint8)
-        return None
-
-    def close(self):
-        pass
-
-
-class ComplexDictSpaceTestEnv(ParallelEnv):
-    """Test environment with dictionary observation spaces containing both vector and image data"""
-
-    metadata = {
-        "render_modes": ["human", "rgb_array"],
-        "name": "complex_dict_space_test_v0",
-    }
-
-    def __init__(self, render_mode=None):
-        self.possible_agents = ["agent_0", "agent_1"]
-        self.agents = self.possible_agents.copy()
-        self.render_mode = render_mode
-
-    def reset(self, seed=None, options=None):
-        self.agents = self.possible_agents.copy()
-        observations = {
-            "agent_0": {
-                "position": np.array([0.1, 0.2, 0.3], dtype=np.float32),
-                "velocity": np.array([0.01, 0.02], dtype=np.float32),
-                "image": np.ones((16, 16, 3), dtype=np.uint8) * 100,
-            },
-            "agent_1": {
-                "position": np.array([0.4, 0.5, 0.6], dtype=np.float32),
-                "velocity": np.array([0.03, 0.04], dtype=np.float32),
-                "image": np.ones((16, 16, 3), dtype=np.uint8) * 200,
-            },
-        }
-        infos = {agent: {} for agent in self.agents}
-        return observations, infos
-
-    def step(self, actions):
-        observations = {
-            "agent_0": {
-                "position": np.array([0.2, 0.3, 0.4], dtype=np.float32),
-                "velocity": np.array([0.02, 0.03], dtype=np.float32),
-                "image": np.ones((16, 16, 3), dtype=np.uint8) * 150,
-            },
-            "agent_1": {
-                "position": np.array([0.5, 0.6, 0.7], dtype=np.float32),
-                "velocity": np.array([0.04, 0.05], dtype=np.float32),
-                "image": np.ones((16, 16, 3), dtype=np.uint8) * 250,
-            },
-        }
-        rewards = {agent: 1.0 for agent in self.agents}
-        terminations = {agent: False for agent in self.agents}
-        truncations = {agent: False for agent in self.agents}
-        infos = {agent: {} for agent in self.agents}
-        return observations, rewards, terminations, truncations, infos
-
-    def observation_space(self, agent):
-        return spaces.Dict(
-            {
-                "position": Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
-                "velocity": Box(low=-0.1, high=0.1, shape=(2,), dtype=np.float32),
-                "image": Box(low=0, high=255, shape=(16, 16, 3), dtype=np.uint8),
-            }
-        )
-
-    def action_space(self, agent):
-        return Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
-
-    def render(self):
-        if self.render_mode == "rgb_array":
-            return np.ones((64, 64, 3), dtype=np.uint8)
-        return None
-
-    def close(self):
-        pass
-
-
-class ComplexTupleSpaceTestEnv(ParallelEnv):
-    """Test environment with tuple observation spaces containing both vector and image data"""
-
-    metadata = {
-        "render_modes": ["human", "rgb_array"],
-        "name": "complex_tuple_space_test_v0",
-    }
-
-    def __init__(self, render_mode=None):
-        self.possible_agents = ["agent_0", "agent_1"]
-        self.agents = self.possible_agents.copy()
-        self.render_mode = render_mode
-
-    def reset(self, seed=None, options=None):
-        self.agents = self.possible_agents.copy()
-        observations = {
-            "agent_0": (
-                np.array([0.1, 0.2, 0.3], dtype=np.float32),
-                np.array([0.01, 0.02], dtype=np.float32),
-                np.ones((16, 16, 3), dtype=np.uint8) * 100,
-            ),
-            "agent_1": (
-                np.array([0.4, 0.5, 0.6], dtype=np.float32),
-                np.array([0.03, 0.04], dtype=np.float32),
-                np.ones((16, 16, 3), dtype=np.uint8) * 200,
-            ),
-        }
-        infos = {agent: {} for agent in self.agents}
-        return observations, infos
-
-    def step(self, actions):
-        observations = {
-            "agent_0": (
-                np.array([0.2, 0.3, 0.4], dtype=np.float32),
-                np.array([0.02, 0.03], dtype=np.float32),
-                np.ones((16, 16, 3), dtype=np.uint8) * 150,
-            ),
-            "agent_1": (
-                np.array([0.5, 0.6, 0.7], dtype=np.float32),
-                np.array([0.04, 0.05], dtype=np.float32),
-                np.ones((16, 16, 3), dtype=np.uint8) * 250,
-            ),
-        }
-        rewards = {agent: 1.0 for agent in self.agents}
-        terminations = {agent: False for agent in self.agents}
-        truncations = {agent: False for agent in self.agents}
-        infos = {agent: {} for agent in self.agents}
-        return observations, rewards, terminations, truncations, infos
-
-    def observation_space(self, agent):
-        return spaces.Tuple(
-            (
-                Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
-                Box(low=-0.1, high=0.1, shape=(2,), dtype=np.float32),
-                Box(low=0, high=255, shape=(16, 16, 3), dtype=np.uint8),
-            )
-        )
-
-    def action_space(self, agent):
-        return Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
-
-    def render(self):
-        if self.render_mode == "rgb_array":
-            return np.ones((64, 64, 3), dtype=np.uint8)
-        return None
-
-    def close(self):
-        pass
 
 
 def test_dict_space_env():
@@ -1404,7 +1487,7 @@ def test_placeholder_dict_space():
     placeholder = get_placeholder_value(
         agent="agent_0",
         transition_name="observation",
-        obs_space=env._single_observation_spaces,
+        obs_spaces=env._single_observation_spaces,
     )
 
     assert isinstance(placeholder, dict)
@@ -1424,12 +1507,58 @@ def test_placeholder_tuple_space():
     placeholder = get_placeholder_value(
         agent="agent_0",
         transition_name="observation",
-        obs_space=env._single_observation_spaces,
+        obs_spaces=env._single_observation_spaces,
     )
 
     assert isinstance(placeholder, tuple)
     assert len(placeholder) == 2
     assert placeholder[0].shape == (3,)
     assert placeholder[1].shape == (2,)
+
+    env.close()
+
+
+# Helper function to create a replay buffer and add transitions
+def create_replay_buffer_with_transitions(env, memory_size=10):
+    buffer = MultiAgentReplayBuffer(
+        memory_size=memory_size,
+        field_names=["state", "action", "reward", "next_state", "done"],
+        agent_ids=env.possible_agents,
+    )
+    env.reset()
+    for _ in range(memory_size):
+        actions = {
+            agent: env.action_space(agent).sample() for agent in env.possible_agents
+        }
+        obs, rewards, dones, truncated, infos = env.step(actions)
+        buffer.save_to_memory(obs, actions, rewards, obs, dones, is_vectorised=True)
+    return buffer
+
+
+@pytest.mark.parametrize("env_cls", [DictSpaceTestEnv, TupleSpaceTestEnv])
+def test_replay_buffer_with_various_spaces(env_cls):
+    env_fns = [lambda: env_cls() for _ in range(3)]  # 3 parallel environments
+    env = AsyncPettingZooVecEnv(env_fns)
+
+    buffer = create_replay_buffer_with_transitions(env)
+    batch_size = 5
+    sampled_transitions = buffer.sample(batch_size)
+
+    # Check that the sampled transitions have the correct structure
+    for field, agent_data in zip(buffer.field_names, sampled_transitions):
+        for agent_id, data in agent_data.items():
+            assert agent_id in env.possible_agents
+            if field == "state":
+                obs_space = env.single_observation_space(agent_id)
+                if isinstance(obs_space, spaces.Dict):
+                    for key in obs_space.spaces:
+                        assert key in data
+                        assert data[key].shape[0] == batch_size
+                elif isinstance(obs_space, spaces.Tuple):
+                    assert len(data) == len(obs_space.spaces)
+                    for i, sub_data in enumerate(data):
+                        assert sub_data.shape[0] == batch_size
+                else:
+                    assert data.shape[0] == batch_size
 
     env.close()

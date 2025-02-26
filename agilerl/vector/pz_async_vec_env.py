@@ -586,7 +586,7 @@ class Observations:
     ):
         self.num_envs = num_envs
         self.shared_memory = shared_memory
-        self.obs_view = OrderedDict()
+        self.obs_view = {}
         self.agents = list(self.shared_memory.keys())
         self.obs_spaces = obs_spaces
         for agent, shm in shared_memory.items():
@@ -729,7 +729,7 @@ def create_shared_memory(
 def get_placeholder_value(
     agent: str,
     transition_name: str,
-    observation_shapes: Optional[Dict[str, Any]] = None,
+    obs_spaces: Optional[Dict[str, spaces.Space]] = None,
 ) -> Any:
     """When an agent is killed, used to obtain a placeholder value to return for associated experience.
 
@@ -737,8 +737,8 @@ def get_placeholder_value(
     :type agent: str
     :param transition_name: Name of the transition
     :type transition_name: str
-    :param observation_shapes: Shapes of observations, defaults to None
-    :type observation_shapes: Optional[Dict[str, Any]], optional
+    :param obs_spaces: Observation spaces
+    :type obs_spaces: Dict[str, gymnasium.spaces.Space]
     """
     match transition_name:
         case "reward":
@@ -750,33 +750,33 @@ def get_placeholder_value(
         case "info":
             return {}
         case "observation":
-            if observation_shapes is None:
+            if obs_spaces is None:
                 return None
 
-            shape = observation_shapes[agent]
-            if isinstance(shape, dict):
+            agent_space = obs_spaces[agent]
+            if isinstance(agent_space, spaces.Dict):
                 # For Dict spaces, create a dictionary of -1 arrays
-                return {k: -np.ones(v) for k, v in shape.items()}
-            elif isinstance(shape, list):
+                return {k: -np.ones(v.shape) for k, v in agent_space.items()}
+            elif isinstance(agent_space, spaces.Tuple):
                 # For Tuple spaces, create a tuple of -1 arrays
-                return tuple(-np.ones(s) for s in shape)
+                return tuple(-np.ones(s.shape) for s in agent_space)
             else:
                 # For normal spaces
-                return -np.ones_like(shape)
+                return -np.ones_like(agent_space.shape)
 
 
 def process_transition(
     transitions: Tuple[Any],
-    observation_shapes: Dict[str, Tuple[int]],
+    obs_spaces: Dict[str, spaces.Space],
     transition_names: List[str],
     agents: List[str],
 ) -> List[Dict[str, Any]]:
-    """Process transition, adds in placeholder values for killed sub-agents
+    """Process transition, adds in placeholder values for killed sub-agents.
 
     :param transitions: Tuple of environment transition
     :type transitions: Tuple[Any]
-    :param observation_shapes: Observation shapes
-    :type observation_shapes: Dict[str, Tuple[int]]
+    :param obs_spaces: Observation spaces
+    :type obs_spaces: Dict[str, gymnasium.spaces.Space]
     :param transition_names: Names associated to transitions
     :type transition_names: List[str]
     :param agents: List of sub-agent names
@@ -788,7 +788,7 @@ def process_transition(
             agent: (
                 transition[agent]
                 if agent in transition.keys()
-                else get_placeholder_value(agent, name, observation_shapes)
+                else get_placeholder_value(agent, name, obs_spaces)
             )
             for agent in agents
         }
@@ -836,11 +836,15 @@ def write_to_shared_memory(
             size = int(np.prod(agent_space.shape))
             dtype = agent_space.dtype
             dest = np.frombuffer(shared_memory[agent].get_obj(), dtype=dtype)
+            np.copyto(
+                dest[index * size : (index + 1) * size],
+                np.asarray(obs, dtype=dtype).flatten(),
+            )
 
 
 def _async_worker(
     index: int,
-    env_fn: Callable[[], Any],
+    env_fn: Callable[[], ParallelEnv],
     pipe: Connection,
     parent_pipe: Connection,
     shared_memory: Dict[str, RawArray],
