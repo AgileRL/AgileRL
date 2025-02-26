@@ -209,6 +209,8 @@ class GenericTestEnv(ParallelEnv):
 class CustomSpace(gym.Space):
     """Minimal custom observation space."""
 
+    shape = (4,)
+
     def sample(self):
         """Generates a sample from the custom space."""
         return self.np_random.integers(0, 10, ())
