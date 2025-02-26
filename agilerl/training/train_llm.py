@@ -1,5 +1,6 @@
 from typing import Any, Dict, Optional
 
+import numpy as np
 from tqdm import trange
 
 import wandb
@@ -19,6 +20,7 @@ def finetune_llm(
     MUT_P: Optional[InitDictType] = None,
     wb: bool = False,
     wandb_api_key: Optional[str] = None,
+    evaluation_interval: Optional[int] = 10,
 ) -> None:
     if wb:
         init_wandb(
@@ -45,9 +47,6 @@ def finetune_llm(
         env.reset()
     )  # calling env.reset() supplies the first batch of training data
     for i in range(max_steps):
-
-        # Obtain answers for the batch of prompts (prompt_batch x group_size), the log probs here are the reference log probs
-        # ATM its a list of length prompt_batch, each with a batch of sequence ids of size=group_size
         completion_ids, action_masks = agent.get_action(prompts)
         next_prompts, rewards = env.step(
             completion_ids
@@ -59,9 +58,30 @@ def finetune_llm(
         )
         loss, kl, grad_norm = agent.learn(experiences)
         prompts = next_prompts
-        print({"Loss": loss, "KL-divergence": kl, "Grad-norm": grad_norm})
+        print(
+            "Epoch: ",
+            i,
+            "| Loss: ",
+            loss,
+            "| KL-divergence: ",
+            kl,
+            "| Grad-norm: ",
+            grad_norm,
+        )
         if wb:
-            wandb.log({"Loss": loss, "KL-divergence": kl, "Grad-norm": grad_norm})
+            wandb.log(
+                {
+                    "Loss": loss,
+                    "KL-divergence": kl,
+                    "Grad-norm": grad_norm,
+                    "Mean evaluation reward": np.mean(rewards),
+                }
+            )
+        if (i + 1) % evaluation_interval == 0:
+            test_reward = agent.test(env)
+            print(f"Test reward: {test_reward}")
+            if wb:
+                wandb.log({"Test reward": test_reward})
         if (
             checkpoint_path is not None
             and checkpoint_interval is not None

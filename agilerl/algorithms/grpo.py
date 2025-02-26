@@ -1,5 +1,5 @@
 import copy
-from typing import Any, Optional, Tuple, Union
+from typing import Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -13,7 +13,9 @@ from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.base import EvolvableModule
-from agilerl.typing import ExperiencesType, GymEnvType
+from agilerl.typing import ExperiencesType
+from agilerl.utils.algo_utils import get_experiences_samples, stack_and_pad_experiences
+from agilerl.utils.llm_utils import HuggingFaceGym
 
 
 class GRPO(RLAlgorithm):
@@ -23,40 +25,24 @@ class GRPO(RLAlgorithm):
     :type observation_space: gym.spaces.Space
     :param action_space: Action space of the environment
     :type action_space: gym.spaces.Space
-    :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
-    :type index: int, optional
+    :param actor_network: Custom actor network, typically a HuggingFace LLM
+    :type actor_network: nn.Module
     :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
     :type hp_config: HyperparameterConfig, optional
-    :param net_config: Network configuration, defaults to None
-    :type net_config: dict, optional
-    :param head_config: Head network configuration, defaults to None
-    :type head_config: dict, optional
+    :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
+    :type index: int, optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
     :param lr: Learning rate for optimizer, defaults to 1e-4
     :type lr: float, optional
-    :param learn_step: Learning frequency, defaults to 2048
-    :type learn_step: int, optional
-    :param gamma: Discount factor, defaults to 0.99
-    :type gamma: float, optional
-    :param mut: Most recent mutation to agent, defaults to None
-    :type mut: str, optional
     :param clip_coef: Surrogate clipping coefficient, defaults to 0.2
     :type clip_coef: float, optional
     :param max_grad_norm: Maximum norm for gradient clipping, defaults to 0.5
     :type max_grad_norm: float, optional
-    :param normalize_images: Flag to normalize images, defaults to True
-    :type normalize_images: bool, optional
     :param update_epochs: Number of policy update epochs, defaults to 4
     :type update_epochs: int, optional
-    :param actor_network: Custom actor network, defaults to None
-    :type actor_network: nn.Module, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
-    :param wrap: Wrap models for distributed training upon creation, defaults to True
-    :type wrap: bool, optional
     """
 
     def __init__(
@@ -67,19 +53,16 @@ class GRPO(RLAlgorithm):
         pad_token_id: int,
         hp_config: Optional[HyperparameterConfig] = None,
         index: int = 0,
-        batch_size: int = 64,
+        batch_size: int = 8,
         beta: float = 0.04,
         lr: float = 2e-5,
-        mut: Optional[str] = None,
         clip_coef: float = 0.2,
         max_grad_norm: float = 1.0,
-        update_epochs: int = 4,
+        update_epochs: int = 1,
         group_size: int = 5,
         temperature: float = 0.9,
         calc_position_embeddings: bool = True,
         device: str = "cpu",
-        accelerator: Optional[Any] = None,
-        wrap: bool = True,
     ) -> None:
 
         super().__init__(
@@ -88,7 +71,7 @@ class GRPO(RLAlgorithm):
             index=index,
             hp_config=hp_config,
             device=device,
-            accelerator=accelerator,
+            accelerator=None,
             normalize_images=False,
             name="GRPO",
         )
@@ -109,13 +92,9 @@ class GRPO(RLAlgorithm):
         assert (
             update_epochs >= 1
         ), "Policy update epochs must be greater than or equal to one."
-        assert isinstance(
-            wrap, bool
-        ), "Wrap models flag must be boolean value True or False."
 
         self.batch_size = batch_size
         self.lr = lr
-        self.mut = mut
         self.clip_coef = clip_coef
         self.update_epochs = update_epochs
         self.group_size = (
@@ -131,18 +110,19 @@ class GRPO(RLAlgorithm):
             pad_token_id=pad_token_id,
         )
         self.max_grad_norm = max_grad_norm
-
         if actor_network is not None:
             if not isinstance(actor_network, EvolvableModule):
                 raise TypeError(
                     f"Passed actor network is of type {type(actor_network)}, but must be of type EvolvableModule."
                 )
             self.actor = actor_network.to(self.device)
-            self.reference_actor = copy.deepcopy(self.actor)
-            self.reference_actor.eval()
+            self.reference_actor = copy.deepcopy(
+                self.actor
+            )  # make_safe_deepcopies does not work here, why?
             self.actor.module.gradient_checkpointing_enable(
                 gradient_checkpointing_kwargs={"use_reentrant": False}
             )
+            self.reference_actor.eval()
 
         else:
             raise ValueError(
@@ -153,9 +133,6 @@ class GRPO(RLAlgorithm):
         self.optimizer = OptimizerWrapper(
             optim.AdamW, networks=[self.actor], lr=self.lr
         )
-
-        if self.accelerator is not None and wrap:
-            self.wrap_models()
 
         # Register network groups for mutations
         self.register_network_group(NetworkGroup(eval=self.actor, policy=True))
@@ -170,20 +147,13 @@ class GRPO(RLAlgorithm):
     ]:
         """Returns the next action to take in the environment.
 
-        :param state: Environment observation, or multiple observations in a batch
-        :type state: numpy.ndarray[float]
-        :param action: Action in environment to evaluate, defaults to None
-        :type action: torch.Tensor(), optional
-        :param grad: Calculate gradients on actions, defaults to False
-        :type grad: bool, optional
-        :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
-        :type action_mask: numpy.ndarray, optional
-        :param preprocess_obs: Flag to preprocess observations, defaults to True
-        :type preprocess_obs: bool, optional
+        :param states: Environment observation, or multiple observations in a batch
+        :type states: numpy.ndarray[float]
+        :param training: Flag to indicate training mode, defaults to True
+        :type training: bool, optional
         """
 
         group_size = self.group_size if training else 1
-
         self.actor.eval()
         with torch.no_grad():
             action_masks = []
@@ -212,41 +182,62 @@ class GRPO(RLAlgorithm):
     def learn(self, experiences: ExperiencesType) -> float:
         """Updates agent network parameters to learn from experiences.
 
-        :param experience: List of batched states, actions, log_probs, rewards, dones, values, next_state in that order.
-        :type experience: Tuple[Union[numpy.ndarray, Dict[str, numpy.ndarray]], ...]
+        :param experiences: List of batched states, actions, log_probs, rewards, dones, values, next_state in that order.
+        :type experiences: Tuple[Union[numpy.ndarray, Dict[str, numpy.ndarray]], ...]
         """
         torch.cuda.empty_cache()
-        # Calculate the advantage
-        # for each experience, perform the GRPO loss update
-        # Do we want to do one experience at a time or a batch of experiences at a time?
-        completion_ids, action_masks, rewards = experiences
-        advantages = self._calculate_advantage(rewards).to(self.device)
-        reference_log_probs = [
-            self._get_logprobs(ids, use_reference=True) for ids in completion_ids
-        ]
-        old_log_probs = [
-            self._get_logprobs(ids, use_reference=False) for ids in completion_ids
-        ]
+        completion_ids, action_masks, rewards = stack_and_pad_experiences(
+            *experiences, padding_values=[self.pad_token_id, False, None]
+        )
+        advantages = self._calculate_advantage(rewards).reshape(-1, 1).to(self.device)
+        with torch.no_grad():
+            reference_log_probs = self._get_logprobs(
+                completion_ids, use_reference=True, eval_mode=True
+            )
+            old_log_probs = self._get_logprobs(
+                completion_ids, use_reference=False, eval_mode=True
+            )
+        experiences = (
+            completion_ids,
+            action_masks,
+            advantages,
+            old_log_probs,
+            reference_log_probs,
+        )
+        num_samples = advantages.shape[0]
+        batch_idxs = np.arange(num_samples)
         mean_loss, mean_kl, mean_grad_norm = 0, 0, 0
-        self.actor.train()
-        # Backprop
-        for idx, (ids, action_mask) in enumerate(zip(completion_ids, action_masks)):
-            log_probs = self._get_logprobs(ids, use_reference=False)
-            loss, kl = self._grpo_loss(
-                action_mask,
-                log_probs,
-                old_log_probs[idx],
-                reference_log_probs[idx],
-                advantages[idx],
-            )
-            self.optimizer.zero_grad()
-            loss.backward()
-            mean_grad_norm += clip_grad_norm_(
-                self.actor.parameters(), self.max_grad_norm
-            )
-            self.optimizer.step()
-            mean_loss += loss.item()
-            mean_kl += kl.item()
+        for _ in range(self.update_epochs):
+            np.random.shuffle(batch_idxs)
+            for start in range(0, num_samples, self.batch_size):
+                minibatch_idxs = batch_idxs[
+                    start : min((start + self.batch_size), num_samples)
+                ]
+                (
+                    batch_ids,
+                    batch_action_mask,
+                    batch_advantages,
+                    batch_old_log_probs,
+                    batch_reference_log_probs,
+                ) = get_experiences_samples(minibatch_idxs, *experiences)
+                batch_log_probs = self._get_logprobs(
+                    batch_ids, use_reference=False, eval_mode=False
+                )
+                loss, kl = self._grpo_loss(
+                    batch_action_mask,
+                    batch_log_probs,
+                    batch_old_log_probs,
+                    batch_reference_log_probs,
+                    batch_advantages,
+                )
+                self.optimizer.zero_grad()
+                loss.backward()
+                mean_grad_norm += clip_grad_norm_(
+                    self.actor.parameters(), self.max_grad_norm
+                )
+                self.optimizer.step()
+                mean_loss += loss.item()
+                mean_kl += kl.item()
         mean_loss /= len(completion_ids)
         mean_kl /= len(completion_ids)
         mean_grad_norm /= len(completion_ids)
@@ -254,26 +245,20 @@ class GRPO(RLAlgorithm):
 
     def test(
         self,
-        env: GymEnvType,
+        env: HuggingFaceGym,
         loop: int = 1,
     ) -> float:
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
-        :type env: Gym-style environment
-        :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
-        :type swap_channels: bool, optional
-        :param max_steps: Maximum number of testing steps, defaults to None
-        :type max_steps: int, optional
+        :type env: HuggingFaceGym environment
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
         :type loop: int, optional
-
-        :return: Mean test score of agent in environment
+        :return: Mean test score of the agent
         :rtype: float
         """
         with env.eval():
             prompts, _ = env.reset()
-            # Eval training loop
             rewards = []
             for _ in range(loop):
                 completion_ids, _ = self.get_action(prompts, training=False)
@@ -287,15 +272,31 @@ class GRPO(RLAlgorithm):
     def _calculate_advantage(
         self, rewards: torch.Tensor, eps: float = 1e-8
     ) -> torch.Tensor:
-        # Reward is of shape (batch_size, group size)
-        # Calc the advantage for each group, i.e. along the 1st dimension
-        return (rewards - rewards.mean(dim=1).unsqueeze(0).T) / (
-            rewards.std(dim=1).unsqueeze(0).T + eps
+        """Calculate the group relative advantage for each groups reward.
+
+        :param rewards: Tensor of rewards.
+        :type rewards: torch.Tensor
+        :param eps: Epsilon to prevent division error, defaults to 1e-8
+        :type eps: float, optional
+        :return: Tensor of group relative advantages.
+        :rtype: torch.Tensor
+        """
+        return (rewards.T - rewards.mean(dim=1).unsqueeze(0)) / (
+            rewards.std(dim=1).unsqueeze(0) + eps
         )
 
     def _calculate_kl_divergence(
         self, log_probs: torch.Tensor, reference_log_probs: torch.Tensor
     ) -> torch.Tensor:
+        """Calculate the KL divergence between the current and reference log probabilities.
+
+        :param log_probs: Current policy log probabilities.
+        :type log_probs: torch.Tensor
+        :param reference_log_probs: Reference policy log probabilities.
+        :type reference_log_probs: torch.Tensor
+        :return: Kl divergence between the current and reference log probabilities.
+        :rtype: torch.Tensor
+        """
         return (
             torch.exp(reference_log_probs - log_probs)
             - (reference_log_probs - log_probs)
@@ -303,8 +304,28 @@ class GRPO(RLAlgorithm):
         )
 
     def _grpo_loss(
-        self, mask, log_probs, old_log_probs, reference_log_probs, advantages
+        self,
+        mask: torch.Tensor,
+        log_probs: torch.Tensor,
+        old_log_probs: torch.Tensor,
+        reference_log_probs: torch.Tensor,
+        advantages: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Calculate the GRPO loss.
+
+        :param mask: Attention mask.
+        :type mask: torch.Tensor
+        :param log_probs: Log probabilities of the current policy.
+        :type log_probs: torch.Tensor
+        :param old_log_probs: Log probabilities of the old policy.
+        :type old_log_probs: torch.Tensor
+        :param reference_log_probs: Log probabilities of the reference policy.
+        :type reference_log_probs: torch.Tensor
+        :param advantages: Advantages.
+        :type advantages: torch.Tensor
+        :return: Mean loss and mean KL divergence.
+        :rtype: Tuple[torch.Tensor, torch.Tensor]
+        """
         kl = self._calculate_kl_divergence(log_probs, reference_log_probs)
         log_probs_ratio = torch.exp(log_probs - old_log_probs) * advantages.unsqueeze(1)
         clipped_log_probs_ratio = log_probs_ratio.clamp(
@@ -315,9 +336,21 @@ class GRPO(RLAlgorithm):
         return loss.mean(), kl.mean()
 
     def _get_logprobs(
-        self, ids: torch.Tensor, use_reference: bool = False
+        self, ids: torch.Tensor, use_reference: bool = False, eval_mode: bool = False
     ) -> torch.Tensor:
+        """Find the log probabilities for a set of previously generated ids.
+
+        :param ids: Completion IDs.
+        :type ids: torch.Tensor
+        :param use_reference: Flag to indicate to use reference policy, defaults to False
+        :type use_reference: bool, optional
+        :param eval_mode: Flag to indicate setting policy network to evaluation mode, defaults to False
+        :type eval_mode: bool, optional
+        :return: Log probabilities of the completion IDs.
+        :rtype: torch.Tensor
+        """
         policy = self.reference_actor if use_reference else self.actor
+        policy.train(mode=not eval_mode)
         attention_mask = ids != self.pad_token_id
         model_kwargs = {
             "input_ids": ids,

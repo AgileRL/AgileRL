@@ -53,7 +53,7 @@ class HuggingFaceGym(gym.Env):
         reward_fn: Callable[..., float],
         system_prompt: str = REASONING_SYSTEM_PROMPT,
         max_answer_tokens: int = 512,
-        batch_size: int = 8,
+        data_batch_size: int = 8,
     ) -> None:
         self.name = dataset_name
         self.reward_fn = reward_fn
@@ -63,10 +63,10 @@ class HuggingFaceGym(gym.Env):
         self.train_dataset = raw_dataset["train"]
         self.test_dataset = raw_dataset["test"]
         self.train_dataloader = DataLoader(
-            self.train_dataset, batch_size=batch_size, shuffle=True
+            self.train_dataset, batch_size=data_batch_size, shuffle=True
         )
         self.test_dataloader = DataLoader(
-            self.test_dataset, batch_size=batch_size, shuffle=False
+            self.test_dataset, batch_size=data_batch_size, shuffle=False
         )
         self.dataloader = iter(self.train_dataloader)
         self.reset_called = False

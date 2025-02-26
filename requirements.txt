@@ -26,3 +26,9 @@ tqdm==4.66.4
 transformers==4.41.2
 ucimlrepo==0.0.3
 wandb==0.17.6
+
+
+huggingface==0.29.1
+datasets==3.3.2
+# flash-attn==2.7.4 # Include info in Readme for this one
+peft==0.14.0
