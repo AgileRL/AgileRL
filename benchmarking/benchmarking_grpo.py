@@ -1,12 +1,12 @@
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer, LlamaForCausalLM
 
 from agilerl.algorithms import GRPO
 from agilerl.modules.dummy import to_evolvable
 from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym, reward_function
 
-MODEL_PATH = "Qwen/Qwen2-0.5B"
+MODEL_PATH = "meta-llama/Llama-3.2-1B-Instruct"
 DATASET = "openai/gsm8k"
 
 
@@ -36,21 +36,12 @@ DATASET = "openai/gsm8k"
 
 
 def create_module(pretrained_model_name_or_path):
-    model = AutoModelForCausalLM.from_pretrained(
+    model = LlamaForCausalLM.from_pretrained(
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         device_map="cuda",
         attn_implementation="flash_attention_2",
         torch_dtype=torch.bfloat16,
     )
-    # lora_config = LoraConfig(
-    #     task_type="CAUSAL_LM",
-    #     r=8,
-    #     lora_alpha=32,
-    #     lora_dropout=0.1,
-    # )
-
-    # model = get_peft_model(model, lora_config)
-    # model.print_trainable_parameters()
     return model
 
 
@@ -69,7 +60,7 @@ def main():
         tokenizer=tokenizer,
         reward_fn=reward_function,
         max_answer_tokens=200,
-        data_batch_size=8,
+        data_batch_size=32,
     )
     # Instantiate the grpo agent
     agent = GRPO(
@@ -78,7 +69,7 @@ def main():
         actor_network=model,
         pad_token_id=tokenizer.pad_token_id,
         device="cuda",
-        batch_size=4,
+        batch_size=16,
     )
     finetune_llm(
         agent=agent, env=env, INIT_HP={}, evaluation_interval=5, wb=True
