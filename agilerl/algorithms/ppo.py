@@ -260,16 +260,13 @@ class PPO(RLAlgorithm):
         :type convert_to_torch: bool, optional
         """
         if convert_to_torch:
-            device = (
-                self.device if self.accelerator is None else self.accelerator.device
-            )
             max_action = (
-                torch.from_numpy(self.max_action).to(device)
+                torch.from_numpy(self.max_action).to(self.device)
                 if isinstance(self.max_action, (np.ndarray))
                 else self.max_action
             )
             min_action = (
-                torch.from_numpy(self.min_action).to(device)
+                torch.from_numpy(self.min_action).to(self.device)
                 if isinstance(self.min_action, (np.ndarray))
                 else self.min_action
             )

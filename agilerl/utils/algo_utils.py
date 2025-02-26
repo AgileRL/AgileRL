@@ -7,7 +7,6 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, TypeGuard, Union
 import numpy as np
 import torch
 import torch.nn.functional as F
-from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 from tensordict.nn import CudaGraphModule
@@ -274,8 +273,9 @@ def chkpt_attribute_to_device(
     assert isinstance(chkpt_dict, dict), f"Expected dict, got {type(chkpt_dict)}"
 
     for key, value in chkpt_dict.items():
-        if hasattr(value, "device") and not isinstance(value, Accelerator):
+        if isinstance(value, torch.Tensor):
             chkpt_dict[key] = value.to(device)
+
     return chkpt_dict
 
 
