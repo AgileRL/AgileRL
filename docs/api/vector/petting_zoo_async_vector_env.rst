@@ -44,18 +44,15 @@ Parameters
 .. autoclass:: agilerl.vector.pz_async_vec_env.AsyncPettingZooVecEnv
   :members:
 
-.. autoclass:: agilerl.vector.pz_async_vec_env.AsyncState
-  :members:
-
 .. autoclass:: agilerl.vector.pz_async_vec_env.Observations
   :members:
 
 .. autofunction:: agilerl.vector.pz_async_vec_env.create_shared_memory
 
-.. autofunction:: agilerl.vector.pz_async_vec_env.set_env_obs
+.. autofunction:: agilerl.vector.pz_async_vec_env.write_to_shared_memory
 
-.. autofunction:: agilerl.vector.pz_async_vec_envprocess_transition
+.. autofunction:: agilerl.vector.pz_async_vec_env.process_transition
 
-.. autofunction:: agilerl.vector.pz_async_vec_envget_placeholder_value
+.. autofunction:: agilerl.vector.pz_async_vec_env.get_placeholder_value
 
 .. autofunction:: agilerl.vector.pz_async_vec_env._async_worker
