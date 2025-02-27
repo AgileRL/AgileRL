@@ -133,4 +133,3 @@ AgileRL also supports multi-agent reinforcement learning using the Petting Zoo-s
 .. figure:: https://github-production-user-asset-6210df.s3.amazonaws.com/118982716/264712154-4965ea5f-b777-423c-989b-e4db86eda3bd.png
    :width: 700px
    :align: center
-
