@@ -1,5 +1,6 @@
 import copy
 import inspect
+import warnings
 from collections import OrderedDict, defaultdict
 from numbers import Number
 from typing import Any, Dict, Iterable, List, Optional, Tuple, TypeGuard, Union
@@ -516,7 +517,7 @@ def preprocess_observation(
     if isinstance(observation_space, spaces.Box):
         # Normalize images if applicable and specified
         if len(observation_space.shape) == 3 and normalize_images:
-            observation = observation.float() / 255.0
+            observation = observation / 255.0
 
         space_shape = observation_space.shape
 
@@ -552,6 +553,40 @@ def preprocess_observation(
     # Check add batch dimension if necessary
     observation = maybe_add_batch_dim(observation, space_shape)
 
+    return observation
+
+
+def apply_image_normalization(
+    observation: NumpyObsType, observation_space: spaces.Space
+) -> NumpyObsType:
+    """Normalize images using minmax scaling
+
+    :param observation: Observation
+    :type observation: NumpyObsType
+    :param observation_space: Observation space
+    :type observation_space: spaces.Space
+    :return: Observation
+    :rtype: NumpyObsType
+    """
+    if np.inf in observation_space.high:
+        warnings.warn(
+            "np.inf detected in observation_space.high, bypassing normalization."
+        )
+        return observation
+
+    if -np.inf in observation_space.low:
+        warnings.warn(
+            "-np.inf detected in observation_space.low, bypassing normalization."
+        )
+        return observation
+
+    if np.all(observation_space.high == 1) and np.all(observation_space.low == 0):
+        # minmax scaling
+        return observation
+
+    observation = (observation - observation_space.low) / (
+        observation_space.high - observation_space.low
+    )
     return observation
 
 

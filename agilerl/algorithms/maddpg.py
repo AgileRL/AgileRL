@@ -35,7 +35,9 @@ from agilerl.utils.evolvable_networks import get_default_encoder_config
 
 
 class MADDPG(MultiAgentRLAlgorithm):
-    """The MADDPG algorithm class. MADDPG paper: https://arxiv.org/abs/1706.02275
+    """Multi-Agent Deep Deterministic Policy Gradient (MADDPG) algorithm.
+
+    Paper: https://arxiv.org/abs/1706.02275
 
     :param observation_spaces: Observation space for each agent
     :type observation_spaces: list[spaces.Space]

@@ -34,7 +34,9 @@ from agilerl.utils.evolvable_networks import get_default_encoder_config
 
 
 class MATD3(MultiAgentRLAlgorithm):
-    """The MATD3 algorithm class. MATD3 paper: https://arxiv.org/abs/1910.01465
+    """Multi-Agent Twin Delayed Deep Deterministic Policy Gradient (MATD3) algorithm.
+
+    Paper: https://arxiv.org/abs/1910.01465
 
     :param observation_spaces: Observation space for each agent
     :type observation_spaces: List[spaces.Space]
