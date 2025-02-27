@@ -1,4 +1,3 @@
-import re
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, Generator, List, Tuple
 
@@ -15,56 +14,6 @@ REASONING_SYSTEM_PROMPT = (
     "process and answer are enclosed within <think> </think> and <answer> </answer> tags, respectively, i.e., "
     "<think> reasoning process here </think><answer> answer here </answer>"
 )
-
-
-def format_reward(completion: str) -> float:
-    """Reward function that checks if the completion has a specific format.
-
-    :param completion: Prompt completion to be evaluated.
-    :type completion: str
-    :return: Reward for the format of the completion.
-    :rtype: float
-    """
-    pattern = r"^<think>.*?</think>\s*<answer>.*?</answer>$"
-    pattern_match = re.match(pattern, completion)
-    return 1.0 if pattern_match else -1.0
-
-
-def accuracy_reward(completion: str, solution: str) -> float:
-    """Reward function that checks if the completion is the same as the ground truth.
-
-    :param completion: Prompt completion to be evaluated.
-    :type completion: str
-    :param solution: Ground truth solution.
-    :type solution: str
-    :return: Reward for the accuracy of the completion.
-    :rtype: float
-    """
-    # Obtain numerical answer
-    pattern = re.compile(r"#### (\-?[0-9\.\,]+)")
-    correct_answer = pattern.search(solution)
-    correct_answer = correct_answer.group(1).strip()
-
-    # Obtain our models answer
-    pattern = r"\d+\.\d+|\d+/\d+|\d+"
-    nums = re.findall(pattern, completion)
-    if len(nums) == 0:
-        return -1.0
-    answer = nums[-1]
-    return 3 if (answer == correct_answer) else -3
-
-
-def reward_function(completion: str, solution: str) -> float:
-    """Reward function that combines the format and accuracy rewards.
-
-    :param completion: Prompt completion to be evaluated.
-    :type completion: str
-    :param solution: Ground truth solution.
-    :type solution: str
-    :return: Combined reward for the completion.
-    :rtype: float
-    """
-    return accuracy_reward(completion, solution) + format_reward(completion)
 
 
 class HuggingFaceGym(gym.Env):
@@ -106,7 +55,9 @@ class HuggingFaceGym(gym.Env):
         self.test_dataloader = DataLoader(
             self.test_dataset, batch_size=data_batch_size, shuffle=False
         )
-        self.dataloader = iter(self.train_dataloader)
+        self.train_dataloader_iter = iter(self.train_dataloader)
+        self.test_dataloader_iter = iter(self.test_dataloader)
+        self.dataloader = self.train_dataloader_iter
         self.reset_called = False
         self.observation_space = gym.spaces.Box(low=0, high=tokenizer.vocab_size - 1)
         self.action_space = gym.spaces.Box(
@@ -136,6 +87,7 @@ class HuggingFaceGym(gym.Env):
         return new_tokenized_prompts, rewards
 
     def reset(self) -> Tuple[List[BatchEncoding], Dict[str, Any]]:
+        self._reset_dataloader()
         if self.reset_called:
             raise RuntimeError(
                 "env.reset() cannot be called more than once sequentially, it must follow with env.step()."
@@ -178,8 +130,9 @@ class HuggingFaceGym(gym.Env):
         return torch.tensor(total_rewards)
 
     def _get_next_batch(self) -> List[BatchEncoding]:
-        batch = next(iter(self.dataloader))
+        batch = next(self.dataloader)
         self.questions = batch["question"]
+        print(self.questions)
         self.answers = batch["answer"]
         tokenized_prompts = [
             apply_chat_template(question, self.system_prompt, self.tokenizer)
@@ -189,14 +142,18 @@ class HuggingFaceGym(gym.Env):
 
     @contextmanager
     def eval(self) -> Generator[None, None, None]:
-        self.dataloader = self.test_dataloader
+        self.dataloader = self.test_dataloader_iter
         self.eval_mode = True
         yield
-        self.dataloader = self.train_dataloader
+        self.dataloader = self.train_dataloader_iter
         self.eval_mode = False
 
     def __len__(self):
         return len(self.train_dataloader)
+
+    def _reset_dataloaders(self):
+        self.train_dataloader_iter = iter(self.train_dataloader)
+        self.test_dataloader_iter = iter(self.test_dataloader)
 
 
 def apply_chat_template(
