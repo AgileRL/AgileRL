@@ -2,7 +2,7 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 from tqdm import trange
-
+import torch
 import wandb
 from agilerl.algorithms import GRPO
 from agilerl.utils.llm_utils import HuggingFaceGym
@@ -44,7 +44,7 @@ def finetune_llm(
     )
 
     prompts, info = (
-        env.reset()
+        env.reset(reset_dataloaders=True)
     )  # calling env.reset() supplies the first batch of training data
     for i in range(max_steps):
         completion_ids, action_masks = agent.get_action(prompts)
@@ -74,7 +74,7 @@ def finetune_llm(
                     "Loss": loss,
                     "KL-divergence": kl,
                     "Grad-norm": grad_norm,
-                    "Mean evaluation reward": np.mean(rewards),
+                    "Mean training reward": torch.mean(rewards),
                 }
             )
         if (i + 1) % evaluation_interval == 0:
@@ -87,6 +87,6 @@ def finetune_llm(
             and checkpoint_interval is not None
             and (i + 1) % checkpoint_interval == 0
         ):
-            agent.save_checkpoint(save_path := checkpoint_path / f"step_{i}.pt")
+            agent.save_checkpoint(save_path := f"step_{i}.pt")
             print(f"Saved checkpoint {save_path}")
         pbar.update(i)

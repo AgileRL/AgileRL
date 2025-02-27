@@ -3,6 +3,7 @@ import re
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+
 from agilerl.algorithms import GRPO
 from agilerl.modules.dummy import to_evolvable
 from agilerl.training.train_llm import finetune_llm
@@ -108,33 +109,33 @@ def reward_function(completion: str, solution: str) -> float:
 
 def main():
     # Instantiate the model and the associated tokenizer
+    print(torch.cuda.is_available())
     model = to_evolvable(
         module_fn=create_module,
         module_kwargs={"pretrained_model_name_or_path": MODEL_PATH},
         device="cuda",
     )
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-
     # Convert the HuggingFace dataset into a Gymnasium environment
     env = HuggingFaceGym(
         dataset_name=DATASET,
         tokenizer=tokenizer,
         reward_fn=reward_function,
         max_answer_tokens=200,
-        data_batch_size=2,
+        data_batch_size=16,
     )
     # Instantiate the grpo agent
     agent = GRPO(
         env.observation_space,
         env.action_space,
         actor_network=model,
-        pad_token_id=tokenizer.pad_token_id,
+        pad_token_id=tokenizer.eos_token_id,
         device="cuda",
-        batch_size=2,
-        group_size=1,
+        batch_size=8,
+        group_size=5
     )
     finetune_llm(
-        agent=agent, env=env, INIT_HP={}, evaluation_interval=5, wb=False
+        agent=agent, env=env, INIT_HP={}, evaluation_interval=5, wb=True, checkpoint_interval=100, checkpoint_path="saved_llms"
     )  # Do we want to keep this the same?
 
 

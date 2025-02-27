@@ -258,7 +258,7 @@ class GRPO(RLAlgorithm):
         :rtype: float
         """
         with env.eval():
-            prompts, _ = env.reset()
+            prompts, _ = env.reset(reset_dataloaders=False)
             rewards = []
             for _ in range(loop):
                 completion_ids, _ = self.get_action(prompts, training=False)

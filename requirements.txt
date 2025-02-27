@@ -28,7 +28,8 @@ ucimlrepo==0.0.3
 wandb==0.17.6
 
 
-huggingface==0.29.1
+huggingface
 datasets==3.3.2
+transformers==4.48.1 
 # flash-attn==2.7.4 # Include info in Readme for this one
 peft==0.14.0

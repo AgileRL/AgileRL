@@ -50,14 +50,14 @@ class HuggingFaceGym(gym.Env):
         self.train_dataset = raw_dataset["train"]
         self.test_dataset = raw_dataset["test"]
         self.train_dataloader = DataLoader(
-            self.train_dataset, batch_size=data_batch_size, shuffle=True
-        )
+            self.train_dataset, batch_size=data_batch_size, shuffle=False
+        )   
         self.test_dataloader = DataLoader(
             self.test_dataset, batch_size=data_batch_size, shuffle=False
         )
         self.train_dataloader_iter = iter(self.train_dataloader)
         self.test_dataloader_iter = iter(self.test_dataloader)
-        self.dataloader = self.train_dataloader_iter
+        self.dataloader = self.train_dataloader_iter # FIXME ME change back to train_dataloader_iter
         self.reset_called = False
         self.observation_space = gym.spaces.Box(low=0, high=tokenizer.vocab_size - 1)
         self.action_space = gym.spaces.Box(
@@ -86,8 +86,9 @@ class HuggingFaceGym(gym.Env):
         self.last_tokenized_prompts = new_tokenized_prompts
         return new_tokenized_prompts, rewards
 
-    def reset(self) -> Tuple[List[BatchEncoding], Dict[str, Any]]:
-        self._reset_dataloader()
+    def reset(self, reset_dataloaders: bool = False) -> Tuple[List[BatchEncoding], Dict[str, Any]]:
+        if reset_dataloaders:
+            self._reset_dataloaders()
         if self.reset_called:
             raise RuntimeError(
                 "env.reset() cannot be called more than once sequentially, it must follow with env.step()."
@@ -132,7 +133,6 @@ class HuggingFaceGym(gym.Env):
     def _get_next_batch(self) -> List[BatchEncoding]:
         batch = next(self.dataloader)
         self.questions = batch["question"]
-        print(self.questions)
         self.answers = batch["answer"]
         tokenized_prompts = [
             apply_chat_template(question, self.system_prompt, self.tokenizer)
@@ -144,9 +144,11 @@ class HuggingFaceGym(gym.Env):
     def eval(self) -> Generator[None, None, None]:
         self.dataloader = self.test_dataloader_iter
         self.eval_mode = True
-        yield
-        self.dataloader = self.train_dataloader_iter
-        self.eval_mode = False
+        try:
+            yield
+        finally:
+            self.dataloader = self.train_dataloader_iter
+            self.eval_mode = False
 
     def __len__(self):
         return len(self.train_dataloader)
