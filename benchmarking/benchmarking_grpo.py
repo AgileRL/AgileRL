@@ -8,8 +8,8 @@ from agilerl.algorithms import GRPO
 from agilerl.modules.dummy import to_evolvable
 from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
-
-MODEL_PATH = "Qwen/Qwen2-0.5B"
+from peft import LoraConfig, get_peft_model
+MODEL_PATH = "Qwen/Qwen2.5-1.5B-Instruct"
 DATASET = "openai/gsm8k"
 
 
@@ -45,15 +45,16 @@ def create_module(pretrained_model_name_or_path):
         attn_implementation="flash_attention_2",
         torch_dtype=torch.bfloat16,
     )
-    # lora_config = LoraConfig(
-    #     task_type="CAUSAL_LM",
-    #     r=8,
-    #     lora_alpha=32,
-    #     lora_dropout=0.1,
-    # )
+    peft_config = LoraConfig(
+        r=16,
+        lora_alpha=64,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "down_proj", "gate_proj"],
+        task_type="CAUSAL_LM",
+        lora_dropout=0.05,
+    )
 
-    # model = get_peft_model(model, lora_config)
-    # model.print_trainable_parameters()
+
+    model = get_peft_model(model, peft_config)
     return model
 
 
@@ -116,6 +117,7 @@ def main():
         device="cuda",
     )
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+    tokenizer.pad_token = tokenizer.eos_token
     # Convert the HuggingFace dataset into a Gymnasium environment
     env = HuggingFaceGym(
         dataset_name=DATASET,

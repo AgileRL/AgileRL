@@ -55,9 +55,9 @@ class GRPO(RLAlgorithm):
         index: int = 0,
         batch_size: int = 8,
         beta: float = 0.04,
-        lr: float = 2e-5,
+        lr: float = 5e-6,
         clip_coef: float = 0.2,
-        max_grad_norm: float = 1.0,
+        max_grad_norm: float = 0.1,
         update_epochs: int = 1,
         group_size: int = 5,
         temperature: float = 0.9,
@@ -158,7 +158,10 @@ class GRPO(RLAlgorithm):
         with torch.no_grad():
             action_masks = []
             completion_ids = []
+            i = 0
             for state in states:
+                print(f"Sample {i + 1}/{len(states)}")
+                i += 1
                 state["input_ids"] = (
                     state["input_ids"].repeat(group_size, 1).to(self.device)
                 )
