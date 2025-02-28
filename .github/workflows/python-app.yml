@@ -13,21 +13,16 @@ permissions:
 jobs:
     build:
         runs-on: gha-runner-scale-set
-        # container:
-        #     image: python:3.11
-        #     options: --user root
+        container:
+            image: python:3.11
+            options: --user root
 
         steps:
             - uses: actions/checkout@v4
-            - name: Set up GCC
-              uses: egor-tensin/setup-gcc@v1
-              with:
-                  version: latest
-                  platform: x64
-            - name: Set up Python 3.11
-              uses: actions/setup-python@v4
-              with:
-                  python-version: '3.11'
+          #  - name: Set up Python 3.11
+          #    uses: actions/setup-python@v4
+          #    with:
+          #       python-version: '3.11'
             - name: Install dependencies
               run: |
                   python -m pip install --upgrade pip
