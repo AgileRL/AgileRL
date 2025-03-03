@@ -10,17 +10,29 @@ from agilerl.modules.base import EvolvableModule
 from agilerl.modules.dummy import to_evolvable
 
 
+class DummyForwardOutput:
+    def __init__(self, tensor):
+        self.output = nn.Softmax(tensor)
+        self.logits = tensor
+
+
 class DummyLLM(nn.Module):
     def __init__(self, input_size, max_tokens, vocab_size):
         super().__init__()
         self.input_size = input_size
         self.max_tokens = max_tokens
         self.vocab_size = vocab_size
-        self.params = nn.ParameterList([nn.Parameter(torch.randn(input_size))])
+        self.net = nn.Linear(
+            input_size + max_tokens, (input_size + max_tokens) * vocab_size
+        )
         self.gradient_checkpointing_enabled = False
 
-    def forward(self, x):
-        return torch.randn(*(x.shape[0], self.max_tokens, self.vocab_size))
+    def forward(self, input_ids, *args, **kwargs):
+        input_ids = input_ids.to(torch.float32)
+        output = self.net.forward(input_ids).reshape(
+            input_ids.shape[0], self.input_size + self.max_tokens, self.vocab_size
+        )
+        return DummyForwardOutput(output)
 
     def generate(self, *args, **kwargs):
         input_ids = kwargs.get("input_ids")
@@ -170,5 +182,24 @@ def test_grpo_loss(grpo, vocab_size, input_size, max_tokens, group_size):
     loss, kl = grpo._grpo_loss(
         mask, log_probs, old_log_probs, reference_log_probs, advantages
     )
+    assert not isinstance(loss, torch.Tensor)
+    assert not isinstance(loss, torch.Tensor)
     assert loss != 0
     assert kl != 0
+
+
+@pytest.mark.parametrize("vocab_size", [1000])
+@pytest.mark.parametrize("input_size", [10])
+@pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize("group_size", [5])
+@pytest.mark.parametrize("batch_size", [8])
+def test_get_logprobs(grpo, vocab_size, input_size, max_tokens, group_size, batch_size):
+    ids = torch.randint(0, vocab_size, (batch_size, input_size + max_tokens)).to(
+        grpo.device
+    )
+    log_probs = grpo._get_logprobs(ids=ids)
+    grpo.reduce_memory_peak = True
+    log_probs_reduced_mem = grpo._get_logprobs(ids=ids)
+    assert log_probs.shape == (ids.shape[0], ids.shape[1] - 1)
+    assert log_probs_reduced_mem.shape == (ids.shape[0], ids.shape[1] - 1)
+    assert torch.allclose(log_probs, log_probs_reduced_mem)

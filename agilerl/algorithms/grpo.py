@@ -62,6 +62,7 @@ class GRPO(RLAlgorithm):
         group_size: int = 5,
         temperature: float = 0.9,
         calc_position_embeddings: bool = True,
+        reduce_memory_peak: bool = False,
         device: str = "cpu",
     ) -> None:
 
@@ -111,6 +112,7 @@ class GRPO(RLAlgorithm):
         )
         self.max_grad_norm = max_grad_norm
         self.temperature = temperature
+        self.reduce_memory_peak = reduce_memory_peak
         if actor_network is not None:
             if not isinstance(actor_network, EvolvableModule):
                 raise TypeError(
@@ -365,7 +367,19 @@ class GRPO(RLAlgorithm):
             position_ids = attention_mask.long().cumsum(dim=-1) - 1
             position_ids.masked_fill_(mask=(attention_mask == 0), value=1)
             model_kwargs |= {"position_ids": position_ids}
-        logits = policy.forward(**model_kwargs).logits
+        if self.reduce_memory_peak:
+            logit_list = []
+            for input_id, mask in zip(ids, attention_mask):
+                kwargs = {
+                    "input_ids": input_id.reshape(1, -1),
+                    "attention_mask": mask,
+                    "use_cache": False,
+                }
+                logit = policy.forward(**kwargs).logits
+                logit_list.append(logit)
+            logits = torch.cat(logit_list)
+        else:
+            logits = policy.forward(**model_kwargs).logits
         log_probs = (
             F.log_softmax(logits[:, :-1], dim=-1)
             .gather(dim=-1, index=ids[:, 1:].unsqueeze(-1))
