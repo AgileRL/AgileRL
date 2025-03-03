@@ -178,8 +178,6 @@ class GRPO(RLAlgorithm):
                 action_mask[completion_id == self.pad_token_id] = False
                 action_mask = action_mask[:, 1:]
                 action_masks.append(action_mask)
-        print("ID SHAPES", [cid.shape for cid in completion_ids])
-        print("MASK SHAPES", [mask.shape for mask in action_masks])
         return completion_ids, action_masks
 
     def learn(self, experiences: ExperiencesType) -> float:
@@ -331,11 +329,13 @@ class GRPO(RLAlgorithm):
         :rtype: Tuple[torch.Tensor, torch.Tensor]
         """
         kl = self._calculate_kl_divergence(log_probs, reference_log_probs)
-        log_probs_ratio = torch.exp(log_probs - old_log_probs) * advantages.unsqueeze(1)
+        log_probs_ratio = torch.exp(log_probs - old_log_probs)
         clipped_log_probs_ratio = log_probs_ratio.clamp(
             1 - self.clip_coef, 1 + self.clip_coef
         )
-        loss = -torch.min(log_probs_ratio, clipped_log_probs_ratio) + self.beta * kl
+        surrogate = log_probs_ratio * advantages
+        clipped_surrogate = clipped_log_probs_ratio * advantages
+        loss = -torch.min(surrogate, clipped_surrogate) + self.beta * kl
         loss = (loss * mask).sum(dim=-1) / mask.sum(dim=-1)
         return loss.mean(), kl.mean()
 
@@ -365,12 +365,6 @@ class GRPO(RLAlgorithm):
             position_ids = attention_mask.long().cumsum(dim=-1) - 1
             position_ids.masked_fill_(mask=(attention_mask == 0), value=1)
             model_kwargs |= {"position_ids": position_ids}
-        print(
-            "INPUT IDS",
-            model_kwargs["input_ids"].shape,
-            "ATTENTION MASK",
-            model_kwargs["attention_mask"].shape,
-        )
         logits = policy.forward(**model_kwargs).logits
         log_probs = (
             F.log_softmax(logits[:, :-1], dim=-1)

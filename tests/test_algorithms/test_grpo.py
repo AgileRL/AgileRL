@@ -136,3 +136,39 @@ def test_calculate_advantage(
     advantages = (rewards - mean_rewards) / (std_rewards + 1e-8)
     advantages = advantages.flatten().unsqueeze(1)
     assert torch.equal(advantages, grpo._calculate_advantage(rewards))
+
+
+@pytest.mark.parametrize("vocab_size", [1000])
+@pytest.mark.parametrize("input_size", [10])
+@pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize("group_size", [5])
+def test_calculate_kl_divergence(grpo, vocab_size, input_size, max_tokens, group_size):
+    normal_dist = torch.distributions.normal.Normal(0.0, 1.0)
+    reference_log_probs = normal_dist.log_prob(torch.randn(5))
+    log_probs = normal_dist.log_prob(torch.randn(5))
+
+    kl = grpo._calculate_kl_divergence(reference_log_probs, log_probs)
+    assert torch.all(kl >= 0.0)
+    assert isinstance(kl, torch.Tensor)
+    assert kl.shape == log_probs.shape
+    assert kl.shape == reference_log_probs.shape
+
+
+@pytest.mark.parametrize("vocab_size", [1000])
+@pytest.mark.parametrize("input_size", [10])
+@pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize("group_size", [5])
+def test_grpo_loss(grpo, vocab_size, input_size, max_tokens, group_size):
+    advantages = torch.arange(0, 10).unsqueeze(1)
+    normal_dist = torch.distributions.normal.Normal(0.0, 1.0)
+    reference_log_probs = normal_dist.log_prob(torch.randn(200)).reshape(10, -1)
+    old_log_probs = normal_dist.log_prob(torch.randn(200)).reshape(10, -1)
+    log_probs = normal_dist.log_prob(torch.randn(200)).reshape(10, -1)
+    mask = torch.ones_like(log_probs)
+    mask[:, -3:] = 0
+    mask = mask.to(torch.bool)
+    loss, kl = grpo._grpo_loss(
+        mask, log_probs, old_log_probs, reference_log_probs, advantages
+    )
+    assert loss != 0
+    assert kl != 0
