@@ -233,6 +233,8 @@ class GRPO(RLAlgorithm):
                     batch_reference_log_probs,
                     batch_advantages,
                 )
+                if not loss.isfinite():
+                    continue
                 self.optimizer.zero_grad()
                 loss.backward()
                 mean_grad_norm += clip_grad_norm_(
