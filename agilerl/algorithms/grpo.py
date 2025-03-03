@@ -372,8 +372,12 @@ class GRPO(RLAlgorithm):
         if self.reduce_memory_peak:
             logit_list = []
             for input_id, mask in zip(ids, attention_mask):
+                input_id = input_id.reshape(1, -1)
+                mask = mask.reshape(1, -1)
+                print("SHAPES")
+                print(input_id.shape, mask.shape)
                 kwargs = {
-                    "input_ids": input_id.reshape(1, -1),
+                    "input_ids": input_id,
                     "attention_mask": mask,
                     "use_cache": False,
                 }

@@ -243,7 +243,7 @@ def main():
         reward_fn=combined_rewards,
         apply_chat_template_fn=countdown_chat_template,
         max_answer_tokens=200,
-        data_batch_size=2,
+        data_batch_size=16,
         custom_collate_fn=custom_collate_fn,
     )
     # Instantiate the grpo agent
@@ -253,8 +253,9 @@ def main():
         actor_network=model,
         pad_token_id=tokenizer.eos_token_id,
         device="cuda",
-        batch_size=2,
-        group_size=3,
+        batch_size=8,
+        group_size=8,
+        reduce_memory_peak=True
     )
     finetune_llm(
         agent=agent,
