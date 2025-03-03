@@ -52,5 +52,9 @@ class DummyEvolvable(EvolvableModule):
     def forward(self, *args, **kwargs) -> torch.Tensor:
         return self.module(*args, **kwargs)
 
-    def generate(self, *args, **kwargs):
+    def generate(self, *args, **kwargs) -> torch.Tensor:
+        if not hasattr(self.module, "generate"):
+            raise AttributeError(
+                f"Module {self.module_fn} does not have a generate method."
+            )
         return self.module.generate(*args, **kwargs)

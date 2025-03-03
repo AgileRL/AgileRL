@@ -1,8 +1,8 @@
 from typing import Any, Dict, Optional
 
-import numpy as np
-from tqdm import trange
 import torch
+from tqdm import trange
+
 import wandb
 from agilerl.algorithms import GRPO
 from agilerl.utils.llm_utils import HuggingFaceGym
@@ -34,7 +34,7 @@ def finetune_llm(
     print("\nTraining...")
 
     bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
-    
+
     pbar = trange(
         (max_steps := len(env)),
         unit="step",
@@ -43,8 +43,8 @@ def finetune_llm(
         dynamic_ncols=True,
     )
 
-    prompts, info = (
-        env.reset(reset_dataloaders=True)
+    prompts, info = env.reset(
+        reset_dataloaders=True
     )  # calling env.reset() supplies the first batch of training data
     for i in range(max_steps):
         completion_ids, action_masks = agent.get_action(prompts)

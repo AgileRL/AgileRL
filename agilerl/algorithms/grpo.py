@@ -1,5 +1,5 @@
 import copy
-from typing import Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -110,6 +110,7 @@ class GRPO(RLAlgorithm):
             pad_token_id=pad_token_id,
         )
         self.max_grad_norm = max_grad_norm
+        self.temperature = temperature
         if actor_network is not None:
             if not isinstance(actor_network, EvolvableModule):
                 raise TypeError(
@@ -141,7 +142,7 @@ class GRPO(RLAlgorithm):
         )
 
     def get_action(
-        self, states: torch.Tensor, training: bool = True
+        self, states: List[Dict[str, torch.Tensor]], training: bool = True
     ) -> Tuple[
         Union[np.ndarray, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor
     ]:
@@ -158,10 +159,7 @@ class GRPO(RLAlgorithm):
         with torch.no_grad():
             action_masks = []
             completion_ids = []
-            i = 0
             for state in states:
-                print(f"Sample {i + 1}/{len(states)}")
-                i += 1
                 state["input_ids"] = (
                     state["input_ids"].repeat(group_size, 1).to(self.device)
                 )
@@ -180,6 +178,8 @@ class GRPO(RLAlgorithm):
                 action_mask[completion_id == self.pad_token_id] = False
                 action_mask = action_mask[:, 1:]
                 action_masks.append(action_mask)
+        print("ID SHAPES", [cid.shape for cid in completion_ids])
+        print("MASK SHAPES", [mask.shape for mask in action_masks])
         return completion_ids, action_masks
 
     def learn(self, experiences: ExperiencesType) -> float:
@@ -192,7 +192,7 @@ class GRPO(RLAlgorithm):
         completion_ids, action_masks, rewards = stack_and_pad_experiences(
             *experiences, padding_values=[self.pad_token_id, False, None]
         )
-        advantages = self._calculate_advantage(rewards).reshape(-1, 1).to(self.device)
+        advantages = self._calculate_advantage(rewards).to(self.device)
         with torch.no_grad():
             reference_log_probs = self._get_logprobs(
                 completion_ids, use_reference=True, eval_mode=True
@@ -284,9 +284,10 @@ class GRPO(RLAlgorithm):
         :return: Tensor of group relative advantages.
         :rtype: torch.Tensor
         """
-        return (rewards.T - rewards.mean(dim=1).unsqueeze(0)) / (
-            rewards.std(dim=1).unsqueeze(0) + eps
+        advantage = (rewards - rewards.mean(dim=1).unsqueeze(1)) / (
+            rewards.std(dim=1).unsqueeze(1) + eps
         )
+        return advantage.flatten().unsqueeze(1)
 
     def _calculate_kl_divergence(
         self, log_probs: torch.Tensor, reference_log_probs: torch.Tensor
@@ -364,6 +365,12 @@ class GRPO(RLAlgorithm):
             position_ids = attention_mask.long().cumsum(dim=-1) - 1
             position_ids.masked_fill_(mask=(attention_mask == 0), value=1)
             model_kwargs |= {"position_ids": position_ids}
+        print(
+            "INPUT IDS",
+            model_kwargs["input_ids"].shape,
+            "ATTENTION MASK",
+            model_kwargs["attention_mask"].shape,
+        )
         logits = policy.forward(**model_kwargs).logits
         log_probs = (
             F.log_softmax(logits[:, :-1], dim=-1)
@@ -371,3 +378,8 @@ class GRPO(RLAlgorithm):
             .squeeze(-1)
         )
         return log_probs
+
+    def _set_reference_policy(self) -> None:
+        """Set the reference policy to the current policy."""
+        self.reference_actor = copy.deepcopy(self.actor)
+        self.reference_actor.eval()
