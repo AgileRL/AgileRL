@@ -30,6 +30,7 @@ wandb==0.17.6
 
 huggingface
 datasets==3.3.2
-transformers==4.48.1 
+transformers==4.48.1
 # flash-attn==2.7.4 # Include info in Readme for this one
 peft==0.14.0
+deepspeed

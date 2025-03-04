@@ -1,17 +1,16 @@
 import copy
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
+import deepspeed
 import numpy as np
 import torch
 import torch.nn.functional as F
-import torch.optim as optim
 from gymnasium import spaces
 from torch.nn.utils import clip_grad_norm_
 from transformers import GenerationConfig
 
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.base import EvolvableModule
 from agilerl.typing import ExperiencesType
 from agilerl.utils.algo_utils import get_experiences_samples, stack_and_pad_experiences
@@ -63,6 +62,7 @@ class GRPO(RLAlgorithm):
         temperature: float = 0.9,
         calc_position_embeddings: bool = True,
         reduce_memory_peak: bool = False,
+        ds_config: Optional[Dict[str, Any]] = None,
         device: str = "cpu",
     ) -> None:
 
@@ -118,22 +118,38 @@ class GRPO(RLAlgorithm):
                 raise TypeError(
                     f"Passed actor network is of type {type(actor_network)}, but must be of type EvolvableModule."
                 )
-            self.actor = actor_network.to(self.device)
-            self.reference_actor = copy.deepcopy(
-                self.actor
-            )  # make_safe_deepcopies does not work here, why?
-            self.actor.module.gradient_checkpointing_enable(
-                gradient_checkpointing_kwargs={"use_reentrant": False}
-            )
-            self.reference_actor.eval()
+
+            if ds_config is None:
+                self.actor = actor_network.to(self.device)
+                self.reference_actor = copy.deepcopy(
+                    self.actor
+                )  # make_safe_deepcopies does not work here, why?
+
+                self.actor.module.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False}
+                )
+                self.reference_actor.eval()
+            else:
+                self.actor, self.optimizer, *_ = deepspeed.initialize(
+                    config=ds_config,
+                    model=actor_network.module,
+                    model_parameters=actor_network.module.parameters(),
+                )
+                self.reference_actor = deepspeed.init_inference(
+                    model=actor_network.module,
+                    mp_size=1,
+                    dtype=torch.float16,
+                    replace_with_kernel_inject=True,
+                )
+
         else:
             raise ValueError(
                 "Actor network must be provided to GRPO in the form of a pre-trained huggingface model wrapped with DummyEvolvable"
             )
         # Use optim.W for LLM fine-tuning
-        self.optimizer = OptimizerWrapper(
-            optim.AdamW, networks=[self.actor], lr=self.lr
-        )
+        # self.optimizer = OptimizerWrapper(
+        #     optim.AdamW, networks=[self.actor], lr=self.lr
+        # )
         # Register network groups for mutations
         self.register_network_group(NetworkGroup(eval=self.actor, policy=True))
         self.register_network_group(

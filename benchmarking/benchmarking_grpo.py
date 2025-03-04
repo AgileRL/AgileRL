@@ -3,7 +3,6 @@ from typing import Tuple
 
 import torch
 from datasets import load_dataset
-from peft import LoraConfig, get_peft_model
 from torch.utils.data import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -44,27 +43,27 @@ DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"  # "openai/gsm8k"
 def create_module(pretrained_model_name_or_path):
     model = AutoModelForCausalLM.from_pretrained(
         pretrained_model_name_or_path=pretrained_model_name_or_path,
-        device_map="cuda",
-        attn_implementation="flash_attention_2",
+        device_map="auto",
+        # attn_implementation="flash_attention_2",
         torch_dtype=torch.bfloat16,
     )
-    peft_config = LoraConfig(
-        r=16,
-        lora_alpha=64,
-        target_modules=[
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",
-            "up_proj",
-            "down_proj",
-            "gate_proj",
-        ],
-        task_type="CAUSAL_LM",
-        lora_dropout=0.05,
-    )
+    # peft_config = LoraConfig(
+    #     r=16,
+    #     lora_alpha=64,
+    #     target_modules=[
+    #         "q_proj",
+    #         "k_proj",
+    #         "v_proj",
+    #         "o_proj",
+    #         "up_proj",
+    #         "down_proj",
+    #         "gate_proj",
+    #     ],
+    #     task_type="CAUSAL_LM",
+    #     lora_dropout=0.05,
+    # )
+    # model = get_peft_model(model, peft_config)
 
-    model = get_peft_model(model, peft_config)
     return model
 
 
@@ -226,7 +225,6 @@ def custom_collate_fn(batch):
 
 def main():
     # Instantiate the model and the associated tokenizer
-    print(torch.cuda.is_available())
     model = to_evolvable(
         module_fn=create_module,
         module_kwargs={"pretrained_model_name_or_path": MODEL_PATH},
@@ -242,10 +240,28 @@ def main():
         tokenizer=tokenizer,
         reward_fn=combined_rewards,
         apply_chat_template_fn=countdown_chat_template,
-        max_answer_tokens=20,
+        max_answer_tokens=600,
         data_batch_size=2,
         custom_collate_fn=custom_collate_fn,
     )
+
+    ds_config = {
+        "train_micro_batch_size_per_gpu": 4,
+        "gradient_accumulation_steps": 2,
+        "optimizer": {"type": "AdamW", "params": {"lr": 1e-6}},
+        "bf16": {"enabled": True},
+        "zero_optimization": {
+            "stage": 2,
+            "allgather_partitions": True,
+            "allgather_bucket_size": 2e8,
+            "overlap_comm": True,
+            "reduce_scatter": True,
+            "reduce_bucket_size": 2e8,
+            "contiguous_gradients": True,
+            "stage3_gather_16bit_weights_on_model_save": True,
+            "offload_optimizer": {"device": "cpu"},
+        },
+    }
     # Instantiate the grpo agent
     agent = GRPO(
         env.observation_space,
@@ -254,8 +270,9 @@ def main():
         pad_token_id=tokenizer.eos_token_id,
         device="cuda",
         batch_size=2,
-        group_size=3,
+        group_size=10,
         reduce_memory_peak=True,
+        ds_config=ds_config,
     )
     finetune_llm(
         agent=agent,
