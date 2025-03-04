@@ -1,3 +1,6 @@
+import copy
+from contextlib import contextmanager
+
 import gymnasium as gym
 import pytest
 import torch
@@ -46,6 +49,40 @@ class DummyLLM(nn.Module):
     def gradient_checkpointing_enable(self, *args, **kwargs):
         self.gradient_checkpointing_enabled = True
         return
+
+
+class DummyHuggingFaceEnv:
+    def __init__(self, vocab_size, input_size, data_batch_size):
+        self.vocab_size = vocab_size
+        self.input_size = input_size
+        self.data_batch_size = data_batch_size
+
+    def reset(self, reset_dataloaders):
+        states = [
+            {
+                "input_ids": torch.randint(0, self.vocab_size, (self.input_size,)),
+                "attention_mask": torch.ones(*(self.input_size,)),
+            }
+            for _ in range(self.data_batch_size)
+        ]
+        return states
+
+    def step(self, completion_ids):
+        states = [
+            {
+                "input_ids": torch.randint(0, self.vocab_size, (self.input_size,)),
+                "attention_mask": torch.ones(*(self.input_size,)),
+            }
+            for _ in range(self.data_batch_size)
+        ]
+        return (states, [1.0 for _ in range(6)])
+
+    @contextmanager
+    def eval(self):
+        try:
+            yield
+        finally:
+            pass
 
 
 def create_module(input_size, max_tokens, vocab_size):
@@ -154,11 +191,13 @@ def test_calculate_advantage(
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize("group_size", [5])
-def test_calculate_kl_divergence(grpo, vocab_size, input_size, max_tokens, group_size):
+@pytest.mark.parametrize("batch_size", [8])
+def test_calculate_kl_divergence(
+    grpo, vocab_size, input_size, max_tokens, group_size, batch_size
+):
     normal_dist = torch.distributions.normal.Normal(0.0, 1.0)
-    reference_log_probs = normal_dist.log_prob(torch.randn(5))
-    log_probs = normal_dist.log_prob(torch.randn(5))
-
+    reference_log_probs = normal_dist.log_prob(torch.randn(batch_size))
+    log_probs = normal_dist.log_prob(torch.randn(batch_size))
     kl = grpo._calculate_kl_divergence(reference_log_probs, log_probs)
     assert torch.all(kl >= 0.0)
     assert isinstance(kl, torch.Tensor)
@@ -182,8 +221,6 @@ def test_grpo_loss(grpo, vocab_size, input_size, max_tokens, group_size):
     loss, kl = grpo._grpo_loss(
         mask, log_probs, old_log_probs, reference_log_probs, advantages
     )
-    assert not isinstance(loss, torch.Tensor)
-    assert not isinstance(loss, torch.Tensor)
     assert loss != 0
     assert kl != 0
 
@@ -203,3 +240,61 @@ def test_get_logprobs(grpo, vocab_size, input_size, max_tokens, group_size, batc
     assert log_probs.shape == (ids.shape[0], ids.shape[1] - 1)
     assert log_probs_reduced_mem.shape == (ids.shape[0], ids.shape[1] - 1)
     assert torch.allclose(log_probs, log_probs_reduced_mem)
+
+
+@pytest.mark.parametrize("vocab_size", [1000])
+@pytest.mark.parametrize("input_size", [10])
+@pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize("group_size", [5])
+def test_set_reference_policy(grpo, vocab_size, input_size, max_tokens, group_size):
+    grpo.reference_actor = None
+    grpo._set_reference_policy()
+    assert isinstance(grpo.reference_actor, EvolvableModule)
+
+
+@pytest.mark.parametrize("vocab_size", [1000])
+@pytest.mark.parametrize("input_size", [10])
+@pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize("group_size", [5])
+@pytest.mark.parametrize("batch_size", [8])
+def test_grpo_learn(grpo, vocab_size, input_size, max_tokens, group_size, batch_size):
+    completions = [
+        torch.randint(
+            0, vocab_size, (group_size, input_size + max_tokens), device=grpo.device
+        )
+        for _ in range(batch_size)
+    ]
+    action_masks = [
+        torch.randint(
+            0, vocab_size, (group_size, input_size + max_tokens - 1), device=grpo.device
+        )
+        for _ in range(batch_size)
+    ]
+    rewards = torch.stack([torch.ones(group_size) for _ in range(batch_size)], dim=0)
+    initial_actor = copy.deepcopy(grpo.actor.state_dict())
+    initial_reference_actor = copy.deepcopy(grpo.reference_actor.state_dict())
+    loss, kl, grad_norm = grpo.learn((completions, action_masks, rewards))
+    assert isinstance(loss, float)
+    assert isinstance(kl, float)
+    assert isinstance(grad_norm, float)
+    final_actor = grpo.actor.state_dict()
+    final_reference_actor = grpo.reference_actor.state_dict()
+    for actor_param, final_actor_param in zip(
+        initial_actor.values(), final_actor.values()
+    ):
+        assert not torch.equal(actor_param, final_actor_param)
+    for ref_actor_param, ref_final_actor_param in zip(
+        initial_reference_actor.values(), final_reference_actor.values()
+    ):
+        assert torch.equal(ref_actor_param, ref_final_actor_param)
+
+
+@pytest.mark.parametrize("vocab_size", [1000])
+@pytest.mark.parametrize("input_size", [10])
+@pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize("group_size", [5])
+@pytest.mark.parametrize("batch_size", [8])
+def test_grpo_test(grpo, vocab_size, input_size, max_tokens, group_size, batch_size):
+    env = DummyHuggingFaceEnv(vocab_size, input_size, batch_size)
+    mean_fit = grpo.test(env)
+    assert isinstance(mean_fit, float)

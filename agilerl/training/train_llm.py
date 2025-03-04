@@ -43,7 +43,7 @@ def finetune_llm(
         dynamic_ncols=True,
     )
 
-    prompts, info = env.reset(
+    prompts = env.reset(
         reset_dataloaders=True
     )  # calling env.reset() supplies the first batch of training data
     for i in range(max_steps):

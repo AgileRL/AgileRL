@@ -1,4 +1,4 @@
-import re
+import warnings
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, Generator, List, Tuple
 
@@ -25,8 +25,6 @@ class HuggingFaceGym(gym.Env):
     :type tokenizer: AutoTokenizer
     :param reward_fn: Reward function for evaluating completions.
     :type reward_fn: Callable[..., float]
-    :param system_prompt: System prompt, defaults to REASONING_SYSTEM_PROMPT
-    :type system_prompt: str, optional
     :param max_answer_tokens: Max number of answer tokens, defaults to 512
     :type max_answer_tokens: int, optional
     :param data_batch_size: DataLoader batch size, defaults to 8
@@ -40,31 +38,30 @@ class HuggingFaceGym(gym.Env):
         tokenizer: AutoTokenizer,
         reward_fn: Callable[[str, str, str], float],
         apply_chat_template_fn: Callable[[str, str, AutoTokenizer], BatchEncoding],
-        system_prompt: str = REASONING_SYSTEM_PROMPT,
         max_answer_tokens: int = 512,
         data_batch_size: int = 8,
         custom_collate_fn: Callable = None,
     ) -> None:
+        assert {"question", "answer"}.issubset(
+            set(train_dataset.features.keys())
+        ), "Train dataset must contain 'question' and 'answer' features."
+        assert {"question", "answer"}.issubset(
+            set(test_dataset.features.keys())
+        ), "Train dataset must contain 'question' and 'answer' features."
         self.name = train_dataset.info.dataset_name
         self.reward_fn = reward_fn
-        self.system_prompt = system_prompt
         self.tokenizer = tokenizer
-
         dataloader_kwargs = (
             {} if custom_collate_fn is None else {"collate_fn": custom_collate_fn}
         )
-
         self.train_dataloader = DataLoader(
             train_dataset, batch_size=data_batch_size, shuffle=True, **dataloader_kwargs
         )
-
         self.test_dataloader = DataLoader(
             test_dataset, batch_size=data_batch_size, shuffle=False, **dataloader_kwargs
         )
         self.train_dataloader_iter = iter(self.train_dataloader)
         self.test_dataloader_iter = iter(self.test_dataloader)
-
-        # FIXME assert to check that 'questions' and 'answers' in the dataset
         self.apply_chat_template_fn = apply_chat_template_fn
         self.dataloader = self.train_dataloader_iter
         self.reset_called = False
@@ -101,14 +98,13 @@ class HuggingFaceGym(gym.Env):
         if reset_dataloaders:
             self._reset_dataloaders()
         if self.reset_called:
-            raise RuntimeError(
-                "env.reset() cannot be called more than once sequentially, it must follow with env.step()."
+            warnings.warn(
+                "env.reset() called more than once sequentially, it should typically follow with env.step()."
             )
         self.reset_called = True
-        self.info = {}
         new_tokenized_prompts = self._get_next_batch()
         self.last_tokenized_prompts = new_tokenized_prompts
-        return new_tokenized_prompts, self.info
+        return new_tokenized_prompts
 
     def _decode_and_evaluate(self, completions: List[torch.Tensor]) -> torch.Tensor:
         # This is for a batch of completions (prompt_batch x group_size), List of tensors of length batch size, each tensor is a group of answers
@@ -162,84 +158,86 @@ class HuggingFaceGym(gym.Env):
             self.eval_mode = False
 
     def __len__(self):
-        return len(self.train_dataloader)
+        if self.eval_mode:
+            return len(self.test_dataloader.dataset)
+        return len(self.train_dataloader.dataset)
 
     def _reset_dataloaders(self):
         self.train_dataloader_iter = iter(self.train_dataloader)
         self.test_dataloader_iter = iter(self.test_dataloader)
 
 
-def example_apply_chat_template(
-    question: str, answer: str, tokenizer: AutoTokenizer
-) -> BatchEncoding:
-    conversation = [
-        {
-            "role": "system",
-            "content": REASONING_SYSTEM_PROMPT,
-        },
-        {
-            "role": "user",
-            "content": question,
-        },
-    ]
-    updated_prompt = tokenizer.apply_chat_template(
-        conversation, tokenize=False, add_generation_prompt=True
-    )
-    tokenized_prompt = tokenizer(
-        [updated_prompt],
-        return_tensors="pt",
-        padding=True,
-        padding_side="left",
-        return_attention_mask=True,
-    )
-    return tokenized_prompt
+# def example_apply_chat_template(
+#     question: str, answer: str, tokenizer: AutoTokenizer
+# ) -> BatchEncoding:
+#     conversation = [
+#         {
+#             "role": "system",
+#             "content": REASONING_SYSTEM_PROMPT,
+#         },
+#         {
+#             "role": "user",
+#             "content": question,
+#         },
+#     ]
+#     updated_prompt = tokenizer.apply_chat_template(
+#         conversation, tokenize=False, add_generation_prompt=True
+#     )
+#     tokenized_prompt = tokenizer(
+#         [updated_prompt],
+#         return_tensors="pt",
+#         padding=True,
+#         padding_side="left",
+#         return_attention_mask=True,
+#     )
+#     return tokenized_prompt
 
 
-def format_reward(completion: str) -> float:
-    """Reward function that checks if the completion has a specific format.
+# def format_reward(completion: str) -> float:
+#     """Reward function that checks if the completion has a specific format.
 
-    :param completion: Prompt completion to be evaluated.
-    :type completion: str
-    :return: Reward for the format of the completion.
-    :rtype: float
-    """
-    pattern = r"^<think>.*?</think>\s*<answer>.*?</answer>$"
-    pattern_match = re.match(pattern, completion)
-    return 1.0 if pattern_match else -1.0
-
-
-def accuracy_reward(completion: str, solution: str) -> float:
-    """Reward function that checks if the completion is the same as the ground truth.
-
-    :param completion: Prompt completion to be evaluated.
-    :type completion: str
-    :param solution: Ground truth solution.
-    :type solution: str
-    :return: Reward for the accuracy of the completion.
-    :rtype: float
-    """
-    # Obtain numerical answer
-    pattern = re.compile(r"#### (\-?[0-9\.\,]+)")
-    correct_answer = pattern.search(solution)
-    correct_answer = correct_answer.group(1).strip()
-
-    # Obtain our models answer
-    pattern = r"\d+\.\d+|\d+/\d+|\d+"
-    nums = re.findall(pattern, completion)
-    if len(nums) == 0:
-        return -1.0
-    answer = nums[-1]
-    return 3 if (answer == correct_answer) else -3
+#     :param completion: Prompt completion to be evaluated.
+#     :type completion: str
+#     :return: Reward for the format of the completion.
+#     :rtype: float
+#     """
+#     pattern = r"^<think>.*?</think>\s*<answer>.*?</answer>$"
+#     pattern_match = re.match(pattern, completion)
+#     return 1.0 if pattern_match else -1.0
 
 
-def reward_function(completion: str, solution: str) -> float:
-    """Reward function that combines the format and accuracy rewards.
+# def accuracy_reward(completion: str, solution: str) -> float:
+#     """Reward function that checks if the completion is the same as the ground truth.
 
-    :param completion: Prompt completion to be evaluated.
-    :type completion: str
-    :param solution: Ground truth solution.
-    :type solution: str
-    :return: Combined reward for the completion.
-    :rtype: float
-    """
-    return accuracy_reward(completion, solution) + format_reward(completion)
+#     :param completion: Prompt completion to be evaluated.
+#     :type completion: str
+#     :param solution: Ground truth solution.
+#     :type solution: str
+#     :return: Reward for the accuracy of the completion.
+#     :rtype: float
+#     """
+#     # Obtain numerical answer
+#     pattern = re.compile(r"#### (\-?[0-9\.\,]+)")
+#     correct_answer = pattern.search(solution)
+#     correct_answer = correct_answer.group(1).strip()
+
+#     # Obtain our models answer
+#     pattern = r"\d+\.\d+|\d+/\d+|\d+"
+#     nums = re.findall(pattern, completion)
+#     if len(nums) == 0:
+#         return -1.0
+#     answer = nums[-1]
+#     return 3 if (answer == correct_answer) else -3
+
+
+# def reward_function(completion: str, solution: str) -> float:
+#     """Reward function that combines the format and accuracy rewards.
+
+#     :param completion: Prompt completion to be evaluated.
+#     :type completion: str
+#     :param solution: Ground truth solution.
+#     :type solution: str
+#     :return: Combined reward for the completion.
+#     :rtype: float
+#     """
+#     return accuracy_reward(completion, solution) + format_reward(completion)

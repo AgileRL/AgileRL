@@ -42,9 +42,11 @@ def test_stack_and_pad_experiences_with_padding():
     tensor2 = torch.tensor([8])
     tensor3 = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]])
     tensor4 = torch.tensor([1, 3, 4])  # This tensor should be returned without change
-    tensor_list = [[tensor1, tensor2, tensor3], tensor4]
-    stacked_tensor, unchanged_tensor = stack_and_pad_experiences(
-        *tensor_list, padding_values=[0, 0]
+    tensor5 = torch.tensor([[10, 11, 12]])
+    tensor6 = torch.tensor([[13, 14, 15, 16, 17]])
+    tensor_list = [[tensor1, tensor2, tensor3], tensor4, [tensor5, tensor6]]
+    stacked_tensor, unchanged_tensor, stacked_tensor_2 = stack_and_pad_experiences(
+        *tensor_list, padding_values=[0, 0, 99]
     )
     assert torch.equal(unchanged_tensor, tensor4)
     assert stacked_tensor == torch.tensor(
@@ -98,6 +100,9 @@ def test_stack_and_pad_experiences_with_padding():
                 10,
             ],
         ]
+    )
+    assert stacked_tensor_2 == torch.tensor(
+        [[10, 11, 12, 99, 99], [13, 14, 15, 16, 17]]
     )
 
 

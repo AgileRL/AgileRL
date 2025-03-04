@@ -648,8 +648,8 @@ def stack_and_pad_experiences(
         if not isinstance(exp, list):
             stacked_exp = exp
         elif isinstance(exp[0], torch.Tensor):
-            max_size = max(e.shape[1] for e in exp)
-            padding_sizes = [(max_size - e.shape[1]) for e in exp]
+            max_size = max(e.shape[-1] for e in exp)
+            padding_sizes = [(max_size - e.shape[-1]) for e in exp]
             if sum(padding_sizes) != 0:
                 exp = [
                     F.pad(e, (padding_size, 0), value=padding)

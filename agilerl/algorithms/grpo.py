@@ -126,17 +126,14 @@ class GRPO(RLAlgorithm):
                 gradient_checkpointing_kwargs={"use_reentrant": False}
             )
             self.reference_actor.eval()
-
         else:
             raise ValueError(
                 "Actor network must be provided to GRPO in the form of a pre-trained huggingface model wrapped with DummyEvolvable"
             )
-
         # Use optim.W for LLM fine-tuning
         self.optimizer = OptimizerWrapper(
             optim.AdamW, networks=[self.actor], lr=self.lr
         )
-
         # Register network groups for mutations
         self.register_network_group(NetworkGroup(eval=self.actor, policy=True))
         self.register_network_group(
@@ -155,7 +152,6 @@ class GRPO(RLAlgorithm):
         :param training: Flag to indicate training mode, defaults to True
         :type training: bool, optional
         """
-
         group_size = self.group_size if training else 1
         self.actor.eval()
         with torch.no_grad():
@@ -237,12 +233,11 @@ class GRPO(RLAlgorithm):
                     continue
                 self.optimizer.zero_grad()
                 loss.backward()
-                mean_grad_norm += clip_grad_norm_(
-                    self.actor.parameters(), self.max_grad_norm
-                )
+                grad_norm = clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
                 self.optimizer.step()
                 mean_loss += loss.item()
                 mean_kl += kl.item()
+                mean_grad_norm += grad_norm.item()
         mean_loss /= len(completion_ids)
         mean_kl /= len(completion_ids)
         mean_grad_norm /= len(completion_ids)
@@ -263,7 +258,7 @@ class GRPO(RLAlgorithm):
         :rtype: float
         """
         with env.eval():
-            prompts, _ = env.reset(reset_dataloaders=False)
+            prompts = env.reset(reset_dataloaders=False)
             rewards = []
             for _ in range(loop):
                 completion_ids, _ = self.get_action(prompts, training=False)
@@ -286,6 +281,8 @@ class GRPO(RLAlgorithm):
         :return: Tensor of group relative advantages.
         :rtype: torch.Tensor
         """
+        if len(rewards.shape) == 1:
+            rewards = rewards.unsqueeze(-1)
         advantage = (rewards - rewards.mean(dim=1).unsqueeze(1)) / (
             rewards.std(dim=1).unsqueeze(1) + eps
         )
@@ -374,8 +371,6 @@ class GRPO(RLAlgorithm):
             for input_id, mask in zip(ids, attention_mask):
                 input_id = input_id.reshape(1, -1)
                 mask = mask.reshape(1, -1)
-                print("SHAPES")
-                print(input_id.shape, mask.shape)
                 kwargs = {
                     "input_ids": input_id,
                     "attention_mask": mask,
