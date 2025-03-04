@@ -331,8 +331,13 @@ class DQN(RLAlgorithm):
         return loss.item()
 
     def soft_update(self) -> None:
-        "Soft updates target network."
-        self.target_params.lerp_(self.param_vals, self.tau)
+        """Soft updates target network."""
+        for eval_param, target_param in zip(
+            self.actor.parameters(), self.actor_target.parameters()
+        ):
+            target_param.data.copy_(
+                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
+            )
 
     def test(
         self,
