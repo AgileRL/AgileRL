@@ -164,6 +164,17 @@ class HyperparameterConfig:
             + "\n)"
         )
 
+    def __bool__(self) -> bool:
+        """Returns False if the config is empty, True otherwise.
+
+        :return: Whether the config contains any hyperparameters
+        :rtype: bool
+        """
+        return bool(self.config)
+
+    def __eq__(self, other: "HyperparameterConfig") -> bool:
+        return set(self.names()) == set(other.names())
+
     def __iter__(self):
         return iter(self.config)
 
@@ -300,19 +311,28 @@ def make_network_group(
 
 @dataclass
 class MutationRegistry:
-    """Registry for storing the evolvable modules and optimizers of an `EvolvableAlgorithm`
+    """Registry to keep track of the components of an algorithms that may evolve during training
     in a structured way to be interpreted by a `Mutations` object when performing evolutionary
-    hyperparameter optimization.
+    hyperparameter optimization. This includes:
+
+    1. The hyperparameter configuration of the algorithm.
+    2. The network groups of the algorithm.
+    3. The optimizers of the algorithm.
+    4. The mutation hooks of the algorithm (i.e. functions that are called when a mutation is performed).
 
     :param hp_config: The hyperparameter configuration of the algorithm.
-    :type hp_config: HyperparameterConfig"""
+    :type hp_config: HyperparameterConfig
+    """
 
-    hp_config: HyperparameterConfig
+    hp_config: Optional[HyperparameterConfig] = field(default=None)
 
     def __post_init__(self):
         self.groups: List[NetworkGroup] = []
         self.optimizers: List[OptimizerConfig] = []
         self.hooks: List[Callable] = []
+
+        if self.hp_config is None:
+            self.hp_config = HyperparameterConfig()
 
     def __repr__(self) -> str:
         groups_str = "\n".join(
@@ -326,12 +346,11 @@ class MutationRegistry:
         )
         return f"Network Groups:\n{groups_str}\n\nOptimizers:\n{optimizers_str}"
 
-    def __eq__(self, other: "MutationRegistry") -> bool:
+    def __eq__(self, other: Optional["MutationRegistry"]) -> bool:
         return (
             self.hp_config == other.hp_config
             and self.groups == other.groups
             and self.optimizers == other.optimizers
-            and self.hooks == other.hooks
         )
 
     @property

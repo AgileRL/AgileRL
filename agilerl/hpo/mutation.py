@@ -540,8 +540,7 @@ class Mutations:
         """
         # Randomly sample hyperparameter to mutate from the passed configuration
         hp_config = individual.registry.hp_config
-
-        if hp_config is None:
+        if not hp_config:
             individual.mut = "None"
             return individual
 

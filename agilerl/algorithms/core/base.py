@@ -706,7 +706,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         # Copy non-evolvable attributes back to clone
         clone = EvolvableAlgorithm.copy_attributes(self, clone)
-
         if index is not None:
             clone.index = index
 
@@ -849,7 +848,17 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         )
 
         # Reconstruct evolvable modules in algorithm
-        network_info: Dict[str, Dict[str, Any]] = checkpoint["network_info"]
+        network_info: Optional[Dict[str, Dict[str, Any]]] = checkpoint.get(
+            "network_info"
+        )
+        if network_info is None:
+            raise ValueError(
+                "Network info not found in checkpoint. You may be loading a checkpoint from "
+                "an older version of AgileRL. Since v2.0, we require AgileRL algorithms to "
+                "have a specific structure to simplify evolutionary hyperparameter optimization. "
+                "Please downgrade to v1.0.30 to load checkpoints from before this change."
+            )
+
         network_names = network_info["network_names"]
         loaded_modules: Dict[str, EvolvableAttributeType] = {}
         for name in network_names:
@@ -871,7 +880,9 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             state_dict = chkpt_attribute_to_device(state_dict, device)
 
             # Reconstruct the modules
-            module_cls: Type[EvolvableModule] = net_dict[f"{name}_cls"]
+            module_cls: Union[Type[EvolvableModule], List[Type[EvolvableModule]]] = (
+                net_dict[f"{name}_cls"]
+            )
             if isinstance(module_cls, list):
                 loaded_modules[name] = []
                 for mod_cls, d, state in zip(module_cls, init_dict, state_dict):
