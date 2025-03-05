@@ -284,6 +284,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             )
         elif isinstance(observation_space, spaces.Discrete):
             return (observation_space.n,)
+        elif isinstance(observation_space, spaces.MultiDiscrete):
+            return (sum(observation_space.nvec),)
         elif isinstance(observation_space, spaces.Box):
             return observation_space.shape
         elif isinstance(observation_space, spaces.Dict):
