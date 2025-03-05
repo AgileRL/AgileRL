@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import deepspeed
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from gymnasium import spaces
 from torch.nn.utils import clip_grad_norm_
@@ -11,10 +12,13 @@ from transformers import GenerationConfig
 
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.modules.base import EvolvableModule
 from agilerl.typing import ExperiencesType
 from agilerl.utils.algo_utils import get_experiences_samples, stack_and_pad_experiences
-from agilerl.utils.llm_utils import HuggingFaceGym
+from agilerl.utils.llm_utils import (
+    DEEPSPEED_INFERENCE_CONFIG,
+    DEEPSPEED_TRAINING_CONFIG,
+    HuggingFaceGym,
+)
 
 
 class GRPO(RLAlgorithm):
@@ -48,7 +52,7 @@ class GRPO(RLAlgorithm):
         self,
         observation_space: spaces.Space,
         action_space: spaces.Space,
-        actor_network: EvolvableModule,
+        actor_network: nn.Module,
         pad_token_id: int,
         hp_config: Optional[HyperparameterConfig] = None,
         index: int = 0,
@@ -62,7 +66,10 @@ class GRPO(RLAlgorithm):
         temperature: float = 0.9,
         calc_position_embeddings: bool = True,
         reduce_memory_peak: bool = False,
-        ds_config: Optional[Dict[str, Any]] = None,
+        deepspeed_training_config: Optional[Dict[str, Any]] = DEEPSPEED_TRAINING_CONFIG,
+        deepspeed_inference_config: Optional[
+            Dict[str, Any]
+        ] = DEEPSPEED_INFERENCE_CONFIG,
         device: str = "cpu",
     ) -> None:
 
@@ -114,34 +121,27 @@ class GRPO(RLAlgorithm):
         self.temperature = temperature
         self.reduce_memory_peak = reduce_memory_peak
         if actor_network is not None:
-            if not isinstance(actor_network, EvolvableModule):
-                raise TypeError(
-                    f"Passed actor network is of type {type(actor_network)}, but must be of type EvolvableModule."
-                )
+            # NOTE disabling evolvable llm nets as adds additional unnecessary complication for now, we can investigate evo later
 
-            if ds_config is None:
-                self.actor = actor_network.to(self.device)
-                self.reference_actor = copy.deepcopy(
-                    self.actor
-                )  # make_safe_deepcopies does not work here, why?
+            # if ds_config is None:
+            #     self.actor = actor_network.to(self.device)
+            #     self.reference_actor = copy.deepcopy(
+            #         self.actor
+            #     )  # make_safe_deepcopies does not work here, why?
 
-                self.actor.module.gradient_checkpointing_enable(
-                    gradient_checkpointing_kwargs={"use_reentrant": False}
-                )
-                self.reference_actor.eval()
-            else:
-                self.actor, self.optimizer, *_ = deepspeed.initialize(
-                    config=ds_config,
-                    model=actor_network.module,
-                    model_parameters=actor_network.module.parameters(),
-                )
-                self.reference_actor = deepspeed.init_inference(
-                    model=actor_network.module,
-                    mp_size=1,
-                    dtype=torch.float16,
-                    replace_with_kernel_inject=True,
-                )
-
+            #     self.actor.gradient_checkpointing_enable(
+            #         gradient_checkpointing_kwargs={"use_reentrant": False}
+            #     )
+            #     self.reference_actor.eval()
+            # else:
+            self.actor, self.optimizer, *_ = deepspeed.initialize(
+                config=deepspeed_training_config,
+                model=actor_network,
+                model_parameters=actor_network.parameters(),
+            )
+            self.reference_actor = deepspeed.init_inference(
+                model=actor_network, **deepspeed_inference_config
+            )
         else:
             raise ValueError(
                 "Actor network must be provided to GRPO in the form of a pre-trained huggingface model wrapped with DummyEvolvable"
@@ -184,6 +184,7 @@ class GRPO(RLAlgorithm):
                     **state,
                     generation_config=self.generation_config,
                 )
+                print("generated...")
                 completion_ids.append(completion_id)
                 action_mask = torch.zeros_like(
                     completion_id, dtype=torch.bool, device=self.device
@@ -370,6 +371,9 @@ class GRPO(RLAlgorithm):
         :return: Log probabilities of the completion IDs.
         :rtype: torch.Tensor
         """
+        import time
+
+        print(f"Getting logprobs... for {'reference' if use_reference else 'policy'}")
         policy = self.reference_actor if use_reference else self.actor
         policy.train(mode=not eval_mode)
         attention_mask = ids != self.pad_token_id
@@ -384,6 +388,8 @@ class GRPO(RLAlgorithm):
             model_kwargs |= {"position_ids": position_ids}
         if self.reduce_memory_peak:
             logit_list = []
+            i = 0
+            t = time.time()
             for input_id, mask in zip(ids, attention_mask):
                 input_id = input_id.reshape(1, -1)
                 mask = mask.reshape(1, -1)
@@ -394,6 +400,8 @@ class GRPO(RLAlgorithm):
                 }
                 logit = policy.forward(**kwargs).logits
                 logit_list.append(logit)
+                i += 1
+            print(f"Took {(time.time() - t) / i} per forward pass")
             logits = torch.cat(logit_list)
         else:
             logits = policy.forward(**model_kwargs).logits

@@ -94,6 +94,7 @@ def test_hugging_face_gym_init(dataset, num_samples):
     assert np.all(env.action_space.high == tokenizer.vocab_size - 1)
     assert len(env.action_space.sample()) == max_answer_tokens
     assert not env.eval_mode
+    assert env.data_batch_size == data_batch_size
 
 
 @pytest.mark.parametrize("num_samples", [200])

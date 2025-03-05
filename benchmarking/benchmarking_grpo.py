@@ -3,15 +3,15 @@ from typing import Tuple
 
 import torch
 from datasets import load_dataset
+from peft import LoraConfig, get_peft_model
 from torch.utils.data import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from agilerl.algorithms import GRPO
-from agilerl.modules.dummy import to_evolvable
 from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 
-MODEL_PATH = "Qwen/Qwen2.5-0.5B"
+MODEL_PATH = "Qwen/Qwen2.5-1.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"  # "openai/gsm8k"
 
 
@@ -47,22 +47,22 @@ def create_module(pretrained_model_name_or_path):
         # attn_implementation="flash_attention_2",
         torch_dtype=torch.bfloat16,
     )
-    # peft_config = LoraConfig(
-    #     r=16,
-    #     lora_alpha=64,
-    #     target_modules=[
-    #         "q_proj",
-    #         "k_proj",
-    #         "v_proj",
-    #         "o_proj",
-    #         "up_proj",
-    #         "down_proj",
-    #         "gate_proj",
-    #     ],
-    #     task_type="CAUSAL_LM",
-    #     lora_dropout=0.05,
-    # )
-    # model = get_peft_model(model, peft_config)
+    peft_config = LoraConfig(
+        r=16,
+        lora_alpha=64,
+        target_modules=[
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "up_proj",
+            "down_proj",
+            "gate_proj",
+        ],
+        task_type="CAUSAL_LM",
+        lora_dropout=0.05,
+    )
+    model = get_peft_model(model, peft_config)
 
     return model
 
@@ -223,13 +223,9 @@ def custom_collate_fn(batch):
     return {"answer": answers, "question": questions}
 
 
-def main():
+def main(world_size, local_rank):
     # Instantiate the model and the associated tokenizer
-    model = to_evolvable(
-        module_fn=create_module,
-        module_kwargs={"pretrained_model_name_or_path": MODEL_PATH},
-        device="cuda",
-    )
+    model = create_module(**{"pretrained_model_name_or_path": MODEL_PATH})
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
@@ -240,12 +236,12 @@ def main():
         tokenizer=tokenizer,
         reward_fn=combined_rewards,
         apply_chat_template_fn=countdown_chat_template,
-        max_answer_tokens=600,
+        max_answer_tokens=20,
         data_batch_size=2,
         custom_collate_fn=custom_collate_fn,
     )
 
-    ds_config = {
+    deepspeed_training_config = {
         "train_micro_batch_size_per_gpu": 4,
         "gradient_accumulation_steps": 2,
         "optimizer": {"type": "AdamW", "params": {"lr": 1e-6}},
@@ -262,6 +258,11 @@ def main():
             "offload_optimizer": {"device": "cpu"},
         },
     }
+    deepspeed_inference_config = {
+        "tensor_parallel": {"tp_size": world_size},
+        "dtype": torch.float16,
+        "replace_with_kernel_inject": True,
+    }
     # Instantiate the grpo agent
     agent = GRPO(
         env.observation_space,
@@ -270,9 +271,10 @@ def main():
         pad_token_id=tokenizer.eos_token_id,
         device="cuda",
         batch_size=2,
-        group_size=10,
+        group_size=2,
         reduce_memory_peak=True,
-        ds_config=ds_config,
+        deepspeed_training_config=deepspeed_training_config,
+        deepspeed_inference_config=deepspeed_inference_config,
     )
     finetune_llm(
         agent=agent,
@@ -286,4 +288,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import os
+
+    world_size = int(os.getenv("WORLD_SIZE", "1"))
+    local_rank = int(os.getenv("LOCAL_RANK", "0"))
+    main(world_size, local_rank)

@@ -36,7 +36,7 @@ def finetune_llm(
     bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
 
     pbar = trange(
-        (max_steps := len(env)),
+        (max_steps := len(env) // env.data_batch_size),
         unit="step",
         bar_format=bar_format,
         ascii=True,
@@ -59,7 +59,7 @@ def finetune_llm(
         loss, kl, grad_norm = agent.learn(experiences)
         prompts = next_prompts
         print(
-            "Epoch: ",
+            f"Step: {i + 1}",
             i,
             "| Loss: ",
             loss,
@@ -89,4 +89,4 @@ def finetune_llm(
         ):
             agent.save_checkpoint(save_path := f"step_{i}.pt")
             print(f"Saved checkpoint {save_path}")
-        pbar.update(i)
+        pbar.update(1)

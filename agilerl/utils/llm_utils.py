@@ -1,3 +1,4 @@
+import os
 import warnings
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, Generator, List, Tuple
@@ -51,6 +52,7 @@ class HuggingFaceGym(gym.Env):
         self.name = train_dataset.info.dataset_name
         self.reward_fn = reward_fn
         self.tokenizer = tokenizer
+        self.data_batch_size = data_batch_size
         dataloader_kwargs = (
             {} if custom_collate_fn is None else {"collate_fn": custom_collate_fn}
         )
@@ -167,6 +169,32 @@ class HuggingFaceGym(gym.Env):
         self.test_dataloader_iter = iter(self.test_dataloader)
 
 
+DEEPSPEED_TRAINING_CONFIG = {
+    "train_micro_batch_size_per_gpu": 4,
+    "gradient_accumulation_steps": 2,
+    "optimizer": {"type": "AdamW", "params": {"lr": 1e-6}},
+    "bf16": {"enabled": True},
+    "zero_optimization": {
+        "stage": 2,
+        "allgather_partitions": True,
+        "allgather_bucket_size": 2e8,
+        "overlap_comm": True,
+        "reduce_scatter": True,
+        "reduce_bucket_size": 2e8,
+        "contiguous_gradients": True,
+        "stage3_gather_16bit_weights_on_model_save": True,
+        "offload_optimizer": {"device": "cpu"},
+    },
+}
+
+DEEPSPEED_INFERENCE_CONFIG = {
+    "tensor_parallel": {"tp_size": int(os.getenv("WORLD_SIZE", "1"))},
+    "mp_size": int(os.getenv("WORLD_SIZE", "1")),
+    "dtype": torch.float16,
+    "replace_with_kernel_inject": True,
+}
+
+# Below are example functions for the gsm8k dataset
 # def example_apply_chat_template(
 #     question: str, answer: str, tokenizer: AutoTokenizer
 # ) -> BatchEncoding:
