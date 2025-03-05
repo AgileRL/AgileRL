@@ -203,7 +203,7 @@ def test_add_channel(
 @pytest.mark.parametrize(
     "input_shape, channel_size, kernel_size, stride_size, num_outputs, num_blocks",
     [
-        ([3, 32, 32], 64, 3, 1, 10, 2),
+        ([3, 32, 32], 128, 3, 1, 10, 2),
         ([3, 64, 64], 128, 3, 2, 10, 3),
     ],
 )
