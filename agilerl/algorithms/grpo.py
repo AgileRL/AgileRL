@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from gymnasium import spaces
 from torch.nn.utils import clip_grad_norm_
 from transformers import GenerationConfig
-
+from contextlib import contextmanager
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.typing import ExperiencesType
@@ -28,7 +28,7 @@ class GRPO(RLAlgorithm):
     :type observation_space: gym.spaces.Space
     :param action_space: Action space of the environment
     :type action_space: gym.spaces.Space
-    :param actor_network: Custom actor network, typically a HuggingFace LLM
+    :param actor_network: HuggingFace LLM
     :type actor_network: nn.Module
     :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
     :type hp_config: HyperparameterConfig, optional
@@ -44,6 +44,18 @@ class GRPO(RLAlgorithm):
     :type max_grad_norm: float, optional
     :param update_epochs: Number of policy update epochs, defaults to 4
     :type update_epochs: int, optional
+    :param group_size: Group size, defaults to 8 
+    :type group_size: int, optional
+    :param temperature: Temperature, controls randomness of text generation
+    :type temperature: float, optional
+    :param calc_position_embeddings: Flag indicating whether to calculate position embeddings, defaults to True
+    :type calc_position_embeddings: bool, optional
+    :param reduce_memory_peak: Flag to reduce memory peak in the _get_log_probs method, defaults to False
+    :type reduce_memory_peak: bool, optional
+    :param deepspeed_training_config: Deepspeed training config, defaults to DEEPSPEED_TRAINING_CONFIG
+    :type deepspeed_training_config: Dict[str, Any], optional
+    :param deepspeed_inference_config: Deepspeed training config, defaults to DEEPSPEED_INFERENCE_CONFIG
+    :type deepspeed_inference_config: Dict[str, Any], optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     """
@@ -62,7 +74,7 @@ class GRPO(RLAlgorithm):
         clip_coef: float = 0.2,
         max_grad_norm: float = 0.1,
         update_epochs: int = 1,
-        group_size: int = 5,
+        group_size: int = 8,
         temperature: float = 0.9,
         calc_position_embeddings: bool = True,
         reduce_memory_peak: bool = False,
@@ -72,7 +84,6 @@ class GRPO(RLAlgorithm):
         ] = DEEPSPEED_INFERENCE_CONFIG,
         device: str = "cpu",
     ) -> None:
-
         super().__init__(
             observation_space,
             action_space,
@@ -83,7 +94,6 @@ class GRPO(RLAlgorithm):
             normalize_images=False,
             name="GRPO",
         )
-
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
         assert isinstance(lr, float), "Learning rate must be a float."
@@ -120,20 +130,9 @@ class GRPO(RLAlgorithm):
         self.max_grad_norm = max_grad_norm
         self.temperature = temperature
         self.reduce_memory_peak = reduce_memory_peak
+        self.local_rank = device.split(":")[-1] 
         if actor_network is not None:
-            # NOTE disabling evolvable llm nets as adds additional unnecessary complication for now, we can investigate evo later
-
-            # if ds_config is None:
-            #     self.actor = actor_network.to(self.device)
-            #     self.reference_actor = copy.deepcopy(
-            #         self.actor
-            #     )  # make_safe_deepcopies does not work here, why?
-
-            #     self.actor.gradient_checkpointing_enable(
-            #         gradient_checkpointing_kwargs={"use_reentrant": False}
-            #     )
-            #     self.reference_actor.eval()
-            # else:
+            actor_network = actor_network.to(device)
             self.actor, self.optimizer, *_ = deepspeed.initialize(
                 config=deepspeed_training_config,
                 model=actor_network,
@@ -146,10 +145,6 @@ class GRPO(RLAlgorithm):
             raise ValueError(
                 "Actor network must be provided to GRPO in the form of a pre-trained huggingface model wrapped with DummyEvolvable"
             )
-        # Use optim.W for LLM fine-tuning
-        # self.optimizer = OptimizerWrapper(
-        #     optim.AdamW, networks=[self.actor], lr=self.lr
-        # )
         # Register network groups for mutations
         self.register_network_group(NetworkGroup(eval=self.actor, policy=True))
         self.register_network_group(
@@ -175,16 +170,16 @@ class GRPO(RLAlgorithm):
             completion_ids = []
             for state in states:
                 state["input_ids"] = (
-                    state["input_ids"].repeat(group_size, 1).to(self.device)
+                    state["input_ids"].repeat(group_size, 1).to(self.actor.device)
                 )
                 state["attention_mask"] = (
-                    state["attention_mask"].repeat(group_size, 1).to(self.device)
+                    state["attention_mask"].repeat(group_size, 1).to(self.actor.device)
                 )
                 completion_id = self.actor.generate(
                     **state,
                     generation_config=self.generation_config,
                 )
-                print("generated...")
+                completion_id = completion_id.to(self.device)
                 completion_ids.append(completion_id)
                 action_mask = torch.zeros_like(
                     completion_id, dtype=torch.bool, device=self.device
@@ -198,8 +193,8 @@ class GRPO(RLAlgorithm):
     def learn(self, experiences: ExperiencesType) -> float:
         """Updates agent network parameters to learn from experiences.
 
-        :param experiences: List of batched states, actions, log_probs, rewards, dones, values, next_state in that order.
-        :type experiences: Tuple[Union[numpy.ndarray, Dict[str, numpy.ndarray]], ...]
+        :param experiences: Batched completion_ids, action_masks and rewards
+        :type experiences: ExperiencesType
         """
         torch.cuda.empty_cache()
         completion_ids, action_masks, rewards = stack_and_pad_experiences(
@@ -248,10 +243,9 @@ class GRPO(RLAlgorithm):
                 )
                 if not loss.isfinite():
                     continue
-                self.optimizer.zero_grad()
-                loss.backward()
+                self.actor.backward(loss)
                 grad_norm = clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
-                self.optimizer.step()
+                self.actor.step()
                 mean_loss += loss.item()
                 mean_kl += kl.item()
                 mean_grad_norm += grad_norm.item()
@@ -293,7 +287,7 @@ class GRPO(RLAlgorithm):
 
         :param rewards: Tensor of rewards.
         :type rewards: torch.Tensor
-        :param eps: Epsilon to prevent division error, defaults to 1e-8
+        :param eps: Epsilon to prevent zero division error, defaults to 1e-8
         :type eps: float, optional
         :return: Tensor of group relative advantages.
         :rtype: torch.Tensor
@@ -371,9 +365,6 @@ class GRPO(RLAlgorithm):
         :return: Log probabilities of the completion IDs.
         :rtype: torch.Tensor
         """
-        import time
-
-        print(f"Getting logprobs... for {'reference' if use_reference else 'policy'}")
         policy = self.reference_actor if use_reference else self.actor
         policy.train(mode=not eval_mode)
         attention_mask = ids != self.pad_token_id
@@ -388,8 +379,6 @@ class GRPO(RLAlgorithm):
             model_kwargs |= {"position_ids": position_ids}
         if self.reduce_memory_peak:
             logit_list = []
-            i = 0
-            t = time.time()
             for input_id, mask in zip(ids, attention_mask):
                 input_id = input_id.reshape(1, -1)
                 mask = mask.reshape(1, -1)
@@ -399,9 +388,8 @@ class GRPO(RLAlgorithm):
                     "use_cache": False,
                 }
                 logit = policy.forward(**kwargs).logits
+                logit = logit.to(self.device)
                 logit_list.append(logit)
-                i += 1
-            print(f"Took {(time.time() - t) / i} per forward pass")
             logits = torch.cat(logit_list)
         else:
             logits = policy.forward(**model_kwargs).logits

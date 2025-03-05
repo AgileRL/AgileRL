@@ -2,6 +2,7 @@ import re
 from typing import Tuple
 
 import torch
+import deepspeed
 from datasets import load_dataset
 from peft import LoraConfig, get_peft_model
 from torch.utils.data import Dataset
@@ -11,41 +12,18 @@ from agilerl.algorithms import GRPO
 from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 
-MODEL_PATH = "Qwen/Qwen2.5-1.5B"
+MODEL_PATH = "Qwen/Qwen2.5-3B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"  # "openai/gsm8k"
 
 
-# def create_module(pretrained_model_name_or_path):
-#     model = AutoModelForCausalLM.from_pretrained(
-#         pretrained_model_name_or_path=pretrained_model_name_or_path,
-#         device_map="cuda",
-#         attn_implementation="flash_attention_2",
-#         quantization_config=BitsAndBytesConfig(
-#             load_in_4bit=True,
-#             bnb_4bit_compute_dtype=torch.float16,
-#             bnb_4bit_use_double_quant=True,
-#             bnb_4bit_quant_type="nf4",
-#         ),
-#     )
-#     lora_config = LoraConfig(
-#         task_type="CAUSAL_LM",
-#         r=8,
-#         lora_alpha=32,
-#         lora_dropout=0.1,
-#         target_modules=["q_proj", "v_proj"],
-#     )
-
-#     model = get_peft_model(model, lora_config)
-#     model.print_trainable_parameters()
-#     return model
 
 
-def create_module(pretrained_model_name_or_path):
+def create_model(pretrained_model_name_or_path):
     model = AutoModelForCausalLM.from_pretrained(
         pretrained_model_name_or_path=pretrained_model_name_or_path,
-        device_map="auto",
-        # attn_implementation="flash_attention_2",
         torch_dtype=torch.bfloat16,
+        device_map=None,        
+        attn_implementation="flash_attention_2",
     )
     peft_config = LoraConfig(
         r=16,
@@ -63,7 +41,6 @@ def create_module(pretrained_model_name_or_path):
         lora_dropout=0.05,
     )
     model = get_peft_model(model, peft_config)
-
     return model
 
 
@@ -225,7 +202,7 @@ def custom_collate_fn(batch):
 
 def main(world_size, local_rank):
     # Instantiate the model and the associated tokenizer
-    model = create_module(**{"pretrained_model_name_or_path": MODEL_PATH})
+    model = create_model(**{"pretrained_model_name_or_path": MODEL_PATH})
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
@@ -236,8 +213,8 @@ def main(world_size, local_rank):
         tokenizer=tokenizer,
         reward_fn=combined_rewards,
         apply_chat_template_fn=countdown_chat_template,
-        max_answer_tokens=20,
-        data_batch_size=2,
+        max_answer_tokens=600,
+        data_batch_size=8,
         custom_collate_fn=custom_collate_fn,
     )
 
@@ -256,22 +233,25 @@ def main(world_size, local_rank):
             "contiguous_gradients": True,
             "stage3_gather_16bit_weights_on_model_save": True,
             "offload_optimizer": {"device": "cpu"},
-        },
+        }
     }
     deepspeed_inference_config = {
         "tensor_parallel": {"tp_size": world_size},
-        "dtype": torch.float16,
+        "dtype": torch.bfloat16,
         "replace_with_kernel_inject": True,
     }
+
+
     # Instantiate the grpo agent
+    deepspeed.init_distributed()
     agent = GRPO(
         env.observation_space,
         env.action_space,
         actor_network=model,
         pad_token_id=tokenizer.eos_token_id,
-        device="cuda",
-        batch_size=2,
-        group_size=2,
+        device=f"cuda:{local_rank}",
+        batch_size=8,
+        group_size=8,
         reduce_memory_peak=True,
         deepspeed_training_config=deepspeed_training_config,
         deepspeed_inference_config=deepspeed_inference_config,
@@ -281,7 +261,7 @@ def main(world_size, local_rank):
         env=env,
         INIT_HP={},
         evaluation_interval=5,
-        wb=False,
+        wb=True,
         checkpoint_interval=100,
         checkpoint_path="saved_llms",
     )  # Do we want to keep this the same?
@@ -289,7 +269,6 @@ def main(world_size, local_rank):
 
 if __name__ == "__main__":
     import os
-
     world_size = int(os.getenv("WORLD_SIZE", "1"))
     local_rank = int(os.getenv("LOCAL_RANK", "0"))
     main(world_size, local_rank)
