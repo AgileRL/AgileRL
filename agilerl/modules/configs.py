@@ -104,6 +104,42 @@ class SimBaNetConfig(NetConfig):
 
 
 @dataclass
+class LSTMNetConfig(NetConfig):
+    hidden_size: List[int]
+    num_layers: int = field(default=1)
+    bidirectional: bool = field(default=False)
+    dropout: float = field(default=0.0)
+    activation: str = field(default="ReLU")
+    output_activation: Optional[str] = field(default=None)
+    min_hidden_layers: int = field(default=1)
+    max_hidden_layers: int = field(default=3)
+    min_lstm_size: int = field(default=32)
+    max_lstm_size: int = field(default=256)
+    layer_norm: bool = field(default=True)
+    output_vanish: bool = field(default=True)
+    init_layers: bool = field(default=True)
+
+    def __post_init__(self):
+        assert (
+            len(self.hidden_size) >= self.min_hidden_layers
+        ), "Hidden layers must be greater than min_hidden_layers."
+
+        assert (
+            len(self.hidden_size) <= self.max_hidden_layers
+        ), "Hidden layers must be less than max_hidden_layers."
+
+        assert all(
+            [
+                self.min_lstm_size <= nodes and nodes <= self.max_lstm_size
+                for nodes in self.hidden_size
+            ]
+        ), "LSTM hidden sizes must be within min_lstm_size and max_lstm_size."
+
+        assert 0 <= self.dropout < 1, "Dropout must be between 0 and 1."
+        assert self.num_layers > 0, "Number of LSTM layers must be greater than 0."
+
+
+@dataclass
 class CnnNetConfig(NetConfig):
     channel_size: List[int]
     kernel_size: List[Union[int, Tuple[int, ...]]]

@@ -11,6 +11,7 @@ from torch.optim import Optimizer
 
 from agilerl.modules.configs import (
     CnnNetConfig,
+    LSTMNetConfig,
     MlpNetConfig,
     MultiInputNetConfig,
     SimBaNetConfig,
@@ -49,6 +50,34 @@ def tuple_to_dict_space(observation_space: spaces.Tuple) -> spaces.Dict:
     return spaces.Dict(dict_space)
 
 
+def is_image_space(space: spaces.Space) -> bool:
+    """Check if a space is an image space.
+
+    :param space: Space to check
+    :type space: spaces.Space
+
+    :return: Whether the space is an image space
+    :rtype: bool
+    """
+    if isinstance(space, spaces.Box):
+        return len(space.shape) >= 3
+    return False
+
+
+def is_time_series_space(space: spaces.Space) -> bool:
+    """Check if a space is a time-series space (2D Box space).
+
+    :param space: Space to check
+    :type space: spaces.Space
+
+    :return: Whether the space is a time-series space
+    :rtype: bool
+    """
+    if isinstance(space, spaces.Box):
+        return len(space.shape) == 2
+    return False
+
+
 def get_default_encoder_config(
     observation_space: spaces.Space, simba: bool = False
 ) -> ConfigType:
@@ -72,6 +101,13 @@ def get_default_encoder_config(
             channel_size=[16, 16],
             kernel_size=[3, 3],
             stride_size=[1, 1],
+            output_activation=None,
+        )
+    elif is_time_series_space(observation_space):
+        # For time-series data, use LSTM
+        return LSTMNetConfig(
+            hidden_size=[64, 32],
+            num_layers=1,
             output_activation=None,
         )
     else:
@@ -386,19 +422,6 @@ def calc_max_kernel_sizes(
     return max_kernel_list
 
 
-def is_image_space(space: spaces.Space) -> bool:
-    """Check if the space is an image space. We ignore dtype and number of channels
-    checks.
-
-    :param space: Input space
-    :type space: spaces.Space
-
-    :return: True if the space is an image space, False otherwise
-    :rtype: bool
-    """
-    return isinstance(space, spaces.Box) and len(space.shape) == 3
-
-
 def create_cnn(
     block_type: Literal["Conv2d", "Conv3d"],
     in_channels: int,
@@ -659,3 +682,105 @@ def create_resnet(
         )
 
     return net_dict
+
+
+def create_rnn(
+    input_size: int,
+    hidden_size: int,
+    num_outputs: int,
+    num_layers: int = 1,
+    bidirectional: bool = False,
+    dropout: float = 0.0,
+    output_activation: Optional[str] = None,
+    output_vanish: bool = True,
+    init_layers: bool = True,
+    rnn_type: Literal["lstm", "gru"] = "lstm",
+    device: DeviceType = "cpu",
+    name: str = "rnn",
+) -> nn.Sequential:
+    """Creates and returns RNN network.
+
+    :param input_size: Size of input features
+    :type input_size: int
+    :param hidden_size: Size of hidden layers
+    :type hidden_size: int
+    :param num_outputs: Output dimension
+    :type num_outputs: int
+    :param num_layers: Number of LSTM layers, defaults to 1
+    :type num_layers: int, optional
+    :param bidirectional: Whether to use bidirectional LSTM, defaults to False
+    :type bidirectional: bool, optional
+    :param dropout: Dropout probability, defaults to 0.0
+    :type dropout: float, optional
+    :param output_activation: Output activation function, defaults to None
+    :type output_activation: Optional[str], optional
+    :param output_vanish: Whether to initialize output layer weights to a small value, defaults to True
+    :type output_vanish: bool, optional
+    :param init_layers: Whether to initialize layers, defaults to True
+    :type init_layers: bool, optional
+    :param layer_norm: Whether to use layer normalization, defaults to False
+    :type layer_norm: bool, optional
+    :param activation: Activation function for hidden layers, defaults to 'ReLU'
+    :type activation: str, optional
+    :param rnn_type: Type of RNN, defaults to 'lstm'
+    :type rnn_type: Literal["lstm", "gru"], optional
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
+    :type device: str, optional
+    :param name: Name of the network, defaults to 'lstm'
+    :type name: str, optional
+
+    :return: LSTM network
+    :rtype: nn.Sequential
+    """
+    net_dict: Dict[str, nn.Module] = OrderedDict()
+
+    # LSTM layers
+    if rnn_type == "lstm":
+        rnn_layer = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size[0],
+            num_layers=num_layers,
+            batch_first=True,
+            bidirectional=bidirectional,
+            dropout=dropout if num_layers > 1 else 0,
+            device=device,
+        )
+    elif rnn_type == "gru":
+        rnn_layer = nn.GRU(
+            input_size=input_size,
+            hidden_size=hidden_size[0],
+            num_layers=num_layers,
+            batch_first=True,
+            bidirectional=bidirectional,
+            dropout=dropout if num_layers > 1 else 0,
+            device=device,
+        )
+
+    if init_layers:
+        # Initialize LSTM weights
+        for name, param in rnn_layer.named_parameters():
+            if "bias" in name:
+                nn.init.constant_(param, 0)
+            elif "weight" in name:
+                nn.init.orthogonal_(param, np.sqrt(2))
+
+    # Hidden linear layer
+    net_dict[f"{name}_rnn"] = rnn_layer
+    prev_size = hidden_size[0] * (2 if bidirectional else 1)
+
+    # Output layer
+    output_layer = nn.Linear(prev_size, num_outputs, device=device)
+    if init_layers:
+        output_layer = layer_init(output_layer)
+
+    if output_vanish:
+        output_layer.weight.data.mul_(0.1)
+        output_layer.bias.data.mul_(0.1)
+
+    net_dict[f"{name}_linear_layer_output"] = output_layer
+
+    # Output activation if specified
+    if output_activation:
+        net_dict[f"{name}_activation_output"] = get_activation(output_activation)
+
+    return nn.Sequential(net_dict)
