@@ -46,7 +46,7 @@ jobs:
                   pyupgrade --py38-plus
             - name: Test with pytest
               run: |
-                  pytest --cov=agilerl --cov-report=xml
+                  pytest --exitfirst --cov=agilerl --cov-report=xml
             - name: Upload coverage reports to Codecov
               uses: codecov/codecov-action@v3
               env:
