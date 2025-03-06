@@ -1,6 +1,7 @@
 import copy
 import inspect
 from abc import ABC, ABCMeta, abstractmethod
+from importlib.metadata import version
 from typing import (
     Any,
     Callable,
@@ -158,6 +159,7 @@ def get_checkpoint_dict(agent: SelfEvolvableAlgorithm) -> Dict[str, Any]:
     network_info["network_names"] = network_attr_names
     network_info["optimizer_names"] = optimizer_attr_names
     attribute_dict["network_info"] = network_info
+    attribute_dict["agilerl_version"] = version("agilerl")
 
     attribute_dict.pop("accelerator", None)
     return attribute_dict
