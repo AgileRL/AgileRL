@@ -28,6 +28,7 @@ jobs:
                   python -m pip install --upgrade pip
                   pip install ruff pytest pytest-cov black codespell yamlfmt isort pyupgrade
                   pip install -r requirements.txt
+                  pip install -e .
             - name: Run black
               run: |
                   black .
