@@ -94,7 +94,7 @@ class MultiAgentReplayBuffer:
                 its = np.array([t[i] for t in ts])
                 _ts.append(np.expand_dims(its, axis=1) if its.ndim == 1 else its)
 
-            ts = _ts
+            ts = tuple(_ts)
         else:
             ts = np.array(ts)
             if ts.ndim == 1:
@@ -102,7 +102,7 @@ class MultiAgentReplayBuffer:
 
         return ts
 
-    def _add(self, *args: Any) -> None:
+    def _add(self, *args: Dict[str, NumpyObsType]) -> None:
         """
         Adds experience to memory.
 
@@ -169,7 +169,7 @@ class MultiAgentReplayBuffer:
         transition = self._process_transition(experiences)
         return tuple(transition.values())
 
-    def save_to_memory_single_env(self, *args: Any) -> None:
+    def save_to_memory_single_env(self, *args: Dict[str, NumpyObsType]) -> None:
         """
         Saves experience to memory.
 
@@ -181,8 +181,8 @@ class MultiAgentReplayBuffer:
         self.counter += 1
 
     def _reorganize_dicts(
-        self, *args: Dict[str, np.ndarray]
-    ) -> Tuple[List[Dict[str, np.ndarray]], ...]:
+        self, *args: Dict[str, NumpyObsType]
+    ) -> Tuple[List[Dict[str, NumpyObsType]], ...]:
         """
         Reorganizes dictionaries from vectorized to unvectorized experiences.
 
@@ -191,22 +191,30 @@ class MultiAgentReplayBuffer:
         :return: Reorganized dictionaries
         :rtype: Tuple[List[Dict[str, np.ndarray]], ...]
         """
+
+        def maybe_to_array(value):
+            return np.array(value) if not isinstance(value, np.ndarray) else value
+
         results = [[] for _ in range(len(args))]
         num_entries = len(next(iter(args[0].values())))
         for i in range(num_entries):
             for j, arg in enumerate(args):
-                new_dict = {
-                    key: (
-                        np.array(value[i])
-                        if not isinstance(value[i], np.ndarray)
-                        else value[i]
-                    )
-                    for key, value in arg.items()
-                }
+                new_dict = {}
+                for key, value in arg.items():
+                    if isinstance(value, dict):
+                        new_dict[key] = {
+                            k: maybe_to_array(v[i]) for k, v in value.items()
+                        }
+                    elif isinstance(value, tuple):
+                        new_dict[key] = tuple(maybe_to_array(v[i]) for v in value)
+                    else:
+                        new_dict[key] = maybe_to_array(value[i])
+
                 results[j].append(new_dict)
+
         return tuple(results)
 
-    def save_to_memory_vect_envs(self, *args: Any) -> None:
+    def save_to_memory_vect_envs(self, *args: Dict[str, NumpyObsType]) -> None:
         """
         Saves multiple experiences to memory.
 
@@ -219,7 +227,9 @@ class MultiAgentReplayBuffer:
             self._add(*transition)
             self.counter += 1
 
-    def save_to_memory(self, *args: Any, is_vectorised: bool = False) -> None:
+    def save_to_memory(
+        self, *args: Dict[str, NumpyObsType], is_vectorised: bool = False
+    ) -> None:
         """
         Applies appropriate save_to_memory function depending on whether
         the environment is vectorized or not.

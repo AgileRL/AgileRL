@@ -1,4 +1,7 @@
+from pathlib import Path
+
 import pytest
+import torch
 import torch.optim as optim
 from gymnasium import spaces
 
@@ -16,6 +19,7 @@ from tests.helper_functions import (
     generate_discrete_space,
     generate_multi_agent_box_spaces,
     generate_multi_agent_discrete_spaces,
+    generate_multidiscrete_space,
     generate_random_box_space,
 )
 
@@ -36,8 +40,8 @@ def multi_input_config():
 
 
 class DummyRLAlgorithm(RLAlgorithm):
-    def __init__(self, *args, lr=True, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, observation_space, action_space, index, lr=True, **kwargs):
+        super().__init__(observation_space, action_space, index, **kwargs)
 
         num_outputs = (
             self.action_space.n
@@ -58,6 +62,10 @@ class DummyRLAlgorithm(RLAlgorithm):
                 if isinstance(self.observation_space, spaces.Box)
                 else self.observation_space.n
             )
+            self.dummy_actor = EvolvableMLP(num_inputs, num_outputs, hidden_size=[8])
+        elif isinstance(self.observation_space, spaces.MultiDiscrete):
+            # Handle MultiDiscrete spaces
+            num_inputs = len(self.observation_space.nvec)
             self.dummy_actor = EvolvableMLP(num_inputs, num_outputs, hidden_size=[8])
         elif isinstance(self.observation_space, (spaces.Dict, spaces.Tuple)):
             self.dummy_actor = EvolvableMultiInput(
@@ -85,8 +93,8 @@ class DummyRLAlgorithm(RLAlgorithm):
 
 
 class DummyMARLAlgorithm(MultiAgentRLAlgorithm):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, observation_spaces, action_spaces, agent_ids, index, **kwargs):
+        super().__init__(observation_spaces, action_spaces, agent_ids, index, **kwargs)
 
         def create_actor(idx):
             obs_space = self.observation_spaces[idx]
@@ -221,3 +229,291 @@ def test_incorrect_hp_config():
             index=0,
             hp_config=hp_config,
         )
+
+
+@pytest.mark.parametrize(
+    "with_hp_config",
+    [
+        False,
+        True,
+    ],
+)
+@pytest.mark.parametrize(
+    "observation_space",
+    [
+        generate_random_box_space((4,)),
+        generate_discrete_space(4),
+        generate_dict_or_tuple_space(1, 1, dict_space=True),
+        generate_dict_or_tuple_space(1, 1, dict_space=False),
+        generate_multidiscrete_space(2, 2),
+    ],
+)
+def test_save_load_checkpoint_single_agent(tmpdir, with_hp_config, observation_space):
+    action_space = generate_discrete_space(4)
+    # Initialize the dummy agent
+    hp_config = None
+    if with_hp_config:
+        hp_config = HyperparameterConfig(lr=RLParameter(min=0.05, max=0.2))
+        agent = DummyRLAlgorithm(
+            observation_space, action_space, index=0, hp_config=hp_config
+        )
+    else:
+        agent = DummyRLAlgorithm(observation_space, action_space, index=0)
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    agent.save_checkpoint(checkpoint_path)
+
+    # Load the saved checkpoint file
+    checkpoint = torch.load(checkpoint_path)
+
+    # Check if the loaded checkpoint has the correct keys
+    assert "dummy_actor_init_dict" in checkpoint["network_info"]["modules"]
+    assert "dummy_actor_state_dict" in checkpoint["network_info"]["modules"]
+    assert "dummy_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
+    assert "lr" in checkpoint
+    assert "index" in checkpoint
+    assert "scores" in checkpoint
+    assert "fitness" in checkpoint
+    assert "steps" in checkpoint
+
+    # Create a new agent with the same hp_config if needed
+    new_agent = DummyRLAlgorithm(
+        observation_space,
+        action_space,
+        index=1,  # Different index to verify it gets overwritten
+        hp_config=hp_config,
+    )
+
+    # Load checkpoint
+    new_agent.load_checkpoint(checkpoint_path)
+
+    # Check if properties and weights are loaded correctly
+    assert isinstance(
+        new_agent.dummy_actor, (EvolvableMLP, EvolvableCNN, EvolvableMultiInput)
+    )
+    assert new_agent.lr == agent.lr
+    assert str(new_agent.dummy_actor.state_dict()) == str(
+        agent.dummy_actor.state_dict()
+    )
+    assert new_agent.index == agent.index
+    assert new_agent.scores == agent.scores
+    assert new_agent.fitness == agent.fitness
+    assert new_agent.steps == agent.steps
+
+
+@pytest.mark.parametrize(
+    "with_hp_config",
+    [
+        False,
+        True,
+    ],
+)
+@pytest.mark.parametrize(
+    "observation_spaces",
+    [
+        generate_multi_agent_box_spaces(2, (4,)),
+        generate_multi_agent_discrete_spaces(2, 4),
+        gen_multi_agent_dict_or_tuple_spaces(2, 1, 1, dict_space=True),
+        gen_multi_agent_dict_or_tuple_spaces(2, 1, 1, dict_space=False),
+    ],
+)
+def test_save_load_checkpoint_multi_agent(tmpdir, with_hp_config, observation_spaces):
+    # Initialize the dummy multi-agent
+    agent_ids = ["agent1", "agent2"]
+    action_spaces = generate_multi_agent_discrete_spaces(2, 4)
+
+    hp_config = None
+    if with_hp_config:
+        hp_config = HyperparameterConfig(lr=RLParameter(min=0.05, max=0.2))
+        agent = DummyMARLAlgorithm(
+            observation_spaces,
+            action_spaces,
+            agent_ids=agent_ids,
+            index=0,
+            hp_config=hp_config,
+        )
+    else:
+        agent = DummyMARLAlgorithm(
+            observation_spaces, action_spaces, agent_ids=agent_ids, index=0
+        )
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    agent.save_checkpoint(checkpoint_path)
+
+    # Load the saved checkpoint file
+    checkpoint = torch.load(checkpoint_path)
+
+    # Check if the loaded checkpoint has the correct keys
+    assert "dummy_actors_init_dict" in checkpoint["network_info"]["modules"]
+    assert "dummy_actors_state_dict" in checkpoint["network_info"]["modules"]
+    assert "dummy_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
+    assert "lr" in checkpoint
+    assert "index" in checkpoint
+    assert "scores" in checkpoint
+    assert "fitness" in checkpoint
+    assert "steps" in checkpoint
+    assert "agent_ids" in checkpoint
+
+    # Create a new agent with the same hp_config if needed
+    new_agent = DummyMARLAlgorithm(
+        observation_spaces,
+        action_spaces,
+        agent_ids=agent_ids,
+        index=1,  # Different index to verify it gets overwritten
+        hp_config=hp_config,
+    )
+
+    # Load checkpoint
+    new_agent.load_checkpoint(checkpoint_path)
+
+    # Check if properties and weights are loaded correctly
+    for i in range(len(agent.dummy_actors)):
+        assert isinstance(
+            new_agent.dummy_actors[i], (EvolvableMLP, EvolvableCNN, EvolvableMultiInput)
+        )
+        assert str(new_agent.dummy_actors[i].state_dict()) == str(
+            agent.dummy_actors[i].state_dict()
+        )
+
+    assert new_agent.lr == agent.lr
+    assert new_agent.index == agent.index
+    assert new_agent.scores == agent.scores
+    assert new_agent.fitness == agent.fitness
+    assert new_agent.steps == agent.steps
+    assert new_agent.agent_ids == agent.agent_ids
+
+
+@pytest.mark.parametrize(
+    "device, with_hp_config",
+    [
+        ("cpu", False),
+        ("cpu", True),
+    ],
+)
+@pytest.mark.parametrize(
+    "observation_space",
+    [
+        generate_random_box_space((4,)),
+        generate_discrete_space(4),
+        generate_dict_or_tuple_space(1, 1, dict_space=True),
+        generate_dict_or_tuple_space(1, 1, dict_space=False),
+        generate_multidiscrete_space(2, 2),
+    ],
+)
+@pytest.mark.parametrize(
+    "action_space",
+    [
+        generate_random_box_space((2,)),
+        generate_discrete_space(4),
+    ],
+)
+def test_load_from_pretrained_single_agent(
+    device, tmpdir, with_hp_config, observation_space, action_space
+):
+    # Initialize the dummy agent
+    hp_config = None
+    if with_hp_config:
+        hp_config = HyperparameterConfig(lr=RLParameter(min=0.05, max=0.2))
+        agent = DummyRLAlgorithm(
+            observation_space, action_space, index=0, hp_config=hp_config
+        )
+    else:
+        agent = DummyRLAlgorithm(observation_space, action_space, index=0)
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    agent.save_checkpoint(checkpoint_path)
+
+    # Create new agent object using the class method
+    new_agent = DummyRLAlgorithm.load(checkpoint_path, device=device)
+
+    # Check if properties and weights are loaded correctly
+    assert new_agent.observation_space == agent.observation_space
+    assert new_agent.action_space == agent.action_space
+    assert isinstance(
+        new_agent.dummy_actor, (EvolvableMLP, EvolvableCNN, EvolvableMultiInput)
+    )
+    assert new_agent.lr == agent.lr
+    assert str(new_agent.dummy_actor.to("cpu").state_dict()) == str(
+        agent.dummy_actor.state_dict()
+    )
+    assert new_agent.index == agent.index
+    assert new_agent.scores == agent.scores
+    assert new_agent.fitness == agent.fitness
+    assert new_agent.steps == agent.steps
+
+
+@pytest.mark.parametrize(
+    "device, with_hp_config",
+    [
+        ("cpu", False),
+        ("cpu", True),
+    ],
+)
+@pytest.mark.parametrize(
+    "observation_spaces",
+    [
+        generate_multi_agent_box_spaces(2, (4,)),
+        generate_multi_agent_discrete_spaces(2, 4),
+        gen_multi_agent_dict_or_tuple_spaces(2, 1, 1, dict_space=True),
+        gen_multi_agent_dict_or_tuple_spaces(2, 1, 1, dict_space=False),
+    ],
+)
+@pytest.mark.parametrize(
+    "action_spaces",
+    [
+        generate_multi_agent_box_spaces(2, (2,)),
+        generate_multi_agent_discrete_spaces(2, 4),
+    ],
+)
+def test_load_from_pretrained_multi_agent(
+    device, tmpdir, with_hp_config, observation_spaces, action_spaces
+):
+    # Initialize the dummy multi-agent
+    agent_ids = ["agent1", "agent2"]
+
+    hp_config = None
+    if with_hp_config:
+        hp_config = HyperparameterConfig(lr=RLParameter(min=0.05, max=0.2))
+        agent = DummyMARLAlgorithm(
+            observation_spaces,
+            action_spaces,
+            agent_ids=agent_ids,
+            index=0,
+            hp_config=hp_config,
+        )
+    else:
+        agent = DummyMARLAlgorithm(
+            observation_spaces, action_spaces, agent_ids=agent_ids, index=0
+        )
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    agent.save_checkpoint(checkpoint_path)
+
+    # Create new agent object using the class method
+    new_agent = DummyMARLAlgorithm.load(checkpoint_path, device=device)
+
+    # Check if properties and weights are loaded correctly
+    for i, agent_id in enumerate(agent_ids):
+        assert (
+            new_agent.observation_space[agent_id] == agent.observation_space[agent_id]
+        )
+        assert new_agent.action_space[agent_id] == agent.action_space[agent_id]
+
+    for i in range(len(agent.dummy_actors)):
+        assert isinstance(
+            new_agent.dummy_actors[i], (EvolvableMLP, EvolvableCNN, EvolvableMultiInput)
+        )
+        assert str(new_agent.dummy_actors[i].to("cpu").state_dict()) == str(
+            agent.dummy_actors[i].state_dict()
+        )
+
+    assert new_agent.lr == agent.lr
+    assert new_agent.index == agent.index
+    assert new_agent.scores == agent.scores
+    assert new_agent.fitness == agent.fitness
+    assert new_agent.steps == agent.steps
+    assert new_agent.agent_ids == agent.agent_ids

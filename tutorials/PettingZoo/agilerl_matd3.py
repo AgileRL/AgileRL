@@ -4,12 +4,14 @@ Authors: Michael (https://github.com/mikepratt1), Nickua (https://github.com/nic
 """
 
 import os
+from typing import List
 
 import numpy as np
 import torch
 from pettingzoo.mpe import simple_speaker_listener_v4
 from tqdm import trange
 
+from agilerl.algorithms import MATD3
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.hpo.mutation import Mutations
@@ -79,7 +81,7 @@ if __name__ == "__main__":
     )
 
     # Create a population ready for evolutionary hyper-parameter optimisation
-    pop = create_population(
+    pop: List[MATD3] = create_population(
         INIT_HP["ALGO"],
         observation_spaces,
         action_spaces,
@@ -92,7 +94,7 @@ if __name__ == "__main__":
     )
 
     # Configure the multi-agent replay buffer
-    field_names = ["state", "action", "reward", "next_state", "done"]
+    field_names = ["obs", "action", "reward", "next_obs", "done"]
     memory = MultiAgentReplayBuffer(
         INIT_HP["MEMORY_SIZE"],
         field_names=field_names,
@@ -137,20 +139,20 @@ if __name__ == "__main__":
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         pop_episode_scores = []
         for agent in pop:  # Loop through population
-            state, info = env.reset()  # Reset environment at start of episode
+            obs, info = env.reset()  # Reset environment at start of episode
             scores = np.zeros(num_envs)
             completed_episode_scores = []
             steps = 0
             if INIT_HP["CHANNELS_LAST"]:
-                state = {
-                    agent_id: obs_channels_to_first(s) for agent_id, s in state.items()
+                obs = {
+                    agent_id: obs_channels_to_first(s) for agent_id, s in obs.items()
                 }
 
             for idx_step in range(evo_steps // num_envs):
 
                 # Get next action from agent
                 cont_actions, discrete_action = agent.get_action(
-                    states=state, training=True, infos=info
+                    obs=obs, training=True, infos=info
                 )
                 if agent.discrete_actions:
                     action = discrete_action
@@ -158,7 +160,7 @@ if __name__ == "__main__":
                     action = cont_actions
 
                 # Act in environment
-                next_state, reward, termination, truncation, info = env.step(action)
+                next_obs, reward, termination, truncation, info = env.step(action)
 
                 scores += np.sum(np.array(list(reward.values())).transpose(), axis=-1)
                 total_steps += num_envs
@@ -166,17 +168,17 @@ if __name__ == "__main__":
 
                 # Image processing if necessary for the environment
                 if INIT_HP["CHANNELS_LAST"]:
-                    next_state = {
+                    next_obs = {
                         agent_id: obs_channels_to_first(ns)
-                        for agent_id, ns in next_state.items()
+                        for agent_id, ns in next_obs.items()
                     }
 
                 # Save experiences to replay buffer
                 memory.save_to_memory(
-                    state,
+                    obs,
                     cont_actions,
                     reward,
-                    next_state,
+                    next_obs,
                     termination,
                     is_vectorised=True,
                 )
@@ -204,7 +206,7 @@ if __name__ == "__main__":
                         # Learn according to agent's RL algorithm
                         agent.learn(experiences)
 
-                state = next_state
+                obs = next_obs
 
                 # Calculate scores and reset noise for finished episodes
                 reset_noise_indices = []

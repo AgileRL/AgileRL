@@ -825,6 +825,9 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
     cqn.save_checkpoint(checkpoint_path)
 
+    checkpoint = torch.load(checkpoint_path, map_location=device, pickle_module=dill)
+    assert "agilerl_version" in checkpoint
+
     # Create new agent object
     new_cqn = CQN.load(checkpoint_path, device=device, accelerator=accelerator)
 

@@ -16,6 +16,7 @@ import yaml
 from pettingzoo.classic import connect_four_v3
 from tqdm import tqdm, trange
 
+from agilerl.algorithms.core import OptimizerWrapper
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
@@ -632,8 +633,13 @@ if __name__ == "__main__":
                 agent.load_checkpoint(LESSON["pretrained_path"])
                 # Reinit optimizer for new task
                 agent.lr = INIT_HP["LR"]
-                agent.optimizer = torch.optim.Adam(
-                    agent.actor.parameters(), lr=agent.lr
+                agent.optimizer = OptimizerWrapper(
+                    torch.optim.Adam,
+                    networks=agent.actor,
+                    lr=agent.lr,
+                    network_names=agent.optimizer.network_names,
+                    lr_name=agent.optimizer.lr_name,
+                    optimizer_kwargs={"capturable": agent.capturable},
                 )
 
         if LESSON["opponent"] == "self":

@@ -9,6 +9,7 @@ import numpy as np
 import wandb
 from accelerate import Accelerator
 from gymnasium import spaces
+from pettingzoo.utils.env import ParallelEnv
 
 from agilerl.algorithms import (
     CQN,
@@ -70,7 +71,7 @@ def make_vect_envs(
 
 
 def make_multi_agent_vect_envs(
-    env: Any, num_envs: int = 1, **env_kwargs: Any
+    env: Callable[[], ParallelEnv], num_envs: int = 1, **env_kwargs: Any
 ) -> AsyncPettingZooVecEnv:
     """Returns async-vectorized PettingZoo parallel environments.
 
