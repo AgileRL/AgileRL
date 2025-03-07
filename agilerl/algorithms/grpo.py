@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from gymnasium import spaces
 from torch.nn.utils import clip_grad_norm_
 from transformers import GenerationConfig
-from contextlib import contextmanager
+
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.typing import ExperiencesType
@@ -44,7 +44,7 @@ class GRPO(RLAlgorithm):
     :type max_grad_norm: float, optional
     :param update_epochs: Number of policy update epochs, defaults to 4
     :type update_epochs: int, optional
-    :param group_size: Group size, defaults to 8 
+    :param group_size: Group size, defaults to 8
     :type group_size: int, optional
     :param temperature: Temperature, controls randomness of text generation
     :type temperature: float, optional
@@ -130,7 +130,7 @@ class GRPO(RLAlgorithm):
         self.max_grad_norm = max_grad_norm
         self.temperature = temperature
         self.reduce_memory_peak = reduce_memory_peak
-        self.local_rank = device.split(":")[-1] 
+        self.local_rank = device.split(":")[-1]
         if actor_network is not None:
             actor_network = actor_network.to(device)
             self.actor, self.optimizer, *_ = deepspeed.initialize(
