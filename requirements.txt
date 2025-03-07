@@ -31,4 +31,3 @@ datasets==3.3.2
 transformers==4.48.1
 peft==0.14.0
 deepspeed
-flash-att
