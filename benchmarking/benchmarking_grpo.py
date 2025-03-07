@@ -7,7 +7,7 @@ from datasets import load_dataset
 from peft import LoraConfig, get_peft_model
 from torch.utils.data import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
-
+from accelerate import Accelerator
 from agilerl.algorithms import GRPO
 from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
@@ -20,12 +20,12 @@ def create_model(pretrained_model_name_or_path):
     model = AutoModelForCausalLM.from_pretrained(
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         torch_dtype=torch.bfloat16,
-        device_map=None,
         attn_implementation="flash_attention_2",
+        # load_in_4bit=True,
     )
     peft_config = LoraConfig(
-        r=16,
-        lora_alpha=64,
+        r=32,
+        lora_alpha=32,
         target_modules=[
             "q_proj",
             "k_proj",
@@ -173,7 +173,7 @@ def combined_rewards(completion, solution, prompt):
     ============================================, \n
     Completion: {completion}, \n
     Numbers: {prompt}, \n
-    Gospel Answer: {solution.item()} \n
+    Correct Answer: {solution.item()} \n
     Reward: {reward}
     """
     )
@@ -211,57 +211,50 @@ def main(world_size, local_rank):
         tokenizer=tokenizer,
         reward_fn=combined_rewards,
         apply_chat_template_fn=countdown_chat_template,
-        max_answer_tokens=600,
-        data_batch_size=8,
+        max_answer_tokens=1024,
+        data_batch_size=1,
         custom_collate_fn=custom_collate_fn,
     )
 
     deepspeed_training_config = {
-        "train_micro_batch_size_per_gpu": 4,
-        "gradient_accumulation_steps": 2,
+        "train_micro_batch_size_per_gpu": 2,
+        "gradient_accumulation_steps": 8,
         "optimizer": {"type": "AdamW", "params": {"lr": 1e-6}},
         "bf16": {"enabled": True},
         "zero_optimization": {
             "stage": 2,
-            "allgather_partitions": True,
-            "allgather_bucket_size": 2e8,
+            "contiguous_gradients": True,
             "overlap_comm": True,
             "reduce_scatter": True,
-            "reduce_bucket_size": 2e8,
-            "contiguous_gradients": True,
-            "stage3_gather_16bit_weights_on_model_save": True,
-            "offload_optimizer": {"device": "cpu"},
+            "reduce_bucket_size": 5e8,
+            "allgather_bucket_size": 5e8,
+            "gather_16bit_weights_on_model_save": True,
+            "offload_optimizer": {
+            "device": "cpu"
+         }
         },
+        "gradient_clipping": 1.0,
     }
-    deepspeed_inference_config = {
-        "tensor_parallel": {"tp_size": world_size},
-        "dtype": torch.bfloat16,
-        "replace_with_kernel_inject": True,
-    }
-
-    # Instantiate the GRPO agent
-    deepspeed.init_distributed()
+    # Instantiate the grpo agent
     agent = GRPO(
         env.observation_space,
         env.action_space,
         actor_network=model,
         pad_token_id=tokenizer.eos_token_id,
         device=f"cuda:{local_rank}",
-        batch_size=8,
-        group_size=8,
-        reduce_memory_peak=True,
-        deepspeed_training_config=deepspeed_training_config,
-        deepspeed_inference_config=deepspeed_inference_config,
+        batch_size=1,
+        group_size=12,
+        reduce_memory_peak=False,
+        accelerator=Accelerator()
     )
     finetune_llm(
         agent=agent,
         env=env,
-        INIT_HP={},
         evaluation_interval=5,
-        wb=True,
-        checkpoint_interval=100,
+        wb=False,
+        checkpoint_interval=1,
         checkpoint_path="saved_llms",
-    )  # Do we want to keep this the same?
+    )  
 
 
 if __name__ == "__main__":
