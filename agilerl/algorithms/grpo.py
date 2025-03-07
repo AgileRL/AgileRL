@@ -454,7 +454,7 @@ class GRPO(RLAlgorithm):
             )
         else:
             self.actor = self.actor.to(self.device)
-            self.actor.module.gradient_checkpointing_enable()
+            self.actor.gradient_checkpointing_enable()
 
     def _create_reference_policy_network(
         self, network: nn.Module

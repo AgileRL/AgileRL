@@ -11,9 +11,6 @@ import torch.nn as nn
 import torch.optim as optim
 from transformers import GenerationConfig
 
-from agilerl.modules.base import EvolvableModule
-from agilerl.modules.dummy import to_evolvable
-
 # Setup mock for AcceleratorState
 mock_accelerator_state = MagicMock()
 mock_deepspeed_plugin = MagicMock()
@@ -95,7 +92,7 @@ class DummyForwardOutput:
 
 
 class DummyLLM(nn.Module):
-    def __init__(self, input_size, max_tokens, vocab_size):
+    def __init__(self, input_size, max_tokens, vocab_size, device):
         super().__init__()
         self.input_size = input_size
         self.max_tokens = max_tokens
@@ -103,6 +100,7 @@ class DummyLLM(nn.Module):
         self.net = nn.Linear(
             input_size + max_tokens, (input_size + max_tokens) * vocab_size
         )
+        self.device = device
         self.gradient_checkpointing_enabled = False
 
     def forward(self, input_ids, *args, **kwargs):
@@ -160,8 +158,8 @@ class DummyHuggingFaceEnv:
             pass
 
 
-def create_module(input_size, max_tokens, vocab_size):
-    return DummyLLM(input_size, max_tokens, vocab_size)
+def create_module(input_size, max_tokens, vocab_size, device):
+    return DummyLLM(input_size, max_tokens, vocab_size, device)
 
 
 # Add the missing method to GRPO prototype
@@ -179,13 +177,10 @@ def grpo(vocab_size, input_size, max_tokens, group_size, use_accelerator):
     return GRPO(
         observation_space,
         action_space,
-        actor_network=to_evolvable(
-            module_fn=create_module,
-            module_kwargs={
-                "input_size": input_size,
-                "max_tokens": max_tokens,
-                "vocab_size": vocab_size,
-            },
+        actor_network=create_module(
+            input_size=input_size,
+            max_tokens=max_tokens,
+            vocab_size=vocab_size,
             device="cuda" if torch.cuda.is_available() else "cpu",
         ),
         pad_token_id=vocab_size - 1,
@@ -220,14 +215,14 @@ def test_init_grpo(
     assert grpo.fitness == []
     assert grpo.steps == [0]
     assert isinstance(grpo.generation_config, GenerationConfig)
-    assert isinstance(grpo.actor, EvolvableModule)
-    assert isinstance(grpo.reference_actor, EvolvableModule) != use_accelerator
+    assert isinstance(grpo.actor, DummyLLM)
+    assert isinstance(grpo.reference_actor, DummyLLM) != use_accelerator
     for ref_param, param in zip(
         grpo.reference_actor.parameters(), grpo.actor.parameters()
     ):
         assert torch.equal(ref_param, param)
-    assert grpo.actor.module.gradient_checkpointing_enabled != use_accelerator
-    assert not grpo.reference_actor.module.gradient_checkpointing_enabled
+    assert grpo.actor.gradient_checkpointing_enabled != use_accelerator
+    assert not grpo.reference_actor.gradient_checkpointing_enabled
     assert isinstance(grpo.optimizer, OptimizerWrapper)
 
 
@@ -402,7 +397,7 @@ def test_set_reference_policy(
 
     grpo.reference_actor = None
     grpo._set_reference_policy()
-    assert isinstance(grpo.reference_actor, EvolvableModule)
+    assert isinstance(grpo.reference_actor, DummyLLM)
 
     # Restore the original method
     GRPO._set_reference_policy = original_method
