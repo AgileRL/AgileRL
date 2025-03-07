@@ -21,7 +21,7 @@ from agilerl.typing import (
     ExperiencesType,
     GymEnvType,
     InfosDict,
-    NumpyObsType,
+    ObservationType,
     TensorDict,
 )
 from agilerl.utils.algo_utils import (
@@ -35,7 +35,9 @@ from agilerl.utils.evolvable_networks import get_default_encoder_config
 
 
 class MADDPG(MultiAgentRLAlgorithm):
-    """The MADDPG algorithm class. MADDPG paper: https://arxiv.org/abs/1706.02275
+    """Multi-Agent Deep Deterministic Policy Gradient (MADDPG) algorithm.
+
+    Paper: https://arxiv.org/abs/1706.02275
 
     :param observation_spaces: Observation space for each agent
     :type observation_spaces: list[spaces.Space]
@@ -233,6 +235,7 @@ class MADDPG(MultiAgentRLAlgorithm):
             )
         else:
             net_config = {} if net_config is None else net_config
+            simba = net_config.get("simba", False)
             critic_net_config = copy.deepcopy(net_config)
 
             encoder_config = net_config.get("encoder_config", None)
@@ -252,8 +255,10 @@ class MADDPG(MultiAgentRLAlgorithm):
                 critic_head_config = MlpNetConfig(hidden_size=[64])
 
             if encoder_config is None:
-                encoder_config = get_default_encoder_config(self.single_space)
-                critic_encoder_config = get_default_encoder_config(self.single_space)
+                encoder_config = get_default_encoder_config(self.single_space, simba)
+                critic_encoder_config = get_default_encoder_config(
+                    self.single_space, simba
+                )
 
             # For image spaces we need to give a sample input tensor to
             # build networks with Conv3d blocks appropriately
@@ -465,7 +470,7 @@ class MADDPG(MultiAgentRLAlgorithm):
 
     def get_action(
         self,
-        states: Dict[str, NumpyObsType],
+        obs: Dict[str, ObservationType],
         training: bool = True,
         infos: Optional[InfosDict] = None,
     ) -> Tuple[ArrayDict, ArrayDict]:
@@ -473,8 +478,8 @@ class MADDPG(MultiAgentRLAlgorithm):
         Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
 
-        :param state: Environment observations: {'agent_0': state_dim_0, ..., 'agent_n': state_dim_n}
-        :type state: Dict[str, numpy.Array]
+        :param obs: Environment observations: {'agent_0': state_dim_0, ..., 'agent_n': state_dim_n}
+        :type obs: Dict[str, numpy.Array]
         :param training: Agent is training, use exploration noise, defaults to True
         :type training: bool, optional
         :param infos: Information dictionary returned by env.step(actions)
@@ -483,25 +488,25 @@ class MADDPG(MultiAgentRLAlgorithm):
         :rtype: Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]
         """
         assert not key_in_nested_dict(
-            states, "action_mask"
+            obs, "action_mask"
         ), "AgileRL requires action masks to be defined in the information dictionary."
 
         action_masks, env_defined_actions, agent_masks = self.process_infos(infos)
 
         # Preprocess observations
-        preprocessed_states = list(self.preprocess_observation(states).values())
+        preprocessed_states = list(self.preprocess_observation(obs).values())
 
         action_dict = {}
-        for idx, (agent_id, state, actor) in enumerate(
+        for idx, (agent_id, obs, actor) in enumerate(
             zip(self.agent_ids, preprocessed_states, self.actors)
         ):
             actor.eval()
             if self.accelerator is not None:
                 with actor.no_sync(), torch.no_grad():
-                    actions = actor(state)
+                    actions = actor(obs)
             else:
                 with torch.no_grad():
-                    actions = actor(state)
+                    actions = actor(obs)
             actor.train()
             if self.discrete_actions and training:
                 actions = torch.clamp(actions + self.action_noise(idx), 0, 1)
@@ -836,6 +841,7 @@ class MADDPG(MultiAgentRLAlgorithm):
         :return: Mean test score
         :rtype: float
         """
+        self.set_training_mode(False)
         with torch.no_grad():
             rewards = []
             if hasattr(env, "num_envs"):
@@ -846,7 +852,7 @@ class MADDPG(MultiAgentRLAlgorithm):
                 is_vectorised = False
 
             for i in range(loop):
-                state, info = env.reset()
+                obs, info = env.reset()
                 scores = (
                     np.zeros((num_envs, 1))
                     if sum_scores
@@ -863,17 +869,17 @@ class MADDPG(MultiAgentRLAlgorithm):
                     step += 1
                     if swap_channels:
                         if is_vectorised:
-                            state = {
+                            obs = {
                                 agent_id: np.moveaxis(s, [-1], [-3])
-                                for agent_id, s in state.items()
+                                for agent_id, s in obs.items()
                             }
                         else:
-                            state = {
+                            obs = {
                                 agent_id: np.moveaxis(np.expand_dims(s, 0), [-1], [-3])
-                                for agent_id, s in state.items()
+                                for agent_id, s in obs.items()
                             }
                     cont_actions, discrete_action = self.get_action(
-                        state,
+                        obs,
                         training=False,
                         infos=info,
                     )
@@ -883,7 +889,7 @@ class MADDPG(MultiAgentRLAlgorithm):
                         action = cont_actions
                     if not is_vectorised:
                         action = {agent: act[0] for agent, act in action.items()}
-                    state, reward, term, trunc, info = env.step(action)
+                    obs, reward, term, trunc, info = env.step(action)
                     score_increment = (
                         (
                             np.sum(

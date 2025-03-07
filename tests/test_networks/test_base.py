@@ -64,18 +64,20 @@ class CustomNetwork(EvolvableNetwork):
         device="cpu",
     ):
         super().__init__(
-            observation_space,
-            encoder_config,
-            action_space,
-            min_latent_dim,
-            max_latent_dim,
-            n_agents,
-            latent_dim,
-            device,
+            observation_space=observation_space,
+            encoder_cls=None,
+            encoder_config=encoder_config,
+            action_space=action_space,
+            min_latent_dim=min_latent_dim,
+            max_latent_dim=max_latent_dim,
+            n_agents=n_agents,
+            latent_dim=latent_dim,
+            simba=False,
+            device=device,
         )
 
         self.name = "dummy"
-        self.net_config = {"hidden_size": [16]}
+        # self.net_config = {"hidden_size": [16]}
         self.build_network_head()
 
     def build_network_head(self):
@@ -83,7 +85,7 @@ class CustomNetwork(EvolvableNetwork):
             num_inputs=self.latent_dim,
             num_outputs=1,
             name=self.name,
-            net_config=self.net_config,
+            net_config={"hidden_size": [16]},
         )
 
     def recreate_network(self):

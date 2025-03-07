@@ -15,7 +15,7 @@ from agilerl.modules.mlp import EvolvableMLP
 from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.value_networks import ValueNetwork
-from agilerl.typing import ArrayLike, ExperiencesType, GymEnvType, NumpyObsType
+from agilerl.typing import ArrayLike, ExperiencesType, GymEnvType, ObservationType
 from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 from agilerl.utils.evolvable_networks import get_default_encoder_config
 
@@ -134,14 +134,17 @@ class NeuralTS(RLAlgorithm):
             self.actor = make_safe_deepcopies(actor_network)
         else:
             net_config = {} if net_config is None else net_config
+            simba = net_config.get("simba", False)
             encoder_config = (
-                get_default_encoder_config(observation_space)
+                get_default_encoder_config(observation_space, simba)
                 if net_config.get("encoder_config") is None
                 else net_config["encoder_config"]
             )
-            encoder_config["layer_norm"] = (
-                False  # Layer norm is not used in the original implementation
-            )
+
+            if not simba:
+                encoder_config["layer_norm"] = (
+                    False  # Layer norm is not used in the original implementation
+                )
 
             net_config["encoder_config"] = encoder_config
 
@@ -179,20 +182,20 @@ class NeuralTS(RLAlgorithm):
         )
 
     def get_action(
-        self, state: NumpyObsType, action_mask: Optional[ArrayLike] = None
+        self, obs: ObservationType, action_mask: Optional[ArrayLike] = None
     ) -> int:
         """Returns the next action to take in the environment.
 
-        :param state: State observation, or multiple observations in a batch
-        :type state: numpy.ndarray[float]
+        :param obs: State observation, or multiple observations in a batch
+        :type obs: numpy.ndarray[float]
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: numpy.ndarray, optional
         :return: Action to take in the environment
         :rtype: int
         """
-        state = self.preprocess_observation(state)
+        obs = self.preprocess_observation(obs)
 
-        mu = self.actor(state)
+        mu = self.actor(obs)
         g = torch.zeros((self.action_dim, self.numel)).to(self.device)
         for k, fx in enumerate(mu):
             self.optimizer.zero_grad()
@@ -207,7 +210,7 @@ class NeuralTS(RLAlgorithm):
 
         with torch.no_grad():
             action_values = torch.normal(
-                mean=self.actor(state),
+                mean=self.actor(obs),
                 std=self.gamma
                 * torch.sqrt(
                     torch.matmul(
@@ -236,7 +239,7 @@ class NeuralTS(RLAlgorithm):
         """Updates agent network parameters to learn from experiences.
 
         :param experiences: Batched states, rewards in that order.
-        :type state: list[torch.Tensor[float]]
+        :type obs: list[torch.Tensor[float]]
         """
         states, rewards = experiences
 
@@ -289,18 +292,19 @@ class NeuralTS(RLAlgorithm):
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean over these tests. Defaults to 3
         :type loop: int, optional
         """
+        self.set_training_mode(False)
         with torch.no_grad():
             rewards = []
             for i in range(loop):
-                state = env.reset()
+                obs = env.reset()
                 score = 0
                 for _ in range(max_steps):
                     if swap_channels:
-                        state = obs_channels_to_first(state)
-                    state = torch.from_numpy(state).float()
-                    state = state.to(self.device)
-                    action = np.argmax(self.actor(state).cpu().numpy())
-                    state, reward = env.step(action)
+                        obs = obs_channels_to_first(obs)
+                    obs = torch.from_numpy(obs).float()
+                    obs = obs.to(self.device)
+                    action = np.argmax(self.actor(obs).cpu().numpy())
+                    obs, reward = env.step(action)
                     score += reward
                 rewards.append(score)
         mean_fit = np.mean(rewards)

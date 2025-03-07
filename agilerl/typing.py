@@ -1,6 +1,7 @@
 from typing import Any, ClassVar, Dict, List, Protocol, Tuple, Union
 
 import gymnasium as gym
+import numpy as np
 import torch
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
@@ -18,19 +19,27 @@ class IsDataclass(Protocol):
 ArrayOrTensor = Union[ArrayLike, torch.Tensor]
 TensorDict = Dict[str, torch.Tensor]
 TensorTuple = Tuple[torch.Tensor, ...]
-ArrayDict = Dict[str, ArrayOrTensor]
+ArrayDict = Dict[str, np.ndarray]
 ArrayTuple = Tuple[ArrayLike, ...]
 NetConfigType = Dict[str, Any]
 KernelSizeType = Union[int, Tuple[int, ...]]
-GymSpaceType = Union[spaces.Space, List[spaces.Space]]
+SupportedGymSpaces = Union[
+    spaces.Box, spaces.Discrete, spaces.MultiDiscrete, spaces.Dict, spaces.Tuple
+]
+GymSpaceType = Union[SupportedGymSpaces, List[SupportedGymSpaces]]
 GymEnvType = Union[str, gym.Env, gym.vector.VectorEnv]
 
-NumpyObsType = Union[ArrayLike, ArrayDict, ArrayTuple]
+NumpyObsType = Union[np.ndarray, ArrayDict, ArrayTuple]
 TorchObsType = Union[torch.Tensor, TensorDict, TensorTuple]
 ObservationType = Union[NumpyObsType, TorchObsType]
+ActionType = Union[int, float, ArrayLike, torch.Tensor]
 InfosDict = Dict[str, Dict[str, Any]]
 MaybeObsList = Union[List[ObservationType], ObservationType]
 ExperiencesType = Tuple[ObservationType, ...]
+StepType = Tuple[NumpyObsType, ActionType, float, MaybeObsList, InfosDict]
+MultiAgentStepType = Tuple[
+    Dict[str, NumpyObsType], ArrayDict, ArrayDict, ArrayDict, Dict[str, Any]
+]
 
 DeviceType = Union[str, torch.device]
 OptimizerType = Union[Optimizer, AcceleratedOptimizer]

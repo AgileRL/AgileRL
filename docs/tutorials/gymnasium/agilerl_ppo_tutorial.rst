@@ -123,7 +123,7 @@ Create a Population of Agents
 -----------------------------
 To perform evolutionary HPO, we require a population of agents. Since PPO is an on-policy algorithm, there is no
 experience replay and so members in the population will not share experiences like they do with off-policy algorithms.
-That being said, tournament selection and mutation still prove to be highly effective in determining the effacacy of
+That being said, tournament selection and mutation still prove to be highly effective in determining the efficacy of
 certain hyperparameters. Individuals that learn best are more likely to survive until the next generation, and so their
 hyperparameters are more likely to remain present in the population. The sequence of evolution (tournament selection
 followed by mutations) is detailed further below.

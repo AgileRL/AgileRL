@@ -1,7 +1,7 @@
 ---
 # Define initial hyperparameters
 INIT_HP:
-    ENV_NAME: LunarLanderContinuous-v2   # Gym environment name
+    ENV_NAME: HalfCheetah-v4   # Gym environment name
     ALGO: DDPG                           # Algorithm
     # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     CHANNELS_LAST: false
@@ -12,8 +12,8 @@ INIT_HP:
     THETA: 0.15                # Rate of mean reversion in OU noise
     DT: 0.01                   # Timestep for OU noise
     BATCH_SIZE: 128            # Batch size
-    LR_ACTOR: 0.0001           # Actor learning rate
-    LR_CRITIC: 0.001           # Critic learning rate
+    LR_ACTOR: 0.0003           # Actor learning rate
+    LR_CRITIC: 0.0003           # Critic learning rate
     MAX_STEPS: 1_000_000       # Max no. steps
     TARGET_SCORE: 200.         # Early training stop at avg score of last 100 episodes
     GAMMA: 0.99                # Discount factor
@@ -24,10 +24,10 @@ INIT_HP:
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
     POP_SIZE: 4                # Population size
-    EVO_STEPS: 10_000          # Evolution frequency
+    EVO_STEPS: 15_000          # Evolution frequency
     EVAL_STEPS:                # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
-    LEARNING_DELAY: 1000       # Steps before learning
+    LEARNING_DELAY: 10_000       # Steps before learning
     WANDB: true               # Log with Weights and Biases
 
 MUTATION_PARAMS:
@@ -53,7 +53,7 @@ NET_CONFIG:
     latent_dim: 64
 
     encoder_config:
-        hidden_size: [64]
+        hidden_size: [128, 128]
         activation: ReLU
         min_mlp_nodes: 64
         max_mlp_nodes: 500

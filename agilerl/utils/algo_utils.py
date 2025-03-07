@@ -1,5 +1,6 @@
 import copy
 import inspect
+import warnings
 from collections import OrderedDict, defaultdict
 from numbers import Number
 from typing import Any, Dict, Iterable, List, Optional, Tuple, TypeGuard, Union
@@ -7,7 +8,6 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, TypeGuard, Union
 import numpy as np
 import torch
 import torch.nn.functional as F
-from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 from tensordict.nn import CudaGraphModule
@@ -21,6 +21,7 @@ from agilerl.typing import (
     MaybeObsList,
     NetworkType,
     NumpyObsType,
+    ObservationType,
     OptimizerType,
     TorchObsType,
 )
@@ -273,7 +274,7 @@ def chkpt_attribute_to_device(
     assert isinstance(chkpt_dict, dict), f"Expected dict, got {type(chkpt_dict)}"
 
     for key, value in chkpt_dict.items():
-        if hasattr(value, "device") and not isinstance(value, Accelerator):
+        if isinstance(value, torch.Tensor):
             chkpt_dict[key] = value.to(device)
     return chkpt_dict
 
@@ -409,9 +410,11 @@ def obs_channels_to_first(observation: NumpyObsType) -> NumpyObsType:
         raise TypeError(f"Expected np.ndarray or dict, got {type(observation)}")
 
 
-def obs_to_tensor(obs: NumpyObsType, device: Union[str, torch.device]) -> TorchObsType:
+def obs_to_tensor(
+    obs: ObservationType, device: Union[str, torch.device]
+) -> TorchObsType:
     """
-    Moves the observation to the given device.
+    Moves the observation to the given device as a PyTorch tensor.
 
     :param obs:
     :type obs: NumpyObsType
@@ -513,7 +516,7 @@ def preprocess_observation(
     if isinstance(observation_space, spaces.Box):
         # Normalize images if applicable and specified
         if len(observation_space.shape) == 3 and normalize_images:
-            observation = observation.float() / observation_space.high
+            observation = observation / 255.0
 
         space_shape = observation_space.shape
 
@@ -549,6 +552,40 @@ def preprocess_observation(
     # Check add batch dimension if necessary
     observation = maybe_add_batch_dim(observation, space_shape)
 
+    return observation
+
+
+def apply_image_normalization(
+    observation: NumpyObsType, observation_space: spaces.Space
+) -> NumpyObsType:
+    """Normalize images using minmax scaling
+
+    :param observation: Observation
+    :type observation: NumpyObsType
+    :param observation_space: Observation space
+    :type observation_space: spaces.Space
+    :return: Observation
+    :rtype: NumpyObsType
+    """
+    if np.inf in observation_space.high:
+        warnings.warn(
+            "np.inf detected in observation_space.high, bypassing normalization."
+        )
+        return observation
+
+    if -np.inf in observation_space.low:
+        warnings.warn(
+            "-np.inf detected in observation_space.low, bypassing normalization."
+        )
+        return observation
+
+    if np.all(observation_space.high == 1) and np.all(observation_space.low == 0):
+        # minmax scaling
+        return observation
+
+    observation = (observation - observation_space.low) / (
+        observation_space.high - observation_space.low
+    )
     return observation
 
 

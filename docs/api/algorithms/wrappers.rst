@@ -1,7 +1,7 @@
 .. _optimizer_wrapper:
 
-Optimizer Wrapper
-=============================
+OptimizerWrapper
+=================
 
 Parameters
 ------------
