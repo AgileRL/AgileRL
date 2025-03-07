@@ -62,7 +62,6 @@ def finetune_llm(
         if agent.local_rank == "0":
             print(
                 f"Step: {i + 1}",
-                i,
                 f"| Loss: {avg_loss}",
                 f"| KL-divergence: {avg_kl}",
             )
@@ -120,11 +119,8 @@ def aggregate_metrics_across_gpus(
 
 def save_llm_checkpoint(agent, checkpoint_path, step):
     checkpoint_path = f"step_{step}" if checkpoint_path is None else checkpoint_path
-    # if agent.use_deepspeed:
-    #     agent.actor.save_checkpoint(checkpoint_path)
-    # else:
-    #     checkpoint_path += f"/{agent.algo}_step_{step}.pt"
-    #     agent.save_checkpoint(checkpoint_path)
-    # print(f"Saved checkpoint to directory {checkpoint_path}")
-    unwrapped_model = agent.accelerator.unwrap_model(agent.actor)
-    unwrapped_model.save_pretrained(checkpoint_path)
+    if agent.accelerator is not None:
+        unwrapped_model = agent.accelerator.unwrap_model(agent.actor)
+        unwrapped_model.save_pretrained(checkpoint_path)
+    else:
+        agent.actor.save_pretrained(checkpoint_path)

@@ -39,14 +39,12 @@ Dependencies
 
     import re
     from typing import Tuple
-
     import torch
-    import deepspeed
+    from accelerate import Accelerator
     from datasets import load_dataset
     from peft import LoraConfig, get_peft_model
     from torch.utils.data import Dataset
     from transformers import AutoModelForCausalLM, AutoTokenizer
-
     from agilerl.algorithms import GRPO
     from agilerl.training.train_llm import finetune_llm
     from agilerl.utils.llm_utils import HuggingFaceGym
@@ -70,12 +68,11 @@ model, and the Countdown dataset, and initialise them as follows:
         model = AutoModelForCausalLM.from_pretrained(
             pretrained_model_name_or_path=pretrained_model_name_or_path,
             torch_dtype=torch.bfloat16,
-            device_map=None,
             attn_implementation="flash_attention_2",
         )
         peft_config = LoraConfig(
-            r=16,
-            lora_alpha=64,
+            r=32,
+            lora_alpha=32,
             target_modules=[
                 "q_proj",
                 "k_proj",
@@ -103,7 +100,7 @@ model, and the Countdown dataset, and initialise them as follows:
         return train_dataset, test_dataset
 
     # Instantiate the model and the associated tokenizer
-    model = create_model(**{"pretrained_model_name_or_path": MODEL_PATH})
+    model = create_model(pretrained_model_name_or_path=MODEL_PATH)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
@@ -148,7 +145,7 @@ for displaying these behaviours, the agent itself discovers the best way to achi
         for completion, gt in zip(completions, target):
 
             try:
-                # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
+                # add synthetic <think> as its already part of  the prompt and prefilled for the assistant to more easily match the regex
                 completion = "<think>" + completion
                 # Check if the format is correct
                 regex = r"^<think>([^<]*(?:<(?!/?think>)[^<]*)*)<\/think>\n<answer>([\s\S]*?)<\/answer>$"
@@ -289,7 +286,7 @@ Combining all these components, we can now initialise the HuggingFaceGym object.
         tokenizer=tokenizer,
         reward_fn=combined_rewards,
         apply_chat_template_fn=countdown_chat_template,
-        max_answer_tokens=600,
+        max_answer_tokens=1024,
         data_batch_size=8,
         custom_collate_fn=custom_collate_fn,
     )
@@ -305,57 +302,24 @@ called *Large* Language Models for a reason, and unless you are a very lucky ind
 have enough capacity on your individual computer to train even a 'small' LLM. If you want to train a
 larger, more powerful model, then this becomes even more infeasible. Instead, we can leverage distributed
 training, to share the workload across multiple devices and speed up training. To enable distributed
-training in this tutorial, we use the deepspeed library. More information on the deepspeed configuration
-can be found in their `docs <https://www.deepspeed.ai/docs/config-json/>`_.
+training in this tutorial, we use deepspeed and accelerate.
+
+To generate an accelerate file, run the command `accelerate config` in your terminal, following the instructions
+on screen to outline the details of the compute you intend to use for your finetuning, saying yes to the question
+"Do you want to use DeepSpeed?" and no to the question "Do you want to specify a json file to a DeepSpeed config?"
+if you want an auto-generated deepspeed config file. More information on the deepspeed configuration can be found
+in their `docs <https://www.deepspeed.ai/docs/config-json/>`_. The accelerate config will handle the details of
+the distribution and the GRPO class handles how the accelerator is used during training.
 
 .. code-block:: python
-
-    # These two variables refer to the number of devices available and
-    # will be unique to your distributed setup.
-    # World size refers to the number of processes for training, which
-    # is usually the number of GPUs.
-    # Local rank is the unique local ID given to a process running in a
-    # single node.
-    world_size = int(os.getenv("WORLD_SIZE", "1"))
-    local_rank = int(os.getenv("LOCAL_RANK", "0"))
-
-    deepspeed_training_config = {
-        "train_micro_batch_size_per_gpu": 4,
-        "gradient_accumulation_steps": 2,
-        "optimizer": {"type": "AdamW", "params": {"lr": 1e-6}},
-        "bf16": {"enabled": True},
-        "zero_optimization": {
-            "stage": 2,
-            "allgather_partitions": True,
-            "allgather_bucket_size": 2e8,
-            "overlap_comm": True,
-            "reduce_scatter": True,
-            "reduce_bucket_size": 2e8,
-            "contiguous_gradients": True,
-            "stage3_gather_16bit_weights_on_model_save": True,
-            "offload_optimizer": {"device": "cpu"},
-        }
-    }
-
-    deepspeed_inference_config = {
-        "tensor_parallel": {"tp_size": world_size},
-        "dtype": torch.bfloat16,
-        "replace_with_kernel_inject": True,
-    }
-
-    # Instantiate the GRPO agent
-    deepspeed.init_distributed()
     agent = GRPO(
         env.observation_space,
         env.action_space,
         actor_network=model,
         pad_token_id=tokenizer.eos_token_id,
-        device=f"cuda:{local_rank}",
-        batch_size=8,
-        group_size=8,
-        reduce_memory_peak=True,
-        deepspeed_training_config=deepspeed_training_config,
-        deepspeed_inference_config=deepspeed_inference_config,
+        batch_size=1,
+        group_size=12,
+        accelerator=Accelerator()
     )
 
 Training and Saving an Agent
@@ -371,11 +335,10 @@ checkpoints of the trained agent that can be used later for inference. It also u
     finetune_llm(
         agent=agent,
         env=env,
-        INIT_HP={},
         evaluation_interval=5,
         wb=True,
         checkpoint_interval=100,
-        checkpoint_path="saved_llms",
+        checkpoint_path="path/to/directory",
     )
 
 Using a custom training loop
@@ -389,37 +352,33 @@ function and is an example of how we might choose to train our agent to exhibit 
     from tqdm import trange
     import torch.distributed as dist
 
-    def gather_tensor(tensor, agent):
+    def gather_tensor(tensor: torch.Tensor, agent: GRPO) -> torch.Tensor:
         # Convert to tensor if it's a scalar
         if not isinstance(tensor, torch.Tensor):
             tensor = torch.tensor(tensor, device=f"cuda:{agent.local_rank}")
-
         # Ensure tensor is on correct device
         tensor = tensor.detach().clone()
-
         # Create a list to store tensors from all processes
         world_size = dist.get_world_size()
         gathered_tensors = [torch.zeros_like(tensor) for _ in range(world_size)]
 
         # Gather the tensor from all processes
         dist.all_gather(gathered_tensors, tensor)
-
         return torch.stack(gathered_tensors)
 
 
-    def aggregate_metrics_across_gpus(agent, loss, kl, grad_norm, rewards):
+    def aggregate_metrics_across_gpus(
+        agent: GRPO, loss: torch.Tensor, kl: torch.Tensor, rewards: torch.Tensor
+    ):
         rewards = rewards.to(agent.device)
         all_losses = gather_tensor(loss, agent)
         all_kls = gather_tensor(kl, agent)
-        all_grad_norms = gather_tensor(grad_norm, agent)
         all_rewards = gather_tensor(torch.mean(rewards), agent)
-
         # Compute aggregated metrics
         avg_loss = all_losses.mean().item()
         avg_kl = all_kls.mean().item()
-        avg_grad_norm = all_grad_norms.mean().item()
         avg_reward = all_rewards.mean().item()
-        return avg_loss, avg_kl, avg_grad_norm, avg_reward
+        return avg_loss, avg_kl, avg_reward
 
     evaluation_interval = 5
     checkpoint_path="saved_llms"
@@ -455,7 +414,6 @@ function and is an example of how we might choose to train our agent to exhibit 
         if agent.local_rank == '0':
             print(
                 f"Step: {i + 1}",
-                i,
                 f"| Loss: {avg_loss}",
                 f"| KL-divergence: {avg_kl}",
                 f"| Grad-norm: {avg_grad_norm}",
@@ -472,27 +430,66 @@ function and is an example of how we might choose to train our agent to exhibit 
                 and checkpoint_interval is not None
                 and (i + 1) % checkpoint_interval == 0
             ):
-                agent.save_checkpoint(save_path := f"step_{i}.pt")
-                print(f"Saved checkpoint {save_path}")
+                if agent.accelerator is not None:
+                    unwrapped_model = agent.accelerator.unwrap_model(agent.actor)
+                    unwrapped_model.save_pretrained(checkpoint_path)
+                    print(f"Saved checkpoint {save_path}")
+                else:
+                    agent.actor.save_pretrained(checkpoint_path)
 
 
 Loading a Trained Agent for Inference
 ------------------------------
-Once we have trained and saved an agent, we may want to then use our trained agent for inference.
-Below outlines how we would load a saved agent.
+Once we have finetuned our LLM, we may want to use it for inference. Below outlines how to load the model
+in this tutorial, this `forum <https://discuss.huggingface.co/t/save-load-and-do-inference-with-fine-tuned-model/76291/2>_`
+provides more info for loading finetuned models.
 
-Load agent
+Load fine-tuned LLM
 ~~~~~~~~~~
 .. code-block:: python
 
-    agent = GRPO.load(save_path, device=device)
+    peft_config = PeftConfig.from_pretrained("Qwen/Qwen2.5-3B")
+    base_model = AutoModelForCausalLM.from_pretrained(
+        peft_config.base_model_name_or_path,
+        torch_dtype=torch.bfloat16,
+        device_map="auto"
+    )
+    tokenizer = AutoTokenizer.from_pretrained(peft_config.base_model_name_or_path)
+    model = PeftModel.from_pretrained(base_model, "path/to/adapter/folder")
 
 Inference
 ~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: python
 
-    todo: not sure what this looks like @mike
+    # Put model in evaluation mode
+    model.eval()
+
+    # Set up input text
+    input_text = "Your prompt text here"
+
+    # Tokenize input
+    inputs = tokenizer(input_text, return_tensors="pt")
+
+    # Move inputs to the same device as model
+    inputs = {k: v.to(model.device) for k, v in inputs.items()}
+
+    # Generate text (inference)
+    with torch.no_grad():  # Disable gradient calculation for inference
+        outputs = model.generate(
+            input_ids=inputs["input_ids"],
+            attention_mask=inputs["attention_mask"],
+            max_new_tokens=100,  # Control the length of generated text
+            temperature=0.7,     # Control randomness (lower = more deterministic)
+            top_p=0.9,           # Nucleus sampling parameter
+            do_sample=True,      # Use sampling instead of greedy decoding
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id
+        )
+
+    # Decode the generated text
+    generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    print(generated_text)
 
 Full Training Code
 ------------------
