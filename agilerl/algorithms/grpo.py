@@ -1,28 +1,29 @@
-import os
 import copy
-import warnings
-from typing import Any, Dict, List, Optional, Tuple, Union
 import gc
+import os
+import warnings
+from typing import Dict, List, Optional, Tuple, Union
+
 import deepspeed
 import numpy as np
-from accelerate import Accelerator
-from accelerate.state import AcceleratorState
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from torch.optim import Optimizer
 import torch.nn.functional as F
+import torch.optim as optim
+from accelerate import Accelerator
+from accelerate.state import AcceleratorState
+from deepspeed.runtime.engine import DeepSpeedEngine
+from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
+from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from gymnasium import spaces
 from torch.nn.utils import clip_grad_norm_
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
-
+from torch.optim import Optimizer
 from transformers import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
-from deepspeed.runtime.engine import DeepSpeedEngine
-from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
-from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
+
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.typing import ExperiencesType
 from agilerl.utils.algo_utils import get_experiences_samples, stack_and_pad_experiences
 from agilerl.utils.llm_utils import (
@@ -30,8 +31,8 @@ from agilerl.utils.llm_utils import (
 )
 
 DeepSpeedOptimizerType = Union[
-    DeepSpeedZeroOptimizer,         # ZeRO Stage 1 & 2 optimizer
-    DeepSpeedZeroOptimizer_Stage3   # ZeRO Stage 3 optimizer
+    DeepSpeedZeroOptimizer,  # ZeRO Stage 1 & 2 optimizer
+    DeepSpeedZeroOptimizer_Stage3,  # ZeRO Stage 3 optimizer
 ]
 
 
@@ -58,7 +59,7 @@ class GRPO(RLAlgorithm):
     :type max_grad_norm: float, optional
     :param update_epochs: Number of policy update epochs, defaults to 4
     :type update_epochs: int, optional
-    :param group_size: Group size, defaults to 8 
+    :param group_size: Group size, defaults to 8
     :type group_size: int, optional
     :param temperature: Temperature, controls randomness of text generation
     :type temperature: float, optional
@@ -91,7 +92,11 @@ class GRPO(RLAlgorithm):
         accelerator: Optional[Accelerator] = None,
         device: str = "cpu",
     ) -> None:
-        device = f"cuda:{os.getenv('LOCAL_RANK', '0')}" if accelerator is not None else device
+        device = (
+            f"cuda:{os.getenv('LOCAL_RANK', '0')}"
+            if accelerator is not None
+            else device
+        )
         super().__init__(
             observation_space,
             action_space,
@@ -123,9 +128,7 @@ class GRPO(RLAlgorithm):
         self.lr = lr
         self.clip_coef = clip_coef
         self.update_epochs = update_epochs
-        self.group_size = (
-            group_size  
-        )
+        self.group_size = group_size
         self.beta = beta
         self.pad_token_id = pad_token_id
         self.calc_position_embeddings = calc_position_embeddings
@@ -136,16 +139,16 @@ class GRPO(RLAlgorithm):
             pad_token_id=pad_token_id,
         )
         if max_grad_norm and accelerator is not None:
-            warnings.warn("Argument 'max_grad_norm' will be overwritten by the 'gradient_clipping' value set in the deepspeed config.")
+            warnings.warn(
+                "Argument 'max_grad_norm' will be overwritten by the 'gradient_clipping' value set in the deepspeed config."
+            )
             self.max_grad_norm = None
         else:
             self.max_grad_norm = max_grad_norm
         self.temperature = temperature
         self.reduce_memory_peak = reduce_memory_peak
-        self.local_rank = device.split(":")[-1] 
+        self.local_rank = device.split(":")[-1]
         self.accelerator = accelerator
-        self.use_deepspeed = True if accelerator is not None else False
-        
         if actor_network is not None:
             self._create_policy_network(actor_network)
             self._create_reference_policy_network(actor_network)
@@ -418,8 +421,11 @@ class GRPO(RLAlgorithm):
     #     self.reference_actor = copy.deepcopy(self.actor)
     #     self.reference_actor.eval()
 
-
-    def _create_policy_network(self, network: PreTrainedModel) -> Tuple[Union[nn.Module, DeepSpeedEngine], Union[Optimizer, DeepSpeedOptimizerType]]: 
+    def _create_policy_network(
+        self, network: PreTrainedModel
+    ) -> Tuple[
+        Union[nn.Module, DeepSpeedEngine], Union[Optimizer, DeepSpeedOptimizerType]
+    ]:
         """Create policy network.
 
         :param network: Pre-trained LLM
@@ -429,18 +435,29 @@ class GRPO(RLAlgorithm):
         :return: Policy network and reference network
         :rtype: Tuple[Union[nn.Module, DeepSpeedEngine], Union[Optimizer, DeepSpeedOptimizerType]]
         """
-        if AcceleratorState().deepspeed_plugin.deepspeed_config["train_micro_batch_size_per_gpu"] == "auto":
-            AcceleratorState().deepspeed_plugin.deepspeed_config["train_micro_batch_size_per_gpu"] = 2
+        if (
+            AcceleratorState().deepspeed_plugin.deepspeed_config[
+                "train_micro_batch_size_per_gpu"
+            ]
+            == "auto"
+        ):
+            AcceleratorState().deepspeed_plugin.deepspeed_config[
+                "train_micro_batch_size_per_gpu"
+            ] = 2
         self.actor = copy.deepcopy(network)
         self.optimizer = OptimizerWrapper(
-                optim.AdamW, networks=[self.actor], lr=self.lr
+            optim.AdamW, networks=[self.actor], lr=self.lr
+        )
+        if self.accelerator is not None:
+            self.actor, self.optimizer = self.accelerator.prepare(
+                self.actor, self.optimizer.optimizer
             )
-        if self.use_deepspeed:
-            self.actor, self.optimizer = self.accelerator.prepare(self.actor, self.optimizer.optimizer)
         else:
             self.actor = self.actor.to(self.device)
 
-    def _create_reference_policy_network(self, network: nn.Module) -> Union[nn.Module, DeepSpeedEngine]: 
+    def _create_reference_policy_network(
+        self, network: nn.Module
+    ) -> Union[nn.Module, DeepSpeedEngine]:
         """Create reference policy network.
 
         :param network: Pre-trained LLM
@@ -454,13 +471,15 @@ class GRPO(RLAlgorithm):
         self.reference_actor.eval()
         for param in self.reference_actor.parameters():
             param.requires_grad = False
-        if self.use_deepspeed:
+        if self.accelerator is not None:
             deepspeed_plugin = self.accelerator.state.deepspeed_plugin
             config_kwargs = copy.deepcopy(deepspeed_plugin.deepspeed_config)
             config_kwargs["zero_optimization"]["stage"] = 0
-            self.reference_actor, *_ = deepspeed.initialize(model=self.reference_actor, config=config_kwargs)
-            self.reference_actor.eval()  
-            return 
+            self.reference_actor, *_ = deepspeed.initialize(
+                model=self.reference_actor, config=config_kwargs
+            )
+            self.reference_actor.eval()
+            return
         self.reference_actor = self.reference_actor.to(self.device)
 
     def _backward_pass(self, loss: float) -> None:
@@ -469,7 +488,7 @@ class GRPO(RLAlgorithm):
         :param loss: Loss
         :type loss: float
         """
-        if self.use_deepspeed:
+        if self.accelerator is not None:
             self.optimizer.zero_grad()
             self.accelerator.backward(loss)
             self.optimizer.step()
@@ -478,6 +497,3 @@ class GRPO(RLAlgorithm):
             loss.backward()
             clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
             self.optimizer.step()
-        
-
-

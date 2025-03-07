@@ -1,8 +1,9 @@
 from typing import Any, Dict, Optional
 
 import torch
-from tqdm import trange
 import torch.distributed as dist
+from tqdm import trange
+
 import wandb
 from agilerl.algorithms import GRPO
 from agilerl.utils.llm_utils import HuggingFaceGym
@@ -21,19 +22,19 @@ def finetune_llm(
     wandb_api_key: Optional[str] = None,
     evaluation_interval: Optional[int] = 10,
 ) -> None:
-    if wb and agent.local_rank == '0':
+    if wb and agent.local_rank == "0":
         init_wandb(
             algo=agent.algo,
             env_name=env.name,
             wandb_api_key=wandb_api_key,
         )
 
-    if agent.local_rank == '0':
+    if agent.local_rank == "0":
         print("\nTraining...")
 
     bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
     max_steps = len(env) // env.data_batch_size
-    if agent.local_rank == '0':
+    if agent.local_rank == "0":
         pbar = trange(
             max_steps,
             unit="step",
@@ -56,9 +57,11 @@ def finetune_llm(
             rewards,
         )
         loss, kl = agent.learn(experiences)
-        avg_loss, avg_kl, avg_reward = aggregate_metrics_across_gpus(agent, loss, kl, rewards)
+        avg_loss, avg_kl, avg_reward = aggregate_metrics_across_gpus(
+            agent, loss, kl, rewards
+        )
         prompts = next_prompts
-        if agent.local_rank == '0':
+        if agent.local_rank == "0":
             print(
                 f"Step: {i + 1}",
                 i,
@@ -73,7 +76,7 @@ def finetune_llm(
                         "Loss": avg_loss,
                         "KL-divergence": avg_kl,
                         "Mean training reward": avg_reward,
-                    }   
+                    }
                 )
             if (i + 1) % evaluation_interval == 0:
                 test_reward = agent.test(env)
@@ -88,22 +91,24 @@ def finetune_llm(
                 save_llm_checkpoint(agent, checkpoint_path, i)
 
 
-def gather_tensor(tensor, agent):
+def gather_tensor(tensor: torch.Tensor, agent: GRPO) -> torch.Tensor:
     # Convert to tensor if it's a scalar
     if not isinstance(tensor, torch.Tensor):
         tensor = torch.tensor(tensor, device=f"cuda:{agent.local_rank}")
     # Ensure tensor is on correct device
-    tensor = tensor.detach().clone()    
+    tensor = tensor.detach().clone()
     # Create a list to store tensors from all processes
     world_size = dist.get_world_size()
     gathered_tensors = [torch.zeros_like(tensor) for _ in range(world_size)]
 
     # Gather the tensor from all processes
-    dist.all_gather(gathered_tensors, tensor)    
+    dist.all_gather(gathered_tensors, tensor)
     return torch.stack(gathered_tensors)
 
 
-def aggregate_metrics_across_gpus(agent, loss, kl, rewards):
+def aggregate_metrics_across_gpus(
+    agent: GRPO, loss: torch.Tensor, kl: torch.Tensor, rewards: torch.Tensor
+):
     rewards = rewards.to(agent.device)
     all_losses = gather_tensor(loss, agent)
     all_kls = gather_tensor(kl, agent)

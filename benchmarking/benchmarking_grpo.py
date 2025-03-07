@@ -2,18 +2,18 @@ import re
 from typing import Tuple
 
 import torch
-import deepspeed
+from accelerate import Accelerator
 from datasets import load_dataset
 from peft import LoraConfig, get_peft_model
 from torch.utils.data import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from accelerate import Accelerator
+
 from agilerl.algorithms import GRPO
 from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 
 MODEL_PATH = "Qwen/Qwen2.5-3B"
-DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"  # "openai/gsm8k"
+DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
 
 def create_model(pretrained_model_name_or_path):
@@ -21,7 +21,6 @@ def create_model(pretrained_model_name_or_path):
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         torch_dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
-        # load_in_4bit=True,
     )
     peft_config = LoraConfig(
         r=32,
@@ -198,7 +197,7 @@ def custom_collate_fn(batch):
     return {"answer": answers, "question": questions}
 
 
-def main(local_rank):
+def main():
     # Instantiate the model and the associated tokenizer
     model = create_model(**{"pretrained_model_name_or_path": MODEL_PATH})
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
@@ -215,26 +214,6 @@ def main(local_rank):
         data_batch_size=1,
         custom_collate_fn=custom_collate_fn,
     )
-
-    deepspeed_training_config = {
-        "train_micro_batch_size_per_gpu": 2,
-        "gradient_accumulation_steps": 8,
-        "optimizer": {"type": "AdamW", "params": {"lr": 1e-6}},
-        "bf16": {"enabled": True},
-        "zero_optimization": {
-            "stage": 2,
-            "contiguous_gradients": True,
-            "overlap_comm": True,
-            "reduce_scatter": True,
-            "reduce_bucket_size": 5e8,
-            "allgather_bucket_size": 5e8,
-            "gather_16bit_weights_on_model_save": True,
-            "offload_optimizer": {
-            "device": "cpu"
-         }
-        },
-        "gradient_clipping": 1.0,
-    }
     # Instantiate the grpo agent
     agent = GRPO(
         env.observation_space,
@@ -244,7 +223,7 @@ def main(local_rank):
         batch_size=1,
         group_size=12,
         reduce_memory_peak=False,
-        accelerator=Accelerator()
+        accelerator=Accelerator(),
     )
     finetune_llm(
         agent=agent,
@@ -253,10 +232,8 @@ def main(local_rank):
         wb=False,
         checkpoint_interval=1,
         checkpoint_path="saved_llms",
-    )  
+    )
 
 
 if __name__ == "__main__":
-    import os
-    local_rank = int(os.getenv("LOCAL_RANK", "0"))
-    main(local_rank)
+    main()
