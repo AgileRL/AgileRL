@@ -312,6 +312,7 @@ in their `docs <https://www.deepspeed.ai/docs/config-json/>`_. The accelerate co
 the distribution and the GRPO class handles how the accelerator is used during training.
 
 .. code-block:: python
+
     agent = GRPO(
         env.observation_space,
         env.action_space,
@@ -439,13 +440,13 @@ function and is an example of how we might choose to train our agent to exhibit 
 
 
 Loading a Trained Agent for Inference
-------------------------------
+-------------------------------------
 Once we have finetuned our LLM, we may want to use it for inference. Below outlines how to load the model
 in this tutorial, this `forum <https://discuss.huggingface.co/t/save-load-and-do-inference-with-fine-tuned-model/76291/2>_`
 provides more info for loading finetuned models.
 
 Load fine-tuned LLM
-~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~
 .. code-block:: python
 
     peft_config = PeftConfig.from_pretrained("Qwen/Qwen2.5-3B")

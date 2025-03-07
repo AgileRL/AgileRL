@@ -1,4 +1,4 @@
-.. _llm_finefuning:
+.. _llm_finetuning:
 
 Large Language Model Finetuning
 ===============================
@@ -15,7 +15,7 @@ develop *agency* and can be described as **agents**.
    * - **Algorithms**
      - **Tutorials**
    * - :ref:`GRPO<grpo>`
-     - :ref:`LLM reasoning with GRPO<grpo tutorial>`
+     - :ref:`LLM reasoning with GRPO<grpo_tutorial>`
 
 
 .. _rl_for_reasoning:
