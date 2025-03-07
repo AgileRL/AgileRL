@@ -1,9 +1,10 @@
 from typing import Any, Dict, Optional
 
 import torch
-from tqdm import trange
 import torch.distributed as dist
 import wandb
+from tqdm import trange
+
 from agilerl.algorithms import GRPO
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import init_wandb
@@ -22,7 +23,7 @@ def finetune_llm(
     wandb_api_key: Optional[str] = None,
     evaluation_interval: Optional[int] = 10,
 ) -> None:
-    if wb and agent.local_rank == '0':
+    if wb and agent.local_rank == "0":
         init_wandb(
             algo=agent.algo,
             env_name=env.name,
@@ -31,12 +32,12 @@ def finetune_llm(
             wandb_api_key=wandb_api_key,
         )
 
-    if agent.local_rank == '0':
+    if agent.local_rank == "0":
         print("\nTraining...")
 
     bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
     max_steps = len(env) // env.data_batch_size
-    if agent.local_rank == '0':
+    if agent.local_rank == "0":
         pbar = trange(
             max_steps,
             unit="step",
@@ -45,23 +46,23 @@ def finetune_llm(
             dynamic_ncols=True,
         )
 
-    prompts = env.reset(
-        reset_dataloaders=True
-    )  # calling env.reset() supplies the first batch of training data
+    # calling env.reset() supplies the first batch of training data
+    prompts = env.reset(reset_dataloaders=True)
     for i in range(max_steps):
         completion_ids, action_masks = agent.get_action(prompts)
-        next_prompts, rewards = env.step(
-            completion_ids
-        )  # Use the reward function stored in env.step to calculate reward of the each answer from the group
+        # Use the reward function stored in env.step to calculate reward of the each answer from the group
+        next_prompts, rewards = env.step(completion_ids)
         experiences = (
             completion_ids,
             action_masks,
             rewards,
         )
         loss, kl, grad_norm = agent.learn(experiences)
-        avg_loss, avg_kl, avg_grad_norm, avg_reward = aggregate_metrics_across_gpus(agent, loss, kl, grad_norm, rewards)
+        avg_loss, avg_kl, avg_grad_norm, avg_reward = aggregate_metrics_across_gpus(
+            agent, loss, kl, grad_norm, rewards
+        )
         prompts = next_prompts
-        if agent.local_rank == '0':
+        if agent.local_rank == "0":
             print(
                 f"Step: {i + 1}",
                 i,
@@ -78,7 +79,7 @@ def finetune_llm(
                         "KL-divergence": avg_kl,
                         "Grad-norm": avg_grad_norm,
                         "Mean training reward": avg_reward,
-                    }   
+                    }
                 )
             if (i + 1) % evaluation_interval == 0:
                 test_reward = agent.test(env)
@@ -98,17 +99,17 @@ def gather_tensor(tensor, agent):
     # Convert to tensor if it's a scalar
     if not isinstance(tensor, torch.Tensor):
         tensor = torch.tensor(tensor, device=f"cuda:{agent.local_rank}")
-    
+
     # Ensure tensor is on correct device
     tensor = tensor.detach().clone()
-    
+
     # Create a list to store tensors from all processes
     world_size = dist.get_world_size()
     gathered_tensors = [torch.zeros_like(tensor) for _ in range(world_size)]
-    
+
     # Gather the tensor from all processes
     dist.all_gather(gathered_tensors, tensor)
-    
+
     return torch.stack(gathered_tensors)
 
 
@@ -118,7 +119,7 @@ def aggregate_metrics_across_gpus(agent, loss, kl, grad_norm, rewards):
     all_kls = gather_tensor(kl, agent)
     all_grad_norms = gather_tensor(grad_norm, agent)
     all_rewards = gather_tensor(torch.mean(rewards), agent)
-    
+
     # Compute aggregated metrics
     avg_loss = all_losses.mean().item()
     avg_kl = all_kls.mean().item()
