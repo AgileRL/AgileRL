@@ -2,9 +2,9 @@ from typing import Any, Dict, Optional
 
 import torch
 import torch.distributed as dist
+import wandb
 from tqdm import trange
 
-import wandb
 from agilerl.algorithms import GRPO
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import init_wandb
