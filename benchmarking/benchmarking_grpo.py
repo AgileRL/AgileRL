@@ -79,15 +79,6 @@ def make_dataset(dataset_name: str) -> Tuple[Dataset, Dataset]:
 
 
 def format_reward_func(completions, target, **kwargs):
-    """
-    Format: <think>...</think><answer>...</answer>
-    Args:
-        completions (list[str]): Generated outputs
-        target (list[str]): Expected answers
-
-      Returns:
-          list[float]: Reward scores
-    """
     rewards = []
 
     for completion, gt in zip(completions, target):
@@ -110,18 +101,6 @@ def format_reward_func(completions, target, **kwargs):
 
 
 def equation_reward_func(completions, target, nums, **kwargs):
-    """
-    Evaluates completions based on:
-    2. Mathematical correctness of the answer
-
-    Args:
-        completions (list[str]): Generated outputs
-        target (list[str]): Expected answers
-        nums (list[str]): Available numbers
-
-    Returns:
-        list[float]: Reward scores
-    """
     rewards = []
 
     for completion, gt, numbers in zip(completions, target, nums):

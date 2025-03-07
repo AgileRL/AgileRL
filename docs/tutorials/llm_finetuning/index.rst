@@ -131,15 +131,6 @@ for displaying these behaviours, the agent itself discovers the best way to achi
 .. code-block:: python
 
     def format_reward_func(completions, target, **kwargs):
-        """
-        Format: <think>...</think><answer>...</answer>
-        Args:
-            completions (list[str]): Generated outputs
-            target (list[str]): Expected answers
-
-        Returns:
-            list[float]: Reward scores
-        """
         rewards = []
 
         for completion, gt in zip(completions, target):
@@ -162,18 +153,6 @@ for displaying these behaviours, the agent itself discovers the best way to achi
 
 
     def equation_reward_func(completions, target, nums, **kwargs):
-        """
-        Evaluates completions based on:
-        2. Mathematical correctness of the answer
-
-        Args:
-            completions (list[str]): Generated outputs
-            target (list[str]): Expected answers
-            nums (list[str]): Available numbers
-
-        Returns:
-            list[float]: Reward scores
-        """
         rewards = []
 
         for completion, gt, numbers in zip(completions, target, nums):
@@ -354,16 +333,11 @@ function and is an example of how we might choose to train our agent to exhibit 
     import torch.distributed as dist
 
     def gather_tensor(tensor: torch.Tensor, agent: GRPO) -> torch.Tensor:
-        # Convert to tensor if it's a scalar
         if not isinstance(tensor, torch.Tensor):
             tensor = torch.tensor(tensor, device=f"cuda:{agent.local_rank}")
-        # Ensure tensor is on correct device
         tensor = tensor.detach().clone()
-        # Create a list to store tensors from all processes
         world_size = dist.get_world_size()
         gathered_tensors = [torch.zeros_like(tensor) for _ in range(world_size)]
-
-        # Gather the tensor from all processes
         dist.all_gather(gathered_tensors, tensor)
         return torch.stack(gathered_tensors)
 

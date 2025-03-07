@@ -422,11 +422,6 @@ class GRPO(RLAlgorithm):
             )
         return log_probs
 
-    # def _set_reference_policy(self) -> None:
-    #     """Set the reference policy to the current policy."""
-    #     self.reference_actor = copy.deepcopy(self.actor)
-    #     self.reference_actor.eval()
-
     def _create_policy_network(
         self, network: PreTrainedModel
     ) -> Tuple[
@@ -463,7 +458,7 @@ class GRPO(RLAlgorithm):
             self.actor = self.actor.to(self.device)
 
     def _create_reference_policy_network(
-        self, network: nn.Module
+        self, network: PreTrainedModel
     ) -> Union[nn.Module, DeepSpeedEngine]:
         """Create reference policy network.
 
