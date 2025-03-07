@@ -198,7 +198,7 @@ def custom_collate_fn(batch):
     return {"answer": answers, "question": questions}
 
 
-def main(world_size, local_rank):
+def main(local_rank):
     # Instantiate the model and the associated tokenizer
     model = create_model(**{"pretrained_model_name_or_path": MODEL_PATH})
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
@@ -241,7 +241,6 @@ def main(world_size, local_rank):
         env.action_space,
         actor_network=model,
         pad_token_id=tokenizer.eos_token_id,
-        device=f"cuda:{local_rank}",
         batch_size=1,
         group_size=12,
         reduce_memory_peak=False,
@@ -259,6 +258,5 @@ def main(world_size, local_rank):
 
 if __name__ == "__main__":
     import os
-    world_size = int(os.getenv("WORLD_SIZE", "1"))
     local_rank = int(os.getenv("LOCAL_RANK", "0"))
-    main(world_size, local_rank)
+    main(local_rank)

@@ -1,3 +1,4 @@
+import os
 import copy
 import warnings
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -90,6 +91,7 @@ class GRPO(RLAlgorithm):
         accelerator: Optional[Accelerator] = None,
         device: str = "cpu",
     ) -> None:
+        device = f"cuda:{os.getenv('LOCAL_RANK', '0')}" if accelerator is not None else device
         super().__init__(
             observation_space,
             action_space,
