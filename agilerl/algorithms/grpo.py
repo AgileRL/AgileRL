@@ -1,24 +1,37 @@
 import copy
+import warnings
 from typing import Any, Dict, List, Optional, Tuple, Union
-
+import gc
 import deepspeed
 import numpy as np
+from accelerate import Accelerator
+from accelerate.state import AcceleratorState
 import torch
 import torch.nn as nn
+import torch.optim as optim
+from torch.optim import Optimizer
 import torch.nn.functional as F
 from gymnasium import spaces
 from torch.nn.utils import clip_grad_norm_
+from agilerl.algorithms.core.wrappers import OptimizerWrapper
+
 from transformers import GenerationConfig
-from contextlib import contextmanager
+from transformers.modeling_utils import PreTrainedModel
+from deepspeed.runtime.engine import DeepSpeedEngine
+from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
+from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.typing import ExperiencesType
 from agilerl.utils.algo_utils import get_experiences_samples, stack_and_pad_experiences
 from agilerl.utils.llm_utils import (
-    DEEPSPEED_INFERENCE_CONFIG,
-    DEEPSPEED_TRAINING_CONFIG,
     HuggingFaceGym,
 )
+
+DeepSpeedOptimizerType = Union[
+    DeepSpeedZeroOptimizer,         # ZeRO Stage 1 & 2 optimizer
+    DeepSpeedZeroOptimizer_Stage3   # ZeRO Stage 3 optimizer
+]
 
 
 class GRPO(RLAlgorithm):
@@ -29,7 +42,7 @@ class GRPO(RLAlgorithm):
     :param action_space: Action space of the environment
     :type action_space: gym.spaces.Space
     :param actor_network: HuggingFace LLM
-    :type actor_network: nn.Module
+    :type actor_network: PreTrainedModel
     :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
     :type hp_config: HyperparameterConfig, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
@@ -52,10 +65,6 @@ class GRPO(RLAlgorithm):
     :type calc_position_embeddings: bool, optional
     :param reduce_memory_peak: Flag to reduce memory peak in the _get_log_probs method, defaults to False
     :type reduce_memory_peak: bool, optional
-    :param deepspeed_training_config: Deepspeed training config, defaults to DEEPSPEED_TRAINING_CONFIG
-    :type deepspeed_training_config: Dict[str, Any], optional
-    :param deepspeed_inference_config: Deepspeed training config, defaults to DEEPSPEED_INFERENCE_CONFIG
-    :type deepspeed_inference_config: Dict[str, Any], optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     """
@@ -64,7 +73,7 @@ class GRPO(RLAlgorithm):
         self,
         observation_space: spaces.Space,
         action_space: spaces.Space,
-        actor_network: nn.Module,
+        actor_network: PreTrainedModel,
         pad_token_id: int,
         hp_config: Optional[HyperparameterConfig] = None,
         index: int = 0,
@@ -78,10 +87,7 @@ class GRPO(RLAlgorithm):
         temperature: float = 0.9,
         calc_position_embeddings: bool = True,
         reduce_memory_peak: bool = False,
-        deepspeed_training_config: Optional[Dict[str, Any]] = DEEPSPEED_TRAINING_CONFIG,
-        deepspeed_inference_config: Optional[
-            Dict[str, Any]
-        ] = DEEPSPEED_INFERENCE_CONFIG,
+        accelerator: Optional[Accelerator] = None,
         device: str = "cpu",
     ) -> None:
         super().__init__(
@@ -116,7 +122,7 @@ class GRPO(RLAlgorithm):
         self.clip_coef = clip_coef
         self.update_epochs = update_epochs
         self.group_size = (
-            group_size  # What if we assume that group size == num_envs ???
+            group_size  
         )
         self.beta = beta
         self.pad_token_id = pad_token_id
@@ -127,20 +133,20 @@ class GRPO(RLAlgorithm):
             max_new_tokens=action_space.shape[0],
             pad_token_id=pad_token_id,
         )
-        self.max_grad_norm = max_grad_norm
+        if max_grad_norm and accelerator is not None:
+            warnings.warn("Argument 'max_grad_norm' will be overwritten by the 'gradient_clipping' value set in the deepspeed config.")
+            self.max_grad_norm = None
+        else:
+            self.max_grad_norm = max_grad_norm
         self.temperature = temperature
         self.reduce_memory_peak = reduce_memory_peak
         self.local_rank = device.split(":")[-1] 
+        self.accelerator = accelerator
+        self.use_deepspeed = True if accelerator is not None else False
+        
         if actor_network is not None:
-            actor_network = actor_network.to(device)
-            self.actor, self.optimizer, *_ = deepspeed.initialize(
-                config=deepspeed_training_config,
-                model=actor_network,
-                model_parameters=actor_network.parameters(),
-            )
-            self.reference_actor = deepspeed.init_inference(
-                model=actor_network, **deepspeed_inference_config
-            )
+            self._create_policy_network(actor_network)
+            self._create_reference_policy_network(actor_network)
         else:
             raise ValueError(
                 "Actor network must be provided to GRPO in the form of a pre-trained huggingface model wrapped with DummyEvolvable"
@@ -150,6 +156,8 @@ class GRPO(RLAlgorithm):
         self.register_network_group(
             NetworkGroup(eval=self.reference_actor, policy=True)
         )
+
+        del actor_network
 
     def get_action(
         self, states: List[Dict[str, torch.Tensor]], training: bool = True
@@ -179,7 +187,6 @@ class GRPO(RLAlgorithm):
                     **state,
                     generation_config=self.generation_config,
                 )
-                completion_id = completion_id.to(self.device)
                 completion_ids.append(completion_id)
                 action_mask = torch.zeros_like(
                     completion_id, dtype=torch.bool, device=self.device
@@ -190,12 +197,14 @@ class GRPO(RLAlgorithm):
                 action_masks.append(action_mask)
         return completion_ids, action_masks
 
-    def learn(self, experiences: ExperiencesType) -> float:
+    def learn(self, experiences: ExperiencesType) -> Tuple[float, float]:
         """Updates agent network parameters to learn from experiences.
 
         :param experiences: Batched completion_ids, action_masks and rewards
         :type experiences: ExperiencesType
         """
+
+        gc.collect()
         torch.cuda.empty_cache()
         completion_ids, action_masks, rewards = stack_and_pad_experiences(
             *experiences, padding_values=[self.pad_token_id, False, None]
@@ -217,7 +226,7 @@ class GRPO(RLAlgorithm):
         )
         num_samples = advantages.shape[0]
         batch_idxs = np.arange(num_samples)
-        mean_loss, mean_kl, mean_grad_norm = 0, 0, 0
+        mean_loss, mean_kl = 0, 0
         for _ in range(self.update_epochs):
             np.random.shuffle(batch_idxs)
             for start in range(0, num_samples, self.batch_size):
@@ -243,16 +252,12 @@ class GRPO(RLAlgorithm):
                 )
                 if not loss.isfinite():
                     continue
-                self.actor.backward(loss)
-                grad_norm = clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
-                self.actor.step()
+                self._backward_pass(loss)
                 mean_loss += loss.item()
                 mean_kl += kl.item()
-                mean_grad_norm += grad_norm.item()
         mean_loss /= len(completion_ids)
         mean_kl /= len(completion_ids)
-        mean_grad_norm /= len(completion_ids)
-        return mean_loss, mean_kl, mean_grad_norm
+        return mean_loss, mean_kl
 
     def test(
         self,
@@ -378,7 +383,7 @@ class GRPO(RLAlgorithm):
             position_ids.masked_fill_(mask=(attention_mask == 0), value=1)
             model_kwargs |= {"position_ids": position_ids}
         if self.reduce_memory_peak:
-            logit_list = []
+            log_probs_list = []
             for input_id, mask in zip(ids, attention_mask):
                 input_id = input_id.reshape(1, -1)
                 mask = mask.reshape(1, -1)
@@ -388,19 +393,89 @@ class GRPO(RLAlgorithm):
                     "use_cache": False,
                 }
                 logit = policy.forward(**kwargs).logits
-                logit = logit.to(self.device)
-                logit_list.append(logit)
-            logits = torch.cat(logit_list)
+                log_prob = (
+                    F.log_softmax(logit[:, :-1], dim=-1)
+                    .gather(dim=-1, index=input_id[:, 1:].unsqueeze(-1))
+                    .squeeze(-1)
+                )
+                log_probs_list.append(log_prob)
+                del logit
+            log_probs = torch.cat(log_probs_list)
+            del log_probs_list
         else:
             logits = policy.forward(**model_kwargs).logits
-        log_probs = (
-            F.log_softmax(logits[:, :-1], dim=-1)
-            .gather(dim=-1, index=ids[:, 1:].unsqueeze(-1))
-            .squeeze(-1)
-        )
+            log_probs = (
+                F.log_softmax(logits[:, :-1], dim=-1)
+                .gather(dim=-1, index=ids[:, 1:].unsqueeze(-1))
+                .squeeze(-1)
+            )
         return log_probs
 
-    def _set_reference_policy(self) -> None:
-        """Set the reference policy to the current policy."""
-        self.reference_actor = copy.deepcopy(self.actor)
+    # def _set_reference_policy(self) -> None:
+    #     """Set the reference policy to the current policy."""
+    #     self.reference_actor = copy.deepcopy(self.actor)
+    #     self.reference_actor.eval()
+
+
+    def _create_policy_network(self, network: PreTrainedModel) -> Tuple[Union[nn.Module, DeepSpeedEngine], Union[Optimizer, DeepSpeedOptimizerType]]: 
+        """Create policy network.
+
+        :param network: Pre-trained LLM
+        :type network: PreTrainedModel
+        :param ds_config: Deepspeed config
+        :type ds_config: Union[Dict[str, Any], None]
+        :return: Policy network and reference network
+        :rtype: Tuple[Union[nn.Module, DeepSpeedEngine], Union[Optimizer, DeepSpeedOptimizerType]]
+        """
+        if AcceleratorState().deepspeed_plugin.deepspeed_config["train_micro_batch_size_per_gpu"] == "auto":
+            AcceleratorState().deepspeed_plugin.deepspeed_config["train_micro_batch_size_per_gpu"] = 2
+        self.actor = copy.deepcopy(network)
+        self.optimizer = OptimizerWrapper(
+                optim.AdamW, networks=[self.actor], lr=self.lr
+            )
+        if self.use_deepspeed:
+            self.actor, self.optimizer = self.accelerator.prepare(self.actor, self.optimizer.optimizer)
+        else:
+            self.actor = self.actor.to(self.device)
+
+    def _create_reference_policy_network(self, network: nn.Module) -> Union[nn.Module, DeepSpeedEngine]: 
+        """Create reference policy network.
+
+        :param network: Pre-trained LLM
+        :type network: PreTrainedModel
+        :param ds_config: Deepspeed config
+        :type ds_config: Union[Dict[str, Any], None]
+        :return: Policy network and reference network
+        :rtype: Union[nn.Module, DeepSpeedEngine]
+        """
+        self.reference_actor = copy.deepcopy(network)
         self.reference_actor.eval()
+        for param in self.reference_actor.parameters():
+            param.requires_grad = False
+        if self.use_deepspeed:
+            deepspeed_plugin = self.accelerator.state.deepspeed_plugin
+            config_kwargs = copy.deepcopy(deepspeed_plugin.deepspeed_config)
+            config_kwargs["zero_optimization"]["stage"] = 0
+            self.reference_actor, *_ = deepspeed.initialize(model=self.reference_actor, config=config_kwargs)
+            self.reference_actor.eval()  
+            return 
+        self.reference_actor = self.reference_actor.to(self.device)
+
+    def _backward_pass(self, loss: float) -> None:
+        """Perform a backward pass
+
+        :param loss: Loss
+        :type loss: float
+        """
+        if self.use_deepspeed:
+            self.optimizer.zero_grad()
+            self.accelerator.backward(loss)
+            self.optimizer.step()
+        else:
+            self.optimizer.zero_grad()
+            loss.backward()
+            clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+            self.optimizer.step()
+        
+
+

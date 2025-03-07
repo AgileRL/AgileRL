@@ -14,6 +14,7 @@ from tensordict.nn import CudaGraphModule
 from torch._dynamo import OptimizedModule
 from torch.nn import Module
 from torch.optim import Optimizer
+from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 
 from agilerl.protocols import EvolvableAttributeType, EvolvableModule, OptimizerWrapper
 from agilerl.typing import (
@@ -239,12 +240,12 @@ def recursive_check_module_attrs(obj: Any, networks_only: bool = False) -> bool:
     """
     check_types = (OptimizedModule, EvolvableModule)
     if not networks_only:
-        check_types += (OptimizerWrapper,)
+        check_types += (OptimizerWrapper, DeepSpeedOptimizerWrapper)
 
     if isinstance(obj, check_types):
         return True
     elif isinstance(obj, Optimizer):
-        raise TypeError("Optimizer objects should be wrapped by OptimizerWrapper.")
+        raise TypeError("Optimizer objects should be wrapped by OptimizerWrapper.") 
     if isinstance(obj, dict):
         return any(
             recursive_check_module_attrs(v, networks_only=networks_only)

@@ -14,7 +14,6 @@ InitDictType = Optional[Dict[str, Any]]
 def finetune_llm(
     agent: GRPO,
     env: HuggingFaceGym,
-    INIT_HP: InitDictType,
     checkpoint_interval: Optional[int] = None,
     checkpoint_path: Optional[str] = None,
     MUT_P: Optional[InitDictType] = None,
@@ -26,8 +25,6 @@ def finetune_llm(
         init_wandb(
             algo=agent.algo,
             env_name=env.name,
-            init_hyperparams=INIT_HP,
-            mutation_hyperparams=MUT_P,
             wandb_api_key=wandb_api_key,
         )
 
@@ -58,8 +55,8 @@ def finetune_llm(
             action_masks,
             rewards,
         )
-        loss, kl, grad_norm = agent.learn(experiences)
-        avg_loss, avg_kl, avg_grad_norm, avg_reward = aggregate_metrics_across_gpus(agent, loss, kl, grad_norm, rewards)
+        loss, kl = agent.learn(experiences)
+        avg_loss, avg_kl, avg_reward = aggregate_metrics_across_gpus(agent, loss, kl, rewards)
         prompts = next_prompts
         if agent.local_rank == '0':
             print(
@@ -67,7 +64,6 @@ def finetune_llm(
                 i,
                 f"| Loss: {avg_loss}",
                 f"| KL-divergence: {avg_kl}",
-                f"| Grad-norm: {avg_grad_norm}",
             )
 
             pbar.update(1)
@@ -76,7 +72,6 @@ def finetune_llm(
                     {
                         "Loss": avg_loss,
                         "KL-divergence": avg_kl,
-                        "Grad-norm": avg_grad_norm,
                         "Mean training reward": avg_reward,
                     }   
                 )
@@ -90,38 +85,43 @@ def finetune_llm(
                 and checkpoint_interval is not None
                 and (i + 1) % checkpoint_interval == 0
             ):
-                agent.save_checkpoint(save_path := f"step_{i}.pt")
-                print(f"Saved checkpoint {save_path}")
+                save_llm_checkpoint(agent, checkpoint_path, i)
 
 
 def gather_tensor(tensor, agent):
     # Convert to tensor if it's a scalar
     if not isinstance(tensor, torch.Tensor):
         tensor = torch.tensor(tensor, device=f"cuda:{agent.local_rank}")
-    
     # Ensure tensor is on correct device
-    tensor = tensor.detach().clone()
-    
+    tensor = tensor.detach().clone()    
     # Create a list to store tensors from all processes
     world_size = dist.get_world_size()
     gathered_tensors = [torch.zeros_like(tensor) for _ in range(world_size)]
-    
+
     # Gather the tensor from all processes
-    dist.all_gather(gathered_tensors, tensor)
-    
+    dist.all_gather(gathered_tensors, tensor)    
     return torch.stack(gathered_tensors)
 
 
-def aggregate_metrics_across_gpus(agent, loss, kl, grad_norm, rewards):
+def aggregate_metrics_across_gpus(agent, loss, kl, rewards):
     rewards = rewards.to(agent.device)
     all_losses = gather_tensor(loss, agent)
     all_kls = gather_tensor(kl, agent)
-    all_grad_norms = gather_tensor(grad_norm, agent)
     all_rewards = gather_tensor(torch.mean(rewards), agent)
-    
     # Compute aggregated metrics
     avg_loss = all_losses.mean().item()
     avg_kl = all_kls.mean().item()
-    avg_grad_norm = all_grad_norms.mean().item()
     avg_reward = all_rewards.mean().item()
-    return avg_loss, avg_kl, avg_grad_norm, avg_reward
+    return avg_loss, avg_kl, avg_reward
+
+
+def save_llm_checkpoint(agent, checkpoint_path, step):
+    checkpoint_path = f"step_{step}" if checkpoint_path is None else checkpoint_path
+    # if agent.use_deepspeed:
+    #     agent.actor.save_checkpoint(checkpoint_path)
+    # else:
+    #     checkpoint_path += f"/{agent.algo}_step_{step}.pt"
+    #     agent.save_checkpoint(checkpoint_path)
+    # print(f"Saved checkpoint to directory {checkpoint_path}")
+    unwrapped_model = agent.accelerator.unwrap_model(agent.actor)
+    unwrapped_model.save_pretrained(checkpoint_path)
