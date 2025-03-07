@@ -1,12 +1,8 @@
 import copy
 from contextlib import contextmanager
-
-# Add mock for AcceleratorState
 from unittest.mock import MagicMock, patch
 
 import accelerate.state
-
-# Mock DeepSpeed initialization
 import deepspeed
 import gymnasium as gym
 import pytest
@@ -15,9 +11,6 @@ import torch.nn as nn
 import torch.optim as optim
 from transformers import GenerationConfig
 
-# Now import the modules after patching
-from agilerl.algorithms import GRPO
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.dummy import to_evolvable
 
@@ -53,6 +46,12 @@ class MockAccelerator:
 def mock_accelerator():
     with patch("accelerate.Accelerator", MockAccelerator):
         yield
+
+
+# Now import the modules after patching.
+# This is ugly but these imports have to be after the above patches.
+from agilerl.algorithms import GRPO  # noqa: E402
+from agilerl.algorithms.core.wrappers import OptimizerWrapper  # noqa: E402
 
 
 def mock_initialize(model, config, **kwargs):
