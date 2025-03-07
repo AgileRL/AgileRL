@@ -55,7 +55,9 @@ def finetune_llm(
             rewards,
         )
         loss, kl = agent.learn(experiences)
-        avg_loss, avg_kl, avg_reward = aggregate_metrics_across_gpus(agent, loss, kl, rewards)
+        avg_loss, avg_kl, avg_reward = aggregate_metrics_across_gpus(
+            agent, loss, kl, rewards
+        )
         prompts = next_prompts
         if agent.local_rank == "0":
             print(
@@ -92,13 +94,13 @@ def gather_tensor(tensor, agent):
     if not isinstance(tensor, torch.Tensor):
         tensor = torch.tensor(tensor, device=f"cuda:{agent.local_rank}")
     # Ensure tensor is on correct device
-    tensor = tensor.detach().clone()    
+    tensor = tensor.detach().clone()
     # Create a list to store tensors from all processes
     world_size = dist.get_world_size()
     gathered_tensors = [torch.zeros_like(tensor) for _ in range(world_size)]
 
     # Gather the tensor from all processes
-    dist.all_gather(gathered_tensors, tensor)    
+    dist.all_gather(gathered_tensors, tensor)
     return torch.stack(gathered_tensors)
 
 

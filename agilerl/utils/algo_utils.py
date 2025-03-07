@@ -9,12 +9,12 @@ import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
+from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from gymnasium import spaces
 from tensordict.nn import CudaGraphModule
 from torch._dynamo import OptimizedModule
 from torch.nn import Module
 from torch.optim import Optimizer
-from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 
 from agilerl.protocols import EvolvableAttributeType, EvolvableModule, OptimizerWrapper
 from agilerl.typing import (
@@ -245,7 +245,7 @@ def recursive_check_module_attrs(obj: Any, networks_only: bool = False) -> bool:
     if isinstance(obj, check_types):
         return True
     elif isinstance(obj, Optimizer):
-        raise TypeError("Optimizer objects should be wrapped by OptimizerWrapper.") 
+        raise TypeError("Optimizer objects should be wrapped by OptimizerWrapper.")
     if isinstance(obj, dict):
         return any(
             recursive_check_module_attrs(v, networks_only=networks_only)

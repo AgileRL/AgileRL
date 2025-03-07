@@ -1,13 +1,13 @@
 import re
 from typing import Tuple
 
-import deepspeed
 import torch
+from accelerate import Accelerator
 from datasets import load_dataset
 from peft import LoraConfig, get_peft_model
 from torch.utils.data import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from accelerate import Accelerator
+
 from agilerl.algorithms import GRPO
 from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
@@ -229,9 +229,7 @@ def main(world_size, local_rank):
             "reduce_bucket_size": 5e8,
             "allgather_bucket_size": 5e8,
             "gather_16bit_weights_on_model_save": True,
-            "offload_optimizer": {
-            "device": "cpu"
-         }
+            "offload_optimizer": {"device": "cpu"},
         },
         "gradient_clipping": 1.0,
     }
@@ -245,7 +243,7 @@ def main(world_size, local_rank):
         batch_size=1,
         group_size=12,
         reduce_memory_peak=False,
-        accelerator=Accelerator()
+        accelerator=Accelerator(),
     )
     finetune_llm(
         agent=agent,
@@ -254,7 +252,7 @@ def main(world_size, local_rank):
         wb=False,
         checkpoint_interval=1,
         checkpoint_path="saved_llms",
-    )  
+    )
 
 
 if __name__ == "__main__":
