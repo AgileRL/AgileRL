@@ -17,7 +17,6 @@ def finetune_llm(
     env: HuggingFaceGym,
     checkpoint_interval: Optional[int] = None,
     checkpoint_path: Optional[str] = None,
-    MUT_P: Optional[InitDictType] = None,
     wb: bool = False,
     wandb_api_key: Optional[str] = None,
     evaluation_interval: Optional[int] = 10,
