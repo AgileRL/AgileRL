@@ -1,6 +1,7 @@
 import copy
 import inspect
 from abc import ABC, ABCMeta, abstractmethod
+from importlib.metadata import version
 from typing import (
     Any,
     Callable,
@@ -158,6 +159,7 @@ def get_checkpoint_dict(agent: SelfEvolvableAlgorithm) -> Dict[str, Any]:
     network_info["network_names"] = network_attr_names
     network_info["optimizer_names"] = optimizer_attr_names
     attribute_dict["network_info"] = network_info
+    attribute_dict["agilerl_version"] = version("agilerl")
 
     attribute_dict.pop("accelerator", None)
     return attribute_dict
@@ -284,6 +286,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             )
         elif isinstance(observation_space, spaces.Discrete):
             return (observation_space.n,)
+        elif isinstance(observation_space, spaces.MultiDiscrete):
+            return (sum(observation_space.nvec),)
         elif isinstance(observation_space, spaces.Box):
             return observation_space.shape
         elif isinstance(observation_space, spaces.Dict):
@@ -848,6 +852,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         )
 
         # Reconstruct evolvable modules in algorithm
+        print("Checkpoint: ", checkpoint)
         network_info: Optional[Dict[str, Dict[str, Any]]] = checkpoint.get(
             "network_info"
         )
@@ -913,6 +918,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         checkpoint["accelerator"] = accelerator
         checkpoint["device"] = device
         self = cls(**class_init_dict)
+        registry: MutationRegistry = checkpoint["registry"]
+        self.registry = registry
 
         # Reconstruct optimizers in algorithm
         optimizer_names = network_info["optimizer_names"]
@@ -958,13 +965,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         for name, optimizer in loaded_optimizers.items():
             setattr(self, name, optimizer)
-
-        # Check loaded registry is consistent with the algorithm
-        if checkpoint["registry"] != self.registry:
-            raise ValueError(
-                "Loaded registry does not match the algorithm's registry. Please make "
-                "sure you are loading the checkpoint with the correct algorithm."
-            )
 
         # Assign other attributes to the algorithm
         for attribute in EvolvableAlgorithm.inspect_attributes(self).keys():
@@ -1098,8 +1098,8 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
     :param observation_spaces: The observation spaces of the agent environments.
     :type observation_spaces: List[spaces.Space]
-    :param action_space: The action spaces of the agent environments.
-    :type action_space: List[spaces.Space]
+    :param action_spaces: The action spaces of the agent environments.
+    :type action_spaces: List[spaces.Space]
     :param agent_ids: The agent IDs of the agents in the environment.
     :type agent_ids: List[int]
     :param index: The index of the individual in the population.
@@ -1169,8 +1169,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             isinstance(space, spaces.Discrete) for space in observation_spaces
         )
         self.discrete_actions = all(
-            isinstance(space, (spaces.Discrete, spaces.MultiDiscrete))
-            for space in action_spaces
+            isinstance(space, spaces.Discrete) for space in action_spaces
         )
 
         # For continuous action spaces, store the min and max action values

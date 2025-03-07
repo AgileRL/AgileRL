@@ -28,6 +28,7 @@ jobs:
                   python -m pip install --upgrade pip
                   pip install ruff pytest pytest-cov black codespell yamlfmt isort pyupgrade
                   pip install -r requirements.txt
+                  pip install -e .
             - name: Run black
               run: |
                   black .
@@ -45,7 +46,7 @@ jobs:
                   pyupgrade --py38-plus
             - name: Test with pytest
               run: |
-                  pytest --cov=agilerl --cov-report=xml
+                  pytest --exitfirst --cov=agilerl --cov-report=xml
             - name: Upload coverage reports to Codecov
               uses: codecov/codecov-action@v3
               env:
