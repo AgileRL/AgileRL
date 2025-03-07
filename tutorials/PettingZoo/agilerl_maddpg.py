@@ -13,6 +13,7 @@ from pettingzoo.atari import space_invaders_v2
 from tqdm import trange
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
+from agilerl.algorithms.maddpg import MADDPG
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import create_population, observation_space_channels_to_first
@@ -87,7 +88,7 @@ if __name__ == "__main__":
     )
 
     # Create a population ready for evolutionary hyper-parameter optimisation
-    agent = create_population(
+    agent: MADDPG = create_population(
         INIT_HP["ALGO"],
         observation_spaces,
         action_spaces,
@@ -100,7 +101,7 @@ if __name__ == "__main__":
     )[0]
 
     # Configure the multi-agent replay buffer
-    field_names = ["state", "action", "reward", "next_state", "done"]
+    field_names = ["obs", "action", "reward", "next_obs", "done"]
     memory = MultiAgentReplayBuffer(
         INIT_HP["MEMORY_SIZE"],
         field_names=field_names,
@@ -122,20 +123,18 @@ if __name__ == "__main__":
     print("Training...")
     pbar = trange(max_steps, unit="step")
     while np.less(agent.steps[-1], max_steps):
-        state, info = env.reset()  # Reset environment at start of episode
+        obs, info = env.reset()  # Reset environment at start of episode
         scores = np.zeros((num_envs, len(agent_ids)))
         completed_episode_scores = []
         steps = 0
         if INIT_HP["CHANNELS_LAST"]:
-            state = {
-                agent_id: obs_channels_to_first(s) for agent_id, s in state.items()
-            }
+            obs = {agent_id: obs_channels_to_first(s) for agent_id, s in obs.items()}
 
         for idx_step in range(training_steps // num_envs):
 
             # Get next action from agent
             cont_actions, discrete_action = agent.get_action(
-                states=state, training=True, infos=info
+                obs=obs, training=True, infos=info
             )
             if agent.discrete_actions:
                 action = discrete_action
@@ -144,7 +143,7 @@ if __name__ == "__main__":
 
             # Act in environment
             action = {agent: env.action_space(agent).sample() for agent in env.agents}
-            next_state, reward, termination, truncation, info = env.step(action)
+            next_obs, reward, termination, truncation, info = env.step(action)
             if not termination:
                 assert False
             scores += np.array(list(reward.values())).transpose()
@@ -153,17 +152,17 @@ if __name__ == "__main__":
 
             # Image processing if necessary for the environment
             if INIT_HP["CHANNELS_LAST"]:
-                next_state = {
+                next_obs = {
                     agent_id: obs_channels_to_first(ns)
-                    for agent_id, ns in next_state.items()
+                    for agent_id, ns in next_obs.items()
                 }
 
             # Save experiences to replay buffer
             memory.save_to_memory(
-                state,
+                obs,
                 cont_actions,
                 reward,
-                next_state,
+                next_obs,
                 termination,
                 is_vectorised=True,
             )
@@ -181,6 +180,7 @@ if __name__ == "__main__":
                     experiences = memory.sample(agent.batch_size)
                     # Learn according to agent's RL algorithm
                     agent.learn(experiences)
+
             # Handle num_envs > learn step; learn multiple times per step in env
             elif len(memory) >= agent.batch_size and memory.counter > learning_delay:
                 for _ in range(num_envs // agent.learn_step):
@@ -189,7 +189,7 @@ if __name__ == "__main__":
                     # Learn according to agent's RL algorithm
                     agent.learn(experiences)
 
-            state = next_state
+            obs = next_obs
 
             # Calculate scores and reset noise for finished episodes
             reset_noise_indices = []
