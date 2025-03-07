@@ -455,6 +455,7 @@ class GRPO(RLAlgorithm):
             )
         else:
             self.actor = self.actor.to(self.device)
+            self.actor.module.gradient_checkpointing_enable()
 
     def _create_reference_policy_network(
         self, network: nn.Module
@@ -474,6 +475,7 @@ class GRPO(RLAlgorithm):
             param.requires_grad = False
         if self.accelerator is not None:
             deepspeed_plugin = self.accelerator.state.deepspeed_plugin
+            print(deepspeed_plugin)
             config_kwargs = copy.deepcopy(deepspeed_plugin.deepspeed_config)
             config_kwargs["zero_optimization"]["stage"] = 0
             self.reference_actor, *_ = deepspeed.initialize(
