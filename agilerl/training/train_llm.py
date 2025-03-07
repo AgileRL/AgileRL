@@ -43,14 +43,12 @@ def finetune_llm(
             dynamic_ncols=True,
         )
 
-    prompts = env.reset(
-        reset_dataloaders=True
-    )  # calling env.reset() supplies the first batch of training data
+    # calling env.reset() supplies the first batch of training data
+    prompts = env.reset(reset_dataloaders=True)
     for i in range(max_steps):
         completion_ids, action_masks = agent.get_action(prompts)
-        next_prompts, rewards = env.step(
-            completion_ids
-        )  # Use the reward function stored in env.step to calculate reward of the each answer from the group
+        # Use the reward function stored in env.step to calculate reward of the each answer from the group
+        next_prompts, rewards = env.step(completion_ids)
         experiences = (
             completion_ids,
             action_masks,

@@ -449,6 +449,7 @@ class GRPO(RLAlgorithm):
             optim.AdamW, networks=[self.actor], lr=self.lr
         )
         if self.accelerator is not None:
+
             self.actor, self.optimizer = self.accelerator.prepare(
                 self.actor, self.optimizer.optimizer
             )
