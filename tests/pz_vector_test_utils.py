@@ -2,6 +2,7 @@ import types
 from collections.abc import Callable
 
 import gymnasium as gym
+import numpy as np
 from gymnasium import spaces
 from gymnasium.spaces import Box, Discrete
 from pettingzoo import ParallelEnv
@@ -210,6 +211,7 @@ class CustomSpace(gym.Space):
     """Minimal custom observation space."""
 
     shape = (4,)
+    _dtype = np.float16
 
     def sample(self):
         """Generates a sample from the custom space."""
@@ -222,3 +224,7 @@ class CustomSpace(gym.Space):
     def __eq__(self, other):
         """Check if the two spaces are equal."""
         return isinstance(other, CustomSpace)
+
+    @property
+    def dtype(self):
+        return self._dtype

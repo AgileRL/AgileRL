@@ -5,10 +5,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import gymnasium as gym
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -187,9 +187,8 @@ def train_on_policy(
     checkpoint_count = 0
 
     # Pre-training mutation
-    if accelerator is None:
-        if mutation is not None:
-            pop = mutation.mutation(pop, pre_training_mut=True)
+    if accelerator is None and mutation is not None:
+        pop = mutation.mutation(pop, pre_training_mut=True)
 
     # RL training loop
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
@@ -259,7 +258,9 @@ def train_on_policy(
                             agent.scores.append(scores[idx])
                             scores[idx] = 0
 
-                pbar.update(learn_steps // len(pop))
+                    pbar.update(num_envs)
+
+                # pbar.update(learn_steps // len(pop))
 
                 if swap_channels:
                     next_state = obs_channels_to_first(next_state)

@@ -185,7 +185,7 @@ class BC_LM(nn.Module):
     def next_score(
         self,
         tokens: torch.Tensor,
-        state: Any,
+        obs: Any,
         temp: float = 1.0,
         top_k: Optional[int] = None,
         top_p: Optional[float] = None,
@@ -195,7 +195,7 @@ class BC_LM(nn.Module):
                 tokens.unsqueeze(1),
                 None,
             ),
-            {"past_key_values": state},
+            {"past_key_values": obs},
             temp=temp,
             top_k=top_k,
             top_p=top_p,

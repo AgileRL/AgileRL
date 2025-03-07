@@ -24,8 +24,9 @@ from benchmarking.networks import BasicNetActorDQN
 
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
+    # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # device = torch.device("cpu")
+
     print("============ AgileRL ============")
     print(f"DEVICE: {device}")
 
@@ -160,9 +161,9 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
 
 
 if __name__ == "__main__":
-    with open("configs/training/dqn.yaml") as file:
+    with open("configs/training/ddpg.yaml") as file:
         config = yaml.safe_load(file)
     INIT_HP = config["INIT_HP"]
     MUTATION_PARAMS = config["MUTATION_PARAMS"]
     NET_CONFIG = config["NET_CONFIG"]
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=True)
+    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False)

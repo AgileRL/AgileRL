@@ -20,8 +20,8 @@ class DummyEvolvable(EvolvableModule):
 
     .. note::
         This doesn't actually allow the user to mutate its architecture, but rather allows us
-        to use nn.Module objects as networks in an EvolvableAlgorithm. If a user wants to
-        mutate the architecture of a network, they should create their network using the EvolvableModule
+        to use nn.Module objects as networks in an ``EvolvableAlgorithm``. If a user wants to
+        mutate the architecture of a network, they should create their network using the ``EvolvableModule``
         class hierarchy directly. Please refer to the documentation for more information on how to do this.
 
     :param module_fn: Function that returns a PyTorch nn.Module object.
@@ -38,6 +38,8 @@ class DummyEvolvable(EvolvableModule):
         module_kwargs: Dict[str, Any],
         device: DeviceType,
     ) -> None:
+
+        # Initialize the module
         module = module_fn(**module_kwargs).to(device)
 
         super().__init__(device)

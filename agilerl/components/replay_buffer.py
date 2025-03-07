@@ -125,24 +125,28 @@ class ReplayBuffer:
 
         return transition
 
-    def sample(self, batch_size: int, return_idx: bool = False) -> Tuple[Any, ...]:
+    def sample(
+        self, batch_size: int, return_idx: bool = False, np_array: bool = False
+    ) -> Tuple[Any, ...]:
         """Returns sample of experiences from memory.
 
         :param batch_size: Number of samples to return
         :type batch_size: int
         :param return_idx: Boolean flag to return index of samples randomly selected, defaults to False
         :type return_idx: bool, optional
+        :param np_array: Flag to return numpy arrays instead of torch tensors, defaults to False
+        :type np_array: bool, optional
         :return: Tuple of sampled experiences
         :rtype: tuple
         """
         if return_idx:
             idxs = np.random.choice(len(self.memory), size=batch_size, replace=False)
             experiences = list(map(lambda i: self.memory[i], idxs))
-            transition = self._process_transition(experiences)
+            transition = self._process_transition(experiences, np_array)
             transition["idxs"] = idxs
         else:
             experiences = random.sample(self.memory, k=batch_size)
-            transition = self._process_transition(experiences)
+            transition = self._process_transition(experiences, np_array)
 
         return tuple(transition.values())
 

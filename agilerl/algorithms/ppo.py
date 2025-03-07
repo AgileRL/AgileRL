@@ -315,7 +315,7 @@ class PPO(RLAlgorithm):
 
     def get_action(
         self,
-        state: np.ndarray,
+        obs: np.ndarray,
         action: Optional[torch.Tensor] = None,
         grad: bool = False,
         action_mask: Optional[np.ndarray] = None,
@@ -324,8 +324,8 @@ class PPO(RLAlgorithm):
     ]:
         """Returns the next action to take in the environment.
 
-        :param state: Environment observation, or multiple observations in a batch
-        :type state: numpy.ndarray[float]
+        :param obs: Environment observation, or multiple observations in a batch
+        :type obs: numpy.ndarray[float]
         :param action: Action in environment to evaluate, defaults to None
         :type action: torch.Tensor(), optional
         :param grad: Calculate gradients on actions, defaults to False
@@ -335,19 +335,19 @@ class PPO(RLAlgorithm):
         :param preprocess_obs: Flag to preprocess observations, defaults to True
         :type preprocess_obs: bool, optional
         """
-        state = self.preprocess_observation(state)
+        obs = self.preprocess_observation(obs)
 
         if not grad:
             self.actor.eval()
             self.critic.eval()
             with torch.no_grad():
-                action_dist = self.actor(state, action_mask=action_mask)
-                state_values = self.critic(state).squeeze(-1)
+                action_dist = self.actor(obs, action_mask=action_mask)
+                state_values = self.critic(obs).squeeze(-1)
         else:
             self.actor.train()
             self.critic.train()
-            action_dist = self.actor(state, action_mask=action_mask)
-            state_values = self.critic(state).squeeze(-1)
+            action_dist = self.actor(obs, action_mask=action_mask)
+            state_values = self.critic(obs).squeeze(-1)
 
         if not isinstance(action_dist, torch.distributions.Distribution):
             raise ValueError(
@@ -470,7 +470,7 @@ class PPO(RLAlgorithm):
 
                 if len(minibatch_idxs) > 1:
                     _, log_prob, entropy, value = self.get_action(
-                        state=batch_states, action=batch_actions, grad=True
+                        obs=batch_states, action=batch_actions, grad=True
                     )
 
                     logratio = log_prob - batch_log_probs
@@ -550,22 +550,23 @@ class PPO(RLAlgorithm):
         :return: Mean test score of agent in environment
         :rtype: float
         """
+        self.set_training_mode(False)
         with torch.no_grad():
             rewards = []
             num_envs = env.num_envs if hasattr(env, "num_envs") else 1
             for i in range(loop):
-                state, info = env.reset()
+                obs, info = env.reset()
                 scores = np.zeros(num_envs)
                 completed_episode_scores = np.zeros(num_envs)
                 finished = np.zeros(num_envs)
                 step = 0
                 while not np.all(finished):
                     if swap_channels:
-                        state = obs_channels_to_first(state)
+                        obs = obs_channels_to_first(obs)
 
                     action_mask = info.get("action_mask", None)
-                    action, _, _, _ = self.get_action(state, action_mask=action_mask)
-                    state, reward, done, trunc, info = env.step(action)
+                    action, _, _, _ = self.get_action(obs, action_mask=action_mask)
+                    obs, reward, done, trunc, info = env.step(action)
                     step += 1
                     scores += np.array(reward)
                     for idx, (d, t) in enumerate(zip(done, trunc)):

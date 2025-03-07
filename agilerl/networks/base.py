@@ -1,20 +1,28 @@
+import inspect
+import warnings
 from dataclasses import asdict
-from typing import Any, Dict, Optional, TypeVar, Union
+from typing import Any, Dict, Optional, Type, TypeVar, Union
 
 import numpy as np
 import torch
 from gymnasium import spaces
 
+from agilerl.modules import (
+    EvolvableCNN,
+    EvolvableMLP,
+    EvolvableMultiInput,
+    EvolvableResNet,
+    EvolvableSimBa,
+)
 from agilerl.modules.base import EvolvableModule, ModuleMeta, mutation
-from agilerl.modules.cnn import EvolvableCNN
-from agilerl.modules.mlp import EvolvableMLP
-from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.protocols import MutationType
 from agilerl.typing import ConfigType, DeviceType, TorchObsType
 from agilerl.utils.evolvable_networks import get_default_encoder_config, is_image_space
 
 SelfEvolvableNetwork = TypeVar("SelfEvolvableNetwork", bound="EvolvableNetwork")
-SupportedEvolvable = Union[EvolvableMLP, EvolvableCNN, EvolvableMultiInput]
+DefaultEncoderType = Union[
+    EvolvableCNN, EvolvableMLP, EvolvableMultiInput, EvolvableSimBa
+]
 
 
 def assert_correct_mlp_net_config(net_config: Dict[str, Any]) -> None:
@@ -32,6 +40,24 @@ def assert_correct_mlp_net_config(net_config: Dict[str, Any]) -> None:
     assert (
         len(net_config["hidden_size"]) > 0
     ), "Net config hidden_size must contain at least one element."
+
+
+def assert_correct_simba_net_config(net_config: Dict[str, Any]) -> None:
+    """Asserts that the MLP network configuration is correct.
+
+    :param net_config: Configuration of the MLP network.
+    :type net_config: Dict[str, Any]
+    """
+    assert (
+        "hidden_size" in net_config.keys()
+    ), "Net config must contain hidden_size: int."
+    assert isinstance(
+        net_config["hidden_size"], (int, np.int64)
+    ), "Net config hidden_size must be an integer."
+    assert "num_blocks" in net_config.keys(), "Net config must contain num_blocks: int."
+    assert isinstance(
+        net_config["num_blocks"], int
+    ), "Net config num_blocks must be an integer."
 
 
 def assert_correct_cnn_net_config(net_config: Dict[str, Any]) -> None:
@@ -99,14 +125,17 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     evolvable modules, inheriting the mutation methods of any underlying evolvable module.
 
     .. note::
-        Currently, evolvable networks should only have the encoder (which is automatically
-        built from the observation space) and a 'head_net' attribute that processes the latent
-        encodings into the desired number of outputs as evolvable components. For example, in RainbowQNetwork,
-        we disable mutations for the advantage net and apply the same mutations to it as the 'value'
-        net, which is the network head in this case. Users should follow the same philosophy.
+        Currently, evolvable networks should only have the encoder (which, if not specified by the user,
+        is automatically built from the observation space) and a 'head_net' attribute that processes the
+        latent encodings into the desired number of outputs as evolvable components. For example, in
+        ``RainbowQNetwork``, we disable mutations for the advantage net and apply the same mutations to it
+        as the 'value' net, which is the network head in this case. Users should follow the same philosophy.
 
     :param observation_space: Observation space of the environment.
     :type observation_space: spaces.Space
+    :param encoder_cls: Encoder class to use for the network. Defaults to None, whereby it is
+        automatically built using an AgileRL module according the observation space.
+    :type encoder_cls: Optional[Union[str, Type[EvolvableModule]]]
     :param encoder_config: Configuration of the encoder. Defaults to None.
     :type encoder_config: Optional[ConfigType]
     :param action_space: Action space of the environment. Defaults to None.
@@ -122,30 +151,39 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     :type encoder_mutations: bool
     :param latent_dim: Dimension of the latent space representation. Defaults to 32.
     :type latent_dim: int
+    :param simba: If True, use a SimBa network for the encoder for vector spaces. Defaults to False.
+    :type simba: bool
     :param device: Device to use for the network. Defaults to "cpu".
     :type device: DeviceType
     """
 
-    encoder: SupportedEvolvable
-    head_net: SupportedEvolvable
+    encoder: EvolvableModule
+    head_net: EvolvableModule
+
+    # Custom encoder aliases
+    _encoder_aliases: Dict[str, Type[EvolvableModule]] = {
+        "ResNet": EvolvableResNet,
+    }
 
     def __init__(
         self,
         observation_space: spaces.Space,
+        encoder_cls: Optional[Union[str, Type[EvolvableModule]]] = None,
         encoder_config: Optional[ConfigType] = None,
         action_space: Optional[spaces.Space] = None,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
         n_agents: Optional[int] = None,
         latent_dim: int = 32,
+        simba: bool = False,
         device: DeviceType = "cpu",
     ) -> None:
         super().__init__(device)
 
         if encoder_config is None:
-            encoder_config = get_default_encoder_config(observation_space)
+            encoder_config = get_default_encoder_config(observation_space, simba=simba)
 
-        # For multi-agent settings, we use a depth corresponding to that of the
+        # NOTE: For multi-agent settings, we use a depth corresponding to that of the
         # sample input for the kernel of the first layer of CNN-based networks
         if n_agents is not None and "kernel_size" in encoder_config.keys():
             encoder_config = EvolvableNetwork.modify_multi_agent_config(
@@ -158,7 +196,9 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         self.latent_dim = latent_dim
         self.min_latent_dim = min_latent_dim
         self.max_latent_dim = max_latent_dim
+        self.encoder_cls = encoder_cls
         self.device = device
+        self.simba = simba
 
         encoder_config = (
             encoder_config
@@ -172,7 +212,28 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             activation = encoder_config.get("activation", "ReLU")
             encoder_config["output_activation"] = activation
 
-        self.encoder = self._build_encoder(encoder_config)
+        if encoder_cls is not None:
+            if isinstance(encoder_cls, str):
+                self.encoder_cls = self._encoder_aliases[encoder_cls]
+            elif not issubclass(encoder_cls, EvolvableModule):
+                raise TypeError("Encoder class must be a subclass of EvolvableModule.")
+
+            # Check if encoder config contains `num_outputs` as input argument, in which
+            # case we can enable latent space mutations. Otherwise, we disable them.
+            input_args = inspect.getfullargspec(self.encoder_cls.__init__).args
+            if "num_outputs" not in input_args:
+                warnings.warn(
+                    "Custom encoder does not contain `num_outputs` as an input argument. "
+                    "Disabling latent space mutations. Make sure to set the number of "
+                    "outputs to the latent dimension in the encoder configuration."
+                )
+                self.filter_mutation_methods("latent")
+            else:
+                encoder_config["num_outputs"] = self.latent_dim
+
+            self.encoder = self.encoder_cls(**encoder_config)
+        else:
+            self.encoder = self._build_encoder(encoder_config)
 
         # NOTE: We disable layer mutations for the encoder since this usually adds a lot
         # of variance to the optimization process
@@ -185,7 +246,11 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         :return: Initial dictionary for the network.
         :rtype: Dict[str, Any]
         """
-        return self.encoder.net_config
+        return (
+            self.encoder.net_config
+            if self.encoder_cls is None
+            else self.encoder.init_dict
+        )
 
     @property
     def head_config(self) -> Dict[str, Any]:
@@ -268,7 +333,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             **net_config,
         )
 
-    def modules(self) -> Dict[str, SupportedEvolvable]:
+    def modules(self) -> Dict[str, EvolvableModule]:
         """Modules of the network.
 
         :return: Modules of the network.
@@ -347,7 +412,19 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
 
         return {"numb_new_nodes": numb_new_nodes}
 
-    def _build_encoder(self, net_config: Dict[str, Any]) -> SupportedEvolvable:
+    def recreate_encoder(self: SelfEvolvableNetwork) -> None:
+        """Recreate the encoder of the network."""
+        if self.encoder_cls is not None:
+            # Need to change `num_outputs` to the latent dimension after a mutation
+            init_dict = self.encoder.init_dict
+            init_dict["num_outputs"] = self.latent_dim
+            encoder = self.encoder_cls(**init_dict)
+        else:
+            encoder = self._build_encoder(self.encoder.net_config)
+
+        self.encoder = EvolvableModule.preserve_parameters(self.encoder, encoder)
+
+    def _build_encoder(self, net_config: Dict[str, Any]) -> DefaultEncoderType:
         """Builds the encoder for the network based on the environments observation space.
 
         :return: Encoder module.
@@ -374,9 +451,14 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                 **net_config,
             )
         else:
-            # assert_correct_mlp_net_config(net_config)
+            if self.simba:
+                assert_correct_simba_net_config(net_config)
+                encoder_mlp_cls = EvolvableSimBa
+            else:
+                assert_correct_mlp_net_config(net_config)
+                encoder_mlp_cls = EvolvableMLP
 
-            encoder = EvolvableMLP(
+            encoder = encoder_mlp_cls(
                 num_inputs=spaces.flatdim(self.observation_space),
                 num_outputs=self.latent_dim,
                 device=self.device,

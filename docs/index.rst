@@ -23,6 +23,8 @@ Streamlining reinforcement learning.
 
    **✨ NEW: AgileRL 2.0 is here! Check out the latest powerful** :ref:`updates <agilerl2changes>` **✨**
 
+   **🚀 Train super-fast for free on** `Arena <https://arena.agilerl.com>`_ **, the RLOps platform from AgileRL 🚀**
+
 **AgileRL** is a Deep Reinforcement Learning library focused on improving development by introducing RLOps - MLOps for reinforcement learning.
 
 This library is initially focused on reducing the time taken for training models and hyperparameter optimisation (HPO) by pioneering evolutionary HPO techniques for reinforcement learning.
@@ -38,6 +40,23 @@ Join the AgileRL `Discord server <https://discord.com/invite/eB8HyTA2ux>`_ to as
    AgileRL offers 10x faster hyperparameter optimization than SOTA.
 
    Global steps is the sum of every step taken by any agent in the environment, including across an entire population, during the entire hyperparameter optimization process.
+
+Installation
+------------
+
+Install as a package with pip:
+
+.. code-block:: bash
+
+   pip install agilerl
+
+Or install in development mode:
+
+.. code-block:: bash
+
+   git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
+   pip install -e .
+
 
 Contents
 --------
@@ -116,42 +135,3 @@ AgileRL also supports multi-agent reinforcement learning using the Petting Zoo-s
 .. figure:: https://github-production-user-asset-6210df.s3.amazonaws.com/118982716/264712154-4965ea5f-b777-423c-989b-e4db86eda3bd.png
    :width: 700px
    :align: center
-
-
-Installation
-------------
-
-Install as a package with pip:
-
-.. code-block:: bash
-
-   pip install agilerl
-
-Or install in development mode:
-
-.. code-block:: bash
-
-   git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
-   pip install -e .
-
-Demo:
-
-.. code-block:: bash
-
-   cd demos
-   python demo_online.py
-
-or to demo distributed training:
-
-.. code-block:: bash
-
-   cd demos
-   accelerate launch --config_file configs/accelerate/accelerate.yaml demos/demo_online_distributed.py
-
-
-Tutorials
----------
-
-We have created tutorials on how to use AgileRL and train agents on a variety of tasks. Currently, we have tutorials for single-agent :ref:`Gymnasium tasks<Gymnasium_tutorials>`,
-multi-agent :ref:`PettingZoo environments<PettingZoo_tutorials>`, learning :ref:`hierarchical skills<skills_tutorials>` and using :ref:`contextual multi-armed bandits<bandit_tutorials>`.
-Our demo files also provide examples on how to train agents using AgileRL, and there are various algorithm-level examples throughout the documentation.

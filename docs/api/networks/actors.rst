@@ -1,5 +1,14 @@
 .. _actors:
 
+EvolvableDistribution
+=====================
+
+Parameters
+----------
+
+.. autoclass:: agilerl.networks.actors.EvolvableDistribution
+  :members:
+
 DeterministicActor
 ==================
 

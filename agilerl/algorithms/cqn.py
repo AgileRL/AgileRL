@@ -14,7 +14,7 @@ from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.q_networks import QNetwork
-from agilerl.typing import GymEnvType, NumpyObsType
+from agilerl.typing import GymEnvType, ObservationType
 from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 
 
@@ -161,7 +161,7 @@ class CQN(RLAlgorithm):
 
     def get_action(
         self,
-        obs: NumpyObsType,
+        obs: ObservationType,
         epsilon: float = 0,
         action_mask: Optional[ArrayLike] = None,
     ) -> ArrayLike:
@@ -169,8 +169,8 @@ class CQN(RLAlgorithm):
         probability of taking a random action, used for exploration.
         For greedy behaviour, set epsilon to 0.
 
-        :param state: State observation, or multiple observations in a batch
-        :type state: numpy.ndarray[float]
+        :param obs: State observation, or multiple observations in a batch
+        :type obs: numpy.ndarray[float]
         :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
@@ -179,16 +179,16 @@ class CQN(RLAlgorithm):
         :return: Action to take in the environment
         :rtype: numpy.ndarray[int]
         """
-        state = self.preprocess_observation(obs)
+        obs = self.preprocess_observation(obs)
 
         # epsilon-greedy
         if random.random() < epsilon:
             if action_mask is None:
-                action = np.random.randint(0, self.action_dim, size=len(state))
+                action = np.random.randint(0, self.action_dim, size=len(obs))
             else:
                 action = np.argmax(
                     (
-                        np.random.uniform(0, 1, (len(state), self.action_dim))
+                        np.random.uniform(0, 1, (len(obs), self.action_dim))
                         * action_mask
                     ),
                     axis=1,
@@ -197,7 +197,7 @@ class CQN(RLAlgorithm):
         else:
             self.actor.eval()
             with torch.no_grad():
-                action_values = self.actor(state).cpu().data.numpy()
+                action_values = self.actor(obs).cpu().data.numpy()
             self.actor.train()
 
             if action_mask is None:
@@ -213,7 +213,7 @@ class CQN(RLAlgorithm):
         """Updates agent network parameters to learn from experiences.
 
         :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
-        :type state: list[torch.Tensor[float]]
+        :type obs: list[torch.Tensor[float]]
 
         :return: Loss from learning
         :rtype: float
@@ -287,22 +287,24 @@ class CQN(RLAlgorithm):
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
         :type loop: int, optional
         """
+        self.set_training_mode(False)
+
         with torch.no_grad():
             rewards = []
             num_envs = env.num_envs if hasattr(env, "num_envs") else 1
             for i in range(loop):
-                state, info = env.reset()
+                obs, info = env.reset()
                 scores = np.zeros(num_envs)
                 completed_episode_scores = np.zeros(num_envs)
                 finished = np.zeros(num_envs)
                 step = 0
                 while not np.all(finished):
                     if swap_channels:
-                        state = obs_channels_to_first(state)
+                        obs = obs_channels_to_first(obs)
 
                     action_mask = info.get("action_mask", None)
-                    action = self.get_action(state, epsilon=0, action_mask=action_mask)
-                    state, reward, done, trunc, info = env.step(action)
+                    action = self.get_action(obs, epsilon=0, action_mask=action_mask)
+                    obs, reward, done, trunc, info = env.step(action)
                     step += 1
                     scores += np.array(reward)
                     for idx, (d, t) in enumerate(zip(done, trunc)):

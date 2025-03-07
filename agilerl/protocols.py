@@ -10,6 +10,7 @@ from typing import (
     Protocol,
     Tuple,
     Type,
+    TypeVar,
     Union,
     runtime_checkable,
 )
@@ -20,6 +21,8 @@ from numpy.typing import ArrayLike
 from torch.optim.optimizer import Optimizer
 
 NumpyObsType = Union[ArrayLike, Dict[str, ArrayLike], Tuple[ArrayLike, ...]]
+TorchObsType = Union[torch.Tensor, Dict[str, torch.Tensor], Tuple[torch.Tensor, ...]]
+ObservationType = Union[NumpyObsType, TorchObsType]
 DeviceType = Union[str, torch.device]
 
 
@@ -111,6 +114,9 @@ class MutationRegistry(Protocol):
     def networks(self) -> List[NetworkConfig]: ...
 
 
+SelfEvolvableAlgorithm = TypeVar("SelfEvolvableAlgorithm", bound="EvolvableAlgorithm")
+
+
 @runtime_checkable
 class EvolvableAlgorithm(Protocol):
     device: Union[str, torch.device]
@@ -124,17 +130,35 @@ class EvolvableAlgorithm(Protocol):
 
     def unwrap_models(self) -> None: ...
     def wrap_models(self) -> None: ...
-    def load(cls, path: str) -> "EvolvableAlgorithm": ...
+    def load(
+        cls: Type[SelfEvolvableAlgorithm], path: str
+    ) -> SelfEvolvableAlgorithm: ...
     def load_checkpoint(
         self, path: str, device: str, accelerator: Optional[Accelerator]
     ) -> None: ...
     def save_checkpoint(self, path: str) -> None: ...
-    def learn(self, experiences: Tuple[Iterable[ArrayLike], ...], **kwargs) -> None: ...
-    def get_action(self, state: NumpyObsType, **kwargs) -> Any: ...
+    def learn(
+        self, experiences: Tuple[Iterable[ObservationType], ...], **kwargs
+    ) -> None: ...
+    def get_action(self, obs: ObservationType, **kwargs) -> Any: ...
     def test(self, *args, **kwargs) -> ArrayLike: ...
     def evolvable_attributes(
         self, networks_only: bool = False
     ) -> EvolvableAttributeDict: ...
-    def inspect_attributes(self, input_args_only: bool = False) -> Dict[str, Any]: ...
-    def clone(self, index: Optional[int], wrap: bool) -> "EvolvableAlgorithm": ...
+    def inspect_attributes(
+        agent: SelfEvolvableAlgorithm, input_args_only: bool = False
+    ) -> Dict[str, Any]: ...
+    def clone(
+        self: SelfEvolvableAlgorithm, index: Optional[int], wrap: bool
+    ) -> SelfEvolvableAlgorithm: ...
     def recompile(self) -> None: ...
+
+
+@runtime_checkable
+class AgentWrapper(Protocol):
+    agent: EvolvableAlgorithm
+
+    def get_action(self, obs: ObservationType, **kwargs) -> Any: ...
+    def learn(
+        self, experiences: Tuple[Iterable[ObservationType], ...], **kwargs
+    ) -> None: ...
