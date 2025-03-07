@@ -71,7 +71,7 @@ are more likely to remain present in the population. The sequence of evolution (
     env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
 
     observation_space = env.single_observation_space
-    action_space - env.single_action_space
+    action_space = env.single_action_space
 
     if INIT_HP['CHANNELS_LAST']:
         observation_space = observation_space_channels_to_first(observation_space)
@@ -186,7 +186,7 @@ Alternatively, use a custom training loop. Combining all of the above:
     env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
 
     observation_space = env.single_observation_space
-    action_space - env.single_action_space
+    action_space = env.single_action_space
 
     if INIT_HP['CHANNELS_LAST']:
         observation_space = observation_space_channels_to_first(observation_space)
