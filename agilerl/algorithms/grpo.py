@@ -67,6 +67,10 @@ class GRPO(RLAlgorithm):
     :type calc_position_embeddings: bool, optional
     :param reduce_memory_peak: Flag to reduce memory peak in the _get_log_probs method, defaults to False
     :type reduce_memory_peak: bool, optional
+    :param min_output_tokens: Minimum output tokens, defaults to 256
+    :type min_output_tokens: int, optional
+    :param accelerator: Accelerator for distributed computing, defaults to None
+    :type accelerator: accelerate.Accelerator(), optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     """
@@ -89,6 +93,7 @@ class GRPO(RLAlgorithm):
         temperature: float = 0.9,
         calc_position_embeddings: bool = True,
         reduce_memory_peak: bool = False,
+        min_output_tokens: int = 256,
         accelerator: Optional[Accelerator] = None,
         device: str = "cpu",
     ) -> None:
@@ -136,6 +141,7 @@ class GRPO(RLAlgorithm):
             do_sample=True,
             temperature=temperature,
             max_new_tokens=action_space.shape[0],
+            min_new_tokens=min_output_tokens,
             pad_token_id=pad_token_id,
         )
         if max_grad_norm and accelerator is not None:
