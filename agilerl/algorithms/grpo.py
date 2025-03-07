@@ -94,7 +94,7 @@ class GRPO(RLAlgorithm):
     ) -> None:
         device = (
             f"cuda:{os.getenv('LOCAL_RANK', '0')}"
-            if accelerator is not None
+            if accelerator is not None and torch.cuda.is_available()
             else device
         )
         super().__init__(
@@ -303,7 +303,7 @@ class GRPO(RLAlgorithm):
         :rtype: torch.Tensor
         """
         if len(rewards.shape) == 1:
-            rewards = rewards.unsqueeze(-1)
+            rewards = rewards.unsqueeze(0)
         advantage = (rewards - rewards.mean(dim=1).unsqueeze(1)) / (
             rewards.std(dim=1).unsqueeze(1) + eps
         )
@@ -449,7 +449,6 @@ class GRPO(RLAlgorithm):
             optim.AdamW, networks=[self.actor], lr=self.lr
         )
         if self.accelerator is not None:
-
             self.actor, self.optimizer = self.accelerator.prepare(
                 self.actor, self.optimizer.optimizer
             )
@@ -465,7 +464,7 @@ class GRPO(RLAlgorithm):
         :param network: Pre-trained LLM
         :type network: PreTrainedModel
         :param ds_config: Deepspeed config
-        :type ds_config: Union[Dict[str, Any], None]
+        :type ds_config: Union[Dict[str, Any], None]Í
         :return: Policy network and reference network
         :rtype: Union[nn.Module, DeepSpeedEngine]
         """
@@ -475,7 +474,6 @@ class GRPO(RLAlgorithm):
             param.requires_grad = False
         if self.accelerator is not None:
             deepspeed_plugin = self.accelerator.state.deepspeed_plugin
-            print(deepspeed_plugin)
             config_kwargs = copy.deepcopy(deepspeed_plugin.deepspeed_config)
             config_kwargs["zero_optimization"]["stage"] = 0
             self.reference_actor, *_ = deepspeed.initialize(
