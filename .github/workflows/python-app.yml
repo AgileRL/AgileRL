@@ -14,7 +14,7 @@ jobs:
     build:
         runs-on: gha-runner-scale-set
         container:
-            image: python:3.11
+            image: 761296822462.dkr.ecr.us-east-1.amazonaws.com/containers/ray/ray-worker:py310-cu128-runner-b1
             options: --user root
 
         steps:
