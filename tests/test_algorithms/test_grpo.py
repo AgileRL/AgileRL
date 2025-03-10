@@ -1,4 +1,5 @@
 import copy
+import os
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
@@ -98,7 +99,9 @@ class DummyLLM(nn.Module):
         self.max_tokens = max_tokens
         self.vocab_size = vocab_size
         self.net = nn.Linear(
-            input_size + max_tokens, (input_size + max_tokens) * vocab_size
+            input_size + max_tokens,
+            (input_size + max_tokens) * vocab_size,
+            device=device,
         )
         self.device = device
         self.gradient_checkpointing_enabled = False
@@ -198,6 +201,15 @@ def grpo(vocab_size, input_size, max_tokens, group_size, use_accelerator):
 def test_init_grpo(
     grpo, vocab_size, input_size, max_tokens, group_size, use_accelerator
 ):
+    if use_accelerator:
+        device = (
+            f"cuda:{os.getenv('LOCAL_RANK', '0')}"
+            if torch.cuda.is_available()
+            else "cpu"
+        )
+    else:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
     assert isinstance(grpo.observation_space, gym.spaces.Box)
     assert isinstance(grpo.action_space, gym.spaces.Box)
     assert grpo.batch_size == 8
@@ -209,7 +221,8 @@ def test_init_grpo(
     assert grpo.group_size == group_size
     assert grpo.temperature == 0.9
     assert grpo.calc_position_embeddings
-    assert grpo.device == "cuda" if torch.cuda.is_available() else "cpu"
+
+    assert grpo.device == device
     assert grpo.index == 0
     assert grpo.scores == []
     assert grpo.fitness == []
