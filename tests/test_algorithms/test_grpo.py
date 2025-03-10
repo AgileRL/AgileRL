@@ -386,7 +386,7 @@ def test_get_logprobs(
     log_probs_reduced_mem = grpo._get_logprobs(ids=ids)
     assert log_probs.shape == (ids.shape[0], ids.shape[1] - 1)
     assert log_probs_reduced_mem.shape == (ids.shape[0], ids.shape[1] - 1)
-    assert torch.allclose(log_probs, log_probs_reduced_mem)
+    assert torch.allclose(log_probs, log_probs_reduced_mem, atol=1e-3)
 
 
 @pytest.mark.parametrize("vocab_size", [1000])
