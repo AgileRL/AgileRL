@@ -3,6 +3,7 @@ from .cqn import CQN
 from .ddpg import DDPG
 from .dqn import DQN
 from .dqn_rainbow import RainbowDQN
+from .grpo import GRPO
 from .ilql import ILQL
 from .maddpg import MADDPG
 from .matd3 import MATD3
@@ -26,4 +27,5 @@ __all__ = [
     "NeuralUCB",
     "PPO",
     "TD3",
+    "GRPO",
 ]

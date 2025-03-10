@@ -1,5 +1,7 @@
 import os
 
+from accelerate import Accelerator
+
 
 def convert_path(path):
     if path is None:
@@ -7,11 +9,11 @@ def convert_path(path):
     return os.path.join(os.path.dirname(os.path.realpath(__file__)), "../../", path)
 
 
-def add_system_configs(cfg, accelerator):
+def add_system_configs(cfg, accelerator: Accelerator):
     cfg["system"] = {}
     cfg["system"]["device"] = str(accelerator.device)
     cfg["system"]["num_processes"] = accelerator.num_processes
-    cfg["system"]["use_fp16"] = accelerator.use_fp16
+    cfg["system"]["use_fp16"] = accelerator.mixed_precision != "no"
     return cfg["system"]
 
 

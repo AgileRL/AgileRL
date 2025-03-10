@@ -32,7 +32,7 @@ def test_add_system_configs():
 
     assert config["device"] == str(accelerator.device)
     assert config["num_processes"] == accelerator.num_processes
-    assert config["use_fp16"] == accelerator.use_fp16
+    assert config["use_fp16"] == (accelerator.mixed_precision != "no")
 
 
 def test_to_bin_none():
