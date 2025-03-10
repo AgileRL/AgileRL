@@ -690,9 +690,10 @@ def stack_and_pad_experiences(
             padding_sizes = [(max_size - e.shape[-1]) for e in exp]
             if sum(padding_sizes) != 0:
                 exp = [
-                    F.pad(e, (padding_size, 0), value=padding)
+                    F.pad(e, (0, padding_size), value=padding)
                     for e, padding_size in zip(exp, padding_sizes)
                 ]
+
             stacked_exp = torch.cat(exp, dim=0)
         else:
             raise TypeError(f"Unsupported experience type: {type(exp[0])}")
