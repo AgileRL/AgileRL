@@ -436,6 +436,7 @@ class GRPO(RLAlgorithm):
         :return: Policy network and reference network
         :rtype: Tuple[Union[nn.Module, DeepSpeedEngine], Union[Optimizer, DeepSpeedOptimizerType]]
         """
+        print(AcceleratorState())
         if self.accelerator is not None and (
             AcceleratorState().deepspeed_plugin.deepspeed_config[
                 "train_micro_batch_size_per_gpu"
