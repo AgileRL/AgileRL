@@ -436,7 +436,7 @@ class GRPO(RLAlgorithm):
         :return: Policy network and reference network
         :rtype: Tuple[Union[nn.Module, DeepSpeedEngine], Union[Optimizer, DeepSpeedOptimizerType]]
         """
-        if (
+        if self.accelerator is not None and (
             AcceleratorState().deepspeed_plugin.deepspeed_config[
                 "train_micro_batch_size_per_gpu"
             ]
@@ -445,6 +445,7 @@ class GRPO(RLAlgorithm):
             AcceleratorState().deepspeed_plugin.deepspeed_config[
                 "train_micro_batch_size_per_gpu"
             ] = 2
+
         self.actor = copy.deepcopy(network)
         self.optimizer = OptimizerWrapper(
             optim.AdamW, networks=[self.actor], lr=self.lr
