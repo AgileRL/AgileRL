@@ -83,7 +83,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
         activation=MUTATION_PARAMS["ACT_MUT"],
         rl_hp=MUTATION_PARAMS["RL_HP_MUT"],
         mutation_sd=MUTATION_PARAMS["MUT_SD"],
-        agent_ids=INIT_HP["AGENT_IDS"],
         rand_seed=MUTATION_PARAMS["RAND_SEED"],
         device=device,
         accelerator=accelerator,
