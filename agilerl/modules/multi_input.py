@@ -131,6 +131,12 @@ class EvolvableMultiInput(EvolvableModule):
         assert isinstance(
             observation_space, (spaces.Dict, spaces.Tuple)
         ), "Observation space must be a Dict or Tuple space."
+        assert (
+            latent_dim <= max_latent_dim
+        ), "Latent dimension must be less than or equal to max latent dimension."
+        assert (
+            latent_dim >= min_latent_dim
+        ), "Latent dimension must be greater than or equal to min latent dimension."
 
         subspaces = (
             observation_space.spaces.values()

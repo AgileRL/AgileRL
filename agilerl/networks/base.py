@@ -180,6 +180,13 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     ) -> None:
         super().__init__(device)
 
+        assert (
+            latent_dim <= max_latent_dim
+        ), "Latent dimension must be less than or equal to max latent dimension."
+        assert (
+            latent_dim >= min_latent_dim
+        ), "Latent dimension must be greater than or equal to min latent dimension."
+
         if encoder_config is None:
             encoder_config = get_default_encoder_config(observation_space, simba=simba)
 
