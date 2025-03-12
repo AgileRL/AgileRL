@@ -9,6 +9,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from accelerate.optimizer import AcceleratedOptimizer
+from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from gymnasium import spaces
 from tensordict.nn import CudaGraphModule
 from torch._dynamo import OptimizedModule
@@ -240,7 +241,7 @@ def recursive_check_module_attrs(obj: Any, networks_only: bool = False) -> bool:
     """
     check_types = (OptimizedModule, EvolvableModule)
     if not networks_only:
-        check_types += (OptimizerWrapper,)
+        check_types += (OptimizerWrapper, DeepSpeedOptimizerWrapper)
 
     if isinstance(obj, check_types):
         return True
@@ -664,6 +665,39 @@ def stack_experiences(
 
         stacked_experiences.append(stacked_exp)
 
+    return tuple(stacked_experiences)
+
+
+def stack_and_pad_experiences(
+    *experiences: MaybeObsList, padding_values: List[Union[int, float, bool]]
+) -> Tuple[ArrayOrTensor, ...]:
+    """Stacks experiences into a single tensor, padding them to the maximum length.
+
+    :param experiences: Experiences to stack
+    :type experiences: list[numpy.ndarray[float]] or list[dict[str, numpy.ndarray[float]]]
+    :param to_torch: If True, convert the stacked experiences to a torch tensor, defaults to True
+    :type to_torch: bool, optional
+
+    :return: Stacked experiences
+    :rtype: Tuple[ArrayOrTensor, ...]
+    """
+    stacked_experiences = []
+    for exp, padding in zip(experiences, padding_values):
+        if not isinstance(exp, list):
+            stacked_exp = exp
+        elif isinstance(exp[0], torch.Tensor):
+            max_size = max(e.shape[-1] for e in exp)
+            padding_sizes = [(max_size - e.shape[-1]) for e in exp]
+            if sum(padding_sizes) != 0:
+                exp = [
+                    F.pad(e, (0, padding_size), value=padding)
+                    for e, padding_size in zip(exp, padding_sizes)
+                ]
+
+            stacked_exp = torch.cat(exp, dim=0)
+        else:
+            raise TypeError(f"Unsupported experience type: {type(exp[0])}")
+        stacked_experiences.append(stacked_exp)
     return tuple(stacked_experiences)
 
 

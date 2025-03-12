@@ -216,7 +216,7 @@ def train_multi_agent(
         pop_episode_scores = []
         pop_fps = []
         for agent_idx, agent in enumerate(pop):  # Loop through population
-            state, info = env.reset()  # Reset environment at start of episode
+            obs, info = env.reset()  # Reset environment at start of episode
             scores = (
                 np.zeros((num_envs, 1))
                 if sum_scores
@@ -228,21 +228,21 @@ def train_multi_agent(
 
             if swap_channels:
                 if not is_vectorised:
-                    state = {
+                    obs = {
                         agent_id: obs_channels_to_first(np.expand_dims(s, 0))
-                        for agent_id, s in state.items()
+                        for agent_id, s in obs.items()
                     }
                 else:
-                    state = {
+                    obs = {
                         agent_id: obs_channels_to_first(s)
-                        for agent_id, s in state.items()
+                        for agent_id, s in obs.items()
                     }
 
             start_time = time.time()
             for idx_step in range(evo_steps // num_envs):
                 # Get next action from agent
                 cont_actions, discrete_action = agent.get_action(
-                    states=state, training=True, infos=info
+                    obs=obs, training=True, infos=info
                 )
                 if agent.discrete_actions:
                     action = discrete_action
@@ -256,7 +256,7 @@ def train_multi_agent(
                     }
 
                 # Act in environment
-                next_state, reward, termination, truncation, info = env.step(action)
+                next_obs, reward, termination, truncation, info = env.step(action)
                 score_increment = (
                     (
                         np.sum(np.array(list(reward.values())).transpose(), axis=-1)[
@@ -277,19 +277,17 @@ def train_multi_agent(
                 # Save experience to replay buffer
                 if swap_channels:
                     if not is_vectorised:
-                        state = {
-                            agent_id: np.squeeze(s) for agent_id, s in state.items()
-                        }
-                    next_state = {
+                        obs = {agent_id: np.squeeze(s) for agent_id, s in obs.items()}
+                    next_obs = {
                         agent_id: np.moveaxis(ns, [-1], [-3])
-                        for agent_id, ns in next_state.items()
+                        for agent_id, ns in next_obs.items()
                     }
 
                 memory.save_to_memory(
-                    state,
+                    obs,
                     cont_actions,
                     reward,
-                    next_state,
+                    next_obs,
                     termination,
                     is_vectorised=is_vectorised,
                 )
@@ -324,12 +322,12 @@ def train_multi_agent(
 
                 # Update the state
                 if swap_channels and not is_vectorised:
-                    next_state = {
+                    next_obs = {
                         agent_id: np.expand_dims(ns, 0)
-                        for agent_id, ns in next_state.items()
+                        for agent_id, ns in next_obs.items()
                     }
 
-                state = next_state
+                obs = next_obs
 
                 reset_noise_indices = []
                 # Find which agents are "done" - i.e. terminated or truncated
@@ -350,7 +348,7 @@ def train_multi_agent(
                         scores[idx].fill(0)
                         reset_noise_indices.append(idx)
                         if not is_vectorised:
-                            state, info = env.reset()
+                            obs, info = env.reset()
                 agent.reset_action_noise(reset_noise_indices)
 
             pbar.update(evo_steps // len(pop))

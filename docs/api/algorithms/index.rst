@@ -28,5 +28,6 @@ Reinforcement learning algorithms implemented:
    td3
    maddpg
    matd3
+   grpo
    neural_ucb
    neural_ts
