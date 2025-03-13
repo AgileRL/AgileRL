@@ -423,7 +423,7 @@ function and is an example of how we might choose to train our agent to exhibit 
 Loading a Trained Agent for Inference
 -------------------------------------
 Once we have finetuned our LLM, we may want to use it for inference. Below outlines how to load the model
-in this tutorial, this `forum <https://discuss.huggingface.co/t/save-load-and-do-inference-with-fine-tuned-model/76291/2>_`
+in this tutorial, this `forum <https://discuss.huggingface.co/t/save-load-and-do-inference-with-fine-tuned-model/76291/2>`_
 provides more info for loading finetuned models.
 
 Load fine-tuned LLM
