@@ -5,11 +5,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import gymnasium as gym
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from tqdm import trange
 
+import wandb
+from agilerl.algorithms import DDPG, DQN, TD3, RainbowDQN
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.components.replay_buffer import (
     MultiStepReplayBuffer,
@@ -245,10 +246,10 @@ def train_off_policy(
             completed_episode_scores, losses = [], []
             steps = 0
 
-            if algo in ["DQN", "Rainbow DQN"]:
+            if isinstance(agent, (DQN, RainbowDQN)):
                 train_actions_hist = [0] * agent.action_dim
 
-            if algo in ["DQN"]:
+            if isinstance(agent, DQN):
                 epsilon = eps_start
 
             start_time = time.time()
@@ -257,18 +258,18 @@ def train_off_policy(
                     state = obs_channels_to_first(state)
 
                 # Get next action from agent
-                if algo in ["DQN"]:
+                if isinstance(agent, DQN):
                     action_mask = info.get("action_mask", None)
                     action = agent.get_action(state, epsilon, action_mask=action_mask)
                     # Decay epsilon for exploration
                     epsilon = max(eps_end, epsilon * eps_decay)
-                elif algo in ["Rainbow DQN"]:
+                elif isinstance(agent, RainbowDQN):
                     action_mask = info.get("action_mask", None)
                     action = agent.get_action(state, action_mask=action_mask)
                 else:
                     action = agent.get_action(state)
 
-                if algo in ["DQN", "Rainbow DQN"]:
+                if isinstance(agent, (DQN, RainbowDQN)):
                     for a in action:
                         if not isinstance(a, int):
                             a = int(a)
@@ -293,51 +294,37 @@ def train_off_policy(
                         scores[idx] = 0
                         reset_noise_indices.append(idx)
 
-                if agent.algo in ["DDPG", "TD3"]:
+                # TODO: Ideally we want to do this in a generalised way
+                if isinstance(agent, (DDPG, TD3)):
                     agent.reset_action_noise(reset_noise_indices)
 
                 total_steps += num_envs
                 steps += num_envs
 
                 # Save experience to replay buffer
+                next_state = (
+                    obs_channels_to_first(next_state) if swap_channels else next_state
+                )
                 if n_step_memory is not None:
-                    if swap_channels:
-                        one_step_transition = n_step_memory.save_to_memory_vect_envs(
-                            state,
-                            action,
-                            reward,
-                            obs_channels_to_first(next_state),
-                            done,
-                        )
-                    else:
-                        one_step_transition = n_step_memory.save_to_memory_vect_envs(
-                            state,
-                            action,
-                            reward,
-                            next_state,
-                            done,
-                        )
+                    one_step_transition = n_step_memory.save_to_memory_vect_envs(
+                        state,
+                        action,
+                        reward,
+                        next_state,
+                        done,
+                    )
+
                     if one_step_transition:
                         memory.save_to_memory_vect_envs(*one_step_transition)
                 else:
-                    if swap_channels:
-                        memory.save_to_memory(
-                            state,
-                            action,
-                            reward,
-                            obs_channels_to_first(next_state),
-                            done,
-                            is_vectorised=is_vectorised,
-                        )
-                    else:
-                        memory.save_to_memory(
-                            state,
-                            action,
-                            reward,
-                            next_state,
-                            done,
-                            is_vectorised=is_vectorised,
-                        )
+                    memory.save_to_memory(
+                        state,
+                        action,
+                        reward,
+                        next_state,
+                        done,
+                        is_vectorised=is_vectorised,
+                    )
 
                 if per:
                     fraction = min(
@@ -378,7 +365,7 @@ def train_off_policy(
                                 loss, *_ = agent.learn(experiences, n_step=n_step)
                             else:
                                 loss = agent.learn(experiences)
-                                if algo == "Rainbow DQN":
+                                if isinstance(agent, RainbowDQN):
                                     loss, *_ = loss
 
                 elif (
@@ -411,7 +398,7 @@ def train_off_policy(
                                 loss, *_ = agent.learn(experiences, n_step=n_step)
                             else:
                                 loss = agent.learn(experiences)
-                                if algo == "Rainbow DQN":
+                                if isinstance(agent, RainbowDQN):
                                     loss, *_ = loss
 
                 if loss is not None:
@@ -437,7 +424,7 @@ def train_off_policy(
 
                 pop_loss[agent_idx].append(mean_loss)
 
-        if algo in ["DQN"]:
+        if isinstance(agent, DQN):
             # Reset epsilon start to final epsilon value of this epoch
             eps_start = epsilon
 
@@ -478,13 +465,13 @@ def train_off_policy(
             }
 
             # Create the loss dictionaries
-            if algo in ["Rainbow DQN", "DQN"]:
+            if isinstance(agent, (DQN, RainbowDQN)):
                 actor_loss_dict = {
                     f"train/agent_{index}_actor_loss": np.mean(loss[-10:])
                     for index, loss in enumerate(pop_loss)
                 }
                 wandb_dict.update(actor_loss_dict)
-            elif algo in ["TD3", "DDPG"]:
+            elif isinstance(agent, (DDPG, TD3)):
                 actor_loss_dict = {
                     f"train/agent_{index}_actor_loss": np.mean(
                         list(zip(*loss_list))[0][-10:]
@@ -500,7 +487,7 @@ def train_off_policy(
                 wandb_dict.update(actor_loss_dict)
                 wandb_dict.update(critic_loss_dict)
 
-            if algo in ["DQN", "Rainbow DQN"]:
+            if isinstance(agent, (DQN, RainbowDQN)):
                 train_actions_hist = [
                     freq / sum(train_actions_hist) for freq in train_actions_hist
                 ]

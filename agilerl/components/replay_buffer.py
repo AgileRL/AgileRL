@@ -106,6 +106,9 @@ class ReplayBuffer:
 
             # Stack the transitions into a single array or tuple/dictionary of arrays
             ts = ReplayBuffer.stack_transitions(field_transitions)
+            if field == "state":
+                print("Shape = ", ts.shape)
+                raise Exception
 
             # Handle integer fields
             if field in [
@@ -146,6 +149,7 @@ class ReplayBuffer:
             transition["idxs"] = idxs
         else:
             experiences = random.sample(self.memory, k=batch_size)
+            print("Batch size = ", batch_size)
             transition = self._process_transition(experiences, np_array)
 
         return tuple(transition.values())

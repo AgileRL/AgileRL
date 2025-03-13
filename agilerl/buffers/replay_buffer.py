@@ -1,227 +1,110 @@
-from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Optional, Union
 
 import torch
 from tensordict import TensorDict
 
-from agilerl.components.segment_tree import MinSegmentTree, SumSegmentTree
+from agilerl.typing import ArrayOrTensor
 
-
-class Sampler(ABC):
-    """Abstract base class for replay buffer samplers."""
-
-    @abstractmethod
-    def sample(self, buffer_size: int, batch_size: int) -> torch.Tensor:
-        """Sample indices from the buffer.
-
-        Args:
-            buffer_size: Current size of the buffer
-            batch_size: Number of indices to sample
-
-        Returns:
-            Tensor of sampled indices
-        """
-        pass
-
-
-class RandomSampler(Sampler):
-    """Random uniform sampling from the buffer."""
-
-    def sample(self, buffer_size: int, batch_size: int) -> torch.Tensor:
-        return torch.randint(0, buffer_size, (batch_size,))
-
-
-class PrioritizedSampler(Sampler):
-    """Prioritized sampling from the buffer using segment trees."""
-
-    def __init__(
-        self,
-        capacity: int,
-        alpha: float = 0.6,
-        beta: float = 0.4,
-        beta_increment: float = 0.001,
-    ):
-        """Initialize the prioritized sampler.
-
-        Args:
-            capacity: Maximum capacity of the buffer
-            alpha: Priority exponent (0 for uniform sampling, 1 for pure prioritized)
-            beta: Initial importance sampling weight
-            beta_increment: How much to increment beta by each update
-        """
-        self.alpha = alpha
-        self.beta = beta
-        self.beta_increment = beta_increment
-        self.max_priority = 1.0
-
-        # Capacity must be positive and a power of 2
-        tree_capacity = 1
-        while tree_capacity < capacity:
-            tree_capacity *= 2
-
-        self.sum_tree = SumSegmentTree(tree_capacity)
-        self.min_tree = MinSegmentTree(tree_capacity)
-
-    def sample(self, buffer_size: int, batch_size: int) -> torch.Tensor:
-        """Sample indices using priority-based sampling.
-
-        Args:
-            buffer_size: Current size of the buffer
-            batch_size: Number of indices to sample
-
-        Returns:
-            Tensor of sampled indices
-        """
-        indices = self._sample_proportional(buffer_size, batch_size)
-        self._last_indices = indices
-        self._last_weights = torch.tensor([self._calculate_weight(i) for i in indices])
-        return torch.tensor(indices)
-
-    def update_priorities(self, indices: List[int], priorities: List[float]) -> None:
-        """Update priorities for sampled transitions.
-
-        Args:
-            indices: Indices of transitions to update
-            priorities: New priority values
-        """
-        for idx, priority in zip(indices, priorities):
-            self.sum_tree[idx] = priority**self.alpha
-            self.min_tree[idx] = priority**self.alpha
-            self.max_priority = max(self.max_priority, priority)
-        self.beta = min(1.0, self.beta + self.beta_increment)
-
-    def _sample_proportional(self, buffer_size: int, batch_size: int) -> List[int]:
-        """Sample indices based on proportions.
-
-        Args:
-            buffer_size: Current size of the buffer
-            batch_size: Number of indices to sample
-
-        Returns:
-            List of sampled indices
-        """
-        indices = []
-        p_total = self.sum_tree.sum(0, buffer_size - 1)
-        segment = p_total / batch_size
-
-        for i in range(batch_size):
-            a = segment * i
-            b = segment * (i + 1)
-            upperbound = torch.rand(1).item() * (b - a) + a
-            idx = self.sum_tree.retrieve(upperbound)
-            indices.append(idx)
-
-        return indices
-
-    def _calculate_weight(self, idx: int) -> float:
-        """Calculate the weight of the experience at idx.
-
-        Args:
-            idx: Index of the experience
-
-        Returns:
-            Weight of the experience
-        """
-        # Get max weight
-        p_min = self.min_tree.min() / self.sum_tree.sum()
-        max_weight = (p_min * self.sum_tree.capacity) ** (-self.beta)
-
-        # Calculate weights
-        p_sample = self.sum_tree[idx] / self.sum_tree.sum()
-        weight = (p_sample * self.sum_tree.capacity) ** (-self.beta)
-        weight = weight / max_weight
-
-        return weight
+DataType = Union[Dict[str, ArrayOrTensor], TensorDict]
 
 
 class ReplayBuffer:
-    """Base class for replay buffers using TensorDict storage."""
+    """A circular replay buffer for off-policy reinforcement learning
+    using a TensorDict as storage.
 
-    def __init__(
-        self,
-        max_size: int,
-        sampler: Optional[Sampler] = None,
-        device: Optional[Union[str, torch.device]] = None,
-    ):
-        """Initialize the replay buffer.
+    :param max_size: Maximum number of transitions to store
+    :type max_size: int
+    :param ndim: the number of dimensions to be accounted for when measuring the storage size.
+        For instance, a storage of shape ``[3, 4]`` has capacity ``3`` if ``ndim=1`` and ``12`` if ``ndim=2``.
+        Defaults to ``1``.
+    :type ndim: int, optional
+    :param device: Device to store the transitions on.
+    :type device: Optional[Union[str, torch.device]], optional
+    """
 
-        Args:
-            max_size: Maximum number of transitions to store
-            sampler: Sampler to use for sampling transitions (defaults to RandomSampler)
-            device: Device to store the buffer on
-        """
+    def __init__(self, max_size: int, device: Union[str, torch.device] = "cpu") -> None:
+
         self.max_size = max_size
-        self.device = device if device is not None else "cpu"
-        self.sampler = sampler if sampler is not None else RandomSampler()
+        self.device = device
+
+        self._cursor = 0
         self._size = 0
         self._storage: Optional[TensorDict] = None
 
     @property
+    def storage(self) -> TensorDict:
+        """Storage of the buffer."""
+        return self._storage
+
+    @property
     def size(self) -> int:
-        """Current number of transitions in the buffer."""
+        """Number of transitions in the buffer."""
         return self._size
 
-    def add(self, data: Union[TensorDict, Dict[str, Any]]) -> None:
+    @property
+    def is_full(self) -> bool:
+        return len(self) == self.max_size
+
+    def __len__(self) -> int:
+        return self._size
+
+    def _init(self, data: TensorDict, is_vectorised: bool) -> None:
+        """Initialize the buffer given the passed data. For each key,
+        we inspect the shape of the value and initialize the storage
+        tensor with the correct shape.
+
+        :param data: Data to initialize the buffer with
+        :type data: TensorDict
+        :param is_vectorised: Whether the data is vectorised or not
+        :type is_vectorised: bool
+        """
+        _data: TensorDict = data.copy()
+        _data = _data.to(self.device)
+        _data = _data[0] if is_vectorised else _data
+        self._storage = torch.empty_like(_data.expand((self.max_size, *_data.shape)))
+
+    def add(
+        self, data: Union[TensorDict, Dict[str, Any]], is_vectorised: bool = False
+    ) -> None:
         """Add a transition to the buffer.
 
-        Args:
-            data: Transition data as TensorDict or dict
+        :param data: Transition to add to the buffer
+        :type data: Union[TensorDict, Dict[str, Any]]
+        :param is_vectorised: Whether the data is vectorised or not
+        :type is_vectorised: bool
         """
         if not isinstance(data, TensorDict):
             data = TensorDict(data, batch_size=[])
 
+        # Initialize storage
         if self._storage is None:
-            # Initialize storage with first transition
-            self._storage = TensorDict(
-                {
-                    k: torch.zeros((self.max_size,) + v.shape, device=self.device)
-                    for k, v in data.items()
-                },
-                batch_size=[self.max_size],
-            )
+            self._init(data, is_vectorised)
 
         # Add to storage
-        idx = self._size % self.max_size
-        for k, v in data.items():
-            self._storage[k][idx] = v.to(self.device)
+        data = data.to(self.device)
+        if not is_vectorised:
+            data = data.expand((1, *data.shape))
 
-        self._size = min(self._size + 1, self.max_size)
+        _n_transitions = data.shape[0]
+        start = self._cursor
+        end = self._cursor + _n_transitions
+        self._storage[start:end] = data
+        self._cursor = end % self.max_size
+        self._size = min(self._size + _n_transitions, self.max_size)
 
     def sample(self, batch_size: int) -> TensorDict:
         """Sample a batch of transitions.
 
-        Args:
-            batch_size: Number of transitions to sample
-
-        Returns:
-            TensorDict containing the sampled transitions
+        :param batch_size: Number of transitions to sample
+        :type batch_size: int
+        :return: Sampled transitions
+        :rtype: TensorDict
         """
-        if self._size == 0:
-            raise RuntimeError("Buffer is empty")
-
-        indices = self.sampler.sample(self._size, batch_size)
-        batch = self._storage[indices]
-
-        # Add importance weights if using PrioritizedSampler
-        if isinstance(self.sampler, PrioritizedSampler):
-            batch["weights"] = self.sampler._last_weights.to(self.device)
-            batch["indices"] = indices
-
-        return batch
-
-    def update_priorities(
-        self, indices: torch.Tensor, priorities: torch.Tensor
-    ) -> None:
-        """Update priorities for sampled transitions.
-
-        Args:
-            indices: Indices of transitions to update
-            priorities: New priority values
-        """
-        if isinstance(self.sampler, PrioritizedSampler):
-            self.sampler.update_priorities(indices.tolist(), priorities.tolist())
+        indices = torch.randint(0, self.size, (batch_size,))
+        return self._storage[indices]
 
     def clear(self) -> None:
         """Clear all transitions from the buffer."""
         self._size = 0
+        self._cursor = 0
         self._storage = None
