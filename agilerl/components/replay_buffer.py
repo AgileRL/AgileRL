@@ -106,9 +106,6 @@ class ReplayBuffer:
 
             # Stack the transitions into a single array or tuple/dictionary of arrays
             ts = ReplayBuffer.stack_transitions(field_transitions)
-            if field == "state":
-                print("Shape = ", ts.shape)
-                raise Exception
 
             # Handle integer fields
             if field in [

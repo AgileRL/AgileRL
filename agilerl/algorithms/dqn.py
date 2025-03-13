@@ -7,7 +7,6 @@ import torch._dynamo
 import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
-from numpy.typing import ArrayLike
 from tensordict import TensorDict, from_module
 from tensordict.nn import CudaGraphModule
 
@@ -193,7 +192,7 @@ class DQN(RLAlgorithm):
         obs: ObservationType,
         epsilon: float = 0.0,
         action_mask: Optional[np.ndarray] = None,
-    ) -> ArrayLike:
+    ) -> np.ndarray:
         """Returns the next action to take in the environment.
 
         :param obs: The current observation from the environment

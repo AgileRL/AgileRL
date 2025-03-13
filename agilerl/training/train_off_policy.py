@@ -6,16 +6,15 @@ from typing import Any, Dict, List, Optional, Tuple
 import gymnasium as gym
 import numpy as np
 from accelerate import Accelerator
+from tensordict import TensorDictBase
 from torch.utils.data import DataLoader
 from tqdm import trange
 
 import wandb
 from agilerl.algorithms import DDPG, DQN, TD3, RainbowDQN
 from agilerl.algorithms.core.base import RLAlgorithm
-from agilerl.components.replay_buffer import (
-    MultiStepReplayBuffer,
-    PrioritizedReplayBuffer,
-)
+from agilerl.buffers import ReplayBuffer
+from agilerl.buffers.data import Observation, Transition
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
@@ -36,7 +35,7 @@ def train_off_policy(
     env_name: str,
     algo: str,
     pop: PopulationType,
-    memory: PrioritizedReplayBuffer,
+    memory: ReplayBuffer,
     INIT_HP: InitDictType = None,
     MUT_P: InitDictType = None,
     swap_channels: bool = False,
@@ -51,7 +50,7 @@ def train_off_policy(
     target: Optional[float] = None,
     n_step: bool = False,
     per: bool = False,
-    n_step_memory: Optional[MultiStepReplayBuffer] = None,
+    n_step_memory: Optional[ReplayBuffer] = None,
     tournament: Optional[TournamentSelection] = None,
     mutation: Optional[Mutations] = None,
     checkpoint: Optional[int] = None,
@@ -317,15 +316,18 @@ def train_off_policy(
                     if one_step_transition:
                         memory.save_to_memory_vect_envs(*one_step_transition)
                 else:
-                    memory.save_to_memory(
-                        state,
-                        action,
-                        reward,
-                        next_state,
-                        done,
+                    transition: TensorDictBase = Transition(
+                        obs=Observation(value=state),
+                        action=action,
+                        reward=reward,
+                        next_obs=Observation(value=next_state),
+                        done=done,
+                        batch_size=[num_envs],
+                    )
+                    memory.add(
+                        transition.to_tensordict(),
                         is_vectorised=is_vectorised,
                     )
-
                 if per:
                     fraction = min(
                         ((agent.steps[-1] + idx_step + 1) * num_envs / max_steps), 1.0
@@ -339,7 +341,7 @@ def train_off_policy(
                     if (
                         idx_step % learn_step == 0
                         and len(memory) >= agent.batch_size
-                        and memory.counter > learning_delay
+                        and memory.size > learning_delay
                     ):
                         if per:
                             experiences = sampler.sample(agent.batch_size, agent.beta)
@@ -368,9 +370,7 @@ def train_off_policy(
                                 if isinstance(agent, RainbowDQN):
                                     loss, *_ = loss
 
-                elif (
-                    len(memory) >= agent.batch_size and memory.counter > learning_delay
-                ):
+                elif len(memory) >= agent.batch_size and memory.size > learning_delay:
                     for _ in range(num_envs // agent.learn_step):
                         # Sample replay buffer
                         # Learn according to agent's RL algorithm

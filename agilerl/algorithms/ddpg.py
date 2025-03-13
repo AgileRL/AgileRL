@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
+from tensordict import TensorDict
 
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
@@ -18,7 +19,6 @@ from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.typing import (
     ArrayLike,
     ArrayOrTensor,
-    ExperiencesType,
     GymEnvType,
     ObservationType,
 )
@@ -409,7 +409,7 @@ class DDPG(RLAlgorithm):
 
     def learn(
         self,
-        experiences: ExperiencesType,
+        experiences: TensorDict,
         noise_clip: float = 0.5,
         policy_noise: float = 0.2,
     ) -> Tuple[float, float]:
@@ -422,7 +422,15 @@ class DDPG(RLAlgorithm):
         :param policy_noise: Standard deviation of noise applied to policy, defaults to 0.2
         :type policy_noise: float, optional
         """
-        states, actions, rewards, next_states, dones = experiences
+        states = experiences["obs"]["value"]
+        actions = experiences["action"]
+        rewards = experiences["reward"]
+        next_states = experiences["next_obs"]["value"]
+        dones = experiences["done"]
+
+        print(
+            states.shape, actions.shape, rewards.shape, next_states.shape, dones.shape
+        )
 
         if self.accelerator is not None:
             actions = actions.to(self.accelerator.device)

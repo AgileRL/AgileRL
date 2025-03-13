@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional, Union
+from typing import Dict, Optional, Union
 
 import torch
 from tensordict import TensorDict
@@ -9,23 +9,23 @@ DataType = Union[Dict[str, ArrayOrTensor], TensorDict]
 
 
 class ReplayBuffer:
-    """A circular replay buffer for off-policy reinforcement learning
-    using a TensorDict as storage.
+    """A circular replay buffer for off-policy learning using a TensorDict as storage.
 
     :param max_size: Maximum number of transitions to store
     :type max_size: int
-    :param ndim: the number of dimensions to be accounted for when measuring the storage size.
-        For instance, a storage of shape ``[3, 4]`` has capacity ``3`` if ``ndim=1`` and ``12`` if ``ndim=2``.
-        Defaults to ``1``.
-    :type ndim: int, optional
     :param device: Device to store the transitions on.
     :type device: Optional[Union[str, torch.device]], optional
     """
 
-    def __init__(self, max_size: int, device: Union[str, torch.device] = "cpu") -> None:
-
+    def __init__(
+        self,
+        max_size: int,
+        device: Union[str, torch.device] = "cpu",
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
         self.max_size = max_size
         self.device = device
+        self.dtype = dtype
 
         self._cursor = 0
         self._size = 0
@@ -58,14 +58,10 @@ class ReplayBuffer:
         :param is_vectorised: Whether the data is vectorised or not
         :type is_vectorised: bool
         """
-        _data: TensorDict = data.copy()
-        _data = _data.to(self.device)
-        _data = _data[0] if is_vectorised else _data
+        _data = data[0] if is_vectorised else data
         self._storage = torch.empty_like(_data.expand((self.max_size, *_data.shape)))
 
-    def add(
-        self, data: Union[TensorDict, Dict[str, Any]], is_vectorised: bool = False
-    ) -> None:
+    def add(self, data: TensorDict, is_vectorised: bool = False) -> None:
         """Add a transition to the buffer.
 
         :param data: Transition to add to the buffer
@@ -73,38 +69,55 @@ class ReplayBuffer:
         :param is_vectorised: Whether the data is vectorised or not
         :type is_vectorised: bool
         """
-        if not isinstance(data, TensorDict):
-            data = TensorDict(data, batch_size=[])
-
         # Initialize storage
+        data = data.to(self.device)
         if self._storage is None:
             self._init(data, is_vectorised)
 
-        # Add to storage
-        data = data.to(self.device)
         if not is_vectorised:
             data = data.expand((1, *data.shape))
 
+        # Add to storage considering circularity of buffer
         _n_transitions = data.shape[0]
         start = self._cursor
         end = self._cursor + _n_transitions
-        self._storage[start:end] = data
+        if end > self.max_size:
+            n = self.max_size - start
+            self._storage[start:] = data[:n]
+            self._storage[: _n_transitions - n] = data[n:]
+        else:
+            self._storage[start:end] = data
+
+        # Update cursor and size
         self._cursor = end % self.max_size
         self._size = min(self._size + _n_transitions, self.max_size)
 
-    def sample(self, batch_size: int) -> TensorDict:
+    def sample(self, batch_size: int, return_idx: bool = False) -> TensorDict:
         """Sample a batch of transitions.
 
-        :param batch_size: Number of transitions to sample
+        :param batch_size: Number of samples to return
         :type batch_size: int
-        :return: Sampled transitions
-        :rtype: TensorDict
+        :param return_idx: Boolean flag to return index of samples randomly selected, defaults to False
+        :type return_idx: bool, optional
+        :return: Tuple of sampled experiences
+        :rtype: tuple
         """
         indices = torch.randint(0, self.size, (batch_size,))
-        return self._storage[indices]
+        samples: TensorDict = self._storage[indices]
+
+        if return_idx:
+            samples["idxs"] = indices
+
+        return samples
 
     def clear(self) -> None:
         """Clear all transitions from the buffer."""
         self._size = 0
         self._cursor = 0
         self._storage = None
+
+
+class NStepReplayBuffer(ReplayBuffer): ...
+
+
+class PrioritizedReplayBuffer(ReplayBuffer): ...

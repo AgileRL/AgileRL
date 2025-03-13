@@ -233,7 +233,7 @@ class RainbowDQN(RLAlgorithm):
         obs: ObservationType,
         action_mask: Optional[np.ndarray] = None,
         training: bool = True,
-    ) -> ArrayLike:
+    ) -> np.ndarray:
         """Returns the next action to take in the environment.
 
         :param obs: State observation, or multiple observations in a batch
