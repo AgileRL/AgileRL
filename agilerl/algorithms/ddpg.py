@@ -428,10 +428,6 @@ class DDPG(RLAlgorithm):
         next_states = experiences["next_obs"]["value"]
         dones = experiences["done"]
 
-        print(
-            states.shape, actions.shape, rewards.shape, next_states.shape, dones.shape
-        )
-
         if self.accelerator is not None:
             actions = actions.to(self.accelerator.device)
             rewards = rewards.to(self.accelerator.device)

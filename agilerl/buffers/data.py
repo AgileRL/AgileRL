@@ -71,5 +71,9 @@ class Transition:
 
     def __post_init__(self) -> None:
         self.action = self.action.to(dtype=torch.float32)
-        self.done = self.done.to(dtype=torch.float32)
-        self.reward = self.reward.to(dtype=torch.float32)
+
+        if self.action.ndim == 1:
+            self.action = self.action.unsqueeze(-1)
+
+        self.done = self.done.to(dtype=torch.float32).unsqueeze(-1)
+        self.reward = self.reward.to(dtype=torch.float32).unsqueeze(-1)

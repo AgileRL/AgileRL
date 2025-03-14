@@ -1,7 +1,7 @@
 ---
 # Define initial hyperparameters
 INIT_HP:
-    ENV_NAME: HalfCheetah-v4   # Gym environment name
+    ENV_NAME: LunarLanderContinuous-v2   # Gym environment name
     ALGO: DDPG                           # Algorithm
     # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     CHANNELS_LAST: false
@@ -53,7 +53,7 @@ NET_CONFIG:
     latent_dim: 64
 
     encoder_config:
-        hidden_size: [128, 128]
+        hidden_size: [64]
         activation: ReLU
         min_mlp_nodes: 64
         max_mlp_nodes: 500
@@ -61,8 +61,7 @@ NET_CONFIG:
     head_config:
         hidden_size: [64]
         activation: ReLU
-        output_activation: Tanh
         min_hidden_layers: 1
-        max_hidden_layers: 2
+        max_hidden_layers: 3
         min_mlp_nodes: 64
         max_mlp_nodes: 500

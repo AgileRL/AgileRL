@@ -1,8 +1,10 @@
-from typing import Dict, Optional, Union
+from collections import deque
+from typing import Deque, Dict, Optional, Union
 
 import torch
 from tensordict import TensorDict
 
+from agilerl.buffers.segment_tree import MinSegmentTree, SumSegmentTree
 from agilerl.typing import ArrayOrTensor
 
 DataType = Union[Dict[str, ArrayOrTensor], TensorDict]
@@ -13,8 +15,10 @@ class ReplayBuffer:
 
     :param max_size: Maximum number of transitions to store
     :type max_size: int
-    :param device: Device to store the transitions on.
+    :param device: Device to store the transitions on
     :type device: Optional[Union[str, torch.device]], optional
+    :param dtype: Data type for the tensors
+    :type dtype: torch.dtype, optional
     """
 
     def __init__(
@@ -26,6 +30,8 @@ class ReplayBuffer:
         self.max_size = max_size
         self.device = device
         self.dtype = dtype
+        self.counter = 0
+        self.initialized = False
 
         self._cursor = 0
         self._size = 0
@@ -60,6 +66,7 @@ class ReplayBuffer:
         """
         _data = data[0] if is_vectorised else data
         self._storage = torch.empty_like(_data.expand((self.max_size, *_data.shape)))
+        self.initialized = True
 
     def add(self, data: TensorDict, is_vectorised: bool = False) -> None:
         """Add a transition to the buffer.
@@ -91,6 +98,7 @@ class ReplayBuffer:
         # Update cursor and size
         self._cursor = end % self.max_size
         self._size = min(self._size + _n_transitions, self.max_size)
+        self.counter += _n_transitions
 
     def sample(self, batch_size: int, return_idx: bool = False) -> TensorDict:
         """Sample a batch of transitions.
@@ -99,10 +107,10 @@ class ReplayBuffer:
         :type batch_size: int
         :param return_idx: Boolean flag to return index of samples randomly selected, defaults to False
         :type return_idx: bool, optional
-        :return: Tuple of sampled experiences
-        :rtype: tuple
+        :return: TensorDict containing sampled experiences
+        :rtype: TensorDict
         """
-        indices = torch.randint(0, self.size, (batch_size,))
+        indices = torch.randperm(self.size)[:batch_size]
         samples: TensorDict = self._storage[indices]
 
         if return_idx:
@@ -117,7 +125,280 @@ class ReplayBuffer:
         self._storage = None
 
 
-class NStepReplayBuffer(ReplayBuffer): ...
+class NStepReplayBuffer(ReplayBuffer):
+    """A circular replay buffer for n-step returns in off-policy learning.
+
+    :param max_size: Maximum number of transitions to store
+    :type max_size: int
+    :param n_step: Number of steps to accumulate reward over
+    :type n_step: int
+    :param gamma: Discount factor
+    :type gamma: float
+    :param device: Device to store the transitions on
+    :type device: Optional[Union[str, torch.device]], optional
+    :param dtype: Data type for the tensors
+    :type dtype: torch.dtype, optional
+    """
+
+    def __init__(
+        self,
+        max_size: int,
+        n_step: int = 3,
+        gamma: float = 0.99,
+        device: Union[str, torch.device] = "cpu",
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
+        super().__init__(max_size, device, dtype)
+
+        self.n_step = n_step
+        self.gamma = gamma
+        self.n_step_buffer: Deque[TensorDict] = deque(maxlen=n_step)
+        self.reward_key = "reward"
+        self.done_key = None
+        self.ns_key = "next_state"
+
+    def add(self, data: TensorDict, is_vectorised: bool = False) -> None:
+        """Add a transition to the n-step buffer and potentially to the replay buffer.
+
+        :param data: Transition to add to the buffer
+        :type data: TensorDict
+        :param is_vectorised: Whether the data is vectorised or not
+        :type is_vectorised: bool
+        """
+        # Add to n-step buffer
+        data = data.to(self.device)
+        self.n_step_buffer.append(data)
+
+        # If buffer is not full yet, don't process n-step return
+        if len(self.n_step_buffer) < self.n_step:
+            return
+
+        # Calculate n-step return
+        n_step_data = self._get_n_step_info()
+
+        # Add to replay buffer
+        super().add(n_step_data, is_vectorised=False)
+
+    def _get_n_step_info(self) -> TensorDict:
+        """Calculate the n-step return information.
+
+        :return: Transition with n-step return
+        :rtype: TensorDict
+        """
+        # Copy the first transition as a base
+        first_transition: TensorDict = self.n_step_buffer[0].clone()
+
+        # Get the reward key based on what's available in the transition
+        if not self.initialized:
+            assert (
+                "reward" in self.n_step_buffer[0]
+            ), "Reward key not found in transition"
+            assert (
+                "next_state" in self.n_step_buffer[0]
+            ), "Next state key not found in transition"
+
+            done_key = None
+            for key in ["done", "termination", "terminated"]:
+                if key in self.n_step_buffer[0]:
+                    done_key = key
+                    break
+
+            assert done_key is not None, "No done/termination key found in transition"
+            self.done_key = done_key
+
+        # Start with reward from first transition
+        n_step_reward: torch.Tensor = first_transition[self.reward_key]
+        n_step_reward = n_step_reward.clone()
+
+        # Get the last next_state and done flag
+        for i, transition in enumerate(list(self.n_step_buffer)[1:]):
+            done: torch.Tensor = transition[self.done_key]
+            if done.bool().any():  # Stop if episode terminated
+                break
+
+            # Add discounted reward
+            reward: torch.Tensor = transition[self.reward_key]
+            n_step_reward += reward * (self.gamma ** (i + 1))
+
+            # Update next_state and done flag
+            next_state: torch.Tensor = transition[self.ns_key]
+            first_transition[self.ns_key] = next_state.clone()
+            first_transition[self.done_key] = done.clone()
+
+        # Update the reward with n-step return
+        first_transition[self.reward_key] = n_step_reward
+
+        return first_transition
 
 
-class PrioritizedReplayBuffer(ReplayBuffer): ...
+class PrioritizedReplayBuffer(ReplayBuffer):
+    """A prioritized replay buffer for off-policy learning as introduced in the paper
+    'Prioritized Experience Replay' (Schaul et al., 2015).
+
+    :param max_size: Maximum number of transitions to store
+    :type max_size: int
+    :param alpha: How much prioritization to use (0 - no prioritization, 1 - full prioritization)
+    :type alpha: float
+    :param device: Device to store the transitions on.
+    :type device: Optional[Union[str, torch.device]], optional
+    :param dtype: Data type for the tensors
+    :type dtype: torch.dtype, optional
+    """
+
+    def __init__(
+        self,
+        max_size: int,
+        alpha: float = 0.6,
+        device: Union[str, torch.device] = "cpu",
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
+        super().__init__(max_size, device, dtype)
+        self.alpha = alpha
+        self.max_priority = 1.0
+        self.tree_ptr = 0
+
+        # Find the closest power of 2 capacity for the segment trees
+        tree_capacity = 1
+        while tree_capacity < max_size:
+            tree_capacity *= 2
+
+        # Initialize segment trees
+        self.sum_tree = SumSegmentTree(tree_capacity)
+        self.min_tree = MinSegmentTree(tree_capacity)
+
+    def add(self, data: TensorDict, is_vectorised: bool = False) -> None:
+        """Add a transition to the buffer.
+
+        :param data: Transition to add to the buffer
+        :type data: TensorDict
+        :param is_vectorised: Whether the data is vectorised or not
+        :type is_vectorised: bool
+        """
+        # Add to replay buffer
+        super().add(data, is_vectorised)
+
+        # Add max priority for new entries
+        if is_vectorised:
+            n_transitions = data.shape[0]
+            for i in range(n_transitions):
+                self._update_priority(self.tree_ptr, self.max_priority)
+                self.tree_ptr = (self.tree_ptr + 1) % self.max_size
+        else:
+            self._update_priority(self.tree_ptr, self.max_priority)
+            self.tree_ptr = (self.tree_ptr + 1) % self.max_size
+
+    def _update_priority(self, idx: int, priority: float) -> None:
+        """Update the priority of an experience in the buffer.
+
+        :param idx: Index of the experience
+        :type idx: int
+        :param priority: New priority value
+        :type priority: float
+        """
+        assert 0 <= idx < self.max_size
+
+        # Apply alpha to priority
+        priority_alpha = priority**self.alpha
+
+        # Update trees
+        self.sum_tree[idx] = priority_alpha
+        self.min_tree[idx] = priority_alpha
+
+        # Update max priority
+        self.max_priority = max(self.max_priority, priority)
+
+    def sample(self, batch_size: int, beta: float = 0.4) -> TensorDict:
+        """Sample a batch of transitions based on priorities.
+
+        :param batch_size: Number of samples to return
+        :type batch_size: int
+        :param beta: Beta parameter for importance sampling, defaults to 0.4
+        :type beta: float, optional
+        :return: Batch of transitions
+        :rtype: TensorDict
+        """
+        # Sample indices based on priorities
+        indices = self._sample_proportional(batch_size)
+
+        # Gather transitions
+        samples = self._storage[indices].clone()
+
+        # Calculate importance sampling weights
+        weights = self._calculate_weights(indices, beta)
+
+        # Add weights and indices to the batch
+        samples["weights"] = weights
+        samples["idxs"] = indices
+
+        return samples
+
+    def _sample_proportional(self, batch_size: int) -> torch.Tensor:
+        """Sample indices based on their priorities.
+
+        :param batch_size: Number of samples
+        :type batch_size: int
+        :return: Sampled indices
+        :rtype: torch.Tensor
+        """
+        indices = torch.zeros(batch_size, dtype=torch.int64)
+
+        # Get the sum of all priorities and section length
+        total_priority = self.sum_tree.sum()
+        segment = total_priority / batch_size
+
+        # Sample from each segment
+        for i in range(batch_size):
+            a = segment * i
+            b = segment * (i + 1)
+
+            # Sample uniformly from segment and retrieve corresponding index
+            upperbound = torch.rand(1).item() * (b - a) + a
+            idx = self.sum_tree.retrieve(upperbound)
+            indices[i] = idx
+
+        return indices
+
+    def _calculate_weights(self, indices: torch.Tensor, beta: float) -> torch.Tensor:
+        """Calculate importance sampling weights for prioritized replay.
+
+        :param indices: Sampled indices
+        :type indices: torch.Tensor
+        :param beta: Beta parameter for importance sampling
+        :type beta: float
+        :return: Weights for the sampled transitions
+        :rtype: torch.Tensor
+        """
+        # Create a tensor for weights
+        batch_size = len(indices)
+        weights = torch.zeros(batch_size, device=self.device)
+
+        # Find the min probability from the min tree
+        p_min = self.min_tree.min() / self.sum_tree.sum()
+
+        # Calculate the max weight value
+        max_weight = (p_min * self.size) ** -beta
+
+        # Calculate weights for each index
+        for i, idx in enumerate(indices):
+            p_sample = self.sum_tree[idx] / self.sum_tree.sum()
+            weight = (p_sample * self.size) ** -beta
+            weights[i] = weight / max_weight  # Normalize
+
+        return weights
+
+    def update_priorities(
+        self, indices: torch.Tensor, priorities: torch.Tensor
+    ) -> None:
+        """Update priorities of the sampled transitions.
+
+        :param indices: Indices of transitions to update
+        :type indices: torch.Tensor
+        :param priorities: New priorities
+        :type priorities: torch.Tensor
+        """
+        for idx, priority in zip(indices, priorities):
+            # Handle small priorities
+            priority = max(priority.item(), 1e-5)
+
+            # Update the priority
+            self._update_priority(idx.item(), priority)
