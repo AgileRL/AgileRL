@@ -283,7 +283,7 @@ larger, more powerful model, then this becomes even more infeasible. Instead, we
 training, to share the workload across multiple devices and speed up training. To enable distributed
 training in this tutorial, we use deepspeed and accelerate.
 
-To generate an accelerate file, run the command `accelerate config` in your terminal, following the instructions
+To generate an accelerate file, run the command ``accelerate config`` in your terminal, following the instructions
 on screen to outline the details of the compute you intend to use for your finetuning, saying yes to the question
 "Do you want to use DeepSpeed?" and no to the question "Do you want to specify a json file to a DeepSpeed config?"
 if you want an auto-generated deepspeed config file. More information on the deepspeed configuration can be found
@@ -320,6 +320,13 @@ checkpoints of the trained agent that can be used later for inference. It also u
         checkpoint_interval=100,
         checkpoint_path="path/to/directory",
     )
+
+You can then launch a training run using ``accelerate`` with the following command:
+
+.. code-block:: bash
+
+    accelerate launch path/to/training_script
+
 
 Using a custom training loop
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -416,7 +423,7 @@ function and is an example of how we might choose to train our agent to exhibit 
 Loading a Trained Agent for Inference
 -------------------------------------
 Once we have finetuned our LLM, we may want to use it for inference. Below outlines how to load the model
-in this tutorial, this `forum <https://discuss.huggingface.co/t/save-load-and-do-inference-with-fine-tuned-model/76291/2>_`
+in this tutorial, this `forum <https://discuss.huggingface.co/t/save-load-and-do-inference-with-fine-tuned-model/76291/2>`_
 provides more info for loading finetuned models.
 
 Load fine-tuned LLM
