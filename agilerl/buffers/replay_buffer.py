@@ -123,6 +123,7 @@ class ReplayBuffer:
         self._size = 0
         self._cursor = 0
         self._storage = None
+        self.initialized = False
 
 
 class NStepReplayBuffer(ReplayBuffer):
@@ -157,13 +158,11 @@ class NStepReplayBuffer(ReplayBuffer):
         self.done_key = None
         self.ns_key = "next_state"
 
-    def add(self, data: TensorDict, is_vectorised: bool = False) -> None:
+    def add(self, data: TensorDict) -> None:
         """Add a transition to the n-step buffer and potentially to the replay buffer.
 
         :param data: Transition to add to the buffer
         :type data: TensorDict
-        :param is_vectorised: Whether the data is vectorised or not
-        :type is_vectorised: bool
         """
         # Add to n-step buffer
         data = data.to(self.device)
@@ -212,18 +211,18 @@ class NStepReplayBuffer(ReplayBuffer):
 
         # Get the last next_state and done flag
         for i, transition in enumerate(list(self.n_step_buffer)[1:]):
-            done: torch.Tensor = transition[self.done_key]
-            if done.bool().any():  # Stop if episode terminated
-                break
-
             # Add discounted reward
             reward: torch.Tensor = transition[self.reward_key]
             n_step_reward += reward * (self.gamma ** (i + 1))
 
             # Update next_state and done flag
+            done: torch.Tensor = transition[self.done_key]
             next_state: torch.Tensor = transition[self.ns_key]
             first_transition[self.ns_key] = next_state.clone()
             first_transition[self.done_key] = done.clone()
+
+            if done.bool().any():  # Stop if episode terminated
+                break
 
         # Update the reward with n-step return
         first_transition[self.reward_key] = n_step_reward
@@ -321,7 +320,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         indices = self._sample_proportional(batch_size)
 
         # Gather transitions
-        samples = self._storage[indices].clone()
+        samples = self.storage[indices].clone()
 
         # Calculate importance sampling weights
         weights = self._calculate_weights(indices, beta)

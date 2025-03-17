@@ -2,8 +2,8 @@ import torch
 import yaml
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-from agilerl.components.replay_buffer import (
-    MultiStepReplayBuffer,
+from agilerl.buffers.replay_buffer import (
+    NStepReplayBuffer,
     PrioritizedReplayBuffer,
     ReplayBuffer,
 )
@@ -44,40 +44,33 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     n_step = True if INIT_HP["N_STEP"] > 1 else False
     if per:
         memory = PrioritizedReplayBuffer(
-            memory_size=INIT_HP["MEMORY_SIZE"],
+            max_size=INIT_HP["MEMORY_SIZE"],
             field_names=field_names,
-            num_envs=INIT_HP["NUM_ENVS"],
             alpha=INIT_HP["ALPHA"],
             gamma=INIT_HP["GAMMA"],
             device=device,
         )
         if n_step:
-            n_step_memory = MultiStepReplayBuffer(
-                memory_size=INIT_HP["MEMORY_SIZE"],
-                field_names=field_names,
-                num_envs=INIT_HP["NUM_ENVS"],
+            n_step_memory = NStepReplayBuffer(
+                max_size=INIT_HP["MEMORY_SIZE"],
                 n_step=INIT_HP["N_STEP"],
                 gamma=INIT_HP["GAMMA"],
                 device=device,
             )
     elif n_step:
         memory = ReplayBuffer(
-            memory_size=INIT_HP["MEMORY_SIZE"],
-            field_names=field_names,
+            max_size=INIT_HP["MEMORY_SIZE"],
             device=device,
         )
-        n_step_memory = MultiStepReplayBuffer(
-            memory_size=INIT_HP["MEMORY_SIZE"],
-            field_names=field_names,
-            num_envs=INIT_HP["NUM_ENVS"],
+        n_step_memory = NStepReplayBuffer(
+            max_size=INIT_HP["MEMORY_SIZE"],
             n_step=INIT_HP["N_STEP"],
             gamma=INIT_HP["GAMMA"],
             device=device,
         )
     else:
         memory = ReplayBuffer(
-            memory_size=INIT_HP["MEMORY_SIZE"],
-            field_names=field_names,
+            max_size=INIT_HP["MEMORY_SIZE"],
             device=device,
         )
 
