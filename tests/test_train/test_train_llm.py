@@ -97,9 +97,9 @@ def mock_gather_tensor(tensor, agent):
 def test_basic_aggregation(mock_gather, setup_test_data):
     """Test basic aggregation functionality."""
     agent, *data = setup_test_data
-    avg_loss, avg_kl, avg_reward = [aggregate_metrics_across_gpus(
-        agent, metric
-    ) for metric in data]
+    avg_loss, avg_kl, avg_reward = (
+        aggregate_metrics_across_gpus(agent, metric) for metric in data
+    )
     mock_gather.assert_called()
     assert avg_loss == 2.5
     assert pytest.approx(avg_kl) == 1.2
@@ -145,7 +145,7 @@ def test_finetune_llm_basic_training_loop():
     mock_env.__len__.return_value = 6
     mock_env.data_batch_size = 2
     mock_env.reset.return_value = "initial_prompts"
-    mock_env.step.return_value = ("next_prompts", torch.tensor([2.0,3.0]))
+    mock_env.step.return_value = ("next_prompts", torch.tensor([2.0, 3.0]))
 
     # Mock other dependencies
     with patch("agilerl.training.train_llm.trange") as mock_trange, patch(
@@ -158,7 +158,9 @@ def test_finetune_llm_basic_training_loop():
         mock_agg.return_value = (0.5, 0.2, 0.7)  # loss, kl, reward
 
         # Run the function
-        finetune_llm(agent=mock_agent, env=mock_env, evaluation_interval=2, max_reward=2.0)
+        finetune_llm(
+            agent=mock_agent, env=mock_env, evaluation_interval=2, max_reward=2.0
+        )
 
         # Verify training loop execution
         assert mock_env.reset.call_count == 1

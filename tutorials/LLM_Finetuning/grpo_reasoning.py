@@ -1,5 +1,6 @@
 import re
 from typing import Tuple
+
 import torch
 from accelerate import Accelerator
 from datasets import load_dataset
@@ -95,6 +96,7 @@ def format_reward_func(completions, target, **kwargs):
             rewards.append(0.0)
     return rewards
 
+
 def equation_reward_func(completions, target, nums, **kwargs):
     rewards = []
 
@@ -103,11 +105,11 @@ def equation_reward_func(completions, target, nums, **kwargs):
             # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
             completion = "<think>" + completion
             answer_tags = re.findall(r"<answer>([\s\S]*?)<\/answer>", completion)
-            
+
             if len(answer_tags) != 1:
                 rewards.append(0.0)
                 continue
-            
+
             equation = answer_tags[0].strip()
             used_numbers = [int(n) for n in re.findall(r"\d+", equation)]
 
@@ -115,7 +117,7 @@ def equation_reward_func(completions, target, nums, **kwargs):
                 print(f"Numbers mismatch: {used_numbers} vs {numbers}")
                 rewards.append(0.0)
                 continue
-                
+
             allowed_pattern = r"^[\d+\-*/().\s]+$"
             if not re.match(allowed_pattern, equation):
                 print(f"Equation format invalid: {equation}")
@@ -123,7 +125,7 @@ def equation_reward_func(completions, target, nums, **kwargs):
                 continue
 
             result = eval(equation, {"__builtins__": None}, {})
-            
+
             if abs(float(result) - float(gt)) < 1e-5:
                 rewards.append(1.0)
             else:
@@ -153,7 +155,9 @@ def combined_rewards(completion, solution, prompt):
 
     if reward == 2.0:
         with open("countdown_completions.txt", "a") as text_file:
-            text_file.write(f"Prompt {prompt}" + "\n" + completion + "\n" + "="*50 + "\n")
+            text_file.write(
+                f"Prompt {prompt}" + "\n" + completion + "\n" + "=" * 50 + "\n"
+            )
 
     return reward
 
@@ -210,7 +214,7 @@ def main():
         wb=True,
         checkpoint_interval=100,
         checkpoint_path="saved_llms",
-        max_reward=2.0
+        max_reward=2.0,
     )
 
 

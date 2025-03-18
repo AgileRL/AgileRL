@@ -156,11 +156,11 @@ for displaying these behaviours, the agent itself discovers the best way to achi
                 # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
                 completion = "<think>" + completion
                 answer_tags = re.findall(r"<answer>([\s\S]*?)<\/answer>", completion)
-                
+
                 if len(answer_tags) != 1:
                     rewards.append(0.0)
                     continue
-                
+
                 equation = answer_tags[0].strip()
                 used_numbers = [int(n) for n in re.findall(r"\d+", equation)]
 
@@ -168,7 +168,7 @@ for displaying these behaviours, the agent itself discovers the best way to achi
                     print(f"Numbers mismatch: {used_numbers} vs {numbers}")
                     rewards.append(0.0)
                     continue
-                    
+
                 allowed_pattern = r"^[\d+\-*/().\s]+$"
                 if not re.match(allowed_pattern, equation):
                     print(f"Equation format invalid: {equation}")
@@ -176,7 +176,7 @@ for displaying these behaviours, the agent itself discovers the best way to achi
                     continue
 
                 result = eval(equation, {"__builtins__": None}, {})
-                
+
                 if abs(float(result) - float(gt)) < 1e-5:
                     rewards.append(1.0)
                 else:
@@ -485,17 +485,17 @@ Inference
 The Aha Moment
 ~~~~~~~~~~~~~~
 
-We finetuned a Qwen2.5-3B using the full training code below and witnessed the model having 'aha' moments. In a noteable example from our training run
+We finetuned a Qwen2.5-3B using the full training code below and witnessed the model having 'aha' moments. In a notable example from our training run
 the model literally exclaims "Aha!" as it reasons its way to the correct solution:
 
 .. code-block:: text
-    
+
     58 - 1 = 57, then 57 - 25 = 32, and finally 32 + 1 = 33.
-    However, 33 is not 82. Let's try another combination: 58 + 25 = 83, but we need 82. 
-    Aha! If we use 58 + 1 = 59, then 59 - 25 = 34, and finally 34 - 1 = 33. This doesn't work either. 
-    Hmm... what if we use 58 + 1 = 59, then 59 - 25 = 34, and finally 34 + 1 = 35. 
-    Nope... closer, but not quite. What if we try 58 + 1 = 59, then 59 - 25 = 34, and finally 34 + 25 = 59. 
-    Nope... still not 82. 
+    However, 33 is not 82. Let's try another combination: 58 + 25 = 83, but we need 82.
+    Aha! If we use 58 + 1 = 59, then 59 - 25 = 34, and finally 34 - 1 = 33. This doesn't work either.
+    Hmm... what if we use 58 + 1 = 59, then 59 - 25 = 34, and finally 34 + 1 = 35.
+    Nope... closer, but not quite. What if we try 58 + 1 = 59, then 59 - 25 = 34, and finally 34 + 25 = 59.
+    Nope... still not 82.
     Ah-ha! One more try: 58 - 1 = 57, then 57 + 25 = 82.</think>
     <answer>(58 - 1) + 25</answer>
 

@@ -5,11 +5,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import gymnasium as gym
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.components.replay_buffer import (
     MultiStepReplayBuffer,

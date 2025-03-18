@@ -2,9 +2,9 @@ from typing import Any, Dict, Optional
 
 import torch
 import torch.distributed as dist
-import wandb
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import GRPO
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import init_wandb
@@ -20,7 +20,7 @@ def finetune_llm(
     wb: bool = False,
     wandb_api_key: Optional[str] = None,
     evaluation_interval: Optional[int] = 10,
-    max_reward: Optional[int] = None
+    max_reward: Optional[int] = None,
 ) -> None:
     if wb and agent.local_rank == "0":
         init_wandb(
@@ -49,7 +49,7 @@ def finetune_llm(
         completion_ids, action_masks = agent.get_action(prompts)
         # Use the reward function stored in env.step to calculate reward of the each answer from the group
         next_prompts, rewards = env.step(completion_ids)
-        
+
         experiences = (
             completion_ids,
             action_masks,
@@ -60,24 +60,22 @@ def finetune_llm(
         if max_reward is not None:
             accuracy = (rewards == max_reward).sum() / len(rewards.squeeze())
             metrics.append(accuracy)
-        agg_metrics = [aggregate_metrics_across_gpus(agent, metric) for metric in metrics]
+        agg_metrics = [
+            aggregate_metrics_across_gpus(agent, metric) for metric in metrics
+        ]
         prompts = next_prompts
         if agent.local_rank == "0":
             metrics = {
-                        "Loss": (agg_metrics[0]),
-                        "KL-divergence": (agg_metrics[1]),
-                        "Mean training reward": (agg_metrics[2]),
-                    }
+                "Loss": (agg_metrics[0]),
+                "KL-divergence": (agg_metrics[1]),
+                "Mean training reward": (agg_metrics[2]),
+            }
             if max_reward is not None:
                 metrics |= {"Accuracy": (agg_metrics[3])}
-            print(
-                metrics
-            )
+            print(metrics)
             pbar.update(1)
             if wb:
-                wandb.log(
-                    metrics
-                )
+                wandb.log(metrics)
             if (i + 1) % evaluation_interval == 0:
                 test_reward = agent.test(env)
                 print(f"Test reward: {test_reward}")
@@ -109,9 +107,7 @@ def gather_tensor(tensor: torch.Tensor, agent: GRPO) -> torch.Tensor:
     return torch.stack(gathered_tensors)
 
 
-def aggregate_metrics_across_gpus(
-    agent: GRPO, metrics: torch.Tensor
-):
+def aggregate_metrics_across_gpus(agent: GRPO, metrics: torch.Tensor):
     all_metrics = gather_tensor(metrics, agent)
     avg_metrics = all_metrics.mean().item()
     return avg_metrics
