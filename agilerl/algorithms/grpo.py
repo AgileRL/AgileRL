@@ -2,7 +2,7 @@ import copy
 import gc
 import os
 import warnings
-from typing import Dict, List, Optional, Tuple, Type, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import deepspeed
 import numpy as np
@@ -20,7 +20,7 @@ from torch.optim import Optimizer
 from transformers import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
 
-from agilerl.algorithms.core import RLAlgorithm, SelfEvolvableAlgorithm
+from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.typing import DeviceType, ExperiencesType
@@ -530,11 +530,11 @@ class GRPO(RLAlgorithm):
 
     @classmethod
     def load(
-        cls: Type[SelfEvolvableAlgorithm],
+        cls,
         path: str,
         device: DeviceType = "cpu",
         accelerator: Optional[Accelerator] = None,
-    ) -> SelfEvolvableAlgorithm:
+    ) -> None:
         raise NotImplementedError(
             "The load class method is not supported for this algorithm class."
             """
