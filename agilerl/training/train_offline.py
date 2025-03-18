@@ -226,7 +226,7 @@ def train_offline(
             disable=not accelerator.is_local_main_process,
         )
     else:
-        pbar = trange(max_steps, unit="step", bar_format=bar_format, ascii=True)
+        pbar = trange(max_steps, unit="step", bar_format=bar_format, ascii=True) #incosequential comment
 
     pop_loss = [[] for _ in pop]
     pop_fitnesses = []
