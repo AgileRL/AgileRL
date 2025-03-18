@@ -66,7 +66,7 @@ class GRPO(RLAlgorithm):
     :type calc_position_embeddings: bool, optional
     :param reduce_memory_peak: Flag to reduce memory peak in the _get_log_probs method, defaults to False
     :type reduce_memory_peak: bool, optional
-    :param min_output_tokens: Minimum output tokens, defaults to 256
+    :param min_output_tokens: Minimum output tokens, defaults to 0
     :type min_output_tokens: int, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
@@ -83,8 +83,8 @@ class GRPO(RLAlgorithm):
         hp_config: Optional[HyperparameterConfig] = None,
         index: int = 0,
         batch_size: int = 8,
-        beta: float = 0.04,
-        lr: float = 5e-6,
+        beta: float = 0.001,
+        lr: float = 5e-7,
         clip_coef: float = 0.2,
         max_grad_norm: float = 0.1,
         update_epochs: int = 1,
@@ -92,7 +92,7 @@ class GRPO(RLAlgorithm):
         temperature: float = 0.9,
         calc_position_embeddings: bool = True,
         reduce_memory_peak: bool = False,
-        min_output_tokens: int = 256,
+        min_output_tokens: Optional[int] = None,
         accelerator: Optional[Accelerator] = None,
         device: str = "cpu",
     ) -> None:

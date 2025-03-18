@@ -213,8 +213,8 @@ def test_init_grpo(
     assert isinstance(grpo.observation_space, gym.spaces.Box)
     assert isinstance(grpo.action_space, gym.spaces.Box)
     assert grpo.batch_size == 8
-    assert grpo.beta == 0.04
-    assert grpo.lr == 5e-6
+    assert grpo.beta == 0.001
+    assert grpo.lr == 5e-7
     assert grpo.clip_coef == 0.2
     assert grpo.max_grad_norm is None if use_accelerator else 0.1
     assert grpo.update_epochs == 1
