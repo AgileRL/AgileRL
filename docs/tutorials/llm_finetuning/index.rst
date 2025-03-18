@@ -446,14 +446,17 @@ Load fine-tuned LLM
 ~~~~~~~~~~~~~~~~~~~
 .. code-block:: python
 
-    peft_config = PeftConfig.from_pretrained("Qwen/Qwen2.5-3B")
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from peft import PeftModel
+    import torch
+
     base_model = AutoModelForCausalLM.from_pretrained(
-        peft_config.base_model_name_or_path,
+        "Qwen/Qwen2.5-3B",
         torch_dtype=torch.bfloat16,
         device_map="auto"
     )
-    tokenizer = AutoTokenizer.from_pretrained(peft_config.base_model_name_or_path)
-    model = PeftModel.from_pretrained(base_model, "path/to/adapter/folder")
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B")
+    model = PeftModel.from_pretrained(base_model, "./saved_llms")
 
 Inference
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -463,11 +466,10 @@ Inference
     # Put model in evaluation mode
     model.eval()
 
-    # Set up input text
-    input_text = "Your prompt text here"
-
     # Tokenize input
-    inputs = tokenizer(input_text, return_tensors="pt")
+    inputs = countdown_chat_template(torch.tensor([33, 19, 27, 5]), # Numbers
+                                    torch.tensor([39]),            # Answer
+                                    tokenizer)
 
     # Move inputs to the same device as model
     inputs = {k: v.to(model.device) for k, v in inputs.items()}

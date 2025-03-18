@@ -2,7 +2,7 @@ import copy
 import gc
 import os
 import warnings
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Type, Union
 
 import deepspeed
 import numpy as np
@@ -20,10 +20,10 @@ from torch.optim import Optimizer
 from transformers import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
 
-from agilerl.algorithms.core import RLAlgorithm
+from agilerl.algorithms.core import RLAlgorithm, SelfEvolvableAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.typing import ExperiencesType
+from agilerl.typing import DeviceType, ExperiencesType
 from agilerl.utils.algo_utils import get_experiences_samples, stack_and_pad_experiences
 from agilerl.utils.llm_utils import (
     HuggingFaceGym,
@@ -499,3 +499,54 @@ class GRPO(RLAlgorithm):
             loss.backward()
             clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
             self.optimizer.step()
+
+    def save_checkpoint(self, path: str) -> None:
+        """
+        Override the save_checkpoint method to provide guidance on the correct method to use.
+        :param path: Location to save checkpoint at
+        :type path: string
+        """
+        raise NotImplementedError(
+            "The save_checkpoint method is not supported for this algorithm class. "
+            "Please use agent.actor.save_pretrained(checkpoint_path) instead."
+        )
+
+    def load_checkpoint(self, path: str) -> None:
+        raise NotImplementedError(
+            "The load_checkpoint method is not supported for this algorithm class."
+            """
+            To load a saved LLM, please load the model as follows, and then re-instantiate the GRPO
+            class.
+
+            base_model = AutoModelForCausalLM.from_pretrained(
+                "Qwen/Qwen2.5-3B",
+                torch_dtype=torch.bfloat16,
+                device_map="auto"
+            )
+            tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B")
+            model = PeftModel.from_pretrained(base_model, "/path/to/adapter/folder")
+            """
+        )
+
+    @classmethod
+    def load(
+        cls: Type[SelfEvolvableAlgorithm],
+        path: str,
+        device: DeviceType = "cpu",
+        accelerator: Optional[Accelerator] = None,
+    ) -> SelfEvolvableAlgorithm:
+        raise NotImplementedError(
+            "The load class method is not supported for this algorithm class."
+            """
+            To load a saved LLM, please load the model as follows, and then re-instantiate the GRPO
+            class, using the pre-trained model.
+
+            base_model = AutoModelForCausalLM.from_pretrained(
+                "Qwen/Qwen2.5-3B",
+                torch_dtype=torch.bfloat16,
+                device_map="auto"
+            )
+            tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B")
+            model = PeftModel.from_pretrained(base_model, "/path/to/adapter/folder")
+            """
+        )
