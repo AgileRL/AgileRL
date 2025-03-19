@@ -1,9 +1,13 @@
+import warnings
 from collections import OrderedDict
+from typing import Iterator
 
 import numpy as np
 import torch
 from tensordict import TensorDict, tensorclass
+from torch.utils.data import IterableDataset
 
+from agilerl.buffers import ReplayBuffer
 from agilerl.typing import ObservationType, TorchObsType
 
 
@@ -71,9 +75,27 @@ class Transition:
 
     def __post_init__(self) -> None:
         self.action = self.action.to(dtype=torch.float32)
-
-        if self.action.ndim == 1:
-            self.action = self.action.unsqueeze(-1)
-
         self.done = self.done.to(dtype=torch.float32).unsqueeze(-1)
         self.reward = self.reward.to(dtype=torch.float32).unsqueeze(-1)
+
+
+class ReplayDataset(IterableDataset):
+    """
+    Iterable Dataset containing the ReplayBuffer which will be updated with new
+    experiences during training
+
+    :param buffer: Experience replay buffer
+    :type buffer: agilerl.components.replay_buffer.ReplayBuffer()
+    :param batch_size: Number of experiences to sample at a time, defaults to 256
+    :type batch_size: int, optional
+    """
+
+    def __init__(self, buffer: ReplayBuffer, batch_size: int = 256) -> None:
+        if not isinstance(buffer, ReplayBuffer):
+            warnings.warn("Buffer is not an agilerl ReplayBuffer.")
+        assert batch_size > 0, "Batch size must be greater than zero."
+        self.buffer = buffer
+        self.batch_size = batch_size
+
+    def __iter__(self) -> Iterator:
+        yield self.buffer.sample(self.batch_size)

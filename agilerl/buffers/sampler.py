@@ -1,32 +1,27 @@
 import warnings
-from typing import Any, Optional, Tuple, Union
+from typing import Any, Optional, Union
 
+from tensordict import TensorDict
 from torch.utils.data import DataLoader
 
-from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
-from agilerl.components.replay_buffer import (
-    MultiStepReplayBuffer,
+from agilerl.buffers import (
+    MultiAgentReplayBuffer,
+    NStepReplayBuffer,
     PrioritizedReplayBuffer,
     ReplayBuffer,
 )
-from agilerl.components.replay_data import ReplayDataset
+from agilerl.buffers.data import ReplayDataset
 
 BufferType = Union[
-    ReplayBuffer, MultiAgentReplayBuffer, PrioritizedReplayBuffer, MultiStepReplayBuffer
+    ReplayBuffer, MultiAgentReplayBuffer, PrioritizedReplayBuffer, NStepReplayBuffer
 ]
 
 
 class Sampler:
     """Sampler class to handle both standard and distributed training.
 
-    :param distributed: Whether to use distributed sampling, defaults to False
-    :type distributed: bool, optional
-    :param per: Whether to use Prioritized Experience Replay (PER), defaults to False
-    :type per: bool, optional
-    :param n_step: Whether to use n-step returns, defaults to False
-    :type n_step: bool, optional
     :param memory: Replay buffer memory, defaults to None
-    :type memory: Optional[Union[ReplayBuffer, MultiAgentReplayBuffer, PrioritizedReplayBuffer, MultiStepReplayBuffer]], optional
+    :type memory: Optional[Union[ReplayBuffer, MultiAgentReplayBuffer, PrioritizedReplayBuffer, NStepReplayBuffer]], optional
     :param dataset: Dataset for distributed sampling, defaults to None
     :type dataset: Optional[ReplayDataset], optional
     :param dataloader: DataLoader for distributed sampling, defaults to None
@@ -36,9 +31,6 @@ class Sampler:
 
     def __init__(
         self,
-        distributed: bool = False,
-        per: bool = False,
-        n_step: bool = False,
         memory: Optional[BufferType] = None,
         dataset: Optional[ReplayDataset] = None,
         dataloader: Optional[DataLoader] = None,
@@ -48,9 +40,9 @@ class Sampler:
             (dataset is not None) and (dataloader is not None)
         ), "Sampler needs to be initialized with either 'memory' or ('dataset' AND 'dataloader')."
 
-        self.distributed = distributed
-        self.per = per
-        self.n_step = n_step
+        self.distributed = dataloader is not None and dataset is not None
+        self.per = isinstance(memory, PrioritizedReplayBuffer)
+        self.n_step = isinstance(memory, NStepReplayBuffer)
         self.memory = memory
         self.dataset = dataset
         self.dataloader = dataloader
@@ -68,8 +60,8 @@ class Sampler:
             self.sample = self.sample_per
 
         elif self.n_step:
-            if not isinstance(self.memory, MultiStepReplayBuffer):
-                warnings.warn("Memory is not an agilerl MultiStepReplayBuffer.")
+            if not isinstance(self.memory, NStepReplayBuffer):
+                warnings.warn("Memory is not an agilerl NStepReplayBuffer.")
             self.sample = self.sample_n_step
 
         else:
@@ -79,7 +71,7 @@ class Sampler:
                 )
             self.sample = self.sample_standard
 
-    def sample_standard(self, batch_size: int, return_idx: bool = False) -> Any:
+    def sample_standard(self, batch_size: int, return_idx: bool = False) -> TensorDict:
         """Sample a batch of experiences from the standard replay buffer.
 
         :param batch_size: Size of the batch to sample
@@ -87,13 +79,13 @@ class Sampler:
         :param return_idx: Whether to return indices, defaults to False
         :type return_idx: bool, optional
         :return: Sampled batch of experiences
-        :rtype: Any
+        :rtype: TensorDict
         """
         return self.memory.sample(batch_size, return_idx)
 
     def sample_distributed(
         self, batch_size: int, return_idx: Optional[bool] = None
-    ) -> Any:
+    ) -> TensorDict:
         """Sample a batch of experiences from the distributed dataset.
 
         :param batch_size: Size of the batch to sample
@@ -101,12 +93,12 @@ class Sampler:
         :param return_idx: Not used in distributed sampling, defaults to None
         :type return_idx: Optional[bool], optional
         :return: Sampled batch of experiences
-        :rtype: Any
+        :rtype: TensorDict
         """
         self.dataset.batch_size = batch_size
         return next(iter(self.dataloader))
 
-    def sample_per(self, batch_size: int, beta: float) -> Tuple[Any, Any, Any]:
+    def sample_per(self, batch_size: int, beta: float) -> TensorDict:
         """Sample a batch of experiences from the Prioritized Experience Replay buffer.
 
         :param batch_size: Size of the batch to sample
@@ -114,16 +106,16 @@ class Sampler:
         :param beta: Importance-sampling weight
         :type beta: float
         :return: Sampled batch of experiences, indices, and importance-sampling weights
-        :rtype: Tuple[Any, Any, Any]
+        :rtype: TensorDict
         """
         return self.memory.sample(batch_size, beta)
 
-    def sample_n_step(self, idxs: Any) -> Any:
+    def sample_n_step(self, idxs: Any) -> TensorDict:
         """Sample a batch of experiences from the n-step replay buffer.
 
         :param idxs: Indices to sample from
         :type idxs: Any
         :return: Sampled batch of experiences
-        :rtype: Any
+        :rtype: TensorDict
         """
         return self.memory.sample_from_indices(idxs)

@@ -295,6 +295,9 @@ class DQN(RLAlgorithm):
             # target, if terminal then y_j = rewards
             y_j = rewards + self.gamma * q_target * (1 - dones)
 
+        if actions.ndim == 1:
+            actions = actions.unsqueeze(-1)
+
         # Compute Q-values for actions taken and loss
         q_eval = self.actor(obs).gather(1, actions.long())
         loss: torch.Tensor = self.criterion(q_eval, y_j)
@@ -313,12 +316,17 @@ class DQN(RLAlgorithm):
         """Updates agent network parameters to learn from experiences.
 
         :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
-        :type obs: list[torch.Tensor[float]]
+        :type experiences: TensorDict
         """
-        states, actions, rewards, next_states, dones = experiences
-        actions = actions.to(self.device)
-        rewards = rewards.to(self.device)
-        dones = dones.to(self.device)
+        states = experiences["obs"]["value"]
+        actions = experiences["action"]
+        rewards = experiences["reward"]
+        next_states = experiences["next_obs"]["value"]
+        dones = experiences["done"]
+        if self.accelerator is not None:
+            actions = actions.to(self.accelerator.device)
+            rewards = rewards.to(self.accelerator.device)
+            dones = dones.to(self.accelerator.device)
 
         states = self.preprocess_observation(states)
         next_states = self.preprocess_observation(next_states)

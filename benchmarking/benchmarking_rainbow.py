@@ -38,16 +38,13 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     if INIT_HP["CHANNELS_LAST"]:
         observation_space = observation_space_channels_to_first(observation_space)
 
-    field_names = ["state", "action", "reward", "next_state", "done"]
     n_step_memory = None
     per = INIT_HP["PER"]
-    n_step = True if INIT_HP["N_STEP"] > 1 else False
+    n_step = INIT_HP["N_STEP"] > 1
     if per:
         memory = PrioritizedReplayBuffer(
             max_size=INIT_HP["MEMORY_SIZE"],
-            field_names=field_names,
             alpha=INIT_HP["ALPHA"],
-            gamma=INIT_HP["GAMMA"],
             device=device,
         )
         if n_step:

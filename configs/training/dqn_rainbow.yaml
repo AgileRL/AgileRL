@@ -15,7 +15,7 @@ INIT_HP:
     LEARN_STEP: 1              # Learning frequency
     # NOTE: If using a population of agents, a standard replay buffer
     # (i.e. not multi-step or prioritized) is often best, hence the defaults below
-    N_STEP: 1                  # Step number to calculate td error
+    N_STEP: 4                  # Step number to calculate td error
     PER: false                 # Use prioritized experience replay buffer
     ALPHA: 0.6                 # Prioritized replay buffer parameter
     BETA: 0.4                  # Importance sampling coefficient
@@ -27,12 +27,12 @@ INIT_HP:
     V_MAX: 200.                # Maximum value of support
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
-    POP_SIZE: 4                # Population size
+    POP_SIZE: 1                # Population size
     EVO_STEPS: 10_000          # Evolution frequency
     EVAL_STEPS:                # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
     LEARNING_DELAY: 1000       # Steps before learning
-    WANDB: true               # Log with Weights and Biases
+    WANDB: false               # Log with Weights and Biases
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation

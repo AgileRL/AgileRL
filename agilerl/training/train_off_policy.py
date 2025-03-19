@@ -1,7 +1,7 @@
 import time
 import warnings
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import gymnasium as gym
 import numpy as np
@@ -13,10 +13,9 @@ from tqdm import trange
 import wandb
 from agilerl.algorithms import DDPG, DQN, TD3, RainbowDQN
 from agilerl.algorithms.core.base import RLAlgorithm
-from agilerl.buffers import ReplayBuffer
-from agilerl.buffers.data import Observation, Transition
-from agilerl.components.replay_data import ReplayDataset
-from agilerl.components.sampler import Sampler
+from agilerl.buffers import NStepReplayBuffer, PrioritizedReplayBuffer, ReplayBuffer
+from agilerl.buffers.data import Observation, ReplayDataset, Transition
+from agilerl.buffers.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.algo_utils import obs_channels_to_first
@@ -28,6 +27,7 @@ from agilerl.utils.utils import (
 
 InitDictType = Optional[Dict[str, Any]]
 PopulationType = List[RLAlgorithm]
+BufferType = Union[ReplayBuffer, PrioritizedReplayBuffer, NStepReplayBuffer]
 
 
 def train_off_policy(
@@ -35,7 +35,7 @@ def train_off_policy(
     env_name: str,
     algo: str,
     pop: PopulationType,
-    memory: ReplayBuffer,
+    memory: BufferType,
     INIT_HP: InitDictType = None,
     MUT_P: InitDictType = None,
     swap_channels: bool = False,
@@ -50,7 +50,7 @@ def train_off_policy(
     target: Optional[float] = None,
     n_step: bool = False,
     per: bool = False,
-    n_step_memory: Optional[ReplayBuffer] = None,
+    n_step_memory: Optional[NStepReplayBuffer] = None,
     tournament: Optional[TournamentSelection] = None,
     mutation: Optional[Mutations] = None,
     checkpoint: Optional[int] = None,
@@ -195,15 +195,11 @@ def train_off_policy(
         replay_dataset = ReplayDataset(memory, pop[0].batch_size)
         replay_dataloader = DataLoader(replay_dataset, batch_size=None)
         replay_dataloader = accelerator.prepare(replay_dataloader)
-        sampler = Sampler(
-            distributed=True, dataset=replay_dataset, dataloader=replay_dataloader
-        )
+        sampler = Sampler(dataset=replay_dataset, dataloader=replay_dataloader)
     else:
-        sampler = Sampler(distributed=False, per=per, memory=memory)
+        sampler = Sampler(memory=memory)
         if n_step_memory is not None:
-            n_step_sampler = Sampler(
-                distributed=False, n_step=True, memory=n_step_memory
-            )
+            n_step_sampler = Sampler(memory=n_step_memory)
 
     if accelerator is not None:
         print(f"\nDistributed training on {accelerator.device}...")
@@ -229,14 +225,14 @@ def train_off_policy(
     checkpoint_count = 0
 
     # Pre-training mutation
-    if accelerator is None:
-        if mutation is not None:
-            pop = mutation.mutation(pop, pre_training_mut=True)
+    if accelerator is None and mutation is not None:
+        pop = mutation.mutation(pop, pre_training_mut=True)
 
     # RL training loop
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         if accelerator is not None:
             accelerator.wait_for_everyone()
+
         pop_episode_scores = []
         pop_fps = []
         for agent_idx, agent in enumerate(pop):  # Loop through population
@@ -293,7 +289,6 @@ def train_off_policy(
                         scores[idx] = 0
                         reset_noise_indices.append(idx)
 
-                # TODO: Ideally we want to do this in a generalised way
                 if isinstance(agent, (DDPG, TD3)):
                     agent.reset_action_noise(reset_noise_indices)
 
@@ -304,26 +299,25 @@ def train_off_policy(
                 next_state = (
                     obs_channels_to_first(next_state) if swap_channels else next_state
                 )
+
+                # TODO: Modify with new TensorDict-based replay buffer
+                transition: TensorDictBase = Transition(
+                    obs=Observation(value=state),
+                    action=action,
+                    reward=reward,
+                    next_obs=Observation(value=next_state),
+                    done=done,
+                    batch_size=[num_envs],
+                )
                 if n_step_memory is not None:
-                    one_step_transition = n_step_memory.save_to_memory_vect_envs(
-                        state,
-                        action,
-                        reward,
-                        next_state,
-                        done,
+                    one_step_transition = n_step_memory.add(
+                        transition.to_tensordict(),
+                        is_vectorised=is_vectorised,
                     )
 
-                    if one_step_transition:
-                        memory.save_to_memory_vect_envs(*one_step_transition)
+                    if one_step_transition is not None:
+                        memory.add(one_step_transition, is_vectorised=is_vectorised)
                 else:
-                    transition: TensorDictBase = Transition(
-                        obs=Observation(value=state),
-                        action=action,
-                        reward=reward,
-                        next_obs=Observation(value=next_state),
-                        done=done,
-                        batch_size=[num_envs],
-                    )
                     memory.add(
                         transition.to_tensordict(),
                         is_vectorised=is_vectorised,
@@ -347,11 +341,13 @@ def train_off_policy(
                             experiences = sampler.sample(agent.batch_size, agent.beta)
                             if n_step_memory is not None:
                                 n_step_experiences = n_step_sampler.sample(
-                                    experiences[6]
+                                    experiences["idxs"]
                                 )
-                                experiences += n_step_experiences
+                            else:
+                                n_step_experiences = None
+
                             loss, idxs, priorities = agent.learn(
-                                experiences, n_step=n_step, per=per
+                                experiences, n_experiences=n_step_experiences, per=per
                             )
                             memory.update_priorities(idxs, priorities)
                         else:
@@ -361,10 +357,11 @@ def train_off_policy(
                             )
                             if n_step_memory is not None:
                                 n_step_experiences = n_step_sampler.sample(
-                                    experiences[5]
+                                    experiences["idxs"]
                                 )
-                                experiences += n_step_experiences
-                                loss, *_ = agent.learn(experiences, n_step=n_step)
+                                loss, *_ = agent.learn(
+                                    experiences, n_experiences=n_step_experiences
+                                )
                             else:
                                 loss = agent.learn(experiences)
                                 if isinstance(agent, RainbowDQN):
@@ -378,11 +375,12 @@ def train_off_policy(
                             experiences = sampler.sample(agent.batch_size, agent.beta)
                             if n_step_memory is not None:
                                 n_step_experiences = n_step_sampler.sample(
-                                    experiences[6]
+                                    experiences["idxs"]
                                 )
-                                experiences += n_step_experiences
+                            else:
+                                n_step_experiences = None
                             loss, idxs, priorities = agent.learn(
-                                experiences, n_step=n_step, per=per
+                                experiences, n_experiences=n_step_experiences, per=per
                             )
                             memory.update_priorities(idxs, priorities)
                         else:
@@ -392,10 +390,11 @@ def train_off_policy(
                             )
                             if n_step_memory is not None:
                                 n_step_experiences = n_step_sampler.sample(
-                                    experiences[5]
+                                    experiences["idxs"]
                                 )
-                                experiences += n_step_experiences
-                                loss, *_ = agent.learn(experiences, n_step=n_step)
+                                loss, *_ = agent.learn(
+                                    experiences, n_experiences=n_step_experiences
+                                )
                             else:
                                 loss = agent.learn(experiences)
                                 if isinstance(agent, RainbowDQN):

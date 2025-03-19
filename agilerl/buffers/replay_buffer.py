@@ -65,7 +65,7 @@ class ReplayBuffer:
         :type is_vectorised: bool
         """
         _data = data[0] if is_vectorised else data
-        self._storage = torch.empty_like(_data.expand((self.max_size, *_data.shape)))
+        self._storage = torch.zeros_like(_data.expand((self.max_size, *_data.shape)))
         self.initialized = True
 
     def add(self, data: TensorDict, is_vectorised: bool = False) -> None:
@@ -156,13 +156,19 @@ class NStepReplayBuffer(ReplayBuffer):
         self.n_step_buffer: Deque[TensorDict] = deque(maxlen=n_step)
         self.reward_key = "reward"
         self.done_key = None
-        self.ns_key = "next_state"
+        self.ns_key = "next_obs"
 
-    def add(self, data: TensorDict) -> None:
+    def add(
+        self, data: TensorDict, is_vectorised: bool = False
+    ) -> Optional[TensorDict]:
         """Add a transition to the n-step buffer and potentially to the replay buffer.
 
         :param data: Transition to add to the buffer
         :type data: TensorDict
+        :param is_vectorised: Whether the data is vectorised or not
+        :type is_vectorised: bool
+        :return: First transition in the n-step buffer
+        :rtype: Optional[TensorDict]
         """
         # Add to n-step buffer
         data = data.to(self.device)
@@ -176,7 +182,18 @@ class NStepReplayBuffer(ReplayBuffer):
         n_step_data = self._get_n_step_info()
 
         # Add to replay buffer
-        super().add(n_step_data, is_vectorised=False)
+        super().add(n_step_data, is_vectorised=is_vectorised)
+        return self.n_step_buffer[0]
+
+    def sample_from_indices(self, idxs: torch.Tensor) -> TensorDict:
+        """Sample a batch of transitions from the buffer using the provided indices.
+
+        :param idxs: Indices of the transitions to sample
+        :type idxs: torch.Tensor
+        :return: TensorDict containing sampled experiences
+        :rtype: TensorDict
+        """
+        return self.storage[idxs]
 
     def _get_n_step_info(self) -> TensorDict:
         """Calculate the n-step return information.
@@ -190,11 +207,11 @@ class NStepReplayBuffer(ReplayBuffer):
         # Get the reward key based on what's available in the transition
         if not self.initialized:
             assert (
-                "reward" in self.n_step_buffer[0]
+                self.reward_key in self.n_step_buffer[0]
             ), "Reward key not found in transition"
             assert (
-                "next_state" in self.n_step_buffer[0]
-            ), "Next state key not found in transition"
+                self.ns_key in self.n_step_buffer[0]
+            ), "Next observation key not found in transition"
 
             done_key = None
             for key in ["done", "termination", "terminated"]:
@@ -217,8 +234,8 @@ class NStepReplayBuffer(ReplayBuffer):
 
             # Update next_state and done flag
             done: torch.Tensor = transition[self.done_key]
-            next_state: torch.Tensor = transition[self.ns_key]
-            first_transition[self.ns_key] = next_state.clone()
+            next_obs: torch.Tensor = transition[self.ns_key]
+            first_transition[self.ns_key] = next_obs.clone()
             first_transition[self.done_key] = done.clone()
 
             if done.bool().any():  # Stop if episode terminated

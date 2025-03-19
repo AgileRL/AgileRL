@@ -354,47 +354,38 @@ class RainbowDQN(RLAlgorithm):
         return elementwise_loss
 
     def learn(
-        self, experiences: ExperiencesType, n_step: bool = False, per: bool = False
+        self,
+        experiences: ExperiencesType,
+        n_experiences: Optional[ExperiencesType] = None,
+        per: bool = False,
     ) -> Tuple[float, Optional[ArrayLike], Optional[ArrayLike]]:
         """Updates agent network parameters to learn from experiences.
 
         :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
-        :type obs: list[torch.Tensor[float]]
-        :param n_step: Use multi-step learning, defaults to True
-        :type n_step: bool, optional
+        :type experiences: TensorDict
+        :param n_experiences: List of batched states, actions, rewards, next_states, dones in that order.
+        :type n_experiences: TensorDict, optional
         :param per: Use prioritized experience replay buffer, defaults to True
         :type per: bool, optional
 
         :return: Tuple of loss, indices, and new priorities
         :rtype: Tuple[float, numpy.ndarray, numpy.ndarray]
         """
-        experiences = self.to_device(*experiences)
+        n_step = n_experiences is not None
+        states = experiences["obs"]["value"]
+        actions = experiences["action"]
+        rewards = experiences["reward"]
+        next_states = experiences["next_obs"]["value"]
+        dones = experiences["done"]
         if per:
+            weights = experiences["weights"]
+            idxs = experiences["idxs"]
             if n_step:
-                (
-                    states,
-                    actions,
-                    rewards,
-                    next_states,
-                    dones,
-                    weights,
-                    idxs,
-                    n_states,
-                    n_actions,
-                    n_rewards,
-                    n_next_states,
-                    n_dones,
-                ) = experiences
-            else:
-                (
-                    states,
-                    actions,
-                    rewards,
-                    next_states,
-                    dones,
-                    weights,
-                    idxs,
-                ) = experiences
+                n_states = n_experiences["obs"]["value"]
+                n_actions = n_experiences["action"]
+                n_rewards = n_experiences["reward"]
+                n_next_states = n_experiences["next_obs"]["value"]
+                n_dones = n_experiences["done"]
 
             if self.combined_reward or not n_step:
                 elementwise_loss = self._dqn_loss(
@@ -409,37 +400,21 @@ class RainbowDQN(RLAlgorithm):
                     elementwise_loss += n_step_elementwise_loss
                 else:
                     elementwise_loss = n_step_elementwise_loss
+
             loss = torch.mean(elementwise_loss * weights)
 
         else:
             if n_step:
-                (
-                    states,
-                    actions,
-                    rewards,
-                    next_states,
-                    dones,
-                    idxs,
-                    n_states,
-                    n_actions,
-                    n_rewards,
-                    n_next_states,
-                    n_dones,
-                ) = experiences
+                idxs = experiences["idxs"]
+                n_states = n_experiences["obs"]["value"]
+                n_actions = n_experiences["action"]
+                n_rewards = n_experiences["reward"]
+                n_next_states = n_experiences["next_obs"]["value"]
+                n_dones = n_experiences["done"]
             else:
-                (
-                    states,
-                    actions,
-                    rewards,
-                    next_states,
-                    dones,
-                ) = experiences
-
-            if not n_step:
                 idxs = None
 
             new_priorities = None
-
             if self.combined_reward or not n_step:
                 elementwise_loss = self._dqn_loss(
                     states, actions, rewards, next_states, dones, self.gamma
@@ -454,6 +429,7 @@ class RainbowDQN(RLAlgorithm):
                     elementwise_loss += n_step_elementwise_loss
                 else:
                     elementwise_loss = n_step_elementwise_loss
+
             loss = torch.mean(elementwise_loss)
 
         self.optimizer.zero_grad()
@@ -469,7 +445,6 @@ class RainbowDQN(RLAlgorithm):
         self.soft_update()
         self.actor.reset_noise()
         self.actor_target.reset_noise()
-
         if per:
             loss_for_prior = elementwise_loss.detach().cpu().numpy()
             new_priorities = loss_for_prior + self.prior_eps
