@@ -23,7 +23,7 @@ from transformers.modeling_utils import PreTrainedModel
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.typing import ExperiencesType
+from agilerl.typing import DeviceType, ExperiencesType
 from agilerl.utils.algo_utils import get_experiences_samples, stack_and_pad_experiences
 from agilerl.utils.llm_utils import (
     HuggingFaceGym,
@@ -66,7 +66,7 @@ class GRPO(RLAlgorithm):
     :type calc_position_embeddings: bool, optional
     :param reduce_memory_peak: Flag to reduce memory peak in the _get_log_probs method, defaults to False
     :type reduce_memory_peak: bool, optional
-    :param min_output_tokens: Minimum output tokens, defaults to 256
+    :param min_output_tokens: Minimum output tokens, defaults to 0
     :type min_output_tokens: int, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
@@ -83,8 +83,8 @@ class GRPO(RLAlgorithm):
         hp_config: Optional[HyperparameterConfig] = None,
         index: int = 0,
         batch_size: int = 8,
-        beta: float = 0.04,
-        lr: float = 5e-6,
+        beta: float = 0.001,
+        lr: float = 5e-7,
         clip_coef: float = 0.2,
         max_grad_norm: float = 0.1,
         update_epochs: int = 1,
@@ -92,7 +92,7 @@ class GRPO(RLAlgorithm):
         temperature: float = 0.9,
         calc_position_embeddings: bool = True,
         reduce_memory_peak: bool = False,
-        min_output_tokens: int = 256,
+        min_output_tokens: Optional[int] = None,
         accelerator: Optional[Accelerator] = None,
         device: str = "cpu",
     ) -> None:
@@ -499,3 +499,54 @@ class GRPO(RLAlgorithm):
             loss.backward()
             clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
             self.optimizer.step()
+
+    def save_checkpoint(self, path: str) -> None:
+        """
+        Override the save_checkpoint method to provide guidance on the correct method to use.
+        :param path: Location to save checkpoint at
+        :type path: string
+        """
+        raise NotImplementedError(
+            "The save_checkpoint method is not supported for this algorithm class. "
+            "Please use agent.actor.save_pretrained(checkpoint_path) instead."
+        )
+
+    def load_checkpoint(self, path: str) -> None:
+        raise NotImplementedError(
+            "The load_checkpoint method is not supported for this algorithm class."
+            """
+            To load a saved LLM, please load the model as follows, and then re-instantiate the GRPO
+            class.
+
+            base_model = AutoModelForCausalLM.from_pretrained(
+                "Qwen/Qwen2.5-3B",
+                torch_dtype=torch.bfloat16,
+                device_map="auto"
+            )
+            tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B")
+            model = PeftModel.from_pretrained(base_model, "/path/to/adapter/folder")
+            """
+        )
+
+    @classmethod
+    def load(
+        cls,
+        path: str,
+        device: DeviceType = "cpu",
+        accelerator: Optional[Accelerator] = None,
+    ) -> None:
+        raise NotImplementedError(
+            "The load class method is not supported for this algorithm class."
+            """
+            To load a saved LLM, please load the model as follows, and then re-instantiate the GRPO
+            class, using the pre-trained model.
+
+            base_model = AutoModelForCausalLM.from_pretrained(
+                "Qwen/Qwen2.5-3B",
+                torch_dtype=torch.bfloat16,
+                device_map="auto"
+            )
+            tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B")
+            model = PeftModel.from_pretrained(base_model, "/path/to/adapter/folder")
+            """
+        )

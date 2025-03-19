@@ -20,6 +20,7 @@ def finetune_llm(
     wb: bool = False,
     wandb_api_key: Optional[str] = None,
     evaluation_interval: Optional[int] = 10,
+    max_reward: Optional[int] = None,
 ) -> None:
     if wb and agent.local_rank == "0":
         init_wandb(
@@ -48,32 +49,33 @@ def finetune_llm(
         completion_ids, action_masks = agent.get_action(prompts)
         # Use the reward function stored in env.step to calculate reward of the each answer from the group
         next_prompts, rewards = env.step(completion_ids)
+
         experiences = (
             completion_ids,
             action_masks,
             rewards,
         )
         loss, kl = agent.learn(experiences)
-        avg_loss, avg_kl, avg_reward = aggregate_metrics_across_gpus(
-            agent, loss, kl, rewards
-        )
+        metrics = [loss, kl, rewards]
+        if max_reward is not None:
+            accuracy = (rewards == max_reward).sum() / len(rewards.squeeze())
+            metrics.append(accuracy)
+        agg_metrics = [
+            aggregate_metrics_across_gpus(agent, metric) for metric in metrics
+        ]
         prompts = next_prompts
         if agent.local_rank == "0":
-            print(
-                f"Step: {i + 1}",
-                f"| Loss: {avg_loss}",
-                f"| KL-divergence: {avg_kl}",
-            )
-
+            metrics = {
+                "Loss": (agg_metrics[0]),
+                "KL-divergence": (agg_metrics[1]),
+                "Mean training reward": (agg_metrics[2]),
+            }
+            if max_reward is not None:
+                metrics |= {"Accuracy": (agg_metrics[3])}
+            print(metrics)
             pbar.update(1)
             if wb:
-                wandb.log(
-                    {
-                        "Loss": avg_loss,
-                        "KL-divergence": avg_kl,
-                        "Mean training reward": avg_reward,
-                    }
-                )
+                wandb.log(metrics)
             if (i + 1) % evaluation_interval == 0:
                 test_reward = agent.test(env)
                 print(f"Test reward: {test_reward}")
@@ -91,6 +93,9 @@ def gather_tensor(tensor: torch.Tensor, agent: GRPO) -> torch.Tensor:
     # Convert to tensor if it's a scalar
     if not isinstance(tensor, torch.Tensor):
         tensor = torch.tensor(tensor, device=f"cuda:{agent.local_rank}")
+
+    if tensor.device != agent.device:
+        tensor = tensor.to(agent.device)
     # Ensure tensor is on correct device
     tensor = tensor.detach().clone()
     # Create a list to store tensors from all processes
@@ -102,18 +107,10 @@ def gather_tensor(tensor: torch.Tensor, agent: GRPO) -> torch.Tensor:
     return torch.stack(gathered_tensors)
 
 
-def aggregate_metrics_across_gpus(
-    agent: GRPO, loss: torch.Tensor, kl: torch.Tensor, rewards: torch.Tensor
-):
-    rewards = rewards.to(agent.device)
-    all_losses = gather_tensor(loss, agent)
-    all_kls = gather_tensor(kl, agent)
-    all_rewards = gather_tensor(torch.mean(rewards), agent)
-    # Compute aggregated metrics
-    avg_loss = all_losses.mean().item()
-    avg_kl = all_kls.mean().item()
-    avg_reward = all_rewards.mean().item()
-    return avg_loss, avg_kl, avg_reward
+def aggregate_metrics_across_gpus(agent: GRPO, metrics: torch.Tensor):
+    all_metrics = gather_tensor(metrics, agent)
+    avg_metrics = all_metrics.mean().item()
+    return avg_metrics
 
 
 def save_llm_checkpoint(agent, checkpoint_path, step):

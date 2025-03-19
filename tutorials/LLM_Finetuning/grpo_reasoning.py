@@ -49,7 +49,7 @@ def countdown_chat_template(q, a, tokenizer):
         },
         {
             "role": "user",
-            "content": f"Using each number in this tensor only once {tuple(i.item() for i in q)}, create an equation that equals {a.item()}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer> (1 + 2) / 3 = 1 </answer>.",
+            "content": f"Using each number in this tensor only once {tuple(i.item() for i in q)}, create an equation that equals {a.item()}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
         },
         {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
     ]
@@ -86,11 +86,8 @@ def format_reward_func(completions, target, **kwargs):
         try:
             # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
             completion = "<think>" + completion
-            # Check if the format is correct
             regex = r"^<think>([^<]*(?:<(?!/?think>)[^<]*)*)<\/think>\n<answer>([\s\S]*?)<\/answer>$"
-
             match = re.search(regex, completion, re.DOTALL)
-            # if the format is not correct, reward is 0
             if match is None or len(match.groups()) != 2:
                 rewards.append(0.0)
             else:
@@ -107,35 +104,35 @@ def equation_reward_func(completions, target, nums, **kwargs):
         try:
             # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
             completion = "<think>" + completion
-            # Check if the format is correct
-            match = re.search(r"<answer>(.*?)<\/answer>", completion)
-            if match is None:
+            answer_tags = re.findall(r"<answer>([\s\S]*?)<\/answer>", completion)
+
+            if len(answer_tags) != 1:
                 rewards.append(0.0)
                 continue
-            # Extract the "answer" part from the completion
-            equation = match.group(1).strip()
-            # Extract all numbers from the equation
+
+            equation = answer_tags[0].strip()
             used_numbers = [int(n) for n in re.findall(r"\d+", equation)]
 
-            # Check if all numbers are used exactly once
             if sorted(used_numbers) != sorted(numbers):
-                rewards.append(0.0)
-                continue
-            # Define a regex pattern that only allows numbers, operators, parentheses, and whitespace
-            allowed_pattern = r"^[\d+\-*/().\s]+$"
-            if not re.match(allowed_pattern, equation):
+                print(f"Numbers mismatch: {used_numbers} vs {numbers}")
                 rewards.append(0.0)
                 continue
 
-            # Evaluate the equation with restricted globals and locals
+            allowed_pattern = r"^[\d+\-*/().\s]+$"
+            if not re.match(allowed_pattern, equation):
+                print(f"Equation format invalid: {equation}")
+                rewards.append(0.0)
+                continue
+
             result = eval(equation, {"__builtins__": None}, {})
-            # Check if the equation is correct and matches the ground truth
+
             if abs(float(result) - float(gt)) < 1e-5:
                 rewards.append(1.0)
             else:
+                print(f"Result {result} doesn't match target {gt}")
                 rewards.append(0.0)
-        except Exception:
-            # If evaluation fails, reward is 0
+        except Exception as e:
+            print(f"Equation error: {e}")
             rewards.append(0.0)
     return rewards
 
@@ -155,6 +152,12 @@ def combined_rewards(completion, solution, prompt):
     Reward: {reward}
     """
     )
+
+    if reward == 2.0:
+        with open("countdown_completions.txt", "a") as text_file:
+            text_file.write(
+                f"Prompt {prompt}" + "\n" + completion + "\n" + "=" * 50 + "\n"
+            )
 
     return reward
 
@@ -201,16 +204,17 @@ def main():
         pad_token_id=tokenizer.eos_token_id,
         batch_size=1,
         group_size=12,
-        reduce_memory_peak=False,
+        reduce_memory_peak=True,
         accelerator=Accelerator(),
     )
     finetune_llm(
         agent=agent,
         env=env,
         evaluation_interval=5,
-        wb=False,
-        checkpoint_interval=1,
+        wb=True,
+        checkpoint_interval=100,
         checkpoint_path="saved_llms",
+        max_reward=2.0,
     )
 
 

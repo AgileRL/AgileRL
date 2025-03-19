@@ -38,6 +38,7 @@ def test_gather_tensor_with_tensor_input(
         )
 
     mock_all_gather.side_effect = mock_gather
+    mock_agent.device = f"cuda:{mock_agent.local_rank}"
     result = gather_tensor(input_tensor, mock_agent)
     expected = torch.tensor(
         [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
@@ -61,6 +62,7 @@ def test_gather_tensor_with_scalar_input(
         output_list[1].copy_(torch.tensor(84.0, device=f"cuda:{mock_agent.local_rank}"))
 
     mock_all_gather.side_effect = mock_gather
+    mock_agent.device = f"cuda:{mock_agent.local_rank}"
     result = gather_tensor(input_scalar, mock_agent)
     expected = torch.tensor([42.0, 84.0], device=f"cuda:{mock_agent.local_rank}")
     assert torch.allclose(result, expected)
@@ -94,18 +96,18 @@ def mock_gather_tensor(tensor, agent):
 @patch("agilerl.training.train_llm.gather_tensor", side_effect=mock_gather_tensor)
 def test_basic_aggregation(mock_gather, setup_test_data):
     """Test basic aggregation functionality."""
-    agent, loss, kl, rewards = setup_test_data
-    avg_loss, avg_kl, avg_reward = aggregate_metrics_across_gpus(
-        agent, loss, kl, rewards
+    agent, *data = setup_test_data
+    avg_loss, avg_kl, avg_reward = (
+        aggregate_metrics_across_gpus(agent, metric) for metric in data
     )
     mock_gather.assert_called()
     assert avg_loss == 2.5
     assert pytest.approx(avg_kl) == 1.2
     assert avg_reward == 4.0
     assert mock_gather.call_count == 3
-    mock_gather.assert_any_call(loss, agent)
-    mock_gather.assert_any_call(kl, agent)
-    assert mock_gather.call_args_list[2][0][0].item() == 4.0
+    mock_gather.assert_any_call(data[0], agent)
+    mock_gather.assert_any_call(data[1], agent)
+    assert mock_gather.call_args_list[2][0][0].mean() == 4.0
 
 
 def test_save_with_accelerator():
@@ -143,7 +145,7 @@ def test_finetune_llm_basic_training_loop():
     mock_env.__len__.return_value = 6
     mock_env.data_batch_size = 2
     mock_env.reset.return_value = "initial_prompts"
-    mock_env.step.return_value = ("next_prompts", Mock())
+    mock_env.step.return_value = ("next_prompts", torch.tensor([2.0, 3.0]))
 
     # Mock other dependencies
     with patch("agilerl.training.train_llm.trange") as mock_trange, patch(
@@ -156,7 +158,9 @@ def test_finetune_llm_basic_training_loop():
         mock_agg.return_value = (0.5, 0.2, 0.7)  # loss, kl, reward
 
         # Run the function
-        finetune_llm(agent=mock_agent, env=mock_env, evaluation_interval=2)
+        finetune_llm(
+            agent=mock_agent, env=mock_env, evaluation_interval=2, max_reward=2.0
+        )
 
         # Verify training loop execution
         assert mock_env.reset.call_count == 1
@@ -164,7 +168,7 @@ def test_finetune_llm_basic_training_loop():
         assert mock_agent.get_action.call_count == 3
         assert mock_env.step.call_count == 3
         assert mock_agent.learn.call_count == 3
-        assert mock_agg.call_count == 3
+        assert mock_agg.call_count == 12
 
         # Verify progress bar
         assert mock_trange.call_count == 1

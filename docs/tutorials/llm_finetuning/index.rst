@@ -134,15 +134,11 @@ for displaying these behaviours, the agent itself discovers the best way to achi
         rewards = []
 
         for completion, gt in zip(completions, target):
-
             try:
-                # add synthetic <think> as its already part of  the prompt and prefilled for the assistant to more easily match the regex
+                # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
                 completion = "<think>" + completion
-                # Check if the format is correct
                 regex = r"^<think>([^<]*(?:<(?!/?think>)[^<]*)*)<\/think>\n<answer>([\s\S]*?)<\/answer>$"
-
                 match = re.search(regex, completion, re.DOTALL)
-                # if the format is not correct, reward is 0
                 if match is None or len(match.groups()) != 2:
                     rewards.append(0.0)
                 else:
@@ -159,35 +155,35 @@ for displaying these behaviours, the agent itself discovers the best way to achi
             try:
                 # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
                 completion = "<think>" + completion
-                # Check if the format is correct
-                match = re.search(r"<answer>(.*?)<\/answer>", completion)
-                if match is None:
+                answer_tags = re.findall(r"<answer>([\s\S]*?)<\/answer>", completion)
+
+                if len(answer_tags) != 1:
                     rewards.append(0.0)
                     continue
-                # Extract the "answer" part from the completion
-                equation = match.group(1).strip()
-                # Extract all numbers from the equation
+
+                equation = answer_tags[0].strip()
                 used_numbers = [int(n) for n in re.findall(r"\d+", equation)]
 
-                # Check if all numbers are used exactly once
                 if sorted(used_numbers) != sorted(numbers):
-                    rewards.append(0.0)
-                    continue
-                # Define a regex pattern that only allows numbers, operators, parentheses, and whitespace
-                allowed_pattern = r"^[\d+\-*/().\s]+$"
-                if not re.match(allowed_pattern, equation):
+                    print(f"Numbers mismatch: {used_numbers} vs {numbers}")
                     rewards.append(0.0)
                     continue
 
-                # Evaluate the equation with restricted globals and locals
+                allowed_pattern = r"^[\d+\-*/().\s]+$"
+                if not re.match(allowed_pattern, equation):
+                    print(f"Equation format invalid: {equation}")
+                    rewards.append(0.0)
+                    continue
+
                 result = eval(equation, {"__builtins__": None}, {})
-                # Check if the equation is correct and matches the ground truth
+
                 if abs(float(result) - float(gt)) < 1e-5:
                     rewards.append(1.0)
                 else:
+                    print(f"Result {result} doesn't match target {gt}")
                     rewards.append(0.0)
-            except Exception:
-                # If evaluation fails, reward is 0
+            except Exception as e:
+                print(f"Equation error: {e}")
                 rewards.append(0.0)
         return rewards
 
@@ -207,6 +203,11 @@ for displaying these behaviours, the agent itself discovers the best way to achi
         Reward: {reward}
         """
         )
+        # Save successful countdown  comletions
+        if reward == 2.0:
+            with open("countdown_completions.txt", "a") as text_file:
+                text_file.write(completion + "\n" + "="*50 + "\n")
+
 
         return reward
 
@@ -226,7 +227,7 @@ Combining all these components, we can now initialise the HuggingFaceGym object.
             },
             {
                 "role": "user",
-                "content": f"Using each number in this tensor only once {tuple(i.item() for i in q)}, create an equation that equals {a.item()}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer> (1 + 2) / 3 = 1 </answer>.",
+                "content": f"Using each number in this tensor only once {tuple(i.item() for i in q)}, create an equation that equals {a.item()}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer> (1 + 2) / 3 </answer>.",
             },
             {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
         ]
@@ -319,6 +320,7 @@ checkpoints of the trained agent that can be used later for inference. It also u
         wb=True,
         checkpoint_interval=100,
         checkpoint_path="path/to/directory",
+        max_reward=2.0
     )
 
 You can then launch a training run using ``accelerate`` with the following command:
@@ -340,29 +342,32 @@ function and is an example of how we might choose to train our agent to exhibit 
     import torch.distributed as dist
 
     def gather_tensor(tensor: torch.Tensor, agent: GRPO) -> torch.Tensor:
+        # Convert to tensor if it's a scalar
         if not isinstance(tensor, torch.Tensor):
             tensor = torch.tensor(tensor, device=f"cuda:{agent.local_rank}")
+
+        if tensor.device != agent.device:
+            tensor = tensor.to(agent.device)
+        # Ensure tensor is on correct device
         tensor = tensor.detach().clone()
+        # Create a list to store tensors from all processes
         world_size = dist.get_world_size()
         gathered_tensors = [torch.zeros_like(tensor) for _ in range(world_size)]
+
+        # Gather the tensor from all processes
         dist.all_gather(gathered_tensors, tensor)
         return torch.stack(gathered_tensors)
 
 
     def aggregate_metrics_across_gpus(
-        agent: GRPO, loss: torch.Tensor, kl: torch.Tensor, rewards: torch.Tensor
+        agent: GRPO, metrics: torch.Tensor
     ):
-        rewards = rewards.to(agent.device)
-        all_losses = gather_tensor(loss, agent)
-        all_kls = gather_tensor(kl, agent)
-        all_rewards = gather_tensor(torch.mean(rewards), agent)
-        # Compute aggregated metrics
-        avg_loss = all_losses.mean().item()
-        avg_kl = all_kls.mean().item()
-        avg_reward = all_rewards.mean().item()
-        return avg_loss, avg_kl, avg_reward
+        all_metrics = gather_tensor(metrics, agent)
+        avg_metrics = all_metrics.mean().item()
+        return avg_metrics
 
     evaluation_interval = 5
+    max_reward = 2.0
     checkpoint_path="saved_llms"
 
     if agent.local_rank == '0':
@@ -390,18 +395,29 @@ function and is an example of how we might choose to train our agent to exhibit 
             action_masks,
             rewards,
         )
-        loss, kl, grad_norm = agent.learn(experiences)
-        avg_loss, avg_kl, avg_grad_norm, avg_reward = aggregate_metrics_across_gpus(agent, loss, kl, grad_norm, rewards)
+        loss, kl = agent.learn(experiences)
+        metrics = [loss, kl, rewards]
+        if max_reward is not None:
+            accuracy = (rewards == max_reward).sum() / len(rewards.squeeze())
+            metrics.append(accuracy)
+        agg_metrics = [aggregate_metrics_across_gpus(agent, metric) for metric in metrics]
         prompts = next_prompts
-        if agent.local_rank == '0':
+        if agent.local_rank == "0":
+            metrics = {
+                        "Loss": (agg_metrics[0]),
+                        "KL-divergence": (agg_metrics[1]),
+                        "Mean training reward": (agg_metrics[2]),
+                    }
+            if max_reward is not None:
+                metrics |= {"Accuracy": (agg_metrics[3])}
             print(
-                f"Step: {i + 1}",
-                f"| Loss: {avg_loss}",
-                f"| KL-divergence: {avg_kl}",
-                f"| Grad-norm: {avg_grad_norm}",
+                metrics
             )
-
             pbar.update(1)
+            if wb:
+                wandb.log(
+                    metrics
+                )
             if (i + 1) % evaluation_interval == 0:
                 test_reward = agent.test(env)
                 print(f"Test reward: {test_reward}")
@@ -430,14 +446,17 @@ Load fine-tuned LLM
 ~~~~~~~~~~~~~~~~~~~
 .. code-block:: python
 
-    peft_config = PeftConfig.from_pretrained("Qwen/Qwen2.5-3B")
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from peft import PeftModel
+    import torch
+
     base_model = AutoModelForCausalLM.from_pretrained(
-        peft_config.base_model_name_or_path,
+        "Qwen/Qwen2.5-3B",
         torch_dtype=torch.bfloat16,
         device_map="auto"
     )
-    tokenizer = AutoTokenizer.from_pretrained(peft_config.base_model_name_or_path)
-    model = PeftModel.from_pretrained(base_model, "path/to/adapter/folder")
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B")
+    model = PeftModel.from_pretrained(base_model, "./saved_llms")
 
 Inference
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -447,11 +466,10 @@ Inference
     # Put model in evaluation mode
     model.eval()
 
-    # Set up input text
-    input_text = "Your prompt text here"
-
     # Tokenize input
-    inputs = tokenizer(input_text, return_tensors="pt")
+    inputs = countdown_chat_template(torch.tensor([33, 19, 27, 5]), # Numbers
+                                    torch.tensor([39]),            # Answer
+                                    tokenizer)
 
     # Move inputs to the same device as model
     inputs = {k: v.to(model.device) for k, v in inputs.items()}
@@ -472,6 +490,23 @@ Inference
     # Decode the generated text
     generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
     print(generated_text)
+
+The Aha Moment
+~~~~~~~~~~~~~~
+
+We finetuned a Qwen2.5-3B using the full training code below and witnessed the model having 'aha' moments. In a notable example from our training run
+the model literally exclaims "Aha!" as it reasons its way to the correct solution:
+
+.. code-block:: text
+
+    58 - 1 = 57, then 57 - 25 = 32, and finally 32 + 1 = 33.
+    However, 33 is not 82. Let's try another combination: 58 + 25 = 83, but we need 82.
+    Aha! If we use 58 + 1 = 59, then 59 - 25 = 34, and finally 34 - 1 = 33. This doesn't work either.
+    Hmm... what if we use 58 + 1 = 59, then 59 - 25 = 34, and finally 34 + 1 = 35.
+    Nope... closer, but not quite. What if we try 58 + 1 = 59, then 59 - 25 = 34, and finally 34 + 25 = 59.
+    Nope... still not 82.
+    Ah-ha! One more try: 58 - 1 = 57, then 57 + 25 = 82.</think>
+    <answer>(58 - 1) + 25</answer>
 
 Full Training Code
 ------------------
