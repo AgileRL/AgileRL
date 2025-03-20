@@ -27,8 +27,8 @@ class HuggingFaceGym(gym.Env):
     :type reward_fn: Callable[..., float]
     :param max_answer_tokens: Max number of answer tokens, defaults to 512
     :type max_answer_tokens: int, optional
-    :param data_batch_size: DataLoader batch size, defaults to 8
-    :type data_batch_size: int, optional
+    :param data_batch_size_per_gpu: DataLoader batch size, defaults to 8
+    :type data_batch_size_per_gpu: int, optional
     """
 
     def __init__(
@@ -39,7 +39,7 @@ class HuggingFaceGym(gym.Env):
         reward_fn: Callable[[str, str, str], float],
         apply_chat_template_fn: Callable[[str, str, AutoTokenizer], BatchEncoding],
         max_answer_tokens: int = 512,
-        data_batch_size: int = 8,
+        data_batch_size_per_gpu: int = 8,
         custom_collate_fn: Callable = None,
     ) -> None:
         assert {"question", "answer"}.issubset(
@@ -51,15 +51,21 @@ class HuggingFaceGym(gym.Env):
         self.name = train_dataset.info.dataset_name
         self.reward_fn = reward_fn
         self.tokenizer = tokenizer
-        self.data_batch_size = data_batch_size
+        self.data_batch_size_per_gpu = data_batch_size_per_gpu
         dataloader_kwargs = (
             {} if custom_collate_fn is None else {"collate_fn": custom_collate_fn}
         )
         self.train_dataloader = DataLoader(
-            train_dataset, batch_size=data_batch_size, shuffle=True, **dataloader_kwargs
+            train_dataset,
+            batch_size=data_batch_size_per_gpu,
+            shuffle=True,
+            **dataloader_kwargs,
         )
         self.test_dataloader = DataLoader(
-            test_dataset, batch_size=data_batch_size, shuffle=False, **dataloader_kwargs
+            test_dataset,
+            batch_size=data_batch_size_per_gpu,
+            shuffle=False,
+            **dataloader_kwargs,
         )
         self.train_dataloader_iter = iter(self.train_dataloader)
         self.test_dataloader_iter = iter(self.test_dataloader)

@@ -2,13 +2,14 @@ import re
 from typing import Tuple
 
 import torch
+import torch.distributed as dist
 from accelerate import Accelerator
 from datasets import load_dataset
 from peft import LoraConfig, get_peft_model
 from torch.utils.data import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from agilerl.algorithms import GRPO
+from agilerl.algorithms.grpo import GRPO, CosineLRScheduleConfig
 from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 
@@ -145,7 +146,7 @@ def combined_rewards(completion, solution, prompt):
 
     print(
         f"""
-    ============================================, \n
+    ============================================ \n
     Completion: {completion}, \n
     Numbers: {prompt}, \n
     Correct Answer: {solution.item()} \n
@@ -185,6 +186,9 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
+    world_size = (
+        getattr(dist, "get_world_size", lambda: 1)() if dist.is_initialized() else 1
+    )
     # Convert the HuggingFace dataset into a Gymnasium environment
     env = HuggingFaceGym(
         train_dataset=train_dataset,
@@ -193,7 +197,7 @@ def main():
         reward_fn=combined_rewards,
         apply_chat_template_fn=countdown_chat_template,
         max_answer_tokens=1024,
-        data_batch_size=1,
+        data_batch_size_per_gpu=1,
         custom_collate_fn=custom_collate_fn,
     )
     # Instantiate the grpo agent
@@ -203,14 +207,18 @@ def main():
         actor_network=model,
         pad_token_id=tokenizer.eos_token_id,
         batch_size=1,
-        group_size=12,
+        group_size=8,
         reduce_memory_peak=True,
         accelerator=Accelerator(),
+        cosine_lr_schedule_config=CosineLRScheduleConfig(
+            num_epochs=len(env) / world_size,
+            warmup_proportion=0.03,
+        ),
     )
     finetune_llm(
         agent=agent,
         env=env,
-        evaluation_interval=5,
+        evaluation_interval=10,
         wb=True,
         checkpoint_interval=100,
         checkpoint_path="saved_llms",

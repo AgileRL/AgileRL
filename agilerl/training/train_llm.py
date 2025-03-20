@@ -1,10 +1,11 @@
 from typing import Any, Dict, Optional
 
+import numpy as np
 import torch
 import torch.distributed as dist
-import wandb
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import GRPO
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import init_wandb
@@ -22,6 +23,25 @@ def finetune_llm(
     evaluation_interval: Optional[int] = 10,
     max_reward: Optional[int] = None,
 ) -> None:
+
+    data_increment = (
+        getattr(dist, "get_world_size", lambda: 1)() if dist.is_initialized() else 1
+    )
+    grad_accum = getattr(agent.actor, "gradient_accumulation_steps", lambda: 1)()
+    if agent.local_rank == "0":
+        print(
+            f"""
+=========================================================================
+Commencing RL finetuning
+
+Data batch size per gpu: {env.data_batch_size_per_gpu}
+Number of GPUs: {data_increment}
+Gradient accumulation: {grad_accum}
+Effective data batch size: {data_increment} * {env.data_batch_size_per_gpu} * {grad_accum} = {data_increment * env.data_batch_size_per_gpu * grad_accum}
+=========================================================================
+        """
+        )
+
     if wb and agent.local_rank == "0":
         init_wandb(
             algo=agent.algo,
@@ -33,7 +53,7 @@ def finetune_llm(
         print("\nTraining...")
 
     bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
-    max_steps = len(env) // env.data_batch_size
+    max_steps = len(env) // env.data_batch_size_per_gpu
     if agent.local_rank == "0":
         pbar = trange(
             max_steps,
@@ -47,6 +67,8 @@ def finetune_llm(
     prompts = env.reset(reset_dataloaders=True)
     for i in range(max_steps):
         completion_ids, action_masks = agent.get_action(prompts)
+        completion_lengths = np.mean([x.shape[1] for x in completion_ids])
+
         # Use the reward function stored in env.step to calculate reward of the each answer from the group
         next_prompts, rewards = env.step(completion_ids)
 
@@ -56,7 +78,7 @@ def finetune_llm(
             rewards,
         )
         loss, kl = agent.learn(experiences)
-        metrics = [loss, kl, rewards]
+        metrics = [loss, kl, rewards, completion_lengths]
         if max_reward is not None:
             accuracy = (rewards == max_reward).sum() / len(rewards.squeeze())
             metrics.append(accuracy)
@@ -64,29 +86,42 @@ def finetune_llm(
             aggregate_metrics_across_gpus(agent, metric) for metric in metrics
         ]
         prompts = next_prompts
+        agg_test_metrics = None
+        if (i + 1) % evaluation_interval == 0:
+            test_reward = agent.test(env)
+            test_metrics = [test_reward]
+            if max_reward is not None:
+                test_accuracy = (test_reward == max_reward).sum() / test_reward.shape[0]
+                test_metrics.append(test_accuracy)
+            agg_test_metrics = [
+                aggregate_metrics_across_gpus(agent, metric) for metric in test_metrics
+            ]
         if agent.local_rank == "0":
-            metrics = {
-                "Loss": (agg_metrics[0]),
-                "KL-divergence": (agg_metrics[1]),
-                "Mean training reward": (agg_metrics[2]),
+            metrics_dict = {
+                "Train/Loss": agg_metrics[0],
+                "Train/KL-divergence": agg_metrics[1],
+                "Train/Mean reward": agg_metrics[2],
+                "Train/Average completion length": int(agg_metrics[3]),
             }
             if max_reward is not None:
-                metrics |= {"Accuracy": (agg_metrics[3])}
-            print(metrics)
-            pbar.update(1)
-            if wb:
-                wandb.log(metrics)
-            if (i + 1) % evaluation_interval == 0:
-                test_reward = agent.test(env)
-                print(f"Test reward: {test_reward}")
+                metrics_dict |= {"Train/Accuracy": agg_metrics[4]}
+            print(metrics_dict)
+            if agg_test_metrics is not None:
+                test_metrics_dict = {"Eval/Mean reward": agg_test_metrics[0]}
+                if max_reward is not None:
+                    test_metrics_dict |= {"Eval/Accuracy": agg_test_metrics[1]}
+                print(test_metrics_dict)
                 if wb:
-                    wandb.log({"Test reward": test_reward})
+                    wandb.log(test_metrics_dict)
+            if wb:
+                wandb.log(metrics_dict)
             if (
                 checkpoint_path is not None
                 and checkpoint_interval is not None
                 and (i + 1) % checkpoint_interval == 0
             ):
                 save_llm_checkpoint(agent, checkpoint_path, i)
+            pbar.update(data_increment)
 
 
 def gather_tensor(tensor: torch.Tensor, agent: GRPO) -> torch.Tensor:

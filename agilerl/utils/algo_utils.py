@@ -15,6 +15,7 @@ from tensordict.nn import CudaGraphModule
 from torch._dynamo import OptimizedModule
 from torch.nn import Module
 from torch.optim import Optimizer
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
 from agilerl.protocols import EvolvableAttributeType, EvolvableModule, OptimizerWrapper
 from agilerl.typing import (
@@ -753,3 +754,40 @@ def is_vectorized_experiences(*experiences: ArrayOrTensor) -> bool:
         is_vec_ls.append(is_vec)
 
     return all(is_vec_ls)
+
+
+def create_warmup_cosine_scheduler(optimizer, config, min_lr, max_lr):
+    num_epochs = config.num_epochs
+    warmup_proportion = config.warmup_proportion
+    # Calculate warmup epochs
+    warmup_epochs = int(num_epochs * warmup_proportion)
+    remaining_epochs = num_epochs - warmup_epochs
+
+    # Set the initial learning rate to a very small value
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = max_lr
+
+    # Warmup scheduler: Linear growth from initial LR to max_lr
+    warmup_scheduler = LinearLR(
+        optimizer,
+        start_factor=min_lr / max_lr,  # Start factor to get from min_lr to max_lr
+        end_factor=1.0,  # End with the full max_lr
+        total_iters=warmup_epochs,
+    )
+
+    # Decay scheduler: Cosine decay from max_lr to min_lr
+    # Double T_max to ensure we only use the first half of the cosine curve (strictly decreasing)
+    cosine_scheduler = CosineAnnealingLR(
+        optimizer,
+        T_max=remaining_epochs * 2,  # Doubled to ensure strictly decreasing LR
+        eta_min=min_lr,
+    )
+
+    # Combine schedulers
+    scheduler = SequentialLR(
+        optimizer,
+        schedulers=[warmup_scheduler, cosine_scheduler],
+        milestones=[warmup_epochs],
+    )
+
+    return scheduler

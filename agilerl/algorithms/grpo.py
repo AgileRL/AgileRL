@@ -2,6 +2,7 @@ import copy
 import gc
 import os
 import warnings
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Union
 
 import deepspeed
@@ -24,7 +25,11 @@ from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.typing import DeviceType, ExperiencesType
-from agilerl.utils.algo_utils import get_experiences_samples, stack_and_pad_experiences
+from agilerl.utils.algo_utils import (
+    create_warmup_cosine_scheduler,
+    get_experiences_samples,
+    stack_and_pad_experiences,
+)
 from agilerl.utils.llm_utils import (
     HuggingFaceGym,
 )
@@ -33,6 +38,14 @@ DeepSpeedOptimizerType = Union[
     DeepSpeedZeroOptimizer,  # ZeRO Stage 1 & 2 optimizer
     DeepSpeedZeroOptimizer_Stage3,  # ZeRO Stage 3 optimizer
 ]
+
+
+@dataclass
+class CosineLRScheduleConfig:
+    """Data class to configure a cosine LR scheduler."""
+
+    num_epochs: int
+    warmup_proportion: float
 
 
 class GRPO(RLAlgorithm):
@@ -68,6 +81,8 @@ class GRPO(RLAlgorithm):
     :type reduce_memory_peak: bool, optional
     :param min_output_tokens: Minimum output tokens, defaults to 0
     :type min_output_tokens: int, optional
+    :param cosine_lr_schedule_config: Config for cosine lr scheduling, defaults to None
+    :type cosine_lr_schedule_config: CosineLRScheduleConfig, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
@@ -93,6 +108,7 @@ class GRPO(RLAlgorithm):
         calc_position_embeddings: bool = True,
         reduce_memory_peak: bool = False,
         min_output_tokens: Optional[int] = None,
+        cosine_lr_schedule_config: Optional[CosineLRScheduleConfig] = None,
         accelerator: Optional[Accelerator] = None,
         device: str = "cpu",
     ) -> None:
@@ -143,7 +159,8 @@ class GRPO(RLAlgorithm):
             min_new_tokens=min_output_tokens,
             pad_token_id=pad_token_id,
         )
-        if max_grad_norm and accelerator is not None:
+        self.cosine_lr_schedule_config = cosine_lr_schedule_config
+        if max_grad_norm and accelerator is not None and device == "cuda:0":
             warnings.warn(
                 "Argument 'max_grad_norm' will be overwritten by the 'gradient_clipping' value set in the deepspeed config."
             )
@@ -273,7 +290,7 @@ class GRPO(RLAlgorithm):
         self,
         env: HuggingFaceGym,
         loop: int = 1,
-    ) -> float:
+    ) -> torch.Tensor:
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
@@ -293,7 +310,8 @@ class GRPO(RLAlgorithm):
                 rewards.append(reward)
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
-        return mean_fit
+        reward_tensor = torch.cat(rewards)
+        return reward_tensor
 
     def _calculate_advantage(
         self, rewards: torch.Tensor, eps: float = 1e-8
@@ -449,9 +467,16 @@ class GRPO(RLAlgorithm):
         self.optimizer = OptimizerWrapper(
             optim.AdamW, networks=[self.actor], lr=self.lr
         )
+        self.lr_scheduler = (
+            create_warmup_cosine_scheduler(
+                self.optimizer.optimizer, self.cosine_lr_schedule_config, 1e-8, self.lr
+            )
+            if self.cosine_lr_schedule_config is not None
+            else None
+        )
         if self.accelerator is not None:
-            self.actor, self.optimizer = self.accelerator.prepare(
-                self.actor, self.optimizer.optimizer
+            self.actor, self.optimizer, self.lr_scheduler = self.accelerator.prepare(
+                self.actor, self.optimizer.optimizer, self.lr_scheduler
             )
         else:
             self.actor = self.actor.to(self.device)
@@ -499,6 +524,9 @@ class GRPO(RLAlgorithm):
             loss.backward()
             clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
             self.optimizer.step()
+        if self.lr_scheduler is not None:
+            self.lr_scheduler.step()
+            self.lr = self.lr_scheduler.get_last_lr()[0]
 
     def save_checkpoint(self, path: str) -> None:
         """

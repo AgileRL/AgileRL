@@ -193,7 +193,7 @@ def main():
         reward_fn=combined_rewards,
         apply_chat_template_fn=countdown_chat_template,
         max_answer_tokens=1024,
-        data_batch_size=1,
+        data_batch_size_per_gpu=1,
         custom_collate_fn=custom_collate_fn,
     )
     # Instantiate the grpo agent
