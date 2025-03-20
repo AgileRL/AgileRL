@@ -6,10 +6,10 @@ import yaml
 from accelerate import Accelerator
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-from agilerl.buffers import MultiAgentReplayBuffer
+from agilerl.components import MultiAgentReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.training.train_multi_agent_v0 import train_multi_agent
+from agilerl.training.train_multi_agent import train_multi_agent
 from agilerl.utils.utils import (
     create_population,
     make_multi_agent_vect_envs,

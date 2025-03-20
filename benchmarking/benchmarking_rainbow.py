@@ -2,7 +2,7 @@ import torch
 import yaml
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-from agilerl.buffers.replay_buffer import (
+from agilerl.components import (
     NStepReplayBuffer,
     PrioritizedReplayBuffer,
     ReplayBuffer,

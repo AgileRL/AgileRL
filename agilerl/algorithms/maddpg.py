@@ -455,15 +455,20 @@ class MADDPG(MultiAgentRLAlgorithm):
 
         return env_defined_actions, agent_masks
 
-    def process_infos(self, infos: InfosDict) -> Tuple[ArrayDict, ArrayDict, ArrayDict]:
+    def process_infos(
+        self, infos: Optional[InfosDict]
+    ) -> Tuple[ArrayDict, ArrayDict, ArrayDict]:
         """
         Process the information, extract env_defined_actions, action_masks and agent_masks
 
         :param infos: Info dict
         :type infos: Dict[str, Dict[...]]
+        :return: Tuple of action masks, env_defined_actions and agent masks
+        :rtype: Tuple[ArrayDict, ArrayDict, ArrayDict]
         """
         if infos is None:
             infos = {agent: {} for agent in self.agent_ids}
+
         env_defined_actions, agent_masks = self.extract_agent_masks(infos)
         action_masks = self.extract_action_masks(infos)
         return action_masks, env_defined_actions, agent_masks

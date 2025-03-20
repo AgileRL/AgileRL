@@ -318,10 +318,10 @@ class DQN(RLAlgorithm):
         :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
         :type experiences: TensorDict
         """
-        states = experiences["obs"]["value"]
+        states = experiences["obs"]
         actions = experiences["action"]
         rewards = experiences["reward"]
-        next_states = experiences["next_obs"]["value"]
+        next_states = experiences["next_obs"]
         dones = experiences["done"]
         if self.accelerator is not None:
             actions = actions.to(self.accelerator.device)

@@ -4,13 +4,13 @@ from typing import Any, Optional, Union
 from tensordict import TensorDict
 from torch.utils.data import DataLoader
 
-from agilerl.buffers import (
+from agilerl.components import (
     MultiAgentReplayBuffer,
     NStepReplayBuffer,
     PrioritizedReplayBuffer,
     ReplayBuffer,
 )
-from agilerl.buffers.data import ReplayDataset
+from agilerl.components.data import ReplayDataset
 
 BufferType = Union[
     ReplayBuffer, MultiAgentReplayBuffer, PrioritizedReplayBuffer, NStepReplayBuffer

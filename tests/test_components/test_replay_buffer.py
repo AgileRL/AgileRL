@@ -2,12 +2,12 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from agilerl.buffers.replay_buffer import (
+from agilerl.components.replay_buffer import (
     NStepReplayBuffer,
     PrioritizedReplayBuffer,
     ReplayBuffer,
 )
-from agilerl.buffers.segment_tree import MinSegmentTree, SumSegmentTree
+from agilerl.components.segment_tree import MinSegmentTree, SumSegmentTree
 
 
 ##### ReplayBuffer class tests #####

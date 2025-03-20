@@ -6,9 +6,8 @@ import torch
 import torch.nn as nn
 from gymnasium import spaces
 
+from agilerl.modules import EvolvableCNN, EvolvableLSTM, EvolvableMLP
 from agilerl.modules.base import EvolvableModule, ModuleDict, MutationType, mutation
-from agilerl.modules.cnn import EvolvableCNN
-from agilerl.modules.mlp import EvolvableMLP
 from agilerl.typing import ArrayOrTensor
 from agilerl.utils.evolvable_networks import (
     get_activation,
@@ -17,7 +16,7 @@ from agilerl.utils.evolvable_networks import (
 )
 
 ModuleType = Union[EvolvableModule, nn.Module]
-SupportedEvolvableTypes = Union[EvolvableCNN, EvolvableMLP]
+SupportedEvolvableTypes = Union[EvolvableCNN, EvolvableMLP, EvolvableLSTM]
 TupleOrDictSpace = Union[spaces.Tuple, spaces.Dict]
 TupleOrDictObservation = Union[Dict[str, ArrayOrTensor], Tuple[ArrayOrTensor]]
 
@@ -351,7 +350,7 @@ class EvolvableMultiInput(EvolvableModule):
         EvolvableModule.init_weights_gaussian(self.final_dense, std_coeff=output_coeff)
 
     def get_inner_init_dict(
-        self, key: str, default: Literal["cnn", "mlp"]
+        self, key: str, default: Literal["cnn", "mlp", "lstm"]
     ) -> Dict[str, Any]:
         """Returns the initialization dictionary for the specified key.
 
@@ -368,7 +367,8 @@ class EvolvableMultiInput(EvolvableModule):
         assert default in [
             "cnn",
             "mlp",
-        ], "Invalid default value provided, must be 'cnn' or 'mlp'."
+            "lstm",
+        ], "Invalid default value provided, must be 'cnn' or 'mlp' or 'lstm'."
 
         return self.cnn_init_dict if default == "cnn" else self.mlp_init_dict
 
@@ -403,12 +403,25 @@ class EvolvableMultiInput(EvolvableModule):
 
                 self._init_dicts[key] = feature_extractor.init_dict
                 feature_net[key] = feature_extractor
-            elif isinstance(space, spaces.Box) and not len(space.shape) == 1:
-                raise ValueError(
-                    "Box spaces with shape {} are not supported. Please use vector or image observations.".format(
-                        space.shape
-                    )
-                )
+
+            # NOTE: We assume 2D Box spaces correspond to time-series data.
+            # For other types of data, it is probably adequate to flatten the space
+            # and use an MLP.
+            # elif isinstance(space, spaces.Box):
+            #     if len(space.shape) == 2:
+            #         feature_extractor = EvolvableLSTM(
+            #             input_size=space.shape[1],
+            #             name=init_dict.pop("name", key),
+            #             **init_dict
+            #         )
+            #         self._init_dicts[key] = feature_extractor.init_dict
+            #         feature_net[key] = feature_extractor
+            #     else:
+            #         raise ValueError(
+            #             "Box spaces with shape {} are not supported. Please use vector or image observations.".format(
+            #                 space.shape
+            #             )
+            #         )
 
         # Collect all vector space shapes for concatenation
         vector_input_dim = sum(

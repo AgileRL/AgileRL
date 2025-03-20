@@ -422,10 +422,10 @@ class DDPG(RLAlgorithm):
         :param policy_noise: Standard deviation of noise applied to policy, defaults to 0.2
         :type policy_noise: float, optional
         """
-        states = experiences["obs"]["value"]
+        states = experiences["obs"]
         actions = experiences["action"]
         rewards = experiences["reward"]
-        next_states = experiences["next_obs"]["value"]
+        next_states = experiences["next_obs"]
         dones = experiences["done"]
         if self.accelerator is not None:
             actions = actions.to(self.accelerator.device)

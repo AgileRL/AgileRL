@@ -7,7 +7,7 @@ import torch
 from tensordict import TensorDict, tensorclass
 from torch.utils.data import IterableDataset
 
-from agilerl.buffers import ReplayBuffer
+from agilerl.components import ReplayBuffer
 from agilerl.typing import ObservationType, TorchObsType
 
 
@@ -44,32 +44,10 @@ def to_tensordict(
 
 
 @tensorclass
-class Observation:
-    """TensorDict wrapper for observations."""
-
-    value: TorchObsType
-
-    def __post_init__(self) -> None:
-        self.value = to_tensordict(self.value)
-
-
-@tensorclass
-class RecurrentObservation:
-    """TensorDict wrapper for recurrent observations."""
-
-    value: TorchObsType
-    hidden: TorchObsType
-
-    def __post_init__(self) -> None:
-        self.value = to_tensordict(self.value)
-        self.hidden = to_tensordict(self.hidden)
-
-
-@tensorclass
 class Transition:
-    obs: Observation
+    obs: TorchObsType
     action: torch.Tensor
-    next_obs: Observation
+    next_obs: TorchObsType
     reward: torch.Tensor
     done: torch.Tensor
 
@@ -93,6 +71,7 @@ class ReplayDataset(IterableDataset):
     def __init__(self, buffer: ReplayBuffer, batch_size: int = 256) -> None:
         if not isinstance(buffer, ReplayBuffer):
             warnings.warn("Buffer is not an agilerl ReplayBuffer.")
+
         assert batch_size > 0, "Batch size must be greater than zero."
         self.buffer = buffer
         self.batch_size = batch_size

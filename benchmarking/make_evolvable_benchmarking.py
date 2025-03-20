@@ -7,11 +7,11 @@ from pettingzoo.atari import pong_v3
 from pettingzoo.mpe import simple_speaker_listener_v4
 
 from agilerl.algorithms.core.base import MultiAgentRLAlgorithm, RLAlgorithm
-from agilerl.buffers import MultiAgentReplayBuffer, ReplayBuffer
+from agilerl.components import MultiAgentReplayBuffer, ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules.mlp import EvolvableMLP
-from agilerl.training.train_multi_agent_v0 import train_multi_agent
+from agilerl.training.train_multi_agent import train_multi_agent
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_on_policy import train_on_policy
 from agilerl.utils.utils import (

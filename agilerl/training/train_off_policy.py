@@ -13,9 +13,9 @@ from tqdm import trange
 import wandb
 from agilerl.algorithms import DDPG, DQN, TD3, RainbowDQN
 from agilerl.algorithms.core.base import RLAlgorithm
-from agilerl.buffers import NStepReplayBuffer, PrioritizedReplayBuffer, ReplayBuffer
-from agilerl.buffers.data import Observation, ReplayDataset, Transition
-from agilerl.buffers.sampler import Sampler
+from agilerl.components import NStepReplayBuffer, PrioritizedReplayBuffer, ReplayBuffer
+from agilerl.components.data import ReplayDataset, Transition
+from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.algo_utils import obs_channels_to_first
@@ -300,12 +300,11 @@ def train_off_policy(
                     obs_channels_to_first(next_state) if swap_channels else next_state
                 )
 
-                # TODO: Modify with new TensorDict-based replay buffer
                 transition: TensorDictBase = Transition(
-                    obs=Observation(value=state),
+                    obs=state,
                     action=action,
                     reward=reward,
-                    next_obs=Observation(value=next_state),
+                    next_obs=next_state,
                     done=done,
                     batch_size=[num_envs],
                 )

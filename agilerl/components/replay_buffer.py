@@ -4,7 +4,7 @@ from typing import Deque, Dict, Optional, Union
 import torch
 from tensordict import TensorDict
 
-from agilerl.buffers.segment_tree import MinSegmentTree, SumSegmentTree
+from agilerl.components.segment_tree import MinSegmentTree, SumSegmentTree
 from agilerl.typing import ArrayOrTensor
 
 DataType = Union[Dict[str, ArrayOrTensor], TensorDict]

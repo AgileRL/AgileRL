@@ -1,20 +1,17 @@
 import torch
 import yaml
+from gym_anytrading.datasets import FOREX_EURUSD_1H_ASK
 
-from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.modules.dummy import DummyEvolvable
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.utils.utils import (
     create_population,
     make_vect_envs,
-    observation_space_channels_to_first,
     print_hyperparams,
 )
-from benchmarking.networks import BasicNetActorDQN
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -30,13 +27,15 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
     print("============ AgileRL ============")
     print(f"DEVICE: {device}")
 
-    env = make_vect_envs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
+    env_kwargs = dict(
+        df=FOREX_EURUSD_1H_ASK, window_size=10, frame_bound=(10, 300), unit_side="right"
+    )
+    env = make_vect_envs(
+        INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"], **env_kwargs
+    )
 
     observation_space = env.single_observation_space
     action_space = env.single_action_space
-    if INIT_HP["CHANNELS_LAST"]:
-        observation_space = observation_space_channels_to_first(observation_space)
-
     memory = ReplayBuffer(max_size=INIT_HP["MEMORY_SIZE"], device=device)
     tournament = TournamentSelection(
         INIT_HP["TOURN_SIZE"],
@@ -55,21 +54,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
         rand_seed=MUTATION_PARAMS["RAND_SEED"],
         device=device,
     )
-
-    state_dim = RLAlgorithm.get_state_dim(observation_space)
-    action_dim = RLAlgorithm.get_action_dim(action_space)
-    if use_net:
-        # Currently set up for DQN
-        actor_kwargs = dict(
-            input_size=state_dim[0],
-            hidden_sizes=[64, 64],
-            output_size=action_dim,
-        )
-        actor = DummyEvolvable(BasicNetActorDQN, actor_kwargs, device=device)
-        critic = None
-    else:
-        actor = None
-        critic = None
 
     if INIT_HP["ALGO"] in ["DDPG", "TD3"]:
         hp_config = HyperparameterConfig(
@@ -118,8 +102,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
         net_config=NET_CONFIG,
         INIT_HP=INIT_HP,
         hp_config=hp_config,
-        actor_network=actor,
-        critic_network=critic,
         population_size=INIT_HP["POP_SIZE"],
         num_envs=INIT_HP["NUM_ENVS"],
         device=device,
@@ -158,7 +140,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
 
 
 if __name__ == "__main__":
-    with open("configs/training/ddpg.yaml") as file:
+    with open("configs/training/dqn_lstm.yaml") as file:
         config = yaml.safe_load(file)
     INIT_HP = config["INIT_HP"]
     MUTATION_PARAMS = config["MUTATION_PARAMS"]

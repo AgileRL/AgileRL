@@ -9,6 +9,7 @@ from gymnasium import spaces
 
 from agilerl.modules import (
     EvolvableCNN,
+    EvolvableLSTM,
     EvolvableMLP,
     EvolvableMultiInput,
     EvolvableResNet,
@@ -21,7 +22,7 @@ from agilerl.utils.evolvable_networks import get_default_encoder_config, is_imag
 
 SelfEvolvableNetwork = TypeVar("SelfEvolvableNetwork", bound="EvolvableNetwork")
 DefaultEncoderType = Union[
-    EvolvableCNN, EvolvableMLP, EvolvableMultiInput, EvolvableSimBa
+    EvolvableCNN, EvolvableMLP, EvolvableMultiInput, EvolvableSimBa, EvolvableLSTM
 ]
 
 
@@ -91,6 +92,20 @@ def assert_correct_multi_input_net_config(net_config: Dict[str, Any]) -> None:
     """
     # Multi-input networks contain at least one image space
     assert_correct_cnn_net_config(net_config)
+
+
+def assert_correct_lstm_net_config(net_config: Dict[str, Any]) -> None:
+    """Asserts that the LSTM network configuration is correct.
+
+    :param net_config: Configuration of the LSTM network.
+    :type net_config: Dict[str, Any]
+    """
+    assert (
+        "hidden_size" in net_config.keys()
+    ), "Net config must contain hidden_size: int."
+    assert isinstance(
+        net_config["hidden_size"], (int, np.int64)
+    ), "Net config hidden_size must be an integer."
 
 
 # TODO: Need to think of a way to do this check without the metaclass
@@ -445,6 +460,19 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
 
             encoder = EvolvableCNN(
                 input_shape=self.observation_space.shape,
+                num_outputs=self.latent_dim,
+                device=self.device,
+                name="encoder",
+                **net_config,
+            )
+        elif (
+            isinstance(self.observation_space, spaces.Box)
+            and len(self.observation_space.shape) == 2
+        ):
+            assert_correct_lstm_net_config(net_config)
+
+            encoder = EvolvableLSTM(
+                input_size=self.observation_space.shape[1],
                 num_outputs=self.latent_dim,
                 device=self.device,
                 name="encoder",

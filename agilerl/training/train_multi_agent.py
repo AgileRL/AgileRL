@@ -2,7 +2,7 @@ import time
 import warnings
 from copy import deepcopy
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 import gymnasium as gym
 import numpy as np
@@ -11,10 +11,10 @@ from torch.utils.data import DataLoader
 from tqdm import trange
 
 import wandb
-from agilerl.algorithms import MADDPG, MATD3
-from agilerl.buffers import MultiAgentReplayBuffer
-from agilerl.buffers.data import ReplayDataset
-from agilerl.buffers.sampler import Sampler
+from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
+from agilerl.components.replay_buffer import ReplayBuffer
+from agilerl.components.replay_data import ReplayDataset
+from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.algo_utils import obs_channels_to_first
@@ -25,8 +25,7 @@ from agilerl.utils.utils import (
 )
 
 InitDictType = Optional[Dict[str, Any]]
-SupportedAlgorithms = Union[MADDPG, MATD3]
-PopulationType = List[SupportedAlgorithms]
+PopulationType = List[MultiAgentRLAlgorithm]
 
 
 def train_multi_agent(
@@ -34,7 +33,7 @@ def train_multi_agent(
     env_name: str,
     algo: str,
     pop: PopulationType,
-    memory: MultiAgentReplayBuffer,
+    memory: ReplayBuffer,
     sum_scores: bool = True,
     INIT_HP: InitDictType = None,
     MUT_P: InitDictType = None,
@@ -69,7 +68,7 @@ def train_multi_agent(
     :param pop: Population of agents
     :type pop: list[object]
     :param memory: Experience Replay Buffer
-    :type memory: MultiAgentReplayBuffer
+    :type memory: object
     :param sum_scores: Boolean flag indicating whether to sum sub-agents scores, typically True for co-operative environments, defaults to True
     :type sum_scores: bool, optional
     :param INIT_HP: Dictionary containing initial hyperparameters.
@@ -175,9 +174,11 @@ def train_multi_agent(
         replay_dataset = ReplayDataset(memory, pop[0].batch_size)
         replay_dataloader = DataLoader(replay_dataset, batch_size=None)
         replay_dataloader = accelerator.prepare(replay_dataloader)
-        sampler = Sampler(dataset=replay_dataset, dataloader=replay_dataloader)
+        sampler = Sampler(
+            distributed=True, dataset=replay_dataset, dataloader=replay_dataloader
+        )
     else:
-        sampler = Sampler(memory=memory)
+        sampler = Sampler(distributed=False, memory=memory)
 
     if accelerator is not None:
         print(f"\nDistributed training on {accelerator.device}...")
@@ -205,8 +206,9 @@ def train_multi_agent(
     checkpoint_count = 0
 
     # Pre-training mutation
-    if accelerator is None and mutation is not None:
-        pop = mutation.mutation(pop, pre_training_mut=True)
+    if accelerator is None:
+        if mutation is not None:
+            pop = mutation.mutation(pop, pre_training_mut=True)
 
     # RL training loop
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
@@ -281,7 +283,7 @@ def train_multi_agent(
                             agent_id: np.squeeze(s) for agent_id, s in state.items()
                         }
                     next_state = {
-                        agent_id: obs_channels_to_first(ns)
+                        agent_id: np.moveaxis(ns, [-1], [-3])
                         for agent_id, ns in next_state.items()
                     }
 
@@ -351,7 +353,6 @@ def train_multi_agent(
                         reset_noise_indices.append(idx)
                         if not is_vectorised:
                             state, info = env.reset()
-
                 agent.reset_action_noise(reset_noise_indices)
 
             pbar.update(evo_steps // len(pop))

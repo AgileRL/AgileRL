@@ -13,7 +13,7 @@ from gymnasium.spaces import Box, Discrete
 from pettingzoo import ParallelEnv
 
 import agilerl.training.train_bandits
-import agilerl.training.train_multi_agent_v0
+import agilerl.training.train_multi_agent
 import agilerl.training.train_off_policy
 import agilerl.training.train_offline
 import agilerl.training.train_on_policy
@@ -28,7 +28,7 @@ from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
 from agilerl.algorithms.ppo import PPO
 from agilerl.algorithms.td3 import TD3
 from agilerl.training.train_bandits import train_bandits
-from agilerl.training.train_multi_agent_v0 import train_multi_agent
+from agilerl.training.train_multi_agent import train_multi_agent
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_offline import train_offline
 from agilerl.training.train_on_policy import train_on_policy
@@ -2472,7 +2472,7 @@ def test_train_multi_wandb_init_log(
         else:
             accelerator = None
         # Call the function that should trigger wandb.init
-        agilerl.training.train_multi_agent_v0.train_multi_agent(
+        agilerl.training.train_multi_agent.train_multi_agent(
             multi_env,
             "env_name",
             "algo",
@@ -2536,7 +2536,7 @@ def test_multi_agent_early_stop(
         "agilerl.training.train_multi_agent.wandb.finish"
     ) as mock_wandb_finish:
         # Call the function that should trigger wandb.init
-        agilerl.training.train_multi_agent_v0.train_multi_agent(
+        agilerl.training.train_multi_agent.train_multi_agent(
             multi_env,
             "env_name",
             "algo",
