@@ -13,7 +13,7 @@ from agilerl.algorithms.grpo import GRPO, CosineLRScheduleConfig
 from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 
-MODEL_PATH = "Qwen/Qwen2.5-3B"
+MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
 
@@ -114,14 +114,12 @@ def equation_reward_func(completions, target, nums, **kwargs):
             equation = answer_tags[0].strip()
             used_numbers = [int(n) for n in re.findall(r"\d+", equation)]
 
-            if sorted(used_numbers) != sorted(numbers):
-                print(f"Numbers mismatch: {used_numbers} vs {numbers}")
+            if sorted(used_numbers) != sorted(numbers.flatten().tolist()):
                 rewards.append(0.0)
                 continue
 
             allowed_pattern = r"^[\d+\-*/().\s]+$"
             if not re.match(allowed_pattern, equation):
-                print(f"Equation format invalid: {equation}")
                 rewards.append(0.0)
                 continue
 
@@ -130,7 +128,6 @@ def equation_reward_func(completions, target, nums, **kwargs):
             if abs(float(result) - float(gt)) < 1e-5:
                 rewards.append(1.0)
             else:
-                print(f"Result {result} doesn't match target {gt}")
                 rewards.append(0.0)
         except Exception as e:
             print(f"Equation error: {e}")
@@ -186,9 +183,6 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
-    world_size = (
-        getattr(dist, "get_world_size", lambda: 1)() if dist.is_initialized() else 1
-    )
     # Convert the HuggingFace dataset into a Gymnasium environment
     env = HuggingFaceGym(
         train_dataset=train_dataset,
@@ -197,7 +191,7 @@ def main():
         reward_fn=combined_rewards,
         apply_chat_template_fn=countdown_chat_template,
         max_answer_tokens=10,
-        data_batch_size_per_gpu=1,
+        data_batch_size_per_gpu=2,
         custom_collate_fn=custom_collate_fn,
     )
     # Instantiate the grpo agent
@@ -207,20 +201,17 @@ def main():
         actor_network=model,
         pad_token_id=tokenizer.eos_token_id,
         batch_size=1,
-        group_size=8,
+        group_size=2,
         reduce_memory_peak=True,
         accelerator=Accelerator(),
-        cosine_lr_schedule_config=CosineLRScheduleConfig(
-            num_epochs=len(env) / world_size,
-            warmup_proportion=0.03,
-        ),
+        lr=5e-6
     )
     finetune_llm(
         agent=agent,
         env=env,
         evaluation_interval=10,
         wb=False,
-        checkpoint_interval=1,
+        checkpoint_interval=100,
         checkpoint_path="saved_llms",
         max_reward=2.0,
     )

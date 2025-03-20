@@ -366,7 +366,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         else:
             # Remove the algo specific guarded variables (if specified)
             attributes = {k: v for k, v in attributes if k not in exclude}
-
         return attributes
 
     @staticmethod
@@ -852,7 +851,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         )
 
         # Reconstruct evolvable modules in algorithm
-        print("Checkpoint: ", checkpoint)
         network_info: Optional[Dict[str, Dict[str, Any]]] = checkpoint.get(
             "network_info"
         )

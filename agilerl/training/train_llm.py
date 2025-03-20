@@ -1,18 +1,20 @@
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 import numpy as np
 import torch
 import torch.distributed as dist
 from tqdm import trange
-
 import wandb
+
 from agilerl.algorithms import GRPO
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import init_wandb
+from agilerl.algorithms.core.base import RLAlgorithm
+
 
 InitDictType = Optional[Dict[str, Any]]
-
+PopulationType = List[RLAlgorithm]
 
 def finetune_llm(
     agent: GRPO,
@@ -24,11 +26,10 @@ def finetune_llm(
     evaluation_interval: Optional[int] = 10,
     max_reward: Optional[int] = None,
 ) -> None:
-
-    data_increment = (
-        getattr(dist, "get_world_size", lambda: 1)() if dist.is_initialized() else 1
-    )
+    data_increment = agent.accelerator.num_processes if agent.accelerator is not None else 1
     grad_accum = getattr(agent.actor, "gradient_accumulation_steps", lambda: 1)()
+    effective_data_batch_size = data_increment * env.data_batch_size_per_gpu
+    effective_learning_batch_size = data_increment * env.data_batch_size_per_gpu * grad_accum
     if agent.local_rank == "0":
         print(
             f"""
@@ -38,12 +39,146 @@ Commencing RL finetuning
 Data batch size per gpu: {env.data_batch_size_per_gpu}
 Number of GPUs: {data_increment}
 Gradient accumulation: {grad_accum}
-Effective data batch size: {data_increment} * {env.data_batch_size_per_gpu} = {(effective_data_batch_size := data_increment * env.data_batch_size_per_gpu)}
-Effective learning batch_size: {data_increment} * {agent.batch_size} * {grad_accum} = {(effective_learning_batch_size := data_increment * env.data_batch_size_per_gpu * grad_accum)}
+Effective data batch size: {data_increment} * {env.data_batch_size_per_gpu} = {effective_data_batch_size}
+Effective learning batch_size: {data_increment} * {agent.batch_size} * {grad_accum} = {effective_learning_batch_size}
 =========================================================================
         """
         )
+    if wb and agent.accelerator.is_main_process: #agent.local_rank == "0":
+        init_wandb(
+            algo=agent.algo,
+            env_name=env.name,
+            wandb_api_key=wandb_api_key,
+            init_hyperparams={
+                "effective_data_batch_size": effective_data_batch_size,
+                "effective_learning_batch_size": effective_learning_batch_size,
+                "group_size": agent.group_size,
+                "temperature": agent.generation_config.temperature,
+                "max_new_tokens": agent.generation_config.max_new_tokens,
+                "min_new_tokens": agent.generation_config.min_new_tokens,
+                "pad_token_id": agent.generation_config.pad_token_id,
+                "beta": agent.beta,
+                "clip_coefficient": agent.clip_coef,
+                "update_epochs": agent.update_epochs,
+                "reduce_memory_peak": agent.reduce_memory_peak,
+                "cosine_lr_scheduler": (
+                    True if agent.cosine_lr_schedule_config is not None else False
+                ),
+                "distributed_training": (
+                    True if agent.accelerator is not None else False
+                ),
+                "learning_rate": agent.lr,
+            },
+        )
 
+    if agent.accelerator.is_main_process: #agent.local_rank == "0":
+        print("\nTraining...")
+
+    bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
+    max_steps = len(env) // effective_data_batch_size
+    if agent.accelerator.is_main_process: # agent.local_rank == "0":
+        pbar = trange(
+            max_steps,
+            unit="step",
+            bar_format=bar_format,
+            ascii=True,
+            dynamic_ncols=True,
+        )
+
+    # calling env.reset() supplies the first batch of training data
+    prompts = env.reset(reset_dataloaders=True)
+    for i in range(max_steps):
+        if i == 2:
+            agent = agent.clone()
+            print("AGENT CLONED")
+        completion_ids, action_masks = agent.get_action(prompts)
+        completion_lengths = np.mean([x.shape[1] for x in completion_ids])
+
+        # Use the reward function stored in env.step to calculate reward of the each answer from the group
+        next_prompts, rewards = env.step(completion_ids)
+
+        experiences = (
+            completion_ids,
+            action_masks,
+            rewards,
+        )
+        loss, kl = agent.learn(experiences)
+        metrics = [loss, kl, rewards, completion_lengths]
+        if max_reward is not None:
+            accuracy = (rewards == max_reward).sum() / len(rewards.flatten())
+            metrics.append(accuracy)
+        agg_metrics = [
+            aggregate_metrics_across_gpus(agent, metric) for metric in metrics
+        ]
+        prompts = next_prompts
+        agg_test_metrics = None
+        if (i + 1) % evaluation_interval == 0:
+            test_reward = agent.test(env)
+            test_metrics = [test_reward]
+            if max_reward is not None:
+                test_accuracy = (test_reward == max_reward).sum() / len(rewards.flatten())
+                test_metrics.append(test_accuracy)
+            agg_test_metrics = [
+                aggregate_metrics_across_gpus(agent, metric) for metric in test_metrics
+            ]
+        if agent.accelerator.is_main_process: #agent.local_rank == "0":
+            metrics_dict = {
+                "Train/Loss": agg_metrics[0],
+                "Train/KL-divergence": agg_metrics[1],
+                "Train/Mean reward": agg_metrics[2],
+                "Train/Average completion length": int(agg_metrics[3]),
+            }
+            if max_reward is not None:
+                metrics_dict |= {"Train/Accuracy": agg_metrics[4]}
+            print(metrics_dict)
+            if agg_test_metrics is not None:
+                test_metrics_dict = {"Eval/Mean reward": agg_test_metrics[0]}
+                if max_reward is not None:
+                    test_metrics_dict |= {"Eval/Accuracy": agg_test_metrics[1]}
+                print(test_metrics_dict)
+                if wb:
+                    wandb.log(test_metrics_dict)
+            if wb:
+                wandb.log(metrics_dict)
+            if (
+                checkpoint_path is not None
+                and checkpoint_interval is not None
+                and (i + 1) % checkpoint_interval == 0
+            ):
+                save_llm_checkpoint(agent, checkpoint_path, i)
+            pbar.update(effective_data_batch_size)
+
+
+def finetune_evolvable_llm(
+    pop: GRPO,
+    env: HuggingFaceGym,
+    checkpoint_interval: Optional[int] = None,
+    checkpoint_path: Optional[str] = None,
+    wb: bool = False,
+    wandb_api_key: Optional[str] = None,
+    evaluation_interval: Optional[int] = 10,
+    max_reward: Optional[int] = None,
+):
+    data_increment = (
+        getattr(dist, "get_world_size", lambda: 1)() if dist.is_initialized() else 1
+    )
+    grad_accum = getattr(agent.actor, "gradient_accumulation_steps", lambda: 1)()
+    effective_data_batch_size = data_increment * env.data_batch_size_per_gpu
+    effective_learning_batch_size = data_increment * env.data_batch_size_per_gpu * grad_accum
+    if agent.local_rank == "0":
+        print(
+            f"""
+=========================================================================
+Commencing RL finetuning
+
+Data batch size per gpu: {env.data_batch_size_per_gpu}
+Number of GPUs: {data_increment}
+Gradient accumulation: {grad_accum}
+Effective data batch size: {data_increment} * {env.data_batch_size_per_gpu} = {effective_data_batch_size}
+Effective learning batch_size: {data_increment} * {agent.batch_size} * {grad_accum} = {effective_learning_batch_size}
+=========================================================================
+        """
+        )
     if wb and agent.local_rank == "0":
         init_wandb(
             algo=agent.algo,
@@ -87,63 +222,62 @@ Effective learning batch_size: {data_increment} * {agent.batch_size} * {grad_acc
     # calling env.reset() supplies the first batch of training data
     prompts = env.reset(reset_dataloaders=True)
     for i in range(max_steps):
-        completion_ids, action_masks = agent.get_action(prompts)
-        completion_lengths = np.mean([x.shape[1] for x in completion_ids])
+        for agent_idx, agent in enumerate(pop):
+            completion_ids, action_masks = agent.get_action(prompts)
+            completion_lengths = np.mean([x.shape[1] for x in completion_ids])
 
-        # Use the reward function stored in env.step to calculate reward of the each answer from the group
-        next_prompts, rewards = env.step(completion_ids)
-
-        experiences = (
-            completion_ids,
-            action_masks,
-            rewards,
-        )
-        loss, kl = agent.learn(experiences)
-        metrics = [loss, kl, rewards, completion_lengths]
-        if max_reward is not None:
-            accuracy = (rewards == max_reward).sum() / len(rewards.squeeze())
-            metrics.append(accuracy)
-        agg_metrics = [
-            aggregate_metrics_across_gpus(agent, metric) for metric in metrics
-        ]
-        prompts = next_prompts
-        agg_test_metrics = None
-        if (i + 1) % evaluation_interval == 0:
-            test_reward = agent.test(env)
-            test_metrics = [test_reward]
+            # Use the reward function stored in env.step to calculate reward of the each answer from the group
+            next_prompts, rewards = env.step(completion_ids)
+            experiences = (
+                completion_ids,
+                action_masks,
+                rewards,
+            )
+            loss, kl = agent.learn(experiences)
+            metrics = [loss, kl, rewards, completion_lengths]
             if max_reward is not None:
-                test_accuracy = (test_reward == max_reward).sum() / test_reward.shape[0]
-                test_metrics.append(test_accuracy)
-            agg_test_metrics = [
-                aggregate_metrics_across_gpus(agent, metric) for metric in test_metrics
+                accuracy = (rewards == max_reward).sum() / len(rewards.flatten())
+                metrics.append(accuracy)
+            agg_metrics = [
+                aggregate_metrics_across_gpus(agent, metric) for metric in metrics
             ]
-        if agent.local_rank == "0":
-            metrics_dict = {
-                "Train/Loss": agg_metrics[0],
-                "Train/KL-divergence": agg_metrics[1],
-                "Train/Mean reward": agg_metrics[2],
-                "Train/Average completion length": int(agg_metrics[3]),
-            }
-            if max_reward is not None:
-                metrics_dict |= {"Train/Accuracy": agg_metrics[4]}
-            print(metrics_dict)
-            if agg_test_metrics is not None:
-                test_metrics_dict = {"Eval/Mean reward": agg_test_metrics[0]}
+            prompts = next_prompts
+            agg_test_metrics = None
+            if (i + 1) % evaluation_interval == 0:
+                test_reward = agent.test(env)
+                test_metrics = [test_reward]
                 if max_reward is not None:
-                    test_metrics_dict |= {"Eval/Accuracy": agg_test_metrics[1]}
-                print(test_metrics_dict)
+                    test_accuracy = (test_reward == max_reward).sum() / len(rewards.flatten())
+                    test_metrics.append(test_accuracy)
+                agg_test_metrics = [
+                    aggregate_metrics_across_gpus(agent, metric) for metric in test_metrics
+                ]
+            if agent.local_rank == "0":
+                metrics_dict = {
+                    "Train/Loss": agg_metrics[0],
+                    "Train/KL-divergence": agg_metrics[1],
+                    "Train/Mean reward": agg_metrics[2],
+                    "Train/Average completion length": int(agg_metrics[3]),
+                }
+                if max_reward is not None:
+                    metrics_dict |= {"Train/Accuracy": agg_metrics[4]}
+                print(metrics_dict)
+                if agg_test_metrics is not None:
+                    test_metrics_dict = {"Eval/Mean reward": agg_test_metrics[0]}
+                    if max_reward is not None:
+                        test_metrics_dict |= {"Eval/Accuracy": agg_test_metrics[1]}
+                    print(test_metrics_dict)
+                    if wb:
+                        wandb.log(test_metrics_dict)
                 if wb:
-                    wandb.log(test_metrics_dict)
-            if wb:
-                wandb.log(metrics_dict)
-            if (
-                checkpoint_path is not None
-                and checkpoint_interval is not None
-                and (i + 1) % checkpoint_interval == 0
-            ):
-                save_llm_checkpoint(agent, checkpoint_path, i)
-            pbar.update(data_increment)
-
+                    wandb.log(metrics_dict)
+                if (
+                    checkpoint_path is not None
+                    and checkpoint_interval is not None
+                    and (i + 1) % checkpoint_interval == 0
+                ):
+                    save_llm_checkpoint(agent, checkpoint_path, i)
+                pbar.update(effective_data_batch_size)
 
 def gather_tensor(tensor: torch.Tensor, agent: GRPO) -> torch.Tensor:
     """Gather tensors from gpus
