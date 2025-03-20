@@ -74,7 +74,7 @@ Effective learning batch_size: {data_increment} * {agent.batch_size} * {grad_acc
         print("\nTraining...")
 
     bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
-    max_steps = len(env) // env.data_batch_size_per_gpu
+    max_steps = len(env) // effective_data_batch_size
     if agent.local_rank == "0":
         pbar = trange(
             max_steps,
@@ -146,6 +146,15 @@ Effective learning batch_size: {data_increment} * {agent.batch_size} * {grad_acc
 
 
 def gather_tensor(tensor: torch.Tensor, agent: GRPO) -> torch.Tensor:
+    """Gather tensors from gpus
+
+    :param tensor: Tensor to gather
+    :type tensor: torch.Tensor
+    :param agent: GRPO agent object
+    :type agent: GRPO
+    :return: Stacked tensors
+    :rtype: torch.Tensor
+    """
     # Convert to tensor if it's a scalar
     if not isinstance(tensor, torch.Tensor):
         tensor = torch.tensor(tensor, device=f"cuda:{agent.local_rank}")
@@ -163,13 +172,31 @@ def gather_tensor(tensor: torch.Tensor, agent: GRPO) -> torch.Tensor:
     return torch.stack(gathered_tensors)
 
 
-def aggregate_metrics_across_gpus(agent: GRPO, metrics: torch.Tensor):
-    all_metrics = gather_tensor(metrics, agent)
+def aggregate_metrics_across_gpus(agent: GRPO, metric_tensor: torch.Tensor) -> float:
+    """Aggregate gathered tensors
+
+    :param agent: GRPO agent
+    :type agent: GRPO
+    :param metric_tensor: Metrics
+    :type metric_tensor: torch.Tensor
+    :return: Mean metric
+    :rtype: float
+    """
+    all_metrics = gather_tensor(metric_tensor, agent)
     avg_metrics = all_metrics.mean().item()
     return avg_metrics
 
 
-def save_llm_checkpoint(agent, checkpoint_path: str, step: int) -> None:
+def save_llm_checkpoint(agent: GRPO, checkpoint_path: str | None, step: int) -> None:
+    """Checkpoint the LLM
+
+    :param agent: GRPO agent
+    :type agent: GRPO
+    :param checkpoint_path: Checkpoint path
+    :type checkpoint_path: str
+    :param step: Training step
+    :type step: int
+    """
     base_path = "./saved_llms" if checkpoint_path is None else checkpoint_path
     path = base_path + f"/step_{step}"
     os.makedirs(path, exist_ok=True)
