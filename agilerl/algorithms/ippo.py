@@ -34,10 +34,10 @@ from agilerl.utils.algo_utils import (
 from agilerl.utils.evolvable_networks import get_default_encoder_config
 
 
-class MADDPG(MultiAgentRLAlgorithm):
-    """Multi-Agent Deep Deterministic Policy Gradient (MADDPG) algorithm.
+class IPPO(MultiAgentRLAlgorithm):
+    """Independent Proximal Policy Optimization (IPPO) algorithm.
 
-    Paper: https://arxiv.org/abs/1706.02275
+    Paper: https://arxiv.org/pdf/2011.09533
 
     :param observation_spaces: Observation space for each agent
     :type observation_spaces: list[spaces.Space]
@@ -45,40 +45,40 @@ class MADDPG(MultiAgentRLAlgorithm):
     :type action_spaces: list[spaces.Space]
     :param agent_ids: Agent ID for each agent
     :type agent_ids: list[str]
-    :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
-    :type O_U_noise: bool, optional
-    :param vect_noise_dim: Vectorization dimension of environment for action noise, defaults to 1
-    :type vect_noise_dim: int, optional
-    :param expl_noise: Scale for Ornstein Uhlenbeck action noise, or standard deviation for Gaussian exploration noise
-    :type expl_noise: float, optional
-    :param mean_noise: Mean of exploration noise, defaults to 0.0
-    :type mean_noise: float, optional
-    :param theta: Rate of mean reversion in Ornstein Uhlenbeck action noise, defaults to 0.15
-    :type theta: float, optional
-    :param dt: Timestep for Ornstein Uhlenbeck action noise update, defaults to 1e-2
-    :type dt: float, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
     :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
     :type hp_config: HyperparameterConfig, optional
-    :param net_config: Encoder configuration, defaults to mlp with hidden size [64,64]
+    :param net_config: Network configuration, defaults to None
     :type net_config: dict, optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
-    :param lr_actor: Learning rate for actor optimizer, defaults to 0.001
-    :type lr_actor: float, optional
-    :param lr_critic: Learning rate for critic optimizer, defaults to 0.01
-    :type lr_critic: float, optional
-    :param learn_step: Learning frequency, defaults to 5
+    :param lr: Learning rate for optimizer, defaults to 1e-4
+    :type lr: float, optional
+    :param learn_step: Learning frequency, defaults to 2048
     :type learn_step: int, optional
-    :param gamma: Discount factor, defaults to 0.95
+    :param gamma: Discount factor, defaults to 0.99
     :type gamma: float, optional
-    :param tau: For soft update of target network parameters, defaults to 0.01
-    :type tau: float, optional
+    :param gae_lambda: Lambda for general advantage estimation, defaults to 0.95
+    :type gae_lambda: float, optional
     :param mut: Most recent mutation to agent, defaults to None
     :type mut: str, optional
-    :param normalize_images: Normalize image observations, defaults to True
+    :param action_std_init: Initial action standard deviation, defaults to 0.6
+    :type action_std_init: float, optional
+    :param clip_coef: Surrogate clipping coefficient, defaults to 0.2
+    :type clip_coef: float, optional
+    :param ent_coef: Entropy coefficient, defaults to 0.01
+    :type ent_coef: float, optional
+    :param vf_coef: Value function coefficient, defaults to 0.5
+    :type vf_coef: float, optional
+    :param max_grad_norm: Maximum norm for gradient clipping, defaults to 0.5
+    :type max_grad_norm: float, optional
+    :param target_kl: Target KL divergence threshold, defaults to None
+    :type target_kl: float, optional
+    :param normalize_images: Flag to normalize images, defaults to True
     :type normalize_images: bool, optional
+    :param update_epochs: Number of policy update epochs, defaults to 4
+    :type update_epochs: int, optional
     :param actor_networks: List of custom actor networks, defaults to None
     :type actor_networks: list[nn.Module], optional
     :param critic_networks: List of custom critic networks, defaults to None
@@ -103,23 +103,23 @@ class MADDPG(MultiAgentRLAlgorithm):
         observation_spaces: List[spaces.Space],
         action_spaces: List[spaces.Space],
         agent_ids: List[str],
-        O_U_noise: bool = True,
-        expl_noise: float = 0.1,
-        vect_noise_dim: int = 1,
-        mean_noise: float = 0.0,
-        theta: float = 0.15,
-        dt: float = 1e-2,
         index: int = 0,
         hp_config: Optional[HyperparameterConfig] = None,
         net_config: Optional[Dict[str, Any]] = None,
         batch_size: int = 64,
-        lr_actor: float = 0.001,
-        lr_critic: float = 0.01,
-        learn_step: int = 5,
-        gamma: float = 0.95,
-        tau: float = 0.01,
+        lr: float = 1e-4,
+        learn_step: int = 2048,
+        gamma: float = 0.99,
+        gae_lambda: float = 0.95,
         mut: Optional[str] = None,
+        action_std_init: float = 0.0,
+        clip_coef: float = 0.2,
+        ent_coef: float = 0.01,
+        vf_coef: float = 0.5,
+        max_grad_norm: float = 0.5,
+        target_kl: Optional[float] = None,
         normalize_images: bool = True,
+        update_epochs: int = 4,
         actor_networks: Optional[list[EvolvableModule]] = None,
         critic_networks: Optional[list[EvolvableModule]] = None,
         device: str = "cpu",
@@ -128,6 +128,7 @@ class MADDPG(MultiAgentRLAlgorithm):
         wrap: bool = True,
     ):
 
+        # TODO: update ma algo for ippo
         super().__init__(
             observation_spaces,
             action_spaces,
@@ -145,13 +146,54 @@ class MADDPG(MultiAgentRLAlgorithm):
         assert isinstance(learn_step, int), "Learn step rate must be an integer."
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
-        assert isinstance(lr_actor, float), "Actor learning rate must be a float."
-        assert lr_actor > 0, "Actor learning rate must be greater than zero."
-        assert isinstance(lr_critic, float), "Critic learning rate must be a float."
-        assert lr_critic > 0, "Critic learning rate must be greater than zero."
-        assert isinstance(gamma, float), "Gamma must be a float."
-        assert isinstance(tau, float), "Tau must be a float."
-        assert tau > 0, "Tau must be greater than zero."
+        assert isinstance(lr, float), "Learning rate must be a float."
+        assert lr > 0, "Learning rate must be greater than zero."
+        assert isinstance(gamma, (float, int, torch.Tensor)), "Gamma must be a float."
+        assert isinstance(gae_lambda, (float, int)), "Lambda must be a float."
+        assert gae_lambda >= 0, "Lambda must be greater than or equal to zero."
+        assert isinstance(
+            action_std_init, (float, int)
+        ), "Action standard deviation must be a float."
+        assert (
+            action_std_init >= 0
+        ), "Action standard deviation must be greater than or equal to zero."
+        assert isinstance(
+            clip_coef, (float, int)
+        ), "Clipping coefficient must be a float."
+        assert (
+            clip_coef >= 0
+        ), "Clipping coefficient must be greater than or equal to zero."
+        assert isinstance(
+            ent_coef, (float, int)
+        ), "Entropy coefficient must be a float."
+        assert (
+            ent_coef >= 0
+        ), "Entropy coefficient must be greater than or equal to zero."
+        assert isinstance(
+            vf_coef, (float, int)
+        ), "Value function coefficient must be a float."
+        assert (
+            vf_coef >= 0
+        ), "Value function coefficient must be greater than or equal to zero."
+        assert isinstance(
+            max_grad_norm, (float, int)
+        ), "Maximum norm for gradient clipping must be a float."
+        assert (
+            max_grad_norm >= 0
+        ), "Maximum norm for gradient clipping must be greater than or equal to zero."
+        assert (
+            isinstance(target_kl, (float, int)) or target_kl is None
+        ), "Target KL divergence threshold must be a float."
+        if target_kl is not None:
+            assert (
+                target_kl >= 0
+            ), "Target KL divergence threshold must be greater than or equal to zero."
+        assert isinstance(
+            update_epochs, int
+        ), "Policy update epochs must be an integer."
+        assert (
+            update_epochs >= 1
+        ), "Policy update epochs must be greater than or equal to one."
         assert isinstance(
             wrap, bool
         ), "Wrap models flag must be boolean value True or False."
@@ -169,45 +211,19 @@ class MADDPG(MultiAgentRLAlgorithm):
 
         self.is_image_space = contains_image_space(self.single_space)
         self.batch_size = batch_size
-        self.lr_actor = lr_actor
-        self.lr_critic = lr_critic
-        self.learn_step = learn_step
+        self.lr = lr
         self.gamma = gamma
-        self.tau = tau
+        self.learn_step = learn_step
         self.mut = mut
+        self.gae_lambda = gae_lambda
+        self.action_std_init = action_std_init
         self.net_config = net_config
-        self.learn_counter = 0
-        self.O_U_noise = O_U_noise
-        self.vect_noise_dim = vect_noise_dim
-        self.sample_gaussian = [
-            torch.zeros(*(vect_noise_dim, self.action_dims[idx]), device=self.device)
-            for idx in range(self.n_agents)
-        ]
-        self.expl_noise = (
-            expl_noise
-            if isinstance(expl_noise, list)
-            else [
-                expl_noise
-                * torch.ones(*(vect_noise_dim, action_dim), device=self.device)
-                for action_dim in self.action_dims
-            ]
-        )
-        self.mean_noise = (
-            mean_noise
-            if isinstance(mean_noise, list)
-            else [
-                mean_noise
-                * torch.ones(*(vect_noise_dim, action_dim), device=self.device)
-                for action_dim in self.action_dims
-            ]
-        )
-        self.current_noise = [
-            torch.zeros(*(vect_noise_dim, action_dim), device=self.device)
-            for action_dim in self.action_dims
-        ]
-        self.theta = theta
-        self.dt = dt
-        self.sqdt = dt ** (0.5)
+        self.clip_coef = clip_coef
+        self.ent_coef = ent_coef
+        self.vf_coef = vf_coef
+        self.max_grad_norm = max_grad_norm
+        self.target_kl = target_kl
+        self.update_epochs = update_epochs
 
         if actor_networks is not None and critic_networks is not None:
             assert (

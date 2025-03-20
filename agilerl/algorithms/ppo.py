@@ -38,8 +38,6 @@ class PPO(RLAlgorithm):
     :type hp_config: HyperparameterConfig, optional
     :param net_config: Network configuration, defaults to None
     :type net_config: dict, optional
-    :param head_config: Head network configuration, defaults to None
-    :type head_config: dict, optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
     :param lr: Learning rate for optimizer, defaults to 1e-4
@@ -87,7 +85,6 @@ class PPO(RLAlgorithm):
         index: int = 0,
         hp_config: Optional[HyperparameterConfig] = None,
         net_config: Optional[Dict[str, Any]] = None,
-        head_config: Optional[Dict[str, Any]] = None,
         batch_size: int = 64,
         lr: float = 1e-4,
         learn_step: int = 2048,
