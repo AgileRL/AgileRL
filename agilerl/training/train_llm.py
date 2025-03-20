@@ -38,7 +38,8 @@ Commencing RL finetuning
 Data batch size per gpu: {env.data_batch_size_per_gpu}
 Number of GPUs: {data_increment}
 Gradient accumulation: {grad_accum}
-Effective data batch size: {data_increment} * {env.data_batch_size_per_gpu} * {grad_accum} = {data_increment * env.data_batch_size_per_gpu * grad_accum}
+Effective data batch size: {data_increment} * {env.data_batch_size_per_gpu} = {(effective_data_batch_size := data_increment * env.data_batch_size_per_gpu)}
+Effective learning batch_size: {data_increment} * {agent.batch_size} * {grad_accum} = {(effective_learning_batch_size := data_increment * env.data_batch_size_per_gpu * grad_accum)}
 =========================================================================
         """
         )
@@ -48,6 +49,25 @@ Effective data batch size: {data_increment} * {env.data_batch_size_per_gpu} * {g
             algo=agent.algo,
             env_name=env.name,
             wandb_api_key=wandb_api_key,
+            init_hyperparams={
+                "effective_data_batch_size": effective_data_batch_size,
+                "effective_learning_batch_size": effective_learning_batch_size,
+                "group_size": agent.group_size,
+                "temperature": agent.generation_config.temperature,
+                "max_new_tokens": agent.generation_config.max_new_tokens,
+                "min_new_tokens": agent.generation_config.min_new_tokens,
+                "pad_token_id": agent.generation_config.pad_token_id,
+                "beta": agent.beta,
+                "clip_coefficient": agent.clip_coef,
+                "update_epochs": agent.update_epochs,
+                "reduce_memory_peak": agent.reduce_memory_peak,
+                "cosine_lr_scheduler": (
+                    True if agent.cosine_lr_schedule_config is not None else False
+                ),
+                "distributed_training": (
+                    True if agent.accelerator is not None else False
+                ),
+            },
         )
 
     if agent.local_rank == "0":
@@ -149,7 +169,7 @@ def aggregate_metrics_across_gpus(agent: GRPO, metrics: torch.Tensor):
     return avg_metrics
 
 
-def save_llm_checkpoint(agent, checkpoint_path, step):
+def save_llm_checkpoint(agent, checkpoint_path: str, step: int) -> None:
     base_path = "./saved_llms" if checkpoint_path is None else checkpoint_path
     path = base_path + f"/step_{step}"
     os.makedirs(path, exist_ok=True)
@@ -158,6 +178,3 @@ def save_llm_checkpoint(agent, checkpoint_path, step):
         unwrapped_model.save_pretrained(path)
     else:
         agent.actor.save_pretrained(path)
-    import time
-
-    time.sleep(180)

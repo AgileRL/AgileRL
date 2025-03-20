@@ -2,7 +2,6 @@ import copy
 import gc
 import os
 import warnings
-from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Union
 
 import deepspeed
@@ -26,6 +25,7 @@ from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.typing import DeviceType, ExperiencesType
 from agilerl.utils.algo_utils import (
+    CosineLRScheduleConfig,
     create_warmup_cosine_scheduler,
     get_experiences_samples,
     stack_and_pad_experiences,
@@ -38,14 +38,6 @@ DeepSpeedOptimizerType = Union[
     DeepSpeedZeroOptimizer,  # ZeRO Stage 1 & 2 optimizer
     DeepSpeedZeroOptimizer_Stage3,  # ZeRO Stage 3 optimizer
 ]
-
-
-@dataclass
-class CosineLRScheduleConfig:
-    """Data class to configure a cosine LR scheduler."""
-
-    num_epochs: int
-    warmup_proportion: float
 
 
 class GRPO(RLAlgorithm):

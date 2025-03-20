@@ -2,6 +2,7 @@ import copy
 import inspect
 import warnings
 from collections import OrderedDict, defaultdict
+from dataclasses import dataclass
 from numbers import Number
 from typing import Any, Dict, Iterable, List, Optional, Tuple, TypeGuard, Union
 
@@ -756,25 +757,45 @@ def is_vectorized_experiences(*experiences: ArrayOrTensor) -> bool:
     return all(is_vec_ls)
 
 
-def create_warmup_cosine_scheduler(optimizer, config, min_lr, max_lr):
+@dataclass
+class CosineLRScheduleConfig:
+    """Data class to configure a cosine LR scheduler."""
+
+    num_epochs: int
+    warmup_proportion: float
+
+
+def create_warmup_cosine_scheduler(
+    optimizer: Union[DeepSpeedOptimizerWrapper, OptimizerWrapper],
+    config: CosineLRScheduleConfig,
+    min_lr: float,
+    max_lr: float,
+) -> SequentialLR:
+    """Helper function to create cosine annealing lr scheduler with warm-up
+
+    :param optimizer: Optimizer
+    :type optimizer: Union[DeepSpeedOptimizerWrapper, OptimizerWrapper]
+    :param config: LR scheduler config
+    :type config: CosineLRScheduleConfig
+    :param min_lr: Minimum learning rate
+    :type min_lr: float
+    :param max_lr: Maximum learning rate
+    :type max_lr: float
+    :return: Return sequential learning rate scheduler
+    :rtype: SequentialLR
+    """
     num_epochs = config.num_epochs
     warmup_proportion = config.warmup_proportion
-    # Calculate warmup epochs
     warmup_epochs = int(num_epochs * warmup_proportion)
     remaining_epochs = num_epochs - warmup_epochs
-
-    # Set the initial learning rate to a very small value
     for param_group in optimizer.param_groups:
         param_group["lr"] = max_lr
-
-    # Warmup scheduler: Linear growth from initial LR to max_lr
     warmup_scheduler = LinearLR(
         optimizer,
         start_factor=min_lr / max_lr,  # Start factor to get from min_lr to max_lr
         end_factor=1.0,  # End with the full max_lr
         total_iters=warmup_epochs,
     )
-
     # Decay scheduler: Cosine decay from max_lr to min_lr
     # Double T_max to ensure we only use the first half of the cosine curve (strictly decreasing)
     cosine_scheduler = CosineAnnealingLR(
@@ -782,12 +803,9 @@ def create_warmup_cosine_scheduler(optimizer, config, min_lr, max_lr):
         T_max=remaining_epochs * 2,  # Doubled to ensure strictly decreasing LR
         eta_min=min_lr,
     )
-
-    # Combine schedulers
     scheduler = SequentialLR(
         optimizer,
         schedulers=[warmup_scheduler, cosine_scheduler],
         milestones=[warmup_epochs],
     )
-
     return scheduler

@@ -10,7 +10,10 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.optim.lr_scheduler import SequentialLR
 from transformers import GenerationConfig
+
+from agilerl.utils.algo_utils import CosineLRScheduleConfig
 
 # Setup mock for AcceleratorState
 mock_accelerator_state = MagicMock()
@@ -20,8 +23,6 @@ mock_deepspeed_plugin.deepspeed_config = {
     "zero_optimization": {"stage": 0},
 }
 mock_accelerator_state.deepspeed_plugin = mock_deepspeed_plugin
-
-# Apply the patch
 accelerate.state.AcceleratorState = lambda: mock_accelerator_state
 
 
@@ -30,9 +31,17 @@ class MockAccelerator:
     def __init__(self, *args, **kwargs):
         self.state = mock_accelerator_state
 
-    def prepare(self, model, opt):
-        return model, OptimizerWrapper(
-            optim.AdamW, networks=[model], lr=5e-6, network_names=["net"], lr_name="lr"
+    def prepare(self, model, opt, *args):
+        return (
+            model,
+            OptimizerWrapper(
+                optim.AdamW,
+                networks=[model],
+                lr=5e-6,
+                network_names=["net"],
+                lr_name="lr",
+            ),
+            args[0],
         )
 
     def backward(self, loss):
@@ -151,7 +160,10 @@ class DummyHuggingFaceEnv:
             }
             for _ in range(self.data_batch_size)
         ]
-        return (states, [1.0 for _ in range(self.data_batch_size)])
+        return (
+            states,
+            torch.cat([torch.tensor([1.0]) for _ in range(self.data_batch_size)]),
+        )
 
     @contextmanager
     def eval(self):
@@ -189,6 +201,9 @@ def grpo(vocab_size, input_size, max_tokens, group_size, use_accelerator):
         pad_token_id=vocab_size - 1,
         device="cuda" if torch.cuda.is_available() else "cpu",
         group_size=group_size,
+        cosine_lr_schedule_config=CosineLRScheduleConfig(
+            num_epochs=10, warmup_proportion=0.05
+        ),
         accelerator=MockAccelerator() if use_accelerator else None,
     )
 
@@ -221,7 +236,10 @@ def test_init_grpo(
     assert grpo.group_size == group_size
     assert grpo.temperature == 0.9
     assert grpo.calc_position_embeddings
-
+    assert isinstance(grpo.cosine_lr_schedule_config, CosineLRScheduleConfig), type(
+        grpo.cosine_lr_schedule_config
+    )
+    assert isinstance(grpo.lr_scheduler, SequentialLR), grpo.lr_scheduler
     assert grpo.device == device
     assert grpo.index == 0
     assert grpo.scores == []
@@ -491,8 +509,8 @@ def test_grpo_test(
     grpo, vocab_size, input_size, max_tokens, group_size, batch_size, use_accelerator
 ):
     env = DummyHuggingFaceEnv(vocab_size, input_size, batch_size)
-    mean_fit = grpo.test(env)
-    assert isinstance(mean_fit, float)
+    fitnesses = grpo.test(env)
+    assert isinstance(fitnesses, torch.Tensor)
 
 
 @pytest.mark.parametrize("vocab_size", [1000])
