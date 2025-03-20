@@ -196,7 +196,7 @@ def main():
         tokenizer=tokenizer,
         reward_fn=combined_rewards,
         apply_chat_template_fn=countdown_chat_template,
-        max_answer_tokens=1024,
+        max_answer_tokens=10,
         data_batch_size_per_gpu=1,
         custom_collate_fn=custom_collate_fn,
     )
@@ -219,8 +219,8 @@ def main():
         agent=agent,
         env=env,
         evaluation_interval=10,
-        wb=True,
-        checkpoint_interval=100,
+        wb=False,
+        checkpoint_interval=1,
         checkpoint_path="saved_llms",
         max_reward=2.0,
     )

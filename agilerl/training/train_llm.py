@@ -1,3 +1,4 @@
+import os
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -149,9 +150,14 @@ def aggregate_metrics_across_gpus(agent: GRPO, metrics: torch.Tensor):
 
 
 def save_llm_checkpoint(agent, checkpoint_path, step):
-    checkpoint_path = f"step_{step}" if checkpoint_path is None else checkpoint_path
+    base_path = "./saved_llms" if checkpoint_path is None else checkpoint_path
+    path = base_path + f"/step_{step}"
+    os.makedirs(path, exist_ok=True)
     if agent.accelerator is not None:
         unwrapped_model = agent.accelerator.unwrap_model(agent.actor)
-        unwrapped_model.save_pretrained(checkpoint_path)
+        unwrapped_model.save_pretrained(path)
     else:
-        agent.actor.save_pretrained(checkpoint_path)
+        agent.actor.save_pretrained(path)
+    import time
+
+    time.sleep(180)
