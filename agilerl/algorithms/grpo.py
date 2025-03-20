@@ -20,7 +20,7 @@ from torch.optim import Optimizer
 from transformers import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
 
-from agilerl.algorithms.core import RLAlgorithm, EvolvableAlgorithm
+from agilerl.algorithms.core import EvolvableAlgorithm, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.typing import DeviceType, ExperiencesType
@@ -103,7 +103,7 @@ class GRPO(RLAlgorithm):
         cosine_lr_schedule_config: Optional[CosineLRScheduleConfig] = None,
         accelerator: Optional[Accelerator] = None,
         device: str = "cpu",
-        wrap=True
+        wrap=True,
     ) -> None:
         device = (
             f"cuda:{os.getenv('LOCAL_RANK', '0')}"
@@ -136,7 +136,7 @@ class GRPO(RLAlgorithm):
         assert (
             update_epochs >= 1
         ), "Policy update epochs must be greater than or equal to one."
-        # FIXME 
+        # FIXME
         self.wrap = wrap
         self.batch_size = batch_size
         self.lr = lr
@@ -312,7 +312,6 @@ class GRPO(RLAlgorithm):
         self.fitness.append(mean_fit)
         reward_tensor = torch.cat(rewards)
         return reward_tensor
-        
 
     def _calculate_advantage(
         self, rewards: torch.Tensor, eps: float = 1e-8
@@ -562,24 +561,24 @@ class GRPO(RLAlgorithm):
             model = PeftModel.from_pretrained(base_model, "/path/to/adapter/folder")
             """
         )
-    
 
     def wrap_models(self):
         if self.accelerator is not None:
-            self.actor, self.optimizer, self.lr_scheduler = self.accelerator.prepare(self.actor, self.optimizer.optimizer, self.lr_scheduler)
+            self.actor, self.optimizer, self.lr_scheduler = self.accelerator.prepare(
+                self.actor, self.optimizer.optimizer, self.lr_scheduler
+            )
             deepspeed_plugin = self.accelerator.state.deepspeed_plugin
             config_kwargs = copy.deepcopy(deepspeed_plugin.deepspeed_config)
             config_kwargs["zero_optimization"]["stage"] = 0
             self.reference_actor, *_ = deepspeed.initialize(
                 model=self.reference_actor, config=config_kwargs
             )
-    
+
     def unwrap_models(self):
         if self.accelerator is not None:
-            self.optimizer =  self.actor.optimizer
+            self.optimizer = self.actor.optimizer
             self.actor = self.accelerator.unwrap_model(self.actor)
             self.reference_actor = self.reference_actor.module
-
 
     # def wrap_optimizer(self):
     #     if self.accelerator is not None:
@@ -587,10 +586,7 @@ class GRPO(RLAlgorithm):
     #             self.optimizer.optimizer, self.lr_scheduler
     #         )
 
-
-    def clone(
-        self, index: Optional[int] = None, wrap: bool = True
-    ):
+    def clone(self, index: Optional[int] = None, wrap: bool = True):
         """Creates a clone of the algorithm.
 
         :param index: The index of the clone, defaults to None

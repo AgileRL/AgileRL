@@ -1,20 +1,20 @@
 import os
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
 import torch.distributed as dist
 from tqdm import trange
-import wandb
 
+import wandb
 from agilerl.algorithms import GRPO
+from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import init_wandb
-from agilerl.algorithms.core.base import RLAlgorithm
-
 
 InitDictType = Optional[Dict[str, Any]]
 PopulationType = List[RLAlgorithm]
+
 
 def finetune_llm(
     agent: GRPO,
@@ -26,10 +26,14 @@ def finetune_llm(
     evaluation_interval: Optional[int] = 10,
     max_reward: Optional[int] = None,
 ) -> None:
-    data_increment = agent.accelerator.num_processes if agent.accelerator is not None else 1
+    data_increment = (
+        agent.accelerator.num_processes if agent.accelerator is not None else 1
+    )
     grad_accum = getattr(agent.actor, "gradient_accumulation_steps", lambda: 1)()
     effective_data_batch_size = data_increment * env.data_batch_size_per_gpu
-    effective_learning_batch_size = data_increment * env.data_batch_size_per_gpu * grad_accum
+    effective_learning_batch_size = (
+        data_increment * env.data_batch_size_per_gpu * grad_accum
+    )
     if agent.local_rank == "0":
         print(
             f"""
@@ -44,7 +48,7 @@ Effective learning batch_size: {data_increment} * {agent.batch_size} * {grad_acc
 =========================================================================
         """
         )
-    if wb and agent.accelerator.is_main_process: #agent.local_rank == "0":
+    if wb and agent.accelerator.is_main_process:  # agent.local_rank == "0":
         init_wandb(
             algo=agent.algo,
             env_name=env.name,
@@ -71,12 +75,12 @@ Effective learning batch_size: {data_increment} * {agent.batch_size} * {grad_acc
             },
         )
 
-    if agent.accelerator.is_main_process: #agent.local_rank == "0":
+    if agent.accelerator.is_main_process:  # agent.local_rank == "0":
         print("\nTraining...")
 
     bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
     max_steps = len(env) // effective_data_batch_size
-    if agent.accelerator.is_main_process: # agent.local_rank == "0":
+    if agent.accelerator.is_main_process:  # agent.local_rank == "0":
         pbar = trange(
             max_steps,
             unit="step",
@@ -116,12 +120,14 @@ Effective learning batch_size: {data_increment} * {agent.batch_size} * {grad_acc
             test_reward = agent.test(env)
             test_metrics = [test_reward]
             if max_reward is not None:
-                test_accuracy = (test_reward == max_reward).sum() / len(rewards.flatten())
+                test_accuracy = (test_reward == max_reward).sum() / len(
+                    rewards.flatten()
+                )
                 test_metrics.append(test_accuracy)
             agg_test_metrics = [
                 aggregate_metrics_across_gpus(agent, metric) for metric in test_metrics
             ]
-        if agent.accelerator.is_main_process: #agent.local_rank == "0":
+        if agent.accelerator.is_main_process:  # agent.local_rank == "0":
             metrics_dict = {
                 "Train/Loss": agg_metrics[0],
                 "Train/KL-divergence": agg_metrics[1],
@@ -164,7 +170,9 @@ def finetune_evolvable_llm(
     )
     grad_accum = getattr(agent.actor, "gradient_accumulation_steps", lambda: 1)()
     effective_data_batch_size = data_increment * env.data_batch_size_per_gpu
-    effective_learning_batch_size = data_increment * env.data_batch_size_per_gpu * grad_accum
+    effective_learning_batch_size = (
+        data_increment * env.data_batch_size_per_gpu * grad_accum
+    )
     if agent.local_rank == "0":
         print(
             f"""
@@ -247,10 +255,13 @@ Effective learning batch_size: {data_increment} * {agent.batch_size} * {grad_acc
                 test_reward = agent.test(env)
                 test_metrics = [test_reward]
                 if max_reward is not None:
-                    test_accuracy = (test_reward == max_reward).sum() / len(rewards.flatten())
+                    test_accuracy = (test_reward == max_reward).sum() / len(
+                        rewards.flatten()
+                    )
                     test_metrics.append(test_accuracy)
                 agg_test_metrics = [
-                    aggregate_metrics_across_gpus(agent, metric) for metric in test_metrics
+                    aggregate_metrics_across_gpus(agent, metric)
+                    for metric in test_metrics
                 ]
             if agent.local_rank == "0":
                 metrics_dict = {
@@ -278,6 +289,7 @@ Effective learning batch_size: {data_increment} * {agent.batch_size} * {grad_acc
                 ):
                     save_llm_checkpoint(agent, checkpoint_path, i)
                 pbar.update(effective_data_batch_size)
+
 
 def gather_tensor(tensor: torch.Tensor, agent: GRPO) -> torch.Tensor:
     """Gather tensors from gpus

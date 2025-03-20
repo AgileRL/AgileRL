@@ -6,11 +6,11 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl.algorithms import (
     CQN,
     DDPG,
@@ -579,16 +579,19 @@ def tournament_selection_and_mutation(
 
     return population
 
-def llm_finetuning_tournament_selection_and_mutation(population: PopulationType,
+
+def llm_finetuning_tournament_selection_and_mutation(
+    population: PopulationType,
     tournament: TournamentSelection,
     mutation: Mutations,
     env_name: str,
     algo: Optional[str] = None,
     elite_path: Optional[str] = None,
     save_elite: bool = False,
-    accelerator: Optional[Accelerator] = None
+    accelerator: Optional[Accelerator] = None,
 ):
     import json
+
     if accelerator is not None:
         accelerator.wait_for_everyone()
         if accelerator.is_main_process():
@@ -596,9 +599,7 @@ def llm_finetuning_tournament_selection_and_mutation(population: PopulationType,
             population = mutation.mutation(population)
             hyperparams = [agent.get_hyperparams() for agent in population]
             json_data = json.dumps(hyperparams)
-            json_bytes = json_data.encode('utf-8')
-            
-
+            json_bytes = json_data.encode("utf-8")
 
 
 def init_wandb(

@@ -2,14 +2,13 @@ import re
 from typing import Tuple
 
 import torch
-import torch.distributed as dist
 from accelerate import Accelerator
 from datasets import load_dataset
 from peft import LoraConfig, get_peft_model
 from torch.utils.data import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from agilerl.algorithms.grpo import GRPO, CosineLRScheduleConfig
+from agilerl.algorithms.grpo import GRPO
 from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 
@@ -204,7 +203,7 @@ def main():
         group_size=2,
         reduce_memory_peak=True,
         accelerator=Accelerator(),
-        lr=5e-6
+        lr=5e-6,
     )
     finetune_llm(
         agent=agent,
