@@ -9,7 +9,7 @@ from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.training.train_multi_agent import train_multi_agent
+from agilerl.training.train_multi_agent_off_policy import train_multi_agent_off_policy
 from agilerl.utils.utils import (
     create_population,
     make_multi_agent_vect_envs,
@@ -125,7 +125,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
         torch_compiler=INIT_HP["TORCH_COMPILE"],
     )
 
-    train_multi_agent(
+    train_multi_agent_off_policy(
         env,
         INIT_HP["ENV_NAME"],
         INIT_HP["ALGO"],

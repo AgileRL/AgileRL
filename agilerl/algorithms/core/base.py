@@ -1181,6 +1181,32 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         self.agent_ids = agent_ids
         self.n_agents = len(agent_ids)
+
+        self.unique_agent_ids = []
+        self.homogeneous_agents = {}
+        self.unique_observation_spaces = {}
+        self.unique_action_spaces = {}
+        for agent_id, obs_space, action_space in zip(
+            self.agent_ids, observation_spaces, action_spaces
+        ):
+            # Split agent names on expected pattern of e.g. speaker_0, speaker_1,
+            # listener_0, listener_1, to determine which agents are homogeneous
+            homo_agent = agent_id.rsplit(", ", 1)[0]
+            if self.homogeneous_agents[homo_agent]:
+                self.homogeneous_agents[homo_agent].append(homo_agent)
+                assert (
+                    obs_space == self.unique_observation_spaces[homo_agent]
+                ), f"Homogeneous agents, i.e. agents that share the prefix {homo_agent}, must have the same observation space. Found {self.unique_observation_spaces[homo_agent]} and {obs_space}."
+                assert (
+                    action_space == self.unique_action_spaces[homo_agent]
+                ), f"Homogeneous agents, i.e. agents that share the prefix {homo_agent}, must have the same action space. Found {self.unique_action_spaces[homo_agent]} and {action_space}."
+            else:
+                self.unique_agent_ids.append(homo_agent)
+                self.homogeneous_agents[homo_agent] = [homo_agent]
+                self.unique_observation_spaces.append[homo_agent] = obs_space
+                self.unique_action_spaces.append[homo_agent] = action_space
+
+        self.n_unique_agents = len(self.unique_agent_ids)
         self.normalize_images = normalize_images
         self.observation_spaces = observation_spaces
         self.action_spaces = action_spaces
@@ -1265,3 +1291,17 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             processed_obs = torch.cat(obs, dim=1)
 
         return processed_obs
+
+    def disassemble_homogeneous_outputs(self, dict: Dict) -> Dict:
+        """Disassembles batched output by shared policies into their homogeneous agents' outputs.
+
+        :param dict: Dictionary to be disassembled, has the form {'agent': [4, 7, 8]}
+        :type dict: Dict
+        :return: isassembled dictionary, e.g. {'agent_0': 4, 'agent_1': 7, 'agent_2': 8}
+        :rtype: Dict
+        """
+        output_dict = {}
+        for unique_id in self.unique_agent_ids:
+            for i, homo_id in enumerate(self.homogeneous_agents[unique_id]):
+                output_dict[homo_id] = dict[unique_id][i]
+        return output_dict

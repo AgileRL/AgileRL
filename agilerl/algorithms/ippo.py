@@ -7,14 +7,16 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
+from torch.nn.utils import clip_grad_norm_
 
 from agilerl.algorithms.core import MultiAgentRLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
-from agilerl.networks.actors import DeterministicActor
+from agilerl.networks.actors import DeterministicActor, StochasticActor
 from agilerl.networks.q_networks import ContinuousQNetwork
+from agilerl.networks.value_networks import ValueNetwork
 from agilerl.typing import (
     ArrayDict,
     ArrayLike,
@@ -23,15 +25,18 @@ from agilerl.typing import (
     InfosDict,
     ObservationType,
     TensorDict,
+    TorchObsType,
 )
 from agilerl.utils.algo_utils import (
-    concatenate_spaces,
     contains_image_space,
+    flatten_experiences,
+    get_experiences_samples,
+    is_vectorized_experiences,
     key_in_nested_dict,
     make_safe_deepcopies,
-    multi_agent_sample_tensor_from_space,
+    preprocess_observation,
+    stack_experiences,
 )
-from agilerl.utils.evolvable_networks import get_default_encoder_config
 
 
 class IPPO(MultiAgentRLAlgorithm):
@@ -241,97 +246,56 @@ class IPPO(MultiAgentRLAlgorithm):
                 raise TypeError(
                     "All critic networks must be instances of EvolvableModule"
                 )
+            assert (
+                len(actor_networks) == self.n_unique_agents
+            ), f"Length of actor_networks ({len(actor_networks)}) does not match number of unique agents defined in environment ({self.n_unique_agents}: {self.unique_agent_ids})"
+            assert (
+                len(actor_networks) == self.n_unique_agents
+            ), f"Length of critic_networks ({len(actor_networks)}) does not match number of unique agents defined in environment ({self.n_unique_agents}: {self.unique_agent_ids})"
             self.actors, self.critics = make_safe_deepcopies(
                 actor_networks, critic_networks
             )
-            self.actor_targets, self.critic_targets = make_safe_deepcopies(
-                actor_networks, critic_networks
-            )
         else:
-            net_config = {} if net_config is None else net_config
-            simba = net_config.get("simba", False)
-            critic_net_config = copy.deepcopy(net_config)
+            self.actors = []
+            self.critics = []
+            for obs_space, action_space in zip(
+                self.unique_observation_spaces, self.unique_action_spaces
+            ):
+                net_config = {} if net_config is None else net_config
+                critic_net_config = copy.deepcopy(net_config)
 
-            encoder_config = net_config.get("encoder_config", None)
-            critic_encoder_config = critic_net_config.get("encoder_config", None)
-            head_config = net_config.get("head_config", None)
+                head_config = net_config.get("head_config", None)
 
-            # Determine actor output activation from action space
-            output_activation = None if not self.discrete_actions else "GumbelSoftmax"
-            if head_config is not None:
-                head_config["output_activation"] = output_activation
-                critic_head_config = copy.deepcopy(head_config)
-                critic_head_config["output_activation"] = None
-            else:
-                head_config = MlpNetConfig(
-                    hidden_size=[64], output_activation=output_activation
-                )
-                critic_head_config = MlpNetConfig(hidden_size=[64])
+                if head_config is not None:
+                    critic_head_config = copy.deepcopy(head_config)
+                    critic_head_config["output_activation"] = None
+                else:
+                    critic_head_config = MlpNetConfig(hidden_size=[64])
 
-            if encoder_config is None:
-                encoder_config = get_default_encoder_config(self.single_space, simba)
-                critic_encoder_config = get_default_encoder_config(
-                    self.single_space, simba
-                )
+                critic_net_config["head_config"] = critic_head_config
 
-            # For image spaces we need to give a sample input tensor to
-            # build networks with Conv3d blocks appropriately
-            if self.is_image_space:
-                encoder_config["sample_input"] = multi_agent_sample_tensor_from_space(
-                    self.single_space, self.n_agents, device=self.device
-                )
-                critic_encoder_config["sample_input"] = (
-                    multi_agent_sample_tensor_from_space(
-                        self.single_space,
-                        self.n_agents,
-                        device=self.device,
-                        critic=True,
-                    )
-                )
-
-            net_config["encoder_config"] = encoder_config
-            net_config["head_config"] = head_config
-
-            critic_net_config["encoder_config"] = critic_encoder_config
-            critic_net_config["head_config"] = critic_head_config
-
-            def create_actor(idx):
-                return DeterministicActor(
-                    self.observation_spaces[idx],
-                    self.action_spaces[idx],
-                    n_agents=self.n_agents,
+                actor = StochasticActor(
+                    obs_space,
+                    action_space,
+                    log_std_init=self.action_std_init,
                     device=self.device,
                     **copy.deepcopy(net_config),
                 )
 
-            # NOTE: Critic uses observations + actions of all agents to predict Q-value
-            def create_critic():
-                return ContinuousQNetwork(
-                    observation_space=concatenate_spaces(observation_spaces),
-                    action_space=concatenate_spaces(action_spaces),
-                    n_agents=self.n_agents,
+                critic = ValueNetwork(
+                    observation_space=obs_space,
                     device=self.device,
                     **copy.deepcopy(critic_net_config),
                 )
 
-            self.actors = [create_actor(idx) for idx in range(self.n_agents)]
-            self.critics = [create_critic() for _ in range(self.n_agents)]
-            self.actor_targets = [create_actor(idx) for idx in range(self.n_agents)]
-            self.critic_targets = [create_critic() for _ in range(self.n_agents)]
-
-        # Initialise target network parameters
-        for actor, actor_target in zip(self.actors, self.actor_targets):
-            actor_target.load_state_dict(actor.state_dict())
-        for critic, critic_target in zip(self.critics, self.critic_targets):
-            critic_target.load_state_dict(critic.state_dict())
+                self.actors.append(actor)
+                self.critics.append(critic)
 
         # Optimizers
-        self.actor_optimizers = OptimizerWrapper(
-            optim.Adam, networks=self.actors, lr=self.lr_actor, multiagent=True
-        )
-        self.critic_optimizers = OptimizerWrapper(
-            optim.Adam, networks=self.critics, lr=self.lr_critic, multiagent=True
-        )
+        self.optimizers = [
+            OptimizerWrapper(optim.Adam, networks=[actor, critic], lr=self.lr)
+            for actor, critic in zip(self.actors, self.critics)
+        ]
 
         if self.accelerator is not None and wrap:
             self.wrap_models()
@@ -354,14 +318,11 @@ class IPPO(MultiAgentRLAlgorithm):
         self.register_network_group(
             NetworkGroup(
                 eval=self.actors,
-                shared=self.actor_targets,
                 policy=True,
                 multiagent=True,
             )
         )
-        self.register_network_group(
-            NetworkGroup(eval=self.critics, shared=self.critic_targets, multiagent=True)
-        )
+        self.register_network_group(NetworkGroup(eval=self.critics, multiagent=True))
 
     def scale_to_action_space(self, action: ArrayLike, idx: int) -> torch.Tensor:
         """Scales actions to action space defined by self.min_action and self.max_action.
@@ -469,6 +430,33 @@ class IPPO(MultiAgentRLAlgorithm):
 
         return env_defined_actions, agent_masks
 
+    def preprocess_observation(
+        self, observation: ObservationType
+    ) -> Dict[str, TorchObsType]:
+        """Preprocesses observations for forward pass through neural network.
+
+        :param observations: Observations of environment
+        :type observations: numpy.ndarray[float] or dict[str, numpy.ndarray[float]]
+
+        :return: Preprocessed observations
+        :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
+        """
+        preprocessed = {homo_id: [] for homo_id in self.unique_agent_ids}
+        for agent_id, obs in observation.items():
+            homo_id = agent_id.rsplit(", ", 1)[0]
+            preprocessed[homo_id].append(
+                preprocess_observation(
+                    observation=obs,
+                    observation_space=self.observation_space.get(agent_id),
+                    device=self.device,
+                    normalize_images=self.normalize_images,
+                )
+            )
+        for homo_id in self.unique_agent_ids:
+            preprocessed[homo_id] = torch.stack(preprocessed[homo_id], dim=0)
+
+        return preprocessed
+
     def process_infos(self, infos: InfosDict) -> Tuple[ArrayDict, ArrayDict, ArrayDict]:
         """
         Process the information, extract env_defined_actions, action_masks and agent_masks
@@ -485,7 +473,8 @@ class IPPO(MultiAgentRLAlgorithm):
     def get_action(
         self,
         obs: Dict[str, ObservationType],
-        training: bool = True,
+        action: Optional[torch.Tensor] = None,
+        grad: bool = False,
         infos: Optional[InfosDict] = None,
     ) -> Tuple[ArrayDict, ArrayDict]:
         """Returns the next action to take in the environment.
@@ -494,8 +483,10 @@ class IPPO(MultiAgentRLAlgorithm):
 
         :param obs: Environment observations: {'agent_0': state_dim_0, ..., 'agent_n': state_dim_n}
         :type obs: Dict[str, numpy.Array]
-        :param training: Agent is training, use exploration noise, defaults to True
-        :type training: bool, optional
+        :param action: Actions in environment to evaluate, defaults to None
+        :type action: torch.Tensor(), optional
+        :param grad: Calculate gradients on actions, defaults to False
+        :type grad: bool, optional
         :param infos: Information dictionary returned by env.step(actions)
         :type infos: Dict[str, Dict[str, ...]]
         :return: Tuple of actions for each agent
@@ -511,97 +502,86 @@ class IPPO(MultiAgentRLAlgorithm):
         preprocessed_states = list(self.preprocess_observation(obs).values())
 
         action_dict = {}
-        for idx, (agent_id, obs, actor) in enumerate(
-            zip(self.agent_ids, preprocessed_states, self.actors)
+        action_logprob_dict = {}
+        dist_entropy_dict = {}
+        state_values_dict = {}
+        for idx, (agent_id, obs, action_mask, actor, critic) in enumerate(
+            zip(
+                self.unique_agent_ids,
+                preprocessed_states,
+                action_masks,
+                self.actors,
+                self.critics,
+            )
         ):
-            actor.eval()
-            if self.accelerator is not None:
-                with actor.no_sync(), torch.no_grad():
-                    actions = actor(obs)
-            else:
+            if not grad:
+                actor.eval()
+                critic.eval()
                 with torch.no_grad():
-                    actions = actor(obs)
-            actor.train()
-            if self.discrete_actions and training:
-                actions = torch.clamp(actions + self.action_noise(idx), 0, 1)
-            elif not self.discrete_actions:
-                actions = self.scale_to_action_space(actions, idx)
-                if training:
-                    actions = torch.clamp(
-                        actions + self.action_noise(idx),
-                        self.min_action[idx][0],
-                        self.max_action[idx][0],
-                    )
-            action_dict[agent_id] = actions.cpu().numpy()
+                    action_dist = actor(obs, action_mask=action_mask)
+                    state_values = critic(obs).squeeze(-1)
+            else:
+                actor.train()
+                critic.train()
+                action_dist = self.actor(obs, action_mask=action_mask)
+                state_values = self.critic(obs).squeeze(-1)
 
-        if self.discrete_actions:
-            discrete_action_dict = {}
-            for agent, action in action_dict.items():
-                mask = (
-                    1 - np.array(action_masks[agent])
-                    if action_masks[agent] is not None
-                    else None
+            if not isinstance(action_dist, torch.distributions.Distribution):
+                raise ValueError(
+                    f"Expected action_dist to be a torch.distributions.Distribution, got {type(action_dist)}."
                 )
-                action: np.ndarray = np.ma.array(action, mask=mask)
-                discrete_action_dict[agent] = action.argmax(axis=-1)
 
-                if len(discrete_action_dict[agent].shape) == 1 and env_defined_actions:
-                    env_defined_actions = {
-                        agent: action.squeeze(1) if len(action.shape) > 1 else action
-                        for agent, action in env_defined_actions.items()
-                    }
-                    agent_masks = {
-                        agent: mask.squeeze(1) if len(mask.shape) > 1 else mask
-                        for agent, mask in agent_masks.items()
-                    }
-        else:
-            discrete_action_dict = None
+            return_tensors = True
+            if action is None:
+                action = action_dist.sample()
+                return_tensors = False
+            else:
+                action = action.to(self.device)
+
+            action_logprob = action_dist.log_prob(action)
+
+            if len(action_logprob.shape) > 1:
+                action_logprob = action_logprob.sum(dim=1)
+
+            dist_entropy = action_dist.entropy()
+
+            if return_tensors:
+                action_dict[agent_id] = (
+                    self.scale_to_action_space(action, convert_to_torch=True)
+                    if not self.discrete_actions
+                    else action
+                )
+                action_logprob_dict[agent_id] = action_logprob
+                dist_entropy_dict[agent_id] = dist_entropy
+                state_values_dict[agent_id] = state_values
+            else:
+                action_dict[agent_id] = (
+                    self.scale_to_action_space(action.cpu().data.numpy())
+                    if not self.discrete_actions
+                    else action.cpu().data.numpy()
+                )
+                action_logprob_dict[agent_id] = action_logprob.cpu().data.numpy()
+                dist_entropy_dict[agent_id] = dist_entropy.cpu().data.numpy()
+                state_values_dict[agent_id] = state_values.cpu().data.numpy()
 
         # If using env_defined_actions replace actions
         if env_defined_actions is not None:
             for agent in self.agent_ids:
                 if self.discrete_actions:
-                    discrete_action_dict[agent][agent_masks[agent]] = (
-                        env_defined_actions[agent][agent_masks[agent]]
-                    )
+                    action_dict[agent][agent_masks[agent]] = env_defined_actions[agent][
+                        agent_masks[agent]
+                    ]
                 else:
                     action_dict[agent][agent_masks[agent]] = env_defined_actions[agent][
                         agent_masks[agent]
                     ]
-        return (action_dict, discrete_action_dict)
 
-    def action_noise(self, idx: int) -> torch.Tensor:
-        """Create action noise for exploration, either Ornstein Uhlenbeck or
-            from a normal distribution.
-
-        :param idx: Agent index for action dims
-        :type idx: int
-        :return: Action noise
-        :rtype: torch.Tensor
-        """
-        if self.O_U_noise:
-            noise = (
-                self.current_noise[idx]
-                + self.theta
-                * (self.mean_noise[idx] - self.current_noise[idx])
-                * self.dt
-                + self.expl_noise[idx] * self.sqdt * self.sample_gaussian[idx].normal_()
-            )
-            self.current_noise[idx] = noise
-        else:
-            torch.normal(
-                self.mean_noise[idx],
-                self.expl_noise[idx],
-                out=self.sample_gaussian[idx],
-            )
-            noise = self.sample_gaussian[idx]
-        return noise
-
-    def reset_action_noise(self, indices: List[int]) -> None:
-        """Reset action noise."""
-        for i in range(len(self.current_noise)):
-            for idx in indices:
-                self.current_noise[i][idx, :] = 0
+        return (
+            self.disassemble_homogeneous_outputs(action_dict),
+            self.disassemble_homogeneous_outputs(action_logprob_dict),
+            self.disassemble_homogeneous_outputs(dist_entropy_dict),
+            self.disassemble_homogeneous_outputs(state_values_dict),
+        )
 
     def learn(self, experiences: ExperiencesType) -> TensorDict:
         """Updates agent network parameters to learn from experiences.
@@ -613,224 +593,182 @@ class IPPO(MultiAgentRLAlgorithm):
         :return: Loss dictionary
         :rtype: Dict[str, torch.Tensor]
         """
-        states, actions, rewards, next_states, dones = experiences
 
-        actions = {
-            agent_id: agent_actions.to(self.device)
-            for agent_id, agent_actions in actions.items()
-        }
-        rewards = {
-            agent_id: agent_rewards.to(self.device)
-            for agent_id, agent_rewards in rewards.items()
-        }
-        dones = {
-            agent_id: agent_dones.to(self.device)
-            for agent_id, agent_dones in dones.items()
-        }
-
-        # Preprocess observations
-        states = self.preprocess_observation(states)
-        next_states = self.preprocess_observation(next_states)
-
-        # Get next actions
-        next_actions = []
-        with torch.no_grad():
-            for i, agent_id_label in enumerate(self.agent_ids):
-                unscaled_actions = self.actor_targets[i](next_states[agent_id_label])
-                if not self.discrete_actions:
-                    scaled_actions = torch.where(
-                        unscaled_actions > 0,
-                        unscaled_actions * self.max_action[i][0],
-                        unscaled_actions * -self.min_action[i][0],
-                    )
-                    next_actions.append(scaled_actions)
-                else:
-                    next_actions.append(unscaled_actions)
-
-        # Stack states and actions
-        stacked_states = self.stack_critic_observations(states)
-        stacked_next_states = self.stack_critic_observations(next_states)
-        stacked_actions = torch.cat(list(actions.values()), dim=1)
-        stacked_next_actions = torch.cat(next_actions, dim=1)
+        # process experiences
 
         loss_dict = {}
+
         for idx, (
             agent_id,
+            exp,
             actor,
             critic,
-            critic_target,
-            actor_optimizer,
-            critic_optimizer,
+            optimizer,
         ) in enumerate(
             zip(
                 self.agent_ids,
+                experiences,
                 self.actors,
                 self.critics,
-                self.critic_targets,
-                self.actor_optimizers,
-                self.critic_optimizers,
+                self.optimizers,
             )
         ):
             loss_dict[f"{agent_id}"] = self._learn_individual(
-                idx,
-                agent_id,
-                actor,
-                critic,
-                critic_target,
-                actor_optimizer,
-                critic_optimizer,
-                stacked_states,
-                stacked_actions,
-                stacked_next_states,
-                stacked_next_actions,
-                states,
-                actions,
-                rewards,
-                dones,
+                exp, actor, critic, optimizer
             )
-
-        for actor, actor_target, critic, critic_target in zip(
-            self.actors, self.actor_targets, self.critics, self.critic_targets
-        ):
-            self.soft_update(actor, actor_target)
-            self.soft_update(critic, critic_target)
 
         return loss_dict
 
     def _learn_individual(
         self,
-        idx: int,
-        agent_id: str,
-        actor: nn.Module,
-        critic: nn.Module,
-        critic_target: nn.Module,
-        actor_optimizer: optim.Optimizer,
-        critic_optimizer: optim.Optimizer,
-        stacked_states: torch.Tensor,
-        stacked_actions: torch.Tensor,
-        stacked_next_states: torch.Tensor,
-        stacked_next_actions: torch.Tensor,
-        states: TensorDict,
-        actions: TensorDict,
-        rewards: TensorDict,
-        dones: TensorDict,
-    ) -> Tuple[float, float]:
+        experiences: ExperiencesType,
+        actor: EvolvableModule,
+        critic: EvolvableModule,
+        optimizer: OptimizerWrapper,
+    ) -> float:
+        """Inner call to each agent for the learning/algo training steps,
+        essentially the PPO learn method. Applies all forward/backward props.
+
+        :param experience: List of batched states, actions, log_probs, rewards, dones, values, next_state in that order.
+        :type experience: Tuple[Union[numpy.ndarray, Dict[str, numpy.ndarray]], ...]
+        :param actor: Actor network
+        :typr actor: EvolvableModule
+        :param critic: Critic network
+        :typr critic: EvolvableModule
+        :param optimizer: Optimizer specific to the actor and critic
+        :typr critic: OptimizerWrapper
         """
-        Inner call to each agent for the learning/algo training steps, up until the soft updates.
-        Applies all forward/backward props.
-
-        :param idx: Index of the agent
-        :type idx: int
-        :param agent_id: ID of the agent
-        :type agent_id: str
-        :param actor: Actor network of the agent
-        :type actor: nn.Module
-        :param critic: Critic network of the agent
-        :type critic: nn.Module
-        :param critic_target: Target critic network of the agent
-        :type critic_target: nn.Module
-        :param actor_optimizer: Optimizer for the actor network
-        :type actor_optimizer: optim.Optimizer
-        :param critic_optimizer: Optimizer for the critic network
-        :type critic_optimizer: optim.Optimizer
-        :param stacked_states: Stacked states tensor
-        :type stacked_states: torch.Tensor
-        :param stacked_actions: Stacked actions tensor
-        :type stacked_actions: torch.Tensor
-        :param stacked_next_states: Stacked next states tensor
-        :type stacked_next_states: torch.Tensor
-        :param stacked_next_actions: Stacked next actions tensor
-        :type stacked_next_actions: torch.Tensor
-        :param states: Dictionary of current states for each agent
-        :type states: TensorDict
-        :param actions: Dictionary of actions for each agent
-        :type actions: TensorDict
-        :param rewards: Dictionary of rewards for each agent
-        :type rewards: TensorDict
-        :param dones: Dictionary of done flags for each agent
-        :type dones: TensorDict
-        :return: Tuple containing actor loss and critic loss
-        :rtype: Tuple[float, float]
-        """
-        if self.accelerator is not None:
-            with critic.no_sync():
-                q_value = critic(stacked_states, stacked_actions)
-        else:
-            q_value = critic(stacked_states, stacked_actions)
-
-        with torch.no_grad():
-            if self.accelerator is not None:
-                with critic_target.no_sync():
-                    q_value_next_state = critic_target(
-                        stacked_next_states, stacked_next_actions
-                    )
-            else:
-                q_value_next_state = critic_target(
-                    stacked_next_states, stacked_next_actions
-                )
-
-        y_j = (
-            rewards[agent_id] + (1 - dones[agent_id]) * self.gamma * q_value_next_state
+        (states, actions, log_probs, rewards, dones, values, next_state) = (
+            stack_experiences(*experiences)
         )
 
-        critic_loss = self.criterion(q_value, y_j)
+        # Bootstrapping returns using GAE advantage estimation
+        dones = dones.long()
+        with torch.no_grad():
+            num_steps = rewards.size(0)
+            next_state = preprocess_observation(next_state)
+            next_value = critic(next_state).reshape(1, -1).cpu()
+            advantages = torch.zeros_like(rewards).float()
+            for t in range(num_steps):
+                discount = 1
+                a_t = 0
+                for k in range(t, num_steps):
+                    if k != num_steps - 1:
+                        nextvalue = values[k + 1]
+                    else:
+                        nextvalue = next_value.squeeze()
 
-        # critic loss backprop
-        critic_optimizer.zero_grad()
-        if self.accelerator is not None:
-            self.accelerator.backward(critic_loss)
-        else:
-            critic_loss.backward()
-        critic_optimizer.step()
+                    a_t += discount * (
+                        rewards[k]
+                        + self.gamma * nextvalue * (1.0 - dones[k])
+                        - values[k]
+                    )
+                    discount *= self.gamma * self.gae_lambda * (1.0 - dones[k])
 
-        # Get actions from actor
-        if self.accelerator is not None:
-            with actor.no_sync():
-                action = actor(states[agent_id])
-        else:
-            action = actor(states[agent_id])
+                advantages[t] = a_t
+            returns = advantages + values
 
-        # Scale actions to action space
-        if not self.discrete_actions:
-            action = torch.where(
-                action > 0,
-                action * self.max_action[idx][0],
-                action * -self.min_action[idx][0],
-            )
+        # Flatten experiences from (batch_size, num_envs, ...) to (batch_size*num_envs, ...)
+        # after checking if experiences are vectorized
+        experiences = (states, actions, log_probs, advantages, returns, values)
+        if is_vectorized_experiences(*experiences):
+            experiences = flatten_experiences(*experiences)
 
-        detached_actions = copy.deepcopy(actions)
-        detached_actions[agent_id] = action
+        # Move experiences to algo device
+        experiences = self.to_device(*experiences)
 
-        # update actor and targets
-        stacked_detached_actions = torch.cat(list(detached_actions.values()), dim=1)
-        if self.accelerator is not None:
-            with critic.no_sync():
-                actor_loss = -critic(stacked_states, stacked_detached_actions).mean()
-        else:
-            actor_loss = -critic(stacked_states, stacked_detached_actions).mean()
+        (
+            states,
+            actions,
+            log_probs,
+            advantages,
+            returns,
+            values,
+        ) = experiences
 
-        # actor loss backprop
-        actor_optimizer.zero_grad()
-        if self.accelerator is not None:
-            self.accelerator.backward(actor_loss)
-        else:
-            actor_loss.backward()
-        actor_optimizer.step()
+        num_samples = returns.size(0)
+        batch_idxs = np.arange(num_samples)
+        clipfracs = []
+        mean_loss = 0
+        for epoch in range(self.update_epochs):
+            np.random.shuffle(batch_idxs)
+            for start in range(0, num_samples, self.batch_size):
+                minibatch_idxs = batch_idxs[start : start + self.batch_size]
+                (
+                    batch_states,
+                    batch_actions,
+                    batch_log_probs,
+                    batch_advantages,
+                    batch_returns,
+                    batch_values,
+                ) = get_experiences_samples(minibatch_idxs, *experiences)
 
-        return actor_loss.item(), critic_loss.item()
+                batch_actions = batch_actions.squeeze()
+                batch_returns = batch_returns.squeeze()
+                batch_log_probs = batch_log_probs.squeeze()
+                batch_advantages = batch_advantages.squeeze()
+                batch_values = batch_values.squeeze()
 
-    def soft_update(self, net: nn.Module, target: nn.Module) -> None:
-        """Soft updates target network.
+                if len(minibatch_idxs) > 1:
+                    _, log_prob, entropy, value = self.get_action(
+                        obs=batch_states, action=batch_actions, grad=True
+                    )
 
-        :param net: Network to be updated
-        :type net: nn.Module
-        :param target: Target network
-        :type target: nn.Module
-        """
-        for eval_param, target_param in zip(net.parameters(), target.parameters()):
-            target_param.data.copy_(
-                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
-            )
+                    logratio = log_prob - batch_log_probs
+                    ratio = logratio.exp()
+
+                    with torch.no_grad():
+                        approx_kl = ((ratio - 1) - logratio).mean()
+                        clipfracs += [
+                            ((ratio - 1.0).abs() > self.clip_coef).float().mean().item()
+                        ]
+
+                    minibatch_advs = batch_advantages
+                    minibatch_advs = (minibatch_advs - minibatch_advs.mean()) / (
+                        minibatch_advs.std() + 1e-8
+                    )
+
+                    # Policy loss
+                    pg_loss1 = -minibatch_advs * ratio
+                    pg_loss2 = -minibatch_advs * torch.clamp(
+                        ratio, 1 - self.clip_coef, 1 + self.clip_coef
+                    )
+                    pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+
+                    # Value loss
+                    value = value.view(-1)
+                    v_loss_unclipped = (value - batch_returns) ** 2
+                    v_clipped = batch_values + torch.clamp(
+                        value - batch_values, -self.clip_coef, self.clip_coef
+                    )
+
+                    v_loss_clipped = (v_clipped - batch_returns) ** 2
+                    v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
+                    v_loss = 0.5 * v_loss_max.mean()
+
+                    entropy_loss = entropy.mean()
+                    loss = (
+                        pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
+                    )
+
+                    # actor + critic loss backprop
+                    optimizer.zero_grad()
+                    if self.accelerator is not None:
+                        self.accelerator.backward(loss)
+                    else:
+                        loss.backward()
+
+                    clip_grad_norm_(actor.parameters(), self.max_grad_norm)
+                    optimizer.step()
+
+                    mean_loss += loss.item()
+
+            if self.target_kl is not None:
+                if approx_kl > self.target_kl:
+                    break
+
+        mean_loss /= num_samples * self.update_epochs
+        return mean_loss
 
     def test(
         self,
@@ -870,12 +808,12 @@ class IPPO(MultiAgentRLAlgorithm):
                 scores = (
                     np.zeros((num_envs, 1))
                     if sum_scores
-                    else np.zeros((num_envs, len(self.agent_ids)))
+                    else np.zeros((num_envs, len(self.unique_agent_ids)))
                 )
                 completed_episode_scores = (
                     np.zeros((num_envs, 1))
                     if sum_scores
-                    else np.zeros((num_envs, len(self.agent_ids)))
+                    else np.zeros((num_envs, len(self.unique_agent_ids)))
                 )
                 finished = np.zeros(num_envs)
                 step = 0
@@ -892,15 +830,7 @@ class IPPO(MultiAgentRLAlgorithm):
                                 agent_id: np.moveaxis(np.expand_dims(s, 0), [-1], [-3])
                                 for agent_id, s in obs.items()
                             }
-                    cont_actions, discrete_action = self.get_action(
-                        obs,
-                        training=False,
-                        infos=info,
-                    )
-                    if self.discrete_actions:
-                        action = discrete_action
-                    else:
-                        action = cont_actions
+                    action, _, _, _ = self.get_action(obs=obs, infos=info)
                     if not is_vectorised:
                         action = {agent: act[0] for agent, act in action.items()}
                     obs, reward, term, trunc, info = env.step(action)

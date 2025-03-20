@@ -329,8 +329,6 @@ class PPO(RLAlgorithm):
         :type grad: bool, optional
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: numpy.ndarray, optional
-        :param preprocess_obs: Flag to preprocess observations, defaults to True
-        :type preprocess_obs: bool, optional
         """
         obs = self.preprocess_observation(obs)
 

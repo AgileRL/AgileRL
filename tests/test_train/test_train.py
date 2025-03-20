@@ -13,7 +13,7 @@ from gymnasium.spaces import Box, Discrete
 from pettingzoo import ParallelEnv
 
 import agilerl.training.train_bandits
-import agilerl.training.train_multi_agent
+import agilerl.training.train_multi_agent_off_policy
 import agilerl.training.train_off_policy
 import agilerl.training.train_offline
 import agilerl.training.train_on_policy
@@ -28,7 +28,7 @@ from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
 from agilerl.algorithms.ppo import PPO
 from agilerl.algorithms.td3 import TD3
 from agilerl.training.train_bandits import train_bandits
-from agilerl.training.train_multi_agent import train_multi_agent
+from agilerl.training.train_multi_agent_off_policy import train_multi_agent_off_policy
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_offline import train_offline
 from agilerl.training.train_on_policy import train_on_policy
@@ -2268,10 +2268,10 @@ def test_train_on_policy_save_checkpoint(
 @pytest.mark.parametrize(
     "state_size, action_size, sum_scores", [((6,), 2, True), ((6,), 2, False)]
 )
-def test_train_multi_agent(
+def test_train_multi_agent_off_policy(
     multi_env, population_multi_agent, multi_memory, tournament, mutations, sum_scores
 ):
-    pop, pop_fitnesses = train_multi_agent(
+    pop, pop_fitnesses = train_multi_agent_off_policy(
         multi_env,
         "env_name",
         "algo",
@@ -2292,11 +2292,11 @@ def test_train_multi_agent(
 
 
 @pytest.mark.parametrize("state_size, action_size", [((6,), 2)])
-def test_train_multi_agent_distributed(
+def test_train_multi_agent_off_policy_distributed(
     multi_env, population_multi_agent, multi_memory, tournament, mutations
 ):
     accelerator = Accelerator()
-    pop, pop_fitnesses = train_multi_agent(
+    pop, pop_fitnesses = train_multi_agent_off_policy(
         multi_env,
         "env_name",
         "algo",
@@ -2316,15 +2316,15 @@ def test_train_multi_agent_distributed(
     assert len(pop) == len(population_multi_agent)
 
 
-def test_train_multi_agent_agent_masking():
+def test_train_multi_agent_off_policy_agent_masking():
     pass
 
 
 @pytest.mark.parametrize("state_size, action_size", [((250, 160, 3), 2)])
-def test_train_multi_agent_rgb(
+def test_train_multi_agent_off_policy_rgb(
     multi_env, population_multi_agent, multi_memory, tournament, mutations
 ):
-    pop, pop_fitnesses = train_multi_agent(
+    pop, pop_fitnesses = train_multi_agent_off_policy(
         multi_env,
         "env_name",
         "algo",
@@ -2344,7 +2344,7 @@ def test_train_multi_agent_rgb(
 
 
 @pytest.mark.parametrize("state_size, action_size", [((250, 160, 3), 2)])
-def test_train_multi_agent_rgb_vectorized(
+def test_train_multi_agent_off_policy_rgb_vectorized(
     multi_env,
     population_multi_agent,
     multi_memory,
@@ -2360,7 +2360,7 @@ def test_train_multi_agent_rgb_vectorized(
         agent.num_envs = 4
         agent.scores = [1]
     env.reset()
-    pop, pop_fitnesses = train_multi_agent(
+    pop, pop_fitnesses = train_multi_agent_off_policy(
         env,
         "env_name",
         "algo",
@@ -2386,7 +2386,7 @@ def test_train_multi_save_elite_warning(
     warning_string = "'save_elite' set to False but 'elite_path' has been defined, elite will not\
                       be saved unless 'save_elite' is set to True."
     with pytest.warns(match=warning_string):
-        pop, pop_fitnesses = train_multi_agent(
+        pop, pop_fitnesses = train_multi_agent_off_policy(
             multi_env,
             "env_name",
             "algo",
@@ -2412,7 +2412,7 @@ def test_train_multi_checkpoint_warning(
     warning_string = "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
                       be saved unless 'checkpoint' is defined."
     with pytest.warns(match=warning_string):
-        pop, pop_fitnesses = train_multi_agent(
+        pop, pop_fitnesses = train_multi_agent_off_policy(
             multi_env,
             "env_name",
             "algo",
@@ -2460,19 +2460,19 @@ def test_train_multi_wandb_init_log(
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_multi_agent.wandb.login") as _, patch(
-        "agilerl.training.train_multi_agent.wandb.init"
+    with patch("agilerl.training.train_multi_agent_off_policy.wandb.login") as _, patch(
+        "agilerl.training.train_multi_agent_off_policy.wandb.init"
     ) as mock_wandb_init, patch(
-        "agilerl.training.train_multi_agent.wandb.log"
+        "agilerl.training.train_multi_agent_off_policy.wandb.log"
     ) as mock_wandb_log, patch(
-        "agilerl.training.train_multi_agent.wandb.finish"
+        "agilerl.training.train_multi_agent_off_policy.wandb.finish"
     ) as mock_wandb_finish:
         if accelerator_flag:
             accelerator = Accelerator()
         else:
             accelerator = None
         # Call the function that should trigger wandb.init
-        agilerl.training.train_multi_agent.train_multi_agent(
+        agilerl.training.train_multi_agent_off_policy.train_multi_agent_off_policy(
             multi_env,
             "env_name",
             "algo",
@@ -2530,13 +2530,15 @@ def test_multi_agent_early_stop(
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_multi_agent.wandb.login") as _, patch(
-        "agilerl.training.train_multi_agent.wandb.init"
-    ) as _, patch("agilerl.training.train_multi_agent.wandb.log") as _, patch(
-        "agilerl.training.train_multi_agent.wandb.finish"
+    with patch("agilerl.training.train_multi_agent_off_policy.wandb.login") as _, patch(
+        "agilerl.training.train_multi_agent_off_policy.wandb.init"
+    ) as _, patch(
+        "agilerl.training.train_multi_agent_off_policy.wandb.log"
+    ) as _, patch(
+        "agilerl.training.train_multi_agent_off_policy.wandb.finish"
     ) as mock_wandb_finish:
         # Call the function that should trigger wandb.init
-        agilerl.training.train_multi_agent.train_multi_agent(
+        agilerl.training.train_multi_agent_off_policy.train_multi_agent_off_policy(
             multi_env,
             "env_name",
             "algo",
@@ -2565,7 +2567,7 @@ def test_multi_agent_early_stop(
         ((6,), 2, MATD3, True),
     ],
 )
-def test_train_multi_agent_calls(
+def test_train_multi_agent_off_policy_calls(
     multi_env, mocked_multi_agent, multi_memory, tournament, mutations, accelerator_flag
 ):
     if accelerator_flag:
@@ -2575,7 +2577,7 @@ def test_train_multi_agent_calls(
 
     mock_population = [mocked_multi_agent for _ in range(6)]
 
-    pop, pop_fitnesses = train_multi_agent(
+    pop, pop_fitnesses = train_multi_agent_off_policy(
         multi_env,
         "env_name",
         "algo",
@@ -2611,7 +2613,7 @@ def test_train_multi_agent_calls(
 def test_train_multi_env_calls(
     mocked_multi_env, multi_memory, population_multi_agent, tournament, mutations
 ):
-    pop, pop_fitnesses = train_multi_agent(
+    pop, pop_fitnesses = train_multi_agent_off_policy(
         mocked_multi_env,
         "env_name",
         "algo",
@@ -2640,7 +2642,7 @@ def test_train_multi_env_calls(
 def test_train_multi_tourn_mut_calls(
     multi_env, multi_memory, population_multi_agent, mocked_tournament, mocked_mutations
 ):
-    pop, pop_fitnesses = train_multi_agent(
+    pop, pop_fitnesses = train_multi_agent_off_policy(
         multi_env,
         "env_name",
         "algo",
@@ -2669,7 +2671,7 @@ def test_train_multi_tourn_mut_calls(
 def test_train_multi_memory_calls(
     multi_env, mocked_multi_memory, population_multi_agent, tournament, mutations
 ):
-    pop, pop_fitnesses = train_multi_agent(
+    pop, pop_fitnesses = train_multi_agent_off_policy(
         multi_env,
         "env_name",
         "algo",
@@ -2705,7 +2707,7 @@ def test_train_multi_save_elite(
     else:
         accelerator = None
     elite_path = "elite"
-    pop, pop_fitnesses = train_multi_agent(
+    pop, pop_fitnesses = train_multi_agent_off_policy(
         multi_env,
         "env_name",
         "algo",
@@ -2745,7 +2747,7 @@ def test_train_multi_save_checkpoint(
     else:
         accelerator = None
     checkpoint_path = str(Path(tmpdir) / "checkpoint")
-    pop, pop_fitnesses = train_multi_agent(
+    pop, pop_fitnesses = train_multi_agent_off_policy(
         multi_env,
         "env_name",
         "algo",
