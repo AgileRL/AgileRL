@@ -12,7 +12,6 @@ from accelerate import Accelerator
 from tqdm import trange
 
 from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
-from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.algo_utils import obs_channels_to_first
@@ -26,12 +25,11 @@ InitDictType = Optional[Dict[str, Any]]
 PopulationType = List[MultiAgentRLAlgorithm]
 
 
-def train_multi_agent_off_policy(
+def train_multi_agent_on_policy(
     env: gym.Env,
     env_name: str,
     algo: str,
     pop: PopulationType,
-    memory: ReplayBuffer,
     sum_scores: bool = True,
     INIT_HP: InitDictType = None,
     MUT_P: InitDictType = None,
@@ -40,7 +38,6 @@ def train_multi_agent_off_policy(
     evo_steps: int = 25,
     eval_steps: Optional[int] = None,
     eval_loop: int = 1,
-    learning_delay: int = 0,
     target: Optional[float] = None,
     tournament: Optional[TournamentSelection] = None,
     mutation: Optional[Mutations] = None,
@@ -65,8 +62,6 @@ def train_multi_agent_off_policy(
     :type algo: str
     :param pop: Population of agents
     :type pop: list[object]
-    :param memory: Experience Replay Buffer
-    :type memory: object
     :param sum_scores: Boolean flag indicating whether to sum sub-agents scores, typically True for co-operative environments, defaults to True
     :type sum_scores: bool, optional
     :param INIT_HP: Dictionary containing initial hyperparameters.
@@ -85,8 +80,6 @@ def train_multi_agent_off_policy(
     :type eval_steps: int, optional
     :param eval_loop: Number of evaluation episodes, defaults to 1
     :type eval_loop: int, optional
-    :param learning_delay: Steps in environment before starting learning, defaults to 0
-    :type learning_delay: int, optional
     :param target: Target score for early stopping, defaults to None
     :type target: float, optional
     :param tournament: Tournament selection object, defaults to None
@@ -232,7 +225,7 @@ def train_multi_agent_off_policy(
                 rewards = {
                     unique_agent_id: [] for unique_agent_id in agent.unique_agent_ids
                 }
-                dones = {
+                terms = {
                     unique_agent_id: [] for unique_agent_id in agent.unique_agent_ids
                 }
                 values = {
@@ -273,52 +266,66 @@ def train_multi_agent_off_policy(
                     steps += num_envs
 
                     for unique_agent_id in agent.unique_agent_ids:
-                        states[unique_agent_id].extend(
-                            list(
-                                itemgetter(*agent.homogeneous_agents[unique_agent_id])(
-                                    obs
+                        states[unique_agent_id].append(
+                            np.stack(
+                                list(
+                                    itemgetter(
+                                        *agent.homogeneous_agents[unique_agent_id]
+                                    )(obs)
                                 )
                             )
                         )
-                        actions[unique_agent_id].extend(
-                            list(
-                                itemgetter(*agent.homogeneous_agents[unique_agent_id])(
-                                    action
+                        actions[unique_agent_id].append(
+                            np.stack(
+                                list(
+                                    itemgetter(
+                                        *agent.homogeneous_agents[unique_agent_id]
+                                    )(action)
                                 )
                             )
                         )
-                        log_probs[unique_agent_id].extend(
-                            list(
-                                itemgetter(*agent.homogeneous_agents[unique_agent_id])(
-                                    log_prob
+                        log_probs[unique_agent_id].append(
+                            np.stack(
+                                list(
+                                    itemgetter(
+                                        *agent.homogeneous_agents[unique_agent_id]
+                                    )(log_prob)
                                 )
                             )
                         )
-                        rewards[unique_agent_id].extend(
-                            list(
-                                itemgetter(*agent.homogeneous_agents[unique_agent_id])(
-                                    reward
+                        rewards[unique_agent_id].append(
+                            np.stack(
+                                list(
+                                    itemgetter(
+                                        *agent.homogeneous_agents[unique_agent_id]
+                                    )(reward)
                                 )
                             )
                         )
-                        dones[unique_agent_id].extend(
-                            list(
-                                itemgetter(*agent.homogeneous_agents[unique_agent_id])(
-                                    termination
+                        terms[unique_agent_id].append(
+                            np.stack(
+                                list(
+                                    itemgetter(
+                                        *agent.homogeneous_agents[unique_agent_id]
+                                    )(termination)
                                 )
                             )
                         )
-                        values[unique_agent_id].extend(
-                            list(
-                                itemgetter(*agent.homogeneous_agents[unique_agent_id])(
-                                    values
+                        values[unique_agent_id].append(
+                            np.stack(
+                                list(
+                                    itemgetter(
+                                        *agent.homogeneous_agents[unique_agent_id]
+                                    )(value)
                                 )
                             )
                         )
-                        truncs[unique_agent_id].extend(
-                            list(
-                                itemgetter(*agent.homogeneous_agents[unique_agent_id])(
-                                    truncation
+                        truncs[unique_agent_id].append(
+                            np.stack(
+                                list(
+                                    itemgetter(
+                                        *agent.homogeneous_agents[unique_agent_id]
+                                    )(truncation)
                                 )
                             )
                         )
@@ -353,16 +360,16 @@ def train_multi_agent_off_policy(
                     pbar.update(num_envs)
 
                 if swap_channels:
-                    next_state = obs_channels_to_first(next_obs)
+                    next_obs = obs_channels_to_first(next_obs)
 
                 experiences = (
                     states,
                     actions,
                     log_probs,
                     rewards,
-                    dones,
+                    terms,
                     values,
-                    next_state,
+                    next_obs,
                 )
 
                 # Learn according to agent's RL algorithm

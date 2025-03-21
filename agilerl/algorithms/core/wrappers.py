@@ -8,8 +8,51 @@ from agilerl.modules.base import EvolvableModule
 from agilerl.protocols import EvolvableAlgorithm
 from agilerl.typing import OptimizerType, StateDict
 
+ModuleList = List[EvolvableModule]
 _Optimizer = Union[OptimizerType, List[OptimizerType]]
-_Module = Union[EvolvableModule, List[EvolvableModule]]
+_Module = Union[EvolvableModule, ModuleList, List[ModuleList]]
+
+
+def init_from_multiple(
+    networks: ModuleList,
+    optimizer_cls: OptimizerType,
+    lr: float,
+    optimizer_kwargs: Dict[str, Any],
+) -> Optimizer:
+    """
+    Initialize an optimizer from a list of networks.
+
+    :param networks: The list of networks that the optimizer will update.
+    :type networks: ModuleList
+    :param optimizer_cls: The optimizer class to be initialized.
+    :type optimizer_cls: OptimizerType
+    :param lr: The learning rate of the optimizer.
+    :type lr: float
+    :param optimizer_kwargs: The keyword arguments to be passed to the optimizer.
+    :type optimizer_kwargs: Dict[str, Any]
+    """
+    opt_args = []
+    for i, net in enumerate(networks):
+        kwargs = (
+            optimizer_kwargs[i]
+            if isinstance(optimizer_kwargs, list)
+            else optimizer_kwargs
+        )
+        opt_args.append({"params": net.parameters(), "lr": lr, **kwargs})
+
+    return optimizer_cls(opt_args)
+
+
+def init_from_single(
+    network: EvolvableModule,
+    optimizer_cls: OptimizerType,
+    lr: float,
+    optimizer_kwargs: Dict[str, Any],
+) -> Optimizer:
+    """
+    Initialize an optimizer from a single network.
+    """
+    return optimizer_cls(network.parameters(), lr=lr, **optimizer_kwargs)
 
 
 class OptimizerWrapper:
@@ -74,10 +117,12 @@ class OptimizerWrapper:
 
         # Initialize the optimizer/s
         # NOTE: For multi-agent algorithms, we want to have a different optimizer
-        # for each of the networks in the passed list
+        # for each of the networks in the passed list since they correspond to
+        # different agents.
         multiple_attrs = len(self.network_names) > 1
         multiple_networks = len(self.networks) > 1
         if multiagent:
+            multiple_networks = isinstance(self.networks[0], list)
             self.optimizer = []
             for i, net in enumerate(self.networks):
                 optimizer = (
@@ -90,7 +135,14 @@ class OptimizerWrapper:
                     if isinstance(self.optimizer_kwargs, list)
                     else self.optimizer_kwargs
                 )
-                self.optimizer.append(optimizer(net.parameters(), lr=self.lr, **kwargs))
+                if isinstance(net, list):
+                    self.optimizer.append(
+                        init_from_multiple(net, optimizer, self.lr, kwargs)
+                    )
+                else:
+                    self.optimizer.append(
+                        init_from_single(net, optimizer, self.lr, kwargs)
+                    )
 
         # Single-agent algorithms with multiple networks for a single optimizer
         elif multiple_networks and multiple_attrs:
@@ -101,16 +153,9 @@ class OptimizerWrapper:
                 optimizer_cls, type
             ), "Expected a single optimizer class for multiple networks."
             # Initialize a single optimizer from the combination of network parameters
-            opt_args = []
-            for i, net in enumerate(self.networks):
-                kwargs = (
-                    optimizer_kwargs[i]
-                    if isinstance(self.optimizer_kwargs, list)
-                    else self.optimizer_kwargs
-                )
-                opt_args.append({"params": net.parameters(), "lr": self.lr, **kwargs})
-
-            self.optimizer = optimizer_cls(opt_args)
+            self.optimizer = init_from_multiple(
+                self.networks, optimizer_cls, self.lr, self.optimizer_kwargs
+            )
 
         # Single-agent algorithms with a single network for a single optimizer
         else:
@@ -120,8 +165,9 @@ class OptimizerWrapper:
             assert isinstance(
                 self.optimizer_kwargs, dict
             ), "Expected a single dictionary of optimizer keyword arguments."
-            self.optimizer = optimizer_cls(
-                self.networks[0].parameters(), lr=self.lr, **self.optimizer_kwargs
+
+            self.optimizer = init_from_single(
+                self.networks[0], optimizer_cls, self.lr, self.optimizer_kwargs
             )
 
     def __getitem__(self, index: int) -> Optimizer:
@@ -244,9 +290,10 @@ class OptimizerWrapper:
         Zero the gradients of the optimizer.
         """
         if self.multiagent:
-            optimizers: List[Optimizer] = self.optimizer
-            for opt in optimizers:
-                opt.zero_grad()
+            raise ValueError(
+                "Please use the zero_grad() method of the individual optimizer in "
+                "a multi-agent algorithm."
+            )
         else:
             self.optimizer.zero_grad()
 
@@ -255,9 +302,10 @@ class OptimizerWrapper:
         Perform a single optimization step.
         """
         if self.multiagent:
-            optimizers: List[Optimizer] = self.optimizer
-            for opt in optimizers:
-                opt.step()
+            raise ValueError(
+                "Please use the step() method of the individual optimizer in "
+                "a multi-agent algorithm."
+            )
         else:
             self.optimizer.step()
 

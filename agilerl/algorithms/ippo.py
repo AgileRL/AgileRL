@@ -259,7 +259,8 @@ class IPPO(MultiAgentRLAlgorithm):
             self.actors = []
             self.critics = []
             for obs_space, action_space in zip(
-                self.unique_observation_spaces, self.unique_action_spaces
+                self.unique_observation_spaces.values(),
+                self.unique_action_spaces.values(),
             ):
                 net_config = {} if net_config is None else net_config
                 critic_net_config = copy.deepcopy(net_config)
@@ -292,10 +293,13 @@ class IPPO(MultiAgentRLAlgorithm):
                 self.critics.append(critic)
 
         # Optimizers
-        self.optimizers = [
-            OptimizerWrapper(optim.Adam, networks=[actor, critic], lr=self.lr)
-            for actor, critic in zip(self.actors, self.critics)
-        ]
+        # self.optimizers = OptimizerWrapper(optim.Adam, networks=[[actor, critic] for actor, critic in zip(self.actors, self.critics)], lr=self.lr, multiagent=True)
+        self.actor_optimizers = OptimizerWrapper(
+            optim.Adam, networks=self.actors, lr=self.lr, multiagent=True
+        )
+        self.critic_optimizers = OptimizerWrapper(
+            optim.Adam, networks=self.critics, lr=self.lr, multiagent=True
+        )
 
         if self.accelerator is not None and wrap:
             self.wrap_models()
@@ -330,33 +334,49 @@ class IPPO(MultiAgentRLAlgorithm):
         :param action: Action to be scaled
         :type action: numpy.ndarray
         """
+        device = self.device if self.accelerator is None else self.accelerator.device
+        max_action = (
+            torch.from_numpy(self.max_action[idx][0]).to(device)
+            if isinstance(self.max_action[idx][0], (np.ndarray))
+            else self.max_action[idx][0]
+        )
+        min_action = (
+            torch.from_numpy(self.min_action[idx][0]).to(device)
+            if isinstance(self.min_action[idx][0], (np.ndarray))
+            else self.min_action[idx][0]
+        )
+
+        # True if min and max action limits are defined as arrays/tensors
+        array_limits = isinstance(max_action, (np.ndarray, torch.Tensor))
+
+        if (array_limits and (np.inf in max_action or -np.inf in min_action)) or (
+            not array_limits and (np.inf == max_action or -np.inf == min_action)
+        ):
+            # If infinity in action limits, impossible to scale
+            return action.clip(min_action, max_action)
+
         mlp_output_activation = self.actors[idx].output_activation
         if mlp_output_activation in ["Tanh"]:
             pre_scaled_min = -1
             pre_scaled_max = 1
-        elif mlp_output_activation in ["Sigmoid", "Softmax", "GumbelSoftmax"]:
+        elif mlp_output_activation in ["Sigmoid", "Softmax"]:
             pre_scaled_min = 0
             pre_scaled_max = 1
         else:
-            return torch.where(
-                action > 0,
-                action * self.max_action[idx][0],
-                action * -self.min_action[idx][0],
-            )
+            action = torch.where(action > 0, action * max_action, action * -min_action)
+            return action.clip(min_action, max_action)
 
-        if not (
-            isinstance(self.min_action[idx][0], (np.ndarray, torch.Tensor))
-            or isinstance(self.max_action[idx][0], (np.ndarray, torch.Tensor))
+        if not array_limits and (
+            pre_scaled_min == min_action and pre_scaled_max == max_action
         ):
-            if (
-                pre_scaled_min == self.min_action[idx][0]
-                and pre_scaled_max == self.max_action[idx][0]
-            ):
-                return action
+            return action.clip(min_action, max_action)
 
-        return self.min_action[idx][0] + (
-            self.max_action[idx][0] - self.min_action[idx][0]
-        ) * (action - pre_scaled_min) / (pre_scaled_max - pre_scaled_min)
+        return (
+            min_action
+            + (max_action - min_action)
+            * (action - pre_scaled_min)
+            / (pre_scaled_max - pre_scaled_min)
+        ).clip(min_action, max_action)
 
     def extract_action_masks(self, infos: InfosDict) -> ArrayDict:
         """Extract action masks from info dictionary
@@ -443,7 +463,7 @@ class IPPO(MultiAgentRLAlgorithm):
         """
         preprocessed = {homo_id: [] for homo_id in self.unique_agent_ids}
         for agent_id, obs in observation.items():
-            homo_id = agent_id.rsplit(", ", 1)[0]
+            homo_id = agent_id.rsplit("_", 1)[0]
             preprocessed[homo_id].append(
                 preprocess_observation(
                     observation=obs,
@@ -453,7 +473,7 @@ class IPPO(MultiAgentRLAlgorithm):
                 )
             )
         for homo_id in self.unique_agent_ids:
-            preprocessed[homo_id] = torch.stack(preprocessed[homo_id], dim=0)
+            preprocessed[homo_id] = torch.cat(preprocessed[homo_id], dim=0)
 
         return preprocessed
 
@@ -473,8 +493,6 @@ class IPPO(MultiAgentRLAlgorithm):
     def get_action(
         self,
         obs: Dict[str, ObservationType],
-        action: Optional[torch.Tensor] = None,
-        grad: bool = False,
         infos: Optional[InfosDict] = None,
     ) -> Tuple[ArrayDict, ArrayDict]:
         """Returns the next action to take in the environment.
@@ -483,10 +501,6 @@ class IPPO(MultiAgentRLAlgorithm):
 
         :param obs: Environment observations: {'agent_0': state_dim_0, ..., 'agent_n': state_dim_n}
         :type obs: Dict[str, numpy.Array]
-        :param action: Actions in environment to evaluate, defaults to None
-        :type action: torch.Tensor(), optional
-        :param grad: Calculate gradients on actions, defaults to False
-        :type grad: bool, optional
         :param infos: Information dictionary returned by env.step(actions)
         :type infos: Dict[str, Dict[str, ...]]
         :return: Tuple of actions for each agent
@@ -497,6 +511,8 @@ class IPPO(MultiAgentRLAlgorithm):
         ), "AgileRL requires action masks to be defined in the information dictionary."
 
         action_masks, env_defined_actions, agent_masks = self.process_infos(infos)
+
+        vect_dim = len(list(obs.values())[0])
 
         # Preprocess observations
         preprocessed_states = list(self.preprocess_observation(obs).values())
@@ -514,29 +530,18 @@ class IPPO(MultiAgentRLAlgorithm):
                 self.critics,
             )
         ):
-            if not grad:
-                actor.eval()
-                critic.eval()
-                with torch.no_grad():
-                    action_dist = actor(obs, action_mask=action_mask)
-                    state_values = critic(obs).squeeze(-1)
-            else:
-                actor.train()
-                critic.train()
-                action_dist = self.actor(obs, action_mask=action_mask)
-                state_values = self.critic(obs).squeeze(-1)
+            actor.eval()
+            critic.eval()
+            with torch.no_grad():
+                action_dist = actor(obs, action_mask=action_mask)
+                state_values = critic(obs).squeeze(-1)
 
             if not isinstance(action_dist, torch.distributions.Distribution):
                 raise ValueError(
                     f"Expected action_dist to be a torch.distributions.Distribution, got {type(action_dist)}."
                 )
 
-            return_tensors = True
-            if action is None:
-                action = action_dist.sample()
-                return_tensors = False
-            else:
-                action = action.to(self.device)
+            action = action_dist.sample()
 
             action_logprob = action_dist.log_prob(action)
 
@@ -545,24 +550,14 @@ class IPPO(MultiAgentRLAlgorithm):
 
             dist_entropy = action_dist.entropy()
 
-            if return_tensors:
-                action_dict[agent_id] = (
-                    self.scale_to_action_space(action, convert_to_torch=True)
-                    if not self.discrete_actions
-                    else action
-                )
-                action_logprob_dict[agent_id] = action_logprob
-                dist_entropy_dict[agent_id] = dist_entropy
-                state_values_dict[agent_id] = state_values
-            else:
-                action_dict[agent_id] = (
-                    self.scale_to_action_space(action.cpu().data.numpy())
-                    if not self.discrete_actions
-                    else action.cpu().data.numpy()
-                )
-                action_logprob_dict[agent_id] = action_logprob.cpu().data.numpy()
-                dist_entropy_dict[agent_id] = dist_entropy.cpu().data.numpy()
-                state_values_dict[agent_id] = state_values.cpu().data.numpy()
+            action_dict[agent_id] = (
+                self.scale_to_action_space(action.cpu().data.numpy(), idx)
+                if not self.discrete_actions
+                else action.cpu().data.numpy()
+            )
+            action_logprob_dict[agent_id] = action_logprob.cpu().data.numpy()
+            dist_entropy_dict[agent_id] = dist_entropy.cpu().data.numpy()
+            state_values_dict[agent_id] = state_values.cpu().data.numpy()
 
         # If using env_defined_actions replace actions
         if env_defined_actions is not None:
@@ -577,24 +572,51 @@ class IPPO(MultiAgentRLAlgorithm):
                     ]
 
         return (
-            self.disassemble_homogeneous_outputs(action_dict),
-            self.disassemble_homogeneous_outputs(action_logprob_dict),
-            self.disassemble_homogeneous_outputs(dist_entropy_dict),
-            self.disassemble_homogeneous_outputs(state_values_dict),
+            self.disassemble_homogeneous_outputs(action_dict, vect_dim),
+            self.disassemble_homogeneous_outputs(action_logprob_dict, vect_dim),
+            self.disassemble_homogeneous_outputs(dist_entropy_dict, vect_dim),
+            self.disassemble_homogeneous_outputs(state_values_dict, vect_dim),
         )
+
+    def reorganize_experiences_by_agent(self, experiences):
+        """Reorganizes experiences into a dictionary by agent name.
+
+        :param experiences: Tuple of dictionaries containing batched states, actions,
+            rewards, next_states, dones in that order for each individual agent.
+        :type experiences: Tuple[Dict[str, torch.Tensor]]
+        """
+        states, actions, log_probs, rewards, dones, values, next_state = experiences
+        next_state = self.preprocess_observation(next_state)
+        agent_experiences = {}
+        for agent in list(states.keys()):
+            agent_experiences[agent] = (
+                states[agent],
+                actions[agent] if isinstance(actions, dict) else actions,
+                log_probs[agent] if isinstance(log_probs, dict) else log_probs,
+                rewards[agent] if isinstance(rewards, dict) else rewards,
+                (
+                    np.array(dones[agent], dtype=int)
+                    if isinstance(dones, dict)
+                    else np.array(dones, dtype=int)
+                ),
+                values[agent] if isinstance(values, dict) else values,
+                next_state[agent] if isinstance(next_state, dict) else next_state,
+            )
+        return agent_experiences
 
     def learn(self, experiences: ExperiencesType) -> TensorDict:
         """Updates agent network parameters to learn from experiences.
 
-        :param experience: Tuple of dictionaries containing batched states, actions,
+        :param experiences: Tuple of dictionaries containing batched states, actions,
             rewards, next_states, dones in that order for each individual agent.
-        :type experience: Tuple[Dict[str, torch.Tensor]]
+        :type experiences: Tuple[Dict[str, torch.Tensor]]
 
         :return: Loss dictionary
         :rtype: Dict[str, torch.Tensor]
         """
 
         # process experiences
+        experiences = self.reorganize_experiences_by_agent(experiences)
 
         loss_dict = {}
 
@@ -603,18 +625,22 @@ class IPPO(MultiAgentRLAlgorithm):
             exp,
             actor,
             critic,
-            optimizer,
+            actor_optimizer,
+            critic_optimizer,
+            obs_space,
         ) in enumerate(
             zip(
-                self.agent_ids,
-                experiences,
+                self.unique_agent_ids,
+                experiences.values(),
                 self.actors,
                 self.critics,
-                self.optimizers,
+                self.actor_optimizers,
+                self.critic_optimizers,
+                self.unique_observation_spaces.values(),
             )
         ):
             loss_dict[f"{agent_id}"] = self._learn_individual(
-                exp, actor, critic, optimizer
+                exp, actor, critic, actor_optimizer, critic_optimizer, obs_space
             )
 
         return loss_dict
@@ -624,7 +650,9 @@ class IPPO(MultiAgentRLAlgorithm):
         experiences: ExperiencesType,
         actor: EvolvableModule,
         critic: EvolvableModule,
-        optimizer: OptimizerWrapper,
+        actor_optimizer: OptimizerWrapper,
+        critic_optimizer: OptimizerWrapper,
+        obs_space: spaces,
     ) -> float:
         """Inner call to each agent for the learning/algo training steps,
         essentially the PPO learn method. Applies all forward/backward props.
@@ -632,11 +660,15 @@ class IPPO(MultiAgentRLAlgorithm):
         :param experience: List of batched states, actions, log_probs, rewards, dones, values, next_state in that order.
         :type experience: Tuple[Union[numpy.ndarray, Dict[str, numpy.ndarray]], ...]
         :param actor: Actor network
-        :typr actor: EvolvableModule
+        :type actor: EvolvableModule
         :param critic: Critic network
-        :typr critic: EvolvableModule
-        :param optimizer: Optimizer specific to the actor and critic
-        :typr critic: OptimizerWrapper
+        :type critic: EvolvableModule
+        :param actor_optimizer: Optimizer specific to the actor
+        :type actor_optimizer: OptimizerWrapper
+        :param critic_optimizer: Optimizer specific to the critic
+        :type critic_optimzer: OptimizerWrapper
+        :param obs_space: Observation space for the agent
+        :type obs_space: gymnasium.spaces
         """
         (states, actions, log_probs, rewards, dones, values, next_state) = (
             stack_experiences(*experiences)
@@ -646,7 +678,9 @@ class IPPO(MultiAgentRLAlgorithm):
         dones = dones.long()
         with torch.no_grad():
             num_steps = rewards.size(0)
-            next_state = preprocess_observation(next_state)
+            next_state = preprocess_observation(
+                next_state, obs_space, self.device, self.normalize_images
+            )
             next_value = critic(next_state).reshape(1, -1).cpu()
             advantages = torch.zeros_like(rewards).float()
             for t in range(num_steps):
@@ -710,9 +744,14 @@ class IPPO(MultiAgentRLAlgorithm):
                 batch_values = batch_values.squeeze()
 
                 if len(minibatch_idxs) > 1:
-                    _, log_prob, entropy, value = self.get_action(
-                        obs=batch_states, action=batch_actions, grad=True
-                    )
+                    actor.train()
+                    critic.train()
+                    action_dist = actor(batch_states)
+                    value = critic(batch_states).squeeze(-1)
+                    log_prob = action_dist.log_prob(batch_actions.to(self.device))
+                    if len(log_prob.shape) > 1:
+                        log_prob = log_prob.sum(dim=1)
+                    entropy = action_dist.entropy()
 
                     logratio = log_prob - batch_log_probs
                     ratio = logratio.exp()
@@ -747,21 +786,27 @@ class IPPO(MultiAgentRLAlgorithm):
                     v_loss = 0.5 * v_loss_max.mean()
 
                     entropy_loss = entropy.mean()
-                    loss = (
-                        pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
-                    )
 
-                    # actor + critic loss backprop
-                    optimizer.zero_grad()
+                    actor_loss = pg_loss - self.ent_coef * entropy_loss
+                    critic_loss = v_loss * self.vf_coef
+
+                    # loss backprop
+                    actor_optimizer.zero_grad()
                     if self.accelerator is not None:
-                        self.accelerator.backward(loss)
+                        self.accelerator.backward(actor_loss)
                     else:
-                        loss.backward()
-
+                        actor_loss.backward()
                     clip_grad_norm_(actor.parameters(), self.max_grad_norm)
-                    optimizer.step()
+                    actor_optimizer.step()
 
-                    mean_loss += loss.item()
+                    critic_optimizer.zero_grad()
+                    if self.accelerator is not None:
+                        self.accelerator.backward(critic_loss)
+                    else:
+                        critic_loss.backward()
+                    critic_optimizer.step()
+
+                    mean_loss += actor_loss.item() + critic_loss.item()
 
             if self.target_kl is not None:
                 if approx_kl > self.target_kl:

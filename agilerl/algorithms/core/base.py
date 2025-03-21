@@ -594,6 +594,29 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
             setattr(self, name, compiled)
 
+    def to_device(self, *experiences: TorchObsType) -> Tuple[TorchObsType, ...]:
+        """Moves experiences to the device.
+
+        :param experiences: Experiences to move to device
+        :type experiences: Tuple[torch.Tensor[float], ...]
+
+        :return: Experiences on the device
+        :rtype: Tuple[torch.Tensor[float], ...]
+        """
+        device = self.device if self.accelerator is None else self.accelerator.device
+        on_device = []
+        for exp in experiences:
+            if isinstance(exp, dict):
+                exp = {key: val.to(device) for key, val in exp.items()}
+            elif isinstance(exp, (list, tuple)) and isinstance(exp[0], torch.Tensor):
+                exp = [val.to(device) for val in exp]
+            elif isinstance(exp, torch.Tensor):
+                exp = exp.to(device)
+
+            on_device.append(exp)
+
+        return on_device
+
     def evolvable_attributes(
         self, networks_only: bool = False
     ) -> EvolvableAttributeDict:
@@ -1069,29 +1092,6 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
             normalize_images=self.normalize_images,
         )
 
-    def to_device(self, *experiences: TorchObsType) -> Tuple[TorchObsType, ...]:
-        """Moves experiences to the device.
-
-        :param experiences: Experiences to move to device
-        :type experiences: Tuple[torch.Tensor[float], ...]
-
-        :return: Experiences on the device
-        :rtype: Tuple[torch.Tensor[float], ...]
-        """
-        device = self.device if self.accelerator is None else self.accelerator.device
-        on_device = []
-        for exp in experiences:
-            if isinstance(exp, dict):
-                exp = {key: val.to(device) for key, val in exp.items()}
-            elif isinstance(exp, (list, tuple)) and isinstance(exp[0], torch.Tensor):
-                exp = [val.to(device) for val in exp]
-            elif isinstance(exp, torch.Tensor):
-                exp = exp.to(device)
-
-            on_device.append(exp)
-
-        return on_device
-
 
 class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
     """Base object for all multi-agent algorithms in the AgileRL framework.
@@ -1191,8 +1191,8 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         ):
             # Split agent names on expected pattern of e.g. speaker_0, speaker_1,
             # listener_0, listener_1, to determine which agents are homogeneous
-            homo_agent = agent_id.rsplit(", ", 1)[0]
-            if self.homogeneous_agents[homo_agent]:
+            homo_agent = agent_id.rsplit("_", 1)[0]
+            if homo_agent in self.homogeneous_agents:
                 self.homogeneous_agents[homo_agent].append(homo_agent)
                 assert (
                     obs_space == self.unique_observation_spaces[homo_agent]
@@ -1202,9 +1202,9 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
                 ), f"Homogeneous agents, i.e. agents that share the prefix {homo_agent}, must have the same action space. Found {self.unique_action_spaces[homo_agent]} and {action_space}."
             else:
                 self.unique_agent_ids.append(homo_agent)
-                self.homogeneous_agents[homo_agent] = [homo_agent]
-                self.unique_observation_spaces.append[homo_agent] = obs_space
-                self.unique_action_spaces.append[homo_agent] = action_space
+                self.homogeneous_agents[homo_agent] = [agent_id]
+                self.unique_observation_spaces[homo_agent] = obs_space
+                self.unique_action_spaces[homo_agent] = action_space
 
         self.n_unique_agents = len(self.unique_agent_ids)
         self.normalize_images = normalize_images
@@ -1292,7 +1292,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         return processed_obs
 
-    def disassemble_homogeneous_outputs(self, dict: Dict) -> Dict:
+    def disassemble_homogeneous_outputs(self, dict: Dict, vect_dim: int) -> Dict:
         """Disassembles batched output by shared policies into their homogeneous agents' outputs.
 
         :param dict: Dictionary to be disassembled, has the form {'agent': [4, 7, 8]}
@@ -1302,6 +1302,11 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         """
         output_dict = {}
         for unique_id in self.unique_agent_ids:
+            dict[unique_id] = np.reshape(
+                dict[unique_id], (len(self.homogeneous_agents[unique_id]), vect_dim, -1)
+            )
+            if dict[unique_id].shape[2] == 1:
+                dict[unique_id] = dict[unique_id].squeeze(2)
             for i, homo_id in enumerate(self.homogeneous_agents[unique_id]):
                 output_dict[homo_id] = dict[unique_id][i]
         return output_dict

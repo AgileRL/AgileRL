@@ -15,6 +15,7 @@ from agilerl.algorithms import (
     CQN,
     DDPG,
     DQN,
+    IPPO,
     MADDPG,
     MATD3,
     PPO,
@@ -396,6 +397,35 @@ def create_population(
                 learn_step=INIT_HP["LEARN_STEP"],
                 gamma=INIT_HP["GAMMA"],
                 tau=INIT_HP["TAU"],
+                actor_networks=actor_network,
+                critic_networks=critic_network,
+                device=device,
+                accelerator=accelerator,
+                torch_compiler=torch_compiler,
+            )
+            population.append(agent)
+
+    elif algo == "IPPO":
+        for idx in range(population_size):
+            agent = IPPO(
+                observation_spaces=observation_space,
+                action_spaces=action_space,
+                agent_ids=INIT_HP["AGENT_IDS"],
+                index=idx,
+                hp_config=hp_config,
+                net_config=net_config,
+                batch_size=INIT_HP["BATCH_SIZE"],
+                lr=INIT_HP["LR"],
+                learn_step=INIT_HP["LEARN_STEP"],
+                gamma=INIT_HP["GAMMA"],
+                gae_lambda=INIT_HP["GAE_LAMBDA"],
+                action_std_init=INIT_HP["ACTION_STD_INIT"],
+                clip_coef=INIT_HP["CLIP_COEF"],
+                ent_coef=INIT_HP["ENT_COEF"],
+                vf_coef=INIT_HP["VF_COEF"],
+                max_grad_norm=INIT_HP["MAX_GRAD_NORM"],
+                target_kl=INIT_HP["TARGET_KL"],
+                update_epochs=INIT_HP["UPDATE_EPOCHS"],
                 actor_networks=actor_network,
                 critic_networks=critic_network,
                 device=device,
