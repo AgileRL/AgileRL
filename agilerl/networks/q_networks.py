@@ -347,8 +347,9 @@ class ContinuousQNetwork(EvolvableNetwork):
 
         self.num_actions = spaces.flatdim(action_space)
 
-        # NOTE: If the encoder has nn.LayerNorm layers, we normalize the actions for
+        # If the encoder has nn.LayerNorm layers, we normalize the actions for
         # better training stability
+        # see https://github.com/AgileRL/AgileRL/issues/337
         self.normalize_actions = (
             isinstance(self.encoder, EvolvableMLP) and self.encoder.layer_norm
         ) or normalize_actions
@@ -387,8 +388,7 @@ class ContinuousQNetwork(EvolvableNetwork):
 
         x = self.encoder(obs)
 
-        # Normalize actions if encoder uses LayerNorm
-        # see https://github.com/AgileRL/AgileRL/issues/337
+        # Normalize actions
         if self.normalize_actions:
             actions = nn.functional.layer_norm(actions, [actions.size(-1)])
 

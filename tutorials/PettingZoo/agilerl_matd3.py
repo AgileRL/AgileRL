@@ -27,10 +27,10 @@ if __name__ == "__main__":
     # Define the network configuration
     NET_CONFIG = {
         "encoder_config": {
-            "hidden_size": [32, 32],  # Actor hidden size
+            "hidden_size": [32],  # Actor hidden size
         },
         "head_config": {
-            "hidden_size": [32, 32],  # Critic hidden size
+            "hidden_size": [32],  # Critic hidden size
         },
     }
 
