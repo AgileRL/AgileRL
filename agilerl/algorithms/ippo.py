@@ -33,8 +33,8 @@ from agilerl.utils.algo_utils import (
     is_vectorized_experiences,
     key_in_nested_dict,
     make_safe_deepcopies,
+    obs_channels_to_first,
     preprocess_observation,
-    stack_experiences,
 )
 
 
@@ -245,10 +245,10 @@ class IPPO(MultiAgentRLAlgorithm):
                 )
             assert (
                 len(actor_networks) == self.n_unique_agents
-            ), f"Length of actor_networks ({len(actor_networks)}) does not match number of unique agents defined in environment ({self.n_unique_agents}: {self.unique_agent_ids})"
+            ), f"Length of actor_networks ({len(actor_networks)}) does not match number of unique agents defined in environment ({self.n_unique_agents}: {self.shared_agent_ids})"
             assert (
                 len(actor_networks) == self.n_unique_agents
-            ), f"Length of critic_networks ({len(actor_networks)}) does not match number of unique agents defined in environment ({self.n_unique_agents}: {self.unique_agent_ids})"
+            ), f"Length of critic_networks ({len(actor_networks)}) does not match number of unique agents defined in environment ({self.n_unique_agents}: {self.shared_agent_ids})"
             self.actors, self.critics = make_safe_deepcopies(
                 actor_networks, critic_networks
             )
@@ -385,7 +385,7 @@ class IPPO(MultiAgentRLAlgorithm):
         :rtype: Dict[str, np.ndarray]
         """
         # Get dict of form {"agent_id" : [1, 0, 0, 0]...} etc
-        action_masks = {homo_id: [] for homo_id in self.unique_agent_ids}
+        action_masks = {homo_id: [] for homo_id in self.shared_agent_ids}
         for agent_id, info in infos.items():
             if isinstance(info, dict):
                 homo_id = agent_id.rsplit("_", 1)[0]
@@ -394,7 +394,7 @@ class IPPO(MultiAgentRLAlgorithm):
                 )
 
         # Check and stack masks
-        for homo_id in self.unique_agent_ids:
+        for homo_id in self.shared_agent_ids:
             if None in action_masks[homo_id]:
                 assert all(
                     mask is None for mask in action_masks[homo_id]
@@ -471,7 +471,7 @@ class IPPO(MultiAgentRLAlgorithm):
         :return: Preprocessed observations
         :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
         """
-        preprocessed = {homo_id: [] for homo_id in self.unique_agent_ids}
+        preprocessed = {homo_id: [] for homo_id in self.shared_agent_ids}
         for agent_id, obs in observation.items():
             homo_id = agent_id.rsplit("_", 1)[0]
             preprocessed[homo_id].append(
@@ -482,7 +482,7 @@ class IPPO(MultiAgentRLAlgorithm):
                     normalize_images=self.normalize_images,
                 )
             )
-        for homo_id in self.unique_agent_ids:
+        for homo_id in self.shared_agent_ids:
             preprocessed[homo_id] = torch.cat(preprocessed[homo_id], dim=0)
 
         return preprocessed
@@ -496,7 +496,7 @@ class IPPO(MultiAgentRLAlgorithm):
         """
         if infos is None:
             infos = {agent: {} for agent in self.agent_ids}
-            action_masks = {agent: None for agent in self.unique_agent_ids}
+            action_masks = {agent: None for agent in self.shared_agent_ids}
         else:
             action_masks = self.extract_action_masks(infos)
 
@@ -527,10 +527,16 @@ class IPPO(MultiAgentRLAlgorithm):
         action_masks, env_defined_actions, agent_masks = self.process_infos(infos)
 
         first_obs_shape = list(obs.values())[0].shape
-        vect_dim = first_obs_shape[0] if len(first_obs_shape) > 1 else 1
+        vect_dim = (
+            first_obs_shape[0]
+            if len(first_obs_shape) > len(self.observation_spaces[0].shape)
+            else 1
+        )
 
         # Preprocess observations
-        preprocessed_states = list(self.preprocess_observation(obs).values())
+        preprocessed = self.preprocess_observation(obs)
+        shared_agent_ids = list(preprocessed.keys())
+        preprocessed_states = list(preprocessed.values())
 
         action_dict = {}
         action_logprob_dict = {}
@@ -538,7 +544,7 @@ class IPPO(MultiAgentRLAlgorithm):
         state_values_dict = {}
         for idx, (agent_id, obs, action_mask, actor, critic) in enumerate(
             zip(
-                self.unique_agent_ids,
+                shared_agent_ids,
                 preprocessed_states,
                 action_masks.values(),
                 self.actors,
@@ -574,50 +580,38 @@ class IPPO(MultiAgentRLAlgorithm):
             dist_entropy_dict[agent_id] = dist_entropy.cpu().data.numpy()
             state_values_dict[agent_id] = state_values.cpu().data.numpy()
 
+        action_dict = self.disassemble_homogeneous_outputs(action_dict, vect_dim)
+
         # If using env_defined_actions replace actions
         if env_defined_actions is not None:
             for agent in self.agent_ids:
-                if self.discrete_actions:
-                    action_dict[agent][agent_masks[agent]] = env_defined_actions[agent][
-                        agent_masks[agent]
-                    ]
-                else:
-                    action_dict[agent][agent_masks[agent]] = env_defined_actions[agent][
-                        agent_masks[agent]
-                    ]
+                action_dict[agent][agent_masks[agent]] = env_defined_actions[agent][
+                    agent_masks[agent]
+                ]
 
         return (
-            self.disassemble_homogeneous_outputs(action_dict, vect_dim),
+            action_dict,
             self.disassemble_homogeneous_outputs(action_logprob_dict, vect_dim),
             self.disassemble_homogeneous_outputs(dist_entropy_dict, vect_dim),
             self.disassemble_homogeneous_outputs(state_values_dict, vect_dim),
         )
 
-    def reorganize_experiences_by_agent(self, experiences):
-        """Reorganizes experiences into a dictionary by agent name.
+    def assemble_shared_inputs(
+        self, input: Dict[str, np.ndarray]
+    ) -> Dict[str, TorchObsType]:
+        """Preprocesses inputs by constructing dictionaries by shared agents
 
-        :param experiences: Tuple of dictionaries containing batched states, actions,
-            rewards, next_states, dones in that order for each individual agent.
-        :type experiences: Tuple[Dict[str, torch.Tensor]]
+        :param input: input to reshape from environment
+        :type input: numpy.ndarray[float] or dict[str, numpy.ndarray[float]]
+
+        :return: Preprocessed inputs
+        :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
         """
-        states, actions, log_probs, rewards, dones, values, next_state = experiences
-        next_state = self.preprocess_observation(next_state)
-        agent_experiences = {}
-        for agent in list(states.keys()):
-            agent_experiences[agent] = (
-                states[agent],
-                actions[agent] if isinstance(actions, dict) else actions,
-                log_probs[agent] if isinstance(log_probs, dict) else log_probs,
-                rewards[agent] if isinstance(rewards, dict) else rewards,
-                (
-                    np.array(dones[agent], dtype=int)
-                    if isinstance(dones, dict)
-                    else np.array(dones, dtype=int)
-                ),
-                values[agent] if isinstance(values, dict) else values,
-                next_state[agent] if isinstance(next_state, dict) else next_state,
-            )
-        return agent_experiences
+        shared = {homo_id: {} for homo_id in self.shared_agent_ids}
+        for agent_id, inp in input.items():
+            homo_id = agent_id.rsplit("_", 1)[0]
+            shared[homo_id][agent_id] = inp
+        return shared
 
     def learn(self, experiences: ExperiencesType) -> TensorDict:
         """Updates agent network parameters to learn from experiences.
@@ -631,13 +625,22 @@ class IPPO(MultiAgentRLAlgorithm):
         """
 
         # process experiences
-        experiences = self.reorganize_experiences_by_agent(experiences)
+        # experiences = self.reorganize_experiences_by_agent(experiences)
+        states, actions, log_probs, rewards, dones, values, next_states = map(
+            self.assemble_shared_inputs, experiences
+        )
 
         loss_dict = {}
 
         for idx, (
             agent_id,
-            exp,
+            state,
+            action,
+            log_prob,
+            reward,
+            done,
+            value,
+            next_state,
             actor,
             critic,
             actor_optimizer,
@@ -645,8 +648,14 @@ class IPPO(MultiAgentRLAlgorithm):
             obs_space,
         ) in enumerate(
             zip(
-                self.unique_agent_ids,
-                experiences.values(),
+                self.shared_agent_ids,
+                states.values(),
+                actions.values(),
+                log_probs.values(),
+                rewards.values(),
+                dones.values(),
+                values.values(),
+                next_states.values(),
                 self.actors,
                 self.critics,
                 self.actor_optimizers,
@@ -655,7 +664,12 @@ class IPPO(MultiAgentRLAlgorithm):
             )
         ):
             loss_dict[f"{agent_id}"] = self._learn_individual(
-                exp, actor, critic, actor_optimizer, critic_optimizer, obs_space
+                experiences=(state, action, log_prob, reward, done, value, next_state),
+                actor=actor,
+                critic=critic,
+                actor_optimizer=actor_optimizer,
+                critic_optimizer=critic_optimizer,
+                obs_space=obs_space,
             )
 
         return loss_dict
@@ -672,7 +686,7 @@ class IPPO(MultiAgentRLAlgorithm):
         """Inner call to each agent for the learning/algo training steps,
         essentially the PPO learn method. Applies all forward/backward props.
 
-        :param experience: List of batched states, actions, log_probs, rewards, dones, values, next_state in that order.
+        :param experience: States, actions, log_probs, rewards, dones, values, next_state in that order, organised by shared agent id
         :type experience: Tuple[Union[numpy.ndarray, Dict[str, numpy.ndarray]], ...]
         :param actor: Actor network
         :type actor: EvolvableModule
@@ -685,9 +699,11 @@ class IPPO(MultiAgentRLAlgorithm):
         :param obs_space: Observation space for the agent
         :type obs_space: gymnasium.spaces
         """
-        (states, actions, log_probs, rewards, dones, values, next_state) = (
-            stack_experiences(*experiences)
+        (states, actions, log_probs, rewards, dones, values, next_state) = experiences
+        rewards, dones, values = map(
+            self.vectorize_experiences_by_agent, (rewards, dones, values)
         )
+        next_state = self.vectorize_experiences_by_agent(next_state, dim=0)
 
         # Bootstrapping returns using GAE advantage estimation
         dones = dones.long()
@@ -696,8 +712,9 @@ class IPPO(MultiAgentRLAlgorithm):
             next_state = preprocess_observation(
                 next_state, obs_space, self.device, self.normalize_images
             )
-            next_value = critic(next_state).reshape(1, -1).cpu()
+            next_value = critic(next_state).cpu()
             advantages = torch.zeros_like(rewards).float()
+
             for t in range(num_steps):
                 discount = 1
                 a_t = 0
@@ -705,7 +722,7 @@ class IPPO(MultiAgentRLAlgorithm):
                     if k != num_steps - 1:
                         nextvalue = values[k + 1]
                     else:
-                        nextvalue = next_value.squeeze()
+                        nextvalue = next_value
 
                     a_t += discount * (
                         rewards[k]
@@ -715,10 +732,14 @@ class IPPO(MultiAgentRLAlgorithm):
                     discount *= self.gamma * self.gae_lambda * (1.0 - dones[k])
 
                 advantages[t] = a_t
+            advantages = advantages.reshape((-1,))
+            values = values.reshape((-1,))
             returns = advantages + values
 
-        # Flatten experiences from (batch_size, num_envs, ...) to (batch_size*num_envs, ...)
-        # after checking if experiences are vectorized
+        (states, actions, log_probs) = map(
+            self.concatenate_experiences_into_batches, (states, actions, log_probs)
+        )
+
         experiences = (states, actions, log_probs, advantages, returns, values)
         if is_vectorized_experiences(*experiences):
             experiences = flatten_experiences(*experiences)
@@ -761,6 +782,9 @@ class IPPO(MultiAgentRLAlgorithm):
                 if len(minibatch_idxs) > 1:
                     actor.train()
                     critic.train()
+                    batch_states = preprocess_observation(
+                        batch_states, obs_space, self.device, self.normalize_images
+                    )
                     action_dist = actor(batch_states)
                     value = critic(batch_states).squeeze(-1)
                     log_prob = action_dist.log_prob(batch_actions.to(self.device))
@@ -868,32 +892,28 @@ class IPPO(MultiAgentRLAlgorithm):
                 scores = (
                     np.zeros((num_envs, 1))
                     if sum_scores
-                    else np.zeros((num_envs, len(self.unique_agent_ids)))
+                    else np.zeros((num_envs, len(self.shared_agent_ids)))
                 )
                 completed_episode_scores = (
                     np.zeros((num_envs, 1))
                     if sum_scores
-                    else np.zeros((num_envs, len(self.unique_agent_ids)))
+                    else np.zeros((num_envs, len(self.shared_agent_ids)))
                 )
                 finished = np.zeros(num_envs)
                 step = 0
                 while not np.all(finished):
                     step += 1
                     if swap_channels:
-                        if is_vectorised:
-                            obs = {
-                                agent_id: np.moveaxis(s, [-1], [-3])
-                                for agent_id, s in obs.items()
-                            }
-                        else:
-                            obs = {
-                                agent_id: np.moveaxis(np.expand_dims(s, 0), [-1], [-3])
-                                for agent_id, s in obs.items()
-                            }
+                        obs = {
+                            agent_id: obs_channels_to_first(s)
+                            for agent_id, s in obs.items()
+                        }
+
                     action, _, _, _ = self.get_action(obs=obs, infos=info)
                     if not is_vectorised:
                         action = {agent: act[0] for agent, act in action.items()}
                     obs, reward, term, trunc, info = env.step(action)
+                    reward = self.sum_shared_rewards(reward)
                     score_increment = (
                         (
                             np.sum(

@@ -1182,7 +1182,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         self.agent_ids = agent_ids
         self.n_agents = len(agent_ids)
 
-        self.unique_agent_ids = []
+        self.shared_agent_ids = []
         self.homogeneous_agents = {}
         self.unique_observation_spaces = {}
         self.unique_action_spaces = {}
@@ -1201,12 +1201,12 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
                     action_space == self.unique_action_spaces[homo_agent]
                 ), f"Homogeneous agents, i.e. agents that share the prefix {homo_agent}, must have the same action space. Found {self.unique_action_spaces[homo_agent]} and {action_space}."
             else:
-                self.unique_agent_ids.append(homo_agent)
+                self.shared_agent_ids.append(homo_agent)
                 self.homogeneous_agents[homo_agent] = [agent_id]
                 self.unique_observation_spaces[homo_agent] = obs_space
                 self.unique_action_spaces[homo_agent] = action_space
 
-        self.n_unique_agents = len(self.unique_agent_ids)
+        self.n_unique_agents = len(self.shared_agent_ids)
         self.normalize_images = normalize_images
         self.observation_spaces = observation_spaces
         self.action_spaces = action_spaces
@@ -1301,12 +1301,62 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         :rtype: Dict
         """
         output_dict = {}
-        for unique_id in self.unique_agent_ids:
+        for unique_id in self.shared_agent_ids:
             dict[unique_id] = np.reshape(
                 dict[unique_id], (len(self.homogeneous_agents[unique_id]), vect_dim, -1)
             )
-            if dict[unique_id].shape[2] == 1:
-                dict[unique_id] = dict[unique_id].squeeze(2)
             for i, homo_id in enumerate(self.homogeneous_agents[unique_id]):
                 output_dict[homo_id] = dict[unique_id][i]
         return output_dict
+
+    def vectorize_experiences_by_agent(self, experiences, dim=1):
+        """Reorganizes experiences into a tensor, vectorized by time step
+
+        Example input:
+        {'agent_0': [1, 2, 3, 4], 'agent_1': [5, 6, 7, 8]}
+        Example output:
+        torch.Tensor([1, 2, 3, 4, 5, 6, 7, 8])
+
+        :param experiences: Dictionaries containing experiences indexed by agent_id that share a policy agent.
+        :type experiences: Tuple[Dict[str, np.ndarray]]
+        :param dim: New dimension to stack along
+        :type dim: int
+        """
+        tensors = [
+            torch.Tensor(experiences[agent_id]) for agent_id in experiences.keys()
+        ]
+        stacked_tensor = torch.stack(tensors, dim=dim)
+        return stacked_tensor
+
+    def concatenate_experiences_into_batches(self, experiences):
+        """Reorganizes experiences into a batched tensor
+
+        Example input:
+        {'agent_0': [1, 2, 3, 4], 'agent_1': [5, 6, 7, 8]}
+        Example output:
+        torch.Tensor([[1, 5], [2, 6], [3, 7], [4, 8]])
+
+        :param experiences: Dictionaries containing experiences indexed by agent_id that share a policy agent.
+        :type experiences: Tuple[Dict[str, np.ndarray]]
+        """
+        tensors = [
+            torch.Tensor(experiences[agent_id]) for agent_id in experiences.keys()
+        ]
+        stacked_tensor = torch.cat(tensors, dim=0)
+        return stacked_tensor
+
+    def sum_shared_rewards(
+        self, rewards: Dict[str, np.ndarray]
+    ) -> Dict[str, np.ndarray]:
+        """Sums the rewards for homogeneous agents
+
+        :param rewards: Reward dictionary from environment
+        :type rewards: Dict[str, np.ndarray]
+        :return: Summed rewards dictionary
+        :rtype: Dict[str, np.ndarray]
+        """
+        summed_rewards = {homo_id: 0 for homo_id in self.shared_agent_ids}
+        for agent_id, reward in rewards.items():
+            homo_id = agent_id.rsplit("_", 1)[0]
+            summed_rewards[homo_id] += reward
+        return summed_rewards

@@ -184,7 +184,7 @@ def train_multi_agent_on_policy(
             dynamic_ncols=True,
         )
 
-    agent_ids = deepcopy(pop[0].unique_agent_ids)
+    agent_ids = deepcopy(pop[0].shared_agent_ids)
     pop_loss = [{agent_id: [] for agent_id in agent_ids} for _ in pop]
     pop_fitnesses = [{agent_id: [] for agent_id in agent_ids} for _ in pop]
     total_steps = 0
@@ -214,25 +214,25 @@ def train_multi_agent_on_policy(
             for _ in range(-(evo_steps // -agent.learn_step)):
 
                 states = {
-                    unique_agent_id: [] for unique_agent_id in agent.unique_agent_ids
+                    unique_agent_id: [] for unique_agent_id in agent.shared_agent_ids
                 }
                 actions = {
-                    unique_agent_id: [] for unique_agent_id in agent.unique_agent_ids
+                    unique_agent_id: [] for unique_agent_id in agent.shared_agent_ids
                 }
                 log_probs = {
-                    unique_agent_id: [] for unique_agent_id in agent.unique_agent_ids
+                    unique_agent_id: [] for unique_agent_id in agent.shared_agent_ids
                 }
                 rewards = {
-                    unique_agent_id: [] for unique_agent_id in agent.unique_agent_ids
+                    unique_agent_id: [] for unique_agent_id in agent.shared_agent_ids
                 }
                 terms = {
-                    unique_agent_id: [] for unique_agent_id in agent.unique_agent_ids
+                    unique_agent_id: [] for unique_agent_id in agent.shared_agent_ids
                 }
                 values = {
-                    unique_agent_id: [] for unique_agent_id in agent.unique_agent_ids
+                    unique_agent_id: [] for unique_agent_id in agent.shared_agent_ids
                 }
                 truncs = {
-                    unique_agent_id: [] for unique_agent_id in agent.unique_agent_ids
+                    unique_agent_id: [] for unique_agent_id in agent.shared_agent_ids
                 }
 
                 for idx_step in range(-(agent.learn_step // -num_envs)):
@@ -265,7 +265,7 @@ def train_multi_agent_on_policy(
                     total_steps += num_envs
                     steps += num_envs
 
-                    for unique_agent_id in agent.unique_agent_ids:
+                    for unique_agent_id in agent.shared_agent_ids:
                         states[unique_agent_id].append(
                             np.stack(
                                 list(

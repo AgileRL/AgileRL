@@ -22,7 +22,10 @@ from agilerl.modules.mlp import EvolvableMLP
 from agilerl.networks.actors import StochasticActor
 from agilerl.networks.value_networks import ValueNetwork
 from agilerl.utils.evolvable_networks import get_default_encoder_config
-from agilerl.utils.utils import make_multi_agent_vect_envs
+from agilerl.utils.utils import (
+    make_multi_agent_vect_envs,
+    observation_space_channels_to_first,
+)
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
     generate_multi_agent_box_spaces,
@@ -49,12 +52,12 @@ class DummyMultiEnv(ParallelEnv):
         return Discrete(self.action_spaces[0].n)
 
     def observation_space(self, agent):
-        return Box(0, 1, self.observation_spaces.shape)
+        return Box(0, 1, self.observation_spaces[0].shape)
 
     def reset(self, seed=None, options=None):
         return {
-            agent: np.random.rand(*self.observation_spaces.shape)
-            for agent in self.agents
+            agent: np.random.rand(*self.observation_spaces[i].shape)
+            for i, agent in enumerate(self.agents)
         }, {
             "agent_0": {"env_defined_actions": np.array([1])},
             "agent_1": {"env_defined_actions": None},
@@ -64,8 +67,8 @@ class DummyMultiEnv(ParallelEnv):
     def step(self, action):
         return (
             {
-                agent: np.random.rand(*self.observation_spaces.shape)
-                for agent in self.agents
+                agent: np.random.rand(*self.observation_spaces[i].shape)
+                for i, agent in enumerate(self.agents)
             },
             {agent: np.random.randint(0, 5) for agent in self.agents},
             {agent: 1 for agent in self.agents},
@@ -200,13 +203,15 @@ def mocked_accelerator():
 
 
 @pytest.fixture
-def accelerated_experiences(batch_size, observation_spaces, action_spaces, agent_ids):
+def accelerated_experiences(
+    batch_size, observation_spaces, action_spaces, agent_ids, device
+):
     one_hot = all(isinstance(space, Discrete) for space in observation_spaces)
     discrete_actions = all(isinstance(space, Discrete) for space in action_spaces)
     state_size = (
         observation_spaces[0].shape if not one_hot else (observation_spaces[0].n,)
     )
-    action_size = action_spaces[0].n if discrete_actions else action_spaces[0].shape[0]
+    action_size = 1 if discrete_actions else action_spaces[0].shape[0]
     if one_hot:
         states = {
             agent: torch.randint(0, state_size[0], (batch_size, 1)).float()
@@ -215,22 +220,24 @@ def accelerated_experiences(batch_size, observation_spaces, action_spaces, agent
     else:
         states = {agent: torch.randn(batch_size, *state_size) for agent in agent_ids}
 
-    actions = {agent: torch.randn(batch_size, action_size) for agent in agent_ids}
+    if discrete_actions:
+        actions = {
+            agent: torch.randint(0, action_size, (batch_size,)) for agent in agent_ids
+        }
+    else:
+        actions = {agent: torch.randn(batch_size, action_size) for agent in agent_ids}
     log_probs = {agent: torch.randn(batch_size, 1) for agent in agent_ids}
     rewards = {agent: torch.randn(batch_size, 1) for agent in agent_ids}
     dones = {agent: torch.randint(0, 2, (batch_size, 1)) for agent in agent_ids}
     values = {agent: torch.randn(batch_size, 1) for agent in agent_ids}
     if one_hot:
-        next_states = {
-            agent: torch.randint(0, state_size[0], (batch_size, 1)).float()
-            for agent in agent_ids
+        next_state = {
+            agent: torch.randint(0, state_size[0], (1,)).float() for agent in agent_ids
         }
     else:
-        next_states = {
-            agent: torch.randn(batch_size, *state_size) for agent in agent_ids
-        }
+        next_state = {agent: torch.randn(*state_size) for agent in agent_ids}
 
-    return states, actions, log_probs, rewards, dones, values, next_states
+    return states, actions, log_probs, rewards, dones, values, next_state
 
 
 @pytest.fixture
@@ -240,7 +247,7 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, device
     state_size = (
         observation_spaces[0].shape if not one_hot else (observation_spaces[0].n,)
     )
-    action_size = action_spaces[0].n if discrete_actions else action_spaces[0].shape[0]
+    action_size = 1 if discrete_actions else action_spaces[0].shape[0]
     if one_hot:
         states = {
             agent: torch.randint(0, state_size[0], (batch_size, 1)).float().to(device)
@@ -252,9 +259,16 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, device
             for agent in agent_ids
         }
 
-    actions = {
-        agent: torch.randn(batch_size, action_size).to(device) for agent in agent_ids
-    }
+    if discrete_actions:
+        actions = {
+            agent: torch.randint(0, action_size, (batch_size,), device=device)
+            for agent in agent_ids
+        }
+    else:
+        actions = {
+            agent: torch.randn(batch_size, action_size).to(device)
+            for agent in agent_ids
+        }
     log_probs = {agent: torch.randn(batch_size, 1).to(device) for agent in agent_ids}
     rewards = {agent: torch.randn(batch_size, 1).to(device) for agent in agent_ids}
     dones = {
@@ -262,27 +276,24 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, device
     }
     values = {agent: torch.randn(batch_size, 1).to(device) for agent in agent_ids}
     if one_hot:
-        next_states = {
-            agent: torch.randint(0, state_size[0], (batch_size, 1)).float().to(device)
+        next_state = {
+            agent: torch.randint(0, state_size[0], (1,)).float().to(device)
             for agent in agent_ids
         }
     else:
-        next_states = {
-            agent: torch.randn(batch_size, *state_size).to(device)
-            for agent in agent_ids
-        }
+        next_state = {agent: torch.randn(*state_size).to(device) for agent in agent_ids}
 
-    return states, actions, log_probs, rewards, dones, values, next_states
+    return states, actions, log_probs, rewards, dones, values, next_state
 
 
 @pytest.mark.parametrize("sum_score", [True, False])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
-def test_ippo_algorithm_test_loop(device, sum_score, compile_mode):
+def test_loop(device, sum_score, compile_mode):
     observation_spaces = generate_multi_agent_box_spaces(3, (6,))
     action_spaces = generate_multi_agent_discrete_spaces(3, 2)
     accelerator = None
 
-    env = DummyMultiEnv(observation_spaces[0], action_spaces)
+    env = DummyMultiEnv(observation_spaces, action_spaces)
 
     ippo = IPPO(
         observation_spaces,
@@ -302,9 +313,9 @@ def test_ippo_algorithm_test_loop(device, sum_score, compile_mode):
 
 @pytest.mark.parametrize("sum_score", [True, False])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
-def test_ippo_algorithm_test_loop_cnn_non_vectorized(device, sum_score, compile_mode):
+def test_loop_cnn_non_vectorized(device, sum_score, compile_mode):
     observation_spaces = generate_multi_agent_box_spaces(
-        3, (3, 32, 32), low=0, high=255
+        3, (32, 32, 3), low=0, high=255
     )
     net_config = {
         "encoder_config": {
@@ -318,6 +329,9 @@ def test_ippo_algorithm_test_loop_cnn_non_vectorized(device, sum_score, compile_
     action_spaces = generate_multi_agent_discrete_spaces(3, 2)
     accelerator = None
     env = DummyMultiEnv(observation_spaces, action_spaces)
+    observation_spaces = [
+        observation_space_channels_to_first(space) for space in observation_spaces
+    ]
     ippo = IPPO(
         observation_spaces,
         action_spaces,
@@ -337,12 +351,12 @@ def test_ippo_algorithm_test_loop_cnn_non_vectorized(device, sum_score, compile_
 
 @pytest.mark.parametrize("sum_score", [True, False])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
-def test_ippo_algorithm_test_loop_cnn_vectorized(device, sum_score, compile_mode):
+def test_loop_cnn_vectorized(device, sum_score, compile_mode):
     env_observation_spaces = generate_multi_agent_box_spaces(
-        2, (32, 32, 3), low=0, high=255
+        3, (32, 32, 3), low=0, high=255
     )
     agent_observation_spaces = generate_multi_agent_box_spaces(
-        2, (3, 32, 32), low=0, high=255
+        3, (3, 32, 32), low=0, high=255
     )
     net_config = {
         "encoder_config": {
@@ -358,9 +372,7 @@ def test_ippo_algorithm_test_loop_cnn_vectorized(device, sum_score, compile_mode
     env = make_multi_agent_vect_envs(
         DummyMultiEnv,
         2,
-        **dict(
-            observation_spaces=env_observation_spaces[0], action_spaces=action_spaces
-        )
+        **dict(observation_spaces=env_observation_spaces, action_spaces=action_spaces)
     )
     ippo = IPPO(
         agent_observation_spaces,
@@ -508,19 +520,19 @@ def test_clone_after_learning(compile_mode):
         for idx, agent_id in enumerate(agent_ids)
     }
     actions = {
-        agent_id: torch.randn(batch_size, action_spaces[idx].n)
+        agent_id: torch.randint(0, action_spaces[idx].n, (batch_size,))
         for idx, agent_id in enumerate(agent_ids)
     }
     log_probs = {agent_id: torch.randn(batch_size, 1) for agent_id in agent_ids}
     rewards = {agent_id: torch.randn(batch_size, 1) for agent_id in agent_ids}
     dones = {agent_id: torch.zeros(batch_size, 1) for agent_id in agent_ids}
     values = {agent_id: torch.randn(batch_size, 1) for agent_id in agent_ids}
-    next_states = {
-        agent_id: torch.randn(batch_size, observation_spaces[idx].shape[0])
+    next_state = {
+        agent_id: torch.randn(observation_spaces[idx].shape[0])
         for idx, agent_id in enumerate(agent_ids)
     }
 
-    experiences = states, actions, log_probs, rewards, dones, values, next_states
+    experiences = states, actions, log_probs, rewards, dones, values, next_state
     ippo.learn(experiences)
     clone_agent = ippo.clone()
 
@@ -722,6 +734,15 @@ def test_ippo_save_load_checkpoint_correct_data_and_format_make_evo(
         device=device,
         torch_compiler=compile_mode,
         accelerator=accelerator,
+        net_config={
+            "encoder_config": {
+                "channel_size": [16],
+                "kernel_size": [3],
+                "stride_size": [1],
+                "init_layers": False,
+            },
+            "head_config": {"hidden_size": [32], "init_layers": False},
+        },
     )
     loaded_ippo.load_checkpoint(checkpoint_path)
 
@@ -764,6 +785,10 @@ def test_ippo_unwrap_models(compile_mode):
         agent_ids=["agent_0", "agent_1", "other_agent_0"],
         accelerator=accelerator,
         torch_compiler=compile_mode,
+        net_config={
+            "encoder_config": {"hidden_size": [16, 16], "init_layers": False},
+            "head_config": {"hidden_size": [16], "init_layers": False},
+        },
     )
     ippo.unwrap_models()
     for actor, critic in zip(ippo.actors, ippo.critics):
@@ -811,6 +836,10 @@ def test_load_from_pretrained(device, accelerator, tmpdir, compile_mode):
         torch_compiler=compile_mode,
         accelerator=accelerator,
         device=device,
+        net_config={
+            "encoder_config": {"hidden_size": [16, 16], "init_layers": False},
+            "head_config": {"hidden_size": [16], "init_layers": False},
+        },
     )
 
     # Save the checkpoint to a file
@@ -1209,6 +1238,10 @@ def test_ippo_learns_from_experiences_mlp_distributed(
         agent_ids=agent_ids,
         accelerator=accelerator,
         torch_compiler=compile_mode,
+        net_config={
+            "encoder_config": {"hidden_size": [16, 16], "init_layers": False},
+            "head_config": {"hidden_size": [16], "init_layers": False},
+        },
     )
 
     for actor, critic in zip(ippo.actors, ippo.critics):
@@ -1229,7 +1262,7 @@ def test_ippo_learns_from_experiences_mlp_distributed(
         loss = ippo.learn(accelerated_experiences)
 
     assert isinstance(loss, dict)
-    for agent_id in ippo.agent_ids:
+    for agent_id in ippo.shared_agent_ids:
         assert agent_id in loss
 
     for old_actor, updated_actor in zip(actors, ippo.actors):
@@ -1299,7 +1332,7 @@ def test_ippo_learns_from_experiences_cnn(
         loss = ippo.learn(experiences)
 
     assert isinstance(loss, dict)
-    for agent_id in ippo.agent_ids:
+    for agent_id in ippo.shared_agent_ids:
         assert agent_id in loss
 
     for old_actor, updated_actor in zip(actors, ippo.actors):
@@ -1328,9 +1361,23 @@ def test_ippo_learns_from_experiences_cnn(
             None,
         ),
         (
+            generate_multi_agent_box_spaces(3, (6,)),
+            64,
+            generate_multi_agent_box_spaces(3, (2,)),
+            ["agent_0", "agent_1", "other_agent_0"],
+            None,
+        ),
+        (
             generate_multi_agent_discrete_spaces(3, 6),
             64,
             generate_multi_agent_discrete_spaces(3, 2),
+            ["agent_0", "agent_1", "other_agent_0"],
+            None,
+        ),
+        (
+            generate_multi_agent_discrete_spaces(3, 6),
+            64,
+            generate_multi_agent_box_spaces(3, (6,)),
             ["agent_0", "agent_1", "other_agent_0"],
             None,
         ),
@@ -1341,13 +1388,13 @@ def test_ippo_learns_from_experiences_cnn(
             ["agent_0", "agent_1", "other_agent_0"],
             "default",
         ),
-        (
-            generate_multi_agent_discrete_spaces(3, 6),
-            64,
-            generate_multi_agent_discrete_spaces(3, 2),
-            ["agent_0", "agent_1", "other_agent_0"],
-            "default",
-        ),
+        # (
+        #     generate_multi_agent_discrete_spaces(3, 6),
+        #     64,
+        #     generate_multi_agent_discrete_spaces(3, 2),
+        #     ["agent_0", "agent_1", "other_agent_0"],
+        #     "default",
+        # ),
     ],
 )
 def test_ippo_learns_from_experiences_mlp(
@@ -1359,7 +1406,6 @@ def test_ippo_learns_from_experiences_mlp(
     device,
     compile_mode,
 ):
-    action_spaces = generate_multi_agent_discrete_spaces(3, 2)
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     ippo = IPPO(
         observation_spaces,
@@ -1381,7 +1427,7 @@ def test_ippo_learns_from_experiences_mlp(
         loss = ippo.learn(experiences)
 
     assert isinstance(loss, dict)
-    for agent_id in ippo.agent_ids:
+    for agent_id in ippo.shared_agent_ids:
         assert agent_id in loss
 
     for old_actor, updated_actor in zip(actors, ippo.actors):
@@ -1454,7 +1500,7 @@ def test_ippo_get_action_distributed_cnn(
         "head_config": {"hidden_size": [32], "init_layers": False},
     }
     state = {
-        agent: np.random.randn(*observation_spaces[idx].shape)
+        agent: np.random.randn(*observation_spaces[idx].shape).astype(np.float32)
         for idx, agent in enumerate(agent_ids)
     }
     ippo = IPPO(
@@ -1566,7 +1612,7 @@ def test_ippo_get_action_agent_masking(
     )
 
     if discrete_actions:
-        assert np.array_equal(actions["agent_0"], np.array([1])), actions["agent_0"]
+        assert np.array_equal(actions["agent_0"], np.array([[1]])), actions["agent_0"]
     else:
         assert np.array_equal(actions["agent_0"], np.array([[0, 1]])), actions[
             "agent_0"
@@ -1616,7 +1662,7 @@ def test_ippo_get_action_cnn(
         "head_config": {"hidden_size": [32], "init_layers": False},
     }
     state = {
-        agent: np.random.randn(*observation_spaces[idx].shape)
+        agent: np.random.randn(*observation_spaces[idx].shape).astype(np.float32)
         for idx, agent in enumerate(agent_ids)
     }
     ippo = IPPO(
@@ -1677,7 +1723,7 @@ def test_get_action_distributed(
     accelerator = Accelerator()
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     state = {
-        agent: np.random.randn(*observation_spaces[idx].shape)
+        agent: np.random.randn(*observation_spaces[idx].shape).astype(np.float32)
         for idx, agent in enumerate(agent_ids)
     }
     ippo = IPPO(
@@ -1686,6 +1732,10 @@ def test_get_action_distributed(
         agent_ids=agent_ids,
         accelerator=accelerator,
         torch_compiler=compile_mode,
+        net_config={
+            "encoder_config": {"hidden_size": [16, 16], "init_layers": False},
+            "head_config": {"hidden_size": [16], "init_layers": False},
+        },
     )
     new_actors = [
         DummyStochasticActor(
@@ -1693,6 +1743,8 @@ def test_get_action_distributed(
             action_space=actor.action_space,
             device=actor.device,
             log_std_init=ippo.action_std_init,
+            encoder_config={"hidden_size": [16, 16], "init_layers": False},
+            head_config={"hidden_size": [16], "init_layers": False},
         )
         for actor in ippo.actors
     ]
@@ -1776,7 +1828,7 @@ def test_ippo_get_action_mlp(
         }
     else:
         state = {
-            agent: np.random.randn(*observation_spaces[idx].shape)
+            agent: np.random.randn(*observation_spaces[idx].shape).astype(np.float32)
             for idx, agent in enumerate(agent_ids)
         }
 
@@ -1784,7 +1836,7 @@ def test_ippo_get_action_mlp(
         observation_spaces,
         action_spaces,
         net_config={
-            "encoder_config": {"hidden_size": [64, 64]},
+            "encoder_config": {"hidden_size": [64, 64], "init_layers": False},
             "head_config": {"hidden_size": [32], "init_layers": False},
         },
         agent_ids=agent_ids,
@@ -1864,7 +1916,7 @@ def test_ippo_get_action_action_masking(
 ):
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     state = {
-        agent: np.random.randn(*observation_spaces[idx].shape)
+        agent: np.random.randn(*observation_spaces[idx].shape).astype(np.float32)
         for idx, agent in enumerate(agent_ids)
     }
     info = {

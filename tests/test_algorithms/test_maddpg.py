@@ -1588,6 +1588,8 @@ def test_maddpg_get_action_agent_masking(
             cont_actions["agent_0"], np.array([[0, 1]])
         ), cont_actions["agent_0"]
 
+    assert False
+
 
 @pytest.mark.parametrize(
     "training, observation_spaces, action_spaces",
