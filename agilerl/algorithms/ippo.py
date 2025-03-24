@@ -14,8 +14,7 @@ from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
-from agilerl.networks.actors import DeterministicActor, StochasticActor
-from agilerl.networks.q_networks import ContinuousQNetwork
+from agilerl.networks.actors import StochasticActor
 from agilerl.networks.value_networks import ValueNetwork
 from agilerl.typing import (
     ArrayDict,
@@ -98,10 +97,8 @@ class IPPO(MultiAgentRLAlgorithm):
     :type wrap: bool, optional
     """
 
-    actors: List[Union[nn.Module, DeterministicActor]]
-    actor_targets: List[Union[nn.Module, DeterministicActor]]
-    critics: List[Union[nn.Module, ContinuousQNetwork]]
-    critic_targets: List[Union[nn.Module, ContinuousQNetwork]]
+    actors: List[Union[nn.Module, StochasticActor]]
+    critics: List[Union[nn.Module, ValueNetwork]]
 
     def __init__(
         self,
@@ -387,11 +384,24 @@ class IPPO(MultiAgentRLAlgorithm):
         :return: Action masks
         :rtype: Dict[str, np.ndarray]
         """
-        action_masks = {
-            agent: info.get("action_mask", None) if isinstance(info, dict) else None
-            for agent, info in infos.items()
-            if agent in self.agent_ids
-        }  # Get dict of form {"agent_id" : [1, 0, 0, 0]...} etc
+        # Get dict of form {"agent_id" : [1, 0, 0, 0]...} etc
+        action_masks = {homo_id: [] for homo_id in self.unique_agent_ids}
+        for agent_id, info in infos.items():
+            if isinstance(info, dict):
+                homo_id = agent_id.rsplit("_", 1)[0]
+                action_masks[homo_id].append(
+                    info.get("action_mask", None) if isinstance(info, dict) else None
+                )
+
+        # Check and stack masks
+        for homo_id in self.unique_agent_ids:
+            if None in action_masks[homo_id]:
+                assert all(
+                    mask is None for mask in action_masks[homo_id]
+                ), f"If action masks are provided for any agents, they must be provided for all agents. Action masks can be defined as an array with the shape of the action space ({self.action_space}), where 1=legal and 0=illegal."
+                action_masks[homo_id] = None
+            else:
+                action_masks[homo_id] = torch.Tensor(action_masks[homo_id])
 
         return action_masks
 
@@ -486,8 +496,12 @@ class IPPO(MultiAgentRLAlgorithm):
         """
         if infos is None:
             infos = {agent: {} for agent in self.agent_ids}
+            action_masks = {agent: None for agent in self.unique_agent_ids}
+        else:
+            action_masks = self.extract_action_masks(infos)
+
         env_defined_actions, agent_masks = self.extract_agent_masks(infos)
-        action_masks = self.extract_action_masks(infos)
+
         return action_masks, env_defined_actions, agent_masks
 
     def get_action(
@@ -512,7 +526,8 @@ class IPPO(MultiAgentRLAlgorithm):
 
         action_masks, env_defined_actions, agent_masks = self.process_infos(infos)
 
-        vect_dim = len(list(obs.values())[0])
+        first_obs_shape = list(obs.values())[0].shape
+        vect_dim = first_obs_shape[0] if len(first_obs_shape) > 1 else 1
 
         # Preprocess observations
         preprocessed_states = list(self.preprocess_observation(obs).values())
@@ -525,7 +540,7 @@ class IPPO(MultiAgentRLAlgorithm):
             zip(
                 self.unique_agent_ids,
                 preprocessed_states,
-                action_masks,
+                action_masks.values(),
                 self.actors,
                 self.critics,
             )

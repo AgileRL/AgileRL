@@ -1193,7 +1193,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             # listener_0, listener_1, to determine which agents are homogeneous
             homo_agent = agent_id.rsplit("_", 1)[0]
             if homo_agent in self.homogeneous_agents:
-                self.homogeneous_agents[homo_agent].append(homo_agent)
+                self.homogeneous_agents[homo_agent].append(agent_id)
                 assert (
                     obs_space == self.unique_observation_spaces[homo_agent]
                 ), f"Homogeneous agents, i.e. agents that share the prefix {homo_agent}, must have the same observation space. Found {self.unique_observation_spaces[homo_agent]} and {obs_space}."

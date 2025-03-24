@@ -7,10 +7,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import gymnasium as gym
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -487,8 +487,7 @@ def train_multi_agent_on_policy(
                 wandb.log(
                     {
                         f"learn_step_agent_{idx}": agent.learn_step,
-                        f"learning_rate_actor_agent_{idx}": agent.lr_actor,
-                        f"learning_rate_critic_agent_{idx}": agent.lr_critic,
+                        f"learning_rate_agent_{idx}": agent.lr,
                         f"batch_size_agent_{idx}": agent.batch_size,
                         f"indi_fitness_agent_{idx}": agent.fitness[-1],
                     }
