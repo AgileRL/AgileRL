@@ -476,6 +476,7 @@ def create_mlp(
     noisy: bool = False,
     init_layers: bool = True,
     layer_norm: bool = False,
+    output_layernorm: bool = False,
     activation: str = "ReLU",
     noise_std: float = 0.1,
     device: DeviceType = "cpu",
@@ -500,6 +501,8 @@ def create_mlp(
     :type init_layers: bool, optional
     :param layer_norm: Whether to use layer normalization.
     :type layer_norm: bool, optional
+    :param output_layernorm: Whether to use layer normalization for the output layer.
+    :type output_layernorm: bool, optional
     :param activation: Activation function for hidden layers.
     :type activation: str, optional
     :param noise_std: Standard deviation of noise for noisy layers.
@@ -559,6 +562,10 @@ def create_mlp(
             output_layer.bias.data.mul_(0.1)
 
     net_dict[f"{name}_linear_layer_output"] = output_layer
+
+    if output_layernorm:
+        net_dict[f"{name}_layer_norm_output"] = nn.LayerNorm(output_size, device=device)
+
     net_dict[f"{name}_activation_output"] = get_activation(
         activation_name=output_activation, new_gelu=new_gelu
     )
