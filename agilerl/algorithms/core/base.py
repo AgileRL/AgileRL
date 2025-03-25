@@ -1,5 +1,6 @@
 import copy
 import inspect
+import warnings
 from abc import ABC, ABCMeta, abstractmethod
 from importlib.metadata import version
 from typing import (
@@ -968,7 +969,13 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         # Assign other attributes to the algorithm
         for attribute in EvolvableAlgorithm.inspect_attributes(self).keys():
-            setattr(self, attribute, checkpoint[attribute])
+            if attribute not in checkpoint:
+                warnings.warn(
+                    f"Attribute {attribute} not found in checkpoint. Skipping."
+                )
+                continue
+
+            setattr(self, attribute, checkpoint.get(attribute))
 
         # Wrap models / compile if necessary
         if accelerator is not None:

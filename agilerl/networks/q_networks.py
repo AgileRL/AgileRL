@@ -2,13 +2,14 @@ from dataclasses import asdict
 from typing import Any, Dict, Optional, Type, Union
 
 import torch
+import torch.nn as nn
 from gymnasium import spaces
 
-from agilerl.modules.base import EvolvableModule
+from agilerl.modules import EvolvableMLP, EvolvableModule
 from agilerl.modules.configs import MlpNetConfig, NetConfig
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.custom_modules import DuelingDistributionalMLP
-from agilerl.typing import ConfigType, TorchObsType
+from agilerl.typing import ArrayOrTensor, ConfigType, TorchObsType
 from agilerl.utils.evolvable_networks import is_image_space
 
 
@@ -299,9 +300,18 @@ class ContinuousQNetwork(EvolvableNetwork):
     :type n_agents: Optional[int]
     :param latent_dim: Dimension of the latent space representation.
     :type latent_dim: int
+    :param simba: Whether to use SimBA for the network. Defaults to False.
+    :type simba: bool
+    :param normalize_actions: Whether to normalize the actions. Defaults to False. This is set to True if
+        the encoder has nn.LayerNorm layers.
+    :type normalize_actions: bool
     :param device: Device to use for the network.
     :type device: str
     """
+
+    action_mean: torch.Tensor
+    action_std: torch.Tensor
+    action_count: torch.Tensor
 
     def __init__(
         self,
@@ -315,6 +325,7 @@ class ContinuousQNetwork(EvolvableNetwork):
         n_agents: Optional[int] = None,
         latent_dim: int = 32,
         simba: bool = False,
+        normalize_actions: bool = False,
         device: str = "cpu",
     ):
 
@@ -336,6 +347,13 @@ class ContinuousQNetwork(EvolvableNetwork):
 
         self.num_actions = spaces.flatdim(action_space)
 
+        # If the encoder has nn.LayerNorm layers, we normalize the actions for
+        # better training stability
+        # see https://github.com/AgileRL/AgileRL/issues/337
+        self.normalize_actions = (
+            isinstance(self.encoder, EvolvableMLP) and self.encoder.layer_norm
+        ) or normalize_actions
+
         # Build value network
         self.build_network_head(head_config)
 
@@ -352,7 +370,7 @@ class ContinuousQNetwork(EvolvableNetwork):
             net_config=net_config,
         )
 
-    def forward(self, obs: TorchObsType, actions: torch.Tensor) -> torch.Tensor:
+    def forward(self, obs: TorchObsType, actions: ArrayOrTensor) -> torch.Tensor:
         """Forward pass of the network.
 
         :param obs: Input tensor.
@@ -369,6 +387,11 @@ class ContinuousQNetwork(EvolvableNetwork):
             actions = actions.unsqueeze(0)
 
         x = self.encoder(obs)
+
+        # Normalize actions
+        if self.normalize_actions:
+            actions = nn.functional.layer_norm(actions, [actions.size(-1)])
+
         x = torch.cat([x, actions], dim=-1)
         return self.head_net(x)
 

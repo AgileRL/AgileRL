@@ -31,6 +31,8 @@ class EvolvableMLP(EvolvableModule):
     :type max_mlp_nodes: int, optional
     :param layer_norm: Normalization between layers, defaults to True
     :type layer_norm: bool, optional
+    :param output_layernorm: Normalization for the output layer, defaults to False
+    :type output_layernorm: bool, optional
     :param output_vanish: Vanish output by multiplying by 0.1, defaults to True
     :type output_vanish: bool, optional
     :param init_layers: Initialise network layers, defaults to True
@@ -59,6 +61,7 @@ class EvolvableMLP(EvolvableModule):
         min_mlp_nodes: int = 64,
         max_mlp_nodes: int = 500,
         layer_norm: bool = True,
+        output_layernorm: bool = False,
         output_vanish: bool = True,
         init_layers: bool = True,
         noisy: bool = False,
@@ -99,6 +102,7 @@ class EvolvableMLP(EvolvableModule):
         self.max_mlp_nodes = max_mlp_nodes
         self.layer_norm = layer_norm
         self.output_vanish = output_vanish
+        self.output_layernorm = output_layernorm
         self.init_layers = init_layers
         self.hidden_size = hidden_size
         self.noisy = noisy
@@ -113,6 +117,7 @@ class EvolvableMLP(EvolvableModule):
             noisy=self.noisy,
             init_layers=self.init_layers,
             layer_norm=self.layer_norm,
+            output_layernorm=self.output_layernorm,
             activation=self.activation,
             noise_std=self.noise_std,
             device=self.device,
@@ -270,6 +275,7 @@ class EvolvableMLP(EvolvableModule):
             noisy=self.noisy,
             init_layers=self.init_layers,
             layer_norm=self.layer_norm,
+            output_layernorm=self.output_layernorm,
             activation=self.activation,
             noise_std=self.noise_std,
             new_gelu=self.new_gelu,
