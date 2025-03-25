@@ -25,8 +25,6 @@ class HuggingFaceGym(gym.Env):
     :type tokenizer: AutoTokenizer
     :param reward_fn: Reward function for evaluating completions.
     :type reward_fn: Callable[..., float]
-    :param max_answer_tokens: Max number of answer tokens, defaults to 512
-    :type max_answer_tokens: int, optional
     :param data_batch_size_per_gpu: DataLoader batch size, defaults to 8
     :type data_batch_size_per_gpu: int, optional
     """
@@ -38,7 +36,6 @@ class HuggingFaceGym(gym.Env):
         tokenizer: AutoTokenizer,
         reward_fn: Callable[[str, str, str], float],
         apply_chat_template_fn: Callable[[str, str, AutoTokenizer], BatchEncoding],
-        max_answer_tokens: int = 512,
         data_batch_size_per_gpu: int = 8,
         custom_collate_fn: Callable = None,
     ) -> None:
@@ -76,9 +73,6 @@ class HuggingFaceGym(gym.Env):
         self.action_space = gym.spaces.Box(
             low=0,
             high=tokenizer.vocab_size - 1,
-            shape=(
-                max_answer_tokens,
-            ),  # NOTE: This shape is a max shape, actual shape may vary unless there's padding
         )
         self.eval_mode = False
 

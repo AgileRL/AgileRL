@@ -1,6 +1,6 @@
 import re
 from typing import Tuple
-
+import yaml
 import torch
 from accelerate import Accelerator
 from datasets import load_dataset
@@ -8,11 +8,16 @@ from peft import LoraConfig, get_peft_model
 from torch.utils.data import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.tournament import TournamentSelection
 from agilerl.algorithms.grpo import GRPO
-from agilerl.training.train_llm import finetune_llm
+from agilerl.training.train_llm import finetune_llm, finetune_evolvable_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
+from agilerl.utils.algo_utils import CosineLRScheduleConfig
+from agilerl.utils.utils import create_population
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 
-MODEL_PATH = "Qwen/Qwen2.5-0.5B"
+MODEL_PATH = "Qwen/Qwen2.5-1.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
 
@@ -176,7 +181,7 @@ def custom_collate_fn(batch):
     return {"answer": answers, "question": questions}
 
 
-def main():
+def main(init_hp, mut_p):
     # Instantiate the model and the associated tokenizer
     model = create_model(**{"pretrained_model_name_or_path": MODEL_PATH})
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
@@ -189,32 +194,73 @@ def main():
         tokenizer=tokenizer,
         reward_fn=combined_rewards,
         apply_chat_template_fn=countdown_chat_template,
-        max_answer_tokens=10,
         data_batch_size_per_gpu=2,
         custom_collate_fn=custom_collate_fn,
     )
-    # Instantiate the grpo agent
-    agent = GRPO(
-        env.observation_space,
-        env.action_space,
-        actor_network=model,
-        pad_token_id=tokenizer.eos_token_id,
-        batch_size=1,
-        group_size=2,
-        reduce_memory_peak=True,
-        accelerator=Accelerator(),
-        lr=5e-6,
+    accelerators = [Accelerator() for _ in range(init_hp["POP_SIZE"])]
+    init_hp["actor_network"] = model 
+    init_hp["pad_token_id"] = tokenizer.eos_token_id
+
+    hp_config = HyperparameterConfig(
+        # lr=RLParameter(
+        #     min=mut_p["MIN_LR"], max=mut_p["MAX_LR"]
+        # ),
+        lr=RLParameter(
+            min=mut_p["MIN_LR"], max=mut_p["MAX_LR"]
+        ),
     )
-    finetune_llm(
-        agent=agent,
+
+
+
+    print("creating create_population")
+    pop = create_population(
+        algo=init_hp["ALGO"],
+        observation_space=env.observation_space,
+        action_space=env.action_space,
+        net_config=None,
+        INIT_HP=init_hp,
+        hp_config=hp_config,
+        population_size=init_hp["POP_SIZE"],
+        accelerator=accelerators
+    ) 
+
+    tournament = TournamentSelection(
+        init_hp["TOURN_SIZE"],
+        init_hp["ELITISM"],
+        init_hp["POP_SIZE"],
+        init_hp["EVAL_LOOP"],
+    )
+
+    mutations = Mutations(
+        no_mutation=mut_p["NO_MUT"],
+        architecture=mut_p["ARCH_MUT"],
+        new_layer_prob=mut_p["NEW_LAYER"],
+        parameters=mut_p["PARAMS_MUT"],
+        activation=mut_p["ACT_MUT"],
+        rl_hp=mut_p["RL_HP_MUT"],
+        mutation_sd=mut_p["MUT_SD"],
+        rand_seed=mut_p["RAND_SEED"],
+        accelerator=accelerators[0],
+    )
+
+    finetune_evolvable_llm(
+        pop=pop,
         env=env,
+        init_hp=init_hp,
         evaluation_interval=10,
         wb=False,
         checkpoint_interval=100,
         checkpoint_path="saved_llms",
         max_reward=2.0,
+        evo_steps=1,
+        mutation=mutations,
+        tournament=tournament,
+        accelerator=accelerators[0]
     )
 
-
 if __name__ == "__main__":
-    main()
+    with open("configs/training/grpo.yaml") as file:
+        config = yaml.safe_load(file)
+    init_hp = config["INIT_HP"]
+    mut_p = config["MUTATION_PARAMS"]
+    main(init_hp, mut_p)

@@ -19,6 +19,7 @@ from agilerl.algorithms import (
     MATD3,
     PPO,
     TD3,
+    GRPO,
     NeuralTS,
     NeuralUCB,
     RainbowDQN,
@@ -30,6 +31,7 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules.base import EvolvableModule
 from agilerl.typing import GymSpaceType, PopulationType
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
+from agilerl.utils.algo_utils import CosineLRScheduleConfig
 
 SupportedObservationSpace = Union[
     spaces.Box, spaces.Discrete, spaces.Dict, spaces.Tuple
@@ -444,11 +446,39 @@ def create_population(
             )
             population.append(agent)
 
+    elif algo == "GRPO":
+        import copy
+        for idx in range(population_size):
+            agent = GRPO(
+                observation_space=observation_space,
+                action_space=action_space,
+                actor_network=copy.deepcopy(INIT_HP["actor_network"]),
+                pad_token_id=INIT_HP["pad_token_id"],
+                hp_config=hp_config,
+                index=idx,
+                batch_size=INIT_HP["BATCH_SIZE"],
+                beta=INIT_HP["BETA"],
+                lr=INIT_HP["LR"],
+                clip_coef=INIT_HP["CLIP_COEF"],
+                max_grad_norm=INIT_HP["MAX_GRAD_NORM"],
+                update_epochs=INIT_HP["UPDATE_EPOCHS"],
+                group_size=INIT_HP["GROUP_SIZE"],
+                temperature=INIT_HP["TEMPERATURE"],
+                calc_position_embeddings=INIT_HP["CALC_POSITION_EMBEDDINGS"],
+                reduce_memory_peak=INIT_HP["REDUCE_MEMORY_PEAK"],
+                max_output_tokens=INIT_HP["MAX_OUTPUT_TOKENS"],
+                min_output_tokens=INIT_HP["MIN_OUTPUT_TOKENS"],
+                cosine_lr_schedule_config=CosineLRScheduleConfig(**INIT_HP["COSINE_lR_SCHEDULER"]) if INIT_HP["COSINE_lR_SCHEDULER"] is not None else None,
+                accelerator=accelerator[idx],
+                device=device,
+            )
+            population.append(agent)
+
     return population
 
 
 def save_population_checkpoint(
-    population: PopulationType,
+    population: PopulationType, 
     save_path: str,
     overwrite_checkpoints: bool,
     accelerator: Optional[Accelerator] = None,
@@ -590,17 +620,20 @@ def llm_finetuning_tournament_selection_and_mutation(
     save_elite: bool = False,
     accelerator: Optional[Accelerator] = None,
 ):
-    import json
-
-    if accelerator is not None:
-        accelerator.wait_for_everyone()
-        if accelerator.is_main_process():
-            elite, population = tournament.select(population)
-            population = mutation.mutation(population)
-            hyperparams = [agent.get_hyperparams() for agent in population]
-            json_data = json.dumps(hyperparams)
-            json_bytes = json_data.encode("utf-8")
-
+   
+    # Perform tournament selection and mutation on main process
+    # if accelerator.is_main_process:
+    elite, population = tournament.select(population)
+    population = mutation.mutation(population)
+    for pop_i, model in enumerate(population):
+        model.save_checkpoint(f"GRPO/{algo}_{pop_i}")
+    accelerator.wait_for_everyone()
+    # Load models back to accelerator processes
+    # if not accelerator.is_main_process:
+    for pop_i, model in enumerate(population):
+        model.load_checkpoint(f"GRPO/{algo}_{pop_i}")
+    accelerator.wait_for_everyone()
+    return population
 
 def init_wandb(
     algo: str,

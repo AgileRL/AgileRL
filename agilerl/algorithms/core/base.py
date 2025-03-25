@@ -198,7 +198,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         assert isinstance(
             accelerator, (type(None), Accelerator)
         ), "Accelerator must be an instance of Accelerator."
-
         if torch_compiler:
             assert torch_compiler in [
                 "default",
@@ -416,7 +415,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                     setattr(clone, attribute, copy.deepcopy(getattr(agent, attribute)))
             else:
                 setattr(clone, attribute, copy.deepcopy(getattr(agent, attribute)))
-
         return clone
 
     @classmethod
