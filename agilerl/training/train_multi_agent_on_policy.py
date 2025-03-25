@@ -2,7 +2,6 @@ import time
 import warnings
 from copy import deepcopy
 from datetime import datetime
-from operator import itemgetter
 from typing import Any, Dict, List, Optional, Tuple
 
 import gymnasium as gym
@@ -213,27 +212,13 @@ def train_multi_agent_on_policy(
             start_time = time.time()
             for _ in range(-(evo_steps // -agent.learn_step)):
 
-                states = {
-                    unique_agent_id: [] for unique_agent_id in agent.shared_agent_ids
-                }
-                actions = {
-                    unique_agent_id: [] for unique_agent_id in agent.shared_agent_ids
-                }
-                log_probs = {
-                    unique_agent_id: [] for unique_agent_id in agent.shared_agent_ids
-                }
-                rewards = {
-                    unique_agent_id: [] for unique_agent_id in agent.shared_agent_ids
-                }
-                terms = {
-                    unique_agent_id: [] for unique_agent_id in agent.shared_agent_ids
-                }
-                values = {
-                    unique_agent_id: [] for unique_agent_id in agent.shared_agent_ids
-                }
-                truncs = {
-                    unique_agent_id: [] for unique_agent_id in agent.shared_agent_ids
-                }
+                states = {agent_id: [] for agent_id in agent.agent_ids}
+                actions = {agent_id: [] for agent_id in agent.agent_ids}
+                log_probs = {agent_id: [] for agent_id in agent.agent_ids}
+                rewards = {agent_id: [] for agent_id in agent.agent_ids}
+                terms = {agent_id: [] for agent_id in agent.agent_ids}
+                values = {agent_id: [] for agent_id in agent.agent_ids}
+                truncs = {agent_id: [] for agent_id in agent.agent_ids}
 
                 for idx_step in range(-(agent.learn_step // -num_envs)):
 
@@ -265,70 +250,14 @@ def train_multi_agent_on_policy(
                     total_steps += num_envs
                     steps += num_envs
 
-                    for unique_agent_id in agent.shared_agent_ids:
-                        states[unique_agent_id].append(
-                            np.stack(
-                                list(
-                                    itemgetter(
-                                        *agent.homogeneous_agents[unique_agent_id]
-                                    )(obs)
-                                )
-                            )
-                        )
-                        actions[unique_agent_id].append(
-                            np.stack(
-                                list(
-                                    itemgetter(
-                                        *agent.homogeneous_agents[unique_agent_id]
-                                    )(action)
-                                )
-                            )
-                        )
-                        log_probs[unique_agent_id].append(
-                            np.stack(
-                                list(
-                                    itemgetter(
-                                        *agent.homogeneous_agents[unique_agent_id]
-                                    )(log_prob)
-                                )
-                            )
-                        )
-                        rewards[unique_agent_id].append(
-                            np.stack(
-                                list(
-                                    itemgetter(
-                                        *agent.homogeneous_agents[unique_agent_id]
-                                    )(reward)
-                                )
-                            )
-                        )
-                        terms[unique_agent_id].append(
-                            np.stack(
-                                list(
-                                    itemgetter(
-                                        *agent.homogeneous_agents[unique_agent_id]
-                                    )(termination)
-                                )
-                            )
-                        )
-                        values[unique_agent_id].append(
-                            np.stack(
-                                list(
-                                    itemgetter(
-                                        *agent.homogeneous_agents[unique_agent_id]
-                                    )(value)
-                                )
-                            )
-                        )
-                        truncs[unique_agent_id].append(
-                            np.stack(
-                                list(
-                                    itemgetter(
-                                        *agent.homogeneous_agents[unique_agent_id]
-                                    )(truncation)
-                                )
-                            )
-                        )
+                    for agent_id in agent.agent_ids:
+                        states[agent_id].append(obs[agent_id])
+                        actions[agent_id].append(action[agent_id])
+                        log_probs[agent_id].append(log_prob[agent_id])
+                        rewards[agent_id].append(reward[agent_id])
+                        terms[agent_id].append(termination[agent_id])
+                        values[agent_id].append(value[agent_id])
+                        truncs[agent_id].append(truncation[agent_id])
 
                     obs = next_obs
 

@@ -1323,12 +1323,13 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         :type dim: int
         """
         tensors = [
-            torch.Tensor(experiences[agent_id]) for agent_id in experiences.keys()
+            torch.Tensor(np.array(experiences[agent_id]))
+            for agent_id in experiences.keys()
         ]
         stacked_tensor = torch.stack(tensors, dim=dim)
-        return stacked_tensor
+        return stacked_tensor.squeeze()
 
-    def concatenate_experiences_into_batches(self, experiences):
+    def concatenate_experiences_into_batches(self, experiences, shape):
         """Reorganizes experiences into a batched tensor
 
         Example input:
@@ -1338,12 +1339,16 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         :param experiences: Dictionaries containing experiences indexed by agent_id that share a policy agent.
         :type experiences: Tuple[Dict[str, np.ndarray]]
+        :param shape: Observation/action/etc shape space to maintain
+        :type obs_space: Tuple(int)
         """
         tensors = [
-            torch.Tensor(experiences[agent_id]) for agent_id in experiences.keys()
+            torch.Tensor(np.array(experiences[agent_id]))
+            for agent_id in experiences.keys()
         ]
         stacked_tensor = torch.cat(tensors, dim=0)
-        return stacked_tensor
+        stacked_tensor = stacked_tensor.reshape(-1, *shape)
+        return stacked_tensor.squeeze()
 
     def sum_shared_rewards(
         self, rewards: Dict[str, np.ndarray]
