@@ -968,7 +968,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         # Assign other attributes to the algorithm
         for attribute in EvolvableAlgorithm.inspect_attributes(self).keys():
-            setattr(self, attribute, checkpoint[attribute])
+            setattr(self, attribute, checkpoint.get(attribute))
 
         # Wrap models / compile if necessary
         if accelerator is not None:
