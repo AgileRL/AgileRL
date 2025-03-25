@@ -79,6 +79,7 @@ class DummyRLAlgorithm(RLAlgorithm):
 
         self.lr = 0.1
         self.dummy_optimizer = OptimizerWrapper(optim.Adam, self.dummy_actor, self.lr)
+        self.dummy_attribute = "test_value"
 
         self.register_network_group(NetworkGroup(eval=self.dummy_actor, policy=True))
 
@@ -517,3 +518,36 @@ def test_load_from_pretrained_multi_agent(
     assert new_agent.fitness == agent.fitness
     assert new_agent.steps == agent.steps
     assert new_agent.agent_ids == agent.agent_ids
+
+
+@pytest.mark.parametrize(
+    "observation_space",
+    [
+        generate_random_box_space((4,)),
+    ],
+)
+def test_missing_attribute_warning(tmpdir, observation_space):
+    action_space = generate_discrete_space(4)
+    # Initialize the dummy agent
+    agent = DummyRLAlgorithm(observation_space, action_space, index=0)
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    agent.save_checkpoint(checkpoint_path)
+
+    # Load and modify the checkpoint to remove an attribute
+    checkpoint = torch.load(checkpoint_path)
+    checkpoint.pop("dummy_attribute")
+
+    # Save the modified checkpoint
+    modified_path = Path(tmpdir) / "modified_checkpoint.pth"
+    torch.save(checkpoint, modified_path)
+
+    # Load the modified checkpoint and check if a warning is raised
+    with pytest.warns(
+        UserWarning, match="Attribute dummy_attribute not found in checkpoint"
+    ):
+        new_agent = DummyRLAlgorithm.load(modified_path, device="cpu")
+
+    # The attribute should keep its original value
+    assert new_agent.dummy_attribute == "test_value"
