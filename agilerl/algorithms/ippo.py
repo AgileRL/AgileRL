@@ -139,7 +139,7 @@ class IPPO(MultiAgentRLAlgorithm):
             accelerator=accelerator,
             normalize_images=normalize_images,
             torch_compiler=torch_compiler,
-            name="MADDPG",
+            name="IPPO",
         )
 
         assert learn_step >= 1, "Learn step must be greater than or equal to one."

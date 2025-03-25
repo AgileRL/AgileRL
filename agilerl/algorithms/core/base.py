@@ -1315,7 +1315,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         Example input:
         {'agent_0': [1, 2, 3, 4], 'agent_1': [5, 6, 7, 8]}
         Example output:
-        torch.Tensor([1, 2, 3, 4, 5, 6, 7, 8])
+        torch.Tensor([1, 5, 2, 6, 3, 7, 4, 8])
 
         :param experiences: Dictionaries containing experiences indexed by agent_id that share a policy agent.
         :type experiences: Tuple[Dict[str, np.ndarray]]
@@ -1342,11 +1342,13 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         :param shape: Observation/action/etc shape space to maintain
         :type obs_space: Tuple(int)
         """
-        tensors = [
-            torch.Tensor(np.array(experiences[agent_id]))
-            for agent_id in experiences.keys()
-        ]
-        stacked_tensor = torch.cat(tensors, dim=0)
+        tensors = []
+        for agent_id in experiences.keys():
+            exp = np.array(experiences[agent_id])
+            if len(exp.shape) < 2:
+                exp = np.expand_dims(exp, 0)
+            tensors.append(torch.Tensor(exp))
+        stacked_tensor = torch.cat(tensors, dim=1)
         stacked_tensor = stacked_tensor.reshape(-1, *shape)
         return stacked_tensor.squeeze()
 

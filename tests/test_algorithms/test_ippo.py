@@ -1535,14 +1535,6 @@ def test_ippo_learns_from_experiences_mlp(
     "observation_spaces, batch_size, vect_dim, action_spaces, agent_ids, compile_mode",
     [
         (
-            generate_multi_agent_box_spaces(3, (6,)),
-            64,
-            8,
-            generate_multi_agent_discrete_spaces(3, 2),
-            ["agent_0", "agent_1", "other_agent_0"],
-            None,
-        ),
-        (
             generate_multi_agent_discrete_spaces(3, 6),
             64,
             8,
@@ -1576,9 +1568,17 @@ def test_ippo_learns_from_experiences_mlp(
         ),
         (
             generate_multi_agent_box_spaces(3, (6,)),
-            64,
-            8,
-            generate_multi_agent_box_spaces(3, (2,)),
+            4,
+            1,
+            generate_multi_agent_discrete_spaces(3, 2),
+            ["agent_0", "agent_1", "other_agent_0"],
+            None,
+        ),
+        (
+            generate_multi_agent_box_spaces(3, (6,)),
+            4,
+            3,
+            generate_multi_agent_box_spaces(3, (3,)),
             ["agent_0", "agent_1", "other_agent_0"],
             None,
         ),
@@ -1613,6 +1613,120 @@ def test_ippo_learns_from_vectorized_experiences_mlp(
     for _ in range(4):
         ippo.scores.append(0)
         loss = ippo.learn(vectorized_experiences)
+
+    assert isinstance(loss, dict)
+    for agent_id in ippo.shared_agent_ids:
+        assert agent_id in loss
+
+    for old_actor, updated_actor in zip(actors, ippo.actors):
+        assert old_actor == updated_actor
+
+    for old_actor_state_dict, updated_actor in zip(actors_pre_learn_sd, ippo.actors):
+        assert old_actor_state_dict != str(updated_actor.state_dict())
+
+    for old_critic, updated_critic in zip(critics, ippo.critics):
+        assert old_critic == updated_critic
+
+    for old_critic_state_dict, updated_critic in zip(
+        critics_pre_learn_sd, ippo.critics
+    ):
+        assert old_critic_state_dict != str(updated_critic.state_dict())
+
+
+@pytest.mark.parametrize(
+    "observation_spaces, batch_size, vect_dim, action_spaces, agent_ids, compile_mode",
+    [
+        (
+            generate_multi_agent_box_spaces(3, (3,)),
+            4,
+            3,
+            generate_multi_agent_box_spaces(3, (3,)),
+            ["agent_0", "agent_1", "other_agent_0"],
+            None,
+        ),
+    ],
+)
+def test_ippo_learns_from_hardcoded_vectorized_experiences_mlp(
+    observation_spaces,
+    batch_size,
+    vect_dim,
+    action_spaces,
+    agent_ids,
+    device,
+    compile_mode,
+):
+    states = {
+        agent: torch.Tensor(
+            [
+                [[1, 1, 1], [2, 2, 2], [3, 3, 3]],
+                [[4, 4, 4], [5, 5, 5], [6, 6, 6]],
+                [[7, 7, 7], [8, 8, 8], [9, 9, 9]],
+            ]
+        ).to(device)
+        * i
+        for i, agent in enumerate(agent_ids)
+    }
+
+    actions = {
+        agent: torch.Tensor(
+            [
+                [[1, 1, 1], [2, 2, 2], [3, 3, 3]],
+                [[4, 4, 4], [5, 5, 5], [6, 6, 6]],
+                [[7, 7, 7], [8, 8, 8], [9, 9, 9]],
+            ]
+        ).to(device)
+        * i
+        for i, agent in enumerate(agent_ids)
+    }
+    log_probs = {
+        agent: torch.Tensor([[[1], [2], [3]], [[4], [5], [6]], [[7], [8], [9]]]).to(
+            device
+        )
+        * i
+        for i, agent in enumerate(agent_ids)
+    }
+    rewards = {
+        agent: torch.Tensor([[1, 2, 3], [4, 5, 6], [7, 8, 9]]).to(device) * i
+        for i, agent in enumerate(agent_ids)
+    }
+    dones = {
+        agent: torch.Tensor([[1, 0, 0], [0, 1, 0], [0, 0, 1]]).to(device) * i
+        for i, agent in enumerate(agent_ids)
+    }
+    values = {
+        agent: torch.Tensor([[[1], [2], [3]], [[4], [5], [6]], [[7], [8], [9]]]).to(
+            device
+        )
+        * i
+        for i, agent in enumerate(agent_ids)
+    }
+    next_state = {
+        agent: torch.Tensor([[4, 4, 4], [7, 7, 7], [10, 10, 10]]).to(device) * i
+        for i, agent in enumerate(agent_ids)
+    }
+
+    experiences = (states, actions, log_probs, rewards, dones, values, next_state)
+
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    ippo = IPPO(
+        observation_spaces,
+        action_spaces,
+        agent_ids=agent_ids,
+        device=device,
+        torch_compiler=compile_mode,
+        batch_size=batch_size,
+    )
+
+    actors = ippo.actors
+    actors_pre_learn_sd = [copy.deepcopy(actor.state_dict()) for actor in ippo.actors]
+    critics = ippo.critics
+    critics_pre_learn_sd = [
+        str(copy.deepcopy(critic.state_dict())) for critic in ippo.critics
+    ]
+
+    for _ in range(4):
+        ippo.scores.append(0)
+        loss = ippo.learn(experiences)
 
     assert isinstance(loss, dict)
     for agent_id in ippo.shared_agent_ids:
@@ -1679,7 +1793,6 @@ def test_ippo_learns_from_vectorized_experiences_cnn(
     critics_pre_learn_sd = [
         str(copy.deepcopy(critic.state_dict())) for critic in ippo.critics
     ]
-    print(vectorized_experiences[0]["agent_0"].shape)
     for _ in range(4):
         ippo.scores.append(0)
         loss = ippo.learn(vectorized_experiences)
