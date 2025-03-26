@@ -204,27 +204,56 @@ class GRPO(RLAlgorithm):
         group_size = self.group_size if training else 1
         self.actor.eval()
         with torch.no_grad():
-            action_masks = []
-            completion_ids = []
-            for state in states:
-                state["input_ids"] = (
-                    state["input_ids"].repeat(group_size, 1).to(self.actor.device)
-                )
-                state["attention_mask"] = (
-                    state["attention_mask"].repeat(group_size, 1).to(self.actor.device)
-                )
-                completion_id = self.actor.generate(
-                    **state,
+            if self.reduce_memory_peak:
+                action_masks = []
+                completion_ids = []
+                for state in states:
+                    state["input_ids"] = (
+                        state["input_ids"].repeat(group_size, 1).to(self.actor.device)
+                    )
+                    state["attention_mask"] = (
+                        state["attention_mask"].repeat(group_size, 1).to(self.actor.device)
+                    )
+                    completion_id = self.actor.generate(
+                        **state,
+                        generation_config=self.generation_config,
+                    )
+                    completion_ids.append(completion_id)
+                    action_mask = torch.zeros_like(
+                        completion_id, dtype=torch.bool, device=self.device
+                    )
+                    action_mask[:, state["input_ids"].shape[1] :] = True
+                    action_mask[completion_id == self.pad_token_id] = False
+                    action_mask = action_mask[:, 1:]
+                    action_masks.append(action_mask)
+            else:
+                input_ids = stack_and_pad_experiences([state["input_ids"] for state in states], padding_values=[self.pad_token_id])[0]
+                attention_mask = stack_and_pad_experiences([state["attention_mask"] for state in states], padding_values=[False])[0]
+
+                # Repeat for group size
+                input_ids = input_ids.repeat(1, group_size, 1).reshape(-1, input_ids.size(-1)).to(self.actor.device)
+                attention_mask = attention_mask.repeat(1, group_size, 1).reshape(-1, attention_mask.size(-1)).to(self.actor.device)
+                
+                # Generate completions
+                completion_ids = self.actor.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
                     generation_config=self.generation_config,
                 )
-                completion_ids.append(completion_id)
-                action_mask = torch.zeros_like(
-                    completion_id, dtype=torch.bool, device=self.device
+                
+                # Create action masks
+                action_masks = torch.zeros_like(
+                    completion_ids, dtype=torch.bool, device=self.device
                 )
-                action_mask[:, state["input_ids"].shape[1] :] = True
-                action_mask[completion_id == self.pad_token_id] = False
-                action_mask = action_mask[:, 1:]
-                action_masks.append(action_mask)
+                action_masks[:, input_ids.size(1):] = True
+                action_masks[completion_ids == self.pad_token_id] = False
+                action_masks = action_masks[:, 1:]
+                
+                # Reshape back to original batch structure
+                completion_ids = completion_ids.reshape(len(states), group_size, -1)
+                action_masks = action_masks.reshape(len(states), group_size, -1)
+                completion_ids = [cid for cid in completion_ids]
+                action_masks = [am for am in action_masks]
         return completion_ids, action_masks
 
     def learn(self, experiences: ExperiencesType) -> Tuple[float, float]:
@@ -475,8 +504,6 @@ class GRPO(RLAlgorithm):
         :return: Policy network and reference network
         :rtype: Tuple[Union[nn.Module, DeepSpeedEngine], Union[Optimizer, DeepSpeedOptimizerType]]
         """
-        print(self.accelerator)
-        print(self.accelerator.state.deepspeed_plugin)
         if self.accelerator is not None and (
             self.accelerator.state.deepspeed_plugin.deepspeed_config[
                 "train_micro_batch_size_per_gpu"
@@ -619,13 +646,14 @@ class GRPO(RLAlgorithm):
         """
         if self.accelerator is not None:
             self.accelerator.free_memory()
+            self.save_checkpoint(f"GRPO/agent_{self.index}")
+            self.accelerator.wait_for_everyone()
             input_args = EvolvableAlgorithm.inspect_attributes(self, input_args_only=True)
             input_args["clone"] = True
             input_args["actor_network"] = self.accelerator.unwrap_model(self.actor)
             clone = type(self)(**input_args)
             clone.reference_actor = self.reference_actor 
             clone.reference_actor.eval()
-            clone.accelerator.deepspeed_engine_wrapped.engine = clone.actor
             accelerator = clone.accelerator
             clone = EvolvableAlgorithm.copy_attributes(self, clone)
             clone.accelerator = accelerator
@@ -633,6 +661,14 @@ class GRPO(RLAlgorithm):
                 clone.index = index
             for hook in clone.registry.hooks:
                 getattr(clone, hook)()
+            clone.load_checkpoint(f"GRPO/agent_{self.index}")
+            clone.accelerator.wait_for_everyone()
+            saved_state_files = glob.glob(f"GRPO/agent_{self.index}*")
+            for file in saved_state_files:
+                try:
+                    os.remove(file)
+                except Exception:
+                    pass
         else:
             clone = super().clone(index, wrap)
         return clone

@@ -11,7 +11,7 @@ import wandb
 from agilerl.algorithms import GRPO
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.utils.llm_utils import HuggingFaceGym
-from agilerl.utils.utils import init_wandb, llm_finetuning_tournament_selection_and_mutation
+from agilerl.utils.utils import init_wandb, tournament_selection_and_mutation
 
 InitDictType = Optional[Dict[str, Any]]
 PopulationType = List[RLAlgorithm]
@@ -36,7 +36,7 @@ def finetune_llm(
         data_increment * env.data_batch_size_per_gpu * grad_accum
     )
     if agent.accelerator.is_main_process:
-        print(
+        print(  
             f"""
 =========================================================================
 Commencing RL finetuning
@@ -310,22 +310,14 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
         accelerator.wait_for_everyone()
         if i % evo_steps == 0:
             if tournament and mutation is not None:
-                pop = llm_finetuning_tournament_selection_and_mutation(
+                pop = tournament_selection_and_mutation(
                 population=pop,
                 tournament=tournament,
                 mutation=mutation,
                 env_name=env.name,
-                accelerator=accelerator,
-            )    
-
-            print("LR MUTATIONS =================================")
-            print([agent.lr for agent in pop])
-            for agent in pop:
-                for pg in agent.optimizer.param_groups:
-                    print("PARAM GROUP LEARNING RATE", pg["lr"])
-            assert False
-
-        if accelerator.is_main_process and wb:
+                accelerator=None, # Set as None for LLM finetuning as it does not require the same accelerator handling as standard RL models
+            ) 
+        if wb and accelerator.is_main_process:
             wandb_dict = {
                 "Train/Best reward": np.max([agent_metrics_dict[f"agent_{agent_idx}/train_metrics"]["Train/Mean reward"] for agent_idx,_ in enumerate(pop)]),
                 "Train/Mean population reward": np.mean([agent_metrics_dict[f"agent_{agent_idx}/train_metrics"]["Train/Mean reward"] for agent_idx,_ in enumerate(pop)]),
@@ -335,6 +327,10 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                 "Train/Mean population accuracy": np.mean([agent_metrics_dict[f"agent_{agent_idx}/train_metrics"]["Train/Accuracy"] for agent_idx,_ in enumerate(pop)]),
                 "HPO_agent_0/beta": pop[0].beta,
                 "HPO_agent_1/beta": pop[1].beta,
+                "HPO_agent_0/lr": pop[0].lr,
+                "HPO_agent_1/lr": pop[1].lr,
+                "HPO_agent_0/group_size": pop[0].group_size,
+                "HPO_agent_1/group_size": pop[1].group_size,
             }
             try:
                 test_dict = {
@@ -346,7 +342,7 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                 test_dict = {"key": None} #FIXME sort this out tomorrow
             if all(val is not None for val in test_dict.values()):
                 wandb_dict |= test_dict
-            wandb.log(wandb_dict)
+            wandb.log(wandb_dict)   
 
 
 def gather_tensor(tensor: torch.Tensor, agent: GRPO) -> torch.Tensor:

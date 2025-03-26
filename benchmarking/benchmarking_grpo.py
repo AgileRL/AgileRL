@@ -202,17 +202,17 @@ def main(init_hp, mut_p):
     init_hp["pad_token_id"] = tokenizer.eos_token_id
 
     hp_config = HyperparameterConfig(
-        # lr=RLParameter(
-        #     min=mut_p["MIN_LR"], max=mut_p["MAX_LR"]
-        # ),
+        beta=RLParameter(
+            min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]
+        ),
         lr=RLParameter(
             min=mut_p["MIN_LR"], max=mut_p["MAX_LR"]
         ),
+        group_size=RLParameter(
+            min=mut_p["MIN_GROUP_SIZE"], max=mut_p["MAX_GROUP_SIZE"], dtype=int
+        )
     )
 
-
-
-    print("creating create_population")
     pop = create_population(
         algo=init_hp["ALGO"],
         observation_space=env.observation_space,
@@ -248,11 +248,11 @@ def main(init_hp, mut_p):
         env=env,
         init_hp=init_hp,
         evaluation_interval=10,
-        wb=False,
+        wb=True,
         checkpoint_interval=100,
         checkpoint_path="saved_llms",
         max_reward=2.0,
-        evo_steps=1,
+        evo_steps=10,
         mutation=mutations,
         tournament=tournament,
         accelerator=accelerators[0]
