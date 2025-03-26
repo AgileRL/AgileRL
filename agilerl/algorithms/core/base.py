@@ -41,7 +41,6 @@ from agilerl.typing import (
     ActionType,
     DeviceType,
     GymSpaceType,
-    NumpyObsType,
     ObservationType,
     TorchObsType,
 )
@@ -1053,7 +1052,7 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
             np.array(action_space.high) if hasattr(action_space, "high") else None
         )
 
-    def preprocess_observation(self, observation: NumpyObsType) -> TorchObsType:
+    def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
         """Preprocesses observations for forward pass through neural network.
 
         :param observations: Observations of environment

@@ -99,7 +99,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
 
 
 if __name__ == "__main__":
-    with open("configs/training/ppo_resnet.yaml") as file:
+    with open("configs/training/ppo/ppo_resnet.yaml") as file:
         ppo_config = yaml.safe_load(file)
     INIT_HP = ppo_config["INIT_HP"]
     MUTATION_PARAMS = ppo_config["MUTATION_PARAMS"]

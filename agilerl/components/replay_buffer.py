@@ -337,7 +337,8 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         indices = self._sample_proportional(batch_size)
 
         # Gather transitions
-        samples = self.storage[indices].clone()
+        samples: TensorDict = self.storage[indices]
+        samples = samples.clone()
 
         # Calculate importance sampling weights
         weights = self._calculate_weights(indices, beta)

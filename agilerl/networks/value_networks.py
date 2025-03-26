@@ -32,6 +32,10 @@ class ValueNetwork(EvolvableNetwork):
     :type n_agents: Optional[int]
     :param latent_dim: Latent dimension.
     :type latent_dim: int
+    :param simba: Whether to use the SimBa architecture for training the network.
+    :type simba: bool
+    :param recurrent: Whether to use a recurrent network.
+    :type recurrent: bool
     :param device: Device to run the network on.
     :type device: str
     """
@@ -47,6 +51,7 @@ class ValueNetwork(EvolvableNetwork):
         n_agents: Optional[int] = None,
         latent_dim: int = 32,
         simba: bool = False,
+        recurrent: bool = False,
         device: str = "cpu",
     ):
 
@@ -60,6 +65,7 @@ class ValueNetwork(EvolvableNetwork):
             n_agents=n_agents,
             latent_dim=latent_dim,
             simba=simba,
+            recurrent=recurrent,
             device=device,
         )
 
@@ -98,7 +104,8 @@ class ValueNetwork(EvolvableNetwork):
         :return: Output tensor.
         :rtype: torch.Tensor
         """
-        return self.head_net(self.encoder(x))
+        latent = self.extract_features(x)
+        return self.head_net(latent)
 
     def recreate_network(self) -> None:
         """Recreates the network."""

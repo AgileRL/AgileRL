@@ -315,23 +315,19 @@ class DQN(RLAlgorithm):
     def learn(self, experiences: ExperiencesType) -> float:
         """Updates agent network parameters to learn from experiences.
 
-        :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
-        :type experiences: TensorDict
+        :param experiences: TensorDict of batched observations, actions, rewards, next_observations, dones in that order.
+        :type experiences: tensordict.TensorDict
         """
-        states = experiences["obs"]
+        obs = experiences["obs"]
         actions = experiences["action"]
         rewards = experiences["reward"]
-        next_states = experiences["next_obs"]
+        next_obs = experiences["next_obs"]
         dones = experiences["done"]
-        if self.accelerator is not None:
-            actions = actions.to(self.accelerator.device)
-            rewards = rewards.to(self.accelerator.device)
-            dones = dones.to(self.accelerator.device)
 
-        states = self.preprocess_observation(states)
-        next_states = self.preprocess_observation(next_states)
+        obs = self.preprocess_observation(obs)
+        next_obs = self.preprocess_observation(next_obs)
 
-        loss = self.update(states, actions, rewards, next_states, dones)
+        loss = self.update(obs, actions, rewards, next_obs, dones)
 
         # soft update target network
         self.soft_update()

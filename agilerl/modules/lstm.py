@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -20,8 +20,6 @@ class EvolvableLSTM(EvolvableModule):
     :type num_outputs: int
     :param num_layers: Number of LSTM layers stacked together
     :type num_layers: int
-    :param activation: Activation layer for output, defaults to 'ReLU'
-    :type activation: str, optional
     :param output_activation: Output activation layer, defaults to None
     :type output_activation: str, optional
     :param min_hidden_size: Minimum hidden state size, defaults to 32
@@ -46,7 +44,6 @@ class EvolvableLSTM(EvolvableModule):
         hidden_size: int,
         num_outputs: int,
         num_layers: int = 1,
-        activation: str = "ReLU",
         output_activation: str = None,
         min_hidden_size: int = 32,
         max_hidden_size: int = 512,
@@ -81,7 +78,6 @@ class EvolvableLSTM(EvolvableModule):
         self.hidden_size = hidden_size
         self.num_outputs = num_outputs
         self.num_layers = num_layers
-        self._activation = activation
         self.output_activation = output_activation
         self.min_hidden_size = min_hidden_size
         self.max_hidden_size = max_hidden_size
@@ -100,23 +96,19 @@ class EvolvableLSTM(EvolvableModule):
         """
         # Define network components
         model_dict = nn.ModuleDict()
-
-        # LSTM layer
         model_dict[f"{self.name}_lstm"] = nn.LSTM(
             input_size=self.input_size,
-            hidden_size=self.hidden_size,
+            hidden_size=int(self.hidden_size),
             num_layers=self.num_layers,
             batch_first=True,
             dropout=self.dropout if self.num_layers > 1 else 0,
             device=self.device,
         )
 
-        # Output layer
-        model_dict[f"{self.name}_linear_output"] = nn.Linear(
+        # Add activation if specified
+        model_dict[f"{self.name}_lstm_output"] = nn.Linear(
             self.hidden_size, self.num_outputs, device=self.device
         )
-
-        # Add activation if specified
         model_dict[f"{self.name}_output_activation"] = get_activation(
             self.output_activation
         )
@@ -136,59 +128,45 @@ class EvolvableLSTM(EvolvableModule):
     @property
     def activation(self) -> str:
         """Returns activation function."""
-        return self._activation
+        return
 
     @activation.setter
     def activation(self, activation: str) -> None:
         """Set activation function."""
-        self._activation = activation
+        pass
 
-    def forward(self, x: ArrayOrTensor) -> torch.Tensor:
-        """Forward pass through the LSTM network.
-
-        :param x: Input tensor of shape (batch_size, sequence_length, input_size)
-        :type x: ArrayOrTensor
-        :return: Output tensor
-        :rtype: torch.Tensor
-        """
-        if not isinstance(x, torch.Tensor):
-            x = torch.tensor(x, dtype=torch.float32, device=self.device)
-
-        # Ensure proper shape (batch_size, sequence_length, input_size)
-        if len(x.shape) == 2:
-            x = x.unsqueeze(0)  # Add batch dimension
-
-        # LSTM forward pass
-        lstm_out, _ = self.model[f"{self.name}_lstm"](x)
-
-        # We typically want the last output for each sequence in the batch
-        last_output = lstm_out[:, -1, :]
-
-        # Pass through output layer
-        output = self.model[f"{self.name}_linear_output"](last_output)
-
-        # Apply output activation if configured
-        output = self.model[f"{self.name}_output_activation"](output)
-
-        return output
-
-    def get_output_dense(self) -> torch.nn.Module:
-        """Returns output layer of neural network."""
-        return self.model[f"{self.name}_linear_output"]
-
+    @mutation(MutationType.ACTIVATION)
     def change_activation(self, activation: str, output: bool = False) -> None:
-        """Set the activation function for the network.
+        """Set the output activation function for the network.
 
         :param activation: Activation function to use.
         :type activation: str
         :param output: Flag indicating whether to set the output activation function, defaults to False
         :type output: bool, optional
         """
-        if output:
-            self.output_activation = activation
-
-        self.activation = activation
+        self.output_activation = activation
         self.recreate_network()
+
+    def forward(
+        self,
+        x: ArrayOrTensor,
+        states: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> torch.Tensor:
+        """Forward pass of the network."""
+        if not isinstance(x, torch.Tensor):
+            x = torch.tensor(x, dtype=torch.float32, device=self.device)
+
+        if len(x.shape) == 2:
+            x = x.unsqueeze(0)
+
+        lstm_output, lstm_states = self.model[f"{self.name}_lstm"](x)
+        lstm_output = self.model[f"{self.name}_lstm_output"](lstm_output[:, -1, :])
+        lstm_output = self.model[f"{self.name}_output_activation"](lstm_output)
+        return lstm_output
+
+    def get_output_dense(self) -> torch.nn.Module:
+        """Returns output layer of neural network."""
+        return self.model[f"{self.name}_linear_output"]
 
     @mutation(MutationType.LAYER)
     def add_layer(self) -> None:
@@ -246,7 +224,7 @@ class EvolvableLSTM(EvolvableModule):
         """Recreates the LSTM network with current parameters."""
         model = self.create_lstm()
 
-        # NOTE: Will need to change this
+        # Preserve parameters where possible
         self.model = EvolvableModule.preserve_parameters(
             old_net=self.model, new_net=model
         )

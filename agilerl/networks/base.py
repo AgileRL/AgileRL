@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional, Type, TypeVar, Union
 
 import numpy as np
 import torch
+import torch.nn as nn
 from gymnasium import spaces
 
 from agilerl.modules import (
@@ -84,16 +85,6 @@ def assert_correct_cnn_net_config(net_config: Dict[str, Any]) -> None:
             ), "Kernel size must be of type int, list, or tuple."
 
 
-def assert_correct_multi_input_net_config(net_config: Dict[str, Any]) -> None:
-    """Asserts that the MultiInput network configuration is correct.
-
-    :param net_config: Configuration of the MultiInput network.
-    :type net_config: Dict[str, Any]
-    """
-    # Multi-input networks contain at least one image space
-    assert_correct_cnn_net_config(net_config)
-
-
 def assert_correct_lstm_net_config(net_config: Dict[str, Any]) -> None:
     """Asserts that the LSTM network configuration is correct.
 
@@ -168,6 +159,9 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     :type latent_dim: int
     :param simba: If True, use a SimBa network for the encoder for vector spaces. Defaults to False.
     :type simba: bool
+    :param recurrent: If True, use a recurrent network for 2D observations. Defaults to False, whereby
+        the encoder is a nn.Flatten() followed by an `EvolvableMLP`.
+    :type recurrent: bool
     :param device: Device to use for the network. Defaults to "cpu".
     :type device: DeviceType
     """
@@ -191,6 +185,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         n_agents: Optional[int] = None,
         latent_dim: int = 32,
         simba: bool = False,
+        recurrent: bool = False,
         device: DeviceType = "cpu",
     ) -> None:
         super().__init__(device)
@@ -214,6 +209,8 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         self.encoder_cls = encoder_cls
         self.device = device
         self.simba = simba
+        self.recurrent = recurrent
+        self.flatten_obs = False
 
         encoder_config = (
             encoder_config
@@ -221,10 +218,10 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             else asdict(encoder_config)
         )
 
-        # Encoder processes an observation into a latent vector representation
-        output_activation = encoder_config.get("output_activation", None)
+        # By default we use same activation for encoder output as for the rest of the network
+        output_activation = encoder_config.get("output_activation")
         if output_activation is None:
-            activation = encoder_config.get("activation", "ReLU")
+            activation = encoder_config.get("activation")
             encoder_config["output_activation"] = activation
 
         if encoder_cls is not None:
@@ -288,7 +285,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         """
         return self.encoder.activation
 
-    def forward(self, x: TorchObsType) -> torch.Tensor:
+    def extract_features(self, x: TorchObsType) -> torch.Tensor:
         """Forward pass of the network.
 
         :param x: Input to the network.
@@ -297,7 +294,10 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         :return: Output of the network.
         :rtype: torch.Tensor
         """
-        raise NotImplementedError
+        if self.flatten_obs:
+            x = nn.Flatten()(x)
+
+        return self.encoder(x)
 
     def build_network_head(self, *args, **kwargs) -> None:
         """Build the head of the network."""
@@ -386,7 +386,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         :type output: bool, optional
         """
         for attr, module in self.modules().items():
-            _output = False if attr == "encoder" else output
+            _output = True if attr == "encoder" else output
             module.change_activation(activation, output=_output)
 
     @mutation(MutationType.NODE)
@@ -446,8 +446,6 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         :rtype: EvolvableModule
         """
         if isinstance(self.observation_space, (spaces.Dict, spaces.Tuple)):
-            assert_correct_multi_input_net_config(net_config)
-
             encoder = EvolvableMultiInput(
                 observation_space=self.observation_space,
                 num_outputs=self.latent_dim,
@@ -468,6 +466,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         elif (
             isinstance(self.observation_space, spaces.Box)
             and len(self.observation_space.shape) == 2
+            and self.recurrent
         ):
             assert_correct_lstm_net_config(net_config)
 
@@ -493,5 +492,8 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                 name="encoder",
                 **net_config,
             )
+
+            # Need to flatten > 2D observations by default for MLPs
+            self.flatten_obs = len(self.observation_space.shape) > 1
 
         return encoder

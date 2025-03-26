@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
+from tensordict import TensorDict
 from tensordict.nn import CudaGraphModule
 from torch._dynamo import OptimizedModule
 from torch.nn import Module
@@ -424,9 +425,11 @@ def obs_to_tensor(
     :return: PyTorch tensor of the observation on a desired device.
     :rtype: TorchObsType
     """
-    if isinstance(obs, torch.Tensor):
+    if isinstance(obs, TensorDict):
+        return obs
+    elif isinstance(obs, torch.Tensor):
         return obs.float().to(device)
-    if isinstance(obs, np.ndarray):
+    elif isinstance(obs, np.ndarray):
         return torch.as_tensor(obs, device=device).float()
     elif isinstance(obs, dict):
         return {

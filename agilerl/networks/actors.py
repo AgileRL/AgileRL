@@ -164,6 +164,10 @@ class DeterministicActor(EvolvableNetwork):
     :type n_agents: Optional[int]
     :param latent_dim: Dimension of the latent space representation.
     :type latent_dim: int
+    :param simba: Whether to use the SimBa architecture for training the network.
+    :type simba: bool
+    :param recurrent: Whether to use a recurrent network.
+    :type recurrent: bool
     :param device: Device to use for the network.
     :type device: str
     """
@@ -180,6 +184,7 @@ class DeterministicActor(EvolvableNetwork):
         n_agents: Optional[int] = None,
         latent_dim: int = 32,
         simba: bool = False,
+        recurrent: bool = False,
         device: str = "cpu",
     ):
 
@@ -193,6 +198,7 @@ class DeterministicActor(EvolvableNetwork):
             n_agents=n_agents,
             latent_dim=latent_dim,
             simba=simba,
+            recurrent=recurrent,
             device=device,
         )
 
@@ -242,7 +248,7 @@ class DeterministicActor(EvolvableNetwork):
         :return: Output of the network.
         :rtype: torch.Tensor
         """
-        latent = self.encoder(obs)
+        latent = self.extract_features(obs)
         return self.head_net(latent)
 
     def recreate_network(self) -> None:
@@ -280,6 +286,10 @@ class StochasticActor(DeterministicActor):
     :type n_agents: Optional[int]
     :param latent_dim: Dimension of the latent space representation.
     :type latent_dim: int
+    :param simba: Whether to use the SimBa architecture for training the network.
+    :type simba: bool
+    :param recurrent: Whether to use a recurrent network.
+    :type recurrent: bool
     :param device: Device to use for the network.
     :type device: str
     """
@@ -299,6 +309,7 @@ class StochasticActor(DeterministicActor):
         n_agents: Optional[int] = None,
         latent_dim: int = 32,
         simba: bool = False,
+        recurrent: bool = False,
         device: str = "cpu",
     ):
 
@@ -313,6 +324,7 @@ class StochasticActor(DeterministicActor):
             n_agents=n_agents,
             latent_dim=latent_dim,
             simba=simba,
+            recurrent=recurrent,
             device=device,
         )
 
@@ -331,7 +343,7 @@ class StochasticActor(DeterministicActor):
         :return: Distribution over the action space.
         :rtype: Distribution
         """
-        latent = self.encoder(obs)
+        latent = self.extract_features(obs)
         return self.head_net.forward(latent, action_mask)
 
     def __call__(

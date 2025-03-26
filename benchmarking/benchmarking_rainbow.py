@@ -162,7 +162,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
 
 
 if __name__ == "__main__":
-    with open("configs/training/dqn_rainbow.yaml") as file:
+    with open("configs/training/dqn/dqn_rainbow.yaml") as file:
         rainbow_dqn_config = yaml.safe_load(file)
     INIT_HP = rainbow_dqn_config["INIT_HP"]
     MUTATION_PARAMS = rainbow_dqn_config["MUTATION_PARAMS"]

@@ -2,7 +2,7 @@ import torch
 import yaml
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-from agilerl.buffers import ReplayBuffer
+from agilerl.components import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_off_policy import train_off_policy
@@ -125,7 +125,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
 
 if __name__ == "__main__":
-    with open("configs/training/ddpg_simba.yaml") as file:
+    with open("configs/training/ddpg/ddpg_simba.yaml") as file:
         config = yaml.safe_load(file)
     INIT_HP = config["INIT_HP"]
     MUTATION_PARAMS = config["MUTATION_PARAMS"]

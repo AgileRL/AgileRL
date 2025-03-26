@@ -415,29 +415,25 @@ class DDPG(RLAlgorithm):
     ) -> Tuple[float, float]:
         """Updates agent network parameters to learn from experiences.
 
-        :param experience: List of batched states, actions, rewards, next_states, dones in that order.
-        :type experience: list[torch.Tensor[float]]
+        :param experiences: TensorDict of batched observations, actions, rewards, next_observations, dones.
+        :type experiences: tensordict.TensorDict
         :param noise_clip: Maximum noise limit to apply to actions, defaults to 0.5
         :type noise_clip: float, optional
         :param policy_noise: Standard deviation of noise applied to policy, defaults to 0.2
         :type policy_noise: float, optional
         """
-        states = experiences["obs"]
+        obs = experiences["obs"]
         actions = experiences["action"]
         rewards = experiences["reward"]
-        next_states = experiences["next_obs"]
+        next_obs = experiences["next_obs"]
         dones = experiences["done"]
-        if self.accelerator is not None:
-            actions = actions.to(self.accelerator.device)
-            rewards = rewards.to(self.accelerator.device)
-            dones = dones.to(self.accelerator.device)
 
-        states = self.preprocess_observation(states)
-        next_states = self.preprocess_observation(next_states)
+        obs = self.preprocess_observation(obs)
+        next_obs = self.preprocess_observation(next_obs)
 
-        q_value = self.critic(states, actions)
+        q_value = self.critic(obs, actions)
         with torch.no_grad():
-            next_actions = self.actor_target(next_states)
+            next_actions = self.actor_target(next_obs)
             next_actions = self.scale_to_action_space(
                 next_actions, convert_to_torch=True
             )
@@ -448,7 +444,7 @@ class DDPG(RLAlgorithm):
                 self.min_action, self.max_action, next_actions
             )
 
-            q_value_next_state = self.critic_target(next_states, next_actions)
+            q_value_next_state = self.critic_target(next_obs, next_actions)
 
         y_j = rewards + ((1 - dones) * self.gamma * q_value_next_state)
 
@@ -466,12 +462,12 @@ class DDPG(RLAlgorithm):
         # update actor and targets every policy_freq learn steps
         self.learn_counter += 1
         if self.learn_counter % self.policy_freq == 0:
-            policy_actions = self.actor.forward(states)
+            policy_actions = self.actor.forward(obs)
             policy_actions = self.scale_to_action_space(
                 policy_actions, convert_to_torch=True
             )
 
-            actor_loss = -self.critic(states, policy_actions).mean()
+            actor_loss = -self.critic(obs, policy_actions).mean()
 
             # actor loss backprop
             self.actor_optimizer.zero_grad()

@@ -134,10 +134,11 @@ class NeuralUCB(RLAlgorithm):
                 else net_config["encoder_config"]
             )
 
-            if not simba:
-                encoder_config["layer_norm"] = (
-                    False  # Layer norm is not used in the original implementation
-                )
+            if not simba and not isinstance(
+                observation_space, (spaces.Dict, spaces.Tuple)
+            ):
+                # Layer norm is not used in the original implementation
+                encoder_config["layer_norm"] = False
 
             net_config["encoder_config"] = encoder_config
 

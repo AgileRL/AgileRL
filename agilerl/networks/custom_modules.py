@@ -23,6 +23,14 @@ class DuelingDistributionalMLP(EvolvableMLP):
     :type num_atoms: int
     :param support: Support of the distribution.
     :type support: torch.Tensor
+    :param layer_norm: Normalization between layers, defaults to True
+    :type layer_norm: bool, optional
+    :param output_vanish: Vanish output by multiplying by 0.1, defaults to True
+    :type output_vanish: bool, optional
+    :param init_layers: Initialise network layers, defaults to True
+    :type init_layers: bool, optional
+    :param noisy: Use noisy layers, defaults to True
+    :type noisy: bool, optional
     :param noise_std: Standard deviation of the noise. Defaults to 0.5.
     :type noise_std: float, optional
     :param activation: Activation layer, defaults to 'ReLU'
@@ -37,12 +45,6 @@ class DuelingDistributionalMLP(EvolvableMLP):
     :type min_mlp_nodes: int, optional
     :param max_mlp_nodes: Maximum number of nodes a layer can have within the network, defaults to 500
     :type max_mlp_nodes: int, optional
-    :param layer_norm: Normalization between layers, defaults to True
-    :type layer_norm: bool, optional
-    :param output_vanish: Vanish output by multiplying by 0.1, defaults to True
-    :type output_vanish: bool, optional
-    :param init_layers: Initialise network layers, defaults to True
-    :type init_layers: bool, optional
     :param new_gelu: Use new GELU activation function, defaults to False
     :type new_gelu: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
@@ -56,6 +58,10 @@ class DuelingDistributionalMLP(EvolvableMLP):
         hidden_size: List[int],
         num_atoms: int,
         support: torch.Tensor,
+        layer_norm: bool = True,
+        output_vanish: bool = True,
+        init_layers: bool = False,
+        noisy: bool = True,
         noise_std: float = 0.5,
         activation: str = "ReLU",
         output_activation: str = None,
@@ -77,10 +83,10 @@ class DuelingDistributionalMLP(EvolvableMLP):
             max_hidden_layers,
             min_mlp_nodes,
             max_mlp_nodes,
-            layer_norm=True,
-            output_vanish=True,
-            init_layers=False,
-            noisy=True,
+            layer_norm=layer_norm,
+            output_vanish=output_vanish,
+            init_layers=init_layers,
+            noisy=noisy,
             noise_std=noise_std,
             new_gelu=new_gelu,
             device=device,
