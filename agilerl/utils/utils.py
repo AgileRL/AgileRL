@@ -610,32 +610,6 @@ def tournament_selection_and_mutation(
     return population
 
 
-# TODO, is this the most optimal way to have this??
-def llm_finetuning_tournament_selection_and_mutation(
-    population: PopulationType,
-    tournament: TournamentSelection,
-    mutation: Mutations,
-    env_name: str,
-    algo: Optional[str] = None,
-    elite_path: Optional[str] = None,
-    save_elite: bool = False,
-    accelerator: Optional[Accelerator] = None,
-):
-   
-    # Perform tournament selection and mutation on main process
-    # if accelerator.is_main_process:
-    elite, population = tournament.select(population)
-    population = mutation.mutation(population)
-    for pop_i, model in enumerate(population):
-        model.save_checkpoint(f"GRPO/{algo}_{pop_i}")
-    accelerator.wait_for_everyone()
-    # Load models back to accelerator processes
-    # if not accelerator.is_main_process:
-    for pop_i, model in enumerate(population):
-        model.load_checkpoint(f"GRPO/{algo}_{pop_i}")
-    accelerator.wait_for_everyone()
-    return population
-
 def init_wandb(
     algo: str,
     env_name: str,
