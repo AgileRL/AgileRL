@@ -572,6 +572,7 @@ class GRPO(RLAlgorithm):
         if self.accelerator is not None:
             os.makedirs(path, exist_ok=True)
             self.actor.save_checkpoint(path)
+            self.reference_actor.save_checkpoint(path)
         else:
             super().save_checkpoint(path)
 
@@ -592,6 +593,7 @@ class GRPO(RLAlgorithm):
                 load_optimizer_states=True,
                 load_lr_scheduler_states=True,
             )
+            self.reference_actor.load_checkpoint(path)
             self.accelerator.deepspeed_engine_wrapped.engine = self.actor
         else:
             super().load_checkpoint(path)
