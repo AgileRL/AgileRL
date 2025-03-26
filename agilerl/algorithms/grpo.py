@@ -475,6 +475,8 @@ class GRPO(RLAlgorithm):
         :return: Policy network and reference network
         :rtype: Tuple[Union[nn.Module, DeepSpeedEngine], Union[Optimizer, DeepSpeedOptimizerType]]
         """
+        print(self.accelerator)
+        print(self.accelerator.state.deepspeed_plugin)
         if self.accelerator is not None and (
             self.accelerator.state.deepspeed_plugin.deepspeed_config[
                 "train_micro_batch_size_per_gpu"
@@ -536,22 +538,37 @@ class GRPO(RLAlgorithm):
     def save_checkpoint(self, path: str) -> None:
         """
         Override the save_checkpoint method to provide guidance on the correct method to use.
+
         :param path: Output directory to save the checkpoint at
         :type path: str
         """
-        os.makedirs(path, exist_ok=True)
-        self.actor.save_checkpoint(path)
+        if self.accelerator is not None:
+            os.makedirs(path, exist_ok=True)
+            self.actor.save_checkpoint(path)
+        else:
+            super().save_checkpoint(path)
+
 
     def load_checkpoint(self, path: str) -> None:
-        deepspeed_dirs = sorted(glob.glob(f"{path}/global_step*"))
-        assert len(deepspeed_dirs) > 0
-        self.actor.load_checkpoint(
-            path,
-            load_module_strict=True,
-            load_optimizer_states=True,
-            load_lr_scheduler_states=True,
-        )
-        self.accelerator.deepspeed_engine_wrapped.engine = self.actor
+        """
+        Override the load_checkpoint method to provide guidance on the correct method to use.
+        
+        :param path: Output directory to load the checkpoint from
+        :type path: str
+        """
+        if self.accelerator is not None:
+            deepspeed_dirs = sorted(glob.glob(f"{path}/global_step*"))
+            assert len(deepspeed_dirs) > 0
+            self.actor.load_checkpoint(
+                path,
+                load_module_strict=True,
+                load_optimizer_states=True,
+                load_lr_scheduler_states=True,
+            )
+            self.accelerator.deepspeed_engine_wrapped.engine = self.actor
+        else:
+            super().load_checkpoint(path)
+
 
     @classmethod
     def load(

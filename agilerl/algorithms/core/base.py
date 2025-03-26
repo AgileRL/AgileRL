@@ -23,7 +23,7 @@ from gymnasium import spaces
 from numpy.typing import ArrayLike
 from tensordict import TensorDict
 from torch._dynamo import OptimizedModule
-
+from torch.optim.lr_scheduler import LRScheduler
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
     MutationRegistry,
@@ -95,7 +95,7 @@ def get_checkpoint_dict(agent: SelfEvolvableAlgorithm) -> Dict[str, Any]:
     :rtype: dict[str, Any]
     """
     attribute_dict = EvolvableAlgorithm.inspect_attributes(agent)
-
+    
     # Extract info on evolvable modules and optimizers in the algorithm
     network_info: Dict[str, Dict[str, Any]] = {"modules": {}, "optimizers": {}}
     for attr in agent.evolvable_attributes():
@@ -109,6 +109,13 @@ def get_checkpoint_dict(agent: SelfEvolvableAlgorithm) -> Dict[str, Any]:
                     f"{attr}_lr": obj.lr_name,
                     f"{attr}_kwargs": obj.optimizer_kwargs,
                     f"{attr}_multiagent": obj.multiagent,
+                }
+            )
+        elif isinstance(obj, LRScheduler):
+            print("IN HERE AS THE SCHEDULER")
+            network_info["lr_scheduler"].update(
+                {
+                    "lr_scheduler": obj.state_dict()
                 }
             )
         elif isinstance(obj, (OptimizedModule, EvolvableModule)) or is_module_list(obj):
@@ -160,8 +167,9 @@ def get_checkpoint_dict(agent: SelfEvolvableAlgorithm) -> Dict[str, Any]:
     network_info["optimizer_names"] = optimizer_attr_names
     attribute_dict["network_info"] = network_info
     attribute_dict["agilerl_version"] = version("agilerl")
-
     attribute_dict.pop("accelerator", None)
+    if attribute_dict.pop("lr_scheduler", None) is not None:
+        attribute_dict["lr_scheduler"] = agent.lr_scheduler.state_dict()
     return attribute_dict
 
 
