@@ -3,7 +3,7 @@ from typing import Optional, Type, Union
 import numpy as np
 import torch
 from gymnasium import spaces
-from torch.distributions import Bernoulli, Categorical, Distribution, Normal
+from torch.distributions import Bernoulli, Categorical, Distribution, MultivariateNormal
 
 from agilerl.modules.base import EvolvableModule, EvolvableWrapper
 from agilerl.modules.configs import MlpNetConfig
@@ -28,25 +28,25 @@ class EvolvableDistribution(EvolvableWrapper):
         self,
         action_space: spaces.Space,
         network: EvolvableModule,
-        log_std_init: float = 0.0,
+        action_std_init: float = 0.6,
         device: DeviceType = "cpu",
     ):
 
         super().__init__(network)
 
         self.action_space = action_space
-        self.log_std_init = log_std_init
+        self.action_std_init = action_std_init
         self.device = device
 
-        # For continuous action spaces, we also learn the standard deviation (log_std)
+        # For continuous action spaces, we also learn the variance
         # of the action distribution
         if isinstance(action_space, spaces.Box):
-            self.log_std = torch.nn.Parameter(
-                torch.ones(spaces.flatdim(action_space)) * log_std_init,
+            self.action_std = torch.nn.Parameter(
+                torch.full((spaces.flatdim(action_space),), action_std_init**2),
                 requires_grad=True,
             ).to(device)
         else:
-            self.log_std = None
+            self.action_std = None
 
     @property
     def net_config(self) -> ConfigType:
@@ -58,23 +58,23 @@ class EvolvableDistribution(EvolvableWrapper):
         return self.wrapped.net_config
 
     def get_distribution(
-        self, probs: torch.Tensor, log_std: Optional[torch.Tensor] = None
+        self, probs: torch.Tensor, action_std: Optional[torch.Tensor] = None
     ) -> Distribution:
         """Get the distribution over the action space given an observation.
 
         :param probs: Logits output by the network.
         :type probs: torch.Tensor
-        :param log_std: Log standard deviation of the action distribution. Defaults to None.
-        :type log_std: Optional[torch.Tensor]
+        :param action_std: Log standard deviation of the action distribution. Defaults to None.
+        :type action_std: Optional[torch.Tensor]
         :return: Distribution over the action space.
         :rtype: Distribution
         """
         if isinstance(self.action_space, spaces.Box):
             assert (
-                log_std is not None
-            ), "log_std must be provided for continuous action spaces."
-            std = torch.ones_like(probs) * log_std.exp()
-            return Normal(loc=probs, scale=std)
+                action_std is not None
+            ), "action_std must be provided for continuous action spaces."
+            cov_mat = torch.diag(action_std).unsqueeze(dim=0).clamp(min=1e-6)
+            return MultivariateNormal(loc=probs, covariance_matrix=cov_mat)
 
         elif isinstance(self.action_space, spaces.Discrete):
             return Categorical(probs=probs)
@@ -124,7 +124,7 @@ class EvolvableDistribution(EvolvableWrapper):
                 torch.tensor(0.0, dtype=probs.dtype, device=self.device),
             )
 
-        return self.get_distribution(probs, self.log_std)
+        return self.get_distribution(probs, self.action_std)
 
     def clone(self) -> "EvolvableDistribution":
         """Clones the distribution.
@@ -135,7 +135,7 @@ class EvolvableDistribution(EvolvableWrapper):
         return EvolvableDistribution(
             action_space=self.action_space,
             network=self.wrapped.clone(),
-            log_std_init=self.log_std_init,
+            action_std_init=self.action_std_init,
             device=self.device,
         )
 
@@ -293,7 +293,7 @@ class StochasticActor(DeterministicActor):
         encoder_cls: Optional[Union[str, Type[EvolvableModule]]] = None,
         encoder_config: Optional[ConfigType] = None,
         head_config: Optional[ConfigType] = None,
-        log_std_init: float = 0.0,
+        action_std_init: float = 0.6,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
         n_agents: Optional[int] = None,
@@ -316,9 +316,9 @@ class StochasticActor(DeterministicActor):
             device=device,
         )
 
-        self.log_std_init = log_std_init
+        self.action_std_init = action_std_init
         self.head_net = EvolvableDistribution(
-            action_space, self.head_net, log_std_init=log_std_init, device=device
+            action_space, self.head_net, action_std_init=action_std_init, device=device
         )
 
     def forward(
@@ -364,7 +364,7 @@ class StochasticActor(DeterministicActor):
         head_net = EvolvableDistribution(
             self.action_space,
             head_net,
-            log_std_init=self.log_std_init,
+            action_std_init=self.action_std_init,
             device=self.device,
         )
 

@@ -91,7 +91,7 @@ class PPO(RLAlgorithm):
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
         mut: Optional[str] = None,
-        action_std_init: float = 0.0,
+        action_std_init: float = 0.6,
         clip_coef: float = 0.2,
         ent_coef: float = 0.01,
         vf_coef: float = 0.5,
@@ -226,7 +226,7 @@ class PPO(RLAlgorithm):
             self.actor = StochasticActor(
                 observation_space,
                 action_space,
-                log_std_init=self.action_std_init,
+                action_std_init=self.action_std_init,
                 device=device,
                 **net_config,
             )
@@ -357,10 +357,6 @@ class PPO(RLAlgorithm):
             action = action.to(self.device)
 
         action_logprob = action_dist.log_prob(action)
-
-        if len(action_logprob.shape) > 1:
-            action_logprob = action_logprob.sum(dim=1)
-
         dist_entropy = action_dist.entropy()
 
         if return_tensors:

@@ -1327,7 +1327,10 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             for agent_id in experiences.keys()
         ]
         stacked_tensor = torch.stack(tensors, dim=dim)
-        return stacked_tensor.squeeze()
+        # for squeeze_dim in [0, -1]:
+        #     if stacked_tensor.size(squeeze_dim) == 1:
+        #         stacked_tensor = stacked_tensor.squeeze(squeeze_dim)
+        return stacked_tensor
 
     def concatenate_experiences_into_batches(self, experiences, shape):
         """Reorganizes experiences into a batched tensor
@@ -1350,7 +1353,10 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             tensors.append(torch.Tensor(exp))
         stacked_tensor = torch.cat(tensors, dim=1)
         stacked_tensor = stacked_tensor.reshape(-1, *shape)
-        return stacked_tensor.squeeze()
+        for squeeze_dim in [0, -1]:
+            if stacked_tensor.size(squeeze_dim) == 1:
+                stacked_tensor = stacked_tensor.squeeze(squeeze_dim)
+        return stacked_tensor
 
     def sum_shared_rewards(
         self, rewards: Dict[str, np.ndarray]

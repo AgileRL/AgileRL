@@ -1578,7 +1578,7 @@ def test_ippo_learns_from_experiences_mlp(
             generate_multi_agent_box_spaces(3, (6,)),
             4,
             3,
-            generate_multi_agent_box_spaces(3, (3,)),
+            generate_multi_agent_box_spaces(3, (1,)),
             ["agent_0", "agent_1", "other_agent_0"],
             None,
         ),
@@ -1887,7 +1887,7 @@ def test_ippo_get_action_distributed_cnn(
             observation_space=actor.observation_space,
             action_space=actor.action_space,
             device=actor.device,
-            log_std_init=ippo.action_std_init,
+            action_std_init=ippo.action_std_init,
             **net_config
         )
         for actor in ippo.actors
@@ -2113,7 +2113,7 @@ def test_get_action_distributed(
             observation_space=actor.observation_space,
             action_space=actor.action_space,
             device=actor.device,
-            log_std_init=ippo.action_std_init,
+            action_std_init=ippo.action_std_init,
             encoder_config={"hidden_size": [16, 16], "init_layers": False},
             head_config={"hidden_size": [16], "init_layers": False},
         )

@@ -112,7 +112,7 @@ class IPPO(MultiAgentRLAlgorithm):
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
         mut: Optional[str] = None,
-        action_std_init: float = 0.0,
+        action_std_init: float = 0.6,
         clip_coef: float = 0.2,
         ent_coef: float = 0.01,
         vf_coef: float = 0.5,
@@ -273,7 +273,7 @@ class IPPO(MultiAgentRLAlgorithm):
                 actor = StochasticActor(
                     obs_space,
                     action_space,
-                    log_std_init=self.action_std_init,
+                    action_std_init=self.action_std_init,
                     device=self.device,
                     **copy.deepcopy(net_config),
                 )
@@ -561,12 +561,7 @@ class IPPO(MultiAgentRLAlgorithm):
                 )
 
             action = action_dist.sample()
-
             action_logprob = action_dist.log_prob(action)
-
-            if len(action_logprob.shape) > 1:
-                action_logprob = action_logprob.sum(dim=1)
-
             dist_entropy = action_dist.entropy()
 
             action_dict[agent_id] = (
@@ -709,6 +704,9 @@ class IPPO(MultiAgentRLAlgorithm):
         rewards, dones, values = map(
             self.vectorize_experiences_by_agent, (rewards, dones, values)
         )
+        rewards = rewards.squeeze()
+        dones = dones.squeeze()
+        values = values.squeeze()
         next_state = self.vectorize_experiences_by_agent(next_state, dim=0)
 
         # Bootstrapping returns using GAE advantage estimation
@@ -729,6 +727,7 @@ class IPPO(MultiAgentRLAlgorithm):
                         nextvalue = values[k + 1]
                     else:
                         nextvalue = next_value.reshape(rewards[k].shape).squeeze()
+                        # print(nextvalue.shape)
 
                     a_t += discount * (
                         rewards[k]
@@ -736,6 +735,8 @@ class IPPO(MultiAgentRLAlgorithm):
                         - values[k]
                     )
                     discount *= self.gamma * self.gae_lambda * (1.0 - dones[k])
+
+                    # print(a_t.shape, dones[k].shape, values[k].shape, rewards[k].shape)
 
                 advantages[t] = a_t
             advantages = advantages.reshape((-1,))
@@ -792,9 +793,12 @@ class IPPO(MultiAgentRLAlgorithm):
                     action_dist = actor(batch_states)
                     value = critic(batch_states).squeeze(-1)
 
+                    if isinstance(action_space, spaces.Box) and action_space.shape == (
+                        1,
+                    ):
+                        batch_actions = batch_actions.unsqueeze(1)
+
                     log_prob = action_dist.log_prob(batch_actions.to(self.device))
-                    if len(log_prob.shape) > 1:
-                        log_prob = log_prob.sum(dim=1)
                     entropy = action_dist.entropy()
 
                     logratio = log_prob - batch_log_probs

@@ -1030,7 +1030,9 @@ def check_policy_on_policy_with_probe_env(
         if i < 20:
             print("Loss = ", loss)
 
-    for sample_obs, v_values in zip(env.sample_obs, env.v_values):
+    for sample_obs, v_values, policy_values in zip(
+        env.sample_obs, env.v_values, env.policy_values
+    ):
         if isinstance(sample_obs, dict):
             state = {
                 k: torch.tensor(v).float().to(device) for k, v in sample_obs.items()
@@ -1046,17 +1048,14 @@ def check_policy_on_policy_with_probe_env(
                 v_values, predicted_v_values, atol=0.1
             ), f"{v_values} != {predicted_v_values}"
 
-    if hasattr(env, "sample_actions"):
-        for sample_action, policy_values in zip(env.sample_actions, env.policy_values):
-            action = torch.tensor(sample_action).float().to(device)
-            if policy_values is not None:
-                predicted_policy_values = (
-                    agent.actor(state).sample().detach().cpu().numpy()[0]
-                )
-                # print("pol", policy_values, predicted_policy_values)
-                assert np.allclose(
-                    policy_values, predicted_policy_values, atol=0.1
-                ), f"{policy_values} != {predicted_policy_values}"
+        if policy_values is not None:
+            predicted_policy_values = (
+                agent.actor(state).sample().detach().cpu().numpy()[0]
+            )
+            # print("pol", policy_values, predicted_policy_values)
+            assert np.allclose(
+                policy_values, predicted_policy_values, atol=0.1
+            ), f"{policy_values} != {predicted_policy_values}"
 
 
 # if __name__ == "__main__":
