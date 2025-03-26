@@ -252,10 +252,8 @@ class GRPO(RLAlgorithm):
                 # Reshape back to original batch structure
                 completion_ids = completion_ids.reshape(len(states), group_size, -1)
                 action_masks = action_masks.reshape(len(states), group_size, -1)
-            print("completion_ids_shape", completion_ids.shape)
-            completion_ids = [cid for cid in completion_ids]
-            action_masks = [am for am in action_masks]
-            print("action_masks", action_masks)
+                completion_ids = [cid for cid in completion_ids]
+                action_masks = [am for am in action_masks]
         return completion_ids, action_masks
 
     def learn(self, experiences: ExperiencesType) -> Tuple[float, float]:
