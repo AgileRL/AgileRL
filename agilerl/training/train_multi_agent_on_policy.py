@@ -261,10 +261,6 @@ def train_multi_agent_on_policy(
 
                     obs = next_obs
 
-                    if not is_vectorised:
-                        termination = [termination]
-                        truncation = [truncation]
-
                     # Find which agents are "done" - i.e. terminated or truncated
                     dones = {
                         agent_id: termination[agent_id] | truncation[agent_id]
