@@ -808,10 +808,4 @@ def create_warmup_cosine_scheduler(
         schedulers=[warmup_scheduler, cosine_scheduler],
         milestones=[warmup_epochs],
     )
-    print("TYPE OF THE SCHEDULER")
-    print(type(scheduler))
-    from torch.optim.lr_scheduler import LRScheduler
-
-    print(isinstance(scheduler, LRScheduler))
-    # assert False 
     return scheduler

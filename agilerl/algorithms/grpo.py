@@ -1,9 +1,10 @@
 import copy
 import gc
+import glob
 import os
 import warnings
 from typing import Dict, List, Optional, Tuple, Union
-import glob
+
 import deepspeed
 import numpy as np
 import torch
@@ -173,8 +174,8 @@ class GRPO(RLAlgorithm):
         self.temperature = temperature
         self.reduce_memory_peak = reduce_memory_peak
         self.local_rank = device.split(":")[-1]
-        self.accelerator = accelerator 
-        if actor_network is not None: 
+        self.accelerator = accelerator
+        if actor_network is not None:
             self._initialize_actors(actor_network, not clone)
         else:
             if not clone:
@@ -186,8 +187,7 @@ class GRPO(RLAlgorithm):
                     "Clone mode on, remember to set actor attributes explicitly."
                 )
 
-        del actor_network     
-
+        del actor_network
 
     def get_action(
         self, states: List[Dict[str, torch.Tensor]], training: bool = True
@@ -204,56 +204,56 @@ class GRPO(RLAlgorithm):
         group_size = self.group_size if training else 1
         self.actor.eval()
         with torch.no_grad():
-            if self.reduce_memory_peak:
-                action_masks = []
-                completion_ids = []
-                for state in states:
-                    state["input_ids"] = (
-                        state["input_ids"].repeat(group_size, 1).to(self.actor.device)
-                    )
-                    state["attention_mask"] = (
-                        state["attention_mask"].repeat(group_size, 1).to(self.actor.device)
-                    )
-                    completion_id = self.actor.generate(
-                        **state,
-                        generation_config=self.generation_config,
-                    )
-                    completion_ids.append(completion_id)
-                    action_mask = torch.zeros_like(
-                        completion_id, dtype=torch.bool, device=self.device
-                    )
-                    action_mask[:, state["input_ids"].shape[1] :] = True
-                    action_mask[completion_id == self.pad_token_id] = False
-                    action_mask = action_mask[:, 1:]
-                    action_masks.append(action_mask)
-            else:
-                input_ids = stack_and_pad_experiences([state["input_ids"] for state in states], padding_values=[self.pad_token_id])[0]
-                attention_mask = stack_and_pad_experiences([state["attention_mask"] for state in states], padding_values=[False])[0]
-
-                # Repeat for group size
-                input_ids = input_ids.repeat(1, group_size, 1).reshape(-1, input_ids.size(-1)).to(self.actor.device)
-                attention_mask = attention_mask.repeat(1, group_size, 1).reshape(-1, attention_mask.size(-1)).to(self.actor.device)
-                
-                # Generate completions
-                completion_ids = self.actor.generate(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
+            # if self.reduce_memory_peak:
+            action_masks = []
+            completion_ids = []
+            for state in states:
+                state["input_ids"] = (
+                    state["input_ids"].repeat(group_size, 1).to(self.actor.device)
+                )
+                state["attention_mask"] = (
+                    state["attention_mask"].repeat(group_size, 1).to(self.actor.device)
+                )
+                completion_id = self.actor.generate(
+                    **state,
                     generation_config=self.generation_config,
                 )
-                
-                # Create action masks
-                action_masks = torch.zeros_like(
-                    completion_ids, dtype=torch.bool, device=self.device
+                completion_ids.append(completion_id)
+                action_mask = torch.zeros_like(
+                    completion_id, dtype=torch.bool, device=self.device
                 )
-                action_masks[:, input_ids.size(1):] = True
-                action_masks[completion_ids == self.pad_token_id] = False
-                action_masks = action_masks[:, 1:]
-                
-                # Reshape back to original batch structure
-                completion_ids = completion_ids.reshape(len(states), group_size, -1)
-                action_masks = action_masks.reshape(len(states), group_size, -1)
-                completion_ids = [cid for cid in completion_ids]
-                action_masks = [am for am in action_masks]
+                action_mask[:, state["input_ids"].shape[1] :] = True
+                action_mask[completion_id == self.pad_token_id] = False
+                action_mask = action_mask[:, 1:]
+                action_masks.append(action_mask)
+            # else:
+            #     input_ids = stack_and_pad_experiences([state["input_ids"] for state in states], padding_values=[self.pad_token_id])[0]
+            #     attention_mask = stack_and_pad_experiences([state["attention_mask"] for state in states], padding_values=[False])[0]
+
+            #     # Repeat for group size
+            #     input_ids = input_ids.repeat(1, group_size, 1).reshape(-1, input_ids.size(-1)).to(self.actor.device)
+            #     attention_mask = attention_mask.repeat(1, group_size, 1).reshape(-1, attention_mask.size(-1)).to(self.actor.device)
+
+            #     # Generate completions
+            #     completion_ids = self.actor.generate(
+            #         input_ids=input_ids,
+            #         attention_mask=attention_mask,
+            #         generation_config=self.generation_config,
+            #     )
+
+            #     # Create action masks
+            #     action_masks = torch.zeros_like(
+            #         completion_ids, dtype=torch.bool, device=self.device
+            #     )
+            #     action_masks[:, input_ids.size(1):] = True
+            #     action_masks[completion_ids == self.pad_token_id] = False
+            #     action_masks = action_masks[:, 1:]
+
+            #     # Reshape back to original batch structure
+            #     completion_ids = completion_ids.reshape(len(states), group_size, -1)
+            #     action_masks = action_masks.reshape(len(states), group_size, -1)
+            #     completion_ids = [cid for cid in completion_ids]
+            #     action_masks = [am for am in action_masks]
         return completion_ids, action_masks
 
     def learn(self, experiences: ExperiencesType) -> Tuple[float, float]:
@@ -566,21 +566,56 @@ class GRPO(RLAlgorithm):
         """
         Override the save_checkpoint method to provide guidance on the correct method to use.
 
+        :param path: Location to save checkpoint at
+        :type path: string
+        """
+        raise NotImplementedError(
+            "The save_checkpoint method is not supported for this algorithm class. "
+            "Please use agent.actor.save_pretrained(checkpoint_path) instead."
+        )
+
+    def load_checkpoint(self, path: str) -> None:
+        """
+        Override the load_checkpoint method to provide guidance on the correct method to use.
+
+        :param path: Location to load checkpoint from
+        :type path: string
+        """
+        raise NotImplementedError(
+            "The load_checkpoint method is not supported for this algorithm class."
+            """
+            To load a saved LLM, please load the model as follows, and then re-instantiate the GRPO
+            class.
+
+            base_model = AutoModelForCausalLM.from_pretrained(
+                "Qwen/Qwen2.5-3B",
+                torch_dtype=torch.bfloat16,
+                device_map="auto"
+            )
+            tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B")
+            model = PeftModel.from_pretrained(base_model, "/path/to/adapter/folder")
+            """
+        )
+
+    def _save_distributed_actor(self, path: str) -> None:
+        """
+        Override the save_checkpoint method to provide guidance on the correct method to use.
+
         :param path: Output directory to save the checkpoint at
         :type path: str
         """
         if self.accelerator is not None:
             os.makedirs(path, exist_ok=True)
             self.actor.save_checkpoint(path)
-            self.reference_actor.save_checkpoint(path)
         else:
-            super().save_checkpoint(path)
+            warnings.warn(
+                "Distributed actor save not supported for non-distributed training."
+            )
 
-
-    def load_checkpoint(self, path: str) -> None:
+    def _load_distributed_actor(self, path: str) -> None:
         """
         Override the load_checkpoint method to provide guidance on the correct method to use.
-        
+
         :param path: Output directory to load the checkpoint from
         :type path: str
         """
@@ -593,11 +628,11 @@ class GRPO(RLAlgorithm):
                 load_optimizer_states=True,
                 load_lr_scheduler_states=True,
             )
-            self.reference_actor.load_checkpoint(path)
             self.accelerator.deepspeed_engine_wrapped.engine = self.actor
         else:
-            super().load_checkpoint(path)
-
+            warnings.warn(
+                "Distributed actor load not supported for non-distributed training."
+            )
 
     @classmethod
     def load(
@@ -648,13 +683,15 @@ class GRPO(RLAlgorithm):
         """
         if self.accelerator is not None:
             self.accelerator.free_memory()
-            self.save_checkpoint(f"GRPO/agent_{self.index}")
+            self._save_distributed_actor(f"GRPO/agent_{self.index}")
             self.accelerator.wait_for_everyone()
-            input_args = EvolvableAlgorithm.inspect_attributes(self, input_args_only=True)
+            input_args = EvolvableAlgorithm.inspect_attributes(
+                self, input_args_only=True
+            )
             input_args["clone"] = True
             input_args["actor_network"] = self.accelerator.unwrap_model(self.actor)
             clone = type(self)(**input_args)
-            clone.reference_actor = self.reference_actor 
+            clone.reference_actor = self.reference_actor
             clone.reference_actor.eval()
             accelerator = clone.accelerator
             clone = EvolvableAlgorithm.copy_attributes(self, clone)
@@ -663,7 +700,7 @@ class GRPO(RLAlgorithm):
                 clone.index = index
             for hook in clone.registry.hooks:
                 getattr(clone, hook)()
-            clone.load_checkpoint(f"GRPO/agent_{self.index}")
+            clone._load_distributed_actor(f"GRPO/agent_{self.index}")
             clone.accelerator.wait_for_everyone()
             saved_state_files = glob.glob(f"GRPO/agent_{self.index}*")
             for file in saved_state_files:

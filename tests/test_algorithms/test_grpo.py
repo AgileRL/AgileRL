@@ -1,32 +1,33 @@
 import copy
 import os
 from contextlib import contextmanager
-from unittest.mock import MagicMock, patch
 from pathlib import Path
-import dill
+from unittest.mock import MagicMock, patch
 
-from accelerate.state import AcceleratorState
-from accelerate.accelerator import Accelerator, DeepSpeedPlugin
-from accelerate.utils import patch_environment
 import deepspeed
 import gymnasium as gym
 import pytest
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from accelerate.accelerator import Accelerator, DeepSpeedPlugin
+from accelerate.scheduler import AcceleratedScheduler
+from accelerate.state import AcceleratorState
+from accelerate.utils import patch_environment
 from torch.optim.lr_scheduler import SequentialLR
 from transformers import GenerationConfig
 
 from agilerl.utils.algo_utils import CosineLRScheduleConfig
 
 dist_env = dict(
-            ACCELERATE_USE_DEEPSPEED="true",
-            MASTER_ADDR="localhost",
-            MASTER_PORT="10999",
-            RANK="0",
-            LOCAL_RANK="0",
-            WORLD_SIZE="1",
-        )
+    ACCELERATE_USE_DEEPSPEED="true",
+    MASTER_ADDR="localhost",
+    MASTER_PORT="10999",
+    RANK="0",
+    LOCAL_RANK="0",
+    WORLD_SIZE="1",
+)
+
 
 # Mock the Accelerator class to avoid DeepSpeed issues
 class MockAccelerator:
@@ -40,8 +41,7 @@ class MockAccelerator:
         }
         mock_accelerator_state.deepspeed_plugin = mock_deepspeed_plugin
         AcceleratorState = lambda: mock_accelerator_state
-        original_deepspeed_initialize = deepspeed.initialize
-        deepspeed.initialize = mock_initialize  
+
         self.state = MagicMock()
 
     def prepare(self, model, opt, *args):
@@ -104,6 +104,8 @@ def mock_initialize(model, config, **kwargs):
 
 
 # Patch deepspeed.initialize
+# original_deepspeed_initialize = deepspeed.initialize
+# deepspeed.initialize = mock_initialize
 
 
 class DummyForwardOutput:
@@ -200,23 +202,48 @@ def grpo(vocab_size, input_size, max_tokens, group_size, use_accelerator):
         high=vocab_size - 1,
         shape=(20,),
     )
-    return GRPO(
-        observation_space,
-        action_space,
-        actor_network=create_module(
-            input_size=input_size,
-            max_tokens=max_tokens,
-            vocab_size=vocab_size,
+    if use_accelerator:
+        with patch_environment(**dist_env):
+            AcceleratorState._reset_state(True)
+            accelerator = Accelerator(
+                DeepSpeedPlugin(zero_stage=2, gradient_accumulation_steps=2)
+            )
+            return GRPO(
+                observation_space,
+                action_space,
+                actor_network=create_module(
+                    input_size=input_size,
+                    max_tokens=max_tokens,
+                    vocab_size=vocab_size,
+                    device="cuda" if torch.cuda.is_available() else "cpu",
+                ),
+                pad_token_id=vocab_size - 1,
+                device="cuda" if torch.cuda.is_available() else "cpu",
+                group_size=group_size,
+                cosine_lr_schedule_config=CosineLRScheduleConfig(
+                    num_epochs=10, warmup_proportion=0.05
+                ),
+                accelerator=accelerator,
+            )
+    else:
+        accelerator = None
+        return GRPO(
+            observation_space,
+            action_space,
+            actor_network=create_module(
+                input_size=input_size,
+                max_tokens=max_tokens,
+                vocab_size=vocab_size,
+                device="cuda" if torch.cuda.is_available() else "cpu",
+            ),
+            pad_token_id=vocab_size - 1,
             device="cuda" if torch.cuda.is_available() else "cpu",
-        ),
-        pad_token_id=vocab_size - 1,
-        device="cuda" if torch.cuda.is_available() else "cpu",
-        group_size=group_size,
-        cosine_lr_schedule_config=CosineLRScheduleConfig(
-            num_epochs=10, warmup_proportion=0.05
-        ),
-        accelerator=MockAccelerator() if use_accelerator else None,
-    )
+            group_size=group_size,
+            cosine_lr_schedule_config=CosineLRScheduleConfig(
+                num_epochs=10, warmup_proportion=0.05
+            ),
+            accelerator=accelerator,
+        )
 
 
 @pytest.mark.parametrize("vocab_size", [1000])
@@ -250,22 +277,30 @@ def test_init_grpo(
     assert isinstance(grpo.cosine_lr_schedule_config, CosineLRScheduleConfig), type(
         grpo.cosine_lr_schedule_config
     )
-    assert isinstance(grpo.lr_scheduler, SequentialLR), grpo.lr_scheduler
     assert grpo.device == device
     assert grpo.index == 0
     assert grpo.scores == []
     assert grpo.fitness == []
     assert grpo.steps == [0]
     assert isinstance(grpo.generation_config, GenerationConfig)
-    assert isinstance(grpo.actor, DummyLLM)
+    if use_accelerator:
+        from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
+        from deepspeed.runtime.engine import DeepSpeedEngine
+
+        assert isinstance(grpo.actor, DeepSpeedEngine)
+        assert isinstance(grpo.optimizer, DeepSpeedOptimizerWrapper)
+        assert isinstance(grpo.lr_scheduler, AcceleratedScheduler), grpo.lr_scheduler
+    else:
+        assert isinstance(grpo.actor, DummyLLM)
+        assert isinstance(grpo.lr_scheduler, SequentialLR), grpo.lr_scheduler
+        assert isinstance(grpo.optimizer, OptimizerWrapper)
+        assert grpo.actor.gradient_checkpointing_enabled
     assert isinstance(grpo.reference_actor, DummyLLM) != use_accelerator
     for ref_param, param in zip(
         grpo.reference_actor.parameters(), grpo.actor.parameters()
     ):
         assert torch.equal(ref_param, param)
-    assert grpo.actor.gradient_checkpointing_enabled != use_accelerator
     assert not grpo.reference_actor.gradient_checkpointing_enabled
-    assert isinstance(grpo.optimizer, OptimizerWrapper)
 
 
 @pytest.mark.parametrize("vocab_size", [1000])
@@ -523,7 +558,7 @@ def test_grpo_test(
     fitnesses = grpo.test(env)
     assert isinstance(fitnesses, torch.Tensor)
 
-import tempfile
+
 @pytest.mark.parametrize("vocab_size", [1000])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
@@ -542,51 +577,26 @@ def test_grpo_load(
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize("batch_size", [8])
-@pytest.mark.parametrize("use_accelerator", [False])
-def test_grpo_save_load_checkpoint_no_accelerator(
-    grpo, vocab_size, input_size, max_tokens, group_size, batch_size, use_accelerator, tmpdir
+@pytest.mark.parametrize("use_accelerator", [False, True])
+def test_grpo_load_checkpoint(
+    grpo, vocab_size, input_size, max_tokens, group_size, batch_size, use_accelerator
 ):
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    grpo.save_checkpoint(checkpoint_path)
-    new_grpo = GRPO(
-        gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
-        gym.spaces.Box(
-        low=0,
-        high=vocab_size - 1),
-        actor_network=create_module(
-            input_size=input_size,
-            max_tokens=max_tokens,
-            vocab_size=vocab_size,
-            device="cuda" if torch.cuda.is_available() else "cpu",
-        ),
-        pad_token_id=vocab_size - 1,
-        device="cuda" if torch.cuda.is_available() else "cpu",
-        group_size=group_size,
-        cosine_lr_schedule_config=CosineLRScheduleConfig(
-            num_epochs=10, warmup_proportion=0.05
-        ),
-        accelerator=MockAccelerator() if use_accelerator else None,
-    )
-    new_grpo.load_checkpoint(checkpoint_path)
+    with pytest.raises(NotImplementedError):
+        grpo.load_checkpoint("path")
 
-    assert str(new_grpo.actor.state_dict()) == str(grpo.actor.state_dict())
-    assert str(new_grpo.optimizer.state_dict()) == str(grpo.optimizer.state_dict())
-    assert str(new_grpo.reference_actor.state_dict()) == str(grpo.reference_actor.state_dict())
-    assert new_grpo.batch_size == grpo.batch_size
-    assert new_grpo.beta == grpo.beta
-    assert new_grpo.lr == grpo.lr
-    assert new_grpo.clip_coef == grpo.clip_coef
-    assert new_grpo.max_grad_norm == grpo.max_grad_norm
-    assert new_grpo.update_epochs == grpo.update_epochs
-    assert new_grpo.group_size == grpo.group_size
-    assert new_grpo.temperature == grpo.temperature
-    assert new_grpo.calc_position_embeddings == grpo.calc_position_embeddings
-    assert new_grpo.device == grpo.device
-    assert new_grpo.index == grpo.index
-    assert new_grpo.scores == grpo.scores
-    assert new_grpo.fitness == grpo.fitness
-    assert new_grpo.steps == grpo.steps
-    assert new_grpo.generation_config == grpo.generation_config
+
+@pytest.mark.parametrize("vocab_size", [1000])
+@pytest.mark.parametrize("input_size", [10])
+@pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize("group_size", [5])
+@pytest.mark.parametrize("batch_size", [8])
+@pytest.mark.parametrize("use_accelerator", [False, True])
+def test_grpo_save_checkpoint(
+    grpo, vocab_size, input_size, max_tokens, group_size, batch_size, use_accelerator
+):
+    with pytest.raises(NotImplementedError):
+        grpo.save_checkpoint("path")
+
 
 @pytest.mark.parametrize("vocab_size", [1000])
 @pytest.mark.parametrize("input_size", [10])
@@ -594,22 +604,45 @@ def test_grpo_save_load_checkpoint_no_accelerator(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("use_accelerator", [False])
+def test_grpo_save_load_distributed_actor_no_accelerator(
+    grpo,
+    vocab_size,
+    input_size,
+    max_tokens,
+    group_size,
+    batch_size,
+    use_accelerator,
+    tmpdir,
+):
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    with pytest.warns(UserWarning):
+        grpo._save_distributed_actor(checkpoint_path)
+
+    with pytest.warns(UserWarning):
+        grpo._load_distributed_actor(checkpoint_path)
+
+
+@pytest.mark.parametrize("vocab_size", [1000])
+@pytest.mark.parametrize("input_size", [10])
+@pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize("group_size", [5])
+@pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize(
     "zero_stage",
     [1, 2, 3],
 )
 def test_grpo_save_load_checkpoint_with_accelerator(
-    vocab_size, input_size, max_tokens, group_size, batch_size, use_accelerator, tmpdir, zero_stage
+    vocab_size, input_size, max_tokens, group_size, batch_size, tmpdir, zero_stage
 ):
     with patch_environment(**dist_env):
         AcceleratorState._reset_state(True)
-        deepspeed_plugin = DeepSpeedPlugin(zero_stage=zero_stage, gradient_accumulation_steps=2)
+        deepspeed_plugin = DeepSpeedPlugin(
+            zero_stage=zero_stage, gradient_accumulation_steps=2
+        )
         accelerator = Accelerator(deepspeed_plugin=deepspeed_plugin)
         grpo = GRPO(
             gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
-            gym.spaces.Box(
-            low=0,
-            high=vocab_size - 1),
+            gym.spaces.Box(low=0, high=vocab_size - 1),
             actor_network=create_module(
                 input_size=input_size,
                 max_tokens=max_tokens,
@@ -625,7 +658,7 @@ def test_grpo_save_load_checkpoint_with_accelerator(
             accelerator=accelerator,
         )
         checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-        grpo.save_checkpoint(checkpoint_path)
+        grpo._save_distributed_actor(checkpoint_path)
         grpo_optimizer = grpo.optimizer
         grpo_optim_state_dict = grpo.optimizer.state_dict()
         grpo_optim_state_dict.pop("loss_scaler")
@@ -633,9 +666,7 @@ def test_grpo_save_load_checkpoint_with_accelerator(
         grpo_reference_actor_state_dict = grpo.reference_actor.state_dict()
         new_grpo = GRPO(
             gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
-            gym.spaces.Box(
-            low=0,
-            high=vocab_size - 1),
+            gym.spaces.Box(low=0, high=vocab_size - 1),
             actor_network=create_module(
                 input_size=input_size,
                 max_tokens=max_tokens,
@@ -650,37 +681,51 @@ def test_grpo_save_load_checkpoint_with_accelerator(
             ),
             accelerator=accelerator,
         )
-        new_grpo.load_checkpoint(checkpoint_path)
+        new_grpo._load_distributed_actor(checkpoint_path)
 
     assert str(new_grpo.actor.state_dict()) == str(grpo_actor_state_dict)
-    assert new_grpo.optimizer.optimizer.loss_scaler.cur_scale == grpo_optimizer.optimizer.loss_scaler.cur_scale
+    assert (
+        new_grpo.optimizer.optimizer.loss_scaler.cur_scale
+        == grpo_optimizer.optimizer.loss_scaler.cur_scale
+    )
     assert new_grpo.optimizer.state_dict().keys() == grpo_optimizer.state_dict().keys()
-    assert str(new_grpo.reference_actor.state_dict()) == str(grpo_reference_actor_state_dict)
+    assert str(new_grpo.reference_actor.state_dict()) != str(
+        grpo_reference_actor_state_dict
+    )
     for key in new_grpo.optimizer.state_dict().keys():
         if key == "loss_scaler":
-            continue    
-        assert str(new_grpo.optimizer.state_dict()[key]) == str(grpo_optim_state_dict[key])
+            continue
+        assert str(new_grpo.optimizer.state_dict()[key]) == str(
+            grpo_optim_state_dict[key]
+        )
 
-    print(new_grpo.optimizer.state_dict())
-    # assert False
-
-    # FIXME - do we want to save and load the other attributes ??
 
 @pytest.mark.parametrize("vocab_size", [1000])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize("batch_size", [8])
-def test_grpo_clone_with_accelerator(grpo, vocab_size, input_size, max_tokens, group_size, batch_size, use_accelerator, tmpdir, zero_stage):
+def test_grpo_clone_with_accelerator(
+    grpo,
+    vocab_size,
+    input_size,
+    max_tokens,
+    group_size,
+    batch_size,
+    use_accelerator,
+    tmpdir,
+    zero_stage,
+):
     with patch_environment(**dist_env):
+        deepspeed.initialize = original_deepspeed_initialize
         AcceleratorState._reset_state(True)
-        deepspeed_plugin = DeepSpeedPlugin(zero_stage=zero_stage, gradient_accumulation_steps=2)
+        deepspeed_plugin = DeepSpeedPlugin(
+            zero_stage=zero_stage, gradient_accumulation_steps=2
+        )
         accelerator = Accelerator(deepspeed_plugin=deepspeed_plugin)
         grpo = GRPO(
             gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
-            gym.spaces.Box(
-            low=0,
-            high=vocab_size - 1),
+            gym.spaces.Box(low=0, high=vocab_size - 1),
             actor_network=create_module(
                 input_size=input_size,
                 max_tokens=max_tokens,
@@ -695,3 +740,5 @@ def test_grpo_clone_with_accelerator(grpo, vocab_size, input_size, max_tokens, g
             ),
             accelerator=accelerator,
         )
+
+        new_grpo = grpo.clone()

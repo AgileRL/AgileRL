@@ -1,7 +1,6 @@
 import warnings
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, Generator, List, Tuple
-import re
 
 import gymnasium as gym
 import torch
@@ -244,11 +243,3 @@ class HuggingFaceGym(gym.Env):
 #     :rtype: float
 #     """
 #     return accuracy_reward(completion, solution) + format_reward(completion)
-
-
-def extract_number(completion: str) -> str:
-    pattern = re.compile(r"#### (\-?[0-9\.\,]+)")
-    match = pattern.search(completion)
-    if match:
-        return match.group(1).strip()
-    return None
