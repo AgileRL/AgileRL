@@ -1,21 +1,20 @@
 import re
 from typing import Tuple
-import yaml
+
 import torch
+import yaml
 from accelerate import Accelerator
 from datasets import load_dataset
 from peft import LoraConfig, get_peft_model
 from torch.utils.data import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.algorithms.grpo import GRPO
-from agilerl.training.train_llm import finetune_llm, finetune_evolvable_llm
+from agilerl.training.train_llm import finetune_evolvable_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
-from agilerl.utils.algo_utils import CosineLRScheduleConfig
 from agilerl.utils.utils import create_population
-from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 
 MODEL_PATH = "Qwen/Qwen2.5-1.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
@@ -198,19 +197,15 @@ def main(init_hp, mut_p):
         custom_collate_fn=custom_collate_fn,
     )
     accelerators = [Accelerator() for _ in range(init_hp["POP_SIZE"])]
-    init_hp["actor_network"] = model 
+    init_hp["actor_network"] = model
     init_hp["pad_token_id"] = tokenizer.eos_token_id
 
     hp_config = HyperparameterConfig(
-        beta=RLParameter(
-            min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]
-        ),
-        lr=RLParameter(
-            min=mut_p["MIN_LR"], max=mut_p["MAX_LR"]
-        ),
+        beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),
+        lr=RLParameter(min=mut_p["MIN_LR"], max=mut_p["MAX_LR"]),
         group_size=RLParameter(
             min=mut_p["MIN_GROUP_SIZE"], max=mut_p["MAX_GROUP_SIZE"], dtype=int
-        )
+        ),
     )
 
     pop = create_population(
@@ -221,8 +216,8 @@ def main(init_hp, mut_p):
         INIT_HP=init_hp,
         hp_config=hp_config,
         population_size=init_hp["POP_SIZE"],
-        accelerator=accelerators
-    ) 
+        accelerator=accelerators,
+    )
 
     tournament = TournamentSelection(
         init_hp["TOURN_SIZE"],
@@ -248,15 +243,16 @@ def main(init_hp, mut_p):
         env=env,
         init_hp=init_hp,
         evaluation_interval=10,
-        wb=False,
+        wb=True,
         checkpoint_interval=100,
         checkpoint_path="saved_llms",
         max_reward=2.0,
-        evo_steps=1,
+        evo_steps=10,
         mutation=mutations,
         tournament=tournament,
-        accelerator=accelerators[0]
+        accelerator=accelerators[0],
     )
+
 
 if __name__ == "__main__":
     with open("configs/training/grpo.yaml") as file:

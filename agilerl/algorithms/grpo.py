@@ -688,7 +688,7 @@ class GRPO(RLAlgorithm):
             input_args["clone"] = True
             input_args["actor_network"] = self.accelerator.unwrap_model(self.actor)
             clone = type(self)(**input_args)
-            clone.reference_actor = self.reference_actor 
+            clone.reference_actor = self.reference_actor
             clone.reference_actor.eval()
             accelerator = clone.accelerator
             clone = EvolvableAlgorithm.copy_attributes(self, clone)
@@ -712,7 +712,7 @@ def remove_nested_files(files: str, depth: int = 0) -> None:
     depth += 1
     for _file in files:
         if os.path.isdir(_file):
-            remove_nested_files(glob.glob(_file+'/*'), depth)
+            remove_nested_files(glob.glob(_file + "/*"), depth)
             os.rmdir(_file)
         else:
             os.remove(_file)

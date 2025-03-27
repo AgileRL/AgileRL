@@ -4,8 +4,8 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import torch
 import torch.distributed as dist
-from tqdm import trange
 from accelerate import Accelerator
+from tqdm import trange
 
 import wandb
 from agilerl.algorithms import GRPO
@@ -36,7 +36,7 @@ def finetune_llm(
         data_increment * env.data_batch_size_per_gpu * grad_accum
     )
     if agent.accelerator.is_main_process:
-        print(  
+        print(
             f"""
 =========================================================================
 Commencing RL finetuning
@@ -49,7 +49,7 @@ Effective learning batch_size: {data_increment} * {agent.batch_size} * {grad_acc
 =========================================================================
         """
         )
-    if wb and agent.accelerator.is_main_process:  
+    if wb and agent.accelerator.is_main_process:
         init_wandb(
             algo=agent.algo,
             env_name=env.name,
@@ -76,12 +76,12 @@ Effective learning batch_size: {data_increment} * {agent.batch_size} * {grad_acc
             },
         )
 
-    if agent.accelerator.is_main_process: 
+    if agent.accelerator.is_main_process:
         print("\nTraining...")
 
     bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
     max_steps = len(env) // effective_data_batch_size
-    if agent.accelerator.is_main_process: 
+    if agent.accelerator.is_main_process:
         pbar = trange(
             max_steps,
             unit="step",
@@ -125,7 +125,7 @@ Effective learning batch_size: {data_increment} * {agent.batch_size} * {grad_acc
             agg_test_metrics = [
                 aggregate_metrics_across_gpus(agent, metric) for metric in test_metrics
             ]
-        if agent.accelerator.is_main_process: 
+        if agent.accelerator.is_main_process:
             metrics_dict = {
                 "Train/Loss": agg_metrics[0],
                 "Train/KL-divergence": agg_metrics[1],
@@ -161,15 +161,15 @@ def finetune_evolvable_llm(
     checkpoint_path: Optional[str] = None,
     wb: bool = False,
     evo_steps: int = 500,
-    tournament = None,
-    mutation = None,
+    tournament=None,
+    mutation=None,
     wandb_api_key: Optional[str] = None,
     evaluation_interval: Optional[int] = 10,
     max_reward: Optional[int] = None,
     verbose: bool = True,
-    accelerator: Optional[Accelerator] = None
+    accelerator: Optional[Accelerator] = None,
 ):
-    if init_hp is None: 
+    if init_hp is None:
         init_hp = {}
         init_hp["BATCH_SIZE"] = pop[0].batch_size
     data_increment = (
@@ -202,7 +202,7 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
             algo=init_hp["ALGO"],
             env_name=env.name,
             wandb_api_key=wandb_api_key,
-            init_hyperparams=init_hp
+            init_hyperparams=init_hp,
         )
     if accelerator.is_main_process:
         print("\nTraining...")
@@ -266,12 +266,14 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                 }
                 if max_reward is not None:
                     metrics_dict |= {"Train/Accuracy": agg_metrics[4]}
-                agent_metrics_dict[f"agent_{agent_idx}/train_metrics"] = metrics_dict 
+                agent_metrics_dict[f"agent_{agent_idx}/train_metrics"] = metrics_dict
                 if agg_test_metrics is not None:
                     test_metrics_dict = {"Eval/Mean reward": agg_test_metrics[0]}
                     if max_reward is not None:
                         test_metrics_dict |= {"Eval/Accuracy": agg_test_metrics[1]}
-                    agent_metrics_dict[f"agent_{agent_idx}/test_metrics"] = test_metrics_dict
+                    agent_metrics_dict[f"agent_{agent_idx}/test_metrics"] = (
+                        test_metrics_dict
+                    )
                 #     if wb:
                 #         wandb.log(test_metrics_dict)
                 # if wb:
@@ -286,7 +288,7 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                 agent.steps.append(effective_data_batch_size)
                 agent.scores.append(mean_scores)
                 total_steps += effective_data_batch_size
-        
+
                 # if verbose:
                 #     fitness = [str(round(agent.fitness[-1], 2)) for agent in pop]
                 #     avg_fitness = ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
@@ -311,22 +313,63 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
         if (i + 1) % evo_steps == 0:
             if tournament and mutation is not None:
                 pop = tournament_selection_and_mutation(
-                population=pop,
-                tournament=tournament,
-                mutation=mutation,
-                env_name=env.name,
-                accelerator=None, # Set as None for LLM finetuning as it does not require the same accelerator handling as standard RL models
-            ) 
-
+                    population=pop,
+                    tournament=tournament,
+                    mutation=mutation,
+                    env_name=env.name,
+                    accelerator=None,  # Set as None for LLM finetuning as it does not require the same accelerator handling as standard RL models
+                )
 
         if wb and accelerator.is_main_process:
             wandb_dict = {
-                "Train/Best reward": np.max([agent_metrics_dict[f"agent_{agent_idx}/train_metrics"]["Train/Mean reward"] for agent_idx,_ in enumerate(pop)]),
-                "Train/Mean population reward": np.mean([agent_metrics_dict[f"agent_{agent_idx}/train_metrics"]["Train/Mean reward"] for agent_idx,_ in enumerate(pop)]),
-                "Train/Mean population loss": np.mean([agent_metrics_dict[f"agent_{agent_idx}/train_metrics"]["Train/Loss"] for agent_idx,_ in enumerate(pop)]),
-                "Train/Mean population KL divergence": np.mean([agent_metrics_dict[f"agent_{agent_idx}/train_metrics"]["Train/KL-divergence"] for agent_idx,_ in enumerate(pop)]),
-                "Train/Mean population completion length": np.mean([agent_metrics_dict[f"agent_{agent_idx}/train_metrics"]["Train/Average completion length"] for agent_idx,_ in enumerate(pop)]),
-                "Train/Mean population accuracy": np.mean([agent_metrics_dict[f"agent_{agent_idx}/train_metrics"]["Train/Accuracy"] for agent_idx,_ in enumerate(pop)]),
+                "Train/Best reward": np.max(
+                    [
+                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                            "Train/Mean reward"
+                        ]
+                        for agent_idx, _ in enumerate(pop)
+                    ]
+                ),
+                "Train/Mean population reward": np.mean(
+                    [
+                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                            "Train/Mean reward"
+                        ]
+                        for agent_idx, _ in enumerate(pop)
+                    ]
+                ),
+                "Train/Mean population loss": np.mean(
+                    [
+                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                            "Train/Loss"
+                        ]
+                        for agent_idx, _ in enumerate(pop)
+                    ]
+                ),
+                "Train/Mean population KL divergence": np.mean(
+                    [
+                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                            "Train/KL-divergence"
+                        ]
+                        for agent_idx, _ in enumerate(pop)
+                    ]
+                ),
+                "Train/Mean population completion length": np.mean(
+                    [
+                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                            "Train/Average completion length"
+                        ]
+                        for agent_idx, _ in enumerate(pop)
+                    ]
+                ),
+                "Train/Mean population accuracy": np.mean(
+                    [
+                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                            "Train/Accuracy"
+                        ]
+                        for agent_idx, _ in enumerate(pop)
+                    ]
+                ),
                 "HPO_agent_0/beta": pop[0].beta,
                 "HPO_agent_1/beta": pop[1].beta,
                 "HPO_agent_0/lr": pop[0].lr,
@@ -336,15 +379,36 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
             }
             try:
                 test_dict = {
-                    "Eval/Best reward": np.max([agent_metrics_dict.get(f"agent_{agent_idx}/test_metrics", None).get("Eval/Mean reward", None) for agent_idx,_ in enumerate(pop)]),
-                    "Eval/Mean population reward": np.mean([agent_metrics_dict.get(f"agent_{agent_idx}/test_metrics", None).get("Eval/Mean reward", None) for agent_idx,_ in enumerate(pop)]),
-                    "Eval/Mean population accuracy": np.mean([agent_metrics_dict[f"agent_{agent_idx}/test_metrics"]["Eval/Accuracy"] for agent_idx,_ in enumerate(pop)]),
+                    "Eval/Best reward": np.max(
+                        [
+                            agent_metrics_dict.get(
+                                f"agent_{agent_idx}/test_metrics", None
+                            ).get("Eval/Mean reward", None)
+                            for agent_idx, _ in enumerate(pop)
+                        ]
+                    ),
+                    "Eval/Mean population reward": np.mean(
+                        [
+                            agent_metrics_dict.get(
+                                f"agent_{agent_idx}/test_metrics", None
+                            ).get("Eval/Mean reward", None)
+                            for agent_idx, _ in enumerate(pop)
+                        ]
+                    ),
+                    "Eval/Mean population accuracy": np.mean(
+                        [
+                            agent_metrics_dict[f"agent_{agent_idx}/test_metrics"][
+                                "Eval/Accuracy"
+                            ]
+                            for agent_idx, _ in enumerate(pop)
+                        ]
+                    ),
                 }
             except:
-                test_dict = {"key": None} #FIXME sort this out tomorrow
+                test_dict = {"key": None}  # FIXME sort this out tomorrow
             if all(val is not None for val in test_dict.values()):
                 wandb_dict |= test_dict
-            wandb.log(wandb_dict)   
+            wandb.log(wandb_dict)
 
 
 def gather_tensor(tensor: torch.Tensor, agent: GRPO) -> torch.Tensor:
