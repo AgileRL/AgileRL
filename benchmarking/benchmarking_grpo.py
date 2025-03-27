@@ -12,7 +12,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.training.train_llm import finetune_evolvable_llm
+from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
@@ -238,12 +238,12 @@ def main(init_hp, mut_p):
         accelerator=accelerators[0],
     )
 
-    finetune_evolvable_llm(
+    finetune_llm(
         pop=pop,
         env=env,
         init_hp=init_hp,
         evaluation_interval=1,
-        wb=True,
+        wb=False,
         checkpoint_interval=100,
         checkpoint_path="saved_llms",
         max_reward=2.0,
