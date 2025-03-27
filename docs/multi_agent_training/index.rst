@@ -18,6 +18,8 @@ Optimisation algorithm.
      - :ref:`Space Invaders <MADDPG tutorial>`
    * - :ref:`MATD3<matd3>`
      - :ref:`Simple Speaker Listener <MATD3 tutorial>`
+   * - :ref:`IPPO<ippo>`
+     -
 
 
 .. _initpop_ma:

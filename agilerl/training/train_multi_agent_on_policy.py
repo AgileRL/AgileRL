@@ -209,6 +209,19 @@ def train_multi_agent_on_policy(
             losses = {agent_id: [] for agent_id in agent_ids}
             completed_episode_scores = []
             steps = 0
+
+            if swap_channels:
+                if not is_vectorised:
+                    obs = {
+                        agent_id: obs_channels_to_first(np.expand_dims(s, 0))
+                        for agent_id, s in obs.items()
+                    }
+                else:
+                    obs = {
+                        agent_id: obs_channels_to_first(s)
+                        for agent_id, s in obs.items()
+                    }
+
             start_time = time.time()
             for _ in range(-(evo_steps // -agent.learn_step)):
 
@@ -259,6 +272,18 @@ def train_multi_agent_on_policy(
                         values[agent_id].append(value[agent_id])
                         truncs[agent_id].append(truncation[agent_id])
 
+                    if swap_channels:
+                        if not is_vectorised:
+                            next_obs = {
+                                agent_id: obs_channels_to_first(np.expand_dims(s, 0))
+                                for agent_id, s in next_obs.items()
+                            }
+                        else:
+                            next_obs = {
+                                agent_id: obs_channels_to_first(s)
+                                for agent_id, s in next_obs.items()
+                            }
+
                     obs = next_obs
 
                     # Find which agents are "done" - i.e. terminated or truncated
@@ -283,9 +308,6 @@ def train_multi_agent_on_policy(
                                 obs, info = env.reset()
 
                     pbar.update(num_envs)
-
-                if swap_channels:
-                    next_obs = obs_channels_to_first(next_obs)
 
                 experiences = (
                     states,

@@ -1,13 +1,14 @@
-.. _maddpg:
+.. _ippo:
 
-Multi-Agent Deep Deterministic Policy Gradient (MADDPG)
-=======================================================
+Independent Proximal Policy Optimization (IPPO)
+===============================================
 
-MADDPG (Multi-Agent Deep Deterministic Policy Gradients) extends the DDPG (Deep Deterministic Policy Gradients)
-algorithm to enable cooperative or competitive training of multiple agents in complex environments, enhancing the
-stability and convergence of the learning process through decentralized actor and centralized critic architectures.
+IPPO (Independent Proximal Policy Optimization) extends the PPO algorithm for multi-agent settings,
+enabling cooperative or competitive training of multiple agents in complex environments.
+The algorithm employs independent learning, in which each agent simply estimates its local value function,
+and is well-suited to problems with many homogeneous agents.
 
-* MADDPG paper: https://arxiv.org/pdf/1706.02275.pdf
+* IPPO paper: https://arxiv.org/pdf/2011.09533
 
 Can I use it?
 -------------
@@ -26,14 +27,33 @@ Can I use it?
      - ✔️
      - ✔️
 
-Gumbel-Softmax
---------------
 
-The Gumbel-Softmax activation function is a differentiable approximation that enables gradient-based optimization through
-continuous relaxation of discrete action spaces in multi-agent reinforcement learning, allowing agents to learn and improve
-decision-making in complex environments with discrete choices. If you would like to customise the mlp output activation function,
-you can define it within the network configuration using the key "output_activation". User definition for the output activation is however,
-unnecessary, as the algorithm will select the appropriate function given the environments action space.
+Homogeneous Agents
+------------------
+
+IPPO can efficiently solve environments with large numbers of homogeneous (identical) agents because they share actor and critic networks.
+This is useful for problems where we want multiple agents to learn the same behaviour, and can avoid training them all individually. Allowing
+all homogeneous agents to learn from the experiences collected by each other can be a very fast way to explore an environment.
+
+Labelling agents as homogeneous (or not) is as simple as choosing the names of agents in an environment. The agent_ids will be
+read from the environment, and split on the final ``"_"``. Any agent_ids with matching prefixes will be assumed to be homogeneous.
+
+For example, if an environment contains agents named ``"bob_0"``, ``"bob_1"`` and ``"fred_0"``, then ``"bob_0"`` and ``"bob_1"`` will be assumed to be homogeneous,
+and the same actor and critic networks will be used for them. ``"fred_0"`` will receive its own actor and network, since it has a different prefix.
+
+.. code-block:: python
+
+  env.agent_ids = ["bob_0", "bob_1", "fred_0"]
+
+  agent = IPPO(
+    observation_spaces=env.observation_spaces,
+    action_spaces=env.action_spaces,
+    agent_ids=env.agent_ids
+  )
+
+Agents must have the same observation and action spaces to be homogeneous. In the above example, all ``bob_`` agents must have the same observation
+and action spaces, but these can be different to the observation and action spaces of ``fred_`` agents.
+
 
 Agent Masking
 -------------
@@ -63,8 +83,9 @@ multi-agent training function by passing the info dictionary into the agents get
     else:
         action = cont_actions
 
-Example
-------------
+
+Example Training Loop
+---------------------
 
 .. code-block:: python
 
@@ -73,8 +94,7 @@ Example
     from pettingzoo.mpe import simple_speaker_listener_v4
     from tqdm import trange
 
-    from agilerl.algorithms import MADDPG
-    from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
+    from agilerl.algorithms import IPPO
     from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
     from agilerl.utils.algo_utils import obs_channels_to_first
 
@@ -87,84 +107,95 @@ Example
     # Configure the multi-agent algo input arguments
     observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
     action_spaces = [env.single_action_space(agent) for agent in env.agents]
-
-    channels_last = False  # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-    n_agents = env.num_agents
     agent_ids = [agent_id for agent_id in env.agents]
-    field_names = ["state", "action", "reward", "next_state", "done"]
-    memory = MultiAgentReplayBuffer(
-        memory_size=1_000_000,
-        field_names=field_names,
-        agent_ids=agent_ids,
-        device=device,
-    )
 
-    agent = MADDPG(
+    channels_last = False  # Flag to swap image channels dimension from last to first [H, W, C] -> [C, H, W]
+
+    agent = IPPO(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
         agent_ids=agent_ids,
-        vect_noise_dim=num_envs,
         device=device,
     )
 
     # Define training loop parameters
     max_steps = 100000  # Max steps
-    total_steps = 0
     while agent.steps[-1] < max_steps:
         state, info  = env.reset() # Reset environment at start of episode
-        scores = np.zeros(num_envs)
+        scores = np.zeros((num_envs, len(agent.shared_agent_ids)))
         completed_episode_scores = []
+        steps = 0
+
         if channels_last:
-            state = {agent_id: obs_channels_to_first(s) for agent_id, s in state.items()}
+            state = {
+                agent_id: obs_channels_to_first(s)
+                for agent_id, s in state.items()
+            }
 
-        for _ in range(1000):
+        for _ in range(agent.learn_step):
 
-            # Get next action from agent
-            cont_actions, discrete_action = agent.get_action(
-                states=state,
-                training=True,
-                infos=info,
-            )
-            if agent.discrete_actions:
-                action = discrete_action
-            else:
-                action = cont_actions
+            states = {agent_id: [] for agent_id in agent.agent_ids}
+            actions = {agent_id: [] for agent_id in agent.agent_ids}
+            log_probs = {agent_id: [] for agent_id in agent.agent_ids}
+            rewards = {agent_id: [] for agent_id in agent.agent_ids}
+            terms = {agent_id: [] for agent_id in agent.agent_ids}
+            values = {agent_id: [] for agent_id in agent.agent_ids}
+            truncs = {agent_id: [] for agent_id in agent.agent_ids}
 
-            # Act in environment
-            next_state, reward, termination, truncation, info = env.step(action)
+            for idx_step in range(-(agent.learn_step // -num_envs)):
 
-            scores += np.sum(np.array(list(reward.values())).transpose(), axis=-1)
-            total_steps += num_envs
-            steps += num_envs
+                # Get next action from agent
+                action, log_prob, _, value = agent.get_action(obs=state, infos=info)
 
-            # Save experiences to replay buffer
-            if channels_last:
-                next_state = {
-                    agent_id: obs_channels_to_first(ns)
-                    for agent_id, ns in next_state.items()
+                # Act in environment
+                next_state, reward, termination, truncation, info = env.step(action)
+                scores += np.array(list(reward.values())).transpose()
+
+                steps += num_envs
+
+                for agent_id in agent.agent_ids:
+                    states[agent_id].append(obs[agent_id])
+                    actions[agent_id].append(action[agent_id])
+                    log_probs[agent_id].append(log_prob[agent_id])
+                    rewards[agent_id].append(reward[agent_id])
+                    terms[agent_id].append(termination[agent_id])
+                    values[agent_id].append(value[agent_id])
+                    truncs[agent_id].append(truncation[agent_id])
+
+                if channels_last:
+                    next_state = {
+                        agent_id: obs_channels_to_first(s)
+                        for agent_id, s in next_state.items()
+                    }
+
+                # Find which agents are "done" - i.e. terminated or truncated
+                dones = {
+                    agent_id: termination[agent_id] | truncation[agent_id]
+                    for agent_id in agent.agent_ids
                 }
-            memory.save_to_memory(state, cont_actions, reward, next_state, done, is_vectorised=True)
 
-            # Learn according to learning frequency
-            if len(memory) >= agent.batch_size:
-                for _ in range(num_envs // agent.learn_step):
-                    experiences = memory.sample(agent.batch_size) # Sample replay buffer
-                    agent.learn(experiences) # Learn according to agent's RL algorithm
+                # Calculate scores for completed episodes
+                for idx, agent_dones in enumerate(zip(*dones.values())):
+                    if all(agent_dones):
+                        completed_score = (
+                            float(scores[idx]) if sum_scores else list(scores[idx])
+                        )
+                        completed_episode_scores.append(completed_score)
+                        agent.scores.append(completed_score)
+                        scores[idx].fill(0)
 
-            # Update the state
-            state = next_state
+            experiences = (
+                states,
+                actions,
+                log_probs,
+                rewards,
+                terms,
+                values,
+                next_obs,
+            )
 
-            # Calculate scores and reset noise for finished episodes
-            reset_noise_indices = []
-            term_array = np.array(list(termination.values())).transpose()
-            trunc_array = np.array(list(truncation.values())).transpose()
-            for idx, (d, t) in enumerate(zip(term_array, trunc_array)):
-                if np.any(d) or np.any(t):
-                    completed_episode_scores.append(scores[idx])
-                    agent.scores.append(scores[idx])
-                    scores[idx] = 0
-                    reset_noise_indices.append(idx)
-            agent.reset_action_noise(reset_noise_indices)
+            # Learn according to agent's RL algorithm
+            loss = agent.learn(experiences)
 
         agent.steps[-1] += steps
 
@@ -172,7 +203,7 @@ Example
 Neural Network Configuration
 ----------------------------
 
-To configure the architecture of the network's encoder / head, pass a kwargs dict to the MADDPG ``net_config`` field.
+To configure the architecture of the network's encoder / head, pass a kwargs dict to the IPPO ``net_config`` field.
 Full arguments can be found in the documentation of :ref:`EvolvableMLP<mlp>`, :ref:`EvolvableCNN<cnn>`, and
 :ref:`EvolvableMultiInput<multi_input>`.
 
@@ -214,8 +245,8 @@ For dictionary / tuple observations containing any combination of image, discret
 
 .. code-block:: python
 
-  # Create MADDPG agent
-  agent = MADDPG(
+  # Create IPPO agent
+  agent = IPPO(
     observation_spaces=observation_spaces,
     action_spaces=action_spaces,
     agent_ids=agent_ids,
@@ -236,10 +267,10 @@ To save an agent, use the ``save_checkpoint`` method:
 
 .. code-block:: python
 
-  from agilerl.algorithms.maddpg import MADDPG
+  from agilerl.algorithms import IPPO
 
-  # Create MADDPG agent
-  agent = MADDPG(
+  # Create IPPO agent
+  agent = IPPO(
     observation_spaces=observation_spaces,
     action_spaces=action_spaces,
     agent_ids=agent_ids,
@@ -254,14 +285,14 @@ To load a saved agent, use the ``load`` method:
 
 .. code-block:: python
 
-  from agilerl.algorithms.maddpg import MADDPG
+  from agilerl.algorithms import IPPO
 
   checkpoint_path = "path/to/checkpoint"
-  agent = MADDPG.load(checkpoint_path)
+  agent = IPPO.load(checkpoint_path)
 
 Parameters
 ------------
 
-.. autoclass:: agilerl.algorithms.maddpg.MADDPG
+.. autoclass:: agilerl.algorithms.ippo.IPPO
   :members:
   :inherited-members:

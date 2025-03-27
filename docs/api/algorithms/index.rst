@@ -26,6 +26,7 @@ Reinforcement learning algorithms implemented:
    ilql
    ppo
    td3
+   ippo
    maddpg
    matd3
    grpo
