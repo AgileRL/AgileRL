@@ -114,7 +114,7 @@ class parallel_env(ParallelEnv):
         - terminations
         - truncations
         - infos
-        dicts where each dict looks like {agent_1: item_1, agent_2: item_2}
+        dicts where each dict looks like {agent_1: item_1, other_agent_1: item_2}
         """
         # If a user passes in actions with no agents, then just return empty observations, etc.
         if not actions:

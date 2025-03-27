@@ -356,6 +356,11 @@ class PPO(RLAlgorithm):
         else:
             action = action.to(self.device)
 
+        if isinstance(self.action_space, spaces.Box) and self.action_space.shape == (
+            1,
+        ):
+            action = action.unsqueeze(1)
+
         action_logprob = action_dist.log_prob(action)
         dist_entropy = action_dist.entropy()
 
