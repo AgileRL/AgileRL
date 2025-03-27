@@ -557,7 +557,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         """
         self.registry.register_group(group)
 
-    def register_init_hook(self, hook: Callable) -> None:
+    def register_mutation_hook(self, hook: Callable) -> None:
         """Registers a hook to be executed after a mutation is performed on
         the algorithm.
 
@@ -566,7 +566,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         """
         self.registry.register_hook(hook)
 
-    def init_hook(self) -> None:
+    def mutation_hook(self) -> None:
         """Executes the hooks registered with the algorithm."""
         for hook in self.registry.hooks:
             getattr(self, hook)()
@@ -678,6 +678,10 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
             setattr(clone, attr, cloned_modules[attr])
 
+        # Run mutation hook at this step given possibility of sharing
+        # encoder parameters between networks
+        clone.mutation_hook()
+
         # Reinitialize optimizers
         for opt_config in self.registry.optimizers:
             orig_optimizer: OptimizerWrapper = getattr(self, opt_config.name)
@@ -687,7 +691,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 if opt_config.multiagent
                 else [cloned_modules[net] for net in opt_config.networks]
             )
-
             opt = OptimizerWrapper(
                 getattr(torch.optim, opt_config.optimizer_cls),
                 networks=networks,
@@ -711,10 +714,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         clone = EvolvableAlgorithm.copy_attributes(self, clone)
         if index is not None:
             clone.index = index
-
-        # Run init hooks
-        for hook in clone.registry.hooks:
-            getattr(clone, hook)()
 
         return clone
 

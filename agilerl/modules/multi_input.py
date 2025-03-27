@@ -1,4 +1,5 @@
 import copy
+from collections import OrderedDict
 from dataclasses import asdict
 from typing import Any, Dict, Literal, Optional, Tuple, Union
 
@@ -13,6 +14,7 @@ from agilerl.modules.configs import CnnNetConfig, LstmNetConfig, MlpNetConfig
 from agilerl.typing import ArrayOrTensor, ConfigType
 from agilerl.utils.evolvable_networks import (
     get_activation,
+    is_box_space_ndim,
     is_image_space,
     is_vector_space,
     tuple_to_dict_space,
@@ -52,11 +54,27 @@ def get_total_flatdim(observation_spaces: spaces.Dict) -> int:
     return sum([spaces.flatdim(space) for space in observation_spaces.spaces.values()])
 
 
+def is_adhoc_vector_space(space: spaces.Space, recurrent: bool = False) -> bool:
+    """Check if the space is a vector space.
+
+    :param space: Input space
+    :type space: spaces.Space
+    :param recurrent: Whether to check if the space is a 2D Box space, defaults to False
+    :type recurrent: bool, optional
+    :return: True if the space is a vector space, False otherwise
+    """
+    return (
+        is_vector_space(space)
+        or (is_box_space_ndim(space, 2) and not recurrent)
+        or (isinstance(space, spaces.Box) and len(space.shape) > 3)
+    )
+
+
 class EvolvableMultiInput(EvolvableModule):
     """Evolvable multi-input network for `Tuple` or `Dict` observation spaces. It inspects the
     observation space to determine the type of network to build for each key. It builds an
-    `EvolvableCNN` for image subspaces, an `EvolvableLSTM` for time-series subspaces, and a
-    `nn.Flatten()` for vector subspaces with more than 3 dimensions. Vector observations are
+    `EvolvableCNN` for image subspaces, an `EvolvableLSTM` for time-series subspaces if specified
+    through the `recurrent` flag, and a `nn.Flatten()` for other types. Vector observations are
     concatenated with the extracted features before passing through an `EvolvableMLP` to produce
     the output tensor. Optionally, users may specify an additional `EvolvableMLP` to be applied to
     the concatenated vector observations before concatenation with the extracted features.
@@ -81,6 +99,13 @@ class EvolvableMultiInput(EvolvableModule):
     :type init_dicts: Dict[str, Dict[str, Any]], optional
     :param output_activation: Activation function for the output layer. Default is None.
     :type output_activation: Optional[str], optional
+    :param recurrent: Whether to use an `EvolvableLSTM` for 2D Box spaces. Otherwise, the observation
+        is flattened and treated as a vector space. Default is False.
+    :type recurrent: bool, optional
+    :param min_latent_dim: Minimum dimension of the latent space. Default is 8.
+    :type min_latent_dim: int, optional
+    :param max_latent_dim: Maximum dimension of the latent space. Default is 128.
+    :type max_latent_dim: int, optional
     :param device: Device to use for the network. Default is "cpu".
     :type device: str, optional
     :param name: Name of the network. Default is "multi_input".
@@ -101,6 +126,7 @@ class EvolvableMultiInput(EvolvableModule):
         lstm_config: Optional[MultiInputConfigType] = None,
         init_dicts: Optional[MultiInputConfigType] = None,
         output_activation: Optional[str] = None,
+        recurrent: bool = False,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
         device: str = "cpu",
@@ -131,17 +157,18 @@ class EvolvableMultiInput(EvolvableModule):
 
         self.observation_space = observation_space
         self.num_outputs = num_outputs
-        self.cnn_config = cnn_config or copy.deepcopy(asdict(DefaultCnnConfig))
-        self.mlp_config = mlp_config or copy.deepcopy(asdict(DefaultMlpConfig))
-        self.lstm_config = lstm_config or copy.deepcopy(asdict(DefaultLstmConfig))
+        self.cnn_config = cnn_config or asdict(DefaultCnnConfig)
+        self.mlp_config = mlp_config or asdict(DefaultMlpConfig)
+        self.lstm_config = lstm_config or asdict(DefaultLstmConfig)
         self._init_dicts = init_dicts or {}
         self._activation = None
-
+        self.mlp_name = None
         self.vector_space_mlp = vector_space_mlp
         self.latent_dim = latent_dim
         self.output_activation = output_activation
         self.min_latent_dim = min_latent_dim
         self.max_latent_dim = max_latent_dim
+        self.recurrent = recurrent
         self.name = name
         self.device = device
 
@@ -149,7 +176,7 @@ class EvolvableMultiInput(EvolvableModule):
             {
                 key: space
                 for key, space in observation_space.spaces.items()
-                if is_vector_space(space)
+                if is_adhoc_vector_space(space, self.recurrent)
             }
         )
         self.total_vector_dims = get_total_flatdim(self.vector_spaces)
@@ -166,7 +193,6 @@ class EvolvableMultiInput(EvolvableModule):
         features_dim = self.extracted_features_dim + self.total_vector_dims * (
             1 - self.vector_space_mlp
         )
-
         # Final dense layer to convert feature encodings to desired num_outputs
         self.final_dense = nn.Linear(features_dim, num_outputs, device=device)
         self.output = get_activation(output_activation)
@@ -250,49 +276,48 @@ class EvolvableMultiInput(EvolvableModule):
         EvolvableModule.init_weights_gaussian(self.final_dense, std_coeff=output_coeff)
 
     def calc_extracted_features_dim(self) -> int:
-        """Calculates the dimension of the extracted features."""
-        extracted_features_dim = 0
-        for name in self.feature_net.keys():
-            if name not in self.vector_spaces:
-                subspace = self.observation_space.spaces.get(name)
-                if subspace is None:
-                    extracted_features_dim += self.latent_dim
-                else:
-                    extracted_features_dim += (
-                        spaces.flatdim(subspace)
-                        if len(subspace.shape) > 3
-                        else self.latent_dim
-                    )
+        """Calculates the toal dimension of the features extracted by the evolvable
+        feature extractors.
 
-        return extracted_features_dim
+        :return: Total dimension of the extracted features.
+        :rtype: int
+        """
+        return sum(
+            [
+                self.latent_dim
+                for name in self.feature_net.keys()
+                if name not in self.vector_spaces.keys()
+            ]
+        )
 
     def get_inner_init_dict(
         self, key: str, default: Literal["cnn", "mlp", "lstm"]
     ) -> Dict[str, Any]:
         """Returns the initialization dictionary for the specified key.
 
-        Arguments:
-            key (str): Key of the observation space.
-
-        Returns:
-            Dict[str, Any]: Initialization dictionary.
+        :param key: Key of the observation space.
+        :type key: str
+        :param default: Default value to return if the key is not found.
+        :type default: Literal["cnn", "mlp", "lstm"]
+        :return: Initialization dictionary.
+        :rtype: Dict[str, Any]
         """
         init_dicts = self.init_dicts
         if key in init_dicts:
             return init_dicts[key]
 
-        assert default in [
-            "cnn",
-            "mlp",
-            "lstm",
-        ], "Invalid default value provided, must be 'cnn' or 'mlp' or 'lstm'."
+        init_dict = {
+            "cnn": self.cnn_init_dict,
+            "mlp": self.mlp_init_dict,
+            "lstm": self.lstm_init_dict,
+        }.get(default)
 
-        if default == "cnn":
-            init_dict = self.cnn_init_dict
-        elif default == "mlp":
-            init_dict = self.mlp_init_dict
-        elif default == "lstm":
-            init_dict = self.lstm_init_dict
+        if init_dict is None:
+            raise ValueError(
+                "Invalid default value provided, must be 'cnn' or 'mlp' or 'lstm'."
+            )
+        else:
+            init_dict = copy.deepcopy(init_dict)
 
         init_dict["num_outputs"] = self.latent_dim
         init_dict["device"] = self.device
@@ -307,30 +332,31 @@ class EvolvableMultiInput(EvolvableModule):
         # Automatically build feature extractors from subspaces
         feature_net = ModuleDict(device=self.device)
         for key, space in self.observation_space.spaces.items():
-            if is_image_space(space):  # Use CNN if it's an image space
+            if isinstance(space, spaces.Box) and len(space.shape) in [0, 1]:
+                continue
+            # EvolvableCNN for image spaces
+            if is_image_space(space):
                 init_dict = copy.deepcopy(self.get_inner_init_dict(key, default="cnn"))
                 feature_extractor = EvolvableCNN(
                     input_shape=space.shape,
                     name=init_dict.pop("name", key),
-                    **init_dict
+                    **init_dict,
                 )
-            elif isinstance(space, spaces.Box) and key not in self.vector_spaces.keys():
-                # We assume 2D Box spaces correspond to time-series data.
-                # For other types of data, it is probably adequate to flatten the space
-                # and use an MLP.
-                if len(space.shape) == 2:
-                    init_dict = copy.deepcopy(
-                        self.get_inner_init_dict(key, default="lstm")
-                    )
-                    feature_extractor = EvolvableLSTM(
-                        input_size=space.shape[1],
-                        name=init_dict.pop("name", key),
-                        **init_dict
-                    )
-                elif len(space.shape) > 2:
-                    feature_extractor = nn.Flatten()
+            elif (
+                isinstance(space, spaces.Box)
+                and len(space.shape) == 2
+                and key not in self.vector_spaces.keys()
+            ):
+                # EvolvableLSTM for 2D Box spaces if recurrent=True
+                init_dict = copy.deepcopy(self.get_inner_init_dict(key, default="lstm"))
+                feature_extractor = EvolvableLSTM(
+                    input_size=space.shape[1],
+                    name=init_dict.pop("name", key),
+                    **init_dict,
+                )
+            # Flatten other observation types
             else:
-                continue
+                feature_extractor = nn.Flatten()
 
             feature_net[key] = feature_extractor
 
@@ -339,14 +365,11 @@ class EvolvableMultiInput(EvolvableModule):
             init_dict = copy.deepcopy(
                 self.get_inner_init_dict("vector_mlp", default="mlp")
             )
+            self.mlp_name = init_dict.pop("name", "vector_mlp")
             vector_mlp = EvolvableMLP(
-                num_inputs=self.total_vector_dims,
-                name=init_dict.pop("name", "vector_mlp"),
-                **init_dict
+                num_inputs=self.total_vector_dims, name=self.mlp_name, **init_dict
             )
-
-            self.init_dicts["vector_mlp"] = vector_mlp.init_dict
-            feature_net["vector_mlp"] = vector_mlp
+            feature_net[self.mlp_name] = vector_mlp
 
         return feature_net
 
@@ -368,31 +391,38 @@ class EvolvableMultiInput(EvolvableModule):
                 x[key] = torch.tensor(obs, device=self.device, dtype=torch.float32)
 
         # Extract features from non-vector subspaces
+        extracted_features = OrderedDict()
         if self.extracted_features_dim > 0:
-            extracted_features = [
-                self.feature_net[key](x[key])
-                for key in x.keys()
-                if key in self.feature_net.keys()
-            ]
-            extracted_features = torch.cat(extracted_features, dim=1)
-        else:
-            extracted_features = torch.tensor([], device=self.device)
+            for key in x.keys():
+                if key in self.feature_net.keys():
+                    extracted_features[key] = self.feature_net[key](x[key])
 
         # Extract raw features from vector spaces
         vector_inputs = []
-        for key in self.vector_spaces:
-            _obs = x[key]
+        for key, space in self.vector_spaces.items():
+            _obs = (
+                extracted_features.pop(key)
+                if key in extracted_features.keys()
+                else x[key]
+            )
             if len(_obs.shape) == 1:
-                _obs = _obs.unsqueeze(0)
+                dim = len(space.shape) - 1
+                _obs = _obs.unsqueeze(dim)
 
             vector_inputs.append(_obs)
 
         # Concatenate vector inputs and, optionally, pass through additional EvolvableMLP
         vector_inputs = torch.cat(vector_inputs, dim=1)
-        if self.vector_space_mlp:
-            vector_features = self.feature_net["vector_mlp"](vector_inputs)
+        vector_features = (
+            self.feature_net[self.mlp_name](vector_inputs)
+            if self.vector_space_mlp
+            else vector_inputs
+        )
+
+        if extracted_features:
+            extracted_features = torch.cat(list(extracted_features.values()), dim=1)
         else:
-            vector_features = vector_inputs
+            extracted_features = torch.tensor([], device=self.device)
 
         # Concatenate all features and pass through final MLP
         features = torch.cat([extracted_features, vector_features], dim=1)

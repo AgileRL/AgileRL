@@ -92,23 +92,24 @@ class MutationContext:
         self.method = method
         self.method_name = attribute
 
-    def __enter__(self):
+    def __enter__(self) -> None:
         self.module._mutation_depth += 1
         self.module.last_mutation = self.method
         self.module.last_mutation_attr = self.method_name
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.module._mutation_depth -= 1
 
         if self.module._mutation_depth == 0:
-            # Check recursively for nested mutations to update last_mutation_attr
+            # Identify the mutation method that was actually applied
             final_mutation_attr = self._resolve_final_mutation_attr()
             self.module.last_mutation_attr = final_mutation_attr
 
             if final_mutation_attr is not None:
                 self.module.last_mutation = getattr(self.module, final_mutation_attr)
 
+                # Recreate the network whose architecture was mutated
                 if "." not in final_mutation_attr and not isinstance(
                     self.module, EvolvableWrapper
                 ):
@@ -126,11 +127,20 @@ class MutationContext:
 
                     self.module.recreate_network(**rec_kwargs)
 
+            # Apply mutation hook if specified
             if self.module._mutation_hook is not None:
                 self.module._mutation_hook()
 
-    def _resolve_final_mutation_attr(self) -> str:
-        """Recursively resolve the final mutation attribute."""
+    def _resolve_final_mutation_attr(self) -> Optional[str]:
+        """Resolve the mutation method that was applied last. This is necessary during
+        hyperparameter optimization in RL algorithms because it is often convenient to
+        apply the same architecture mutation to the different networks in an algorithm
+        because the tasks they solve are of similar complexity, and their networks will
+        therefore require similar capacities.
+
+        :return: The final mutation attribute.
+        :rtype: Optional[str]
+        """
         if (
             self.module.last_mutation_attr is not None
             and "." in self.module.last_mutation_attr
@@ -170,6 +180,7 @@ def _mutation_wrapper(
     @wraps(method)
     def wrapped(*args, **kwargs):
         with MutationContext(module, method, attribute):
+            # This handles the case of an `EvolvableWrapper`
             if attribute not in module.mutation_methods:
                 module.last_mutation_attr = None
                 module.last_mutation = None
@@ -217,9 +228,21 @@ def _get_filtered_methods(
 # TODO: Think of a way that doesn't require the use of a metaclass
 class ModuleMeta(type):
     """Metaclass to parse the mutation methods of an EvolvableModule instance
-    and its superclasses."""
+    and its superclasses. Allows us to dynamically keep track of the last mutation
+    method applied to an EvolvableModule instance, and automatically recreate the
+    relevant network after a mutation has been applied.
 
-    def __call__(cls, *args, **kwargs):
+    :param cls: The class to be metaclassed.
+    :type cls: type
+    :param args: The arguments to pass to the class constructor.
+    :type args: tuple
+    :param kwargs: The keyword arguments to pass to the class constructor.
+    :type kwargs: dict
+    """
+
+    def __call__(
+        cls: Type[SelfEvolvableModule], *args, **kwargs
+    ) -> SelfEvolvableModule:
         instance: SelfEvolvableModule = super().__call__(*args, **kwargs)
 
         # Wrap mutation methods to use context manager

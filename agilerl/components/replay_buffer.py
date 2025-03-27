@@ -2,7 +2,7 @@ from collections import deque
 from typing import Deque, Dict, Optional, Union
 
 import torch
-from tensordict import TensorDict
+from tensordict import TensorDict, TensorDictBase, is_tensor_collection
 
 from agilerl.components.segment_tree import MinSegmentTree, SumSegmentTree
 from agilerl.typing import ArrayOrTensor
@@ -78,14 +78,29 @@ class ReplayBuffer:
         """
         # Initialize storage
         data = data.to(self.device)
+        _n_transitions = data.shape[0]
+        if not is_vectorised:
+            data = data.expand((1, *data.shape))
+        else:
+            # Ensure all tensors in data have proper dimensions beyond batch dimension
+            # This handles the case of scalar observations that become (batch_size,)
+            # instead of (batch_size, 1)
+            for key, value in data.items():
+                if is_tensor_collection(value):
+                    value: TensorDictBase = value
+                    for k, v in value.items():
+                        if v.ndim == 1:
+                            value[k] = v.reshape(_n_transitions, 1)
+                else:
+                    if value.ndim == 1:
+                        value = value.reshape(_n_transitions, 1)
+
+                data[key] = value
+
         if self._storage is None:
             self._init(data, is_vectorised)
 
-        if not is_vectorised:
-            data = data.expand((1, *data.shape))
-
         # Add to storage considering circularity of buffer
-        _n_transitions = data.shape[0]
         start = self._cursor
         end = self._cursor + _n_transitions
         if end > self.max_size:

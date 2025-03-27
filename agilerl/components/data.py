@@ -8,7 +8,7 @@ from tensordict import TensorDict, tensorclass
 from torch.utils.data import IterableDataset
 
 from agilerl.components import ReplayBuffer
-from agilerl.typing import ObservationType, TorchObsType
+from agilerl.typing import ArrayOrTensor, ObservationType
 
 
 def to_tensordict(
@@ -45,13 +45,20 @@ def to_tensordict(
 
 @tensorclass
 class Transition:
-    obs: TorchObsType
-    action: torch.Tensor
-    next_obs: TorchObsType
-    reward: torch.Tensor
-    done: torch.Tensor
+    obs: ObservationType
+    action: ArrayOrTensor
+    next_obs: ObservationType
+    reward: ArrayOrTensor
+    done: ArrayOrTensor
 
     def __post_init__(self) -> None:
+        # Convert observations to TensorDict if they are dicts or tuples
+        if isinstance(self.obs, (dict, tuple)):
+            self.obs = to_tensordict(self.obs)
+
+        if isinstance(self.next_obs, (dict, tuple)):
+            self.next_obs = to_tensordict(self.next_obs)
+
         self.action = self.action.to(dtype=torch.float32)
         self.done = self.done.to(dtype=torch.float32).unsqueeze(-1)
         self.reward = self.reward.to(dtype=torch.float32).unsqueeze(-1)

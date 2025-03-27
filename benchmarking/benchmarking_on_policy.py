@@ -98,6 +98,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         device=device,
     )
 
+    print(agent_pop[0].actor)
+    print(agent_pop[0].critic)
     trained_pop, pop_fitnesses = train_on_policy(
         env,
         INIT_HP["ENV_NAME"],

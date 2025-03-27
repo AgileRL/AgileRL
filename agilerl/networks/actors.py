@@ -221,7 +221,7 @@ class DeterministicActor(EvolvableNetwork):
             head_config = MlpNetConfig(
                 hidden_size=[16], output_activation=output_activation
             )
-        elif head_config.get("output_activation", None) is None:
+        elif head_config.get("output_activation") is None:
             head_config["output_activation"] = output_activation
 
         self.build_network_head(head_config)

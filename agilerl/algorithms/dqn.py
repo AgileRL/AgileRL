@@ -173,7 +173,7 @@ class DQN(RLAlgorithm):
 
         # Register DQN network groups and mutation hook
         self.register_network_group(
-            NetworkGroup(eval=self.actor, shared=[self.actor_target], policy=True)
+            NetworkGroup(eval=self.actor, shared=self.actor_target, policy=True)
         )
         self.register_init_hook(self.init_hook)
 

@@ -378,7 +378,20 @@ def is_image_space(space: spaces.Space) -> bool:
     :return: True if the space is an image space, False otherwise
     :rtype: bool
     """
-    return isinstance(space, spaces.Box) and len(space.shape) == 3
+    return is_box_space_ndim(space, 3)
+
+
+def is_box_space_ndim(space: spaces.Space, ndim: int) -> bool:
+    """Check if the space is a Box space with the given number of dimensions.
+
+    :param space: Input space
+    :type space: spaces.Space
+    :param ndim: Number of dimensions
+    :type ndim: int
+
+    :return: True if the space is a Box space with the given number of dimensions, False otherwise
+    """
+    return isinstance(space, spaces.Box) and len(space.shape) == ndim
 
 
 def is_vector_space(space: spaces.Space) -> bool:
@@ -391,7 +404,7 @@ def is_vector_space(space: spaces.Space) -> bool:
     :rtype: bool
     """
     return (
-        (isinstance(space, spaces.Box) and len(space.shape) == 1)
+        (isinstance(space, spaces.Box) and len(space.shape) in [0, 1])
         or isinstance(space, spaces.Discrete)
         or isinstance(space, spaces.MultiDiscrete)
     )

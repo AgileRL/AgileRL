@@ -299,6 +299,20 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
 
         return self.encoder(x)
 
+    def forward_head(self, latent: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+        """Forward pass of the network head using pre-computed latent encodings.
+
+        :param latent: Latent encodings from the encoder.
+        :type latent: torch.Tensor
+
+        :return: Output of the network head.
+        :rtype: torch.Tensor
+        """
+        if not hasattr(self, "head_net"):
+            raise AttributeError("Network does not have a head_net attribute.")
+
+        return self.head_net(latent, *args, **kwargs)
+
     def build_network_head(self, *args, **kwargs) -> None:
         """Build the head of the network."""
         raise NotImplementedError(

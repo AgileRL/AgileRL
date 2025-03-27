@@ -21,6 +21,7 @@ from agilerl.utils.algo_utils import (
     is_vectorized_experiences,
     make_safe_deepcopies,
     obs_channels_to_first,
+    share_encoder_parameters,
     stack_experiences,
 )
 
@@ -78,6 +79,8 @@ class PPO(RLAlgorithm):
     :type accelerator: accelerate.Accelerator(), optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
+    :param share_encoders: Flag to share encoder parameters between actor and critic, defaults to False
+    :type share_encoders: bool, optional
     """
 
     def __init__(
@@ -107,6 +110,7 @@ class PPO(RLAlgorithm):
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
+        share_encoders: bool = True,
     ) -> None:
 
         super().__init__(
@@ -218,9 +222,7 @@ class PPO(RLAlgorithm):
             head_config = net_config.get("head_config", None)
             if head_config is not None:
                 critic_head_config = copy.deepcopy(head_config)
-                critic_head_config["output_activation"] = (
-                    None  # Value function has no output activation
-                )
+                critic_head_config["output_activation"] = None
             else:
                 critic_head_config = MlpNetConfig(hidden_size=[16])
 
@@ -238,6 +240,12 @@ class PPO(RLAlgorithm):
                 observation_space, device=device, **critic_net_config
             )
 
+        # Initialize encoder sharing if requested
+        self.share_encoders = share_encoders
+        if self.share_encoders:
+            self.share_encoder_parameters()
+            self.register_mutation_hook(self.share_encoder_parameters)
+
         self.optimizer = OptimizerWrapper(
             optim.Adam, networks=[self.actor, self.critic], lr=self.lr
         )
@@ -248,6 +256,10 @@ class PPO(RLAlgorithm):
         # Register network groups for mutations
         self.register_network_group(NetworkGroup(eval=self.actor, policy=True))
         self.register_network_group(NetworkGroup(eval=self.critic))
+
+    def share_encoder_parameters(self) -> None:
+        """Shares the encoder parameters between the actor and critic."""
+        share_encoder_parameters(self.actor, self.critic)
 
     def scale_to_action_space(
         self, action: ArrayLike, convert_to_torch: bool = False
@@ -338,13 +350,27 @@ class PPO(RLAlgorithm):
             self.actor.eval()
             self.critic.eval()
             with torch.no_grad():
-                action_dist = self.actor(obs, action_mask=action_mask)
-                state_values = self.critic(obs).squeeze(-1)
+                latent_pi = self.actor.extract_features(obs)
+                action_dist = self.actor.forward_head(
+                    latent_pi, action_mask=action_mask
+                )
+
+                # Handle shared encoder case
+                if self.share_encoders:
+                    state_values = self.critic.forward_head(latent_pi).squeeze(-1)
+                else:
+                    state_values = self.critic(obs).squeeze(-1)
         else:
             self.actor.train()
             self.critic.train()
-            action_dist = self.actor(obs, action_mask=action_mask)
-            state_values = self.critic(obs).squeeze(-1)
+            latent_pi = self.actor.extract_features(obs)
+            action_dist = self.actor.forward_head(latent_pi, action_mask=action_mask)
+
+            # Handle shared encoder case
+            if self.share_encoders:
+                state_values = self.critic.forward_head(latent_pi).squeeze(-1)
+            else:
+                state_values = self.critic(obs).squeeze(-1)
 
         if not isinstance(action_dist, torch.distributions.Distribution):
             raise ValueError(
