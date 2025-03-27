@@ -12,12 +12,16 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.training.train_llm import finetune_evolvable_llm
+from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
+<<<<<<< HEAD
 
 MODEL_PATH = "Qwen/Qwen2.5-3B"
+=======
+MODEL_PATH = "Qwen/Qwen2.5-1.5B"
+>>>>>>> 940155d4163f7dd58d8617d8eed0d0832c2b1f2e
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
 
@@ -146,14 +150,14 @@ def combined_rewards(completion, solution, prompt):
     )
 
     print(
-        f"""
-    ============================================ \n
-    Completion: {completion}, \n
-    Numbers: {prompt}, \n
-    Correct Answer: {solution.item()} \n
-    Reward: {reward}
-    """
-    )
+    f"""
+============================================ \n
+Completion: {completion}, \n
+Numbers: {prompt}, \n
+Correct Answer: {solution.item()} \n
+Reward: {reward}
+"""
+)
 
     if reward == 2.0:
         with open("countdown_completions.txt", "a") as text_file:
@@ -188,6 +192,7 @@ def main(init_hp, mut_p):
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
     # Convert the HuggingFace dataset into a Gymnasium environment
+    accelerators = [Accelerator() for _ in range(init_hp["POP_SIZE"])]
     env = HuggingFaceGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
@@ -197,7 +202,6 @@ def main(init_hp, mut_p):
         data_batch_size_per_gpu=2,
         custom_collate_fn=custom_collate_fn,
     )
-    accelerators = [Accelerator() for _ in range(init_hp["POP_SIZE"])]
     init_hp["actor_network"] = model
     init_hp["pad_token_id"] = tokenizer.eos_token_id
 
@@ -239,18 +243,18 @@ def main(init_hp, mut_p):
         accelerator=accelerators[0],
     )
 
-    finetune_evolvable_llm(
+    finetune_llm(
         pop=pop,
         env=env,
         init_hp=init_hp,
-        evaluation_interval=1,
-        wb=True,
+        evaluation_interval=10,
+        wb=False,
         checkpoint_interval=100,
         checkpoint_path="saved_llms",
         max_reward=2.0,
-        evo_steps=10,
-        mutation=None,
-        tournament=None,
+        evo_steps=500,
+        # mutation=mutations,
+        # tournament=tournament,
         accelerator=accelerators[0],
     )
 
