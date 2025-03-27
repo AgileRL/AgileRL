@@ -6,6 +6,8 @@ import yaml
 from accelerate import Accelerator
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
+from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_multi_agent_on_policy import train_multi_agent_on_policy
 from agilerl.utils.utils import (
     create_population,
@@ -35,7 +37,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
     print(f"DEVICE: {device}")
 
     env = importlib.import_module(f"{INIT_HP['ENV_NAME']}").parallel_env
-    env_kwargs = dict(max_cycles=25, continuous_actions=True)
+    env_kwargs = dict(max_cycles=25, continuous_actions=False)
     env = make_multi_agent_vect_envs(env, num_envs=INIT_HP["NUM_ENVS"], **env_kwargs)
 
     if INIT_HP["CHANNELS_LAST"]:
@@ -57,25 +59,25 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
 
     INIT_HP["AGENT_IDS"] = [agent_id for agent_id in env.agents]
 
-    # tournament = TournamentSelection(
-    #     INIT_HP["TOURN_SIZE"],
-    #     INIT_HP["ELITISM"],
-    #     INIT_HP["POP_SIZE"],
-    #     INIT_HP["EVAL_LOOP"],
-    # )
+    tournament = TournamentSelection(
+        INIT_HP["TOURN_SIZE"],
+        INIT_HP["ELITISM"],
+        INIT_HP["POP_SIZE"],
+        INIT_HP["EVAL_LOOP"],
+    )
 
-    # mutations = Mutations(
-    #     no_mutation=MUTATION_PARAMS["NO_MUT"],
-    #     architecture=MUTATION_PARAMS["ARCH_MUT"],
-    #     new_layer_prob=MUTATION_PARAMS["NEW_LAYER"],
-    #     parameters=MUTATION_PARAMS["PARAMS_MUT"],
-    #     activation=MUTATION_PARAMS["ACT_MUT"],
-    #     rl_hp=MUTATION_PARAMS["RL_HP_MUT"],
-    #     mutation_sd=MUTATION_PARAMS["MUT_SD"],
-    #     rand_seed=MUTATION_PARAMS["RAND_SEED"],
-    #     device=device,
-    #     accelerator=accelerator,
-    # )
+    mutations = Mutations(
+        no_mutation=MUTATION_PARAMS["NO_MUT"],
+        architecture=MUTATION_PARAMS["ARCH_MUT"],
+        new_layer_prob=MUTATION_PARAMS["NEW_LAYER"],
+        parameters=MUTATION_PARAMS["PARAMS_MUT"],
+        activation=MUTATION_PARAMS["ACT_MUT"],
+        rl_hp=MUTATION_PARAMS["RL_HP_MUT"],
+        mutation_sd=MUTATION_PARAMS["MUT_SD"],
+        rand_seed=MUTATION_PARAMS["RAND_SEED"],
+        device=device,
+        accelerator=accelerator,
+    )
 
     hp_config = HyperparameterConfig(
         lr=RLParameter(min=MUTATION_PARAMS["MIN_LR"], max=MUTATION_PARAMS["MAX_LR"]),
@@ -123,8 +125,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
         eval_steps=INIT_HP["EVAL_STEPS"],
         eval_loop=INIT_HP["EVAL_LOOP"],
         target=INIT_HP["TARGET_SCORE"],
-        # tournament=tournament,
-        # mutation=mutations,
+        tournament=tournament,
+        mutation=mutations,
         wb=INIT_HP["WANDB"],
         accelerator=accelerator,
     )

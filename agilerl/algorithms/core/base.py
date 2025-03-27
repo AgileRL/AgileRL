@@ -1070,10 +1070,14 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
             action_space, (spaces.Discrete, spaces.MultiDiscrete)
         )
         self.min_action = (
-            np.array(action_space.low) if hasattr(action_space, "low") else None
+            np.array(action_space.low).astype(np.float32)
+            if hasattr(action_space, "low")
+            else None
         )
         self.max_action = (
-            np.array(action_space.high) if hasattr(action_space, "high") else None
+            np.array(action_space.high).astype(np.float32)
+            if hasattr(action_space, "high")
+            else None
         )
 
     def preprocess_observation(self, observation: NumpyObsType) -> TorchObsType:
@@ -1174,8 +1178,12 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         # For continuous action spaces, store the min and max action values
         if not self.discrete_actions:
-            self.min_action = [space.low for space in action_spaces]
-            self.max_action = [space.high for space in action_spaces]
+            self.min_action = [
+                np.array(space.low).astype(np.float32) for space in action_spaces
+            ]
+            self.max_action = [
+                np.array(space.high).astype(np.float32) for space in action_spaces
+            ]
         else:
             self.min_action, self.max_action = None, None
 
