@@ -5,10 +5,11 @@ from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from numbers import Number
 from typing import Any, Dict, Iterable, List, Optional, Tuple, TypeGuard, Union
-
+import os
 import numpy as np
 import torch
 import torch.nn.functional as F
+import glob
 from accelerate.optimizer import AcceleratedOptimizer
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from gymnasium import spaces
@@ -809,3 +810,19 @@ def create_warmup_cosine_scheduler(
         milestones=[warmup_epochs],
     )
     return scheduler
+
+
+def remove_nested_files(files: str) -> None:
+    """Remove nested files from a list of files.
+
+    :param files: List of files to remove nested files from
+    :type files: List[str]
+    :param depth: Depth of the nested files, defaults to 0
+    :type depth: int, optional
+    """
+    for _file in files:
+        if os.path.isdir(_file):
+            remove_nested_files(glob.glob(_file + "/*"))
+            os.rmdir(_file)
+        else:
+            os.remove(_file)

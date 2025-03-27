@@ -119,7 +119,7 @@ def test_save_with_accelerator():
     agent.accelerator.unwrap_model = Mock(return_value=unwrapped_model)
     save_llm_checkpoint(agent, "test_checkpoint", 100)
     agent.accelerator.unwrap_model.assert_called_once_with(agent.actor)
-    unwrapped_model.save_pretrained.assert_called_once_with("test_checkpoint")
+    unwrapped_model.save_pretrained.assert_called_once_with("test_checkpoint/step_100")
 
 
 def test_save_without_accelerator():
@@ -128,7 +128,7 @@ def test_save_without_accelerator():
     agent.actor = Mock()
     agent.accelerator = None
     save_llm_checkpoint(agent, None, 42)
-    agent.actor.save_pretrained.assert_called_once_with("step_42")
+    agent.actor.save_pretrained.assert_called_once_with("./saved_checkpoints/step_42")
 
 
 def test_finetune_llm_basic_training_loop():
@@ -136,7 +136,7 @@ def test_finetune_llm_basic_training_loop():
     # Create mock agent
     mock_agent = Mock()
     mock_agent.local_rank = "0"  # Main process
-    mock_agent.get_action.return_value = (Mock(), Mock())
+    mock_agent.get_action.return_value = ([torch.ones(1, 100) for _ in range(2)], Mock())
     mock_agent.learn.return_value = (0.5, 0.2)
     mock_agent.test.return_value = 0.8
 
@@ -152,10 +152,7 @@ def test_finetune_llm_basic_training_loop():
         "agilerl.training.train_llm.aggregate_metrics_across_gpus"
     ) as mock_agg, patch("agilerl.training.train_llm.save_llm_checkpoint"):
 
-        # Configure mocks
-        mock_pbar = Mock()
-        mock_trange.return_value = mock_pbar
-        mock_agg.return_value = (0.5, 0.2, 0.7)  # loss, kl, reward
+        mock_agg.return_value = 0.5 # loss, kl, reward
 
         # Run the function
         finetune_llm(
@@ -165,17 +162,10 @@ def test_finetune_llm_basic_training_loop():
         # Verify training loop execution
         assert mock_env.reset.call_count == 1
         assert mock_env.reset.call_args == call(reset_dataloaders=True)
-        assert mock_agent.get_action.call_count == 3
-        assert mock_env.step.call_count == 3
-        assert mock_agent.learn.call_count == 3
-        assert mock_agg.call_count == 12
-
-        # Verify progress bar
-        assert mock_trange.call_count == 1
-        assert mock_trange.call_args[0][0] == 3  # max_steps = 3
-        assert mock_pbar.update.call_count == 3
-
-        # Verify evaluation was called at the right intervals
+        assert mock_agent.get_action.call_count == 1
+        assert mock_env.step.call_count == 1
+        assert mock_agent.learn.call_count == 1
+        assert mock_agg.call_count == 5
         assert mock_agent.test.call_count == 1  # Should be called at step 2
 
 

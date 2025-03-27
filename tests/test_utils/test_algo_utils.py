@@ -3,12 +3,14 @@ import torch
 import torch.nn as nn
 from accelerate import Accelerator
 from torch.optim.lr_scheduler import SequentialLR
-
+import os
+import glob
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     create_warmup_cosine_scheduler,
     stack_and_pad_experiences,
     unwrap_optimizer,
+    remove_nested_files,
 )
 
 
@@ -136,3 +138,25 @@ def test_create_warmup_cosine_scheduler():
         0.1,
     )
     assert isinstance(lr_scheduler, SequentialLR)
+
+
+def test_remove_nested_files():
+    """Test the remove_nested_files function"""
+    # Create test directory structure
+    os.makedirs("test_dir/nested_dir", exist_ok=True)
+    
+    # Create some test files
+    with open("test_dir/file1.txt", "w") as f:
+        f.write("test1")
+    with open("test_dir/nested_dir/file2.txt", "w") as f:
+        f.write("test2")
+        
+    # Test removing the directory structure
+    files = glob.glob("test_dir/*")
+    remove_nested_files(files)
+    
+    # Verify files and directories were removed
+    assert not os.path.exists("test_dir/file1.txt")
+    assert not os.path.exists("test_dir/nested_dir/file2.txt") 
+    assert not os.path.exists("test_dir/nested_dir")
+    

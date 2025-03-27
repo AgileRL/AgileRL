@@ -93,6 +93,7 @@ Effective learning batch_size: {data_increment} * {agent.batch_size} * {grad_acc
     # calling env.reset() supplies the first batch of training data
     prompts = env.reset(reset_dataloaders=True)
     for i in range(max_steps):
+        print("IIIIII", i)
         completion_ids, action_masks = agent.get_action(prompts)
         completion_lengths = np.mean([x.shape[1] for x in completion_ids])
 
@@ -154,7 +155,7 @@ Effective learning batch_size: {data_increment} * {agent.batch_size} * {grad_acc
 
 
 def finetune_evolvable_llm(
-    pop: GRPO,
+    pop: List[GRPO],
     env: HuggingFaceGym,
     init_hp: Optional[Dict[str, Any]] = None,
     checkpoint_interval: Optional[int] = None,
@@ -274,10 +275,6 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                     agent_metrics_dict[f"agent_{agent_idx}/test_metrics"] = (
                         test_metrics_dict
                     )
-                #     if wb:
-                #         wandb.log(test_metrics_dict)
-                # if wb:
-                #     wandb.log(metrics_dict)
                 if (
                     checkpoint_path is not None
                     and checkpoint_interval is not None
@@ -370,28 +367,21 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                         for agent_idx, _ in enumerate(pop)
                     ]
                 ),
-                "HPO_agent_0/beta": pop[0].beta,
-                "HPO_agent_1/beta": pop[1].beta,
-                "HPO_agent_0/lr": pop[0].lr,
-                "HPO_agent_1/lr": pop[1].lr,
-                "HPO_agent_0/group_size": pop[0].group_size,
-                "HPO_agent_1/group_size": pop[1].group_size,
             }
-            try:
+            hpo_dict = {f"HPO_agent_{agent_idx}/{key}": getattr(agent, key) for agent_idx, agent in enumerate(pop) for key in agent.registry.hp_config.config.keys()}
+            wandb_dict |= hpo_dict
+
+            if agg_test_metrics is not None:
                 test_dict = {
                     "Eval/Best reward": np.max(
                         [
-                            agent_metrics_dict.get(
-                                f"agent_{agent_idx}/test_metrics", None
-                            ).get("Eval/Mean reward", None)
+                            agent_metrics_dict[f"agent_{agent_idx}/test_metrics"]["Eval/Mean reward"]
                             for agent_idx, _ in enumerate(pop)
                         ]
                     ),
                     "Eval/Mean population reward": np.mean(
                         [
-                            agent_metrics_dict.get(
-                                f"agent_{agent_idx}/test_metrics", None
-                            ).get("Eval/Mean reward", None)
+                            agent_metrics_dict[f"agent_{agent_idx}/test_metrics"]["Eval/Mean reward"]
                             for agent_idx, _ in enumerate(pop)
                         ]
                     ),
@@ -404,12 +394,13 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                         ]
                     ),
                 }
-            except:
-                test_dict = {"key": None}  # FIXME sort this out tomorrow
-            if all(val is not None for val in test_dict.values()):
                 wandb_dict |= test_dict
             wandb.log(wandb_dict)
 
+    if wb and accelerator.is_main_process:
+        accelerator.wait_for_everyone()
+        wandb.finish()
+    pbar.close()
 
 def gather_tensor(tensor: torch.Tensor, agent: GRPO) -> torch.Tensor:
     """Gather tensors from gpus
@@ -463,7 +454,7 @@ def save_llm_checkpoint(agent: GRPO, checkpoint_path: str | None, step: int) -> 
     :param step: Training step
     :type step: int
     """
-    base_path = "./saved_llms" if checkpoint_path is None else checkpoint_path
+    base_path = "./saved_checkpoints" if checkpoint_path is None else checkpoint_path
     path = base_path + f"/step_{step}"
     os.makedirs(path, exist_ok=True)
     if agent.accelerator is not None:

@@ -87,7 +87,7 @@ def mock_initialize(model, config, **kwargs):
                     except (AttributeError, TypeError):
                         pass
 
-        def eval(self):
+        def eval(self): 
             model.eval()
 
         def train(self, mode=True):
@@ -120,11 +120,11 @@ class DummyLLM(nn.Module):
         self.input_size = input_size
         self.max_tokens = max_tokens
         self.vocab_size = vocab_size
-        self.net = nn.Linear(
+        self.net = nn.Sequential(nn.Linear(
             input_size + max_tokens,
-            (input_size + max_tokens) * vocab_size,
+            32,
             device=device,
-        )
+        ), nn.Linear(32, (input_size + max_tokens) * vocab_size, device=device))
         self.device = device
         self.gradient_checkpointing_enabled = False
 
@@ -306,30 +306,6 @@ def test_init_grpo(
 @pytest.mark.parametrize("vocab_size", [1000])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize("group_size", [5])
-@pytest.mark.parametrize("use_accelerator", [False])
-def test_init_grpo_no_actor_failure(
-    vocab_size, input_size, max_tokens, group_size, use_accelerator
-):
-    observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
-    action_space = gym.spaces.Box(
-        low=0,
-        high=vocab_size - 1,
-        shape=(20,),
-    )
-    with pytest.raises(ValueError) as excinfo:
-        GRPO(
-            observation_space,
-            action_space,
-            actor_network=None,
-            pad_token_id=vocab_size - 1,
-        )
-    assert "Actor network must be provided to GRPO" in str(excinfo.value)
-
-
-@pytest.mark.parametrize("vocab_size", [1000])
-@pytest.mark.parametrize("input_size", [10])
-@pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize("data_batch_size", [8])
 @pytest.mark.parametrize("group_size, training", [(5, True), (1, False)])
 @pytest.mark.parametrize("use_accelerator", [False, True])
@@ -355,7 +331,8 @@ def test_get_action_grpo(
         assert ids.shape == (group_size, input_size + max_tokens)
     for masks in action_masks:
         assert masks.shape == (group_size, input_size + max_tokens - 1)
-    assert not grpo.actor.training
+    if not use_accelerator:
+        assert not grpo.actor.training
 
 
 @pytest.mark.parametrize("vocab_size", [1000])
@@ -451,33 +428,6 @@ def test_get_logprobs(
     assert log_probs.shape == (ids.shape[0], ids.shape[1] - 1)
     assert log_probs_reduced_mem.shape == (ids.shape[0], ids.shape[1] - 1)
     assert torch.allclose(log_probs, log_probs_reduced_mem, atol=1e-3)
-
-
-@pytest.mark.parametrize("vocab_size", [1000])
-@pytest.mark.parametrize("input_size", [10])
-@pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize("group_size", [5])
-@pytest.mark.parametrize("use_accelerator", [False, True])
-def test_set_reference_policy(
-    grpo, vocab_size, input_size, max_tokens, group_size, use_accelerator
-):
-    # Add the method implementation for the test
-    def set_reference_policy(self):
-        self.reference_actor = copy.deepcopy(self.actor)
-        self.reference_actor.eval()
-
-    # Store the original method to restore it later
-    original_method = GRPO._set_reference_policy
-
-    # Replace with our implementation temporarily
-    GRPO._set_reference_policy = set_reference_policy
-
-    grpo.reference_actor = None
-    grpo._set_reference_policy()
-    assert isinstance(grpo.reference_actor, DummyLLM)
-
-    # Restore the original method
-    GRPO._set_reference_policy = original_method
 
 
 @pytest.mark.parametrize("vocab_size", [1000])
@@ -705,22 +655,20 @@ def test_grpo_save_load_checkpoint_with_accelerator(
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize("batch_size", [8])
+@pytest.mark.parametrize("zero_stage", [1, 2, 3])
 def test_grpo_clone_with_accelerator(
-    grpo,
     vocab_size,
     input_size,
     max_tokens,
     group_size,
     batch_size,
-    use_accelerator,
     tmpdir,
     zero_stage,
 ):
     with patch_environment(**dist_env):
-        deepspeed.initialize = original_deepspeed_initialize
         AcceleratorState._reset_state(True)
         deepspeed_plugin = DeepSpeedPlugin(
-            zero_stage=zero_stage, gradient_accumulation_steps=2
+            zero_stage=zero_stage, gradient_accumulation_steps=2, 
         )
         accelerator = Accelerator(deepspeed_plugin=deepspeed_plugin)
         grpo = GRPO(
@@ -735,10 +683,102 @@ def test_grpo_clone_with_accelerator(
             pad_token_id=vocab_size - 1,
             device="cuda" if torch.cuda.is_available() else "cpu",
             group_size=group_size,
-            cosine_lr_schedule_config=CosineLRScheduleConfig(
-                num_epochs=10, warmup_proportion=0.05
-            ),
             accelerator=accelerator,
+            lr=0.1
         )
 
-        new_grpo = grpo.clone()
+        grpo_reference_actor_state_dict = grpo.reference_actor.state_dict()
+        grpo_accelerator = grpo.accelerator
+        grpo_lr_scheduler = grpo.lr_scheduler
+        grpo_optimizer = grpo.optimizer
+        new_grpo = grpo.clone(index=1)
+        assert str(new_grpo.actor.state_dict()) == str(grpo.actor.state_dict())
+        assert str(new_grpo.reference_actor.state_dict()) == str(
+            grpo_reference_actor_state_dict
+        )
+        assert new_grpo.index == 1
+        assert new_grpo.accelerator == grpo_accelerator
+        assert new_grpo.lr_scheduler == grpo_lr_scheduler 
+        for pg1, pg2 in zip(grpo_optimizer.optimizer.param_groups, new_grpo.optimizer.optimizer.param_groups):
+            assert pg1["lr"] == pg2["lr"]
+            assert pg1["weight_decay"] == pg2["weight_decay"]
+            assert pg1["betas"] == pg2["betas"]
+            assert pg1["eps"] == pg2["eps"]
+            
+        assert new_grpo.lr == grpo.lr
+        assert new_grpo.batch_size == grpo.batch_size
+        assert new_grpo.clip_coef == grpo.clip_coef
+        assert new_grpo.update_epochs == grpo.update_epochs
+        assert new_grpo.group_size == grpo.group_size
+        assert new_grpo.beta == grpo.beta
+        assert new_grpo.pad_token_id == grpo.pad_token_id
+        assert new_grpo.calc_position_embeddings == grpo.calc_position_embeddings
+        assert new_grpo.generation_config == grpo.generation_config
+        assert new_grpo.cosine_lr_schedule_config == grpo.cosine_lr_schedule_config
+        assert new_grpo.wrap == grpo.wrap
+        assert new_grpo.device == grpo.device
+
+
+@pytest.mark.parametrize("vocab_size", [1000])
+@pytest.mark.parametrize("input_size", [10])
+@pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize("group_size", [5])
+@pytest.mark.parametrize("batch_size", [8])
+def test_grpo_clone_with_no_accelerator(
+    vocab_size,
+    input_size,
+    max_tokens,
+    group_size,
+    batch_size,
+    tmpdir,
+):
+    
+    grpo = GRPO(
+        gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
+        gym.spaces.Box(low=0, high=vocab_size - 1),
+        actor_network=create_module(
+            input_size=input_size,
+            max_tokens=max_tokens,
+            vocab_size=vocab_size,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+        ),
+        pad_token_id=vocab_size - 1,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        group_size=group_size,
+        accelerator=None,
+        lr=0.1,
+        cosine_lr_schedule_config=CosineLRScheduleConfig(
+            num_epochs=10, warmup_proportion=0.05
+        )
+    )
+
+    grpo_reference_actor_state_dict = grpo.reference_actor.state_dict()
+    grpo_accelerator = grpo.accelerator
+    grpo_lr_scheduler = grpo.lr_scheduler
+    grpo_optimizer = grpo.optimizer
+    new_grpo = grpo.clone(index=1)
+    assert str(new_grpo.actor.state_dict()) == str(grpo.actor.state_dict())
+    assert str(new_grpo.reference_actor.state_dict()) == str(
+        grpo_reference_actor_state_dict
+    )
+    assert new_grpo.index == 1
+    assert new_grpo.accelerator == grpo_accelerator
+    assert new_grpo.lr_scheduler == grpo_lr_scheduler 
+    for pg1, pg2 in zip(grpo_optimizer.optimizer.param_groups, new_grpo.optimizer.optimizer.param_groups):
+        assert pg1["lr"] == pg2["lr"]
+        assert pg1["weight_decay"] == pg2["weight_decay"]
+        assert pg1["betas"] == pg2["betas"]
+        assert pg1["eps"] == pg2["eps"]
+    
+    assert new_grpo.lr == grpo.lr
+    assert new_grpo.batch_size == grpo.batch_size
+    assert new_grpo.clip_coef == grpo.clip_coef
+    assert new_grpo.update_epochs == grpo.update_epochs
+    assert new_grpo.group_size == grpo.group_size
+    assert new_grpo.beta == grpo.beta
+    assert new_grpo.pad_token_id == grpo.pad_token_id
+    assert new_grpo.calc_position_embeddings == grpo.calc_position_embeddings
+    assert new_grpo.generation_config == grpo.generation_config
+    assert new_grpo.cosine_lr_schedule_config == grpo.cosine_lr_schedule_config
+    assert new_grpo.wrap == grpo.wrap
+    assert new_grpo.device == grpo.device

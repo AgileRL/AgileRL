@@ -662,6 +662,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         # Make copy using input arguments
         input_args = EvolvableAlgorithm.inspect_attributes(self, input_args_only=True)
         input_args["wrap"] = wrap
+
+        print("INPUT ARGS", input_args)
         clone = type(self)(**input_args)
 
         if self.accelerator is not None:
@@ -676,7 +678,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 cloned_modules[attr] = obj.clone()
 
             setattr(clone, attr, cloned_modules[attr])
-
         # Reinitialize optimizers
         for opt_config in self.registry.optimizers:
             orig_optimizer: OptimizerWrapper = getattr(self, opt_config.name)
