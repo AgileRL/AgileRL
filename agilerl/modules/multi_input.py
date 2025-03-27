@@ -422,7 +422,7 @@ class EvolvableMultiInput(EvolvableModule):
         :param numb_new_nodes: Number of new nodes to add, defaults to None
         :type numb_new_nodes: int, optional
 
-        :return: Configuration for adding a latent node.
+        :return: Dictionary specifying the number of nodes added.
         :rtype: Dict[str, Any]
         """
         if numb_new_nodes is None:
@@ -442,7 +442,7 @@ class EvolvableMultiInput(EvolvableModule):
         :param numb_new_nodes: Number of nodes to remove, defaults to None
         :type numb_new_nodes: int, optional
 
-        :return: Configuration for removing a latent node.
+        :return: Dictionary specifying the number of nodes removed.
         :rtype: Dict[str, Any]
         """
         if numb_new_nodes is None:
@@ -462,11 +462,9 @@ class EvolvableMultiInput(EvolvableModule):
 
         # Calculate total extracted features dimension
         extracted_features_dim = self.calc_extracted_features_dim()
-        vector_features_dim = (
-            self.latent_dim if self.vector_space_mlp else self.total_vector_dims
+        features_dim = extracted_features_dim + self.total_vector_dims * (
+            1 - self.vector_space_mlp
         )
-
-        features_dim = extracted_features_dim + vector_features_dim
         final_dense = nn.Linear(features_dim, self.num_outputs, device=self.device)
         self.final_dense = EvolvableModule.preserve_parameters(
             old_net=self.final_dense, new_net=final_dense

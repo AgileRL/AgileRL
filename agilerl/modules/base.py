@@ -526,7 +526,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         else:
             raise ValueError(f"Invalid mutation type: {mut_type}")
 
-        # Recursively disable mutations in underlying evolvable modules
+        # Recursively disable mutations in nested evolvable modules
         for module in self.modules().values():
             module.disable_mutations(mut_type)
 
@@ -664,7 +664,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
 
 class EvolvableWrapper(EvolvableModule):
     """Wrapper class for evolvable neural networks. Can be used to provide some
-    additional functionality to an EvolvableModule while maintaining its mutation methods
+    additional functionality to an `EvolvableModule` while maintaining its mutation methods
     at the top-level.
 
     :param module: The evolvable module.
@@ -712,9 +712,7 @@ class EvolvableWrapper(EvolvableModule):
                 raise AttributeError(f"Duplicate mutation method: {method}")
 
     def modules(self) -> Dict[str, "EvolvableModule"]:
-        """Returns the attributes related to the evolvable modules in the algorithm. Includes
-        attributes that are either evolvable modules or a list of evolvable modules, as well
-        as the optimizers associated with the networks.
+        """Returns the attributes related to the evolvable modules in the algorithm.
 
         :return: A dictionary of network attributes.
         :rtype: dict[str, Any]
@@ -733,8 +731,8 @@ ModuleType = TypeVar("ModuleType", bound=Union[EvolvableModule, nn.Module])
 
 
 class ModuleDict(EvolvableModule, nn.ModuleDict):
-    """Analogous to ``nn.ModuleDict``, but allows for the recursive inheritance of the
-    mutation methods of underlying evolvable modules."""
+    """Analogous to ``nn.ModuleDict``, but allows for the inheritance of the
+    mutation methods of nested evolvable modules."""
 
     @property
     def layer_mutation_methods(self) -> List[str]:
@@ -763,6 +761,13 @@ class ModuleDict(EvolvableModule, nn.ModuleDict):
         return super().items()
 
     def modules(self) -> Dict[str, EvolvableModule]:
+        """Returns the attributes related to the evolvable modules in the algorithm.
+        Includes attributes that are either evolvable modules or a list of evolvable
+        modules, as well as the optimizers associated with the networks.
+
+        :return: A dictionary of network attributes.
+        :rtype: dict[str, Any]
+        """
         return {
             name: module
             for name, module in self.items()

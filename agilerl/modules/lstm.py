@@ -152,7 +152,15 @@ class EvolvableLSTM(EvolvableModule):
         x: ArrayOrTensor,
         states: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
-        """Forward pass of the network."""
+        """Forward pass of the network.
+
+        :param x: Input tensor
+        :type x: ArrayOrTensor
+        :param states: Tuple of hidden and cell states, defaults to None
+        :type states: Tuple[torch.Tensor, torch.Tensor], optional
+        :return: Output tensor
+        :rtype: torch.Tensor
+        """
         if not isinstance(x, torch.Tensor):
             x = torch.tensor(x, dtype=torch.float32, device=self.device)
 

@@ -440,6 +440,7 @@ class Mutations:
 
         mutated_population = []
         for mutation, individual in zip(mutation_choice, population):
+            individual: SelfEvolvableAlgorithm = individual
             registry = individual.registry
 
             # Call mutation function for each individual
@@ -568,6 +569,7 @@ class Mutations:
 
         return individual
 
+    # TODO: Activation mutations should really be integrated as architecture mutations
     def activation_mutation(
         self, individual: SelfEvolvableAlgorithm
     ) -> SelfEvolvableAlgorithm:
@@ -577,7 +579,7 @@ class Mutations:
         :type individual: EvolvableAlgorithm
         """
         # Needs to stay constant for policy gradient methods
-        # TODO: Could set up an algorithm registry to make algo checks more robust
+        # NOTE: Could set up an algorithm registry to make algo checks more robust
         # OR perform activation mutations within evolvable modules directly and disable
         # on an algorithm basis
         if individual.algo in ["PPO", "DDPG", "TD3", "MADDPG", "MATD3"]:
@@ -590,6 +592,9 @@ class Mutations:
         for network_group in registry.groups:
             eval_module: OffspringType = getattr(individual, network_group.eval)
             if isinstance(eval_module, list):
+                # FIXME: Will need to modify when making multi-agent support more robust
+                # to different type sof settings (i.e. different observation spaces and thus
+                # network architectures for different agents)
                 if eval_module[0].activation is None:
                     no_activation = True
 
