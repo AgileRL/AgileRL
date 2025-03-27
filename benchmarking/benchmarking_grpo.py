@@ -233,10 +233,10 @@ def main(init_hp, mut_p):
 
     mutations = Mutations(
         no_mutation=mut_p["NO_MUT"],
-        architecture=mut_p["ARCH_MUT"],
-        new_layer_prob=mut_p["NEW_LAYER"],
-        parameters=mut_p["PARAMS_MUT"],
-        activation=mut_p["ACT_MUT"],
+        architecture=0,
+        new_layer_prob=0,
+        parameters=0,
+        activation=0,
         rl_hp=mut_p["RL_HP_MUT"],
         mutation_sd=mut_p["MUT_SD"],
         rand_seed=mut_p["RAND_SEED"],
@@ -248,11 +248,11 @@ def main(init_hp, mut_p):
         env=env,
         init_hp=init_hp,
         evaluation_interval=10,
-        wb=True,
+        wb=False,
         checkpoint_interval=100,
         checkpoint_path="saved_llms",
         max_reward=2.0,
-        evo_steps=10,
+        evo_steps=1,
         mutation=mutations,
         tournament=tournament,
         accelerator=accelerators[0]

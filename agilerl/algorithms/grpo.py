@@ -233,14 +233,12 @@ class GRPO(RLAlgorithm):
             #     # Repeat for group size
             #     input_ids = input_ids.repeat(1, group_size, 1).reshape(-1, input_ids.size(-1)).to(self.actor.device)
             #     attention_mask = attention_mask.repeat(1, group_size, 1).reshape(-1, attention_mask.size(-1)).to(self.actor.device)
-
             #     # Generate completions
             #     completion_ids = self.actor.generate(
             #         input_ids=input_ids,
             #         attention_mask=attention_mask,
             #         generation_config=self.generation_config,
             #     )
-
             #     # Create action masks
             #     action_masks = torch.zeros_like(
             #         completion_ids, dtype=torch.bool, device=self.device
@@ -248,7 +246,6 @@ class GRPO(RLAlgorithm):
             #     action_masks[:, input_ids.size(1):] = True
             #     action_masks[completion_ids == self.pad_token_id] = False
             #     action_masks = action_masks[:, 1:]
-
             #     # Reshape back to original batch structure
             #     completion_ids = completion_ids.reshape(len(states), group_size, -1)
             #     action_masks = action_masks.reshape(len(states), group_size, -1)
@@ -683,15 +680,15 @@ class GRPO(RLAlgorithm):
         """
         if self.accelerator is not None:
             self.accelerator.free_memory()
-            self._save_distributed_actor(f"GRPO/agent_{self.index}")
             self.accelerator.wait_for_everyone()
+            self._save_distributed_actor(f"GRPO_test/agent_{self.index}")
             input_args = EvolvableAlgorithm.inspect_attributes(
                 self, input_args_only=True
             )
             input_args["clone"] = True
             input_args["actor_network"] = self.accelerator.unwrap_model(self.actor)
             clone = type(self)(**input_args)
-            clone.reference_actor = self.reference_actor
+            clone.reference_actor = self.reference_actor 
             clone.reference_actor.eval()
             accelerator = clone.accelerator
             clone = EvolvableAlgorithm.copy_attributes(self, clone)
@@ -700,14 +697,22 @@ class GRPO(RLAlgorithm):
                 clone.index = index
             for hook in clone.registry.hooks:
                 getattr(clone, hook)()
-            clone._load_distributed_actor(f"GRPO/agent_{self.index}")
             clone.accelerator.wait_for_everyone()
-            saved_state_files = glob.glob(f"GRPO/agent_{self.index}*")
-            for file in saved_state_files:
-                try:
-                    os.remove(file)
-                except Exception:
-                    pass
+            clone._load_distributed_actor(f"GRPO_test/agent_{self.index}")
+            saved_state_files = glob.glob(f"GRPO_test/agent_{self.index}/*")
+            clone.accelerator.wait_for_everyone()
+            if clone.accelerator.is_main_process:
+                remove_nested_files(saved_state_files)
         else:
             clone = super().clone(index, wrap)
         return clone
+
+
+def remove_nested_files(files: str, depth: int = 0) -> None:
+    depth += 1
+    for _file in files:
+        if os.path.isdir(_file):
+            remove_nested_files(glob.glob(_file+'/*'), depth)
+            os.rmdir(_file)
+        else:
+            os.remove(_file)

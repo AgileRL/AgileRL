@@ -308,7 +308,7 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                 #         end="\r",
                 #     )
         accelerator.wait_for_everyone()
-        if i % evo_steps == 0:
+        if (i + 1) % evo_steps == 0:
             if tournament and mutation is not None:
                 pop = tournament_selection_and_mutation(
                 population=pop,
@@ -317,6 +317,8 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                 env_name=env.name,
                 accelerator=None, # Set as None for LLM finetuning as it does not require the same accelerator handling as standard RL models
             ) 
+
+
         if wb and accelerator.is_main_process:
             wandb_dict = {
                 "Train/Best reward": np.max([agent_metrics_dict[f"agent_{agent_idx}/train_metrics"]["Train/Mean reward"] for agent_idx,_ in enumerate(pop)]),
