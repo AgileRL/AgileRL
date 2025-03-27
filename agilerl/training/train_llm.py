@@ -286,28 +286,29 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                 agent.scores.append(mean_scores)
                 total_steps += effective_data_batch_size
 
-                if verbose:
-                    fitness = [str(round(agent.fitness[-1], 2)) for agent in pop]
-                    avg_fitness = [
-                        "%.2f" % np.mean(agent.fitness[-5:]) for agent in pop
-                    ]
-                    avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
-                    agents = [agent.index for agent in pop]
-                    num_steps = [agent.steps[-1] for agent in pop]
-                    muts = [agent.mut for agent in pop]
-                    print(
-                        f"""
-                        --- Global Steps {total_steps} ---
-                        Fitness:\t\t{fitness}
-                        Score:\t\t{mean_scores}
-                        5 fitness avgs:\t{avg_fitness}
-                        10 score avgs:\t{avg_score}
-                        Agents:\t\t{agents}
-                        Steps:\t\t{num_steps}
-                        Mutations:\t\t{muts}
-                        """,
-                        end="\r",
-                    )
+                # if verbose:
+                    
+                #     fitness = [str(round(agent.fitness[-1], 2)) for agent in pop]
+                #     avg_fitness = [
+                #         "%.2f" % np.mean(agent.fitness[-5:]) for agent in pop
+                #     ]
+                #     avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
+                #     agents = [agent.index for agent in pop]
+                #     num_steps = [agent.steps[-1] for agent in pop]
+                #     muts = [agent.mut for agent in pop]
+                #     print(
+                #         f"""
+                #         --- Global Steps {total_steps} ---
+                #         Fitness:\t\t{fitness}
+                #         Score:\t\t{mean_scores}
+                #         5 fitness avgs:\t{avg_fitness}
+                #         10 score avgs:\t{avg_score}
+                #         Agents:\t\t{agents}
+                #         Steps:\t\t{num_steps}
+                #         Mutations:\t\t{muts}
+                #         """,
+                #         end="\r",
+                #     )
         accelerator.wait_for_everyone()
         if (i + 1) % evo_steps == 0:
             if tournament and mutation is not None:
