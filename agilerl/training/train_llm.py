@@ -1,8 +1,7 @@
-import os
+import warnings
 from typing import Any, Dict, List, Optional
 
 import numpy as np
-import torch
 import torch.distributed as dist
 from accelerate import Accelerator
 from tqdm import trange
@@ -10,8 +9,15 @@ from tqdm import trange
 import wandb
 from agilerl.algorithms import GRPO
 from agilerl.algorithms.core.base import RLAlgorithm
+from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.llm_utils import HuggingFaceGym
-from agilerl.utils.utils import init_wandb, tournament_selection_and_mutation
+from agilerl.utils.utils import (
+    aggregate_metrics_across_gpus,
+    init_wandb,
+    save_llm_checkpoint,
+    tournament_selection_and_mutation,
+)
 
 InitDictType = Optional[Dict[str, Any]]
 PopulationType = List[RLAlgorithm]
@@ -21,18 +27,61 @@ def finetune_llm(
     pop: List[GRPO],
     env: HuggingFaceGym,
     init_hp: Optional[Dict[str, Any]] = None,
-    checkpoint_interval: Optional[int] = None,
-    checkpoint_path: Optional[str] = None,
+    save_elite: Optional[bool] = None,
+    elite_path: Optional[str] = None,
     wb: bool = False,
-    evo_steps: int = 500,
-    tournament=None,
-    mutation=None,
+    evo_steps: Optional[int] = None,
+    tournament: Optional[TournamentSelection] = None,
+    mutation: Optional[Mutations] = None,
     wandb_api_key: Optional[str] = None,
     evaluation_interval: Optional[int] = 10,
     max_reward: Optional[int] = None,
     verbose: bool = True,
     accelerator: Optional[Accelerator] = None,
 ):
+    """
+    Finetunes a population of GRPOs on a HuggingFaceGym environment.
+
+    :param pop: Population of GRPOs to finetune
+    :type pop: list[GRPO]
+    :param env: HuggingFaceGym environment to finetune on
+    :type env: HuggingFaceGym
+    :param init_hp: Initial hyperparameters for the population
+    :type init_hp: dict, optional
+    :param save_elite: Whether to save the elite model, defaults to None
+    :type save_elite: bool, optional
+    :param elite_path: Path to save the elite model, defaults to None
+    :type elite_path: str, optional
+    :param wb: Whether to use Weights and Biases, defaults to False
+    :type wb: bool, optional
+    :param evo_steps: Number of steps between evolution, defaults to None
+    :type evo_steps: int, optional
+    :param tournament: Tournament selection object, defaults to None
+    :type tournament: TournamentSelection, optional
+    :param mutation: Mutation object, defaults to None
+    :type mutation: Mutations, optional
+    :param wandb_api_key: Wandb API key, defaults to None
+    :type wandb_api_key: str, optional
+    :param evaluation_interval: Number of steps between evaluation, defaults to 10
+    :type evaluation_interval: int, optional
+    :param max_reward: Maximum reward to aim for, defaults to None
+    :type max_reward: int, optional
+    :param verbose: Whether to print verbose output, defaults to True
+    :type verbose: bool, optional
+    :param accelerator: Accelerator object, defaults to None
+    :type accelerator: Accelerator, optional
+    """
+
+    if evo_steps is not None and (tournament is None or mutation is None):
+        warnings.warn(
+            "'evo_steps' is set but at least one of 'tournament' or 'mutation' is set to None. Evolution will not take place."
+        )
+
+    if (tournament is not None and mutation is not None) and evo_steps is None:
+        raise ValueError(
+            "'evo_steps' must be set if 'tournament' and 'mutation' are not None."
+        )
+
     if init_hp is None:
         init_hp = {}
         init_hp["BATCH_SIZE"] = pop[0].batch_size
@@ -121,35 +170,7 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                     aggregate_metrics_across_gpus(agent, metric)
                     for metric in test_metrics
                 ]
-            if accelerator is None or accelerator.is_main_process:
-                metrics_dict = {
-                    "Train/Loss": agg_metrics[0],
-                    "Train/KL-divergence": agg_metrics[1],
-                    "Train/Mean reward": (mean_scores := agg_metrics[2]),
-                    "Train/Average completion length": int(agg_metrics[3]),
-                }
-                if max_reward is not None:
-                    metrics_dict |= {"Train/Accuracy": agg_metrics[4]}
-                agent_metrics_dict[f"agent_{agent_idx}/train_metrics"] = metrics_dict
-                if agg_test_metrics is not None:
-                    test_metrics_dict = {"Eval/Mean reward": agg_test_metrics[0]}
-                    if max_reward is not None:
-                        test_metrics_dict |= {"Eval/Accuracy": agg_test_metrics[1]}
-                    agent_metrics_dict[f"agent_{agent_idx}/test_metrics"] = (
-                        test_metrics_dict
-                    )
-                if (
-                    checkpoint_path is not None
-                    and checkpoint_interval is not None
-                    and (i + 1) % checkpoint_interval == 0
-                ):
-                    save_llm_checkpoint(agent, checkpoint_path, i)
-                pbar.update(effective_data_batch_size)
-                agent.steps.append(effective_data_batch_size)
-                agent.scores.append(mean_scores)
-                total_steps += effective_data_batch_size
-
-                if verbose:
+                if verbose and (accelerator is None or accelerator.is_main_process):
                     fitness = [str(round(agent.fitness[-1], 2)) for agent in pop]
                     avg_fitness = [
                         "%.2f" % np.mean(agent.fitness[-5:]) for agent in pop
@@ -162,7 +183,7 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                         f"""
                         --- Global Steps {total_steps} ---
                         Fitness:\t\t{fitness}
-                        Score:\t\t{mean_scores}
+                        Score:\t\t{agg_metrics[2]}
                         5 fitness avgs:\t{avg_fitness}
                         10 score avgs:\t{avg_score}
                         Agents:\t\t{agents}
@@ -171,17 +192,45 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                         """,
                         end="\r",
                     )
+            if accelerator is None or accelerator.is_main_process:
+                metrics_dict = {
+                    "Train/Loss": agg_metrics[0],
+                    "Train/KL-divergence": agg_metrics[1],
+                    "Train/Mean reward": agg_metrics[2],
+                    "Train/Average completion length": int(agg_metrics[3]),
+                }
+                if max_reward is not None:
+                    metrics_dict |= {"Train/Accuracy": agg_metrics[4]}
+                agent_metrics_dict[f"agent_{agent_idx}/train_metrics"] = metrics_dict
+                if agg_test_metrics is not None:
+                    test_metrics_dict = {"Eval/Mean reward": agg_test_metrics[0]}
+                    if max_reward is not None:
+                        test_metrics_dict |= {"Eval/Accuracy": agg_test_metrics[1]}
+                    agent_metrics_dict[f"agent_{agent_idx}/test_metrics"] = (
+                        test_metrics_dict
+                    )
+                pbar.update(effective_data_batch_size)
+                agent.steps.append(effective_data_batch_size)
+                agent.scores.append(agg_metrics[2])
+                total_steps += effective_data_batch_size
+
         if accelerator is not None:
             accelerator.wait_for_everyone()
-        if (i + 1) % evo_steps == 0:
-            if tournament and mutation is not None:
+        if tournament and mutation is not None:
+            if (i + 1) % evo_steps == 0:
                 pop = tournament_selection_and_mutation(
                     population=pop,
                     tournament=tournament,
                     mutation=mutation,
                     env_name=env.name,
                     accelerator=None,  # Set as None for LLM finetuning as it does not require the same accelerator handling as standard RL models
+                    language_model=True,
+                    elite_path=elite_path,
+                    save_elite=save_elite,
                 )
+        else:
+            if (i + 1) % max_steps == 0:
+                save_llm_checkpoint(agent, elite_path, i + 1)
 
         if wb and (accelerator is None or accelerator.is_main_process):
             wandb_dict = {
@@ -282,65 +331,3 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
             accelerator.wait_for_everyone()
         wandb.finish()
     pbar.close()
-
-
-def gather_tensor(tensor: torch.Tensor, agent: GRPO) -> torch.Tensor:
-    """Gather tensors from gpus
-
-    :param tensor: Tensor to gather
-    :type tensor: torch.Tensor
-    :param agent: GRPO agent object
-    :type agent: GRPO
-    :return: Stacked tensors
-    :rtype: torch.Tensor
-    """
-    # Convert to tensor if it's a scalar
-    if not isinstance(tensor, torch.Tensor):
-        tensor = torch.tensor(tensor, device=f"cuda:{agent.local_rank}")
-
-    if tensor.device != agent.device:
-        tensor = tensor.to(agent.device)
-    # Ensure tensor is on correct device
-    tensor = tensor.detach().clone()
-    # Create a list to store tensors from all processes
-    world_size = dist.get_world_size()
-    gathered_tensors = [torch.zeros_like(tensor) for _ in range(world_size)]
-
-    # Gather the tensor from all processes
-    dist.all_gather(gathered_tensors, tensor)
-    return torch.stack(gathered_tensors)
-
-
-def aggregate_metrics_across_gpus(agent: GRPO, metric_tensor: torch.Tensor) -> float:
-    """Aggregate gathered tensors
-
-    :param agent: GRPO agent
-    :type agent: GRPO
-    :param metric_tensor: Metrics
-    :type metric_tensor: torch.Tensor
-    :return: Mean metric
-    :rtype: float
-    """
-    all_metrics = gather_tensor(metric_tensor, agent)
-    avg_metrics = all_metrics.mean().item()
-    return avg_metrics
-
-
-def save_llm_checkpoint(agent: GRPO, checkpoint_path: str | None, step: int) -> None:
-    """Checkpoint the LLM
-
-    :param agent: GRPO agent
-    :type agent: GRPO
-    :param checkpoint_path: Checkpoint path
-    :type checkpoint_path: str
-    :param step: Training step
-    :type step: int
-    """
-    base_path = "./saved_checkpoints" if checkpoint_path is None else checkpoint_path
-    path = base_path + f"/step_{step}"
-    os.makedirs(path, exist_ok=True)
-    if agent.accelerator is not None:
-        unwrapped_model = agent.accelerator.unwrap_model(agent.actor)
-        unwrapped_model.save_pretrained(path)
-    else:
-        agent.actor.save_pretrained(path)

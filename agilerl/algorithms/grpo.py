@@ -73,8 +73,8 @@ class GRPO(RLAlgorithm):
     :type calc_position_embeddings: bool, optional
     :param reduce_memory_peak: Flag to reduce memory peak in the _get_log_probs method, defaults to False
     :type reduce_memory_peak: bool, optional
-    :param max_answer_tokens: Max number of answer tokens, defaults to 512
-    :type max_answer_tokens: int, optional
+    :param max_output_tokens: Max number of answer tokens, defaults to 512
+    :type max_output_tokens: int, optional
     :param min_output_tokens: Minimum output tokens, defaults to 0
     :type min_output_tokens: int, optional
     :param cosine_lr_schedule_config: Config for cosine lr scheduling, defaults to None
@@ -197,13 +197,12 @@ class GRPO(RLAlgorithm):
             action_masks = []
             completion_ids = []
             for state in states:
-                state["input_ids"] = state["input_ids"].repeat(group_size, 1)
-                state["attention_mask"] = state["attention_mask"].repeat(group_size, 1)
-                if self.accelerator is None:
-                    state["input_ids"] = state["input_ids"].to(self.actor.device)
-                    state["attention_mask"] = state["attention_mask"].to(
-                        self.actor.device
-                    )
+                state["input_ids"] = (
+                    state["input_ids"].repeat(group_size, 1).to(self.actor.device)
+                )
+                state["attention_mask"] = (
+                    state["attention_mask"].repeat(group_size, 1).to(self.actor.device)
+                )
                 completion_id = self.actor.generate(
                     **state,
                     generation_config=self.generation_config,
@@ -229,9 +228,7 @@ class GRPO(RLAlgorithm):
         completion_ids, action_masks, rewards = stack_and_pad_experiences(
             *experiences, padding_values=[self.pad_token_id, False, None]
         )
-        advantages = self._calculate_advantage(rewards)
-        if self.accelerator is None:
-            advantages = advantages.to(self.device)
+        advantages = self._calculate_advantage(rewards).to(self.device)
         with torch.no_grad():
             reference_log_probs = self._get_logprobs(
                 completion_ids, use_reference=True, eval_mode=True

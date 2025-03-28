@@ -154,14 +154,6 @@ class HuggingFaceGym(gym.Env):
             self.apply_chat_template_fn(question, answer, self.tokenizer)
             for question, answer in zip(self.questions, self.answers)
         ]
-        # Use accelerator to place tensors on the correct device
-        tokenized_prompts = [
-            {
-                k: self.accelerator.prepare(v) if isinstance(v, torch.Tensor) else v
-                for k, v in prompt.items()
-            }
-            for prompt in tokenized_prompts
-        ]
         return tokenized_prompts
 
     @contextmanager
@@ -182,80 +174,3 @@ class HuggingFaceGym(gym.Env):
     def _reset_dataloaders(self):
         self.train_dataloader_iter = iter(self.train_dataloader)
         self.test_dataloader_iter = iter(self.test_dataloader)
-
-
-# Below are example functions for the gsm8k dataset
-# def example_apply_chat_template(
-#     question: str, answer: str, tok   enizer: AutoTokenizer
-# ) -> BatchEncoding:
-#     conversation = [
-#         {
-#             "role": "system",
-#             "content": REASONING_SYSTEM_PROMPT,
-#         },
-#         {
-#             "role": "user",
-#             "content": question,
-#         },
-#     ]
-#     updated_prompt = tokenizer.apply_chat_template(
-#         conversation, tokenize=False, add_generation_prompt=True
-#     )
-#     tokenized_prompt = tokenizer(
-#         [updated_prompt],
-#         return_tensors="pt",
-#         padding=True,
-#         padding_side="left",
-#         return_attention_mask=True,
-#     )
-#     return tokenized_prompt
-
-
-# def format_reward(completion: str) -> float:
-#     """Reward function that checks if the completion has a specific format.
-
-#     :param completion: Prompt completion to be evaluated.
-#     :type completion: str
-#     :return: Reward for the format of the completion.
-#     :rtype: float
-#     """
-#     pattern = r"^<think>.*?</think>\s*<answer>.*?</answer>$"
-#     pattern_match = re.match(pattern, completion)
-#     return 1.0 if pattern_match else -1.0
-
-
-# def accuracy_reward(completion: str, solution: str) -> float:
-#     """Reward function that checks if the completion is the same as the ground truth.
-
-#     :param completion: Prompt completion to be evaluated.
-#     :type completion: str
-#     :param solution: Ground truth solution.
-#     :type solution: str
-#     :return: Reward for the accuracy of the completion.
-#     :rtype: float
-#     """
-#     # Obtain numerical answer
-#     pattern = re.compile(r"#### (\-?[0-9\.\,]+)")
-#     correct_answer = pattern.search(solution)
-#     correct_answer = correct_answer.group(1).strip()
-
-#     # Obtain our models answer
-#     pattern = r"\d+\.\d+|\d+/\d+|\d+"
-#     nums = re.findall(pattern, completion)
-#     if len(nums) == 0:
-#         return -1.0
-#     answer = nums[-1]
-#     return 3 if (answer == correct_answer) else -3
-
-
-# def reward_function(completion: str, solution: str) -> float:
-#     """Reward function that combines the format and accuracy rewards.
-
-#     :param completion: Prompt completion to be evaluated.
-#     :type completion: str
-#     :param solution: Ground truth solution.
-#     :type solution: str
-#     :return: Combined reward for the completion.
-#     :rtype: float
-#     """
-#     return accuracy_reward(completion, solution) + format_reward(completion)

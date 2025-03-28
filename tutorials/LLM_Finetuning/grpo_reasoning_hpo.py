@@ -2,7 +2,6 @@ import re
 from typing import Tuple
 
 import torch
-import yaml
 from accelerate import Accelerator
 from datasets import load_dataset
 from peft import LoraConfig, get_peft_model
@@ -258,8 +257,37 @@ def main(init_hp, mut_p):
 
 
 if __name__ == "__main__":
-    with open("configs/training/grpo.yaml") as file:
-        config = yaml.safe_load(file)
-    init_hp = config["INIT_HP"]
-    mut_p = config["MUTATION_PARAMS"]
-    main(init_hp, mut_p)
+    MUTATION_PARAMS = {
+        "NO_MUT": 0.1,
+        "RL_HP_MUT": 0.6,
+        "MUT_SD": 0.1,
+        "RAND_SEED": 42,
+        "MIN_LR": 0.0000001,
+        "MAX_LR": 0.00001,
+        "MIN_BETA": 0.0001,
+        "MAX_BETA": 0.01,
+        "MIN_GROUP_SIZE": 4,
+        "MAX_GROUP_SIZE": 12,
+    }
+
+    INIT_HP = {
+        "ALGO": "GRPO",
+        "BATCH_SIZE": 1,
+        "REDUCE_MEMORY_PEAK": True,
+        "BETA": 0.001,
+        "LR": 0.000005,
+        "CLIP_COEF": 0.2,
+        "MAX_GRAD_NORM": 0.1,
+        "UPDATE_EPOCHS": 1,
+        "GROUP_SIZE": 2,
+        "TEMPERATURE": 0.9,
+        "CALC_POSITION_EMBEDDINGS": True,
+        "MIN_OUTPUT_TOKENS": None,
+        "MAX_OUTPUT_TOKENS": 10,
+        "COSINE_lR_SCHEDULER": None,
+        "TOURN_SIZE": 2,
+        "ELITISM": True,
+        "POP_SIZE": 1,
+        "EVAL_LOOP": 1,
+    }
+    main(INIT_HP, MUTATION_PARAMS)
