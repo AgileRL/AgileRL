@@ -146,12 +146,12 @@ def combined_rewards(completion, solution, prompt):
 
     print(
         f"""
-    ============================================ \n
-    Completion: {completion}, \n
-    Numbers: {prompt}, \n
-    Correct Answer: {solution.item()} \n
-    Reward: {reward}
-    """
+============================================ \n
+Completion: {completion}, \n
+Numbers: {prompt}, \n
+Correct Answer: {solution.item()} \n
+Reward: {reward}
+"""
     )
 
     if reward == 2.0:
@@ -198,7 +198,6 @@ def main(init_hp, mut_p):
         custom_collate_fn=custom_collate_fn,
         accelerator=accelerators[0],
     )
-
     init_hp["actor_network"] = model
     init_hp["pad_token_id"] = tokenizer.eos_token_id
 
