@@ -91,9 +91,7 @@ def finetune_llm(
     )
     grad_accum = getattr(pop[0].actor, "gradient_accumulation_steps", lambda: 1)()
     effective_data_batch_size = data_increment * env.data_batch_size_per_gpu
-    effective_learning_batch_size = (
-        data_increment * env.data_batch_size_per_gpu * grad_accum
-    )
+    effective_learning_batch_size = data_increment * init_hp["BATCH_SIZE"] * grad_accum
     if accelerator is None or accelerator.is_main_process:
         print(
             f"""
@@ -330,4 +328,5 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
         if accelerator is not None:
             accelerator.wait_for_everyone()
         wandb.finish()
-    pbar.close()
+    if accelerator is None or accelerator.is_main_process:
+        pbar.close()
