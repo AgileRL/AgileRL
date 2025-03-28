@@ -187,6 +187,7 @@ def main(init_hp, mut_p):
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
     # Convert the HuggingFace dataset into a Gymnasium environment
+    accelerators = [Accelerator() for _ in range(init_hp["POP_SIZE"])]
     env = HuggingFaceGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
@@ -195,8 +196,9 @@ def main(init_hp, mut_p):
         apply_chat_template_fn=countdown_chat_template,
         data_batch_size_per_gpu=2,
         custom_collate_fn=custom_collate_fn,
+        accelerator=accelerators[0],
     )
-    accelerators = [Accelerator() for _ in range(init_hp["POP_SIZE"])]
+
     init_hp["actor_network"] = model
     init_hp["pad_token_id"] = tokenizer.eos_token_id
 

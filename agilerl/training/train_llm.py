@@ -17,143 +17,6 @@ InitDictType = Optional[Dict[str, Any]]
 PopulationType = List[RLAlgorithm]
 
 
-# def finetune_llm(
-#     agent: GRPO,
-#     env: HuggingFaceGym,
-#     checkpoint_interval: Optional[int] = None,
-#     checkpoint_path: Optional[str] = None,
-#     wb: bool = False,
-#     wandb_api_key: Optional[str] = None,
-#     evaluation_interval: Optional[int] = 10,
-#     max_reward: Optional[int] = None,
-# ) -> None:
-#     data_increment = (
-#         agent.accelerator.num_processes if agent.accelerator is not None else 1
-#     )
-#     grad_accum = getattr(agent.actor, "gradient_accumulation_steps", lambda: 1)()
-#     effective_data_batch_size = data_increment * env.data_batch_size_per_gpu
-#     effective_learning_batch_size = (
-#         data_increment * env.data_batch_size_per_gpu * grad_accum
-#     )
-#     if agent.accelerator.is_main_process:
-#         print(
-#             f"""
-# =========================================================================
-# Commencing RL finetuning
-
-# Data batch size per gpu: {env.data_batch_size_per_gpu}
-# Number of GPUs: {data_increment}
-# Gradient accumulation: {grad_accum}
-# Effective data batch size: {data_increment} * {env.data_batch_size_per_gpu} = {effective_data_batch_size}
-# Effective learning batch_size: {data_increment} * {agent.batch_size} * {grad_accum} = {effective_learning_batch_size}
-# =========================================================================
-#         """
-#         )
-#     if wb and agent.accelerator.is_main_process:
-#         init_wandb(
-#             algo=agent.algo,
-#             env_name=env.name,
-#             wandb_api_key=wandb_api_key,
-#             init_hyperparams={
-#                 "effective_data_batch_size": effective_data_batch_size,
-#                 "effective_learning_batch_size": effective_learning_batch_size,
-#                 "group_size": agent.group_size,
-#                 "temperature": agent.generation_config.temperature,
-#                 "max_new_tokens": agent.generation_config.max_new_tokens,
-#                 "min_new_tokens": agent.generation_config.min_new_tokens,
-#                 "pad_token_id": agent.generation_config.pad_token_id,
-#                 "beta": agent.beta,
-#                 "clip_coefficient": agent.clip_coef,
-#                 "update_epochs": agent.update_epochs,
-#                 "reduce_memory_peak": agent.reduce_memory_peak,
-#                 "cosine_lr_scheduler": (
-#                     True if agent.cosine_lr_schedule_config is not None else False
-#                 ),
-#                 "distributed_training": (
-#                     True if agent.accelerator is not None else False
-#                 ),
-#                 "learning_rate": agent.lr,
-#             },
-#         )
-
-#     if agent.accelerator.is_main_process:
-#         print("\nTraining...")
-
-#     bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
-#     max_steps = len(env) // effective_data_batch_size
-#     if agent.accelerator.is_main_process:
-#         pbar = trange(
-#             max_steps,
-#             unit="step",
-#             bar_format=bar_format,
-#             ascii=True,
-#             dynamic_ncols=True,
-#         )
-
-#     # calling env.reset() supplies the first batch of training data
-#     prompts = env.reset(reset_dataloaders=True)
-#     for i in range(max_steps):
-#         print("IIIIII", i)
-#         completion_ids, action_masks = agent.get_action(prompts)
-#         completion_lengths = np.mean([x.shape[1] for x in completion_ids])
-
-#         # Use the reward function stored in env.step to calculate reward of the each answer from the group
-#         next_prompts, rewards = env.step(completion_ids)
-
-#         experiences = (
-#             completion_ids,
-#             action_masks,
-#             rewards,
-#         )
-#         loss, kl = agent.learn(experiences)
-#         metrics = [loss, kl, rewards, completion_lengths]
-#         if max_reward is not None:
-#             accuracy = (rewards == max_reward).sum() / len(rewards.flatten())
-#             metrics.append(accuracy)
-#         agg_metrics = [
-#             aggregate_metrics_across_gpus(agent, metric) for metric in metrics
-#         ]
-#         prompts = next_prompts
-#         agg_test_metrics = None
-#         if (i + 1) % evaluation_interval == 0:
-#             test_reward = agent.test(env)
-#             test_metrics = [test_reward]
-#             if max_reward is not None:
-#                 test_accuracy = (test_reward == max_reward).sum() / len(
-#                     rewards.flatten()
-#                 )
-#                 test_metrics.append(test_accuracy)
-#             agg_test_metrics = [
-#                 aggregate_metrics_across_gpus(agent, metric) for metric in test_metrics
-#             ]
-#         if agent.accelerator.is_main_process:
-#             metrics_dict = {
-#                 "Train/Loss": agg_metrics[0],
-#                 "Train/KL-divergence": agg_metrics[1],
-#                 "Train/Mean reward": agg_metrics[2],
-#                 "Train/Average completion length": int(agg_metrics[3]),
-#             }
-#             if max_reward is not None:
-#                 metrics_dict |= {"Train/Accuracy": agg_metrics[4]}
-#             print(metrics_dict)
-#             if agg_test_metrics is not None:
-#                 test_metrics_dict = {"Eval/Mean reward": agg_test_metrics[0]}
-#                 if max_reward is not None:
-#                     test_metrics_dict |= {"Eval/Accuracy": agg_test_metrics[1]}
-#                 print(test_metrics_dict)
-#                 if wb:
-#                     wandb.log(test_metrics_dict)
-#             if wb:
-#                 wandb.log(metrics_dict)
-#             if (
-#                 checkpoint_path is not None
-#                 and checkpoint_interval is not None
-#                 and (i + 1) % checkpoint_interval == 0
-#             ):
-#                 save_llm_checkpoint(agent, checkpoint_path, i)
-#             pbar.update(effective_data_batch_size)
-
-
 def finetune_llm(
     pop: List[GRPO],
     env: HuggingFaceGym,
@@ -173,6 +36,7 @@ def finetune_llm(
     if init_hp is None:
         init_hp = {}
         init_hp["BATCH_SIZE"] = pop[0].batch_size
+        init_hp["ALGO"] = pop[0].algo
     data_increment = (
         getattr(dist, "get_world_size", lambda: 1)() if dist.is_initialized() else 1
     )
@@ -181,7 +45,7 @@ def finetune_llm(
     effective_learning_batch_size = (
         data_increment * env.data_batch_size_per_gpu * grad_accum
     )
-    if accelerator.is_main_process:
+    if accelerator is None or accelerator.is_main_process:
         print(
             f"""
 =========================================================================
@@ -195,7 +59,7 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
 =========================================================================
         """
         )
-    if wb and accelerator.is_main_process:
+    if wb:
         init_hp["effective_data_batch_size"] = effective_data_batch_size
         init_hp["effective_learning_batch_size"] = effective_learning_batch_size
         init_hp["distributed_training"] = True if accelerator is not None else False
@@ -205,12 +69,12 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
             wandb_api_key=wandb_api_key,
             init_hyperparams=init_hp,
         )
-    if accelerator.is_main_process:
+    if accelerator is None or accelerator.is_main_process:
         print("\nTraining...")
 
     bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
     max_steps = len(env) // effective_data_batch_size
-    if accelerator.is_main_process:
+    if accelerator is None or accelerator.is_main_process:
         pbar = trange(
             max_steps,
             unit="step",
@@ -220,7 +84,6 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
         )
 
     total_steps = 0
-
     # calling env.reset() supplies the first batch of training data
     prompts = env.reset(reset_dataloaders=True)
     for i in range(max_steps):
@@ -258,7 +121,7 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                     aggregate_metrics_across_gpus(agent, metric)
                     for metric in test_metrics
                 ]
-            if accelerator.is_main_process:
+            if accelerator is None or accelerator.is_main_process:
                 metrics_dict = {
                     "Train/Loss": agg_metrics[0],
                     "Train/KL-divergence": agg_metrics[1],
@@ -308,7 +171,8 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                         """,
                         end="\r",
                     )
-        accelerator.wait_for_everyone()
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
         if (i + 1) % evo_steps == 0:
             if tournament and mutation is not None:
                 pop = tournament_selection_and_mutation(
@@ -319,7 +183,7 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                     accelerator=None,  # Set as None for LLM finetuning as it does not require the same accelerator handling as standard RL models
                 )
 
-        if wb and accelerator.is_main_process:
+        if wb and (accelerator is None or accelerator.is_main_process):
             wandb_dict = {
                 "Train/Best reward": np.max(
                     [
@@ -361,21 +225,24 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                         for agent_idx, _ in enumerate(pop)
                     ]
                 ),
-                "Train/Mean population accuracy": np.mean(
-                    [
-                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                            "Train/Accuracy"
+            }
+            if max_reward is not None:
+                wandb_dict |= {
+                    "Train/Mean population accuracy": np.mean(
+                        [
+                            agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                                "Train/Accuracy"
+                            ]
+                            for agent_idx, _ in enumerate(pop)
                         ]
-                        for agent_idx, _ in enumerate(pop)
-                    ]
-                ),
-            }
-            hpo_dict = {
-                f"HPO_agent_{agent_idx}/{key}": getattr(agent, key)
-                for agent_idx, agent in enumerate(pop)
-                for key in agent.registry.hp_config.config.keys()
-            }
-            wandb_dict |= hpo_dict
+                    )
+                }
+            if len(pop[0].registry.hp_config.config.keys()) > 0:
+                wandb_dict |= {
+                    f"HPO_agent_{agent_idx}/{key}": getattr(agent, key)
+                    for agent_idx, agent in enumerate(pop)
+                    for key in agent.registry.hp_config.config.keys()
+                }
 
             if agg_test_metrics is not None:
                 test_dict = {
@@ -395,20 +262,24 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                             for agent_idx, _ in enumerate(pop)
                         ]
                     ),
-                    "Eval/Mean population accuracy": np.mean(
-                        [
-                            agent_metrics_dict[f"agent_{agent_idx}/test_metrics"][
-                                "Eval/Accuracy"
-                            ]
-                            for agent_idx, _ in enumerate(pop)
-                        ]
-                    ),
                 }
+                if max_reward is not None:
+                    test_dict |= {
+                        "Eval/Mean population accuracy": np.mean(
+                            [
+                                agent_metrics_dict[f"agent_{agent_idx}/test_metrics"][
+                                    "Eval/Accuracy"
+                                ]
+                                for agent_idx, _ in enumerate(pop)
+                            ]
+                        )
+                    }
                 wandb_dict |= test_dict
             wandb.log(wandb_dict)
 
-    if wb and accelerator.is_main_process:
-        accelerator.wait_for_everyone()
+    if wb:
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
         wandb.finish()
     pbar.close()
 

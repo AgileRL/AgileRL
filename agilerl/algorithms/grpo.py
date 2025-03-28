@@ -29,12 +29,12 @@ from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     create_warmup_cosine_scheduler,
     get_experiences_samples,
+    remove_nested_files,
     stack_and_pad_experiences,
 )
 from agilerl.utils.llm_utils import (
     HuggingFaceGym,
 )
-from agilerl.utils.algo_utils import remove_nested_files
 
 DeepSpeedOptimizerType = Union[
     DeepSpeedZeroOptimizer,  # ZeRO Stage 1 & 2 optimizer
@@ -197,12 +197,13 @@ class GRPO(RLAlgorithm):
             action_masks = []
             completion_ids = []
             for state in states:
-                state["input_ids"] = (
-                    state["input_ids"].repeat(group_size, 1).to(self.actor.device)
-                )
-                state["attention_mask"] = (
-                    state["attention_mask"].repeat(group_size, 1).to(self.actor.device)
-                )
+                state["input_ids"] = state["input_ids"].repeat(group_size, 1)
+                state["attention_mask"] = state["attention_mask"].repeat(group_size, 1)
+                if self.accelerator is None:
+                    state["input_ids"] = state["input_ids"].to(self.actor.device)
+                    state["attention_mask"] = state["attention_mask"].to(
+                        self.actor.device
+                    )
                 completion_id = self.actor.generate(
                     **state,
                     generation_config=self.generation_config,
@@ -217,7 +218,6 @@ class GRPO(RLAlgorithm):
                 action_masks.append(action_mask)
         return completion_ids, action_masks
 
-
     def learn(self, experiences: ExperiencesType) -> Tuple[float, float]:
         """Updates agent network parameters to learn from experiences.
 
@@ -229,7 +229,9 @@ class GRPO(RLAlgorithm):
         completion_ids, action_masks, rewards = stack_and_pad_experiences(
             *experiences, padding_values=[self.pad_token_id, False, None]
         )
-        advantages = self._calculate_advantage(rewards).to(self.device)
+        advantages = self._calculate_advantage(rewards)
+        if self.accelerator is None:
+            advantages = advantages.to(self.device)
         with torch.no_grad():
             reference_log_probs = self._get_logprobs(
                 completion_ids, use_reference=True, eval_mode=True
@@ -673,7 +675,11 @@ class GRPO(RLAlgorithm):
         else:
             actor_state_dict = self.actor.state_dict()
             optimizer_state_dict = self.optimizer.optimizer.state_dict()
-            lr_scheduler_state_dict = self.lr_scheduler.state_dict() if self.lr_scheduler is not None else None
+            lr_scheduler_state_dict = (
+                self.lr_scheduler.state_dict()
+                if self.lr_scheduler is not None
+                else None
+            )
             input_args = EvolvableAlgorithm.inspect_attributes(
                 self, input_args_only=True
             )
@@ -693,4 +699,3 @@ class GRPO(RLAlgorithm):
             if lr_scheduler_state_dict is not None:
                 clone.lr_scheduler.load_state_dict(lr_scheduler_state_dict)
         return clone
-

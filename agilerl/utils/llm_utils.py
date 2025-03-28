@@ -1,9 +1,10 @@
 import warnings
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Generator, List, Tuple
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 
 import gymnasium as gym
 import torch
+from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 from transformers.tokenization_utils_base import BatchEncoding
@@ -27,6 +28,8 @@ class HuggingFaceGym(gym.Env):
     :type reward_fn: Callable[..., float]
     :param data_batch_size_per_gpu: DataLoader batch size, defaults to 8
     :type data_batch_size_per_gpu: int, optional
+    :param accelerator: Accelerator to be used for training, defaults to None
+    :type accelerator: Accelerator, optional
     """
 
     def __init__(
@@ -38,6 +41,7 @@ class HuggingFaceGym(gym.Env):
         apply_chat_template_fn: Callable[[str, str, AutoTokenizer], BatchEncoding],
         data_batch_size_per_gpu: int = 8,
         custom_collate_fn: Callable = None,
+        accelerator: Optional[Accelerator] = None,
     ) -> None:
         assert {"question", "answer"}.issubset(
             set(train_dataset.features.keys())
@@ -64,6 +68,10 @@ class HuggingFaceGym(gym.Env):
             shuffle=False,
             **dataloader_kwargs,
         )
+        self.accelerator = accelerator
+        if self.accelerator is not None:
+            self.train_dataloader = self.accelerator.prepare(self.train_dataloader)
+            self.test_dataloader = self.accelerator.prepare(self.test_dataloader)
         self.train_dataloader_iter = iter(self.train_dataloader)
         self.test_dataloader_iter = iter(self.test_dataloader)
         self.apply_chat_template_fn = apply_chat_template_fn
@@ -145,6 +153,14 @@ class HuggingFaceGym(gym.Env):
         tokenized_prompts = [
             self.apply_chat_template_fn(question, answer, self.tokenizer)
             for question, answer in zip(self.questions, self.answers)
+        ]
+        # Use accelerator to place tensors on the correct device
+        tokenized_prompts = [
+            {
+                k: self.accelerator.prepare(v) if isinstance(v, torch.Tensor) else v
+                for k, v in prompt.items()
+            }
+            for prompt in tokenized_prompts
         ]
         return tokenized_prompts
 
