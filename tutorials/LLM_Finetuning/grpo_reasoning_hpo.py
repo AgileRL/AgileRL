@@ -2,7 +2,6 @@ import re
 from typing import Tuple
 
 import torch
-import yaml
 from accelerate import Accelerator
 from datasets import load_dataset
 from peft import LoraConfig, get_peft_model
@@ -76,7 +75,7 @@ def make_dataset(dataset_name: str) -> Tuple[Dataset, Dataset]:
     )
     raw_dataset = raw_dataset.rename_column("target", "answer")
     raw_dataset = raw_dataset.rename_column("nums", "question")
-    train_test_split = raw_dataset.train_test_split(test_size=0.2)
+    train_test_split = raw_dataset.train_test_split(test_size=0.1)
     train_dataset = train_test_split["train"]
     test_dataset = train_test_split["test"]
     return train_dataset, test_dataset
@@ -146,12 +145,12 @@ def combined_rewards(completion, solution, prompt):
 
     print(
         f"""
-============================================ \n
-Completion: {completion}, \n
-Numbers: {prompt}, \n
-Correct Answer: {solution.item()} \n
-Reward: {reward}
-"""
+    ============================================ \n
+    Completion: {completion}, \n
+    Numbers: {prompt}, \n
+    Correct Answer: {solution.item()} \n
+    Reward: {reward}
+    """
     )
 
     if reward == 2.0:
@@ -198,6 +197,7 @@ def main(init_hp, mut_p):
         custom_collate_fn=custom_collate_fn,
         accelerator=accelerators[0],
     )
+
     init_hp["actor_network"] = model
     init_hp["pad_token_id"] = tokenizer.eos_token_id
 
@@ -244,22 +244,50 @@ def main(init_hp, mut_p):
         env=env,
         init_hp=init_hp,
         evaluation_interval=10,
-        wb=True,
+        wb=False,
         save_elite=True,
         elite_path="saved_llms",
         max_reward=2.0,
-        evo_steps=20,
+        evo_steps=10,
         mutation=mutations,
         tournament=tournament,
         accelerator=accelerators[0],
         verbose=True,
-        max_steps=3000,
     )
 
 
 if __name__ == "__main__":
-    with open("configs/training/grpo.yaml") as file:
-        config = yaml.safe_load(file)
-    init_hp = config["INIT_HP"]
-    mut_p = config["MUTATION_PARAMS"]
-    main(init_hp, mut_p)
+    MUTATION_PARAMS = {
+        "NO_MUT": 0.1,
+        "RL_HP_MUT": 0.6,
+        "MUT_SD": 0.1,
+        "RAND_SEED": 42,
+        "MIN_LR": 0.0000001,
+        "MAX_LR": 0.00001,
+        "MIN_BETA": 0.0001,
+        "MAX_BETA": 0.01,
+        "MIN_GROUP_SIZE": 4,
+        "MAX_GROUP_SIZE": 12,
+    }
+
+    INIT_HP = {
+        "ALGO": "GRPO",
+        "BATCH_SIZE": 1,
+        "REDUCE_MEMORY_PEAK": True,
+        "BETA": 0.001,
+        "LR": 0.000005,
+        "CLIP_COEF": 0.2,
+        "MAX_GRAD_NORM": 0.1,
+        "UPDATE_EPOCHS": 1,
+        "GROUP_SIZE": 2,
+        "TEMPERATURE": 0.9,
+        "CALC_POSITION_EMBEDDINGS": True,
+        "MIN_OUTPUT_TOKENS": None,
+        "MAX_OUTPUT_TOKENS": 10,
+        "COSINE_lR_SCHEDULER": None,
+        "TOURN_SIZE": 2,
+        "ELITISM": True,
+        "POP_SIZE": 1,
+        "EVAL_LOOP": 1,
+    }
+    main(INIT_HP, MUTATION_PARAMS)

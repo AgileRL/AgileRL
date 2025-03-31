@@ -1,9 +1,10 @@
 import warnings
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Generator, List, Tuple
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 
 import gymnasium as gym
 import torch
+from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 from transformers.tokenization_utils_base import BatchEncoding
@@ -27,6 +28,8 @@ class HuggingFaceGym(gym.Env):
     :type reward_fn: Callable[..., float]
     :param data_batch_size_per_gpu: DataLoader batch size, defaults to 8
     :type data_batch_size_per_gpu: int, optional
+    :param accelerator: Accelerator to be used for training, defaults to None
+    :type accelerator: Accelerator, optional
     """
 
     def __init__(
@@ -38,6 +41,7 @@ class HuggingFaceGym(gym.Env):
         apply_chat_template_fn: Callable[[str, str, AutoTokenizer], BatchEncoding],
         data_batch_size_per_gpu: int = 8,
         custom_collate_fn: Callable = None,
+        accelerator: Optional[Accelerator] = None,
     ) -> None:
         assert {"question", "answer"}.issubset(
             set(train_dataset.features.keys())
@@ -64,6 +68,10 @@ class HuggingFaceGym(gym.Env):
             shuffle=False,
             **dataloader_kwargs,
         )
+        self.accelerator = accelerator
+        if self.accelerator is not None:
+            self.train_dataloader = self.accelerator.prepare(self.train_dataloader)
+            self.test_dataloader = self.accelerator.prepare(self.test_dataloader)
         self.train_dataloader_iter = iter(self.train_dataloader)
         self.test_dataloader_iter = iter(self.test_dataloader)
         self.apply_chat_template_fn = apply_chat_template_fn
@@ -166,80 +174,3 @@ class HuggingFaceGym(gym.Env):
     def _reset_dataloaders(self):
         self.train_dataloader_iter = iter(self.train_dataloader)
         self.test_dataloader_iter = iter(self.test_dataloader)
-
-
-# Below are example functions for the gsm8k dataset
-# def example_apply_chat_template(
-#     question: str, answer: str, tok   enizer: AutoTokenizer
-# ) -> BatchEncoding:
-#     conversation = [
-#         {
-#             "role": "system",
-#             "content": REASONING_SYSTEM_PROMPT,
-#         },
-#         {
-#             "role": "user",
-#             "content": question,
-#         },
-#     ]
-#     updated_prompt = tokenizer.apply_chat_template(
-#         conversation, tokenize=False, add_generation_prompt=True
-#     )
-#     tokenized_prompt = tokenizer(
-#         [updated_prompt],
-#         return_tensors="pt",
-#         padding=True,
-#         padding_side="left",
-#         return_attention_mask=True,
-#     )
-#     return tokenized_prompt
-
-
-# def format_reward(completion: str) -> float:
-#     """Reward function that checks if the completion has a specific format.
-
-#     :param completion: Prompt completion to be evaluated.
-#     :type completion: str
-#     :return: Reward for the format of the completion.
-#     :rtype: float
-#     """
-#     pattern = r"^<think>.*?</think>\s*<answer>.*?</answer>$"
-#     pattern_match = re.match(pattern, completion)
-#     return 1.0 if pattern_match else -1.0
-
-
-# def accuracy_reward(completion: str, solution: str) -> float:
-#     """Reward function that checks if the completion is the same as the ground truth.
-
-#     :param completion: Prompt completion to be evaluated.
-#     :type completion: str
-#     :param solution: Ground truth solution.
-#     :type solution: str
-#     :return: Reward for the accuracy of the completion.
-#     :rtype: float
-#     """
-#     # Obtain numerical answer
-#     pattern = re.compile(r"#### (\-?[0-9\.\,]+)")
-#     correct_answer = pattern.search(solution)
-#     correct_answer = correct_answer.group(1).strip()
-
-#     # Obtain our models answer
-#     pattern = r"\d+\.\d+|\d+/\d+|\d+"
-#     nums = re.findall(pattern, completion)
-#     if len(nums) == 0:
-#         return -1.0
-#     answer = nums[-1]
-#     return 3 if (answer == correct_answer) else -3
-
-
-# def reward_function(completion: str, solution: str) -> float:
-#     """Reward function that combines the format and accuracy rewards.
-
-#     :param completion: Prompt completion to be evaluated.
-#     :type completion: str
-#     :param solution: Ground truth solution.
-#     :type solution: str
-#     :return: Combined reward for the completion.
-#     :rtype: float
-#     """
-#     return accuracy_reward(completion, solution) + format_reward(completion)

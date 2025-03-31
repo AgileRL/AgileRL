@@ -29,12 +29,12 @@ from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     create_warmup_cosine_scheduler,
     get_experiences_samples,
+    remove_nested_files,
     stack_and_pad_experiences,
 )
 from agilerl.utils.llm_utils import (
     HuggingFaceGym,
 )
-from agilerl.utils.algo_utils import remove_nested_files
 
 DeepSpeedOptimizerType = Union[
     DeepSpeedZeroOptimizer,  # ZeRO Stage 1 & 2 optimizer
@@ -73,8 +73,8 @@ class GRPO(RLAlgorithm):
     :type calc_position_embeddings: bool, optional
     :param reduce_memory_peak: Flag to reduce memory peak in the _get_log_probs method, defaults to False
     :type reduce_memory_peak: bool, optional
-    :param max_answer_tokens: Max number of answer tokens, defaults to 512
-    :type max_answer_tokens: int, optional
+    :param max_output_tokens: Max number of answer tokens, defaults to 512
+    :type max_output_tokens: int, optional
     :param min_output_tokens: Minimum output tokens, defaults to 0
     :type min_output_tokens: int, optional
     :param cosine_lr_schedule_config: Config for cosine lr scheduling, defaults to None
@@ -216,7 +216,6 @@ class GRPO(RLAlgorithm):
                 action_mask = action_mask[:, 1:]
                 action_masks.append(action_mask)
         return completion_ids, action_masks
-
 
     def learn(self, experiences: ExperiencesType) -> Tuple[float, float]:
         """Updates agent network parameters to learn from experiences.
@@ -673,7 +672,11 @@ class GRPO(RLAlgorithm):
         else:
             actor_state_dict = self.actor.state_dict()
             optimizer_state_dict = self.optimizer.optimizer.state_dict()
-            lr_scheduler_state_dict = self.lr_scheduler.state_dict() if self.lr_scheduler is not None else None
+            lr_scheduler_state_dict = (
+                self.lr_scheduler.state_dict()
+                if self.lr_scheduler is not None
+                else None
+            )
             input_args = EvolvableAlgorithm.inspect_attributes(
                 self, input_args_only=True
             )
@@ -693,4 +696,3 @@ class GRPO(RLAlgorithm):
             if lr_scheduler_state_dict is not None:
                 clone.lr_scheduler.load_state_dict(lr_scheduler_state_dict)
         return clone
-
