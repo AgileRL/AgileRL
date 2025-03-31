@@ -6,6 +6,8 @@ import torch
 from gymnasium import spaces
 from tqdm import trange
 
+from agilerl.components.data import Transition
+
 
 class ConstantRewardEnv(gym.Env):
     def __init__(self):
@@ -900,7 +902,10 @@ def check_q_learning_with_probe_env(
             state = np.expand_dims(state, 0)
         action = agent.get_action(state, epsilon=1)
         next_state, reward, done, _, _ = env.step(action)
-        memory.save_to_memory(state, action, reward, next_state, done)
+        transition = Transition(
+            obs=state, action=action, reward=reward, next_obs=next_state, done=done
+        ).to_tensordict()
+        memory.add(transition)
         state = next_state
         if done:
             state, _ = env.reset()
@@ -935,7 +940,10 @@ def check_policy_q_learning_with_probe_env(
         ) + agent.min_action
         action = action[0]
         next_state, reward, done, _, _ = env.step(action)
-        memory.save_to_memory(state, action, reward, next_state, done)
+        transition = Transition(
+            obs=state, action=action, reward=reward, next_obs=next_state, done=done
+        ).to_tensordict()
+        memory.add(transition)
         state = next_state
         if done:
             state, _ = env.reset()

@@ -40,6 +40,7 @@ from agilerl.protocols import (
 from agilerl.typing import (
     ActionType,
     DeviceType,
+    ExperiencesType,
     GymSpaceType,
     ObservationType,
     TorchObsType,
@@ -251,9 +252,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         raise NotImplementedError
 
     @abstractmethod
-    def learn(
-        self, experiences: Tuple[Iterable[ObservationType], ...], **kwargs
-    ) -> Any:
+    def learn(self, experiences: ExperiencesType, **kwargs) -> Any:
         """Abstract method for learning the algorithm."""
         raise NotImplementedError
 
@@ -748,27 +747,37 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             }
 
             module_cls = net_dict[f"{name}_cls"]
-            state_dict = net_dict[f"{name}_state_dict"]
             init_dict = net_dict[f"{name}_init_dict"]
             if isinstance(module_cls, list):
                 loaded_modules = []
-                for mod, d, state in zip(module_cls, init_dict, state_dict):
+                for mod, d in zip(module_cls, init_dict):
                     loaded_mod: EvolvableModule = mod(**d)
-
-                    if state:
-                        loaded_mod.load_state_dict(state)
-
                     loaded_modules.append(loaded_mod)
 
                 setattr(self, name, loaded_modules)
             else:
                 loaded_module: EvolvableModule = module_cls(**init_dict)
-
-                # NOTE: Sometimes we may have empty state dicts (e.g. detached modules)
-                if state_dict:
-                    loaded_module.load_state_dict(state_dict)
-
                 setattr(self, name, loaded_module)
+
+        # Apply mutation hooks
+        # NOTE: We do this before loading the state dicts because there may be
+        # hooks that pertain to the network parameters such as e.g. encoder parameter
+        # sharing
+        self.mutation_hook()
+
+        # Load state dicts after applying mutation hook
+        for name in network_names:
+            net_dict = {
+                k: v for k, v in network_info["modules"].items() if k.startswith(name)
+            }
+            loaded_module = getattr(self, name)
+            state_dict = net_dict[f"{name}_state_dict"]
+            if isinstance(loaded_module, list):
+                for loaded_mod, state in zip(loaded_module, state_dict):
+                    if state:
+                        loaded_mod.load_state_dict(state)
+            elif state_dict:
+                loaded_module.load_state_dict(state_dict)
 
         optimizer_names = network_info["optimizer_names"]
         for name in optimizer_names:
@@ -822,10 +831,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             torch.set_float32_matmul_precision("high")
             self.recompile()
 
-        # Init hooks
-        for hook in self.registry.hooks:
-            getattr(self, hook)()
-
     @classmethod
     def load(
         cls: Type[SelfEvolvableAlgorithm],
@@ -876,35 +881,19 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
             init_dict = chkpt_attribute_to_device(init_dict, device)
 
-            state_dict = net_dict.get(f"{name}_state_dict", None)
-            if state_dict is None:
-                raise ValueError(f"State dict for {name} not found in checkpoint.")
-
-            state_dict = chkpt_attribute_to_device(state_dict, device)
-
             # Reconstruct the modules
             module_cls: Union[Type[EvolvableModule], List[Type[EvolvableModule]]] = (
                 net_dict[f"{name}_cls"]
             )
             if isinstance(module_cls, list):
                 loaded_modules[name] = []
-                for mod_cls, d, state in zip(module_cls, init_dict, state_dict):
+                for mod_cls, d in zip(module_cls, init_dict):
                     d["device"] = device
                     mod: EvolvableModule = mod_cls(**d)
-
-                    if state:
-                        mod.load_state_dict(state)
-
                     loaded_modules[name].append(mod)
             else:
                 init_dict["device"] = device
                 module = module_cls(**init_dict)
-
-                if (
-                    state_dict
-                ):  # Sometimes we may have empty state dicts (e.g. detached modules)
-                    module.load_state_dict(state_dict)
-
                 loaded_modules[name] = module
 
         # Reconstruct the algorithm
@@ -918,6 +907,29 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         self = cls(**class_init_dict)
         registry: MutationRegistry = checkpoint["registry"]
         self.registry = registry
+
+        # Set loaded modules
+        for name, module in loaded_modules.items():
+            setattr(self, name, module)
+
+        # Apply mutation hooks
+        self.mutation_hook()
+
+        # Load state dictionaries
+        for name in network_names:
+            net_dict = {
+                k: v for k, v in network_info["modules"].items() if k.startswith(name)
+            }
+            loaded_module: Union[EvolvableModule, List[EvolvableModule]] = getattr(
+                self, name
+            )
+            state_dict = net_dict[f"{name}_state_dict"]
+            if isinstance(loaded_module, list):
+                for loaded_mod, state in zip(loaded_module, state_dict):
+                    if state:
+                        loaded_mod.load_state_dict(state)
+            elif state_dict:
+                loaded_module.load_state_dict(state_dict)
 
         # Reconstruct optimizers in algorithm
         optimizer_names = network_info["optimizer_names"]
@@ -974,10 +986,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         elif self.torch_compiler:
             torch.set_float32_matmul_precision("high")
             self.recompile()
-
-        # Run init hooks
-        for hook in self.registry.hooks:
-            getattr(self, hook)()
 
         # Check for agent wrapper
         wrapper_cls = checkpoint.get("wrapper_cls")
@@ -1223,7 +1231,9 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         return preprocessed
 
     def stack_critic_observations(self, obs: Dict[str, TorchObsType]) -> TorchObsType:
-        """Process observations for critic network input
+        """Process observations for critic network input.
+
+        .. note:: Assumes that the observation spaces for the different agents are the same.
 
         :param obs: Observation dict
         :type obs: Dict[str, torch.Tensor]

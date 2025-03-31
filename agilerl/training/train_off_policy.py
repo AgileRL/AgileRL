@@ -13,7 +13,11 @@ from tqdm import trange
 import wandb
 from agilerl.algorithms import DDPG, DQN, TD3, RainbowDQN
 from agilerl.algorithms.core.base import RLAlgorithm
-from agilerl.components import NStepReplayBuffer, PrioritizedReplayBuffer, ReplayBuffer
+from agilerl.components import (
+    MultiStepReplayBuffer,
+    PrioritizedReplayBuffer,
+    ReplayBuffer,
+)
 from agilerl.components.data import ReplayDataset, Transition
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
@@ -27,7 +31,7 @@ from agilerl.utils.utils import (
 
 InitDictType = Optional[Dict[str, Any]]
 PopulationType = List[RLAlgorithm]
-BufferType = Union[ReplayBuffer, PrioritizedReplayBuffer, NStepReplayBuffer]
+BufferType = Union[ReplayBuffer, PrioritizedReplayBuffer, MultiStepReplayBuffer]
 
 
 def train_off_policy(
@@ -50,7 +54,7 @@ def train_off_policy(
     target: Optional[float] = None,
     n_step: bool = False,
     per: bool = False,
-    n_step_memory: Optional[NStepReplayBuffer] = None,
+    n_step_memory: Optional[MultiStepReplayBuffer] = None,
     tournament: Optional[TournamentSelection] = None,
     mutation: Optional[Mutations] = None,
     checkpoint: Optional[int] = None,
@@ -179,8 +183,8 @@ def train_off_policy(
         num_envs = env.num_envs
         is_vectorised = True
     else:
-        is_vectorised = False
         num_envs = 1
+        is_vectorised = False
 
     save_path = (
         checkpoint_path.split(".pt")[0]
@@ -278,8 +282,8 @@ def train_off_policy(
                 scores += np.array(reward)
 
                 if not is_vectorised:
-                    done = [done]
-                    trunc = [trunc]
+                    done = np.array([done])
+                    trunc = np.array([trunc])
 
                 reset_noise_indices = []
                 for idx, (d, t) in enumerate(zip(done, trunc)):
@@ -306,21 +310,19 @@ def train_off_policy(
                     reward=reward,
                     next_obs=next_state,
                     done=done,
-                    batch_size=[num_envs],
                 )
-                if n_step_memory is not None:
-                    one_step_transition = n_step_memory.add(
-                        transition.to_tensordict(),
-                        is_vectorised=is_vectorised,
-                    )
+                if not is_vectorised:
+                    transition = transition.unsqueeze(0)
 
+                # Add transition to replay buffer
+                transition = transition.to_tensordict()
+                transition.batch_size = [num_envs]
+                if n_step_memory is not None:
+                    one_step_transition = n_step_memory.add(transition)
                     if one_step_transition is not None:
-                        memory.add(one_step_transition, is_vectorised=is_vectorised)
+                        memory.add(one_step_transition)
                 else:
-                    memory.add(
-                        transition.to_tensordict(),
-                        is_vectorised=is_vectorised,
-                    )
+                    memory.add(transition)
                 if per:
                     fraction = min(
                         ((agent.steps[-1] + idx_step + 1) * num_envs / max_steps), 1.0

@@ -165,7 +165,7 @@ class NeuralTS(RLAlgorithm):
         self.criterion = nn.MSELoss()
 
         # Register network groups for mutations
-        self.register_init_hook(self.init_params)
+        self.register_mutation_hook(self.init_params)
         self.register_network_group(
             NetworkGroup(eval=self.actor, shared=None, policy=True)
         )
@@ -240,12 +240,10 @@ class NeuralTS(RLAlgorithm):
         """Updates agent network parameters to learn from experiences.
 
         :param experiences: Batched states, rewards in that order.
-        :type obs: list[torch.Tensor[float]]
+        :type experiences: dict[str, torch.Tensor[float]]
         """
-        states, rewards = experiences
-
-        states = states.to(self.device)
-        rewards = rewards.to(self.device)
+        states = experiences["obs"]
+        rewards = experiences["reward"]
 
         pred_rewards = self.actor(states)
 

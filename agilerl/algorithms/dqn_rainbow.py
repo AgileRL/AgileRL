@@ -372,19 +372,19 @@ class RainbowDQN(RLAlgorithm):
         :rtype: Tuple[float, numpy.ndarray, numpy.ndarray]
         """
         n_step = n_experiences is not None
-        states = experiences["obs"]["value"]
+        states = experiences["obs"]
         actions = experiences["action"]
         rewards = experiences["reward"]
-        next_states = experiences["next_obs"]["value"]
+        next_states = experiences["next_obs"]
         dones = experiences["done"]
         if per:
             weights = experiences["weights"]
             idxs = experiences["idxs"]
             if n_step:
-                n_states = n_experiences["obs"]["value"]
+                n_states = n_experiences["obs"]
                 n_actions = n_experiences["action"]
                 n_rewards = n_experiences["reward"]
-                n_next_states = n_experiences["next_obs"]["value"]
+                n_next_states = n_experiences["next_obs"]
                 n_dones = n_experiences["done"]
 
             if self.combined_reward or not n_step:
@@ -406,10 +406,10 @@ class RainbowDQN(RLAlgorithm):
         else:
             if n_step:
                 idxs = experiences["idxs"]
-                n_states = n_experiences["obs"]["value"]
+                n_states = n_experiences["obs"]
                 n_actions = n_experiences["action"]
                 n_rewards = n_experiences["reward"]
-                n_next_states = n_experiences["next_obs"]["value"]
+                n_next_states = n_experiences["next_obs"]
                 n_dones = n_experiences["done"]
             else:
                 idxs = None

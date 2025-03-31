@@ -195,7 +195,10 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
 
         # NOTE: For multi-agent settings, we use a depth corresponding to that of the
         # sample input for the kernel of the first layer of CNN-based networks
-        if n_agents is not None and "kernel_size" in encoder_config.keys():
+        cnn_keys = ["cnn_config", "kernel_size"]
+        if n_agents is not None and any(
+            key in encoder_config.keys() for key in cnn_keys
+        ):
             encoder_config = EvolvableNetwork.modify_multi_agent_config(
                 net_config=encoder_config, observation_space=observation_space
             )
@@ -331,7 +334,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         to receive a single output rather than `self.n_agents`
         """
         if isinstance(observation_space, (spaces.Dict, spaces.Tuple)):
-            net_config["cnn_block_type"] = "Conv3d"
+            net_config["cnn_config"]["block_type"] = "Conv3d"
         else:
             net_config["block_type"] = "Conv3d"
 

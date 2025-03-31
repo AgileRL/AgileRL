@@ -1,6 +1,5 @@
 import copy
 from collections import OrderedDict
-from dataclasses import asdict
 from typing import Any, Dict, Literal, Optional, Tuple, Union
 
 import numpy as np
@@ -157,9 +156,9 @@ class EvolvableMultiInput(EvolvableModule):
 
         self.observation_space = observation_space
         self.num_outputs = num_outputs
-        self.cnn_config = cnn_config or asdict(DefaultCnnConfig)
-        self.mlp_config = mlp_config or asdict(DefaultMlpConfig)
-        self.lstm_config = lstm_config or asdict(DefaultLstmConfig)
+        self.cnn_config = cnn_config or DefaultCnnConfig
+        self.mlp_config = mlp_config or DefaultMlpConfig
+        self.lstm_config = lstm_config or DefaultLstmConfig
         self._init_dicts = init_dicts or {}
         self._activation = None
         self.mlp_name = None
@@ -317,7 +316,12 @@ class EvolvableMultiInput(EvolvableModule):
                 "Invalid default value provided, must be 'cnn' or 'mlp' or 'lstm'."
             )
         else:
-            init_dict = copy.deepcopy(init_dict)
+            nested_dict = init_dict.get(key)
+            init_dict = (
+                copy.deepcopy(nested_dict)
+                if nested_dict is not None
+                else copy.deepcopy(init_dict)
+            )
 
         init_dict["num_outputs"] = self.latent_dim
         init_dict["device"] = self.device

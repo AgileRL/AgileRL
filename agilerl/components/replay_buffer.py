@@ -47,6 +47,10 @@ class ReplayBuffer:
         """Number of transitions in the buffer."""
         return self._size
 
+    @size.setter
+    def size(self, value: int) -> None:
+        self._size = value
+
     @property
     def is_full(self) -> bool:
         return len(self) == self.max_size
@@ -54,53 +58,47 @@ class ReplayBuffer:
     def __len__(self) -> int:
         return self._size
 
-    def _init(self, data: TensorDict, is_vectorised: bool) -> None:
+    def _init(self, data: TensorDict) -> None:
         """Initialize the buffer given the passed data. For each key,
         we inspect the shape of the value and initialize the storage
         tensor with the correct shape.
 
         :param data: Data to initialize the buffer with
         :type data: TensorDict
-        :param is_vectorised: Whether the data is vectorised or not
-        :type is_vectorised: bool
         """
-        _data = data[0] if is_vectorised else data
+        _data: TensorDict = data[0]
         self._storage = torch.zeros_like(_data.expand((self.max_size, *_data.shape)))
         self.initialized = True
 
-    def add(self, data: TensorDict, is_vectorised: bool = False) -> None:
+    def add(self, data: TensorDict) -> None:
         """Add a transition to the buffer.
 
         :param data: Transition to add to the buffer
         :type data: Union[TensorDict, Dict[str, Any]]
-        :param is_vectorised: Whether the data is vectorised or not
-        :type is_vectorised: bool
         """
         # Initialize storage
         data = data.to(self.device)
         _n_transitions = data.shape[0]
-        if not is_vectorised:
-            data = data.expand((1, *data.shape))
-        else:
-            # Ensure all tensors in data have proper dimensions beyond batch dimension
-            # This handles the case of scalar observations that become (batch_size,)
-            # instead of (batch_size, 1)
-            for key, value in data.items():
-                if is_tensor_collection(value):
-                    value: TensorDictBase = value
-                    for k, v in value.items():
-                        if v.ndim == 1:
-                            value[k] = v.reshape(_n_transitions, 1)
-                else:
-                    if value.ndim == 1:
-                        value = value.reshape(_n_transitions, 1)
 
-                data[key] = value
+        # Ensure all tensors in data have proper dimensions beyond batch dimension
+        # Handles the case of scalar observations that become (batch_size,)
+        # instead of (batch_size, 1)
+        for key, value in data.items():
+            if is_tensor_collection(value):
+                value: TensorDictBase = value
+                for k, v in value.items():
+                    if v.ndim == 1:
+                        value[k] = v.reshape(_n_transitions, 1)
+            else:
+                if value.ndim == 1:
+                    value = value.reshape(_n_transitions, 1)
+
+            data[key] = value
 
         if self._storage is None:
-            self._init(data, is_vectorised)
+            self._init(data)
 
-        # Add to storage considering circularity of buffer
+        # Add to circular storage
         start = self._cursor
         end = self._cursor + _n_transitions
         if end > self.max_size:
@@ -125,6 +123,7 @@ class ReplayBuffer:
         :return: TensorDict containing sampled experiences
         :rtype: TensorDict
         """
+        # Ensure samples are unique
         indices = torch.randperm(self.size)[:batch_size]
         samples: TensorDict = self._storage[indices]
 
@@ -141,7 +140,7 @@ class ReplayBuffer:
         self.initialized = False
 
 
-class NStepReplayBuffer(ReplayBuffer):
+class MultiStepReplayBuffer(ReplayBuffer):
     """A circular replay buffer for n-step returns in off-policy learning.
 
     :param max_size: Maximum number of transitions to store
@@ -173,15 +172,11 @@ class NStepReplayBuffer(ReplayBuffer):
         self.done_key = None
         self.ns_key = "next_obs"
 
-    def add(
-        self, data: TensorDict, is_vectorised: bool = False
-    ) -> Optional[TensorDict]:
+    def add(self, data: TensorDict) -> Optional[TensorDict]:
         """Add a transition to the n-step buffer and potentially to the replay buffer.
 
         :param data: Transition to add to the buffer
         :type data: TensorDict
-        :param is_vectorised: Whether the data is vectorised or not
-        :type is_vectorised: bool
         :return: First transition in the n-step buffer
         :rtype: Optional[TensorDict]
         """
@@ -197,7 +192,7 @@ class NStepReplayBuffer(ReplayBuffer):
         n_step_data = self._get_n_step_info()
 
         # Add to replay buffer
-        super().add(n_step_data, is_vectorised=is_vectorised)
+        super().add(n_step_data)
         return self.n_step_buffer[0]
 
     def sample_from_indices(self, idxs: torch.Tensor) -> TensorDict:
@@ -297,24 +292,18 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         self.sum_tree = SumSegmentTree(tree_capacity)
         self.min_tree = MinSegmentTree(tree_capacity)
 
-    def add(self, data: TensorDict, is_vectorised: bool = False) -> None:
+    def add(self, data: TensorDict) -> None:
         """Add a transition to the buffer.
 
         :param data: Transition to add to the buffer
         :type data: TensorDict
-        :param is_vectorised: Whether the data is vectorised or not
-        :type is_vectorised: bool
         """
         # Add to replay buffer
-        super().add(data, is_vectorised)
+        super().add(data)
 
         # Add max priority for new entries
-        if is_vectorised:
-            n_transitions = data.shape[0]
-            for i in range(n_transitions):
-                self._update_priority(self.tree_ptr, self.max_priority)
-                self.tree_ptr = (self.tree_ptr + 1) % self.max_size
-        else:
+        n_transitions = data.shape[0]
+        for i in range(n_transitions):
             self._update_priority(self.tree_ptr, self.max_priority)
             self.tree_ptr = (self.tree_ptr + 1) % self.max_size
 
@@ -359,8 +348,8 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         weights = self._calculate_weights(indices, beta)
 
         # Add weights and indices to the batch
-        samples["weights"] = weights
-        samples["idxs"] = indices
+        samples["weights"] = weights.unsqueeze(1)
+        samples["idxs"] = indices.unsqueeze(1)
 
         return samples
 

@@ -175,7 +175,7 @@ class DQN(RLAlgorithm):
         self.register_network_group(
             NetworkGroup(eval=self.actor, shared=self.actor_target, policy=True)
         )
-        self.register_init_hook(self.init_hook)
+        self.register_mutation_hook(self.init_hook)
 
     def init_hook(self) -> None:
         """Resets module parameters for the detached and target networks."""

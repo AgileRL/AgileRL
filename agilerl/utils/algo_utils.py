@@ -16,8 +16,12 @@ from torch._dynamo import OptimizedModule
 from torch.nn import Module
 from torch.optim import Optimizer
 
-from agilerl.networks.base import EvolvableNetwork
-from agilerl.protocols import EvolvableAttributeType, EvolvableModule, OptimizerWrapper
+from agilerl.protocols import (
+    EvolvableAttributeType,
+    EvolvableModule,
+    EvolvableNetwork,
+    OptimizerWrapper,
+)
 from agilerl.typing import (
     ArrayOrTensor,
     MaybeObsList,
@@ -32,13 +36,18 @@ from agilerl.typing import (
 def share_encoder_parameters(
     policy: EvolvableNetwork, *others: EvolvableNetwork
 ) -> None:
-    """Shares the encoder parameters between two networks using parameter sharing.
+    """Shares the encoder parameters between the policy and any number of other networks.
 
     :param policy: The policy network whose encoder parameters will be used.
     :type policy: EvolvableNetwork
     :param others: The other networks whose encoder parameters will be pinned to the policy.
     :type others: EvolvableNetwork
     """
+    assert isinstance(policy, EvolvableNetwork), "Policy must be an EvolvableNetwork"
+    assert all(
+        isinstance(other, EvolvableNetwork) for other in others
+    ), "All others must be EvolvableNetwork"
+
     # detaching encoder parameters from computation graph reduces
     # memory overhead and speeds up training
     param_vals: TensorDict = from_module(policy.encoder).detach()
@@ -46,8 +55,8 @@ def share_encoder_parameters(
         target_params: TensorDict = param_vals.clone().lock_()
         target_params.to_module(other.encoder)
 
-        # Disable architecture mutations since we will be reinitializing directly
-        # through a mutation hook
+        # Disable architecture mutations since we will be
+        # reinitializing directly through a mutation hook
         other.encoder.disable_mutations()
 
 
@@ -449,7 +458,7 @@ def obs_to_tensor(
     :rtype: TorchObsType
     """
     if isinstance(obs, TensorDict):
-        return obs
+        return obs if obs.device == device else obs.to(device)
     elif isinstance(obs, torch.Tensor):
         return obs.float().to(device)
     elif isinstance(obs, np.ndarray):

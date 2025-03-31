@@ -1,5 +1,5 @@
 import copy
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -13,6 +13,7 @@ from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import StochasticActor
+from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.value_networks import ValueNetwork
 from agilerl.typing import ArrayLike, ArrayOrTensor, ExperiencesType, GymEnvType
 from agilerl.utils.algo_utils import (
@@ -73,14 +74,14 @@ class PPO(RLAlgorithm):
     :type actor_network: nn.Module, optional
     :param critic_network: Custom critic network, defaults to None
     :type critic_network: nn.Module, optional
+    :param share_encoders: Flag to share encoder parameters between actor and critic, defaults to False
+    :type share_encoders: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
-    :param share_encoders: Flag to share encoder parameters between actor and critic, defaults to False
-    :type share_encoders: bool, optional
     """
 
     def __init__(
@@ -107,10 +108,10 @@ class PPO(RLAlgorithm):
         update_epochs: int = 4,
         actor_network: Optional[EvolvableModule] = None,
         critic_network: Optional[EvolvableModule] = None,
+        share_encoders: bool = True,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
-        share_encoders: bool = True,
     ) -> None:
 
         super().__init__(
@@ -232,18 +233,21 @@ class PPO(RLAlgorithm):
                 observation_space,
                 action_space,
                 log_std_init=self.action_std_init,
-                device=device,
+                device=self.device,
                 **net_config,
             )
 
             self.critic = ValueNetwork(
-                observation_space, device=device, **critic_net_config
+                observation_space, device=self.device, **critic_net_config
             )
-
-        # Initialize encoder sharing if requested
+        # Share encoders between actor and critic
         self.share_encoders = share_encoders
-        if self.share_encoders:
+        if self.share_encoders and all(
+            isinstance(net, EvolvableNetwork) for net in [self.actor, self.critic]
+        ):
             self.share_encoder_parameters()
+
+            # Need to register a mutation hook that does this after every mutation
             self.register_mutation_hook(self.share_encoder_parameters)
 
         self.optimizer = OptimizerWrapper(
@@ -324,13 +328,11 @@ class PPO(RLAlgorithm):
 
     def get_action(
         self,
-        obs: np.ndarray,
-        action: Optional[torch.Tensor] = None,
+        obs: ArrayOrTensor,
+        action: Optional[ArrayOrTensor] = None,
         grad: bool = False,
-        action_mask: Optional[np.ndarray] = None,
-    ) -> Tuple[
-        Union[np.ndarray, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor
-    ]:
+        action_mask: Optional[ArrayOrTensor] = None,
+    ) -> Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Returns the next action to take in the environment.
 
         :param obs: Environment observation, or multiple observations in a batch
@@ -354,23 +356,21 @@ class PPO(RLAlgorithm):
                 action_dist = self.actor.forward_head(
                     latent_pi, action_mask=action_mask
                 )
-
-                # Handle shared encoder case
-                if self.share_encoders:
-                    state_values = self.critic.forward_head(latent_pi).squeeze(-1)
-                else:
-                    state_values = self.critic(obs).squeeze(-1)
+                state_values = (
+                    self.critic.forward_head(latent_pi).squeeze(-1)
+                    if self.share_encoders
+                    else self.critic(obs).squeeze(-1)
+                )
         else:
             self.actor.train()
             self.critic.train()
             latent_pi = self.actor.extract_features(obs)
             action_dist = self.actor.forward_head(latent_pi, action_mask=action_mask)
-
-            # Handle shared encoder case
-            if self.share_encoders:
-                state_values = self.critic.forward_head(latent_pi).squeeze(-1)
-            else:
-                state_values = self.critic(obs).squeeze(-1)
+            state_values = (
+                self.critic.forward_head(latent_pi).squeeze(-1)
+                if self.share_encoders
+                else self.critic(obs).squeeze(-1)
+            )
 
         if not isinstance(action_dist, torch.distributions.Distribution):
             raise ValueError(

@@ -3,7 +3,7 @@ import torch
 from tensordict import TensorDict
 
 from agilerl.components.replay_buffer import (
-    NStepReplayBuffer,
+    MultiStepReplayBuffer,
     PrioritizedReplayBuffer,
     ReplayBuffer,
 )
@@ -41,8 +41,9 @@ def test_get_length_of_memory():
             "action": torch.tensor([0]),
             "reward": torch.tensor([1.0]),
         },
-        batch_size=[],
     )
+    data = data.unsqueeze(0)
+    data.batch_size = [1]
     buffer.add(data)
 
     data = TensorDict(
@@ -51,8 +52,9 @@ def test_get_length_of_memory():
             "action": torch.tensor([1]),
             "reward": torch.tensor([2.0]),
         },
-        batch_size=[],
     )
+    data = data.unsqueeze(0)
+    data.batch_size = [1]
     buffer.add(data)
 
     assert len(buffer) == 2
@@ -70,8 +72,9 @@ def test_buffer_initialization():
             "action": torch.tensor([0]),
             "reward": torch.tensor([1.0]),
         },
-        batch_size=[],
     )
+    data = data.unsqueeze(0)
+    data.batch_size = [1]
 
     # Add to buffer
     buffer.add(data)
@@ -94,8 +97,9 @@ def test_add_experience_when_buffer_full():
             "action": torch.tensor([0]),
             "reward": torch.tensor([1.0]),
         },
-        batch_size=[],
     )
+    data1 = data1.unsqueeze(0)
+    data1.batch_size = [1]
     buffer.add(data1)
 
     data2 = TensorDict(
@@ -104,8 +108,9 @@ def test_add_experience_when_buffer_full():
             "action": torch.tensor([1]),
             "reward": torch.tensor([2.0]),
         },
-        batch_size=[],
     )
+    data2 = data2.unsqueeze(0)
+    data2.batch_size = [1]
     buffer.add(data2)
 
     data3 = TensorDict(
@@ -114,8 +119,9 @@ def test_add_experience_when_buffer_full():
             "action": torch.tensor([2]),
             "reward": torch.tensor([3.0]),
         },
-        batch_size=[],
     )
+    data3 = data3.unsqueeze(0)
+    data3.batch_size = [1]
     buffer.add(data3)
 
     # Check that buffer has max_size elements
@@ -145,11 +151,11 @@ def test_add_vectorized_experiences():
             "action": torch.tensor([[0], [1]]),
             "reward": torch.tensor([[1.0], [2.0]]),
         },
-        batch_size=[2],
     )
 
     # Add batch to buffer
-    buffer.add(batch_data, is_vectorised=True)
+    batch_data.batch_size = [2]
+    buffer.add(batch_data)
 
     # Check buffer state
     assert len(buffer) == 2
@@ -168,8 +174,9 @@ def test_sample_experiences():
                 "action": torch.tensor([i % 3]),
                 "reward": torch.tensor([float(i)]),
             },
-            batch_size=[],
         )
+        data = data.unsqueeze(0)
+        data.batch_size = [1]
         buffer.add(data)
 
     # Sample experiences
@@ -201,8 +208,9 @@ def test_sample_experiences_with_images():
                 "action": torch.tensor([i % 3]),
                 "reward": torch.tensor([float(i)]),
             },
-            batch_size=[],
         )
+        data = data.unsqueeze(0)
+        data.batch_size = [1]
         buffer.add(data)
 
     # Sample experiences
@@ -230,17 +238,16 @@ def test_sample_experiences_with_dict_obs():
                 "image": torch.ones((3, 84, 84)) * i,
                 "vector": torch.tensor([i, i + 1, i + 2]),
             },
-            batch_size=[],
         )
-
         data = TensorDict(
             {
                 "state": obs,
                 "action": torch.tensor([i % 3]),
                 "reward": torch.tensor([float(i)]),
             },
-            batch_size=[],
         )
+        data = data.unsqueeze(0)
+        data.batch_size = [1]
         buffer.add(data)
 
     # Sample experiences
@@ -272,8 +279,9 @@ def test_sample_with_indices():
                 "action": torch.tensor([i % 3]),
                 "reward": torch.tensor([float(i)]),
             },
-            batch_size=[],
         )
+        data = data.unsqueeze(0)
+        data.batch_size = [1]
         buffer.add(data)
 
     # Sample experiences with indices
@@ -297,8 +305,9 @@ def test_clear_buffer():
             "action": torch.tensor([0]),
             "reward": torch.tensor([1.0]),
         },
-        batch_size=[],
     )
+    data = data.unsqueeze(0)
+    data.batch_size = [1]
     buffer.add(data)
 
     # Clear buffer
@@ -312,14 +321,14 @@ def test_clear_buffer():
     assert not buffer.initialized
 
 
-##### NStepReplayBuffer class tests #####
+##### MultiStepReplayBuffer class tests #####
 def test_nstep_buffer_initialization():
-    """Test initialization of NStepReplayBuffer."""
+    """Test initialization of MultiStepReplayBuffer."""
     max_size = 1000
     n_step = 3
     gamma = 0.99
 
-    buffer = NStepReplayBuffer(max_size, n_step, gamma)
+    buffer = MultiStepReplayBuffer(max_size, n_step, gamma)
 
     assert buffer.max_size == max_size
     assert buffer.n_step == n_step
@@ -328,8 +337,8 @@ def test_nstep_buffer_initialization():
 
 
 def test_nstep_buffer_add():
-    """Test adding transitions to NStepReplayBuffer."""
-    buffer = NStepReplayBuffer(max_size=1000, n_step=3, gamma=0.99)
+    """Test adding transitions to MultiStepReplayBuffer."""
+    buffer = MultiStepReplayBuffer(max_size=1000, n_step=3, gamma=0.99)
 
     # Define transition fields required for n-step returns
     buffer.reward_key = "reward"
@@ -345,9 +354,9 @@ def test_nstep_buffer_add():
             "next_state": torch.tensor([4, 5, 6]),
             "done": torch.tensor([False]),
         },
-        batch_size=[],
     )
-
+    data = data.unsqueeze(0)
+    data.batch_size = [1]
     buffer.add(data)
 
     # Check that transition is in n-step buffer but not in main buffer yet
@@ -364,8 +373,9 @@ def test_nstep_buffer_add():
                 "next_state": torch.tensor([i + 7, i + 8, i + 9]),
                 "done": torch.tensor([False]),
             },
-            batch_size=[],
         )
+        data = data.unsqueeze(0)
+        data.batch_size = [1]
         buffer.add(data)
 
     # Now a transition should be in the main buffer
@@ -374,8 +384,8 @@ def test_nstep_buffer_add():
 
 
 def test_nstep_buffer_add_with_images():
-    """Test adding image transitions to NStepReplayBuffer."""
-    buffer = NStepReplayBuffer(max_size=1000, n_step=3, gamma=0.99)
+    """Test adding image transitions to MultiStepReplayBuffer."""
+    buffer = MultiStepReplayBuffer(max_size=1000, n_step=3, gamma=0.99)
 
     # Define transition fields required for n-step returns
     buffer.reward_key = "reward"
@@ -396,8 +406,9 @@ def test_nstep_buffer_add_with_images():
                 "next_state": next_img,
                 "done": torch.tensor([False]),
             },
-            batch_size=[],
         )
+        data = data.unsqueeze(0)
+        data.batch_size = [1]
         buffer.add(data)
 
     # Should have processed at least one n-step transition
@@ -411,7 +422,7 @@ def test_nstep_buffer_add_with_images():
 
 def test_nstep_reward_calculation():
     """Test n-step reward calculation."""
-    buffer = NStepReplayBuffer(max_size=1000, n_step=3, gamma=0.9)
+    buffer = MultiStepReplayBuffer(max_size=1000, n_step=3, gamma=0.9)
 
     # Define required keys
     buffer.reward_key = "reward"
@@ -431,8 +442,9 @@ def test_nstep_reward_calculation():
                 "next_state": torch.tensor([i + 3, i + 4, i + 5]),
                 "done": torch.tensor([False]),
             },
-            batch_size=[],
         )
+        data = data.unsqueeze(0)
+        data.batch_size = [1]
         buffer.n_step_buffer.append(data)
 
     # Calculate n-step return
@@ -448,15 +460,12 @@ def test_nstep_reward_calculation():
 
 def test_nstep_early_termination():
     """Test n-step calculation with early termination."""
-    buffer = NStepReplayBuffer(max_size=1000, n_step=3, gamma=0.9)
+    buffer = MultiStepReplayBuffer(max_size=1000, n_step=3, gamma=0.9)
 
     # Define required keys
     buffer.reward_key = "reward"
     buffer.done_key = "done"
     buffer.ns_key = "next_state"
-
-    # Initialize buffer storage to avoid None reference
-    buffer._storage = TensorDict({}, batch_size=[0, 0])
 
     # Fill n-step buffer with transitions where second one terminates
     data1 = TensorDict(
@@ -467,8 +476,9 @@ def test_nstep_early_termination():
             "next_state": torch.tensor([4, 5, 6]),
             "done": torch.tensor([False]),
         },
-        batch_size=[],
     )
+    data1 = data1.unsqueeze(0)
+    data1.batch_size = [1]
     buffer.n_step_buffer.append(data1)
 
     data2 = TensorDict(
@@ -479,8 +489,9 @@ def test_nstep_early_termination():
             "next_state": torch.tensor([7, 8, 9]),
             "done": torch.tensor([True]),
         },
-        batch_size=[],
     )
+    data2 = data2.unsqueeze(0)
+    data2.batch_size = [1]
     buffer.n_step_buffer.append(data2)
 
     data3 = TensorDict(
@@ -491,8 +502,9 @@ def test_nstep_early_termination():
             "next_state": torch.tensor([10, 11, 12]),
             "done": torch.tensor([False]),
         },
-        batch_size=[],
     )
+    data3 = data3.unsqueeze(0)
+    data3.batch_size = [1]
     buffer.n_step_buffer.append(data3)
 
     # Calculate n-step return
@@ -508,8 +520,8 @@ def test_nstep_early_termination():
 
 
 def test_nstep_sampling_with_indices():
-    """Test sampling from NStepReplayBuffer with indices."""
-    buffer = NStepReplayBuffer(max_size=1000, n_step=3, gamma=0.99)
+    """Test sampling from MultiStepReplayBuffer with indices."""
+    buffer = MultiStepReplayBuffer(max_size=1000, n_step=3, gamma=0.99)
 
     # Define transition fields required for n-step returns
     buffer.reward_key = "reward"
@@ -526,8 +538,9 @@ def test_nstep_sampling_with_indices():
                 "next_state": torch.tensor([i + 3, i + 4, i + 5]),
                 "done": torch.tensor([i % 5 == 0]),  # Some episodes terminate
             },
-            batch_size=[],
         )
+        data = data.unsqueeze(0)
+        data.batch_size = [1]
         buffer.add(data)
 
     # Skip test if buffer is empty
@@ -570,9 +583,9 @@ def test_prioritized_buffer_add():
             "action": torch.tensor([0]),
             "reward": torch.tensor([1.0]),
         },
-        batch_size=[],
     )
-
+    data = data.unsqueeze(0)
+    data.batch_size = [1]
     buffer.add(data)
 
     assert len(buffer) == 1
@@ -592,10 +605,9 @@ def test_prioritized_buffer_add_batch():
             "action": torch.tensor([[0], [1]]),
             "reward": torch.tensor([[1.0], [2.0]]),
         },
-        batch_size=[2],
     )
-
-    buffer.add(batch_data, is_vectorised=True)
+    batch_data.batch_size = [2]
+    buffer.add(batch_data)
 
     assert len(buffer) == 2
     assert buffer.tree_ptr == 2
@@ -618,8 +630,9 @@ def test_prioritized_buffer_with_image_observations():
                 "action": torch.tensor([i % 3]),
                 "reward": torch.tensor([float(i)]),
             },
-            batch_size=[],
         )
+        data = data.unsqueeze(0)
+        data.batch_size = [1]
         buffer.add(data)
 
     # Sample experiences
@@ -647,17 +660,16 @@ def test_prioritized_buffer_with_dict_observations():
                 "image": torch.ones((3, 84, 84)) * i,
                 "vector": torch.tensor([i, i + 1, i + 2]),
             },
-            batch_size=[],
         )
-
         data = TensorDict(
             {
                 "state": obs,
                 "action": torch.tensor([i % 3]),
                 "reward": torch.tensor([float(i)]),
             },
-            batch_size=[],
         )
+        data = data.unsqueeze(0)
+        data.batch_size = [1]
         buffer.add(data)
 
     # Sample experiences
@@ -689,8 +701,9 @@ def test_prioritized_sampling():
                 "action": torch.tensor([i % 3]),
                 "reward": torch.tensor([float(i)]),
             },
-            batch_size=[],
         )
+        data = data.unsqueeze(0)
+        data.batch_size = [1]
         buffer.add(data)
 
     # Sample experiences
@@ -706,8 +719,8 @@ def test_prioritized_sampling():
     assert "weights" in samples
     assert "idxs" in samples
     assert samples.batch_size == torch.Size([batch_size])
-    assert samples["weights"].shape == (batch_size,)
-    assert samples["idxs"].shape == (batch_size,)
+    assert samples["weights"].shape == (batch_size, 1)
+    assert samples["idxs"].shape == (batch_size, 1)
 
 
 def test_prioritized_buffer_update_priorities():
@@ -722,8 +735,9 @@ def test_prioritized_buffer_update_priorities():
                 "action": torch.tensor([i % 3]),
                 "reward": torch.tensor([float(i)]),
             },
-            batch_size=[],
         )
+        data = data.unsqueeze(0)
+        data.batch_size = [1]
         buffer.add(data)
 
     # Sample experiences
@@ -738,8 +752,12 @@ def test_prioritized_buffer_update_priorities():
 
     # Verify priorities were updated
     for idx, priority in zip(indices, new_priorities):
-        assert buffer.sum_tree[idx.item()] == priority.item() ** buffer.alpha
-        assert buffer.min_tree[idx.item()] == priority.item() ** buffer.alpha
+        assert buffer.sum_tree[idx.item()] == priority.item() ** buffer.alpha, (
+            priority.item() ** buffer.alpha
+        )
+        assert buffer.min_tree[idx.item()] == priority.item() ** buffer.alpha, (
+            priority.item() ** buffer.alpha
+        )
 
     # Max priority should be updated
     assert buffer.max_priority == 4.0
@@ -757,8 +775,9 @@ def test_proportional_sampling():
                 "action": torch.tensor([i % 3]),
                 "reward": torch.tensor([float(i)]),
             },
-            batch_size=[],
         )
+        data = data.unsqueeze(0)
+        data.batch_size = [1]
         buffer.add(data)
 
         # Update priorities to make them different
@@ -803,8 +822,9 @@ def test_weight_calculation():
                 "action": torch.tensor([i % 3]),
                 "reward": torch.tensor([float(i)]),
             },
-            batch_size=[],
         )
+        data = data.unsqueeze(0)
+        data.batch_size = [1]
         buffer.add(data)
 
     # Update priorities to known values

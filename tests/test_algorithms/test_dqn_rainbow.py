@@ -10,6 +10,7 @@ import torch.optim as optim
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
+from tensordict import TensorDict
 
 from agilerl.algorithms.dqn_rainbow import RainbowDQN
 from agilerl.modules.cnn import EvolvableCNN
@@ -395,7 +396,17 @@ def test_learns_from_experiences(accelerator, net_config, observation_space):
     next_states = torch.randn(batch_size, *observation_space.shape)
     dones = torch.randint(0, 2, (batch_size, 1))
 
-    experiences = [states, actions, rewards, next_states, dones]
+    experiences = TensorDict(
+        {
+            "obs": states,
+            "action": actions,
+            "reward": rewards,
+            "next_obs": next_states,
+            "done": dones,
+        },
+        batch_size=[batch_size],
+        device=accelerator.device if accelerator else "cpu",
+    )
 
     # Copy state dict before learning - should be different to after updating weights
     actor = dqn.actor
@@ -404,7 +415,7 @@ def test_learns_from_experiences(accelerator, net_config, observation_space):
     actor_target_pre_learn_sd = str(copy.deepcopy(dqn.actor_target.state_dict()))
 
     # Call the learn method
-    loss, new_idxs, new_priorities = dqn.learn(experiences, n_step=False, per=False)
+    loss, new_idxs, new_priorities = dqn.learn(experiences, per=False)
 
     assert loss > 0.0
     assert new_idxs is None
@@ -440,7 +451,17 @@ def test_learns_from_experiences_one_hot(accelerator):
     next_states = torch.randint(0, observation_space.n, (batch_size, 1))
     dones = torch.randint(0, 2, (batch_size, 1))
 
-    experiences = [states, actions, rewards, next_states, dones]
+    experiences = TensorDict(
+        {
+            "obs": states,
+            "action": actions,
+            "reward": rewards,
+            "next_obs": next_states,
+            "done": dones,
+        },
+        batch_size=[batch_size],
+        device=accelerator.device if accelerator else "cpu",
+    )
 
     # Copy state dict before learning - should be different to after updating weights
     actor = dqn.actor
@@ -449,7 +470,7 @@ def test_learns_from_experiences_one_hot(accelerator):
     actor_target_pre_learn_sd = str(copy.deepcopy(dqn.actor_target.state_dict()))
 
     # Call the learn method
-    loss, new_idxs, new_priorities = dqn.learn(experiences, n_step=False, per=False)
+    loss, new_idxs, new_priorities = dqn.learn(experiences, per=False)
 
     assert loss > 0.0
     assert new_idxs is None
@@ -498,19 +519,30 @@ def test_learns_from_experiences_n_step(accelerator, combined):
     n_next_states = torch.randn(batch_size, observation_space.shape[0])
     n_dones = torch.randint(0, 2, (batch_size, 1))
 
-    experiences = [
-        states,
-        actions,
-        rewards,
-        next_states,
-        dones,
-        idxs,
-        n_states,
-        n_actions,
-        n_rewards,
-        n_next_states,
-        n_dones,
-    ]
+    experiences = TensorDict(
+        {
+            "obs": states,
+            "action": actions,
+            "reward": rewards,
+            "next_obs": next_states,
+            "done": dones,
+            "idxs": idxs,
+        },
+        batch_size=[batch_size],
+        device=accelerator.device if accelerator else "cpu",
+    )
+
+    n_experiences = TensorDict(
+        {
+            "obs": n_states,
+            "action": n_actions,
+            "reward": n_rewards,
+            "next_obs": n_next_states,
+            "done": n_dones,
+        },
+        batch_size=[batch_size],
+        device=accelerator.device if accelerator else "cpu",
+    )
 
     # Copy state dict before learning - should be different to after updating weights
     actor = dqn.actor
@@ -519,7 +551,7 @@ def test_learns_from_experiences_n_step(accelerator, combined):
     actor_target_pre_learn_sd = str(copy.deepcopy(dqn.actor_target.state_dict()))
 
     # Call the learn method
-    loss, new_idxs, new_priorities = dqn.learn(experiences, n_step=True, per=False)
+    loss, new_idxs, new_priorities = dqn.learn(experiences, n_experiences, per=False)
 
     assert loss > 0.0
     assert new_idxs is not None
@@ -561,9 +593,21 @@ def test_learns_from_experiences_per(accelerator, combined):
     next_states = torch.randn(batch_size, observation_space.shape[0])
     dones = torch.randint(0, 2, (batch_size, 1))
     weights = torch.rand(batch_size)
-    idxs = np.arange(batch_size)
+    idxs = torch.from_numpy(np.arange(batch_size))
 
-    experiences = [states, actions, rewards, next_states, dones, weights, idxs]
+    experiences = TensorDict(
+        {
+            "obs": states,
+            "action": actions,
+            "reward": rewards,
+            "next_obs": next_states,
+            "done": dones,
+            "idxs": idxs,
+            "weights": weights,
+        },
+        batch_size=[batch_size],
+        device=accelerator.device if accelerator else "cpu",
+    )
 
     # Copy state dict before learning - should be different to after updating weights
     actor = dqn.actor
@@ -572,12 +616,12 @@ def test_learns_from_experiences_per(accelerator, combined):
     actor_target_pre_learn_sd = str(copy.deepcopy(dqn.actor_target.state_dict()))
 
     # Call the learn method
-    loss, new_idxs, new_priorities = dqn.learn(experiences, n_step=False, per=True)
+    loss, new_idxs, new_priorities = dqn.learn(experiences, per=True)
 
     assert loss > 0.0
-    assert isinstance(new_idxs, np.ndarray)
+    assert isinstance(new_idxs, torch.Tensor)
     assert isinstance(new_priorities, np.ndarray)
-    assert np.array_equal(new_idxs, idxs)
+    assert torch.equal(new_idxs.cpu(), idxs)
     assert actor == dqn.actor
     assert actor_target == dqn.actor_target
     assert actor_pre_learn_sd != str(dqn.actor.state_dict())
@@ -615,27 +659,38 @@ def test_learns_from_experiences_per_n_step(accelerator, combined):
     next_states = torch.randn(batch_size, observation_space.shape[0])
     dones = torch.randint(0, 2, (batch_size, 1))
     weights = torch.rand(batch_size)
-    idxs = np.arange(batch_size)
+    idxs = torch.from_numpy(np.arange(batch_size))
     n_states = torch.randn(batch_size, observation_space.shape[0])
     n_actions = torch.randint(0, action_space.n, (batch_size, 1))
     n_rewards = torch.randn((batch_size, 1))
     n_next_states = torch.randn(batch_size, observation_space.shape[0])
     n_dones = torch.randint(0, 2, (batch_size, 1))
 
-    experiences = [
-        states,
-        actions,
-        rewards,
-        next_states,
-        dones,
-        weights,
-        idxs,
-        n_states,
-        n_actions,
-        n_rewards,
-        n_next_states,
-        n_dones,
-    ]
+    experiences = TensorDict(
+        {
+            "obs": states,
+            "action": actions,
+            "reward": rewards,
+            "next_obs": next_states,
+            "done": dones,
+            "idxs": idxs,
+            "weights": weights,
+        },
+        batch_size=[batch_size],
+        device=accelerator.device if accelerator else "cpu",
+    )
+
+    n_experiences = TensorDict(
+        {
+            "obs": n_states,
+            "action": n_actions,
+            "reward": n_rewards,
+            "next_obs": n_next_states,
+            "done": n_dones,
+        },
+        batch_size=[batch_size],
+        device=accelerator.device if accelerator else "cpu",
+    )
 
     # Copy state dict before learning - should be different to after updating weights
     actor = dqn.actor
@@ -644,12 +699,12 @@ def test_learns_from_experiences_per_n_step(accelerator, combined):
     actor_target_pre_learn_sd = str(copy.deepcopy(dqn.actor_target.state_dict()))
 
     # Call the learn method
-    loss, new_idxs, new_priorities = dqn.learn(experiences, n_step=True, per=True)
+    loss, new_idxs, new_priorities = dqn.learn(experiences, n_experiences, per=True)
 
     assert loss > 0.0
-    assert isinstance(new_idxs, np.ndarray)
+    assert isinstance(new_idxs, torch.Tensor)
     assert isinstance(new_priorities, np.ndarray)
-    assert np.array_equal(new_idxs, idxs)
+    assert torch.equal(new_idxs.cpu(), idxs)
     assert actor == dqn.actor
     assert actor_target == dqn.actor_target
     assert actor_pre_learn_sd != str(dqn.actor.state_dict())
@@ -883,7 +938,17 @@ def test_clone_after_learning():
     next_states = torch.randn(batch_size, observation_space.shape[0])
     dones = torch.zeros(batch_size, 1)
 
-    experiences = states, actions, rewards, next_states, dones
+    experiences = TensorDict(
+        {
+            "obs": states,
+            "action": actions,
+            "reward": rewards,
+            "next_obs": next_states,
+            "done": dones,
+        },
+        batch_size=[batch_size],
+        device="cpu",
+    )
     rainbow_dqn.learn(experiences)
     clone_agent = rainbow_dqn.clone()
 

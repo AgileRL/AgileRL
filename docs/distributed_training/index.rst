@@ -24,7 +24,7 @@ Example distributed training loop:
 .. code-block:: python
 
     from agilerl.components.replay_buffer import ReplayBuffer
-    from agilerl.components.replay_data import ReplayDataset
+    from agilerl.components.data import ReplayDataset
     from agilerl.components.sampler import Sampler
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection

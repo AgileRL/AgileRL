@@ -98,11 +98,8 @@ def test_minari_to_agile_dataset(dataset_id, env_id):
 )
 def test_minari_to_agile_buffer(dataset_id, env_id):
     """Test create agile buffer from minari dataset."""
-
-    field_names = ["state", "action", "reward", "next_state", "done"]
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    memory = ReplayBuffer(10000, field_names=field_names, device=device)
+    memory = ReplayBuffer(10000, device=device)
 
     total_timesteps = create_dataset_return_timesteps(dataset_id, env_id)
 

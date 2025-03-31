@@ -361,7 +361,7 @@ class Mutations:
             self.load_state_dicts(ind_shared, state_dicts, remove_compile_prefix)
         else:
             ind_shared = self.reinit_module(offspring, offspring.init_dict)
-            ind_shared.load_state_dict(offspring.state_dict())
+            ind_shared.load_state_dict(offspring.state_dict(), strict=False)
 
         return ind_shared
 
@@ -384,7 +384,7 @@ class Mutations:
             state_dict = (
                 remove_compile_prefix(state_dict) if remove_prefix else state_dict
             )
-            module.load_state_dict(state_dict)
+            module.load_state_dict(state_dict, strict=False)
 
     def compile_modules(self, modules: OffspringType, compiler: str) -> OffspringType:
         """Compile the modules using the given compiler.

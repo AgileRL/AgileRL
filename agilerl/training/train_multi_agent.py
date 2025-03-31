@@ -12,8 +12,8 @@ from tqdm import trange
 
 import wandb
 from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
+from agilerl.components.data import ReplayDataset
 from agilerl.components.replay_buffer import ReplayBuffer
-from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -174,11 +174,9 @@ def train_multi_agent(
         replay_dataset = ReplayDataset(memory, pop[0].batch_size)
         replay_dataloader = DataLoader(replay_dataset, batch_size=None)
         replay_dataloader = accelerator.prepare(replay_dataloader)
-        sampler = Sampler(
-            distributed=True, dataset=replay_dataset, dataloader=replay_dataloader
-        )
+        sampler = Sampler(dataset=replay_dataset, dataloader=replay_dataloader)
     else:
-        sampler = Sampler(distributed=False, memory=memory)
+        sampler = Sampler(memory=memory)
 
     if accelerator is not None:
         print(f"\nDistributed training on {accelerator.device}...")

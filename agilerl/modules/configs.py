@@ -171,13 +171,30 @@ class MultiInputNetConfig(NetConfig):
             assert isinstance(
                 self.cnn_config, CnnNetConfig
             ), "CNN config must be an instance of CnnNetConfig"
-
+        else:
+            self.cnn_config = CnnNetConfig(
+                channel_size=[16, 16],
+                kernel_size=[3, 3],
+                stride_size=[1, 1],
+                output_activation="ReLU",
+            )
         if self.mlp_config is not None:
             assert isinstance(
                 self.mlp_config, MlpNetConfig
             ), "MLP config must be an instance of MlpNetConfig"
+        else:
+            self.mlp_config = MlpNetConfig(
+                hidden_size=[64, 64],
+                output_activation="ReLU",
+            )
 
         if self.lstm_config is not None:
             assert isinstance(
                 self.lstm_config, LstmNetConfig
             ), "LSTM config must be an instance of LstmNetConfig"
+        else:
+            self.lstm_config = LstmNetConfig(
+                hidden_size=64,
+                num_layers=2,
+                output_activation="ReLU",
+            )

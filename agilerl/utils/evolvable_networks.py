@@ -47,7 +47,6 @@ def get_default_encoder_config(
     :rtype: Dict[str, Any]
     """
     if isinstance(observation_space, (spaces.Dict, spaces.Tuple)):
-        # See `EvolvableMultiInput` for details on default architectures
         return MultiInputNetConfig()
     elif is_image_space(observation_space):
         return CnnNetConfig(

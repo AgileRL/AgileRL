@@ -14,6 +14,7 @@ from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import DeterministicActor
+from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.typing import (
     ArrayLike,
@@ -22,7 +23,11 @@ from agilerl.typing import (
     GymEnvType,
     ObservationType,
 )
-from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
+from agilerl.utils.algo_utils import (
+    make_safe_deepcopies,
+    obs_channels_to_first,
+    share_encoder_parameters,
+)
 
 
 class DDPG(RLAlgorithm):
@@ -74,6 +79,8 @@ class DDPG(RLAlgorithm):
     :type actor_network: Optional[nn.Module], optional
     :param critic_network: Custom critic network, defaults to None
     :type critic_network: Optional[nn.Module], optional
+    :param share_encoders: Share encoders between actor and critic, defaults to True
+    :type share_encoders: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -106,6 +113,7 @@ class DDPG(RLAlgorithm):
         policy_freq: int = 2,
         actor_network: Optional[EvolvableModule] = None,
         critic_network: Optional[EvolvableModule] = None,
+        share_encoders: bool = False,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
@@ -218,7 +226,7 @@ class DDPG(RLAlgorithm):
                 return DeterministicActor(
                     observation_space=observation_space,
                     action_space=action_space,
-                    device=device,
+                    device=self.device,
                     **net_config,
                 )
 
@@ -226,7 +234,7 @@ class DDPG(RLAlgorithm):
                 return ContinuousQNetwork(
                     observation_space=observation_space,
                     action_space=action_space,
-                    device=device,
+                    device=self.device,
                     **critic_net_config,
                 )
 
@@ -234,6 +242,16 @@ class DDPG(RLAlgorithm):
             self.actor_target = create_actor()
             self.critic = create_critic()
             self.critic_target = create_critic()
+
+        # Share encoders between actor and critic
+        self.share_encoders = share_encoders
+        if self.share_encoders and all(
+            isinstance(net, EvolvableNetwork) for net in [self.actor, self.critic]
+        ):
+            self.share_encoder_parameters()
+
+            # Need to register a mutation hook that does this after every mutation
+            self.register_mutation_hook(self.share_encoder_parameters)
 
         self.actor_target.load_state_dict(self.actor.state_dict())
         self.critic_target.load_state_dict(self.critic.state_dict())
@@ -258,6 +276,10 @@ class DDPG(RLAlgorithm):
         self.register_network_group(
             NetworkGroup(eval=self.critic, shared=self.critic_target)
         )
+
+    def share_encoder_parameters(self) -> None:
+        """Shares the encoder parameters between the actor and critic."""
+        share_encoder_parameters(self.actor, self.critic, self.critic_target)
 
     def scale_to_action_space(
         self, action: ArrayLike, convert_to_torch: bool = False

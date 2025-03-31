@@ -158,7 +158,7 @@ class NeuralUCB(RLAlgorithm):
         self.criterion = nn.MSELoss()
 
         # Register network groups for mutations
-        self.register_init_hook(self.init_params)
+        self.register_mutation_hook(self.init_params)
         self.register_network_group(
             NetworkGroup(eval=self.actor, shared=None, policy=True)
         )
@@ -237,10 +237,8 @@ class NeuralUCB(RLAlgorithm):
         :return: Loss value from training step
         :rtype: float
         """
-        states, rewards = experiences
-        if self.accelerator is not None:
-            states = states.to(self.accelerator.device)
-            rewards = rewards.to(self.accelerator.device)
+        states = experiences["obs"]
+        rewards = experiences["reward"]
 
         pred_rewards = self.actor(states)
 
