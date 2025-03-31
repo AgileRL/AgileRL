@@ -7,9 +7,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 from accelerate import Accelerator
+from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from numpy.random import Generator
 from torch._dynamo.eval_frame import OptimizedModule
-from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 
 from agilerl.algorithms.core import EvolvableAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
@@ -499,14 +499,16 @@ class Mutations:
         """
 
         def _reinit_individual(config: OptimizerConfig) -> None:
-            opt: Union[OptimizerWrapper, DeepSpeedOptimizerWrapper] = getattr(individual, config.name)
+            opt: Union[OptimizerWrapper, DeepSpeedOptimizerWrapper] = getattr(
+                individual, config.name
+            )
             optimizer = opt.optimizer
 
             # Multiple optimizers in a single attribute (i.e. multi-agent)
             # or one module optimized by a single optimizer
             if isinstance(opt, DeepSpeedOptimizerWrapper):
                 for param_group in opt.param_groups:
-                    param_group['lr'] = individual.lr
+                    param_group["lr"] = individual.lr
             else:
                 if isinstance(optimizer, list) or len(opt.network_names) == 1:
                     opt_nets = getattr(individual, opt.network_names[0])

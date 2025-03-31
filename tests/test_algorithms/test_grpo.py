@@ -1,10 +1,8 @@
-import copy
 import os
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import deepspeed
 import gymnasium as gym
 import pytest
 import torch
@@ -33,16 +31,19 @@ dist_env = dict(
 class MockAccelerator:
     def __init__(self, *args, **kwargs):
         # Setup mock for AcceleratorState
-        mock_accelerator_state = MagicMock()
+        self.mock_accelerator_state = MagicMock()
         mock_deepspeed_plugin = MagicMock()
         mock_deepspeed_plugin.deepspeed_config = {
             "train_micro_batch_size_per_gpu": "auto",
             "zero_optimization": {"stage": 0},
         }
-        mock_accelerator_state.deepspeed_plugin = mock_deepspeed_plugin
-        AcceleratorState = lambda: mock_accelerator_state
-
+        self.mock_accelerator_state.deepspeed_plugin = mock_deepspeed_plugin
+        AcceleratorState = self.accelerator_state
+        print(AcceleratorState)
         self.state = MagicMock()
+
+    def accelerator_state(self):
+        return self.mock_accelerator_state
 
     def prepare(self, model, opt, *args):
         return (
@@ -87,7 +88,7 @@ def mock_initialize(model, config, **kwargs):
                     except (AttributeError, TypeError):
                         pass
 
-        def eval(self): 
+        def eval(self):
             model.eval()
 
         def train(self, mode=True):
@@ -120,11 +121,14 @@ class DummyLLM(nn.Module):
         self.input_size = input_size
         self.max_tokens = max_tokens
         self.vocab_size = vocab_size
-        self.net = nn.Sequential(nn.Linear(
-            input_size + max_tokens,
-            32,
-            device=device,
-        ), nn.Linear(32, (input_size + max_tokens) * vocab_size, device=device))
+        self.net = nn.Sequential(
+            nn.Linear(
+                input_size + max_tokens,
+                32,
+                device=device,
+            ),
+            nn.Linear(32, (input_size + max_tokens) * vocab_size, device=device),
+        )
         self.device = device
         self.gradient_checkpointing_enabled = False
 
@@ -668,7 +672,8 @@ def test_grpo_clone_with_accelerator(
     with patch_environment(**dist_env):
         AcceleratorState._reset_state(True)
         deepspeed_plugin = DeepSpeedPlugin(
-            zero_stage=zero_stage, gradient_accumulation_steps=2, 
+            zero_stage=zero_stage,
+            gradient_accumulation_steps=2,
         )
         accelerator = Accelerator(deepspeed_plugin=deepspeed_plugin)
         grpo = GRPO(
@@ -684,7 +689,7 @@ def test_grpo_clone_with_accelerator(
             device="cuda" if torch.cuda.is_available() else "cpu",
             group_size=group_size,
             accelerator=accelerator,
-            lr=0.1
+            lr=0.1,
         )
 
         grpo_reference_actor_state_dict = grpo.reference_actor.state_dict()
@@ -698,13 +703,16 @@ def test_grpo_clone_with_accelerator(
         )
         assert new_grpo.index == 1
         assert new_grpo.accelerator == grpo_accelerator
-        assert new_grpo.lr_scheduler == grpo_lr_scheduler 
-        for pg1, pg2 in zip(grpo_optimizer.optimizer.param_groups, new_grpo.optimizer.optimizer.param_groups):
+        assert new_grpo.lr_scheduler == grpo_lr_scheduler
+        for pg1, pg2 in zip(
+            grpo_optimizer.optimizer.param_groups,
+            new_grpo.optimizer.optimizer.param_groups,
+        ):
             assert pg1["lr"] == pg2["lr"]
             assert pg1["weight_decay"] == pg2["weight_decay"]
             assert pg1["betas"] == pg2["betas"]
             assert pg1["eps"] == pg2["eps"]
-            
+
         assert new_grpo.lr == grpo.lr
         assert new_grpo.batch_size == grpo.batch_size
         assert new_grpo.clip_coef == grpo.clip_coef
@@ -732,7 +740,7 @@ def test_grpo_clone_with_no_accelerator(
     batch_size,
     tmpdir,
 ):
-    
+
     grpo = GRPO(
         gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
         gym.spaces.Box(low=0, high=vocab_size - 1),
@@ -749,7 +757,7 @@ def test_grpo_clone_with_no_accelerator(
         lr=0.1,
         cosine_lr_schedule_config=CosineLRScheduleConfig(
             num_epochs=10, warmup_proportion=0.05
-        )
+        ),
     )
 
     grpo_reference_actor_state_dict = grpo.reference_actor.state_dict()
@@ -763,13 +771,15 @@ def test_grpo_clone_with_no_accelerator(
     )
     assert new_grpo.index == 1
     assert new_grpo.accelerator == grpo_accelerator
-    assert new_grpo.lr_scheduler == grpo_lr_scheduler 
-    for pg1, pg2 in zip(grpo_optimizer.optimizer.param_groups, new_grpo.optimizer.optimizer.param_groups):
+    assert new_grpo.lr_scheduler == grpo_lr_scheduler
+    for pg1, pg2 in zip(
+        grpo_optimizer.optimizer.param_groups, new_grpo.optimizer.optimizer.param_groups
+    ):
         assert pg1["lr"] == pg2["lr"]
         assert pg1["weight_decay"] == pg2["weight_decay"]
         assert pg1["betas"] == pg2["betas"]
         assert pg1["eps"] == pg2["eps"]
-    
+
     assert new_grpo.lr == grpo.lr
     assert new_grpo.batch_size == grpo.batch_size
     assert new_grpo.clip_coef == grpo.clip_coef

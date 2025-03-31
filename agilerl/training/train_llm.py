@@ -335,4 +335,3 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
         pbar.close()
         if wb:
             wandb.finish()
-        

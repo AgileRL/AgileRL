@@ -109,7 +109,7 @@ class DDPG(RLAlgorithm):
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
-    ) -> None:  
+    ) -> None:
 
         super().__init__(
             observation_space,
