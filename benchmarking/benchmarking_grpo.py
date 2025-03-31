@@ -16,7 +16,7 @@ from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
-MODEL_PATH = "Qwen/Qwen2.5-3B"
+MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
 
@@ -248,7 +248,7 @@ def main(init_hp, mut_p):
         save_elite=True,
         elite_path="saved_llms",
         max_reward=2.0,
-        evo_steps=10,
+        evo_steps=1,
         mutation=mutations,
         tournament=tournament,
         accelerator=accelerators[0],

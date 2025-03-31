@@ -161,7 +161,7 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                 test_metrics = [test_reward]
                 if max_reward is not None:
                     test_accuracy = (test_reward == max_reward).sum() / len(
-                        rewards.flatten()
+                        test_reward.flatten()
                     )
                     test_metrics.append(test_accuracy)
                 agg_test_metrics = [
