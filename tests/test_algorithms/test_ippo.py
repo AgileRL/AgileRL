@@ -214,30 +214,35 @@ def accelerated_experiences(
     action_size = 1 if discrete_actions else action_spaces[0].shape[0]
     if one_hot:
         states = {
-            agent: torch.randint(0, state_size[0], (batch_size, 1)).float()
+            agent: np.random.randint(0, state_size[0], (batch_size, 1))
             for agent in agent_ids
         }
     else:
-        states = {agent: torch.randn(batch_size, *state_size) for agent in agent_ids}
+        states = {
+            agent: np.random.randn(batch_size, *state_size) for agent in agent_ids
+        }
 
     if discrete_actions:
         actions = {
-            agent: torch.randint(0, action_size, (batch_size,)) for agent in agent_ids
+            agent: np.random.randint(0, action_size, (batch_size,))
+            for agent in agent_ids
         }
     else:
-        actions = {agent: torch.randn(batch_size, action_size) for agent in agent_ids}
-    log_probs = {agent: torch.randn(batch_size, 1) for agent in agent_ids}
-    rewards = {agent: torch.randn(batch_size, 1) for agent in agent_ids}
-    dones = {agent: torch.randint(0, 2, (batch_size, 1)) for agent in agent_ids}
-    values = {agent: torch.randn(batch_size, 1) for agent in agent_ids}
+        actions = {
+            agent: np.random.randn(batch_size, action_size) for agent in agent_ids
+        }
+    log_probs = {agent: np.random.randn(batch_size, 1) for agent in agent_ids}
+    rewards = {agent: np.random.randn(batch_size, 1) for agent in agent_ids}
+    dones = {agent: np.random.randint(0, 2, (batch_size, 1)) for agent in agent_ids}
+    values = {agent: np.random.randn(batch_size, 1) for agent in agent_ids}
     if one_hot:
         next_state = {
-            agent: torch.randint(0, state_size[0], (1,)).float() for agent in agent_ids
+            agent: np.random.randint(0, state_size[0], (1,)) for agent in agent_ids
         }
     else:
-        next_state = {agent: torch.randn(*state_size) for agent in agent_ids}
+        next_state = {agent: np.random.randn(*state_size) for agent in agent_ids}
 
-    next_done = {agent: torch.randint(0, 2, (1,)) for agent in agent_ids}
+    next_done = {agent: np.random.randint(0, 2, (1,)) for agent in agent_ids}
 
     return states, actions, log_probs, rewards, dones, values, next_state, next_done
 
@@ -252,40 +257,35 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, device
     action_size = 1 if discrete_actions else action_spaces[0].shape[0]
     if one_hot:
         states = {
-            agent: torch.randint(0, state_size[0], (batch_size, 1)).float().to(device)
+            agent: np.random.randint(0, state_size[0], (batch_size, 1))
             for agent in agent_ids
         }
     else:
         states = {
-            agent: torch.randn(batch_size, *state_size).to(device)
-            for agent in agent_ids
+            agent: np.random.randn(batch_size, *state_size) for agent in agent_ids
         }
 
     if discrete_actions:
         actions = {
-            agent: torch.randint(0, action_size, (batch_size, 1), device=device)
+            agent: np.random.randint(0, action_size, (batch_size, 1))
             for agent in agent_ids
         }
     else:
         actions = {
-            agent: torch.randn(batch_size, action_size).to(device)
-            for agent in agent_ids
+            agent: np.random.randn(batch_size, action_size) for agent in agent_ids
         }
-    log_probs = {agent: torch.randn(batch_size, 1).to(device) for agent in agent_ids}
-    rewards = {agent: torch.randn(batch_size).to(device) for agent in agent_ids}
-    dones = {
-        agent: torch.randint(0, 2, (batch_size,)).to(device) for agent in agent_ids
-    }
-    values = {agent: torch.randn(batch_size, 1).to(device) for agent in agent_ids}
+    log_probs = {agent: np.random.randn(batch_size, 1) for agent in agent_ids}
+    rewards = {agent: np.random.randn(batch_size) for agent in agent_ids}
+    dones = {agent: np.random.randint(0, 2, (batch_size,)) for agent in agent_ids}
+    values = {agent: np.random.randn(batch_size, 1) for agent in agent_ids}
     if one_hot:
         next_state = {
-            agent: torch.randint(0, state_size[0], (1,)).float().to(device)
-            for agent in agent_ids
+            agent: np.random.randint(0, state_size[0], (1,)) for agent in agent_ids
         }
     else:
-        next_state = {agent: torch.randn(*state_size).to(device) for agent in agent_ids}
+        next_state = {agent: np.random.randn(*state_size) for agent in agent_ids}
 
-    next_done = {agent: torch.randint(0, 2, (1,)).to(device) for agent in agent_ids}
+    next_done = {agent: np.random.randint(0, 2, (1,)) for agent in agent_ids}
 
     return states, actions, log_probs, rewards, dones, values, next_state, next_done
 
@@ -302,45 +302,34 @@ def vectorized_experiences(
     action_size = 1 if discrete_actions else action_spaces[0].shape[0]
     if one_hot:
         states = {
-            agent: torch.randint(0, state_size[0], (batch_size, vect_dim, 1))
-            .float()
-            .to(device)
+            agent: np.random.randint(0, state_size[0], (batch_size, vect_dim, 1))
             for agent in agent_ids
         }
     else:
         states = {
-            agent: torch.randn(batch_size, vect_dim, *state_size).to(device)
+            agent: np.random.randn(batch_size, vect_dim, *state_size)
             for agent in agent_ids
         }
 
     if discrete_actions:
         actions = {
-            agent: torch.randint(
-                0, action_size, (batch_size, vect_dim, 1), device=device
-            )
+            agent: np.random.randint(0, action_size, (batch_size, vect_dim, 1))
             for agent in agent_ids
         }
     else:
         actions = {
-            agent: torch.randn(batch_size, vect_dim, action_size).to(device)
+            agent: np.random.randn(batch_size, vect_dim, action_size)
             for agent in agent_ids
         }
-    log_probs = {
-        agent: torch.randn(batch_size, vect_dim, 1).to(device) for agent in agent_ids
-    }
-    rewards = {
-        agent: torch.randn(batch_size, vect_dim).to(device) for agent in agent_ids
-    }
+    log_probs = {agent: np.random.randn(batch_size, vect_dim, 1) for agent in agent_ids}
+    rewards = {agent: np.random.randn(batch_size, vect_dim) for agent in agent_ids}
     dones = {
-        agent: torch.randint(0, 2, (batch_size, vect_dim)).to(device)
-        for agent in agent_ids
+        agent: np.random.randint(0, 2, (batch_size, vect_dim)) for agent in agent_ids
     }
-    values = {
-        agent: torch.randn(batch_size, vect_dim, 1).to(device) for agent in agent_ids
-    }
+    values = {agent: np.random.randn(batch_size, vect_dim, 1) for agent in agent_ids}
     if one_hot:
         next_state = {
-            agent: torch.randint(
+            agent: np.random.randint(
                 0,
                 state_size[0],
                 (
@@ -348,18 +337,14 @@ def vectorized_experiences(
                     1,
                 ),
             )
-            .float()
-            .to(device)
             for agent in agent_ids
         }
     else:
         next_state = {
-            agent: torch.randn(vect_dim, *state_size).to(device) for agent in agent_ids
+            agent: np.random.randn(vect_dim, *state_size) for agent in agent_ids
         }
 
-    next_done = {
-        agent: torch.randint(0, 2, (1, vect_dim)).to(device) for agent in agent_ids
-    }
+    next_done = {agent: np.random.randint(0, 2, (1, vect_dim)) for agent in agent_ids}
 
     return states, actions, log_probs, rewards, dones, values, next_state, next_done
 
@@ -595,22 +580,22 @@ def test_clone_after_learning(compile_mode):
     )
 
     states = {
-        agent_id: torch.randn(batch_size, observation_spaces[idx].shape[0])
+        agent_id: np.random.randn(batch_size, observation_spaces[idx].shape[0])
         for idx, agent_id in enumerate(agent_ids)
     }
     actions = {
-        agent_id: torch.randint(0, action_spaces[idx].n, (batch_size,))
+        agent_id: np.random.randint(0, action_spaces[idx].n, (batch_size,))
         for idx, agent_id in enumerate(agent_ids)
     }
-    log_probs = {agent_id: torch.randn(batch_size, 1) for agent_id in agent_ids}
-    rewards = {agent_id: torch.randn(batch_size, 1) for agent_id in agent_ids}
+    log_probs = {agent_id: np.random.randn(batch_size, 1) for agent_id in agent_ids}
+    rewards = {agent_id: np.random.randn(batch_size, 1) for agent_id in agent_ids}
     dones = {agent_id: torch.zeros(batch_size, 1) for agent_id in agent_ids}
-    values = {agent_id: torch.randn(batch_size, 1) for agent_id in agent_ids}
+    values = {agent_id: np.random.randn(batch_size, 1) for agent_id in agent_ids}
     next_state = {
-        agent_id: torch.randn(observation_spaces[idx].shape[0])
+        agent_id: np.random.randn(observation_spaces[idx].shape[0])
         for idx, agent_id in enumerate(agent_ids)
     }
-    next_done = {agent: torch.randint(0, 2, (1,)) for agent in agent_ids}
+    next_done = {agent: np.random.randint(0, 2, (1,)) for agent in agent_ids}
 
     experiences = (
         states,
@@ -1681,7 +1666,7 @@ def test_ippo_learns_from_hardcoded_vectorized_experiences_mlp(
                 [[4, 4, 4], [5, 5, 5], [6, 6, 6]],
                 [[7, 7, 7], [8, 8, 8], [9, 9, 9]],
             ]
-        ).to(device)
+        )
         * i
         for i, agent in enumerate(agent_ids)
     }
@@ -1693,7 +1678,7 @@ def test_ippo_learns_from_hardcoded_vectorized_experiences_mlp(
                 [[4, 4, 4], [5, 5, 5], [6, 6, 6]],
                 [[7, 7, 7], [8, 8, 8], [9, 9, 9]],
             ]
-        ).to(device)
+        )
         * i
         for i, agent in enumerate(agent_ids)
     }
@@ -1705,11 +1690,11 @@ def test_ippo_learns_from_hardcoded_vectorized_experiences_mlp(
         for i, agent in enumerate(agent_ids)
     }
     rewards = {
-        agent: torch.Tensor([[1, 2, 3], [4, 5, 6], [7, 8, 9]]).to(device) * i
+        agent: torch.Tensor([[1, 2, 3], [4, 5, 6], [7, 8, 9]]) * i
         for i, agent in enumerate(agent_ids)
     }
     dones = {
-        agent: torch.Tensor([[1, 0, 0], [0, 1, 0], [0, 0, 1]]).to(device)
+        agent: torch.Tensor([[1, 0, 0], [0, 1, 0], [0, 0, 1]])
         for i, agent in enumerate(agent_ids)
     }
     values = {
@@ -1720,12 +1705,10 @@ def test_ippo_learns_from_hardcoded_vectorized_experiences_mlp(
         for i, agent in enumerate(agent_ids)
     }
     next_state = {
-        agent: torch.Tensor([[4, 4, 4], [7, 7, 7], [10, 10, 10]]).to(device) * i
+        agent: torch.Tensor([[4, 4, 4], [7, 7, 7], [10, 10, 10]]) * i
         for i, agent in enumerate(agent_ids)
     }
-    next_done = {
-        agent: torch.Tensor([[0, 1, 0]]).to(device) for i, agent in enumerate(agent_ids)
-    }
+    next_done = {agent: torch.Tensor([[0, 1, 0]]) for i, agent in enumerate(agent_ids)}
 
     experiences = (
         states,
