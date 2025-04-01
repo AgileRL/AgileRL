@@ -64,7 +64,6 @@ def dataset(num_samples):
 def test_hugging_face_gym_init(dataset, num_samples):
     train_dataset, test_dataset = dataset
     tokenizer = DummyTokenizer()
-    max_answer_tokens = 200
     data_batch_size = 8
     env = HuggingFaceGym(
         train_dataset=train_dataset,
@@ -72,7 +71,6 @@ def test_hugging_face_gym_init(dataset, num_samples):
         tokenizer=tokenizer,
         reward_fn=dummy_reward_fn,
         apply_chat_template_fn=dummy_chat_template_fn,
-        max_answer_tokens=max_answer_tokens,
         data_batch_size_per_gpu=data_batch_size,
     )
     assert env.name == "dummy_dataset"
@@ -92,7 +90,6 @@ def test_hugging_face_gym_init(dataset, num_samples):
     assert np.all(env.observation_space.high == tokenizer.vocab_size - 1)
     assert isinstance(env.action_space, gym.spaces.Space)
     assert np.all(env.action_space.high == tokenizer.vocab_size - 1)
-    assert len(env.action_space.sample()) == max_answer_tokens
     assert not env.eval_mode
     assert env.data_batch_size_per_gpu == data_batch_size
 
@@ -102,7 +99,6 @@ def test_hugging_face_gym_init(dataset, num_samples):
 def test_hugging_face_gym_step(dataset, num_samples, eval_mode):
     train_dataset, test_dataset = dataset
     tokenizer = DummyTokenizer()
-    max_answer_tokens = 200
     data_batch_size = 8
     env = HuggingFaceGym(
         train_dataset=train_dataset,
@@ -110,7 +106,6 @@ def test_hugging_face_gym_step(dataset, num_samples, eval_mode):
         tokenizer=tokenizer,
         reward_fn=dummy_reward_fn,
         apply_chat_template_fn=dummy_chat_template_fn,
-        max_answer_tokens=max_answer_tokens,
         data_batch_size_per_gpu=data_batch_size,
     )
     env.eval_mode = eval_mode
@@ -131,7 +126,6 @@ def test_hugging_face_gym_step(dataset, num_samples, eval_mode):
 def test_hugging_face_gym_reset(dataset, num_samples, reset_dataloaders):
     train_dataset, test_dataset = dataset
     tokenizer = DummyTokenizer()
-    max_answer_tokens = 200
     data_batch_size = 8
     env = HuggingFaceGym(
         train_dataset=train_dataset,
@@ -139,7 +133,6 @@ def test_hugging_face_gym_reset(dataset, num_samples, reset_dataloaders):
         tokenizer=tokenizer,
         reward_fn=dummy_reward_fn,
         apply_chat_template_fn=dummy_chat_template_fn,
-        max_answer_tokens=max_answer_tokens,
         data_batch_size_per_gpu=data_batch_size,
     )
     tokenized_prompts = env.reset(reset_dataloaders)
@@ -156,7 +149,6 @@ def test_hugging_face_gym_reset(dataset, num_samples, reset_dataloaders):
 def test_hugging_face_gym_reset_dataloaders(dataset, num_samples, reset_dataloaders):
     train_dataset, test_dataset = dataset
     tokenizer = DummyTokenizer()
-    max_answer_tokens = 200
     data_batch_size = 8
     env = HuggingFaceGym(
         train_dataset=train_dataset,
@@ -164,7 +156,6 @@ def test_hugging_face_gym_reset_dataloaders(dataset, num_samples, reset_dataload
         tokenizer=tokenizer,
         reward_fn=dummy_reward_fn,
         apply_chat_template_fn=dummy_chat_template_fn,
-        max_answer_tokens=max_answer_tokens,
         data_batch_size_per_gpu=data_batch_size,
     )
     first_data_point = next(
@@ -178,7 +169,6 @@ def test_hugging_face_gym_reset_dataloaders(dataset, num_samples, reset_dataload
 def test_reset_warning(dataset, num_samples):
     train_dataset, test_dataset = dataset
     tokenizer = DummyTokenizer()
-    max_answer_tokens = 200
     data_batch_size = 8
     env = HuggingFaceGym(
         train_dataset=train_dataset,
@@ -186,7 +176,6 @@ def test_reset_warning(dataset, num_samples):
         tokenizer=tokenizer,
         reward_fn=dummy_reward_fn,
         apply_chat_template_fn=dummy_chat_template_fn,
-        max_answer_tokens=max_answer_tokens,
         data_batch_size_per_gpu=data_batch_size,
     )
     with pytest.warns():
@@ -198,7 +187,6 @@ def test_reset_warning(dataset, num_samples):
 def test_hugging_face_gym_len(dataset, num_samples):
     train_dataset, test_dataset = dataset
     tokenizer = DummyTokenizer()
-    max_answer_tokens = 200
     data_batch_size = 8
     env = HuggingFaceGym(
         train_dataset=train_dataset,
@@ -206,7 +194,6 @@ def test_hugging_face_gym_len(dataset, num_samples):
         tokenizer=tokenizer,
         reward_fn=dummy_reward_fn,
         apply_chat_template_fn=dummy_chat_template_fn,
-        max_answer_tokens=max_answer_tokens,
         data_batch_size_per_gpu=data_batch_size,
     )
     assert len(env) == 200 * 0.8  # Length returns the training length
