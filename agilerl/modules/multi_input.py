@@ -409,7 +409,7 @@ class EvolvableMultiInput(EvolvableModule):
 
                 self._init_dicts[key] = feature_extractor.init_dict
                 feature_net[key] = feature_extractor
-            elif isinstance(space, spaces.Box) and not len(space.shape) == 1:
+            elif isinstance(space, spaces.Box) and len(space.shape) not in [0, 1]:
                 raise ValueError(
                     "Box spaces with shape {} are not supported. Please use vector or image observations.".format(
                         space.shape

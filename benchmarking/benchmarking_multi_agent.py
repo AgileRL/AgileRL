@@ -5,16 +5,19 @@ import torch
 import yaml
 from accelerate import Accelerator
 
+from agilerl.algorithms.core import MultiAgentRLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.modules import EvolvableMLP
 from agilerl.training.train_multi_agent import train_multi_agent
 from agilerl.utils.utils import (
     create_population,
     make_multi_agent_vect_envs,
     observation_space_channels_to_first,
 )
+from benchmarking.networks import SimpleCritic
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -23,7 +26,7 @@ from agilerl.utils.utils import (
 # sys.path.append('../')
 
 
-def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
+def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=True):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("============ AgileRL Multi-agent benchmarking ============")
 
@@ -109,6 +112,39 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
         ),
     )
 
+    state_dims = MultiAgentRLAlgorithm.get_state_dim(observation_spaces)
+    action_dims = MultiAgentRLAlgorithm.get_action_dim(action_spaces)
+    total_state_dims = sum(state_dim[0] for state_dim in state_dims)
+    total_action_dims = sum(action_dims)
+    if use_net:
+        ## Critic nets currently set-up for MADDPG
+        actor = [
+            EvolvableMLP(
+                num_inputs=state_dim[0],
+                num_outputs=action_dim,
+                hidden_size=[64, 64],
+                activation="ReLU",
+                output_activation="Sigmoid",
+                device=device,
+            )
+            for state_dim, action_dim in zip(state_dims, action_dims)
+        ]
+        NET_CONFIG = None
+        critic = [
+            SimpleCritic(
+                num_inputs=total_state_dims + total_action_dims,
+                num_outputs=1,
+                device=device,
+                hidden_size=[64, 64],
+                activation="ReLU",
+                output_activation=None,
+            )
+            for _ in range(len(state_dims))
+        ]
+    else:
+        actor = None
+        critic = None
+
     agent_pop = create_population(
         algo=INIT_HP["ALGO"],
         observation_space=observation_spaces,
@@ -116,8 +152,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
         net_config=NET_CONFIG,
         INIT_HP=INIT_HP,
         hp_config=hp_config,
-        actor_network=None,
-        critic_network=None,
+        actor_network=actor,
+        critic_network=critic,
         population_size=INIT_HP["POP_SIZE"],
         num_envs=INIT_HP["NUM_ENVS"],
         device=device,
@@ -158,4 +194,4 @@ if __name__ == "__main__":
     MUTATION_PARAMS = config["MUTATION_PARAMS"]
     NET_CONFIG = config["NET_CONFIG"]
     DISTRIBUTED_TRAINING = config["DISTRIBUTED_TRAINING"]
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING)
+    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=False)

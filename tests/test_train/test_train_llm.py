@@ -30,6 +30,7 @@ def test_finetune_llm_basic_training_loop(use_accelerator):
     mock_env.step.return_value = ("next_prompts", torch.tensor([2.0, 3.0]))
     mock_env.data_batch_size_per_gpu = 1
 
+
     # Mock other dependencies
     with patch("agilerl.training.train_llm.trange"), patch(
         "agilerl.training.train_llm.aggregate_metrics_across_gpus"

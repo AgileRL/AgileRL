@@ -513,6 +513,7 @@ def test_grpo_test(
     assert isinstance(fitnesses, torch.Tensor)
 
 
+
 @pytest.mark.parametrize("vocab_size", [1000])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
@@ -550,8 +551,7 @@ def test_grpo_save_checkpoint(
 ):
     with pytest.raises(NotImplementedError):
         grpo.save_checkpoint("path")
-
-
+        
 @pytest.mark.parametrize("vocab_size", [1000])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])

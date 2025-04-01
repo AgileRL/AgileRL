@@ -465,6 +465,13 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                 assert_correct_mlp_net_config(net_config)
                 encoder_mlp_cls = EvolvableMLP
 
+                # For MLP encoders we want to be consistent and also add a layernorm
+                # after the final linear layer for further stability
+                # see https://github.com/AgileRL/AgileRL/issues/337
+                layernorm = net_config.get("layer_norm", True)
+                if layernorm:
+                    net_config["output_layernorm"] = layernorm
+
             encoder = encoder_mlp_cls(
                 num_inputs=spaces.flatdim(self.observation_space),
                 num_outputs=self.latent_dim,

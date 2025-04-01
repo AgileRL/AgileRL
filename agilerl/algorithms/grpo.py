@@ -526,7 +526,6 @@ class GRPO(RLAlgorithm):
     def save_checkpoint(self, path: str) -> None:
         """
         Override the save_checkpoint method to provide guidance on the correct method to use.
-
         :param path: Location to save checkpoint at
         :type path: string
         """

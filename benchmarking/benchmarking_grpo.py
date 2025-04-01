@@ -123,6 +123,7 @@ def equation_reward_func(completions, target, nums, **kwargs):
 
             allowed_pattern = r"^[\d+\-*/().\s]+$"
             if not re.match(allowed_pattern, equation):
+                print(f"Equation format invalid: {equation}")
                 rewards.append(0.0)
                 continue
 
@@ -131,6 +132,7 @@ def equation_reward_func(completions, target, nums, **kwargs):
             if abs(float(result) - float(gt)) < 1e-5:
                 rewards.append(1.0)
             else:
+                print(f"Result {result} doesn't match target {gt}")
                 rewards.append(0.0)
         except Exception as e:
             print(f"Equation error: {e}")
@@ -254,6 +256,11 @@ def main(init_hp, mut_p):
         accelerator=accelerators[0],
         verbose=True,
         max_steps=3000,
+        evaluation_interval=5,
+        wb=True,
+        checkpoint_interval=100,
+        checkpoint_path="saved_llms",
+        max_reward=2.0,
     )
 
 

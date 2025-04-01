@@ -27,8 +27,11 @@ if __name__ == "__main__":
     # Define the network configuration
     NET_CONFIG = {
         "encoder_config": {
-            "hidden_size": [32, 32],  # Actor hidden size
-        }
+            "hidden_size": [32],  # Actor hidden size
+        },
+        "head_config": {
+            "hidden_size": [32],  # Critic hidden size
+        },
     }
 
     # Define the initial hyperparameters
@@ -124,7 +127,7 @@ if __name__ == "__main__":
     )
 
     # Define training loop parameters
-    max_steps = 13000  # Max steps (default: 2000000)
+    max_steps = 2000000  # Max steps (default: 2000000)
     learning_delay = 0  # Steps before starting learning
     evo_steps = 1000  # Evolution frequency
     eval_steps = None  # Evaluation steps per episode - go until done
