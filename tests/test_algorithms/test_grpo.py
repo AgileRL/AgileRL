@@ -513,7 +513,6 @@ def test_grpo_test(
     assert isinstance(fitnesses, torch.Tensor)
 
 
-
 @pytest.mark.parametrize("vocab_size", [1000])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
@@ -551,7 +550,8 @@ def test_grpo_save_checkpoint(
 ):
     with pytest.raises(NotImplementedError):
         grpo.save_checkpoint("path")
-        
+
+
 @pytest.mark.parametrize("vocab_size", [1000])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
@@ -696,6 +696,7 @@ def test_grpo_clone_with_accelerator(
         grpo_accelerator = grpo.accelerator
         grpo_lr_scheduler = grpo.lr_scheduler
         grpo_optimizer = grpo.optimizer
+        grpo.fitness = [1, 2, 3]
         new_grpo = grpo.clone(index=1)
         assert str(new_grpo.actor.state_dict()) == str(grpo.actor.state_dict())
         assert str(new_grpo.reference_actor.state_dict()) == str(
@@ -725,6 +726,7 @@ def test_grpo_clone_with_accelerator(
         assert new_grpo.cosine_lr_schedule_config == grpo.cosine_lr_schedule_config
         assert new_grpo.wrap == grpo.wrap
         assert new_grpo.device == grpo.device
+        assert new_grpo.fitness == grpo.fitness
 
 
 @pytest.mark.parametrize("vocab_size", [1000])

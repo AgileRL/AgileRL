@@ -61,15 +61,15 @@ unlike the rest of the AgileRL framework, we can only tune the RL hyperparameter
         "CLIP_COEF": 0.2,
         "MAX_GRAD_NORM": 0.1,
         "UPDATE_EPOCHS": 1,
-        "GROUP_SIZE": 2,
+        "GROUP_SIZE": 8,
         "TEMPERATURE": 0.9,
         "CALC_POSITION_EMBEDDINGS": True,
         "MIN_OUTPUT_TOKENS": None,
-        "MAX_OUTPUT_TOKENS": 10,
+        "MAX_OUTPUT_TOKENS": 1024,
         "COSINE_lR_SCHEDULER": None,
         "TOURN_SIZE": 2,
         "ELITISM": True,
-        "POP_SIZE": 1,
+        "POP_SIZE": 4,
         "EVAL_LOOP": 1
     }
 
@@ -79,12 +79,12 @@ Defining our base model and dataset
 In this tutorial, we use the open-source transformers and datasets libraries from
 `Hugging Face <https://huggingface.co/models>`_ to download our pretrained model weights and training data.
 There are a huge number of models and datasets hosted on Hugging Face, and different ones can easily be
-substituted in. In this tutorial, to keep things simple and inexpensive, we will use a 3 billion parameter Qwen
+substituted in. In this tutorial, to keep things simple, we will use a 1.5 billion parameter Qwen
 model, and the Countdown dataset, and initialise them as follows:
 
 .. code-block:: python
 
-    MODEL_PATH = "Qwen/Qwen2.5-3B"
+    MODEL_PATH = "Qwen/Qwen2.5-1.5B"
     DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
     def create_model(pretrained_model_name_or_path):
@@ -305,11 +305,11 @@ To allow our model to become an agent and learn through reinforcement learning, 
 :class:`GRPO <agilerl.algorithms.GRPO>` class. This class follows the same structure as the other
 reinforcement learning algorithms in the AgileRL library. We also define a initialisation dictionaries
 for the GRPO hyperparameters and the mutation parameters.
-An important part of training aN LLM to display reasoning bahevaiour is distributed training. They are
-called *Large* Language Models for a reason, and unless you are a very lucky individual, you may not
-have enough capacity on your individual computer to train even a 'small' LLM. If you want to train a
-larger, more powerful model, then this becomes even more infeasible. Instead, we can leverage distributed
-training, to share the workload across multiple devices and speed up training. To enable distributed
+
+An important part of training an LLM to display reasoning behavaiour is distributed training. They are
+called *Large* Language Models for a reason, and are often too large to train on a single GPU. If you want
+to train a larger, more powerful model, then this becomes even more infeasible. Instead, we can leverage
+distributed training, to share the workload across multiple devices and speed up training. To enable distributed
 training in this tutorial, we use deepspeed and accelerate.
 
 To generate an accelerate file, run the command ``accelerate config`` in your terminal, following the instructions
@@ -347,7 +347,7 @@ elitism is used, the best agent from a population is automatically preserved and
 Then, for each tournament, k individuals are randomly chosen, and the agent with the best evaluation fitness is preserved.
 This is repeated until the population for the next generation is full.
 
-The class ``TournamentSelection()`` defines the functions required for tournament selection. TournamentSelection.select()
+The class ``TournamentSelection()`` defines the functions required for tournament selection. ``TournamentSelection.select()``
 returns the best agent, and the new generation of agents.
 
 .. code-block:: python
@@ -368,8 +368,7 @@ The ``Mutations()`` class is used to mutate agents with pre-set probabilities. T
 * No mutation
 * RL algorithm mutation - mutation of learning hyperparameter, such as learning rate or batch size.
 
-``Mutations.mutation()`` returns a mutated population.
-Tournament selection and mutation should be applied sequentially to fully evolve a population between evaluation and learning cycles.
+``Mutations.mutation()`` returns a mutated population. Tournament selection and mutation should be applied sequentially to fully evolve a population between evaluation and learning cycles.
 
 .. code-block:: python
 

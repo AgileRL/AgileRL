@@ -16,7 +16,7 @@ from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
-MODEL_PATH = "Qwen/Qwen2.5-3B"
+MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
 
@@ -184,7 +184,7 @@ def custom_collate_fn(batch):
 
 def main(init_hp, mut_p):
     # Instantiate the model and the associated tokenizer
-    model = create_model(**{"pretrained_model_name_or_path": MODEL_PATH})
+    model = create_model(pretrained_model_name_or_path=MODEL_PATH)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
@@ -256,11 +256,6 @@ def main(init_hp, mut_p):
         accelerator=accelerators[0],
         verbose=True,
         max_steps=3000,
-        evaluation_interval=5,
-        wb=True,
-        checkpoint_interval=100,
-        checkpoint_path="saved_llms",
-        max_reward=2.0,
     )
 
 

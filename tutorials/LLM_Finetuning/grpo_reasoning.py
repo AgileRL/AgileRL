@@ -181,7 +181,7 @@ def custom_collate_fn(batch):
 
 def main():
     # Instantiate the model and the associated tokenizer
-    model = create_model(**{"pretrained_model_name_or_path": MODEL_PATH})
+    model = create_model(pretrained_model_name_or_path=MODEL_PATH)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
@@ -209,7 +209,6 @@ def main():
         group_size=12,
         reduce_memory_peak=True,
         accelerator=accelerator,
-
     )
     finetune_llm(
         pop=[agent],
