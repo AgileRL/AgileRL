@@ -31,7 +31,9 @@ from agilerl.utils.algo_utils import (
 
 
 class DDPG(RLAlgorithm):
-    """The DDPG algorithm class. DDPG paper: https://arxiv.org/abs/1509.02971
+    """Deep Deterministic Policy Gradient (DDPG) algorithm.
+
+    Paper: https://arxiv.org/abs/1509.02971
 
     :param observation_space: Environment observation space
     :type observation_space: gym.spaces.Space
@@ -113,7 +115,7 @@ class DDPG(RLAlgorithm):
         policy_freq: int = 2,
         actor_network: Optional[EvolvableModule] = None,
         critic_network: Optional[EvolvableModule] = None,
-        share_encoders: bool = False,
+        share_encoders: bool = True,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
@@ -279,7 +281,12 @@ class DDPG(RLAlgorithm):
 
     def share_encoder_parameters(self) -> None:
         """Shares the encoder parameters between the actor and critic."""
-        share_encoder_parameters(self.actor, self.critic, self.critic_target)
+        if all(isinstance(net, EvolvableNetwork) for net in [self.actor, self.critic]):
+            share_encoder_parameters(self.actor, self.critic, self.critic_target)
+        else:
+            warnings.warn(
+                "Encoder sharing is disabled as actor or critic is not an EvolvableNetwork."
+            )
 
     def scale_to_action_space(
         self, action: ArrayLike, convert_to_torch: bool = False

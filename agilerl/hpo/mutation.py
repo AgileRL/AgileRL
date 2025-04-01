@@ -824,6 +824,7 @@ class Mutations:
                 self._reinit_bandit_grads(individual, offsprings, old_exp_layer)
 
         individual.mutation_hook()  # Apply mutation hook
+
         self.reinit_opt(individual)  # Reinitialise optimizer
         individual.mut = (
             applied_mutations[0]

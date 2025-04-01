@@ -424,7 +424,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         size: int,
         observation_space: GymSpaceType,
         action_space: GymSpaceType,
-        wrapper_cls: Type[SelfAgentWrapper] = None,
+        wrapper_cls: Optional[Type[SelfAgentWrapper]] = None,
         wrapper_kwargs: Dict[str, Any] = {},
         **kwargs,
     ) -> List[Union[SelfEvolvableAlgorithm, SelfAgentWrapper]]:

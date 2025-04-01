@@ -25,7 +25,9 @@ SupportedEvolvable = Union[
 
 
 class NeuralTS(RLAlgorithm):
-    """The NeuralTS algorithm class. NeuralTS paper: https://arxiv.org/abs/2010.00827
+    """Neural Thompson Sampling (NeuralTS) algorithm.
+
+    Paper: https://arxiv.org/abs/2010.00827
 
     :param observation_space: Observation space of the environment
     :type observation_space: gym.spaces.Space

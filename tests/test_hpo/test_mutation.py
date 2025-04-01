@@ -988,7 +988,6 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
             network_names=individual.critic_optimizer.network_names,
             lr_name=individual.critic_optimizer.lr_name,
         )
-        individual.registry.hooks = []
 
     new_population = [agent.clone(wrap=False) for agent in population]
     mutated_population = [

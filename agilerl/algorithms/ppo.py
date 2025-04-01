@@ -1,4 +1,5 @@
 import copy
+import warnings
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
@@ -28,7 +29,9 @@ from agilerl.utils.algo_utils import (
 
 
 class PPO(RLAlgorithm):
-    """The PPO algorithm class. PPO paper: https://arxiv.org/abs/1707.06347v2
+    """Proximal Policy Optimization (PPO) algorithm.
+
+    Paper: https://arxiv.org/abs/1707.06347v2
 
     :param observation_space: Observation space of the environment
     :type observation_space: gym.spaces.Space
@@ -263,7 +266,12 @@ class PPO(RLAlgorithm):
 
     def share_encoder_parameters(self) -> None:
         """Shares the encoder parameters between the actor and critic."""
-        share_encoder_parameters(self.actor, self.critic)
+        if all(isinstance(net, EvolvableNetwork) for net in [self.actor, self.critic]):
+            share_encoder_parameters(self.actor, self.critic)
+        else:
+            warnings.warn(
+                "Encoder sharing is disabled as actor or critic is not an EvolvableNetwork."
+            )
 
     def scale_to_action_space(
         self, action: ArrayLike, convert_to_torch: bool = False

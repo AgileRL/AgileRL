@@ -20,7 +20,9 @@ from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 
 
 class DQN(RLAlgorithm):
-    """The DQN algorithm class. DQN paper: https://arxiv.org/abs/1312.5602
+    """Deep Q-Network (DQN) algorithm.
+
+    Paper: https://arxiv.org/abs/1312.5602
 
     :param observation_space: Observation space of the environment
     :type observation_space: gymnasium.spaces.Space
@@ -179,13 +181,23 @@ class DQN(RLAlgorithm):
 
     def init_hook(self) -> None:
         """Resets module parameters for the detached and target networks."""
-        self.param_vals: TensorDict = from_module(self.actor).detach()
+        param_vals: TensorDict = from_module(self.actor).detach()
 
         # NOTE: This removes the target params from the computation graph which
         # reduces memory overhead and speeds up training, however these won't
         # appear in the modules parameters
-        self.target_params: TensorDict = self.param_vals.clone().lock_()
-        self.target_params.to_module(self.actor_target)
+        target_params: TensorDict = param_vals.clone().lock_()
+
+        # This hook is prompted after performing architecture mutations on policy / evaluation
+        # networks, which will fail since the target network is a shared network that won't be
+        # reintiialized until the end. We can bypass the error safely for this reason.
+        try:
+            target_params.to_module(self.actor_target)
+        except KeyError:
+            pass
+        finally:
+            self.param_vals = param_vals
+            self.target_params = target_params
 
     def get_action(
         self,

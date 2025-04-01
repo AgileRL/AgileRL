@@ -83,13 +83,19 @@ Importing the following packages, functions and classes will enable us to run th
 Curriculum Learning
 ^^^^^^^^^^^^^^^^^^^
 
-First, we need to set up and modify our environment to enable curriculum learning. Curriculum learning is enabled by changing the environment that the agent trains in. This can be implemented by changing what happens when certain actions are taken - altering the next observation returned by the environment, or more simply by altering the reward. First, we will change the reward. By default, Connect Four uses the following rewards:
+First, we need to set up and modify our environment to enable curriculum learning. Curriculum learning is enabled by changing the environment that the
+agent trains in. This can be implemented by changing what happens when certain actions are taken - altering the next observation returned by the
+environment, or more simply by altering the reward. First, we will change the reward. By default, Connect Four uses the following rewards:
 
 * Win = +1
 * Lose = -1
 * Play continues = 0
 
-To help guide our agent, we can introduce rewards for other outcomes in the environment, such as a small reward for placing 3 pieces in a row, or a small negative reward when the opponent manages the same feat. We can also use reward shaping to encourage our agent to explore more. In Connect Four, if playing against a random opponent, an easy way to win is to always play in the same column. An agent may find success doing this, and therefore not learn other, more sophisticated strategies that can help it win against better opponents. We may therefore elect to reward vertical wins slightly less than horizontal or diagonal wins, to encourage the agent to try winning in different ways. An example reward system could be defined as follows:
+To help guide our agent, we can introduce rewards for other outcomes in the environment, such as a small reward for placing 3 pieces in a row, or a small
+negative reward when the opponent manages the same feat. We can also use reward shaping to encourage our agent to explore more. In Connect Four, if playing
+against a random opponent, an easy way to win is to always play in the same column. An agent may find success doing this, and therefore not learn other, more
+sophisticated strategies that can help it win against better opponents. We may therefore elect to reward vertical wins slightly less than horizontal or diagonal
+wins, to encourage the agent to try winning in different ways. An example reward system could be defined as follows:
 
 * Win (horizontal or diagonal) = +1
 * Win (vertical) = +0.8
@@ -101,7 +107,8 @@ To help guide our agent, we can introduce rewards for other outcomes in the envi
 Config files
 ^^^^^^^^^^^^
 
-It is best to use YAML config files to define the lessons in our curriculum and easily change and keep track of our settings. The first three lessons in our curriculum can be defined as follows:
+It is best to use YAML config files to define the lessons in our curriculum and easily change and keep track of our settings. The first three lessons in our
+curriculum can be defined as follows:
 
 .. collapse:: Lesson 1
    :open:
@@ -122,12 +129,21 @@ It is best to use YAML config files to define the lessons in our curriculum and 
    .. literalinclude:: ../../../tutorials/PettingZoo/curriculums/connect_four/lesson3.yaml
       :language: yaml
 
-To implement our curriculum, we create a ``CurriculumEnv`` class that acts as a wrapper on top of our Connect Four environment and enables us to alter the reward to guide the training of our agent. This uses the configs that we set up to define the lesson.
+To implement our curriculum, we create a ``CurriculumEnv`` class that acts as a wrapper on top of our Connect Four environment and enables us
+to alter the reward to guide the training of our agent. This uses the configs that we set up to define the lesson.
 
 .. collapse:: CurriculumEnv
    :open:
 
    .. code-block:: python
+
+      import random
+      from typing import List, Tuple, Optional
+
+      from pettingzoo.parallel import ParallelEnv
+
+      from agilerl.components.data import Transition
+      from agilerl.components.replay_buffer import ReplayBuffer
 
       class CurriculumEnv:
          """Wrapper around environment to modify reward for curriculum learning.
@@ -138,148 +154,176 @@ To implement our curriculum, we create a ``CurriculumEnv`` class that acts as a 
          :type lesson: dict
          """
 
-         def __init__(self, env, lesson):
+         def __init__(self, env: ParallelEnv, lesson: dict):
             self.env = env
             self.lesson = lesson
 
-         def fill_replay_buffer(self, memory, opponent):
+         def fill_replay_buffer(
+            self, memory: ReplayBuffer, opponent: "Opponent"
+         ) -> ReplayBuffer:
             """Fill the replay buffer with experiences collected by taking random actions in the environment.
 
             :param memory: Experience replay buffer
             :type memory: AgileRL experience replay buffer
+            :param opponent: Opponent to train against
+            :type opponent: Opponent
+            :return: Filled replay buffer
+            :rtype: ReplayBuffer
             """
             print("Filling replay buffer ...")
 
-            pbar = tqdm(total=memory.memory_size)
-            while len(memory) < memory.memory_size:
-               # Randomly decide whether random player will go first or second
-               if random.random() > 0.5:
-                     opponent_first = False
-               else:
-                     opponent_first = True
+            pbar = tqdm(total=memory.max_size)
+            while len(memory) < memory.max_size:
+                  # Randomly decide whether random player will go first or second
+                  opponent_first = random.random() > 0.5
 
-               mem_full = len(memory)
-               self.reset()  # Reset environment at start of episode
-               observation, reward, done, truncation, _ = self.last()
+                  mem_full = len(memory)
+                  self.reset()  # Reset environment at start of episode
+                  observation, reward, done, truncation, _ = self.last()
 
-               (
+                  (
                      p1_state,
                      p1_state_flipped,
                      p1_action,
                      p1_next_state,
                      p1_next_state_flipped,
-               ) = (None, None, None, None, None)
-               done, truncation = False, False
+                  ) = (None, None, None, None, None)
+                  done, truncation = False, False
 
-               while not (done or truncation):
+                  while not (done or truncation):
                      # Player 0's turn
                      p0_action_mask = observation["action_mask"]
-                     p0_state, p0_state_flipped = transform_and_flip(observation, player = 0)
+                     p0_state, p0_state_flipped = transform_and_flip(observation, player=0)
                      if opponent_first:
                         p0_action = self.env.action_space("player_0").sample(p0_action_mask)
                      else:
                         if self.lesson["warm_up_opponent"] == "random":
-                           p0_action = opponent.get_action(
+                              p0_action = opponent.get_action(
                                  p0_action_mask, p1_action, self.lesson["block_vert_coef"]
-                           )
+                              )
                         else:
-                           p0_action = opponent.get_action(player=0)
+                              p0_action = opponent.get_action(player=0)
                      self.step(p0_action)  # Act in environment
                      observation, env_reward, done, truncation, _ = self.last()
-                     p0_next_state, p0_next_state_flipped = transform_and_flip(observation, player = 0)
+                     p0_next_state, p0_next_state_flipped = transform_and_flip(
+                        observation, player=0
+                     )
 
                      if done or truncation:
                         reward = self.reward(done=True, player=0)
-                        memory.save_to_memory_vect_envs(
-                           np.concatenate(
+                        transition = Transition(
+                              obs=np.concatenate(
                                  (p0_state, p1_state, p0_state_flipped, p1_state_flipped)
-                           ),
-                           [p0_action, p1_action, 6 - p0_action, 6 - p1_action],
-                           [
-                                 reward,
-                                 LESSON["rewards"]["lose"],
-                                 reward,
-                                 LESSON["rewards"]["lose"],
-                           ],
-                           np.concatenate(
+                              ),
+                              action=np.array(
+                                 [p0_action, p1_action, 6 - p0_action, 6 - p1_action]
+                              ),
+                              reward=np.array(
+                                 [
+                                    reward,
+                                    LESSON["rewards"]["lose"],
+                                    reward,
+                                    LESSON["rewards"]["lose"],
+                                 ]
+                              ),
+                              next_obs=np.concatenate(
                                  (
                                     p0_next_state,
                                     p1_next_state,
                                     p0_next_state_flipped,
                                     p1_next_state_flipped,
                                  )
-                           ),
-                           [done, done, done, done],
+                              ),
+                              done=np.array([done, done, done, done]),
+                              batch_size=[4],
                         )
+                        memory.add(transition.to_tensordict(), is_vectorised=True)
                      else:  # Play continues
                         if p1_state is not None:
-                           reward = self.reward(done=False, player=1)
-                           memory.save_to_memory_vect_envs(
-                                 np.concatenate((p1_state, p1_state_flipped)),
-                                 [p1_action, 6 - p1_action],
-                                 [reward, reward],
-                                 np.concatenate((p1_next_state, p1_next_state_flipped)),
-                                 [done, done],
-                           )
+                              reward = self.reward(done=False, player=1)
+                              transition = Transition(
+                                 obs=np.concatenate((p1_state, p1_state_flipped)),
+                                 action=np.array([p1_action, 6 - p1_action]),
+                                 reward=np.array([reward, reward]),
+                                 next_obs=np.concatenate(
+                                    (p1_next_state, p1_next_state_flipped)
+                                 ),
+                                 done=np.array([done, done]),
+                                 batch_size=[2],
+                              )
+                              memory.add(transition.to_tensordict(), is_vectorised=True)
 
                         # Player 1's turn
                         p1_action_mask = observation["action_mask"]
-                        p1_state, p1_state_flipped = transform_and_flip(observation, player = 1)
+                        p1_state, p1_state_flipped = transform_and_flip(
+                              observation, player=1
+                        )
                         if not opponent_first:
-                           p1_action = self.env.action_space("player_1").sample(
+                              p1_action = self.env.action_space("player_1").sample(
                                  p1_action_mask
-                           )
+                              )
                         else:
-                           if self.lesson["warm_up_opponent"] == "random":
+                              if self.lesson["warm_up_opponent"] == "random":
                                  p1_action = opponent.get_action(
                                     p1_action_mask, p0_action, LESSON["block_vert_coef"]
                                  )
-                           else:
+                              else:
                                  p1_action = opponent.get_action(player=1)
                         self.step(p1_action)  # Act in environment
                         observation, env_reward, done, truncation, _ = self.last()
-                        p1_next_state, p1_next_state_flipped = transform_and_flip(observation, player = 1)
+                        p1_next_state, p1_next_state_flipped = transform_and_flip(
+                              observation, player=1
+                        )
 
                         if done or truncation:
-                           reward = self.reward(done=True, player=1)
-                           memory.save_to_memory_vect_envs(
-                                 np.concatenate(
+                              reward = self.reward(done=True, player=1)
+                              transition = Transition(
+                                 obs=np.concatenate(
                                     (p0_state, p1_state, p0_state_flipped, p1_state_flipped)
                                  ),
-                                 [p0_action, p1_action, 6 - p0_action, 6 - p1_action],
-                                 [
-                                    LESSON["rewards"]["lose"],
-                                    reward,
-                                    LESSON["rewards"]["lose"],
-                                    reward,
-                                 ],
-                                 np.concatenate(
+                                 action=np.array(
+                                    [p0_action, p1_action, 6 - p0_action, 6 - p1_action]
+                                 ),
+                                 reward=np.array(
+                                    [
+                                          LESSON["rewards"]["lose"],
+                                          reward,
+                                          LESSON["rewards"]["lose"],
+                                          reward,
+                                    ]
+                                 ),
+                                 next_obs=np.concatenate(
                                     (
-                                       p0_next_state,
-                                       p1_next_state,
-                                       p0_next_state_flipped,
-                                       p1_next_state_flipped,
+                                          p0_next_state,
+                                          p1_next_state,
+                                          p0_next_state_flipped,
+                                          p1_next_state_flipped,
                                     )
                                  ),
-                                 [done, done, done, done],
-                           )
-
+                                 done=np.array([done, done, done, done]),
+                                 batch_size=[4],
+                              )
+                              memory.add(transition.to_tensordict(), is_vectorised=True)
                         else:  # Play continues
-                           reward = self.reward(done=False, player=0)
-                           memory.save_to_memory_vect_envs(
-                                 np.concatenate((p0_state, p0_state_flipped)),
-                                 [p0_action, 6 - p0_action],
-                                 [reward, reward],
-                                 np.concatenate((p0_next_state, p0_next_state_flipped)),
-                                 [done, done],
-                           )
+                              reward = self.reward(done=False, player=0)
+                              transition = Transition(
+                                 obs=np.concatenate((p0_state, p0_state_flipped)),
+                                 action=np.array([p0_action, 6 - p0_action]),
+                                 reward=np.array([reward, reward]),
+                                 next_obs=np.concatenate(
+                                    (p0_next_state, p0_next_state_flipped)
+                                 ),
+                                 done=np.array([done, done]),
+                                 batch_size=[2],
+                              )
+                              memory.add(transition.to_tensordict(), is_vectorised=True)
 
-               pbar.update(len(memory) - mem_full)
+                  pbar.update(len(memory) - mem_full)
             pbar.close()
             print("Replay buffer warmed up.")
             return memory
 
-         def check_winnable(self, lst, piece):
+         def check_winnable(self, lst: List[int], piece: int) -> bool:
             """Checks if four pieces in a row represent a winnable opportunity, e.g. [1, 1, 1, 0] or [2, 0, 2, 2].
 
             :param lst: List of pieces in row
@@ -289,7 +333,7 @@ To implement our curriculum, we create a ``CurriculumEnv`` class that acts as a 
             """
             return lst.count(piece) == 3 and lst.count(0) == 1
 
-         def check_vertical_win(self, player):
+         def check_vertical_win(self, player: int) -> bool:
             """Checks if a win is vertical.
 
             :param player: Player who we are checking, 0 or 1
@@ -303,7 +347,7 @@ To implement our curriculum, we create a ``CurriculumEnv`` class that acts as a 
 
             # Check vertical locations for win
             for c in range(column_count):
-               for r in range(row_count - 3):
+                  for r in range(row_count - 3):
                      if (
                         board[r][c] == piece
                         and board[r + 1][c] == piece
@@ -313,7 +357,7 @@ To implement our curriculum, we create a ``CurriculumEnv`` class that acts as a 
                         return True
             return False
 
-         def check_three_in_row(self, player):
+         def check_three_in_row(self, player: int) -> int:
             """Checks if there are three pieces in a row and a blank space next, or two pieces - blank - piece.
 
             :param player: Player who we are checking, 0 or 1
@@ -329,25 +373,25 @@ To implement our curriculum, we create a ``CurriculumEnv`` class that acts as a 
 
             # Check vertical locations
             for c in range(column_count):
-               for r in range(row_count - 3):
+                  for r in range(row_count - 3):
                      if self.check_winnable(board[r : r + 4, c].tolist(), piece):
                         three_in_row_count += 1
 
             # Check horizontal locations
             for r in range(row_count):
-               for c in range(column_count - 3):
+                  for c in range(column_count - 3):
                      if self.check_winnable(board[r, c : c + 4].tolist(), piece):
                         three_in_row_count += 1
 
             # Check positively sloped diagonals
             for c in range(column_count - 3):
-               for r in range(row_count - 3):
+                  for r in range(row_count - 3):
                      if self.check_winnable(
                         [
-                           board[r, c],
-                           board[r + 1, c + 1],
-                           board[r + 2, c + 2],
-                           board[r + 3, c + 3],
+                              board[r, c],
+                              board[r + 1, c + 1],
+                              board[r + 2, c + 2],
+                              board[r + 3, c + 3],
                         ],
                         piece,
                      ):
@@ -355,13 +399,13 @@ To implement our curriculum, we create a ``CurriculumEnv`` class that acts as a 
 
             # Check negatively sloped diagonals
             for c in range(column_count - 3):
-               for r in range(3, row_count):
+                  for r in range(3, row_count):
                      if self.check_winnable(
                         [
-                           board[r, c],
-                           board[r - 1, c + 1],
-                           board[r - 2, c + 2],
-                           board[r - 3, c + 3],
+                              board[r, c],
+                              board[r - 1, c + 1],
+                              board[r - 2, c + 2],
+                              board[r - 3, c + 3],
                         ],
                         piece,
                      ):
@@ -369,7 +413,7 @@ To implement our curriculum, we create a ``CurriculumEnv`` class that acts as a 
 
             return three_in_row_count
 
-         def reward(self, done, player):
+         def reward(self, done: bool, player: int) -> float:
             """Processes and returns reward from environment according to lesson criteria.
 
             :param done: Environment has terminated
@@ -378,37 +422,41 @@ To implement our curriculum, we create a ``CurriculumEnv`` class that acts as a 
             :type player: int
             """
             if done:
-               reward = (
+                  reward = (
                      self.lesson["rewards"]["vertical_win"]
                      if self.check_vertical_win(player)
                      else self.lesson["rewards"]["win"]
-               )
+                  )
             else:
-               agent_three_count = self.check_three_in_row(1 - player)
-               opp_three_count = self.check_three_in_row(player)
-               if (agent_three_count + opp_three_count) == 0:
+                  agent_three_count = self.check_three_in_row(1 - player)
+                  opp_three_count = self.check_three_in_row(player)
+                  if (agent_three_count + opp_three_count) == 0:
                      reward = self.lesson["rewards"]["play_continues"]
-               else:
+                  else:
                      reward = (
                         self.lesson["rewards"]["three_in_row"] * agent_three_count
                         + self.lesson["rewards"]["opp_three_in_row"] * opp_three_count
                      )
             return reward
 
-         def last(self):
+         def last(self) -> Tuple[dict, float, bool, bool, dict]:
             """Wrapper around PettingZoo env last method."""
             return self.env.last()
 
-         def step(self, action):
+         def step(self, action: int) -> None:
             """Wrapper around PettingZoo env step method."""
             self.env.step(action)
 
-         def reset(self):
+         def reset(self) -> None:
             """Wrapper around PettingZoo env reset method."""
             self.env.reset()
 
 
-When defining the different lessons in our curriculum, we can increase the difficulty of our task by modifying environment observations for our agent - in Connect Four, we can increase the skill level of our opponent. By progressively doing this, we can help our agent improve. We can change our rewards between lessons too; for example, we may wish to reward wins in all directions equally once we have learned to beat a random agent and now wish to train against a harder opponent. In this tutorial, an ``Opponent`` class is implemented to provide different levels of difficulty for training our agent.
+When defining the different lessons in our curriculum, we can increase the difficulty of our task by modifying environment observations for
+our agent - in Connect Four, we can increase the skill level of our opponent. By progressively doing this, we can help our agent improve. We
+can change our rewards between lessons too; for example, we may wish to reward wins in all directions equally once we have learned to beat a
+random agent and now wish to train against a harder opponent. In this tutorial, an ``Opponent`` class is implemented to provide different
+levels of difficulty for training our agent.
 
 .. collapse:: Opponent
    :open:
@@ -424,38 +472,44 @@ When defining the different lessons in our curriculum, we can increase the diffi
          :type difficulty: str
          """
 
-         def __init__(self, env, difficulty):
+         def __init__(self, env: ParallelEnv, difficulty: str):
             self.env = env.env
             self.difficulty = difficulty
             if self.difficulty == "random":
-               self.get_action = self.random_opponent
+                  self.get_action = self.random_opponent
             elif self.difficulty == "weak":
-               self.get_action = self.weak_rule_based_opponent
+                  self.get_action = self.weak_rule_based_opponent
             else:
-               self.get_action = self.strong_rule_based_opponent
+                  self.get_action = self.strong_rule_based_opponent
             self.num_cols = 7
             self.num_rows = 6
             self.length = 4
             self.top = [0] * self.num_cols
 
-         def update_top(self):
+         def update_top(self) -> None:
             """Updates self.top, a list which tracks the row on top of the highest piece in each column."""
             board = np.array(self.env.env.board).reshape(self.num_rows, self.num_cols)
             non_zeros = np.where(board != 0)
             rows, cols = non_zeros
             top = np.zeros(board.shape[1], dtype=int)
             for col in range(board.shape[1]):
-               column_pieces = rows[cols == col]
-               if len(column_pieces) > 0:
+                  column_pieces = rows[cols == col]
+                  if len(column_pieces) > 0:
                      top[col] = np.min(column_pieces) - 1
-               else:
+                  else:
                      top[col] = 5
             full_columns = np.all(board != 0, axis=0)
             top[full_columns] = 6
             self.top = top
 
-         def random_opponent(self, action_mask, last_opp_move=None, block_vert_coef=1):
-            """Takes move for random opponent. If the lesson aims to randomly block vertical wins with a higher probability, this is done here too.
+         def random_opponent(
+            self,
+            action_mask: List[int],
+            last_opp_move: Optional[int] = None,
+            block_vert_coef: float = 1,
+         ) -> int:
+            """Takes move for random opponent. If the lesson aims to randomly block vertical
+            wins with a higher probability, this is done here too.
 
             :param action_mask: Mask of legal actions: 1=legal, 0=illegal
             :type action_mask: List
@@ -465,11 +519,11 @@ When defining the different lessons in our curriculum, we can increase the diffi
             :type block_vert_coef: float
             """
             if last_opp_move is not None:
-               action_mask[last_opp_move] *= block_vert_coef
+                  action_mask[last_opp_move] *= block_vert_coef
             action = random.choices(list(range(self.num_cols)), action_mask)[0]
             return action
 
-         def weak_rule_based_opponent(self, player):
+         def weak_rule_based_opponent(self, player: int) -> int:
             """Takes move for weak rule-based opponent.
 
             :param player: Player who we are checking, 0 or 1
@@ -479,18 +533,18 @@ When defining the different lessons in our curriculum, we can increase the diffi
             max_length = -1
             best_actions = []
             for action in range(self.num_cols):
-               possible, reward, ended, lengths = self.outcome(
+                  possible, reward, ended, lengths = self.outcome(
                      action, player, return_length=True
-               )
-               if possible and lengths.sum() > max_length:
+                  )
+                  if possible and lengths.sum() > max_length:
                      best_actions = []
                      max_length = lengths.sum()
-               if possible and lengths.sum() == max_length:
+                  if possible and lengths.sum() == max_length:
                      best_actions.append(action)
             best_action = random.choice(best_actions)
             return best_action
 
-         def strong_rule_based_opponent(self, player):
+         def strong_rule_based_opponent(self, player: int) -> int:
             """Takes move for strong rule-based opponent.
 
             :param player: Player who we are checking, 0 or 1
@@ -500,26 +554,28 @@ When defining the different lessons in our curriculum, we can increase the diffi
 
             winning_actions = []
             for action in range(self.num_cols):
-               possible, reward, ended = self.outcome(action, player)
-               if possible and ended:
+                  possible, reward, ended = self.outcome(action, player)
+                  if possible and ended:
                      winning_actions.append(action)
             if len(winning_actions) > 0:
-               winning_action = random.choice(winning_actions)
-               return winning_action
+                  winning_action = random.choice(winning_actions)
+                  return winning_action
 
             opp = 1 if player == 0 else 0
             loss_avoiding_actions = []
             for action in range(self.num_cols):
-               possible, reward, ended = self.outcome(action, opp)
-               if possible and ended:
+                  possible, reward, ended = self.outcome(action, opp)
+                  if possible and ended:
                      loss_avoiding_actions.append(action)
             if len(loss_avoiding_actions) > 0:
-               loss_avoiding_action = random.choice(loss_avoiding_actions)
-               return loss_avoiding_action
+                  loss_avoiding_action = random.choice(loss_avoiding_actions)
+                  return loss_avoiding_action
 
             return self.weak_rule_based_opponent(player)  # take best possible move
 
-         def outcome(self, action, player, return_length=False):
+         def outcome(
+            self, action: int, player: int, return_length: bool = False
+         ) -> Tuple[bool, Optional[float], bool, Optional[np.ndarray]]:
             """Takes move for weak rule-based opponent.
 
             :param action: Action to take in environment
@@ -530,33 +586,33 @@ When defining the different lessons in our curriculum, we can increase the diffi
             :type player: bool, optional
             """
             if not (self.top[action] < self.num_rows):  # action column is full
-               return (False, None, None) + ((None,) if return_length else ())
+                  return (False, None, None) + ((None,) if return_length else ())
 
             row, col = self.top[action], action
             piece = player + 1
 
             # down, up, left, right, down-left, up-right, down-right, up-left,
             directions = np.array(
-               [
+                  [
                      [[-1, 0], [1, 0]],
                      [[0, -1], [0, 1]],
                      [[-1, -1], [1, 1]],
                      [[-1, 1], [1, -1]],
-               ]
+                  ]
             )  # |4x2x2|
 
             positions = np.array([row, col]).reshape(1, 1, 1, -1) + np.expand_dims(
-               directions, -2
+                  directions, -2
             ) * np.arange(1, self.length).reshape(
-               1, 1, -1, 1
+                  1, 1, -1, 1
             )  # |4x2x3x2|
             valid_positions = np.logical_and(
-               np.logical_and(
+                  np.logical_and(
                      positions[:, :, :, 0] >= 0, positions[:, :, :, 0] < self.num_rows
-               ),
-               np.logical_and(
+                  ),
+                  np.logical_and(
                      positions[:, :, :, 1] >= 0, positions[:, :, :, 1] < self.num_cols
-               ),
+                  ),
             )  # |4x2x3|
             d0 = np.where(valid_positions, positions[:, :, :, 0], 0)
             d1 = np.where(valid_positions, positions[:, :, :, 1], 0)
@@ -564,23 +620,23 @@ When defining the different lessons in our curriculum, we can increase the diffi
             board_values = np.where(valid_positions, board[d0, d1], 0)
             a = (board_values == piece).astype(int)
             b = np.concatenate(
-               (a, np.zeros_like(a[:, :, :1])), axis=-1
+                  (a, np.zeros_like(a[:, :, :1])), axis=-1
             )  # padding with zeros to compute length
             lengths = np.argmin(b, -1)
 
             ended = False
             # check if winnable in any direction
             for both_dir in board_values:
-               # |2x3|
-               line = np.concatenate((both_dir[0][::-1], [piece], both_dir[1]))
-               if "".join(map(str, [piece] * self.length)) in "".join(map(str, line)):
+                  # |2x3|
+                  line = np.concatenate((both_dir[0][::-1], [piece], both_dir[1]))
+                  if "".join(map(str, [piece] * self.length)) in "".join(map(str, line)):
                      ended = True
                      break
 
             # ended = np.any(np.greater_equal(np.sum(lengths, 1), self.length - 1))
             draw = True
             for c, v in enumerate(self.top):
-               draw &= (v == self.num_rows) if c != col else (v == (self.num_rows - 1))
+                  draw &= (v == self.num_rows) if c != col else (v == (self.num_rows - 1))
             ended |= draw
             reward = (-1) ** (player) if ended and not draw else 0
 
@@ -680,10 +736,8 @@ Before we go any further in this tutorial, it would be helpful to define and set
       )
 
       # Configure the replay buffer
-      field_names = ["state", "action", "reward", "next_state", "done"]
       memory = ReplayBuffer(
-         memory_size=INIT_HP["MEMORY_SIZE"],  # Max replay buffer size
-         field_names=field_names,  # Field names to store in memory
+         max_size=INIT_HP["MEMORY_SIZE"],  # Max replay buffer size
          device=device,
       )
 
@@ -737,15 +791,19 @@ As part of the curriculum, we may also choose to fill the replay buffer with ran
          if LESSON["agent_warm_up"] > 0:
                print("Warming up agents ...")
                agent = pop[0]
+
                # Train on randomly collected samples
                for epoch in trange(LESSON["agent_warm_up"]):
                   experiences = memory.sample(agent.batch_size)
                   agent.learn(experiences)
+
                pop = [agent.clone() for _ in pop]
                elite = agent
                print("Agent population warmed up.")
 
-The observation space of Connect Four is (6, 7, 2), where the first two dimensions represent the board and the third dimension represents the player. As PyTorch uses channels-first by default, we need to preprocess the observation. Moreover, we need to flip and swap the planes of the observation to account for the fact that the agent will play as both player 0 and player 1. We can define a function to do this as follows:
+The observation space of Connect Four is (6, 7, 2), where the first two dimensions represent the board and the third dimension represents the player.
+As PyTorch uses channels-first by default, we need to preprocess the observation. Moreover, we need to flip and swap the planes of the observation to
+account for the fact that the agent will play as both player 0 and player 1. We can define a function to do this as follows:
 
 .. collapse:: Transform and flip
    :open:
@@ -766,6 +824,7 @@ The observation space of Connect Four is (6, 7, 2), where the first two dimensio
          if player == 1:
             # Swap pieces so that the agent always sees the board from the same perspective
             state[[0, 1], :, :] = state[[1, 0], :, :]
+
          state_flipped = np.expand_dims(np.flip(state, 2), 0)
          state = np.expand_dims(state, 0)
          return state, state_flipped
@@ -773,12 +832,16 @@ The observation space of Connect Four is (6, 7, 2), where the first two dimensio
 Self-play
 ^^^^^^^^^
 
-In this tutorial, we use self-play as the final lesson in our curriculum. By iteratively improving our agent and making it learn to win against itself, we can allow it to discover new strategies and achieve higher performance. The weights of our pretrained agent from an earlier lesson can be loaded to the population as follows:
+In this tutorial, we use self-play as the final lesson in our curriculum. By iteratively improving our agent and making it learn to win against
+itself, we can allow it to discover new strategies and achieve higher performance. The weights of our pretrained agent from an earlier lesson
+can be loaded to the population as follows:
 
 .. collapse:: Load pretrained weights
    :open:
 
    .. code-block:: python
+
+      from agilerl.algorithms.core.wrappers import OptimizerWrapper
 
       if LESSON["pretrained_path"] is not None:
          for agent in pop:
@@ -786,12 +849,18 @@ In this tutorial, we use self-play as the final lesson in our curriculum. By ite
                agent.load_checkpoint(LESSON["pretrained_path"])
                # Reinit optimizer for new task
                agent.lr = INIT_HP["LR"]
-               agent.optimizer = torch.optim.Adam(
-                  agent.actor.parameters(), lr=agent.lr
+               agent.optimizer = OptimizerWrapper(
+                  torch.optim.Adam,
+                  networks=agent.actor,
+                  lr=agent.lr,
+                  network_names=agent.optimizer.network_names,
+                  lr_name=agent.optimizer.lr_name,
+                  optimizer_kwargs={"capturable": agent.capturable},
                )
 
-
-To train against an old version of our agent, we create a pool of opponents. At training time, we randomly select an opponent from this pool. At regular intervals, we update the opponent pool by removing the oldest opponent and adding a copy of the latest version of our agent. This provides a balance between training against an increasingly difficult opponent and providing variety in the moves an opponent might make.
+To train against an old version of our agent, we create a pool of opponents. At training time, we randomly select an opponent from this pool. At
+regular intervals, we update the opponent pool by removing the oldest opponent and adding a copy of the latest version of our agent. This provides
+a balance between training against an increasingly difficult opponent and providing variety in the moves an opponent might make.
 
 .. collapse:: Create opponent pool
    :open:
@@ -816,14 +885,21 @@ A sample lesson config for self-play training could be defined as follows:
    .. literalinclude:: ../../../tutorials/PettingZoo/curriculums/connect_four/lesson4.yaml
       :language: yaml
 
-It could also be possible to train an agent through self-play only, without using any previous lessons in the curriculum. This would require significant training time, but could ultimately result in better performance than other methods, and could avoid some of the mistakes discussed in `The Bitter Lesson <http://incompleteideas.net/IncIdeas/BitterLesson.html>`_.
+It could also be possible to train an agent through self-play only, without using any previous lessons in the curriculum. This would require significant
+training time, but could ultimately result in better performance than other methods, and could avoid some of the mistakes discussed in
+`The Bitter Lesson <http://incompleteideas.net/IncIdeas/BitterLesson.html>`_.
 
 Training loop
 ^^^^^^^^^^^^^^
 
-The Connect Four training loop must take into account that the agent only takes an action every other interaction with the environment (the opponent takes alternating turns). This must be considered when saving transitions to the replay buffer. Equally, we must wait for the outcome of the next player's turn before determining what the reward should be for a transition. This is not a true Markov Decision Process for this reason, but we can still train a reinforcement learning agent reasonably successfully in these non-stationary conditions.
+The Connect Four training loop must take into account that the agent only takes an action every other interaction with the environment (the opponent takes
+alternating turns). This must be considered when saving transitions to the replay buffer. Equally, we must wait for the outcome of the next player's turn
+before determining what the reward should be for a transition. This is not a true Markov Decision Process for this reason, but we can still train a reinforcement
+learning agent reasonably successfully in these non-stationary conditions.
 
-At regular intervals, we evaluate the performance, or 'fitness',  of the agents in our population, and do an evolutionary step. Those which perform best are more likely to become members of the next generation, and the hyperparameters and neural architectures of agents in the population are mutated. This evolution allows us to optimize hyperparameters and maximise the performance of our agents in a single training run.
+At regular intervals, we evaluate the performance, or 'fitness',  of the agents in our population, and do an evolutionary step. Those which perform best are more
+likely to become members of the next generation, and the hyperparameters and neural architectures of agents in the population are mutated. This evolution allows us
+to optimize hyperparameters and maximise the performance of our agents in a single training run.
 
 .. collapse:: Training loop
    :open:
@@ -856,7 +932,7 @@ At regular intervals, we evaluate the performance, or 'fitness',  of the agents 
       # Training loop
       for idx_epi in pbar:
          turns_per_episode = []
-         train_actions_hist = [0] * action_space.n
+         train_actions_hist = [0] * action_spaces[0].n
          for agent in pop:  # Loop through population
                for episode in range(episodes_per_epoch):
                   env.reset()  # Reset environment at start of episode
@@ -878,18 +954,16 @@ At regular intervals, we evaluate the performance, or 'fitness',  of the agents 
                      opponent = Opponent(env, difficulty=LESSON["opponent"])
 
                   # Randomly decide whether agent will go first or second
-                  if random.random() > 0.5:
-                     opponent_first = False
-                  else:
-                     opponent_first = True
+                  opponent_first = random.random() > 0.5
 
                   score = 0
                   turns = 0  # Number of turns counter
-
                   for idx_step in range(max_steps):
                      # Player 0"s turn
                      p0_action_mask = observation["action_mask"]
-                     p0_state, p0_state_flipped = transform_and_flip(observation, player = 0)
+                     p0_state, p0_state_flipped = transform_and_flip(
+                           observation, player=0
+                     )
 
                      if opponent_first:
                            if LESSON["opponent"] == "self":
@@ -913,7 +987,7 @@ At regular intervals, we evaluate the performance, or 'fitness',  of the agents 
                      env.step(p0_action)  # Act in environment
                      observation, cumulative_reward, done, truncation, _ = env.last()
                      p0_next_state, p0_next_state_flipped = transform_and_flip(
-                           observation, player = 0
+                           observation, player=0
                      )
                      if not opponent_first:
                            score = cumulative_reward
@@ -922,8 +996,8 @@ At regular intervals, we evaluate the performance, or 'fitness',  of the agents 
                      # Check if game is over (Player 0 win)
                      if done or truncation:
                            reward = env.reward(done=True, player=0)
-                           memory.save_to_memory_vect_envs(
-                              np.concatenate(
+                           transition = Transition(
+                              obs=np.concatenate(
                                  (
                                        p0_state,
                                        p1_state,
@@ -931,14 +1005,18 @@ At regular intervals, we evaluate the performance, or 'fitness',  of the agents 
                                        p1_state_flipped,
                                  )
                               ),
-                              [p0_action, p1_action, 6 - p0_action, 6 - p1_action],
-                              [
-                                 reward,
-                                 LESSON["rewards"]["lose"],
-                                 reward,
-                                 LESSON["rewards"]["lose"],
-                              ],
-                              np.concatenate(
+                              action=np.array(
+                                 [p0_action, p1_action, 6 - p0_action, 6 - p1_action]
+                              ),
+                              reward=np.array(
+                                 [
+                                       reward,
+                                       LESSON["rewards"]["lose"],
+                                       reward,
+                                       LESSON["rewards"]["lose"],
+                                 ]
+                              ),
+                              next_obs=np.concatenate(
                                  (
                                        p0_next_state,
                                        p1_next_state,
@@ -946,24 +1024,32 @@ At regular intervals, we evaluate the performance, or 'fitness',  of the agents 
                                        p1_next_state_flipped,
                                  )
                               ),
-                              [done, done, done, done],
+                              done=np.array([done, done, done, done]),
+                              batch_size=[4],
                            )
+                           memory.add(transition.to_tensordict(), is_vectorised=True)
                      else:  # Play continues
                            if p1_state is not None:
                               reward = env.reward(done=False, player=1)
-                              memory.save_to_memory_vect_envs(
-                                 np.concatenate((p1_state, p1_state_flipped)),
-                                 [p1_action, 6 - p1_action],
-                                 [reward, reward],
-                                 np.concatenate(
+                              transition = Transition(
+                                 obs=np.concatenate((p1_state, p1_state_flipped)),
+                                 action=np.array([p1_action, 6 - p1_action]),
+                                 reward=np.array([reward, reward]),
+                                 next_obs=np.concatenate(
                                        (p1_next_state, p1_next_state_flipped)
                                  ),
-                                 [done, done],
+                                 done=np.array([done, done]),
+                                 batch_size=[2],
+                              )
+                              memory.add(
+                                 transition.to_tensordict(), is_vectorised=True
                               )
 
                            # Player 1"s turn
                            p1_action_mask = observation["action_mask"]
-                           p1_state, p1_state_flipped = transform_and_flip(observation, player = 1)
+                           p1_state, p1_state_flipped = transform_and_flip(
+                              observation, player=1
+                           )
 
                            if not opponent_first:
                               if LESSON["opponent"] == "self":
@@ -987,9 +1073,11 @@ At regular intervals, we evaluate the performance, or 'fitness',  of the agents 
                               train_actions_hist[p1_action] += 1
 
                            env.step(p1_action)  # Act in environment
-                           observation, cumulative_reward, done, truncation, _ = env.last()
+                           observation, cumulative_reward, done, truncation, _ = (
+                              env.last()
+                           )
                            p1_next_state, p1_next_state_flipped = transform_and_flip(
-                                observation, player = 1
+                              observation, player=1
                            )
 
                            if opponent_first:
@@ -999,8 +1087,8 @@ At regular intervals, we evaluate the performance, or 'fitness',  of the agents 
                            # Check if game is over (Player 1 win)
                            if done or truncation:
                               reward = env.reward(done=True, player=1)
-                              memory.save_to_memory_vect_envs(
-                                 np.concatenate(
+                              transition = Transition(
+                                 obs=np.concatenate(
                                        (
                                           p0_state,
                                           p1_state,
@@ -1008,19 +1096,23 @@ At regular intervals, we evaluate the performance, or 'fitness',  of the agents 
                                           p1_state_flipped,
                                        )
                                  ),
-                                 [
-                                       p0_action,
-                                       p1_action,
-                                       6 - p0_action,
-                                       6 - p1_action,
-                                 ],
-                                 [
-                                       LESSON["rewards"]["lose"],
-                                       reward,
-                                       LESSON["rewards"]["lose"],
-                                       reward,
-                                 ],
-                                 np.concatenate(
+                                 action=np.array(
+                                       [
+                                          p0_action,
+                                          p1_action,
+                                          6 - p0_action,
+                                          6 - p1_action,
+                                       ]
+                                 ),
+                                 reward=np.array(
+                                       [
+                                          reward,
+                                          LESSON["rewards"]["lose"],
+                                          reward,
+                                          LESSON["rewards"]["lose"],
+                                       ]
+                                 ),
+                                 next_obs=np.concatenate(
                                        (
                                           p0_next_state,
                                           p1_next_state,
@@ -1028,19 +1120,26 @@ At regular intervals, we evaluate the performance, or 'fitness',  of the agents 
                                           p1_next_state_flipped,
                                        )
                                  ),
-                                 [done, done, done, done],
+                                 done=np.array([done, done, done, done]),
+                                 batch_size=[4],
                               )
-
+                              memory.add(
+                                 transition.to_tensordict(), is_vectorised=True
+                              )
                            else:  # Play continues
                               reward = env.reward(done=False, player=0)
-                              memory.save_to_memory_vect_envs(
-                                 np.concatenate((p0_state, p0_state_flipped)),
-                                 [p0_action, 6 - p0_action],
-                                 [reward, reward],
-                                 np.concatenate(
+                              transition = Transition(
+                                 obs=np.concatenate((p0_state, p0_state_flipped)),
+                                 action=np.array([p0_action, 6 - p0_action]),
+                                 reward=np.array([reward, reward]),
+                                 next_obs=np.concatenate(
                                        (p0_next_state, p0_next_state_flipped)
                                  ),
-                                 [done, done],
+                                 done=np.array([done, done]),
+                                 batch_size=[2],
+                              )
+                              memory.add(
+                                 transition.to_tensordict(), is_vectorised=True
                               )
 
                      # Learn according to learning frequency
@@ -1081,14 +1180,16 @@ At regular intervals, we evaluate the performance, or 'fitness',  of the agents 
                # Evaluate population vs random actions
                fitnesses = []
                win_rates = []
-               eval_actions_hist = [0] * action_space.n  # Eval actions histogram
+               eval_actions_hist = [0] * action_spaces[0].n  # Eval actions histogram
                eval_turns = 0  # Eval turns counter
                for agent in pop:
                   with torch.no_grad():
                      rewards = []
                      for i in range(evo_loop):
                            env.reset()  # Reset environment at start of episode
-                           observation, cumulative_reward, done, truncation, _ = env.last()
+                           observation, cumulative_reward, done, truncation, _ = (
+                              env.last()
+                           )
 
                            player = -1  # Tracker for which player"s turn it is
 
@@ -1116,7 +1217,9 @@ At regular intervals, we evaluate the performance, or 'fitness',  of the agents 
                                           observation["observation"], [-1], [-3]
                                        )
                                        state = np.expand_dims(state, 0)
-                                       action = agent.get_action(state, 0, action_mask)[
+                                       action = agent.get_action(
+                                          state, 0, action_mask
+                                       )[
                                           0
                                        ]  # Get next action from agent
                                        eval_actions_hist[action] += 1
@@ -1132,13 +1235,17 @@ At regular intervals, we evaluate the performance, or 'fitness',  of the agents 
                                        )
                                        state[[0, 1], :, :] = state[[1, 0], :, :]
                                        state = np.expand_dims(state, 0)
-                                       action = agent.get_action(state, 0, action_mask)[
+                                       action = agent.get_action(
+                                          state, 0, action_mask
+                                       )[
                                           0
                                        ]  # Get next action from agent
                                        eval_actions_hist[action] += 1
 
                               env.step(action)  # Act in environment
-                              observation, cumulative_reward, done, truncation, _ = env.last()
+                              observation, cumulative_reward, done, truncation, _ = (
+                                 env.last()
+                              )
 
                               if (player > 0 and opponent_first) or (
                                  player < 0 and not opponent_first
@@ -1160,46 +1267,18 @@ At regular intervals, we evaluate the performance, or 'fitness',  of the agents 
                eval_turns = eval_turns / len(pop) / evo_loop
 
                pbar.set_postfix_str(
-                  f"    Train Mean Score: {np.mean(agent.scores[-episodes_per_epoch:])}   Train Mean Turns: {mean_turns}   Eval Mean Fitness: {np.mean(fitnesses)}   Eval Best Fitness: {np.max(fitnesses)}   Eval Mean Turns: {eval_turns}   Total Steps: {total_steps}"
+                  f"Train Mean Score: {np.mean(agent.scores[-episodes_per_epoch:])} "
+                  f"Train Mean Turns: {mean_turns} "
+                  f"Eval Mean Fitness: {np.mean(fitnesses)} "
+                  f"Eval Best Fitness: {np.max(fitnesses)} "
+                  f"Eval Mean Turns: {eval_turns} "
+                  f"Total Steps: {total_steps}"
                )
                pbar.update(0)
-
-               # Format action histograms for visualisation
-               train_actions_hist = [
-                  freq / sum(train_actions_hist) for freq in train_actions_hist
-               ]
-               eval_actions_hist = [
-                  freq / sum(eval_actions_hist) for freq in eval_actions_hist
-               ]
-               train_actions_dict = {
-                  f"train/action_{index}": action
-                  for index, action in enumerate(train_actions_hist)
-               }
-               eval_actions_dict = {
-                  f"eval/action_{index}": action
-                  for index, action in enumerate(eval_actions_hist)
-               }
-
-               wandb_dict = {
-                  "global_step": total_steps,
-                  "train/mean_score": np.mean(agent.scores[-episodes_per_epoch:]),
-                  "train/mean_turns_per_game": mean_turns,
-                  "train/epsilon": epsilon,
-                  "train/opponent_updates": opp_update_counter,
-                  "eval/mean_fitness": np.mean(fitnesses),
-                  "eval/best_fitness": np.max(fitnesses),
-                  "eval/mean_turns_per_game": eval_turns,
-               }
-               wandb_dict.update(train_actions_dict)
-               wandb_dict.update(eval_actions_dict)
-               wandb.log(wandb_dict)
 
                # Tournament selection and population mutation
                elite, pop = tournament.select(pop)
                pop = mutations.mutation(pop)
-
-      if max_episodes > 0:
-         wandb.finish()
 
       # Save the trained agent
       save_path = LESSON["save_path"]

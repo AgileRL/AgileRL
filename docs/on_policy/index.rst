@@ -141,7 +141,12 @@ Alternatively, use a custom on-policy training loop:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     NET_CONFIG = {
-        "head_config": {"hidden_size": [32, 32]}  # Actor head hidden size
+        "encoder_config": {
+            "hidden_size": [32, 32] # Encoder hidden size
+            },
+        "head_config": {
+            "hidden_size": [32, 32]  # Head hidden size
+        }
     }
 
     INIT_HP = {

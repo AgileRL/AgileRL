@@ -458,7 +458,7 @@ End-to-end example
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Create environment
-    num_envs=16
+    num_envs = 16
     env = make_vect_envs("CartPole-v1", num_envs=num_envs)
 
     observation_space = env.single_observation_space
@@ -571,10 +571,8 @@ End-to-end example
     )
 
     # Define the memory buffer
-    field_names = ["state", "action", "reward", "next_state", "terminated"]
     memory = ReplayBuffer(
-        memory_size=INIT_HP['MEMORY_SIZE'],  # Max replay buffer size
-        field_names=field_names,  # Field names to store in memory
+        max_size=INIT_HP['MEMORY_SIZE'],  # Max replay buffer size
         device=device,
     )
 

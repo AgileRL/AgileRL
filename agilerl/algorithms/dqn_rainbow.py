@@ -24,7 +24,9 @@ from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
 class RainbowDQN(RLAlgorithm):
-    """The Rainbow DQN algorithm class. Rainbow DQN paper: https://arxiv.org/abs/1710.02298
+    """Rainbow Deep Q-Network (DQN) algorithm.
+
+    Paper: https://arxiv.org/abs/1710.02298
 
     :param observation_space: Observation space of the environment
     :type observation_space: gym.spaces.Space

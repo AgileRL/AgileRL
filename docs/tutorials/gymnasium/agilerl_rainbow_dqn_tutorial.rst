@@ -110,7 +110,7 @@ initialises the population of agents from the corresponding observation and acti
 
 .. code-block:: python
 
-    num_envs=16
+    num_envs = 16
     env = make_vect_envs("CartPole-v1", num_envs=num_envs)  # Create environment
 
     observation_space = env.single_observation_space
@@ -128,7 +128,10 @@ Instantiate an Agent
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Define the network configuration of a simple mlp with two hidden layers, each with 64 nodes
-    net_config = {"head_config": {"hidden_size": [64, 64]}}
+    net_config = {
+        "encoder_config": {"hidden_size": [64, 64]},  # Encoder hidden size
+        "head_config": {"hidden_size": [64, 64]}  # Head hidden size
+    }
 
     # RL hyperparameters configuration for mutation during training
     hp_config = HyperparameterConfig(
@@ -170,19 +173,13 @@ you would define your memory and n_step_memory.
 
 .. code-block:: python
 
-    field_names = ["state", "action", "reward", "next_state", "termination"]
     memory = PrioritizedReplayBuffer(
-        memory_size=INIT_HP["MEMORY_SIZE"],
-        field_names=field_names,
-        num_envs=num_envs,
+        max_size=INIT_HP["MEMORY_SIZE"],
         alpha=INIT_HP["ALPHA"],
-        gamma=INIT_HP["GAMMA"],
         device=device,
     )
     n_step_memory = MultiStepReplayBuffer(
-        memory_size=INIT_HP["MEMORY_SIZE"],
-        field_names=field_names,
-        num_envs=num_envs,
+        max_size=INIT_HP["MEMORY_SIZE"],
         n_step=INIT_HP["N_STEP"],
         gamma=INIT_HP["GAMMA"],
         device=device,
@@ -259,8 +256,8 @@ function and is an example of how we might choose to train an AgileRL agent.
         completed_episode_scores = []
         steps = 0
         for idx_step in range(INIT_HP["EVO_STEPS"] // num_envs):
-            if INIT_HP["CHANNELS_LAST"]:
-                state = obs_channels_to_first(state)
+            # Swap channels if channels last is True
+            state = obs_channels_to_first(state) if INIT_HP["CHANNELS_LAST"] else state
 
             # Get next action from agent
             action = rainbow_dqn.get_action(state)
@@ -276,24 +273,23 @@ function and is an example of how we might choose to train an AgileRL agent.
                     rainbow_dqn.scores.append(scores[idx])
                     scores[idx] = 0
 
-            if INIT_HP["CHANNELS_LAST"]: # Channels last for atari envs, set to False for this tutorial
-                one_step_transition = n_step_memory.save_to_memory_vect_envs(
-                    state,
-                    action,
-                    reward,
-                    obs_channels_to_first(next_state),
-                    done,
-                )
-            else:
-                one_step_transition = n_step_memory.save_to_memory_vect_envs(
-                    state,
-                    action,
-                    reward,
-                    next_state,
-                    done,
-                )
+            next_state = obs_channels_to_first(next_state) if INIT_HP["CHANNELS_LAST"] else next_state
+            done = terminated or truncated
+
+            transition = Transition(
+                obs=state,
+                action=action,
+                reward=reward,
+                next_obs=next_state,
+                done=done,
+                batch_size=[num_envs]
+            )
+
+            transition = transition.to_tensordict()
+
+            one_step_transition = n_step_memory.add(transition)
             if one_step_transition:
-                memory.save_to_memory_vect_envs(*one_step_transition)
+                memory.add(one_step_transition)
 
             # Update agent beta
             fraction = min(

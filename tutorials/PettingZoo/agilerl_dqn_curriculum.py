@@ -1071,42 +1071,9 @@ if __name__ == "__main__":
                 )
                 pbar.update(0)
 
-                # # Format action histograms for visualisation
-                # train_actions_hist = [
-                #     freq / sum(train_actions_hist) for freq in train_actions_hist
-                # ]
-                # eval_actions_hist = [
-                #     freq / sum(eval_actions_hist) for freq in eval_actions_hist
-                # ]
-                # train_actions_dict = {
-                #     f"train/action_{index}": action
-                #     for index, action in enumerate(train_actions_hist)
-                # }
-                # eval_actions_dict = {
-                #     f"eval/action_{index}": action
-                #     for index, action in enumerate(eval_actions_hist)
-                # }
-
-                # wandb_dict = {
-                #     "global_step": total_steps,
-                #     "train/mean_score": np.mean(agent.scores[-episodes_per_epoch:]),
-                #     "train/mean_turns_per_game": mean_turns,
-                #     "train/epsilon": epsilon,
-                #     "train/opponent_updates": opp_update_counter,
-                #     "eval/mean_fitness": np.mean(fitnesses),
-                #     "eval/best_fitness": np.max(fitnesses),
-                #     "eval/mean_turns_per_game": eval_turns,
-                # }
-                # wandb_dict.update(train_actions_dict)
-                # wandb_dict.update(eval_actions_dict)
-                # wandb.log(wandb_dict)
-
                 # Tournament selection and population mutation
                 elite, pop = tournament.select(pop)
                 pop = mutations.mutation(pop)
-
-        # if max_episodes > 0:
-        #     wandb.finish()
 
         # Save the trained agent
         save_path = LESSON["save_path"]

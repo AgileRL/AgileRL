@@ -59,7 +59,7 @@ class EvolvableMLP(EvolvableModule):
         min_mlp_nodes: int = 64,
         max_mlp_nodes: int = 500,
         layer_norm: bool = True,
-        output_vanish: bool = True,
+        output_vanish: bool = False,
         init_layers: bool = True,
         noisy: bool = False,
         noise_std: float = 0.5,

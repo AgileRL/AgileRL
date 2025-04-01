@@ -53,7 +53,12 @@ are more likely to remain present in the population. The sequence of evolution (
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     NET_CONFIG = {
-        "head_config": {"hidden_size": [32, 32]}  # Actor head hidden size
+        "encoder_config": {
+            "hidden_size": [32, 32] # Encoder hidden size
+            },
+        "head_config": {
+            "hidden_size": [32, 32]  # Head hidden size
+        }
     }
 
     INIT_HP = {
@@ -67,12 +72,12 @@ are more likely to remain present in the population. The sequence of evolution (
         "POP_SIZE": 4,  # Population size
     }
 
+    # Initialize vectorized environments
     num_envs = 16
     env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
 
     observation_space = env.single_observation_space
     action_space = env.single_action_space
-
     if INIT_HP['CHANNELS_LAST']:
         observation_space = observation_space_channels_to_first(observation_space)
 
@@ -108,17 +113,16 @@ by an individual agent because it allows faster learning from the behaviour of o
 a maze, you could learn from their mistakes and successes without necessarily having to explore the entire maze yourself.
 
 The object used to store experiences collected by agents in the environment is called the Experience Replay Buffer, and is defined by the class ``ReplayBuffer()``.
-During training it can be added to using the ``ReplayBuffer.save_to_memory()`` function, or ``ReplayBuffer.save_to_memory_vect_envs()`` for vectorized environments (recommended).
-To sample from the replay buffer, call ``ReplayBuffer.sample()``.
+During training we use the ``ReplayBuffer.add()`` function to add experiences to the buffer as ``TensorDict`` objects. Specifically, we wrap transitions through the
+``Transition`` tensorclass that wraps the ``obs``, ``action``, ``reward``, ``next_obs``, and ``done`` fields as ``torch.Tensor`` objects. To sample from the replay
+buffer, call ``ReplayBuffer.sample()``.
 
 .. code-block:: python
 
     from agilerl.components.replay_buffer import ReplayBuffer
 
-    field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
-        memory_size=10000,  # Max replay buffer size
-        field_names=field_names,  # Field names to store in memory
+        max_size=10000,  # Max replay buffer size
         device=device,
     )
 
@@ -158,6 +162,7 @@ Alternatively, use a custom training loop. Combining all of the above:
 .. code-block:: python
 
     from agilerl.components.replay_buffer import ReplayBuffer
+    from agilerl.components.data import Transition
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
     from agilerl.utils.utils import create_population, make_vect_envs, observation_space_channels_to_first
@@ -168,7 +173,12 @@ Alternatively, use a custom training loop. Combining all of the above:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     NET_CONFIG = {
-        "head_config": {"hidden_size": [32, 32]}  # Actor hidden size
+        "encoder_config": {
+            "hidden_size": [32, 32] # Encoder hidden size
+            },
+        "head_config": {
+            "hidden_size": [32, 32]  # Head hidden size
+        }
     }
 
     INIT_HP = {
@@ -182,12 +192,12 @@ Alternatively, use a custom training loop. Combining all of the above:
         "POP_SIZE": 4,  # Population size
     }
 
+    # Initialize vectorized environments
     num_envs = 16
     env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
 
     observation_space = env.single_observation_space
     action_space = env.single_action_space
-
     if INIT_HP['CHANNELS_LAST']:
         observation_space = observation_space_channels_to_first(observation_space)
 
@@ -202,10 +212,8 @@ Alternatively, use a custom training loop. Combining all of the above:
         device=device,
     )
 
-    field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
-        memory_size=10000,  # Max replay buffer size
-        field_names=field_names,  # Field names to store in memory
+        max_size=10000,  # Max replay buffer size
         device=device,
     )
 
@@ -277,28 +285,24 @@ Alternatively, use a custom training loop. Combining all of the above:
                         agent.scores.append(scores[idx])
                         scores[idx] = 0
 
+                next_state = obs_channels_to_first(next_state) if INIT_HP["CHANNELS_LAST"] else next_state
+
+                # Wrap transition as TensorDict
+                transition = Transition(
+                    obs=state,
+                    action=action,
+                    reward=reward,
+                    next_obs=next_state,
+                    done=terminated,
+                    batch_size=[num_envs]
+                )
+                transition = transition.to_tensordict()
+
                 # Save experience to replay buffer
-                if INIT_HP["CHANNELS_LAST"]:
-                    memory.save_to_memory(
-                        state,
-                        action,
-                        reward,
-                        obs_channels_to_first(next_state),
-                        terminated,
-                        is_vectorised=True,
-                    )
-                else:
-                    memory.save_to_memory(
-                        state,
-                        action,
-                        reward,
-                        next_state,
-                        terminated,
-                        is_vectorised=True,
-                    )
+                memory.add(transition)
 
                 # Learn according to learning frequency
-                if memory.counter > learning_delay and len(memory) >= agent.batch_size:
+                if memory.size > learning_delay and len(memory) >= agent.batch_size:
                     for _ in range(num_envs // agent.learn_step):
                         experiences = memory.sample(
                             agent.batch_size

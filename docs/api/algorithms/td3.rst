@@ -34,6 +34,7 @@ Example
   from agilerl.utils.algo_utils import obs_channels_to_first
   from agilerl.utils.utils import make_vect_envs, observation_space_channels_first
   from agilerl.components.replay_buffer import ReplayBuffer
+  from agilerl.components.data import Transition
   from agilerl.algorithms.td3 import TD3
 
   # Create environment and Experience Replay Buffer
@@ -47,8 +48,7 @@ Example
   if channels_last:
       observation_space = observation_space_channels_first(observation_space)
 
-  field_names = ["state", "action", "reward", "next_state", "done"]
-  memory = ReplayBuffer(memory_size=10000, field_names=field_names)
+  memory = ReplayBuffer(max_size=10000)
 
   agent = TD3(observation_space, action_space)   # Create TD3 agent
 
@@ -60,10 +60,16 @@ Example
       next_state, reward, done, _, _ = env.step(action)   # Act in environment
 
       # Save experience to replay buffer
-      if channels_last:
-          memory.save_to_memory_vect_envs(state, action, reward, obs_channels_to_first(next_state), done)
-      else:
-          memory.save_to_memory_vect_envs(state, action, reward, next_state, done)
+      transition = Transition(
+          obs=state,
+          action=action,
+          reward=reward,
+          next_obs=next_state,
+          done=done,
+          batch_size=[num_envs]
+      )
+      transition = transition.to_tensordict()
+      memory.add(transition)
 
       # Learn according to learning frequency
       if len(memory) >= agent.batch_size:
@@ -103,12 +109,22 @@ For dictionary / tuple observations containing any combination of image, discret
 
 .. code-block:: python
 
+  CNN_CONFIG = {
+      "channel_size": [32, 32], # CNN channel size
+      "kernel_size": [8, 4],   # CNN kernel size
+      "stride_size": [4, 2],   # CNN stride size
+  }
+
   NET_CONFIG = {
       "encoder_config": {
-        'hidden_size': [32, 32],  # Network head hidden size
-        'channel_size': [32, 32], # CNN channel size
-        'kernel_size': [8, 4],   # CNN kernel size
-        'stride_size': [4, 2],   # CNN stride size
+        "latent_dim": 32,
+        # Config for nested EvolvableCNN objects
+        "cnn_config": CNN_CONFIG,
+        # Config for nested EvolvableMLP objects
+        "mlp_config": {
+            "hidden_size": [32, 32]
+        },
+        "vector_space_mlp": True # Process vector observations with an MLP
       },
       "head_config": {'hidden_size': [32]}  # Network head hidden size
     }

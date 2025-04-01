@@ -25,7 +25,9 @@ from agilerl.utils.algo_utils import (
 
 
 class TD3(RLAlgorithm):
-    """The TD3 algorithm class. TD3 paper: https://arxiv.org/abs/1802.09477
+    """Twin Delayed Deep Deterministic Policy Gradient (TD3) algorithm.
+
+    Paper: https://arxiv.org/abs/1802.09477
 
     :param observation_space: Observation space of the environment
     :type observation_space: gym.spaces.Space
@@ -296,13 +298,21 @@ class TD3(RLAlgorithm):
 
     def share_encoder_parameters(self) -> None:
         """Shares the encoder parameters between the actor and critic."""
-        share_encoder_parameters(
-            self.actor,
-            self.critic_1,
-            self.critic_2,
-            self.critic_target_1,
-            self.critic_target_2,
-        )
+        if all(
+            isinstance(net, EvolvableNetwork)
+            for net in [self.actor, self.critic_1, self.critic_2]
+        ):
+            share_encoder_parameters(
+                self.actor,
+                self.critic_1,
+                self.critic_2,
+                self.critic_target_1,
+                self.critic_target_2,
+            )
+        else:
+            warnings.warn(
+                "Encoder sharing is disabled as actor or critic is not an EvolvableNetwork."
+            )
 
     def scale_to_action_space(
         self, action: ArrayLike, convert_to_torch: bool = False
