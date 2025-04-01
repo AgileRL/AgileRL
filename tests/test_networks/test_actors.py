@@ -245,7 +245,7 @@ def test_stochastic_actor_forward(
     if isinstance(action_space, spaces.Discrete):
         assert isinstance(dist, torch.distributions.Categorical)
     else:
-        assert isinstance(dist, torch.distributions.MultivariateNormal)
+        assert isinstance(dist, torch.distributions.Normal)
 
     if isinstance(observation_space, spaces.Dict):
         x = {key: torch.tensor(value) for key, value in x_np.items()}

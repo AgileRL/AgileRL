@@ -544,7 +544,7 @@ def test_initialize_maddpg_with_mlp_networks_gumbel_softmax(
         device=device,
         torch_compiler=compile_mode,
     )
-    assert maddpg.torch_compiler == "default"
+    assert maddpg.torch_compiler == compile_mode
 
 
 @pytest.mark.parametrize(
@@ -790,7 +790,6 @@ def test_initialize_maddpg_with_evo_networks(
             for critic_optimizer in maddpg.critic_optimizers
         )
     else:
-        print(maddpg.actor_optimizers.optimizer)
         assert all(
             isinstance(actor_optimizer, AcceleratedOptimizer)
             for actor_optimizer in maddpg.actor_optimizers
@@ -898,7 +897,7 @@ def test_maddpg_init_torch_compiler_no_error(mode):
             isinstance(a, torch._dynamo.eval_frame.OptimizedModule)
             for a in maddpg.critic_targets
         )
-        assert maddpg.torch_compiler == "default"
+        assert maddpg.torch_compiler == mode
     else:
         assert isinstance(maddpg, MADDPG)
 

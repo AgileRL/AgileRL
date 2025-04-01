@@ -237,7 +237,9 @@ def accelerated_experiences(
     else:
         next_state = {agent: torch.randn(*state_size) for agent in agent_ids}
 
-    return states, actions, log_probs, rewards, dones, values, next_state
+    next_done = {agent: torch.randint(0, 2, (1,)) for agent in agent_ids}
+
+    return states, actions, log_probs, rewards, dones, values, next_state, next_done
 
 
 @pytest.fixture
@@ -283,7 +285,9 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, device
     else:
         next_state = {agent: torch.randn(*state_size).to(device) for agent in agent_ids}
 
-    return states, actions, log_probs, rewards, dones, values, next_state
+    next_done = {agent: torch.randint(0, 2, (1,)).to(device) for agent in agent_ids}
+
+    return states, actions, log_probs, rewards, dones, values, next_state, next_done
 
 
 @pytest.fixture
@@ -353,7 +357,11 @@ def vectorized_experiences(
             agent: torch.randn(vect_dim, *state_size).to(device) for agent in agent_ids
         }
 
-    return states, actions, log_probs, rewards, dones, values, next_state
+    next_done = {
+        agent: torch.randint(0, 2, (1, vect_dim)).to(device) for agent in agent_ids
+    }
+
+    return states, actions, log_probs, rewards, dones, values, next_state, next_done
 
 
 @pytest.mark.parametrize("sum_score", [True, False])
@@ -602,8 +610,18 @@ def test_clone_after_learning(compile_mode):
         agent_id: torch.randn(observation_spaces[idx].shape[0])
         for idx, agent_id in enumerate(agent_ids)
     }
+    next_done = {agent: torch.randint(0, 2, (1,)) for agent in agent_ids}
 
-    experiences = states, actions, log_probs, rewards, dones, values, next_state
+    experiences = (
+        states,
+        actions,
+        log_probs,
+        rewards,
+        dones,
+        values,
+        next_state,
+        next_done,
+    )
     ippo.learn(experiences)
     clone_agent = ippo.clone()
 
@@ -1601,6 +1619,7 @@ def test_ippo_learns_from_vectorized_experiences_mlp(
         device=device,
         torch_compiler=compile_mode,
         batch_size=batch_size,
+        lr=0.1,
     )
 
     actors = ippo.actors
@@ -1690,7 +1709,7 @@ def test_ippo_learns_from_hardcoded_vectorized_experiences_mlp(
         for i, agent in enumerate(agent_ids)
     }
     dones = {
-        agent: torch.Tensor([[1, 0, 0], [0, 1, 0], [0, 0, 1]]).to(device) * i
+        agent: torch.Tensor([[1, 0, 0], [0, 1, 0], [0, 0, 1]]).to(device)
         for i, agent in enumerate(agent_ids)
     }
     values = {
@@ -1704,9 +1723,20 @@ def test_ippo_learns_from_hardcoded_vectorized_experiences_mlp(
         agent: torch.Tensor([[4, 4, 4], [7, 7, 7], [10, 10, 10]]).to(device) * i
         for i, agent in enumerate(agent_ids)
     }
+    next_done = {
+        agent: torch.Tensor([[0, 1, 0]]).to(device) for i, agent in enumerate(agent_ids)
+    }
 
-    experiences = (states, actions, log_probs, rewards, dones, values, next_state)
-
+    experiences = (
+        states,
+        actions,
+        log_probs,
+        rewards,
+        dones,
+        values,
+        next_state,
+        next_done,
+    )
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     ippo = IPPO(
         observation_spaces,
@@ -2837,7 +2867,7 @@ def test_initialize_ippo_with_mlp_networks_gumbel_softmax(
         device=device,
         torch_compiler=compile_mode,
     )
-    assert ippo.torch_compiler == "default"
+    assert ippo.torch_compiler == "reduce-overhead"
 
 
 @pytest.mark.parametrize(

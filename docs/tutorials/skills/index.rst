@@ -408,8 +408,10 @@ Finally, we can run the training loop for the selector agent. Each skill agent's
                actions = []
                log_probs = []
                rewards = []
-               terminations = []
+               dones = []
                values = []
+
+               done = np.zeros(1)
 
                for idx_step in range(500):
                   # Get next action from agent
@@ -430,17 +432,19 @@ Finally, we can run the training loop for the selector agent. Each skill agent's
                            next_state, skill_reward, termination, truncation, _ = env.step(
                               skill_action
                            )  # Act in environment
+                     next_done = np.logical_or(termination, truncation).astype(np.int8)
                      reward += skill_reward
                      if np.any(termination) or np.any(truncation):
                            break
                      state = next_state
+                     done = next_done
                   score += reward
 
                   states.append(state)
                   actions.append(action)
                   log_probs.append(log_prob)
                   rewards.append(reward)
-                  terminations.append(termination)
+                  dones.append(done)
                   values.append(value)
 
                agent.scores.append(score)
@@ -452,9 +456,10 @@ Finally, we can run the training loop for the selector agent. Each skill agent's
                      actions,
                      log_probs,
                      rewards,
-                     terminations,
+                     dones,
                      values,
                      next_state,
+                     next_done,
                   )
                )
 

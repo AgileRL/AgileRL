@@ -1001,7 +1001,8 @@ def check_policy_on_policy_with_probe_env(
         rewards = []
         dones = []
         values = []
-        truncs = []
+
+        done = 0
 
         for j in range(100):
             if isinstance(state, dict):
@@ -1014,7 +1015,8 @@ def check_policy_on_policy_with_probe_env(
             action = action[0]
             log_prob = log_prob[0]
             value = value[0]
-            next_state, reward, done, trunc, _ = env.step(action)
+            next_state, reward, term, trunc, _ = env.step(action)
+            next_done = np.logical_or(term, trunc).astype(np.int8)
 
             states.append(state)
             actions.append(action)
@@ -1022,13 +1024,12 @@ def check_policy_on_policy_with_probe_env(
             rewards.append(reward)
             dones.append(done)
             values.append(value)
-            truncs.append(trunc)
 
             state = next_state
+            done = next_done
+
             if done:
                 state, _ = env.reset()
-
-        print(np.array(states).shape)
 
         experiences = (
             states,
@@ -1038,6 +1039,7 @@ def check_policy_on_policy_with_probe_env(
             dones,
             values,
             next_state,
+            next_done,
         )
         loss = agent.learn(experiences)
         if i < 20:

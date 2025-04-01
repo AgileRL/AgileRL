@@ -70,7 +70,7 @@ def train_multi_agent_on_policy(
     :param swap_channels: Swap image channels dimension from last to first
         [H, W, C] -> [C, H, W], defaults to False
     :type swap_channels: bool, optional
-    :param max_steps: Maximum number of steps in environment, defaults to 50000
+    :param max_steps: Maximum number of steps in environment across the entire population, defaults to 50000
     :type max_steps: int, optional
     :param evo_steps: Evolution frequency (steps), defaults to 25
     :type evo_steps: int, optional
@@ -194,7 +194,7 @@ def train_multi_agent_on_policy(
     if accelerator is None and mutation is not None:
         pop = mutation.mutation(pop, pre_training_mut=True)
     # RL training loop
-    while np.less([agent.steps[-1] for agent in pop], max_steps).all():
+    while np.sum([agent.steps[-1] for agent in pop]) < max_steps:
         if accelerator is not None:
             accelerator.wait_for_everyone()
         pop_episode_scores = []
@@ -229,9 +229,10 @@ def train_multi_agent_on_policy(
                 actions = {agent_id: [] for agent_id in agent.agent_ids}
                 log_probs = {agent_id: [] for agent_id in agent.agent_ids}
                 rewards = {agent_id: [] for agent_id in agent.agent_ids}
-                terms = {agent_id: [] for agent_id in agent.agent_ids}
+                dones = {agent_id: [] for agent_id in agent.agent_ids}
                 values = {agent_id: [] for agent_id in agent.agent_ids}
-                truncs = {agent_id: [] for agent_id in agent.agent_ids}
+
+                done = {agent_id: np.zeros(num_envs) for agent_id in agent.agent_ids}
 
                 for idx_step in range(-(agent.learn_step // -num_envs)):
 
@@ -263,14 +264,17 @@ def train_multi_agent_on_policy(
                     total_steps += num_envs
                     steps += num_envs
 
+                    next_done = {}
                     for agent_id in agent.agent_ids:
                         states[agent_id].append(obs[agent_id])
                         actions[agent_id].append(action[agent_id])
                         log_probs[agent_id].append(log_prob[agent_id])
                         rewards[agent_id].append(reward[agent_id])
-                        terms[agent_id].append(termination[agent_id])
+                        dones[agent_id].append(done[agent_id])
                         values[agent_id].append(value[agent_id])
-                        truncs[agent_id].append(truncation[agent_id])
+                        next_done[agent_id] = np.logical_or(
+                            termination[agent_id], truncation[agent_id]
+                        ).astype(np.int8)
 
                     if swap_channels:
                         if not is_vectorised:
@@ -284,19 +288,15 @@ def train_multi_agent_on_policy(
                                 for agent_id, s in next_obs.items()
                             }
 
-                    obs = next_obs
-
-                    # Find which agents are "done" - i.e. terminated or truncated
-                    dones = {
-                        agent_id: termination[agent_id] | truncation[agent_id]
-                        for agent_id in agent.agent_ids
-                    }
                     if not is_vectorised:
-                        dones = {
-                            agent: np.array([done]) for agent, done in dones.items()
+                        next_done = {
+                            agent: np.array([n_d]) for agent, n_d in next_done.items()
                         }
 
-                    for idx, agent_dones in enumerate(zip(*dones.values())):
+                    obs = next_obs
+                    done = next_done
+
+                    for idx, agent_dones in enumerate(zip(*next_done.values())):
                         if all(agent_dones):
                             completed_score = (
                                 float(scores[idx]) if sum_scores else list(scores[idx])
@@ -314,9 +314,11 @@ def train_multi_agent_on_policy(
                     actions,
                     log_probs,
                     rewards,
-                    terms,
+                    # terms,
+                    dones,
                     values,
                     next_obs,
+                    next_done,
                 )
 
                 # Learn according to agent's RL algorithm

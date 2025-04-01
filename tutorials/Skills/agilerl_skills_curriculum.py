@@ -3,9 +3,9 @@ from datetime import datetime
 
 import numpy as np
 import torch
-import wandb
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms.ppo import PPO
 from agilerl.training.train_on_policy import train_on_policy
 from agilerl.utils.utils import (
@@ -277,8 +277,10 @@ if __name__ == "__main__":
             actions = []
             log_probs = []
             rewards = []
-            terminations = []
+            dones = []
             values = []
+
+            done = np.zeros(1)
 
             for idx_step in range(500):
                 # Get next action from agent
@@ -299,17 +301,19 @@ if __name__ == "__main__":
                         next_state, skill_reward, termination, truncation, _ = env.step(
                             skill_action
                         )  # Act in environment
+                    next_done = np.logical_or(termination, truncation).astype(np.int8)
                     reward += skill_reward
                     if np.any(termination) or np.any(truncation):
                         break
                     state = next_state
+                    done = next_done
                 score += reward
 
                 states.append(state)
                 actions.append(action)
                 log_probs.append(log_prob)
                 rewards.append(reward)
-                terminations.append(termination)
+                dones.append(done)
                 values.append(value)
 
             agent.scores.append(score)
@@ -321,9 +325,10 @@ if __name__ == "__main__":
                     actions,
                     log_probs,
                     rewards,
-                    terminations,
+                    dones,
                     values,
                     next_state,
+                    next_done,
                 )
             )
 

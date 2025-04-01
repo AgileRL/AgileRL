@@ -416,7 +416,7 @@ def test_initialize_matd3_with_mlp_networks_gumbel_softmax(
         device=device,
         torch_compiler=compile_mode,
     )
-    assert matd3.torch_compiler == "default"
+    assert matd3.torch_compiler == compile_mode
 
 
 @pytest.mark.parametrize(
@@ -921,7 +921,7 @@ def test_matd3_init_with_compile_no_error(mode):
             isinstance(a, torch._dynamo.eval_frame.OptimizedModule)
             for a in matd3.critic_targets_2
         )
-        assert matd3.torch_compiler == "default"
+        assert matd3.torch_compiler == mode
     else:
         assert isinstance(matd3, MATD3)
 

@@ -166,7 +166,7 @@ def test_initializes_with_default_values():
     assert ppo.gamma == 0.99
     assert ppo.gae_lambda == 0.95
     assert ppo.mut is None
-    assert ppo.action_std_init == 0.6
+    assert ppo.action_std_init == 0.0
     assert ppo.clip_coef == 0.2
     assert ppo.ent_coef == 0.01
     assert ppo.vf_coef == 0.5
@@ -300,7 +300,7 @@ def test_initialize_ppo_with_actor_network(
     assert ppo.gamma == 0.99
     assert ppo.gae_lambda == 0.95
     assert ppo.mut is None
-    assert ppo.action_std_init == 0.6
+    assert ppo.action_std_init == 0.0
     assert ppo.clip_coef == 0.2
     assert ppo.ent_coef == 0.01
     assert ppo.vf_coef == 0.5
@@ -373,7 +373,7 @@ def test_initialize_ppo_with_actor_network_evo_net(observation_space, net_type):
     assert ppo.gamma == 0.99
     assert ppo.gae_lambda == 0.95
     assert ppo.mut is None
-    assert ppo.action_std_init == 0.6
+    assert ppo.action_std_init == 0.0
     assert ppo.clip_coef == 0.2
     assert ppo.ent_coef == 0.01
     assert ppo.vf_coef == 0.5
@@ -638,8 +638,17 @@ def test_learns_from_experiences():
         num_steps,
     )
     next_states = torch.rand(1, *observation_space.shape)
-
-    experiences = [states, actions, log_probs, rewards, dones, values, next_states]
+    next_done = np.zeros(1)
+    experiences = [
+        states,
+        actions,
+        log_probs,
+        rewards,
+        dones,
+        values,
+        next_states,
+        next_done,
+    ]
     # Call the learn method
     loss = ppo.learn(experiences)
 
@@ -691,8 +700,17 @@ def test_learns_from_experiences_continuous_accel():
         num_steps,
     )
     next_state = torch.rand(1, *observation_space.shape)
-
-    experiences = [states, actions, log_probs, rewards, dones, values, next_state]
+    next_done = np.zeros(1)
+    experiences = [
+        states,
+        actions,
+        log_probs,
+        rewards,
+        dones,
+        values,
+        next_state,
+        next_done,
+    ]
     # Call the learn method
     loss = ppo.learn(experiences)
 
@@ -897,7 +915,17 @@ def test_clone_after_learning():
     rewards = np.random.randint(0, 100, (max_env_steps, num_vec_envs))
     dones = np.zeros((max_env_steps, num_vec_envs))
     values = np.random.randn(max_env_steps, num_vec_envs)
-    experiences = states, actions, log_probs, rewards, dones, values, next_states
+    next_done = np.zeros((1, num_vec_envs))
+    experiences = (
+        states,
+        actions,
+        log_probs,
+        rewards,
+        dones,
+        values,
+        next_states,
+        next_done,
+    )
     ppo.learn(experiences)
     clone_agent = ppo.clone()
     assert clone_agent.observation_space == ppo.observation_space
@@ -977,7 +1005,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert ppo.batch_size == 64
     assert ppo.gamma == 0.99
     assert ppo.mut is None
-    assert ppo.action_std_init == 0.6
+    assert ppo.action_std_init == 0.0
     assert ppo.clip_coef == 0.2
     assert ppo.ent_coef == 0.01
     assert ppo.vf_coef == 0.5
@@ -1051,7 +1079,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert ppo.batch_size == 64
     assert ppo.gamma == 0.99
     assert ppo.mut is None
-    assert ppo.action_std_init == 0.6
+    assert ppo.action_std_init == 0.0
     assert ppo.clip_coef == 0.2
     assert ppo.ent_coef == 0.01
     assert ppo.vf_coef == 0.5
@@ -1141,7 +1169,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert ppo.batch_size == 64
     assert ppo.gamma == 0.99
     assert ppo.mut is None
-    assert ppo.action_std_init == 0.6
+    assert ppo.action_std_init == 0.0
     assert ppo.clip_coef == 0.2
     assert ppo.ent_coef == 0.01
     assert ppo.vf_coef == 0.5

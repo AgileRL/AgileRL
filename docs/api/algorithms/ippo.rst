@@ -138,9 +138,10 @@ Example Training Loop
             actions = {agent_id: [] for agent_id in agent.agent_ids}
             log_probs = {agent_id: [] for agent_id in agent.agent_ids}
             rewards = {agent_id: [] for agent_id in agent.agent_ids}
-            terms = {agent_id: [] for agent_id in agent.agent_ids}
+            dones = {agent_id: [] for agent_id in agent.agent_ids}
             values = {agent_id: [] for agent_id in agent.agent_ids}
-            truncs = {agent_id: [] for agent_id in agent.agent_ids}
+
+            done = {agent_id: np.zeros(num_envs) for agent_id in agent.agent_ids}
 
             for idx_step in range(-(agent.learn_step // -num_envs)):
 
@@ -153,14 +154,15 @@ Example Training Loop
 
                 steps += num_envs
 
+                next_done = {}
                 for agent_id in agent.agent_ids:
-                    states[agent_id].append(obs[agent_id])
+                    states[agent_id].append(state[agent_id])
                     actions[agent_id].append(action[agent_id])
                     log_probs[agent_id].append(log_prob[agent_id])
                     rewards[agent_id].append(reward[agent_id])
-                    terms[agent_id].append(termination[agent_id])
+                    dones[agent_id].append(done[agent_id])
                     values[agent_id].append(value[agent_id])
-                    truncs[agent_id].append(truncation[agent_id])
+                    next_done[agent_id] = np.logical_or(termination[agent_id], truncation[agent_id]).astype(np.int8)
 
                 if channels_last:
                     next_state = {
@@ -177,21 +179,23 @@ Example Training Loop
                 # Calculate scores for completed episodes
                 for idx, agent_dones in enumerate(zip(*dones.values())):
                     if all(agent_dones):
-                        completed_score = (
-                            float(scores[idx]) if sum_scores else list(scores[idx])
-                        )
+                        completed_score = list(scores[idx])
                         completed_episode_scores.append(completed_score)
                         agent.scores.append(completed_score)
                         scores[idx].fill(0)
+
+                state = next_state
+                done = next_done
 
             experiences = (
                 states,
                 actions,
                 log_probs,
                 rewards,
-                terms,
+                dones,
                 values,
-                next_obs,
+                next_state,
+                next_done,
             )
 
             # Learn according to agent's RL algorithm

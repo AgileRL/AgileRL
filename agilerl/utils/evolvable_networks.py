@@ -78,7 +78,9 @@ def get_default_encoder_config(
         if simba:
             return SimBaNetConfig(hidden_size=128, num_blocks=2)
 
-        return MlpNetConfig(hidden_size=[16, 16], output_activation=None)
+        return MlpNetConfig(
+            hidden_size=[16, 16], output_activation=None, output_vanish=False
+        )
 
 
 def unwrap_optimizer(

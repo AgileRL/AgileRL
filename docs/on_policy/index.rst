@@ -236,6 +236,8 @@ Alternatively, use a custom on-policy training loop:
                 dones = []
                 values = []
 
+                done = np.zeros(num_envs)
+
                 learn_steps = 0
 
                 for idx_step in range(-(agent.learn_step // -num_envs)):
@@ -247,6 +249,7 @@ Alternatively, use a custom on-policy training loop:
 
                     # Act in environment
                     next_state, reward, terminated, truncated, info = env.step(action)
+                    next_done = np.logical_or(terminated, truncated).astype(np.int8)
 
                     total_steps += num_envs
                     steps += num_envs
@@ -256,10 +259,11 @@ Alternatively, use a custom on-policy training loop:
                     actions.append(action)
                     log_probs.append(log_prob)
                     rewards.append(reward)
-                    dones.append(terminated)
+                    dones.append(dones)
                     values.append(value)
 
                     state = next_state
+                    done = next_done
                     scores += np.array(reward)
 
                     for idx, (d, t) in enumerate(zip(terminated, truncated)):
@@ -281,6 +285,7 @@ Alternatively, use a custom on-policy training loop:
                     dones,
                     values,
                     next_state,
+                    next_done,
                 )
                 # Learn according to agent's RL algorithm
                 agent.learn(experiences)

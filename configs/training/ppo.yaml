@@ -9,7 +9,7 @@ INIT_HP:
     BATCH_SIZE: 128            # Batch size
     LR: 0.001                  # Learning rate
     LEARN_STEP: 2048           # Learning frequency
-    MAX_STEPS: 1_000_000       # Max no. steps
+    MAX_STEPS: 2_000_000       # Max no. steps
     TARGET_SCORE: 190.         # Early training stop at avg score of last 100 episodes
     GAMMA: 0.99                # Discount factor
     GAE_LAMBDA: 0.95           # Lambda for general advantage estimation
@@ -26,7 +26,7 @@ INIT_HP:
     EVO_STEPS: 20_480          # Evolution frequency
     EVAL_STEPS:                # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
-    WANDB: false                # Log with Weights and Biases
+    WANDB: true                # Log with Weights and Biases
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation
@@ -49,14 +49,18 @@ NET_CONFIG:
 
     encoder_config:
         hidden_size: [64]
-        # activation: Tanh
+        activation: ReLU
         min_mlp_nodes: 64
         max_mlp_nodes: 500
+        layer_norm: true
 
     head_config:
         hidden_size: [64]
-        activation: Tanh
+        activation: ReLU
+        output_activation:
         min_hidden_layers: 1
         max_hidden_layers: 2
         min_mlp_nodes: 64
         max_mlp_nodes: 500
+        output_vanish: true
+        layer_norm: true

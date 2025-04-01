@@ -65,7 +65,7 @@ class IPPO(MultiAgentRLAlgorithm):
     :type gae_lambda: float, optional
     :param mut: Most recent mutation to agent, defaults to None
     :type mut: str, optional
-    :param action_std_init: Initial action standard deviation, defaults to 0.6
+    :param action_std_init: Initial action standard deviation, defaults to 0.0
     :type action_std_init: float, optional
     :param clip_coef: Surrogate clipping coefficient, defaults to 0.2
     :type clip_coef: float, optional
@@ -112,7 +112,7 @@ class IPPO(MultiAgentRLAlgorithm):
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
         mut: Optional[str] = None,
-        action_std_init: float = 0.6,
+        action_std_init: float = 0.0,
         clip_coef: float = 0.2,
         ent_coef: float = 0.01,
         vf_coef: float = 0.5,
@@ -564,8 +564,13 @@ class IPPO(MultiAgentRLAlgorithm):
             action_logprob = action_dist.log_prob(action)
             dist_entropy = action_dist.entropy()
 
+            if len(action_logprob.shape) == 2:
+                action_logprob = action_logprob.sum(1)
+            if len(dist_entropy.shape) == 2:
+                dist_entropy = dist_entropy.sum(1)
+
             action_dict[agent_id] = (
-                self.scale_to_action_space(action.cpu().data.numpy(), idx)
+                self.scale_to_action_space(action, idx).cpu().data.numpy()
                 if not self.discrete_actions
                 else action.cpu().data.numpy()
             )
@@ -621,8 +626,8 @@ class IPPO(MultiAgentRLAlgorithm):
         """
 
         # process experiences
-        states, actions, log_probs, rewards, dones, values, next_states = map(
-            self.assemble_shared_inputs, experiences
+        states, actions, log_probs, rewards, dones, values, next_states, next_dones = (
+            map(self.assemble_shared_inputs, experiences)
         )
 
         loss_dict = {}
@@ -636,6 +641,7 @@ class IPPO(MultiAgentRLAlgorithm):
             done,
             value,
             next_state,
+            next_done,
             actor,
             critic,
             actor_optimizer,
@@ -652,6 +658,7 @@ class IPPO(MultiAgentRLAlgorithm):
                 dones.values(),
                 values.values(),
                 next_states.values(),
+                next_dones.values(),
                 self.actors,
                 self.critics,
                 self.actor_optimizers,
@@ -661,7 +668,16 @@ class IPPO(MultiAgentRLAlgorithm):
             )
         ):
             loss_dict[f"{agent_id}"] = self._learn_individual(
-                experiences=(state, action, log_prob, reward, done, value, next_state),
+                experiences=(
+                    state,
+                    action,
+                    log_prob,
+                    reward,
+                    done,
+                    value,
+                    next_state,
+                    next_done,
+                ),
                 actor=actor,
                 critic=critic,
                 actor_optimizer=actor_optimizer,
@@ -685,7 +701,7 @@ class IPPO(MultiAgentRLAlgorithm):
         """Inner call to each agent for the learning/algo training steps,
         essentially the PPO learn method. Applies all forward/backward props.
 
-        :param experience: States, actions, log_probs, rewards, dones, values, next_state in that order, organised by shared agent id
+        :param experience: States, actions, log_probs, rewards, dones, values, next_state, next_done in that order, organised by shared agent id
         :type experience: Tuple[Union[numpy.ndarray, Dict[str, numpy.ndarray]], ...]
         :param actor: Actor network
         :type actor: EvolvableModule
@@ -700,53 +716,60 @@ class IPPO(MultiAgentRLAlgorithm):
         :param action_space: Action space for the agent
         :type action_space: gymnasium.spaces
         """
-        (states, actions, log_probs, rewards, dones, values, next_state) = experiences
-        rewards, dones, values = map(
-            self.vectorize_experiences_by_agent, (rewards, dones, values)
+        (states, actions, log_probs, rewards, dones, values, next_state, next_done) = (
+            experiences
         )
+        log_probs, rewards, dones, values = map(
+            self.vectorize_experiences_by_agent, (log_probs, rewards, dones, values)
+        )
+        log_probs = log_probs.squeeze()
         rewards = rewards.squeeze()
         dones = dones.squeeze()
         values = values.squeeze()
         next_state = self.vectorize_experiences_by_agent(next_state, dim=0)
+        next_done = self.vectorize_experiences_by_agent(next_done)
 
         # Bootstrapping returns using GAE advantage estimation
         dones = dones.long()
         with torch.no_grad():
             num_steps = rewards.size(0)
+            rewards = rewards.reshape(num_steps, -1)
+            dones = dones.reshape(num_steps, -1)
+            values = values.reshape(num_steps, -1)
+            next_done = next_done.reshape(1, -1)
+
             next_state = preprocess_observation(
                 next_state, obs_space, self.device, self.normalize_images
             )
-            next_value = critic(next_state).cpu()
+            next_value = critic(next_state).reshape(1, -1).cpu()
             advantages = torch.zeros_like(rewards).float()
+            last_gae_lambda = 0
+            for t in reversed(range(num_steps)):
+                if t == num_steps - 1:
+                    next_non_terminal = 1.0 - next_done
+                    nextvalue = next_value.squeeze()
+                else:
+                    next_non_terminal = 1.0 - dones[t + 1]
+                    nextvalue = values[t + 1]
 
-            for t in range(num_steps):
-                discount = 1
-                a_t = 0
-                for k in range(t, num_steps):
-                    if k != num_steps - 1:
-                        nextvalue = values[k + 1]
-                    else:
-                        nextvalue = next_value.reshape(rewards[k].shape).squeeze()
-                        # print(nextvalue.shape)
+                # Calculate delta (TD error)
+                delta = (
+                    rewards[t] + self.gamma * nextvalue * next_non_terminal - values[t]
+                )
 
-                    a_t += discount * (
-                        rewards[k]
-                        + self.gamma * nextvalue * (1.0 - dones[k])
-                        - values[k]
-                    )
-                    discount *= self.gamma * self.gae_lambda * (1.0 - dones[k])
+                # Use recurrence relation to compute advantage
+                advantages[t] = last_gae_lambda = (
+                    delta
+                    + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lambda
+                )
 
-                    # print(a_t.shape, dones[k].shape, values[k].shape, rewards[k].shape)
-
-                advantages[t] = a_t
             advantages = advantages.reshape((-1,))
             values = values.reshape((-1,))
             returns = advantages + values
 
         states = self.concatenate_experiences_into_batches(states, obs_space.shape)
         actions = self.concatenate_experiences_into_batches(actions, action_space.shape)
-        log_probs = self.concatenate_experiences_into_batches(log_probs, (1,))
-
+        log_probs = log_probs.reshape((-1,))
         experiences = (states, actions, log_probs, advantages, returns, values)
 
         # Move experiences to algo device
@@ -763,7 +786,6 @@ class IPPO(MultiAgentRLAlgorithm):
 
         num_samples = returns.size(0)
         batch_idxs = np.arange(num_samples)
-        clipfracs = []
         mean_loss = 0
         for epoch in range(self.update_epochs):
             np.random.shuffle(batch_idxs)
@@ -793,22 +815,23 @@ class IPPO(MultiAgentRLAlgorithm):
                     action_dist = actor(batch_states)
                     value = critic(batch_states).squeeze(-1)
 
+                    log_prob = action_dist.log_prob(batch_actions.to(self.device))
+                    entropy = action_dist.entropy()
+                    if len(log_prob.shape) == 2:
+                        log_prob = log_prob.sum(1)
+                    if len(entropy.shape) == 2:
+                        entropy = entropy.sum(1)
+
                     if isinstance(action_space, spaces.Box) and action_space.shape == (
                         1,
                     ):
                         batch_actions = batch_actions.unsqueeze(1)
-
-                    log_prob = action_dist.log_prob(batch_actions.to(self.device))
-                    entropy = action_dist.entropy()
 
                     logratio = log_prob - batch_log_probs
                     ratio = logratio.exp()
 
                     with torch.no_grad():
                         approx_kl = ((ratio - 1) - logratio).mean()
-                        clipfracs += [
-                            ((ratio - 1.0).abs() > self.clip_coef).float().mean().item()
-                        ]
 
                     minibatch_advs = batch_advantages
                     minibatch_advs = (minibatch_advs - minibatch_advs.mean()) / (
@@ -852,6 +875,7 @@ class IPPO(MultiAgentRLAlgorithm):
                         self.accelerator.backward(critic_loss)
                     else:
                         critic_loss.backward()
+                    clip_grad_norm_(critic.parameters(), self.max_grad_norm)
                     critic_optimizer.step()
 
                     mean_loss += actor_loss.item() + critic_loss.item()

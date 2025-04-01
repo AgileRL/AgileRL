@@ -1321,9 +1321,9 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         """Reorganizes experiences into a tensor, vectorized by time step
 
         Example input:
-        {'agent_0': [1, 2, 3, 4], 'agent_1': [5, 6, 7, 8]}
+        {'agent_0': [[1, 2, 3, 4]], 'agent_1': [[5, 6, 7, 8]]}
         Example output:
-        torch.Tensor([1, 5, 2, 6, 3, 7, 4, 8])
+        torch.Tensor([[1, 2, 3, 4, 5, 6, 7, 8]])
 
         :param experiences: Dictionaries containing experiences indexed by agent_id that share a policy agent.
         :type experiences: Tuple[Dict[str, np.ndarray]]
@@ -1335,18 +1335,17 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             for agent_id in experiences.keys()
         ]
         stacked_tensor = torch.stack(tensors, dim=dim)
-        # for squeeze_dim in [0, -1]:
-        #     if stacked_tensor.size(squeeze_dim) == 1:
-        #         stacked_tensor = stacked_tensor.squeeze(squeeze_dim)
         return stacked_tensor
 
     def concatenate_experiences_into_batches(self, experiences, shape):
         """Reorganizes experiences into a batched tensor
 
         Example input:
-        {'agent_0': [1, 2, 3, 4], 'agent_1': [5, 6, 7, 8]}
+        {'agent_0': [[[...1], [...2]], [[...5], [...6]]],
+         'agent_1': [[[...3], [...4]], [[...7], [...8]]]}
+
         Example output:
-        torch.Tensor([[1, 5], [2, 6], [3, 7], [4, 8]])
+        torch.Tensor([...1], [...2], [...3], [...4], [...5], [...6], [...7], [...8])
 
         :param experiences: Dictionaries containing experiences indexed by agent_id that share a policy agent.
         :type experiences: Tuple[Dict[str, np.ndarray]]
@@ -1359,7 +1358,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             if len(exp.shape) < 2:
                 exp = np.expand_dims(exp, 0)
             tensors.append(torch.Tensor(exp))
-        stacked_tensor = torch.cat(tensors, dim=1)
+        stacked_tensor = torch.cat(tensors, dim=0)
         stacked_tensor = stacked_tensor.reshape(-1, *shape)
         for squeeze_dim in [0, -1]:
             if stacked_tensor.size(squeeze_dim) == 1:

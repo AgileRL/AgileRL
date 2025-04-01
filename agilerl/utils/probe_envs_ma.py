@@ -496,7 +496,9 @@ class DiscountedRewardEnv:
             if self.last_obs["agent_0"] == 1
             else {"agent_0": 0, "other_agent_0": 0}
         )  # Reward depends on observation  # Reward depends on observation
-        terminated = self.last_obs  # Terminate after second step
+        terminated = {
+            agent: obs[0] for agent, obs in self.last_obs.items()
+        }  # Terminate after second step
         truncated = {"agent_0": False, "other_agent_0": False}
         info = {}
         self.last_obs = {"agent_0": np.array([1]), "other_agent_0": np.array([1])}
@@ -628,7 +630,9 @@ class DiscountedRewardContActionsEnv:
             if self.last_obs["agent_0"] == 1
             else {"agent_0": 0, "other_agent_0": 0}
         )  # Reward depends on observation  # Reward depends on observation
-        terminated = self.last_obs  # Terminate after second step
+        terminated = {
+            agent: obs[0] for agent, obs in self.last_obs.items()
+        }  # Terminate after second step
         truncated = {"agent_0": False, "other_agent_0": False}
         info = {}
         self.last_obs = {"agent_0": np.array([1]), "other_agent_0": np.array([1])}
@@ -1785,9 +1789,10 @@ def check_on_policy_learning_with_probe_env(
         actions = {agent_id: [] for agent_id in agent.agent_ids}
         log_probs = {agent_id: [] for agent_id in agent.agent_ids}
         rewards = {agent_id: [] for agent_id in agent.agent_ids}
-        terms = {agent_id: [] for agent_id in agent.agent_ids}
+        dones = {agent_id: [] for agent_id in agent.agent_ids}
         values = {agent_id: [] for agent_id in agent.agent_ids}
-        truncs = {agent_id: [] for agent_id in agent.agent_ids}
+
+        done = {agent_id: np.zeros((1,)) for agent_id in agent.agent_ids}
 
         for _ in range(100):
             # Make vectorized
@@ -1801,16 +1806,22 @@ def check_on_policy_learning_with_probe_env(
 
             next_state, reward, termination, truncation, info = env.step(action)
 
+            next_done = {}
             for agent_id in agent.agent_ids:
                 states[agent_id].append(state[agent_id])
                 actions[agent_id].append(action[agent_id])
                 log_probs[agent_id].append(log_prob[agent_id])
                 rewards[agent_id].append(reward[agent_id])
-                terms[agent_id].append(termination[agent_id])
+                dones[agent_id].append(done[agent_id])
                 values[agent_id].append(value[agent_id])
-                truncs[agent_id].append(truncation[agent_id])
+                next_done[agent_id] = np.logical_or(
+                    termination[agent_id], truncation[agent_id]
+                ).astype(np.int8)
+
+            next_done = {agent: np.array([n_d]) for agent, n_d in next_done.items()}
 
             state = next_state
+            done = next_done
 
             done = {
                 agent_id: np.expand_dims(np.array(d), 0)
@@ -1825,9 +1836,10 @@ def check_on_policy_learning_with_probe_env(
             actions,
             log_probs,
             rewards,
-            terms,
+            dones,
             values,
             next_state,
+            next_done,
         )
         _loss = agent.learn(experiences)
         # if i < 20:
@@ -1849,7 +1861,7 @@ def check_on_policy_learning_with_probe_env(
                         critic(state[agent_id]).detach().cpu().numpy()[0]
                     )
 
-                    print(agent_id, "v", values[agent_id], predicted_v_values)
+                    print(agent_id, "v", v_values[agent_id], predicted_v_values)
                     # assert np.allclose(v_values[agent_id], predicted_v_values, atol=0.1):
                     # if not np.allclose(
                     #     v_values[agent_id], predicted_v_values, atol=0.1
@@ -1906,115 +1918,115 @@ def check_on_policy_learning_with_probe_env(
                     #     )
 
 
-# if __name__ == "__main__":
-#     from agilerl.algorithms import IPPO
+if __name__ == "__main__":
+    from agilerl.algorithms import IPPO
 
-#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-#     vector_envs = [
-#         (ConstantRewardEnv(), 10),
-#         (ObsDependentRewardEnv(), 10),
-#         (DiscountedRewardEnv(), 30),
-#         (FixedObsPolicyEnv(), 10),
-#         (PolicyEnv(), 10),
-#         (MultiPolicyEnv(), 10),
-#     ]
+    vector_envs = [
+        (ConstantRewardEnv(), 10),
+        (ObsDependentRewardEnv(), 10),
+        (DiscountedRewardEnv(), 30),
+        (FixedObsPolicyEnv(), 10),
+        (PolicyEnv(), 10),
+        (MultiPolicyEnv(), 10),
+    ]
 
-#     for env, learn_steps in vector_envs:
-#         algo_args = {
-#             "observation_spaces": [space for space in env.observation_space.values()],
-#             "action_spaces": [space for space in env.action_space.values()],
-#             "agent_ids": env.agents,
-#             "lr": 1e-2,
-#             "net_config": {
-#                 "encoder_config": {"hidden_size": [16, 16], "init_layers": False},
-#                 "head_config": {"hidden_size": [16], "init_layers": False},
-#             },
-#         }
+    for env, learn_steps in vector_envs:
+        algo_args = {
+            "observation_spaces": [space for space in env.observation_space.values()],
+            "action_spaces": [space for space in env.action_space.values()],
+            "agent_ids": env.agents,
+            "lr": 1e-2,
+            "net_config": {
+                "encoder_config": {"hidden_size": [16, 16], "init_layers": False},
+                "head_config": {"hidden_size": [16], "init_layers": False},
+            },
+        }
 
-#         check_on_policy_learning_with_probe_env(
-#             env, IPPO, algo_args, learn_steps, device, discrete=True
-#         )
+        check_on_policy_learning_with_probe_env(
+            env, IPPO, algo_args, learn_steps, device, discrete=True
+        )
 
-#     image_envs = [
-#         (ConstantRewardImageEnv(), 10),
-#         (ObsDependentRewardImageEnv(), 30),
-#         (DiscountedRewardImageEnv(), 60),
-#         (FixedObsPolicyImageEnv(), 10),
-#         (PolicyImageEnv(), 20),
-#         (MultiPolicyImageEnv(), 20),
-#     ]
+    image_envs = [
+        (ConstantRewardImageEnv(), 10),
+        (ObsDependentRewardImageEnv(), 30),
+        (DiscountedRewardImageEnv(), 60),
+        (FixedObsPolicyImageEnv(), 10),
+        (PolicyImageEnv(), 20),
+        (MultiPolicyImageEnv(), 20),
+    ]
 
-#     for env, learn_steps in image_envs:
-#         algo_args = {
-#             "observation_spaces": [space for space in env.observation_space.values()],
-#             "action_spaces": [space for space in env.action_space.values()],
-#             "agent_ids": env.agents,
-#             "lr": 1e-2,
-#             "net_config": {
-#                 "encoder_config": {
-#                     "channel_size": [16],
-#                     "kernel_size": [3],
-#                     "stride_size": [1],
-#                 },
-#                 "head_config": {"hidden_size": [32], "output_activation": "Sigmoid"},
-#             },
-#             "normalize_images": False,
-#         }
+    for env, learn_steps in image_envs:
+        algo_args = {
+            "observation_spaces": [space for space in env.observation_space.values()],
+            "action_spaces": [space for space in env.action_space.values()],
+            "agent_ids": env.agents,
+            "lr": 1e-2,
+            "net_config": {
+                "encoder_config": {
+                    "channel_size": [16],
+                    "kernel_size": [3],
+                    "stride_size": [1],
+                },
+                "head_config": {"hidden_size": [32], "output_activation": "Sigmoid"},
+            },
+            "normalize_images": False,
+        }
 
-#         check_on_policy_learning_with_probe_env(
-#             env, IPPO, algo_args, learn_steps, device, discrete=True
-#         )
+        check_on_policy_learning_with_probe_env(
+            env, IPPO, algo_args, learn_steps, device, discrete=True
+        )
 
-#     cont_vector_envs = [
-#         (ConstantRewardContActionsEnv(), 10),
-#         (ObsDependentRewardContActionsEnv(), 10),
-#         (DiscountedRewardContActionsEnv(), 50),
-#         (FixedObsPolicyContActionsEnv(), 30),
-#         (PolicyContActionsEnv(), 30),
-#     ]
+    cont_vector_envs = [
+        (ConstantRewardContActionsEnv(), 10),
+        (ObsDependentRewardContActionsEnv(), 10),
+        (DiscountedRewardContActionsEnv(), 50),
+        (FixedObsPolicyContActionsEnv(), 30),
+        (PolicyContActionsEnv(), 30),
+    ]
 
-#     for env, learn_steps in cont_vector_envs:
-#         algo_args = {
-#             "observation_spaces": [space for space in env.observation_space.values()],
-#             "action_spaces": [space for space in env.action_space.values()],
-#             "agent_ids": env.agents,
-#             "lr": 1e-2,
-#             "net_config": {
-#                 "encoder_config": {"hidden_size": [16, 16], "init_layers": False},
-#                 "head_config": {"hidden_size": [16], "init_layers": False},
-#             },
-#         }
+    for env, learn_steps in cont_vector_envs:
+        algo_args = {
+            "observation_spaces": [space for space in env.observation_space.values()],
+            "action_spaces": [space for space in env.action_space.values()],
+            "agent_ids": env.agents,
+            "lr": 1e-2,
+            "net_config": {
+                "encoder_config": {"hidden_size": [16, 16], "init_layers": False},
+                "head_config": {"hidden_size": [16], "init_layers": False},
+            },
+        }
 
-#         check_on_policy_learning_with_probe_env(
-#             env, IPPO, algo_args, learn_steps, device, discrete=False
-#         )
+        check_on_policy_learning_with_probe_env(
+            env, IPPO, algo_args, learn_steps, device, discrete=False
+        )
 
-#     cont_image_envs = [
-#         (ConstantRewardContActionsImageEnv(), 10),
-#         (ObsDependentRewardContActionsImageEnv(), 30),
-#         (DiscountedRewardContActionsImageEnv(), 80),
-#         (FixedObsPolicyContActionsImageEnv(), 30),
-#         (PolicyContActionsImageEnv(), 90),
-#     ]
+    cont_image_envs = [
+        (ConstantRewardContActionsImageEnv(), 10),
+        (ObsDependentRewardContActionsImageEnv(), 30),
+        (DiscountedRewardContActionsImageEnv(), 80),
+        (FixedObsPolicyContActionsImageEnv(), 30),
+        (PolicyContActionsImageEnv(), 90),
+    ]
 
-#     for env, learn_steps in cont_image_envs:
-#         algo_args = {
-#             "observation_spaces": [space for space in env.observation_space.values()],
-#             "action_spaces": [space for space in env.action_space.values()],
-#             "agent_ids": env.agents,
-#             "lr": 1e-2,
-#             "net_config": {
-#                 "encoder_config": {
-#                     "channel_size": [16],
-#                     "kernel_size": [3],
-#                     "stride_size": [1],
-#                 },
-#                 "head_config": {"hidden_size": [32], "output_activation": "Sigmoid"},
-#             },
-#             "normalize_images": False,
-#         }
+    for env, learn_steps in cont_image_envs:
+        algo_args = {
+            "observation_spaces": [space for space in env.observation_space.values()],
+            "action_spaces": [space for space in env.action_space.values()],
+            "agent_ids": env.agents,
+            "lr": 1e-2,
+            "net_config": {
+                "encoder_config": {
+                    "channel_size": [16],
+                    "kernel_size": [3],
+                    "stride_size": [1],
+                },
+                "head_config": {"hidden_size": [32], "output_activation": "Sigmoid"},
+            },
+            "normalize_images": False,
+        }
 
-#         check_on_policy_learning_with_probe_env(
-#             env, IPPO, algo_args, learn_steps, device, discrete=False
-#         )
+        check_on_policy_learning_with_probe_env(
+            env, IPPO, algo_args, learn_steps, device, discrete=False
+        )

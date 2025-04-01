@@ -3,7 +3,7 @@ from typing import Optional, Type, Union
 import numpy as np
 import torch
 from gymnasium import spaces
-from torch.distributions import Bernoulli, Categorical, Distribution, MultivariateNormal
+from torch.distributions import Bernoulli, Categorical, Distribution, Normal
 
 from agilerl.modules.base import EvolvableModule, EvolvableWrapper
 from agilerl.modules.configs import MlpNetConfig
@@ -28,7 +28,7 @@ class EvolvableDistribution(EvolvableWrapper):
         self,
         action_space: spaces.Space,
         network: EvolvableModule,
-        action_std_init: float = 0.6,
+        action_std_init: float = 0.0,
         device: DeviceType = "cpu",
     ):
 
@@ -38,15 +38,15 @@ class EvolvableDistribution(EvolvableWrapper):
         self.action_std_init = action_std_init
         self.device = device
 
-        # For continuous action spaces, we also learn the variance
+        # For continuous action spaces, we also learn the standard deviation (log_std)
         # of the action distribution
         if isinstance(action_space, spaces.Box):
-            self.action_std = torch.nn.Parameter(
-                torch.full((spaces.flatdim(action_space),), action_std_init**2),
+            self.log_std = torch.nn.Parameter(
+                torch.ones(np.prod(action_space.shape)) * action_std_init,
                 requires_grad=True,
             ).to(device)
         else:
-            self.action_std = None
+            self.log_std = None
 
     @property
     def net_config(self) -> ConfigType:
@@ -58,23 +58,24 @@ class EvolvableDistribution(EvolvableWrapper):
         return self.wrapped.net_config
 
     def get_distribution(
-        self, probs: torch.Tensor, action_std: Optional[torch.Tensor] = None
+        self, probs: torch.Tensor, log_std: Optional[torch.Tensor] = None
     ) -> Distribution:
         """Get the distribution over the action space given an observation.
 
         :param probs: Logits output by the network.
         :type probs: torch.Tensor
-        :param action_std: Log standard deviation of the action distribution. Defaults to None.
-        :type action_std: Optional[torch.Tensor]
+        :param log_std: Log standard deviation of the action distribution. Defaults to None.
+        :type log_std: Optional[torch.Tensor]
         :return: Distribution over the action space.
         :rtype: Distribution
         """
         if isinstance(self.action_space, spaces.Box):
             assert (
-                action_std is not None
-            ), "action_std must be provided for continuous action spaces."
-            cov_mat = torch.diag(action_std).unsqueeze(dim=0).clamp(min=1e-6)
-            return MultivariateNormal(loc=probs, covariance_matrix=cov_mat)
+                log_std is not None
+            ), "log_std must be provided for continuous action spaces."
+            action_logstd = log_std.expand_as(probs).clamp(min=-20)
+            action_std = torch.exp(action_logstd)
+            return Normal(loc=probs, scale=action_std)
 
         elif isinstance(self.action_space, spaces.Discrete):
             return Categorical(probs=probs)
@@ -124,7 +125,7 @@ class EvolvableDistribution(EvolvableWrapper):
                 torch.tensor(0.0, dtype=probs.dtype, device=self.device),
             )
 
-        return self.get_distribution(probs, self.action_std)
+        return self.get_distribution(probs, self.log_std)
 
     def clone(self) -> "EvolvableDistribution":
         """Clones the distribution.
@@ -206,6 +207,8 @@ class DeterministicActor(EvolvableNetwork):
         # Set output activation based on action space
         if isinstance(action_space, (spaces.Discrete, spaces.MultiDiscrete)):
             output_activation = "Softmax"
+        elif isinstance(head_config, dict) and "output_activation" in head_config:
+            output_activation = head_config["output_activation"]
         elif np.any(self.min_action < 0):
             output_activation = "Tanh"
         else:
@@ -215,8 +218,7 @@ class DeterministicActor(EvolvableNetwork):
             head_config = MlpNetConfig(
                 hidden_size=[16], output_activation=output_activation
             )
-        elif head_config.get("output_activation", None) is None:
-            head_config["output_activation"] = output_activation
+        head_config["output_activation"] = output_activation
 
         self.build_network_head(head_config)
         self.output_activation = head_config.get("output_activation", output_activation)
@@ -293,7 +295,7 @@ class StochasticActor(DeterministicActor):
         encoder_cls: Optional[Union[str, Type[EvolvableModule]]] = None,
         encoder_config: Optional[ConfigType] = None,
         head_config: Optional[ConfigType] = None,
-        action_std_init: float = 0.6,
+        action_std_init: float = 0.0,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
         n_agents: Optional[int] = None,
