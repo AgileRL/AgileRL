@@ -57,7 +57,10 @@ def init_from_single(
 
 class OptimizerWrapper:
     """Wrapper to initialize optimizer and store metadata relevant for
-    evolutionary hyperparameter optimization.
+    evolutionary hyperparameter optimization. In AgileRL algorithms,
+    all optimizers should be initialized using this wrapper. This allows
+    us to access the relevant networks that they optimize inside `Mutations`
+    to be able to reinitialize them after mutating an individual.
 
     :param optimizer_cls: The optimizer class to be initialized.
     :type optimizer_cls: Type[torch.optim.Optimizer]
@@ -194,7 +197,7 @@ class OptimizerWrapper:
 
         :return: The parent container object
         """
-        # NOTE: Here the assumption is that OptimizerWrapper is used inside the __init__
+        # Here the assumption is that OptimizerWrapper is used inside the __init__
         # method of the implemented algorithm, such that we can access the defined locals
         # and extract the corresponding attribute names to the passed networks.
         current_frame = inspect.currentframe()

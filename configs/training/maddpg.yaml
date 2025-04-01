@@ -22,7 +22,7 @@ INIT_HP:
     TAU: 0.001                  # For soft update of target parameters
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
-    POP_SIZE: 4                # Population size
+    POP_SIZE: 2                # Population size
     EVO_STEPS: 10_000           # Evolution frequency
     EVAL_STEPS:                # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
@@ -40,7 +40,7 @@ MUTATION_PARAMS:
     # Learning HPs to choose from
     RL_HP_SELECTION: [lr, batch_size, learn_step]
     MUT_SD: 0.1                            # Mutation strength
-    RAND_SEED: 42                          # Random seed
+    RAND_SEED: 40                          # Random seed
     # Define max and min limits for mutating RL hyperparams
     MIN_LR: 0.0001
     MAX_LR: 0.01
