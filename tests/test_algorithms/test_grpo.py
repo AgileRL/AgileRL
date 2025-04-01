@@ -212,7 +212,7 @@ def grpo(vocab_size, input_size, max_tokens, group_size, use_accelerator):
             accelerator = Accelerator(
                 DeepSpeedPlugin(zero_stage=2, gradient_accumulation_steps=2)
             )
-            return GRPO(
+            grpo = GRPO(
                 observation_space,
                 action_space,
                 actor_network=create_module(
@@ -229,6 +229,7 @@ def grpo(vocab_size, input_size, max_tokens, group_size, use_accelerator):
                 ),
                 accelerator=accelerator,
             )
+            return grpo
     else:
         accelerator = None
         return GRPO(
@@ -652,6 +653,7 @@ def test_grpo_save_load_checkpoint_with_accelerator(
         assert str(new_grpo.optimizer.state_dict()[key]) == str(
             grpo_optim_state_dict[key]
         )
+    AcceleratorState._reset_state(True)
 
 
 @pytest.mark.parametrize("vocab_size", [1000])
@@ -727,6 +729,7 @@ def test_grpo_clone_with_accelerator(
         assert new_grpo.wrap == grpo.wrap
         assert new_grpo.device == grpo.device
         assert new_grpo.fitness == grpo.fitness
+        AcceleratorState._reset_state(True)
 
 
 @pytest.mark.parametrize("vocab_size", [1000])

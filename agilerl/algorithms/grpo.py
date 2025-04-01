@@ -43,7 +43,7 @@ DeepSpeedOptimizerType = Union[
 
 
 class GRPO(RLAlgorithm):
-    """The PPO algorithm class. PPO paper: https://arxiv.org/abs/1707.06347v2
+    """The GRPO algorithm class. GRPO paper: https://arxiv.org/pdf/2402.03300
 
     :param observation_space: Observation space of the environment
     :type observation_space: gym.spaces.Space

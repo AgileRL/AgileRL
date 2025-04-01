@@ -664,7 +664,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         input_args = EvolvableAlgorithm.inspect_attributes(self, input_args_only=True)
         input_args["wrap"] = wrap
 
-        print("INPUT ARGS", input_args)
         clone = type(self)(**input_args)
 
         if self.accelerator is not None:
