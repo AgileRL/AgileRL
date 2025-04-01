@@ -618,6 +618,11 @@ class GRPO(RLAlgorithm):
         )
 
     def wrap_models(self, create_reference_net):
+        """Wrap the models in the accelerator
+
+        :param create_reference_net: Flag to indicate if the reference network should be wrapped
+        :type create_reference_net: bool
+        """
         if self.accelerator is not None:
             self.actor, self.optimizer, self.lr_scheduler = self.accelerator.prepare(
                 self.actor, self.optimizer.optimizer, self.lr_scheduler
