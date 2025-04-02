@@ -79,6 +79,8 @@ class GRPO(RLAlgorithm):
     :type min_output_tokens: int, optional
     :param cosine_lr_schedule_config: Config for cosine lr scheduling, defaults to None
     :type cosine_lr_schedule_config: CosineLRScheduleConfig, optional
+    :param gradient_checkpointing: Flag to enable gradient checkpointing, defaults to False
+    :type gradient_checkpointing: bool, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
@@ -110,6 +112,7 @@ class GRPO(RLAlgorithm):
         max_output_tokens: int = 1024,
         min_output_tokens: Optional[int] = None,
         cosine_lr_schedule_config: Optional[CosineLRScheduleConfig] = None,
+        gradient_checkpointing: bool = True,
         accelerator: Optional[Accelerator] = None,
         device: str = "cpu",
         clone: bool = False,
@@ -146,8 +149,6 @@ class GRPO(RLAlgorithm):
         assert (
             update_epochs >= 1
         ), "Policy update epochs must be greater than or equal to one."
-        # FIXME
-        # self.wrap = wrap
         self.batch_size = batch_size
         self.lr = lr
         self.clip_coef = clip_coef
@@ -163,6 +164,7 @@ class GRPO(RLAlgorithm):
             min_new_tokens=min_output_tokens,
             pad_token_id=pad_token_id,
         )
+        self.gradient_checkpointing = gradient_checkpointing
         self.cosine_lr_schedule_config = cosine_lr_schedule_config
         self.wrap = wrap
         if max_grad_norm and accelerator is not None and device == "cuda:0":
@@ -179,6 +181,44 @@ class GRPO(RLAlgorithm):
         self._initialize_actors(actor_network, not clone)
         del actor_network
 
+    # def get_action(
+    #     self, states: List[Dict[str, torch.Tensor]], training: bool = True
+    # ) -> Tuple[
+    #     Union[np.ndarray, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor
+    # ]:
+    #     """Returns the next action to take in the environment.
+
+    #     :param states: Environment observation, or multiple observations in a batch
+    #     :type states: numpy.ndarray[float]
+    #     :param training: Flag to indicate training mode, defaults to True
+    #     :type training: bool, optional
+    #     """
+    #     group_size = self.group_size if training else 1
+    #     self.actor.eval()
+    #     with torch.no_grad():
+    #         action_masks = []
+    #         completion_ids = []
+    #         for state in states:
+    #             state["input_ids"] = (
+    #                 state["input_ids"].repeat(group_size, 1).to(self.actor.device)
+    #             )
+    #             state["attention_mask"] = (
+    #                 state["attention_mask"].repeat(group_size, 1).to(self.actor.device)
+    #             )
+    #             completion_id = self.actor.generate(
+    #                 **state,
+    #                 generation_config=self.generation_config,
+    #             )
+    #             completion_ids.append(completion_id)
+    #             action_mask = torch.zeros_like(
+    #                 completion_id, dtype=torch.bool, device=self.device
+    #             )
+    #             action_mask[:, state["input_ids"].shape[1] :] = True
+    #             action_mask[completion_id == self.pad_token_id] = False
+    #             action_mask = action_mask[:, 1:]
+    #             action_masks.append(action_mask)
+    #     return completion_ids, action_masks
+
     def get_action(
         self, states: List[Dict[str, torch.Tensor]], training: bool = True
     ) -> Tuple[
@@ -194,27 +234,74 @@ class GRPO(RLAlgorithm):
         group_size = self.group_size if training else 1
         self.actor.eval()
         with torch.no_grad():
-            action_masks = []
-            completion_ids = []
-            for state in states:
-                state["input_ids"] = (
-                    state["input_ids"].repeat(group_size, 1).to(self.actor.device)
+            if self.reduce_memory_peak:
+                action_masks = []
+                completion_ids = []
+                for state in states:
+                    state["input_ids"] = (
+                        state["input_ids"].repeat(group_size, 1).to(self.actor.device)
+                    )
+                    state["attention_mask"] = (
+                        state["attention_mask"]
+                        .repeat(group_size, 1)
+                        .to(self.actor.device)
+                    )
+                    completion_id = self.actor.generate(
+                        **state,
+                        generation_config=self.generation_config,
+                    )
+                    completion_ids.append(completion_id)
+                    action_mask = torch.zeros_like(
+                        completion_id, dtype=torch.bool, device=self.device
+                    )
+                    action_mask[:, state["input_ids"].shape[1] :] = True
+                    action_mask[completion_id == self.pad_token_id] = False
+                    action_mask = action_mask[:, 1:]
+                    action_masks.append(action_mask)
+            else:
+                input_ids = stack_and_pad_experiences(
+                    [state["input_ids"] for state in states],
+                    padding_values=[self.pad_token_id],
+                    padding_side="left",
+                )[0]
+                attention_mask = stack_and_pad_experiences(
+                    [state["attention_mask"] for state in states],
+                    padding_values=[False],
+                    padding_side="left",
+                )[0]
+
+                # Repeat for group size
+                input_ids = (
+                    input_ids.repeat(1, group_size, 1)
+                    .reshape(-1, input_ids.size(-1))
+                    .to(self.actor.device)
                 )
-                state["attention_mask"] = (
-                    state["attention_mask"].repeat(group_size, 1).to(self.actor.device)
+                attention_mask = (
+                    attention_mask.repeat(1, group_size, 1)
+                    .reshape(-1, attention_mask.size(-1))
+                    .to(self.actor.device)
                 )
-                completion_id = self.actor.generate(
-                    **state,
+
+                # Generate completions
+                completion_ids = self.actor.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
                     generation_config=self.generation_config,
                 )
-                completion_ids.append(completion_id)
-                action_mask = torch.zeros_like(
-                    completion_id, dtype=torch.bool, device=self.device
+
+                # Create action masks
+                action_masks = torch.zeros_like(
+                    completion_ids, dtype=torch.bool, device=self.device
                 )
-                action_mask[:, state["input_ids"].shape[1] :] = True
-                action_mask[completion_id == self.pad_token_id] = False
-                action_mask = action_mask[:, 1:]
-                action_masks.append(action_mask)
+                action_masks[:, input_ids.size(1) :] = True
+                action_masks[completion_ids == self.pad_token_id] = False
+                action_masks = action_masks[:, 1:]
+
+                # Reshape back to original batch structure
+                completion_ids = completion_ids.reshape(len(states), group_size, -1)
+                action_masks = action_masks.reshape(len(states), group_size, -1)
+                completion_ids = [cid for cid in completion_ids]
+                action_masks = [am for am in action_masks]
         return completion_ids, action_masks
 
     def learn(self, experiences: ExperiencesType) -> Tuple[float, float]:
@@ -315,7 +402,6 @@ class GRPO(RLAlgorithm):
         :param create_reference_net: Flag to indicate to create a reference network
         :type create_reference_net: bool
         """
-        self.reference_actor = None
         self._create_policy_network(actor_network)
         if create_reference_net:
             self._create_reference_policy_network(actor_network)
@@ -323,20 +409,17 @@ class GRPO(RLAlgorithm):
             self.wrap_models(create_reference_net)
         else:
             self.actor = self.actor.to(self.device)
-            self.actor.gradient_checkpointing_enable()
+            if self.gradient_checkpointing:
+                self.actor.gradient_checkpointing_enable()
             if create_reference_net:
                 self.reference_actor = self.reference_actor.to(self.device)
 
         # Register network groups for mutations
-        self.register_network_group(
-            NetworkGroup(
-                eval=self.actor, policy=True, shared=[self.reference_actor], llm=True
-            )
-        )
+        self.register_network_group(NetworkGroup(eval=self.actor, policy=True))
         if create_reference_net:
-            # self.register_network_group(
-            #     NetworkGroup(eval=self.reference_actor, policy=True)
-            # )
+            self.register_network_group(
+                NetworkGroup(eval=self.reference_actor, policy=True)
+            )
             self.reference_actor.eval()
 
     def _calculate_advantage(
@@ -458,11 +541,15 @@ class GRPO(RLAlgorithm):
             del log_probs_list
         else:
             logits = policy.forward(**model_kwargs).logits
-            log_probs = (
-                F.log_softmax(logits[:, :-1], dim=-1)
-                .gather(dim=-1, index=ids[:, 1:].unsqueeze(-1))
-                .squeeze(-1)
+            selected_logits = logits[:, :-1].gather(
+                dim=-1, index=ids[:, 1:].unsqueeze(-1)
             )
+            log_probs = F.log_softmax(selected_logits, dim=-1).squeeze(-1)
+            del logits
+            del selected_logits
+            torch.cuda.empty_cache()
+            policy = None
+
         return log_probs
 
     def _create_policy_network(
@@ -489,6 +576,15 @@ class GRPO(RLAlgorithm):
                 "train_micro_batch_size_per_gpu"
             ] = 2
 
+        if self.gradient_checkpointing:
+            self.accelerator.state.deepspeed_plugin.deepspeed_config[
+                "activation_checkpointing"
+            ] = {
+                "partition_activations": True,
+                "cpu_checkpointing": True,
+                "synchronize_checkpoint_boundary": True,
+                "number_checkpoints": 2,
+            }
         self.actor = network
         self.optimizer = OptimizerWrapper(
             optim.AdamW, networks=[self.actor], lr=self.lr

@@ -221,7 +221,6 @@ class NetworkGroup:
     )
     policy: bool = field(default=False)
     multiagent: bool = field(default=False)
-    llm: bool = field(default=False)
 
     def __post_init__(self):
         if self.multiagent:
@@ -250,10 +249,9 @@ class NetworkGroup:
                     self._infer_attribute_names(container, shared) for shared in shared
                 ]
             else:
-                if not self.llm:
-                    assert isinstance(
-                        shared[0], EvolvableModule
-                    ), "Expected a list of EvolvableModule objects for the shared argument in the network group."
+                assert isinstance(
+                    shared[0], EvolvableModule
+                ), "Expected a list of EvolvableModule objects for the shared argument in the network group."
 
                 self.shared = self._infer_attribute_names(container, shared)
 
