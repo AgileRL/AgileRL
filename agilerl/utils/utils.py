@@ -6,11 +6,11 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
+import wandb
 from accelerate import Accelerator
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
-import wandb
 from agilerl.algorithms import (
     CQN,
     DDPG,
