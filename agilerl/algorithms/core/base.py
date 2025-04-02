@@ -611,7 +611,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             if isinstance(exp, dict):
                 exp = {key: val.to(device) for key, val in exp.items()}
             elif isinstance(exp, (list, tuple)) and isinstance(exp[0], torch.Tensor):
-                exp = [val.to(device) for val in exp]
+                exp = tuple(val.to(device) for val in exp)
             elif isinstance(exp, torch.Tensor):
                 exp = exp.to(device)
 

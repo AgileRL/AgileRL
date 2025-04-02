@@ -47,17 +47,24 @@ class TorchDistribution:
     to sample actions and compute log probabilities, relevant for many policy-gradient algorithms such as
     PPO, A2C, TRPO.
 
-    :param dist: Distribution to wrap.
-    :type dist: Union[Distribution, List[Distribution]]
+    :param distribution: Distribution to wrap.
+    :type distribution: Union[Distribution, List[Distribution]]
+    :param squash_output: Whether to squash the output to the action space.
+    :type squash_output: bool
     """
 
-    def __init__(self, dist: DistributionType):
-        if isinstance(dist, list):
+    def __init__(
+        self,
+        distribution: DistributionType,
+        squash_output: bool = False,
+    ) -> None:
+        if isinstance(distribution, list):
             assert all(
-                isinstance(d, Categorical) for d in dist
+                isinstance(d, Categorical) for d in distribution
             ), "Only list of Categorical distributions are supported (for MultiDiscrete action spaces)."
 
-        self.dist = dist
+        self.distribution = distribution
+        self.squash_output = squash_output
 
     def sample(self) -> torch.Tensor:
         """Sample an action from the distribution.
@@ -65,14 +72,24 @@ class TorchDistribution:
         :return: Action from the distribution.
         :rtype: torch.Tensor
         """
-        if isinstance(self.dist, Normal):
-            return self.dist.rsample()
-        elif isinstance(self.dist, (Bernoulli, Categorical)):
-            return self.dist.sample()
-        elif isinstance(self.dist, list):
-            return torch.stack([dist.sample() for dist in self.dist], dim=1)
+        if isinstance(self.distribution, Normal):
+            # Reparametrization trick to allow gradient flow through the sample
+            self.sampled_action = self.distribution.rsample()
+        elif isinstance(self.distribution, (Bernoulli, Categorical)):
+            self.sampled_action = self.distribution.sample()
+        elif isinstance(self.distribution, list):
+            self.sampled_action = torch.stack(
+                [dist.sample() for dist in self.distribution], dim=1
+            )
         else:
-            raise NotImplementedError(f"Distribution {self.dist} not supported.")
+            raise NotImplementedError(
+                f"Distribution {self.distribution} not supported."
+            )
+
+        if self.squash_output:
+            return torch.tanh(self.sampled_action)
+
+        return self.sampled_action
 
     def log_prob(self, action: torch.Tensor) -> torch.Tensor:
         """Get the log probability of the action.
@@ -82,31 +99,60 @@ class TorchDistribution:
         :return: Log probability of the action.
         :rtype: torch.Tensor
         """
-        if isinstance(self.dist, (Normal, Bernoulli, Categorical)):
-            return sum_independent_tensor(self.dist.log_prob(action))
-        elif isinstance(self.dist, list):
-            return torch.stack(
+        _action = action if not self.squash_output else self.sampled_action
+        if isinstance(self.distribution, Normal):
+            log_prob = sum_independent_tensor(self.distribution.log_prob(_action))
+        elif isinstance(self.distribution, Bernoulli):
+            log_prob = self.distribution.log_prob(_action).sum(dim=1)
+        elif isinstance(self.distribution, Categorical):
+            log_prob = self.distribution.log_prob(_action)
+        elif isinstance(self.distribution, list):
+            log_prob = torch.stack(
                 [
                     dist.log_prob(action)
-                    for dist, action in zip(self.dist, torch.unbind(action, dim=1))
+                    for dist, action in zip(
+                        self.distribution, torch.unbind(action, dim=1)
+                    )
                 ],
                 dim=1,
             )
         else:
-            raise NotImplementedError(f"Distribution {self.dist} not supported.")
+            raise NotImplementedError(
+                f"Distribution {self.distribution} not supported."
+            )
 
-    def entropy(self) -> torch.Tensor:
+        # Correction for squashed outputs as per SAC paper:
+        # See https://arxiv.org/html/2410.16739v1
+        if self.squash_output:
+            log_prob -= torch.log(1 - action.pow(2) + 1e-6).sum(dim=1)
+
+        return log_prob
+
+    def entropy(self) -> Optional[torch.Tensor]:
         """Get the entropy of the action distribution.
 
         :return: Entropy of the action distribution.
-        :rtype: torch.Tensor
+        :rtype: torch.Tensor, None
         """
-        if isinstance(self.dist, (Normal, Bernoulli, Categorical)):
-            return sum_independent_tensor(self.dist.entropy())
-        elif isinstance(self.dist, list):
-            return torch.stack([dist.entropy() for dist in self.dist], dim=1)
+        # No analytical form for entropy with squashed outputs so must
+        # use -log_prob.mean() in algorithm instead
+        if self.squash_output:
+            return
+
+        if isinstance(self.distribution, Normal):
+            return sum_independent_tensor(self.distribution.entropy())
+        elif isinstance(self.distribution, Bernoulli):
+            return self.distribution.entropy().sum(dim=1)
+        elif isinstance(self.distribution, Categorical):
+            return self.distribution.entropy()
+        elif isinstance(self.distribution, list):
+            return torch.stack(
+                [dist.entropy() for dist in self.distribution], dim=1
+            ).sum(dim=1)
         else:
-            raise NotImplementedError(f"Distribution {self.dist} not supported.")
+            raise NotImplementedError(
+                f"Distribution {self.distribution} not supported."
+            )
 
 
 class EvolvableDistribution(EvolvableWrapper):
@@ -118,8 +164,10 @@ class EvolvableDistribution(EvolvableWrapper):
     :type action_space: spaces.Space
     :param network: Network that outputs the logits of the distribution.
     :type network: EvolvableModule
-    :param log_std_init: Initial log standard deviation of the action distribution. Defaults to 0.0.
-    :type log_std_init: float
+    :param action_std_init: Initial log standard deviation of the action distribution. Defaults to 0.0.
+    :type action_std_init: float
+    :param squash_output: Whether to squash the output to the action space.
+    :type squash_output: bool
     :param device: Device to use for the network.
     :type device: DeviceType
     """
@@ -127,12 +175,14 @@ class EvolvableDistribution(EvolvableWrapper):
     wrapped: EvolvableModule
     dist: Optional[TorchDistribution]
     mask: Optional[ArrayOrTensor]
+    log_std: Optional[torch.nn.Parameter]
 
     def __init__(
         self,
         action_space: spaces.Space,
         network: EvolvableModule,
         action_std_init: float = 0.0,
+        squash_output: bool = False,
         device: DeviceType = "cpu",
     ):
 
@@ -142,9 +192,10 @@ class EvolvableDistribution(EvolvableWrapper):
         self.action_dim = spaces.flatdim(action_space)
         self.action_std_init = action_std_init
         self.device = device
-
+        self.squash_output = squash_output and isinstance(action_space, spaces.Box)
         self.dist = None
         self.mask = None
+        self.log_std = None
 
         # For continuous action spaces, we also learn the standard
         # deviation (log_std) of the action distribution
@@ -153,8 +204,6 @@ class EvolvableDistribution(EvolvableWrapper):
                 torch.ones(np.prod(action_space.shape)) * action_std_init,
                 requires_grad=True,
             ).to(device)
-        else:
-            self.log_std = None
 
     @property
     def net_config(self) -> ConfigType:
@@ -182,9 +231,9 @@ class EvolvableDistribution(EvolvableWrapper):
             assert (
                 log_std is not None
             ), "log_std must be provided for continuous action spaces."
-            action_logstd = log_std.expand_as(logits).clamp(min=-20)
-            action_std = torch.exp(action_logstd)
-            return Normal(loc=logits, scale=action_std)
+            log_std = log_std.expand_as(logits).clamp(min=-20)
+            std = torch.exp(log_std)
+            dist = Normal(loc=logits, scale=std)
 
         # Categorical distribution for Discrete action spaces
         elif isinstance(self.action_space, spaces.Discrete):
@@ -205,7 +254,7 @@ class EvolvableDistribution(EvolvableWrapper):
                 f"Action space {self.action_space} not supported."
             )
 
-        return TorchDistribution(dist)
+        return TorchDistribution(dist, self.squash_output)
 
     def log_prob(self, action: torch.Tensor) -> torch.Tensor:
         """Get the log probability of the action.
@@ -288,7 +337,7 @@ class EvolvableDistribution(EvolvableWrapper):
         logits = self.wrapped(latent)
 
         if action_mask is not None:
-            if isinstance(action_mask, np.ndarray):
+            if isinstance(action_mask, (np.ndarray, list)):
                 action_mask = (
                     np.stack(action_mask)
                     if action_mask.dtype == np.object_ or isinstance(action_mask, list)
@@ -467,6 +516,10 @@ class StochasticActor(DeterministicActor):
     :type encoder_config: ConfigType
     :param head_config: Configuration of the network MLP head.
     :type head_config: Optional[ConfigType]
+    :param action_std_init: Initial log standard deviation of the action distribution. Defaults to 0.0.
+    :type action_std_init: float
+    :param squash_output: Whether to squash the output to the action space.
+    :type squash_output: bool
     :param n_agents: Number of agents in the environment. Defaults to None, which corresponds to
         single-agent environments.
     :type n_agents: Optional[int]
@@ -496,6 +549,7 @@ class StochasticActor(DeterministicActor):
         encoder_config: Optional[ConfigType] = None,
         head_config: Optional[ConfigType] = None,
         action_std_init: float = 0.0,
+        squash_output: bool = False,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
         n_agents: Optional[int] = None,
@@ -526,8 +580,13 @@ class StochasticActor(DeterministicActor):
         )
 
         self.action_std_init = action_std_init
+        self.squash_output = squash_output
         self.head_net = EvolvableDistribution(
-            action_space, self.head_net, action_std_init=action_std_init, device=device
+            action_space=action_space,
+            network=self.head_net,
+            action_std_init=action_std_init,
+            squash_output=squash_output,
+            device=device,
         )
 
     def forward(
@@ -581,6 +640,7 @@ class StochasticActor(DeterministicActor):
             self.action_space,
             head_net,
             action_std_init=self.action_std_init,
+            squash_output=self.squash_output,
             device=self.device,
         )
 

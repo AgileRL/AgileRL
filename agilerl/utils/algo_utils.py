@@ -647,6 +647,8 @@ def get_experiences_samples(
     for exp in experiences:
         if isinstance(exp, dict):
             sampled_exp = {key: value[minibatch_indices] for key, value in exp.items()}
+        elif isinstance(exp, tuple):
+            sampled_exp = tuple(value[minibatch_indices] for value in exp)
         elif isinstance(exp, torch.Tensor):
             sampled_exp = exp[minibatch_indices]
         else:
@@ -689,6 +691,17 @@ def stack_experiences(
                 stacked_exp = {
                     key: torch.from_numpy(value) for key, value in stacked_exp.items()
                 }
+        elif isinstance(exp[0], tuple):
+            stacked_exp = [[] for _ in exp[0]]
+            for it in exp:
+                for i, value in enumerate(it):
+                    stacked_exp[i].append(value)
+
+            stacked_exp = [np.array(value) for value in stacked_exp]
+            if to_torch:
+                stacked_exp = [torch.from_numpy(value) for value in stacked_exp]
+
+            stacked_exp = tuple(stacked_exp)
 
         elif isinstance(exp[0], (np.ndarray, Number)):
             stacked_exp = np.array(exp)
@@ -739,7 +752,7 @@ def stack_and_pad_experiences(
     return tuple(stacked_experiences)
 
 
-def flatten_experiences(*experiences: ArrayOrTensor) -> Tuple[ArrayOrTensor, ...]:
+def flatten_experiences(*experiences: ObservationType) -> Tuple[ArrayOrTensor, ...]:
     """Flattens experiences into a single array or tensor.
 
     :param experiences: Experiences to flatten
@@ -762,6 +775,8 @@ def flatten_experiences(*experiences: ArrayOrTensor) -> Tuple[ArrayOrTensor, ...
     for exp in experiences:
         if isinstance(exp, dict):
             flattened_exp = {key: flatten(value) for key, value in exp.items()}
+        elif isinstance(exp, tuple):
+            flattened_exp = tuple(flatten(value) for value in exp)
         elif isinstance(exp, (torch.Tensor, np.ndarray)):
             flattened_exp = flatten(exp)
         else:
@@ -772,7 +787,7 @@ def flatten_experiences(*experiences: ArrayOrTensor) -> Tuple[ArrayOrTensor, ...
     return tuple(flattened_experiences)
 
 
-def is_vectorized_experiences(*experiences: ArrayOrTensor) -> bool:
+def is_vectorized_experiences(*experiences: ObservationType) -> bool:
     """Checks if experiences are vectorised.
 
     :param experiences: Experiences to check
@@ -785,6 +800,8 @@ def is_vectorized_experiences(*experiences: ArrayOrTensor) -> bool:
     for exp in experiences:
         if isinstance(exp, dict):
             is_vec = all(value.ndim > 1 for value in exp.values())
+        elif isinstance(exp, tuple):
+            is_vec = all(value.ndim > 1 for value in exp)
         else:
             is_vec = exp.ndim > 1
 

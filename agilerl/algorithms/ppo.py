@@ -16,7 +16,7 @@ from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import StochasticActor
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.value_networks import ValueNetwork
-from agilerl.typing import ArrayLike, ArrayOrTensor, ExperiencesType, GymEnvType
+from agilerl.typing import ArrayOrTensor, ExperiencesType, GymEnvType
 from agilerl.utils.algo_utils import (
     flatten_experiences,
     get_experiences_samples,
@@ -265,7 +265,7 @@ class PPO(RLAlgorithm):
             )
 
     def scale_to_action_space(
-        self, action: ArrayLike, convert_to_torch: bool = False
+        self, action: np.ndarray, convert_to_torch: bool = False
     ) -> ArrayOrTensor:
         """Scales actions to action space defined by self.min_action and self.max_action.
 
@@ -273,6 +273,8 @@ class PPO(RLAlgorithm):
         :type action: numpy.ndarray
         :param convert_to_torch: Flag to convert array to torch, defaults to False
         :type convert_to_torch: bool, optional
+        :return: Scaled action
+        :rtype: numpy.ndarray, torch.Tensor
         """
         if convert_to_torch:
             max_action = (
@@ -299,18 +301,21 @@ class PPO(RLAlgorithm):
             return action.clip(min_action, max_action)
 
         mlp_output_activation = self.actor.output_activation
-        if mlp_output_activation in ["Tanh"]:
+        squashed_output = (
+            isinstance(self.actor, StochasticActor) and self.actor.squash_output
+        )
+        if mlp_output_activation in ["Tanh"] or squashed_output:
             pre_scaled_min = -1
             pre_scaled_max = 1
         elif mlp_output_activation in ["Sigmoid", "Softmax"]:
             pre_scaled_min = 0
             pre_scaled_max = 1
         else:
-            action = (
-                torch.where(action > 0, action * max_action, action * -min_action)
-                if convert_to_torch
-                else np.where(action > 0, action * max_action, action * -min_action)
-            )
+            # action = (
+            #     torch.where(action > 0, action * max_action, action * -min_action)
+            #     if convert_to_torch
+            #     else np.where(action > 0, action * max_action, action * -min_action)
+            # )
             return action.clip(min_action, max_action)
 
         if not array_limits and (
@@ -344,7 +349,6 @@ class PPO(RLAlgorithm):
         :type action_mask: numpy.ndarray, optional
         """
         obs = self.preprocess_observation(obs)
-
         if not grad:
             self.actor.eval()
             self.critic.eval()
@@ -379,6 +383,9 @@ class PPO(RLAlgorithm):
         else:
             action = action.to(self.device)
             log_prob = self.actor.action_log_prob(action)
+
+        # Use -log_prob as entropy when squashing output in continuous action spaces
+        entropy = -log_prob.mean() if entropy is None else entropy
 
         if isinstance(self.action_space, spaces.Box) and self.action_space.shape == (
             1,
@@ -456,15 +463,6 @@ class PPO(RLAlgorithm):
         # Move experiences to algo device
         experiences = self.to_device(*experiences)
 
-        (
-            states,
-            actions,
-            log_probs,
-            advantages,
-            returns,
-            values,
-        ) = experiences
-
         num_samples = returns.size(0)
         batch_idxs = np.arange(num_samples)
         mean_loss = 0
@@ -508,6 +506,7 @@ class PPO(RLAlgorithm):
                     pg_loss2 = -minibatch_advs * torch.clamp(
                         ratio, 1 - self.clip_coef, 1 + self.clip_coef
                     )
+
                     pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
                     # Value loss
@@ -532,8 +531,11 @@ class PPO(RLAlgorithm):
                         self.accelerator.backward(loss)
                     else:
                         loss.backward()
+
+                    # Clip gradients
                     clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
                     clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+
                     self.optimizer.step()
 
                     mean_loss += loss.item()

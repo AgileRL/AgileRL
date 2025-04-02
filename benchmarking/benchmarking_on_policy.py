@@ -24,7 +24,7 @@ from agilerl.utils.utils import (
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("============ AgileRL ============")
-    print(f"DEVICE: {device}")
+    print(f"DEVICE: {device}, ENV: {INIT_HP['ENV_NAME']}")
 
     env = make_vect_envs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
 
@@ -98,7 +98,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         device=device,
     )
 
-    print("Sharing encoders:", agent_pop[0].share_encoders)
     print("Actor:", agent_pop[0].actor)
     trained_pop, pop_fitnesses = train_on_policy(
         env,
