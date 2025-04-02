@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 import torch
 
+from agilerl.algorithms.ippo import IPPO
 from agilerl.algorithms.maddpg import MADDPG
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.utils.probe_envs_ma import (
@@ -27,6 +28,7 @@ from agilerl.utils.probe_envs_ma import (
     PolicyContActionsImageEnv,
     PolicyEnv,
     PolicyImageEnv,
+    check_on_policy_learning_with_probe_env,
     check_policy_q_learning_with_probe_env,
 )
 
@@ -651,4 +653,65 @@ def test_policy_q_learning_with_probe_env_cnn():
 
     check_policy_q_learning_with_probe_env(
         env, MADDPG, algo_args, memory, learn_steps, device
+    )
+
+
+@pytest.mark.parametrize(
+    "Env, discrete",
+    [
+        (ConstantRewardEnv, True),
+        (ConstantRewardContActionsEnv, False),
+        (FixedObsPolicyEnv, True),
+        (FixedObsPolicyContActionsEnv, False),
+    ],
+)
+def test_on_policy_learning_with_probe_env_mlp(Env, discrete):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    env = Env()
+    learn_steps = 20
+    algo_args = {
+        "observation_spaces": [space for space in env.observation_space.values()],
+        "action_spaces": [space for space in env.action_space.values()],
+        "agent_ids": env.agents,
+        "lr": 1e-2,
+        "net_config": {
+            "encoder_config": {"hidden_size": [16, 16], "init_layers": False},
+            "head_config": {"hidden_size": [16], "init_layers": False},
+        },
+    }
+
+    check_on_policy_learning_with_probe_env(
+        env, IPPO, algo_args, learn_steps, device, discrete=discrete
+    )
+
+
+@pytest.mark.parametrize(
+    "Env, discrete",
+    [
+        (ConstantRewardImageEnv, True),
+        (FixedObsPolicyImageEnv, True),
+    ],
+)
+def test_on_policy_learning_with_probe_env_cnn(Env, discrete):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    env = Env()
+    learn_steps = 30
+    algo_args = {
+        "observation_spaces": [space for space in env.observation_space.values()],
+        "action_spaces": [space for space in env.action_space.values()],
+        "agent_ids": env.agents,
+        "lr": 1e-2,
+        "net_config": {
+            "encoder_config": {
+                "channel_size": [16],
+                "kernel_size": [3],
+                "stride_size": [1],
+            },
+            "head_config": {"hidden_size": [32], "output_activation": "Sigmoid"},
+        },
+        "normalize_images": False,
+    }
+
+    check_on_policy_learning_with_probe_env(
+        env, IPPO, algo_args, learn_steps, device, discrete=discrete
     )

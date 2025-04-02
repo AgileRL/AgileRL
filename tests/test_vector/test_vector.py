@@ -56,7 +56,7 @@ class DictSpaceTestEnv(ParallelEnv):
     metadata = {"render_modes": ["human", "rgb_array"], "name": "dict_space_test_v0"}
 
     def __init__(self, render_mode=None):
-        self.possible_agents = ["agent_0", "agent_1"]
+        self.possible_agents = ["agent_0", "other_agent_0"]
         self.agents = self.possible_agents.copy()
         self.render_mode = render_mode
 
@@ -67,7 +67,7 @@ class DictSpaceTestEnv(ParallelEnv):
                 "position": np.array([0.1, 0.2, 0.3], dtype=np.float32),
                 "velocity": np.array([0.01, 0.02], dtype=np.float32),
             },
-            "agent_1": {
+            "other_agent_0": {
                 "position": np.array([0.4, 0.5, 0.6], dtype=np.float32),
                 "velocity": np.array([0.03, 0.04], dtype=np.float32),
             },
@@ -81,7 +81,7 @@ class DictSpaceTestEnv(ParallelEnv):
                 "position": np.array([0.2, 0.3, 0.4], dtype=np.float32),
                 "velocity": np.array([0.02, 0.03], dtype=np.float32),
             },
-            "agent_1": {
+            "other_agent_0": {
                 "position": np.array([0.5, 0.6, 0.7], dtype=np.float32),
                 "velocity": np.array([0.04, 0.05], dtype=np.float32),
             },
@@ -118,7 +118,7 @@ class TupleSpaceTestEnv(ParallelEnv):
     metadata = {"render_modes": ["human", "rgb_array"], "name": "tuple_space_test_v0"}
 
     def __init__(self, render_mode=None):
-        self.possible_agents = ["agent_0", "agent_1"]
+        self.possible_agents = ["agent_0", "other_agent_0"]
         self.agents = self.possible_agents.copy()
         self.render_mode = render_mode
 
@@ -129,7 +129,7 @@ class TupleSpaceTestEnv(ParallelEnv):
                 np.array([0.1, 0.2, 0.3], dtype=np.float32),
                 np.array([0.01, 0.02], dtype=np.float32),
             ),
-            "agent_1": (
+            "other_agent_0": (
                 np.array([0.4, 0.5, 0.6], dtype=np.float32),
                 np.array([0.03, 0.04], dtype=np.float32),
             ),
@@ -143,7 +143,7 @@ class TupleSpaceTestEnv(ParallelEnv):
                 np.array([0.2, 0.3, 0.4], dtype=np.float32),
                 np.array([0.02, 0.03], dtype=np.float32),
             ),
-            "agent_1": (
+            "other_agent_0": (
                 np.array([0.5, 0.6, 0.7], dtype=np.float32),
                 np.array([0.04, 0.05], dtype=np.float32),
             ),
@@ -183,7 +183,7 @@ class ComplexDictSpaceTestEnv(ParallelEnv):
     }
 
     def __init__(self, render_mode=None):
-        self.possible_agents = ["agent_0", "agent_1"]
+        self.possible_agents = ["agent_0", "other_agent_0"]
         self.agents = self.possible_agents.copy()
         self.render_mode = render_mode
 
@@ -195,7 +195,7 @@ class ComplexDictSpaceTestEnv(ParallelEnv):
                 "velocity": np.array([0.01, 0.02], dtype=np.float32),
                 "image": np.ones((16, 16, 3), dtype=np.uint8) * 100,
             },
-            "agent_1": {
+            "other_agent_0": {
                 "position": np.array([0.4, 0.5, 0.6], dtype=np.float32),
                 "velocity": np.array([0.03, 0.04], dtype=np.float32),
                 "image": np.ones((16, 16, 3), dtype=np.uint8) * 200,
@@ -211,7 +211,7 @@ class ComplexDictSpaceTestEnv(ParallelEnv):
                 "velocity": np.array([0.02, 0.03], dtype=np.float32),
                 "image": np.ones((16, 16, 3), dtype=np.uint8) * 150,
             },
-            "agent_1": {
+            "other_agent_0": {
                 "position": np.array([0.5, 0.6, 0.7], dtype=np.float32),
                 "velocity": np.array([0.04, 0.05], dtype=np.float32),
                 "image": np.ones((16, 16, 3), dtype=np.uint8) * 250,
@@ -253,7 +253,7 @@ class ComplexTupleSpaceTestEnv(ParallelEnv):
     }
 
     def __init__(self, render_mode=None):
-        self.possible_agents = ["agent_0", "agent_1"]
+        self.possible_agents = ["agent_0", "other_agent_0"]
         self.agents = self.possible_agents.copy()
         self.render_mode = render_mode
 
@@ -265,7 +265,7 @@ class ComplexTupleSpaceTestEnv(ParallelEnv):
                 np.array([0.01, 0.02], dtype=np.float32),
                 np.ones((16, 16, 3), dtype=np.uint8) * 100,
             ),
-            "agent_1": (
+            "other_agent_0": (
                 np.array([0.4, 0.5, 0.6], dtype=np.float32),
                 np.array([0.03, 0.04], dtype=np.float32),
                 np.ones((16, 16, 3), dtype=np.uint8) * 200,
@@ -281,7 +281,7 @@ class ComplexTupleSpaceTestEnv(ParallelEnv):
                 np.array([0.02, 0.03], dtype=np.float32),
                 np.ones((16, 16, 3), dtype=np.uint8) * 150,
             ),
-            "agent_1": (
+            "other_agent_0": (
                 np.array([0.5, 0.6, 0.7], dtype=np.float32),
                 np.array([0.04, 0.05], dtype=np.float32),
                 np.ones((16, 16, 3), dtype=np.uint8) * 250,
@@ -816,16 +816,16 @@ def test_add_info_dictionaries():
                 "env_defined_actions": np.array([1, 2, 3]),
                 "action_mask": np.array([1, 0]),
             },
-            "agent_1": {},
+            "other_agent_0": {},
         },
         {
             "agent_0": {},
-            "agent_1": {
+            "other_agent_0": {
                 "env_defined_actions": np.array([5, 6, 7]),
                 "action_mask": np.array([0, 1]),
             },
         },
-        {"agent_0": {}, "agent_1": {}},
+        {"agent_0": {}, "other_agent_0": {}},
     ]
     env_fns = [lambda: simple_speaker_listener_v4.parallel_env() for _ in range(3)]
     env = AsyncPettingZooVecEnv(env_fns)
@@ -841,11 +841,12 @@ def test_add_info_dictionaries():
         vector_infos["agent_0"]["action_mask"] == np.array([[1, 0], [0, 0], [0, 0]])
     )
     assert np.all(
-        vector_infos["agent_1"]["env_defined_actions"]
+        vector_infos["other_agent_0"]["env_defined_actions"]
         == np.array([[0, 0, 0], [5, 6, 7], [0, 0, 0]])
     )
     assert np.all(
-        vector_infos["agent_1"]["action_mask"] == np.array([[0, 0], [0, 1], [0, 0]])
+        vector_infos["other_agent_0"]["action_mask"]
+        == np.array([[0, 0], [0, 1], [0, 0]])
     )
     env.close()
 
@@ -853,7 +854,7 @@ def test_add_info_dictionaries():
 def test_add_info_int():
     info_list = [
         {"agent_0": 1.0},
-        {"agent_1": 1},
+        {"other_agent_0": 1},
     ]
     env_fns = [lambda: GenericTestEnv() for _ in range(3)]
     env = AsyncPettingZooVecEnv(env_fns)
@@ -867,7 +868,7 @@ def test_add_info_int():
 def test_add_info_unknown_objects():
     info_list = [
         {"agent_0": "string"},
-        {"agent_1": "string"},
+        {"other_agent_0": "string"},
         {"agent_2": None},
     ]
     env_fns = [lambda: GenericTestEnv() for _ in range(3)]
@@ -1150,7 +1151,7 @@ def test_write_to_shared_memory_dict_image():
             "velocity": np.ones((2,), dtype=np.float32) * 2,
             "image": np.ones((16, 16, 3), dtype=np.uint8) * 100,
         },
-        "agent_1": {
+        "other_agent_0": {
             "position": np.ones((3,), dtype=np.float32) * 3,
             "velocity": np.ones((2,), dtype=np.float32) * 4,
             "image": np.ones((16, 16, 3), dtype=np.uint8) * 200,
@@ -1185,7 +1186,7 @@ def test_write_to_shared_memory_tuple_image():
             np.ones((2,), dtype=np.float32) * 2,
             np.ones((16, 16, 3), dtype=np.uint8) * 100,
         ),
-        "agent_1": (
+        "other_agent_0": (
             np.ones((3,), dtype=np.float32) * 3,
             np.ones((2,), dtype=np.float32) * 4,
             np.ones((16, 16, 3), dtype=np.uint8) * 200,
@@ -1430,7 +1431,7 @@ def test_write_to_shared_memory_dict():
             "position": np.ones((3,), dtype=np.float32),
             "velocity": np.ones((2,), dtype=np.float32) * 2,
         },
-        "agent_1": {
+        "other_agent_0": {
             "position": np.ones((3,), dtype=np.float32) * 3,
             "velocity": np.ones((2,), dtype=np.float32) * 4,
         },
@@ -1462,7 +1463,7 @@ def test_write_to_shared_memory_tuple():
             np.ones((3,), dtype=np.float32),
             np.ones((2,), dtype=np.float32) * 2,
         ),
-        "agent_1": (
+        "other_agent_0": (
             np.ones((3,), dtype=np.float32) * 3,
             np.ones((2,), dtype=np.float32) * 4,
         ),

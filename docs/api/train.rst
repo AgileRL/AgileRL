@@ -13,4 +13,4 @@ The multi agent training function handles Pettingzoo-style environments and mult
 
 .. autofunction:: agilerl.training.train_on_policy.train_on_policy
 
-.. autofunction:: agilerl.training.train_multi_agent.train_multi_agent
+.. autofunction:: agilerl.training.train_multi_agent_off_policy.train_multi_agent_off_policy

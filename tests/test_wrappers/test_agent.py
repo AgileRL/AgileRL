@@ -67,13 +67,13 @@ def setup_rs_norm_tuple():
 def setup_rs_norm_multi_agent():
     observation_space = {
         "agent_1": spaces.Box(low=-1.0, high=1.0, shape=(3,)),
-        "agent_2": spaces.Box(low=-1.0, high=1.0, shape=(2,)),
+        "other_agent_1": spaces.Box(low=-1.0, high=1.0, shape=(2,)),
     }
     mock_agent = MagicMock(spec=MultiAgentRLAlgorithm)
     mock_agent.observation_space = observation_space
     mock_agent.action_space = {
         "agent_1": spaces.Discrete(2),
-        "agent_2": spaces.Discrete(2),
+        "other_agent_1": spaces.Discrete(2),
     }
     mock_agent.device = "cpu"
     mock_agent.training = True
@@ -230,14 +230,14 @@ def test_normalize_observation_multi_agent(setup_rs_norm_multi_agent):
     wrapper, _ = setup_rs_norm_multi_agent
     obs = {
         "agent_1": torch.tensor([1.0, 2.0, 3.0]),
-        "agent_2": torch.tensor([1.0, 2.0]),
+        "other_agent_1": torch.tensor([1.0, 2.0]),
     }
     wrapper.obs_rms["agent_1"].mean = torch.tensor([1.0, 1.0, 1.0])
     wrapper.obs_rms["agent_1"].var = torch.tensor([1.0, 1.0, 1.0])
     wrapper.obs_rms["agent_1"].epsilon = 1e-4
-    wrapper.obs_rms["agent_2"].mean = torch.tensor([1.0, 1.0])
-    wrapper.obs_rms["agent_2"].var = torch.tensor([1.0, 1.0])
-    wrapper.obs_rms["agent_2"].epsilon = 1e-4
+    wrapper.obs_rms["other_agent_1"].mean = torch.tensor([1.0, 1.0])
+    wrapper.obs_rms["other_agent_1"].var = torch.tensor([1.0, 1.0])
+    wrapper.obs_rms["other_agent_1"].epsilon = 1e-4
 
     normalized_obs = wrapper._normalize_observation(obs)
     expected_obs = {
@@ -245,13 +245,16 @@ def test_normalize_observation_multi_agent(setup_rs_norm_multi_agent):
         / torch.sqrt(
             wrapper.obs_rms["agent_1"].var + wrapper.obs_rms["agent_1"].epsilon
         ),
-        "agent_2": (obs["agent_2"] - wrapper.obs_rms["agent_2"].mean)
+        "other_agent_1": (obs["other_agent_1"] - wrapper.obs_rms["other_agent_1"].mean)
         / torch.sqrt(
-            wrapper.obs_rms["agent_2"].var + wrapper.obs_rms["agent_2"].epsilon
+            wrapper.obs_rms["other_agent_1"].var
+            + wrapper.obs_rms["other_agent_1"].epsilon
         ),
     }
     assert torch.allclose(normalized_obs["agent_1"], expected_obs["agent_1"], atol=1e-2)
-    assert torch.allclose(normalized_obs["agent_2"], expected_obs["agent_2"], atol=1e-2)
+    assert torch.allclose(
+        normalized_obs["other_agent_1"], expected_obs["other_agent_1"], atol=1e-2
+    )
 
 
 # Clones the agent and returns an identical agent.

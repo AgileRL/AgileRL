@@ -18,6 +18,8 @@ Optimisation algorithm.
      - :ref:`Space Invaders <MADDPG tutorial>`
    * - :ref:`MATD3<matd3>`
      - :ref:`Simple Speaker Listener <MATD3 tutorial>`
+   * - :ref:`IPPO<ippo>`
+     -
 
 
 .. _initpop_ma:
@@ -136,11 +138,11 @@ for multi-agent environments) it is easiest to use our training function, which 
 
 .. code-block:: python
 
-    from agilerl.training.train_multi_agent import train_multi_agent
+    from agilerl.training.train_multi_agent_off_policy import train_multi_agent_off_policy
     import gymnasium as gym
     import torch
 
-    trained_pop, pop_fitnesses = train_multi_agent(
+    trained_pop, pop_fitnesses = train_multi_agent_off_policy(
         env=env,  # Pettingzoo-style environment
         env_name='simple_speaker_listener_v4',  # Environment name
         algo="MADDPG",  # Algorithm

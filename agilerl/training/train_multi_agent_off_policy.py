@@ -28,7 +28,7 @@ InitDictType = Optional[Dict[str, Any]]
 PopulationType = List[MultiAgentRLAlgorithm]
 
 
-def train_multi_agent(
+def train_multi_agent_off_policy(
     env: gym.Env,
     env_name: str,
     algo: str,
@@ -56,7 +56,7 @@ def train_multi_agent(
     accelerator: Optional[Accelerator] = None,
     wandb_api_key: Optional[str] = None,
 ) -> Tuple[PopulationType, List[List[float]]]:
-    """The general online multi-agent RL training function. Returns trained population of agents
+    """The general off-policy multi-agent RL training function. Returns trained population of agents
     and their fitnesses.
 
     :param env: The environment to train in. Can be vectorized.
@@ -192,10 +192,17 @@ def train_multi_agent(
             unit="step",
             bar_format=bar_format,
             ascii=True,
+            dynamic_ncols=True,
             disable=not accelerator.is_local_main_process,
         )
     else:
-        pbar = trange(max_steps, unit="step", bar_format=bar_format, ascii=True)
+        pbar = trange(
+            max_steps,
+            unit="step",
+            bar_format=bar_format,
+            ascii=True,
+            dynamic_ncols=True,
+        )
 
     agent_ids = deepcopy(env.agents)
     pop_actor_loss = [{agent_id: [] for agent_id in agent_ids} for _ in pop]

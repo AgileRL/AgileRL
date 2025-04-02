@@ -576,22 +576,38 @@ def test_policy_q_learning_with_probe_env_dict():
     )
 
 
-def test_policy_on_policy_with_probe_env():
+def test_policy_on_policy_discrete_with_probe_env():
     device = torch.device("cpu")
-    env = ConstantRewardContActionsEnv()
-    learn_steps = 100
+    env = FixedObsPolicyEnv()
+    learn_steps = 10
     algo_args = {
         "observation_space": env.observation_space,
         "action_space": env.action_space,
         "lr": 0.01,
     }
-    check_policy_on_policy_with_probe_env(env, PPO, algo_args, learn_steps, device)
+    check_policy_on_policy_with_probe_env(
+        env, PPO, algo_args, learn_steps, device, True
+    )
+
+
+def test_policy_on_policy_with_probe_env():
+    device = torch.device("cpu")
+    env = ConstantRewardContActionsEnv()
+    learn_steps = 10
+    algo_args = {
+        "observation_space": env.observation_space,
+        "action_space": env.action_space,
+        "lr": 0.01,
+    }
+    check_policy_on_policy_with_probe_env(
+        env, PPO, algo_args, learn_steps, device, False
+    )
 
 
 def test_policy_on_policy_with_probe_env_cnn():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = ConstantRewardContActionsImageEnv()  # FixedObsPolicyContActionsImageEnv()
-    learn_steps = 100
+    learn_steps = 20
     algo_args = {
         "observation_space": env.observation_space,
         "action_space": env.action_space,
@@ -608,13 +624,15 @@ def test_policy_on_policy_with_probe_env_cnn():
         "normalize_images": False,
         "lr": 0.01,
     }
-    check_policy_on_policy_with_probe_env(env, PPO, algo_args, learn_steps, device)
+    check_policy_on_policy_with_probe_env(
+        env, PPO, algo_args, learn_steps, device, False
+    )
 
 
 def test_policy_on_policy_with_probe_env_dict():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = ConstantRewardContActionsDictEnv()  # FixedObsPolicyContActionsDictEnv()
-    learn_steps = 100
+    learn_steps = 10
     algo_args = {
         "observation_space": env.observation_space,
         "action_space": env.action_space,
@@ -633,4 +651,6 @@ def test_policy_on_policy_with_probe_env_dict():
         "normalize_images": False,
         "lr": 0.01,
     }
-    check_policy_on_policy_with_probe_env(env, PPO, algo_args, learn_steps, device)
+    check_policy_on_policy_with_probe_env(
+        env, PPO, algo_args, learn_steps, device, False
+    )
