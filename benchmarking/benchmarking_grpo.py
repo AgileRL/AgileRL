@@ -188,6 +188,7 @@ def main(init_hp, mut_p):
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
+
     # Convert the HuggingFace dataset into a Gymnasium environment
     accelerators = [Accelerator() for _ in range(init_hp["POP_SIZE"])]
     env = HuggingFaceGym(
@@ -250,7 +251,7 @@ def main(init_hp, mut_p):
         save_elite=True,
         elite_path="saved_llms",
         max_reward=2.0,
-        evo_steps=20,
+        evo_steps=1,
         mutation=mutations,
         tournament=tournament,
         accelerator=accelerators[0],

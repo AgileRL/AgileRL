@@ -315,6 +315,7 @@ class GRPO(RLAlgorithm):
         :param create_reference_net: Flag to indicate to create a reference network
         :type create_reference_net: bool
         """
+        self.reference_actor = None
         self._create_policy_network(actor_network)
         if create_reference_net:
             self._create_reference_policy_network(actor_network)
@@ -327,11 +328,11 @@ class GRPO(RLAlgorithm):
                 self.reference_actor = self.reference_actor.to(self.device)
 
         # Register network groups for mutations
-        self.register_network_group(NetworkGroup(eval=self.actor, policy=True))
+        self.register_network_group(NetworkGroup(eval=self.actor, policy=True, shared=[self.reference_actor], llm=True))
         if create_reference_net:
-            self.register_network_group(
-                NetworkGroup(eval=self.reference_actor, policy=True)
-            )
+            # self.register_network_group(
+            #     NetworkGroup(eval=self.reference_actor, policy=True)
+            # )
             self.reference_actor.eval()
 
     def _calculate_advantage(
@@ -495,7 +496,6 @@ class GRPO(RLAlgorithm):
             if self.cosine_lr_schedule_config is not None
             else None
         )
-        self.actor.gradient_checkpointing_enable()
 
     def _create_reference_policy_network(
         self, network: PreTrainedModel
