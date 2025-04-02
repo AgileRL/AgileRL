@@ -757,7 +757,7 @@ def is_vectorized_experiences(*experiences: ArrayOrTensor) -> bool:
 
 
 def vectorize_experiences_by_agent(
-    self, experiences: ArrayDict, dim: int = 1
+    experiences: ArrayDict, dim: int = 1
 ) -> torch.Tensor:
     """Reorganizes experiences into a tensor, vectorized by time step
 
@@ -781,7 +781,7 @@ def vectorize_experiences_by_agent(
 
 
 def concatenate_experiences_into_batches(
-    self, experiences: ArrayDict, shape: Tuple[int]
+    experiences: ArrayDict, shape: Tuple[int]
 ) -> torch.Tensor:
     """Reorganizes experiences into a batched tensor
 
