@@ -78,6 +78,7 @@ Contents
    on_policy/index
    offline_training/index
    multi_agent_training/index
+   llm_finetuning/index
    bandits/index
    distributed_training/index
    custom_architecture/index
@@ -91,6 +92,7 @@ Contents
    tutorials/gymnasium/index
    tutorials/pettingzoo/index
    tutorials/skills/index
+   tutorials/llm_finetuning/index
    tutorials/bandits/index
    tutorials/custom_networks/index
 

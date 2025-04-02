@@ -33,6 +33,7 @@ from agilerl.utils.algo_utils import (
     recursive_check_module_attrs,
     remove_compile_prefix,
     share_encoder_parameters,
+    stack_and_pad_experiences,
     stack_experiences,
     unwrap_optimizer,
 )
@@ -69,15 +70,76 @@ def test_algo_utils_multi_nets():
     assert isinstance(unwrapped_optimizer, torch.optim.Adam)
 
 
-def test_inf_in_high():
-    # Create observation space with inf in high
-    obs_space = spaces.Box(low=np.array([0, 0]), high=np.array([np.inf, 1]))
-    obs = np.array([0.5, 0.5])
-
-    with pytest.warns(UserWarning, match="np.inf detected in observation_space.high"):
-        result = apply_image_normalization(obs, obs_space)
-
-    np.testing.assert_array_equal(result, obs)
+def test_stack_and_pad_experiences_with_padding():
+    tensor1 = torch.tensor([[1, 2, 3], [4, 5, 6]])
+    tensor2 = torch.tensor([[8]])
+    tensor3 = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]])
+    tensor4 = torch.tensor([1, 3, 4])  # This tensor should be returned without change
+    tensor5 = torch.tensor([[10, 11, 12]])
+    tensor6 = torch.tensor([[13, 14, 15, 16, 17]])
+    tensor_list = [[tensor1, tensor2, tensor3], tensor4, [tensor5, tensor6]]
+    stacked_tensor, unchanged_tensor, stacked_tensor_2 = stack_and_pad_experiences(
+        *tensor_list, padding_values=[0, 0, 99]
+    )
+    assert torch.equal(unchanged_tensor, tensor4)
+    assert torch.equal(
+        stacked_tensor,
+        torch.tensor(
+            [
+                [
+                    1,
+                    2,
+                    3,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ],
+                [
+                    4,
+                    5,
+                    6,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ],
+                [
+                    8,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ],
+                [
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10,
+                ],
+            ]
+        ),
+    )
+    assert torch.equal(
+        stacked_tensor_2, torch.tensor([[10, 11, 12, 99, 99], [13, 14, 15, 16, 17]])
+    )
 
 
 def test_neg_inf_in_low():

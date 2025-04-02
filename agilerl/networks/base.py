@@ -190,6 +190,13 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     ) -> None:
         super().__init__(device)
 
+        assert (
+            latent_dim <= max_latent_dim
+        ), "Latent dimension must be less than or equal to max latent dimension."
+        assert (
+            latent_dim >= min_latent_dim
+        ), "Latent dimension must be greater than or equal to min latent dimension."
+
         if encoder_config is None:
             encoder_config = get_default_encoder_config(observation_space, simba=simba)
 
@@ -501,6 +508,13 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             else:
                 assert_correct_mlp_net_config(net_config)
                 encoder_mlp_cls = EvolvableMLP
+
+                # For MLP encoders we want to be consistent and also add a layernorm
+                # after the final linear layer for further stability
+                # see https://github.com/AgileRL/AgileRL/issues/337
+                layernorm = net_config.get("layer_norm", True)
+                if layernorm:
+                    net_config["output_layernorm"] = layernorm
 
             encoder = encoder_mlp_cls(
                 num_inputs=spaces.flatdim(self.observation_space),
