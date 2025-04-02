@@ -305,7 +305,16 @@ class GRPO(RLAlgorithm):
         reward_tensor = torch.cat(rewards)
         return reward_tensor
 
-    def _initialize_actors(self, actor_network, create_reference_net):
+    def _initialize_actors(
+        self, actor_network: PreTrainedModel, create_reference_net: bool
+    ):
+        """Initialize the actor network and reference network.
+
+        :param actor_network: Actor network
+        :type actor_network: PreTrainedModel
+        :param create_reference_net: Flag to indicate to create a reference network
+        :type create_reference_net: bool
+        """
         self._create_policy_network(actor_network)
         if create_reference_net:
             self._create_reference_policy_network(actor_network)
@@ -486,6 +495,7 @@ class GRPO(RLAlgorithm):
             if self.cosine_lr_schedule_config is not None
             else None
         )
+        self.actor.gradient_checkpointing_enable()
 
     def _create_reference_policy_network(
         self, network: PreTrainedModel
