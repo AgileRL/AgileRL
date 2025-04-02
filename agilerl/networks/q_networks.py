@@ -49,10 +49,12 @@ class QNetwork(EvolvableNetwork):
     :type device: str
     """
 
+    supported_spaces = (spaces.Discrete, spaces.MultiDiscrete)
+
     def __init__(
         self,
         observation_space: spaces.Space,
-        action_space: spaces.Discrete,
+        action_space: Union[spaces.Discrete, spaces.MultiDiscrete],
         encoder_cls: Optional[Union[str, Type[EvolvableModule]]] = None,
         encoder_config: Optional[ConfigType] = None,
         head_config: Optional[ConfigType] = None,
@@ -78,7 +80,7 @@ class QNetwork(EvolvableNetwork):
             device=device,
         )
 
-        if not isinstance(action_space, (spaces.Discrete, spaces.MultiDiscrete)):
+        if not isinstance(action_space, self.supported_spaces):
             raise ValueError("Action space must be either Discrete or MultiDiscrete")
 
         if head_config is None:

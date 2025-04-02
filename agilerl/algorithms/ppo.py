@@ -351,8 +351,6 @@ class PPO(RLAlgorithm):
         :type grad: bool, optional
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: numpy.ndarray, optional
-        :param preprocess_obs: Flag to preprocess observations, defaults to True
-        :type preprocess_obs: bool, optional
         """
         obs = self.preprocess_observation(obs)
 
@@ -361,7 +359,7 @@ class PPO(RLAlgorithm):
             self.critic.eval()
             with torch.no_grad():
                 latent_pi = self.actor.extract_features(obs)
-                action_dist = self.actor.forward_head(
+                action_pred, log_prob, entropy = self.actor.forward_head(
                     latent_pi, action_mask=action_mask
                 )
                 state_values = (
@@ -373,31 +371,23 @@ class PPO(RLAlgorithm):
             self.actor.train()
             self.critic.train()
             latent_pi = self.actor.extract_features(obs)
-            action_dist = self.actor.forward_head(latent_pi, action_mask=action_mask)
+            action_pred, log_prob, entropy = self.actor.forward_head(
+                latent_pi, action_mask=action_mask
+            )
             state_values = (
                 self.critic.forward_head(latent_pi).squeeze(-1)
                 if self.share_encoders
                 else self.critic(obs).squeeze(-1)
             )
 
-        if not isinstance(action_dist, torch.distributions.Distribution):
-            raise ValueError(
-                f"Expected action_dist to be a torch.distributions.Distribution, got {type(action_dist)}."
-            )
-
+        # If no action is provided, use the predicted action
         return_tensors = True
         if action is None:
-            action = action_dist.sample()
+            action = action_pred
             return_tensors = False
         else:
             action = action.to(self.device)
-
-        action_logprob = action_dist.log_prob(action)
-
-        if len(action_logprob.shape) > 1:
-            action_logprob = action_logprob.sum(dim=1)
-
-        dist_entropy = action_dist.entropy()
+            log_prob = self.actor.action_log_prob(action)
 
         if return_tensors:
             return (
@@ -406,8 +396,8 @@ class PPO(RLAlgorithm):
                     if not self.discrete_actions
                     else action
                 ),
-                action_logprob,
-                dist_entropy,
+                log_prob,
+                entropy,
                 state_values,
             )
         else:
@@ -417,8 +407,8 @@ class PPO(RLAlgorithm):
                     if not self.discrete_actions
                     else action.cpu().data.numpy()
                 ),
-                action_logprob.cpu().data.numpy(),
-                dist_entropy.cpu().data.numpy(),
+                log_prob.cpu().data.numpy(),
+                entropy.cpu().data.numpy(),
                 state_values.cpu().data.numpy(),
             )
 

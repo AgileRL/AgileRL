@@ -114,9 +114,9 @@ class NetworkMeta(ModuleMeta):
                 attr = mut_method.split(".")[0]
                 if attr not in ["encoder", "head_net"]:
                     raise AttributeError(
-                        "Mutation methods of underlying modules in EvolvableNetwork objects should only correspond "
-                        "to the encoder or head_net. This is done to ensure that analogous architecture mutations "
-                        "can be applied between different networks. "
+                        "Mutation methods of nested modules in EvolvableNetwork objects should only correspond "
+                        "to the 'encoder' or 'head_net'. This is done to ensure that equivalent architecture "
+                        "mutations can be applied across different evaluation networks (e.g. actor and critic)."
                     )
 
         return instance
@@ -128,7 +128,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     a specific way for a reinforcement learning algorithm, similar to how CNNs are used
     as building blocks in ResNet, VGG, etc. An evolvable network automatically inspects the passed
     observation space to determine the appropriate encoder to build through the AgileRL
-    evolvable modules, inheriting the mutation methods of any underlying evolvable module.
+    evolvable modules, inheriting the mutation methods of any nested evolvable modules.
 
     .. note::
         Currently, evolvable networks should only have the encoder (which, if not specified by the user,
@@ -193,8 +193,8 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         if encoder_config is None:
             encoder_config = get_default_encoder_config(observation_space, simba=simba)
 
-        # NOTE: For multi-agent settings, we use a depth corresponding to that of the
-        # sample input for the kernel of the first layer of CNN-based networks
+        # For multi-agent settings with image observation spaces, we use
+        # `nn.Conv3D` layers and stack the agents observations across the depth dimension.
         cnn_keys = ["cnn_config", "kernel_size"]
         if n_agents is not None and any(
             key in encoder_config.keys() for key in cnn_keys
@@ -238,9 +238,9 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             input_args = inspect.getfullargspec(self.encoder_cls.__init__).args
             if "num_outputs" not in input_args:
                 warnings.warn(
-                    "Custom encoder does not contain `num_outputs` as an input argument. "
-                    "Disabling latent space mutations. Make sure to set the number of "
-                    "outputs to the latent dimension in the encoder configuration."
+                    f"{self.encoder_cls.__name__} does not contain `num_outputs` as an input argument. "
+                    "Disabling latent space mutations. Make sure to set the number of outputs to the "
+                    "latent dimension in the encoder configuration."
                 )
                 self.filter_mutation_methods("latent")
             else:
@@ -287,6 +287,10 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         :rtype: str
         """
         return self.encoder.activation
+
+    def __call__(self, *args, **kwargs) -> torch.Tensor:
+        """Forward pass of the network."""
+        return self.forward(*args, **kwargs)
 
     def extract_features(self, x: TorchObsType) -> torch.Tensor:
         """Forward pass of the network.
@@ -501,6 +505,9 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             else:
                 assert_correct_mlp_net_config(net_config)
                 encoder_mlp_cls = EvolvableMLP
+
+                # Need to disable output_vanish in MLP encoder
+                net_config["output_vanish"] = False
 
             encoder = encoder_mlp_cls(
                 num_inputs=spaces.flatdim(self.observation_space),
