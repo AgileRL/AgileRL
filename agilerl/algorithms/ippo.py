@@ -127,8 +127,6 @@ class IPPO(MultiAgentRLAlgorithm):
         torch_compiler: Optional[str] = None,
         wrap: bool = True,
     ):
-
-        # TODO: update ma algo for ippo
         super().__init__(
             observation_spaces,
             action_spaces,
@@ -402,61 +400,6 @@ class IPPO(MultiAgentRLAlgorithm):
                 action_masks[homo_id] = torch.Tensor(action_masks[homo_id])
 
         return action_masks
-
-    def extract_agent_masks(self, infos: InfosDict) -> Tuple[ArrayDict, ArrayDict]:
-        """Extract env_defined_actions from info dictionary and determine agent masks
-
-        :param infos: Info dict
-        :type infos: Dict[str, Dict[...]]
-        """
-
-        # Deal with case of no env_defined_actions defined in the info dict
-        # Deal with empty info dicts for each sub agent
-        if not key_in_nested_dict(infos, "env_defined_actions") or all(
-            not info for agent, info in infos.items() if agent in self.agent_ids
-        ):
-            return None, None
-
-        env_defined_actions = {
-            agent: (
-                info.get("env_defined_actions", None)
-                if isinstance(info, dict)
-                else None
-            )
-            for agent, info in infos.items()
-            if agent in self.agent_ids
-        }
-        agent_masks = None
-        if env_defined_actions is not None:
-            agent_masks = {}
-            for idx, agent in enumerate(env_defined_actions.keys()):
-                # Handle None if environment isn't vectorized
-                if env_defined_actions[agent] is None:
-                    if not self.discrete_actions:
-                        nan_arr = np.empty(self.action_dims[idx])
-                        nan_arr[:] = np.nan
-                    else:
-                        nan_arr = np.array([[np.nan]])
-                    env_defined_actions[agent] = nan_arr
-
-                # Handle discrete actions + env not vectorized
-                if isinstance(env_defined_actions[agent], (int, float)):
-                    env_defined_actions[agent] = np.array(
-                        [[env_defined_actions[agent]]]
-                    )
-
-                # Ensure additional dimension is added in so shapes align for masking
-                if len(env_defined_actions[agent].shape) == 1:
-                    env_defined_actions[agent] = (
-                        env_defined_actions[agent][:, np.newaxis]
-                        if self.discrete_actions
-                        else env_defined_actions[agent][np.newaxis, :]
-                    )
-                agent_masks[agent] = np.where(
-                    np.isnan(env_defined_actions[agent]), 0, 1
-                ).astype(bool)
-
-        return env_defined_actions, agent_masks
 
     def preprocess_observation(
         self, observation: ObservationType

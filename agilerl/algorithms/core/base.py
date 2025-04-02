@@ -40,8 +40,10 @@ from agilerl.protocols import (
 )
 from agilerl.typing import (
     ActionType,
+    ArrayDict,
     DeviceType,
     GymSpaceType,
+    InfosDict,
     NumpyObsType,
     ObservationType,
     TorchObsType,
@@ -52,6 +54,7 @@ from agilerl.utils.algo_utils import (
     compile_model,
     is_module_list,
     isroutine,
+    key_in_nested_dict,
     preprocess_observation,
     recursive_check_module_attrs,
     remove_compile_prefix,
@@ -1264,6 +1267,78 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             )
 
         return preprocessed
+
+    def extract_action_masks(self, infos: InfosDict) -> ArrayDict:
+        """Extract action masks from info dictionary
+
+        :param infos: Info dict
+        :type infos: Dict[str, Dict[...]]
+
+        :return: Action masks
+        :rtype: Dict[str, np.ndarray]
+        """
+        action_masks = {
+            agent: info.get("action_mask", None) if isinstance(info, dict) else None
+            for agent, info in infos.items()
+            if agent in self.agent_ids
+        }  # Get dict of form {"agent_id" : [1, 0, 0, 0]...} etc
+
+        return action_masks
+
+    def extract_agent_masks(self, infos: InfosDict) -> Tuple[ArrayDict, ArrayDict]:
+        """Extract env_defined_actions from info dictionary and determine agent masks
+
+        :param infos: Info dict
+        :type infos: Dict[str, Dict[...]]
+        """
+
+        # Deal with case of no env_defined_actions defined in the info dict
+        # Deal with empty info dicts for each sub agent
+        if not key_in_nested_dict(infos, "env_defined_actions") or all(
+            not info for agent, info in infos.items() if agent in self.agent_ids
+        ):
+            return None, None
+
+        env_defined_actions = {
+            agent: (
+                info.get("env_defined_actions", None)
+                if isinstance(info, dict)
+                else None
+            )
+            for agent, info in infos.items()
+            if agent in self.agent_ids
+        }
+        agent_masks = None
+        if env_defined_actions is not None:
+            agent_masks = {}
+            for idx, agent in enumerate(env_defined_actions.keys()):
+                # Handle None if environment isn't vectorized
+                if env_defined_actions[agent] is None:
+                    if not self.discrete_actions:
+                        nan_arr = np.empty(self.action_dims[idx])
+                        nan_arr[:] = np.nan
+                    else:
+                        nan_arr = np.array([[np.nan]])
+                    env_defined_actions[agent] = nan_arr
+
+                # Handle discrete actions + env not vectorized
+                if isinstance(env_defined_actions[agent], (int, float)):
+                    env_defined_actions[agent] = np.array(
+                        [[env_defined_actions[agent]]]
+                    )
+
+                # Ensure additional dimension is added in so shapes align for masking
+                if len(env_defined_actions[agent].shape) == 1:
+                    env_defined_actions[agent] = (
+                        env_defined_actions[agent][:, np.newaxis]
+                        if self.discrete_actions
+                        else env_defined_actions[agent][np.newaxis, :]
+                    )
+                agent_masks[agent] = np.where(
+                    np.isnan(env_defined_actions[agent]), 0, 1
+                ).astype(bool)
+
+        return env_defined_actions, agent_masks
 
     def stack_critic_observations(self, obs: Dict[str, TorchObsType]) -> TorchObsType:
         """Process observations for critic network input
