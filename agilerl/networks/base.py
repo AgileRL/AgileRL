@@ -462,6 +462,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                 assert_correct_simba_net_config(net_config)
                 encoder_mlp_cls = EvolvableSimBa
             else:
+                net_config["output_vanish"] = False
                 assert_correct_mlp_net_config(net_config)
                 encoder_mlp_cls = EvolvableMLP
 

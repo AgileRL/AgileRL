@@ -468,6 +468,49 @@ def test_returns_expected_action_training():
         assert -1 <= act <= 1
 
 
+# Returns the expected action from float64 input
+def test_returns_expected_action_float64():
+    observation_space = generate_discrete_space(4)
+    action_space = generate_random_box_space(shape=(2,), low=-1, high=1)
+
+    td3 = TD3(observation_space, action_space)
+    state = np.array([0, 1, 2, 3]).astype(np.float64)
+    training = False
+    action = td3.get_action(state, training)[0]
+
+    assert len(action) == action_space.shape[0]
+    for act in action:
+        assert isinstance(act, np.float32)
+        assert -1 <= act <= 1
+
+    td3 = TD3(
+        observation_space,
+        action_space,
+    )
+    state = np.array([1]).astype(np.float64)
+    training = True
+    action = td3.get_action(state, training)[0]
+
+    assert len(action) == action_space.shape[0]
+    for act in action:
+        assert isinstance(act, np.float32)
+        assert -1 <= act <= 1
+
+    td3 = TD3(
+        observation_space,
+        action_space,
+        O_U_noise=False,
+    )
+    state = np.array([1]).astype(np.float64)
+    training = True
+    action = td3.get_action(state, training)[0]
+
+    assert len(action) == action_space.shape[0]
+    for act in action:
+        assert isinstance(act, np.float32)
+        assert -1 <= act <= 1
+
+
 # learns from experiences and updates network parameters
 @pytest.mark.parametrize(
     "min_action, max_action",

@@ -638,8 +638,17 @@ def test_learns_from_experiences():
         num_steps,
     )
     next_states = torch.rand(1, *observation_space.shape)
-
-    experiences = [states, actions, log_probs, rewards, dones, values, next_states]
+    next_done = np.zeros(1)
+    experiences = [
+        states,
+        actions,
+        log_probs,
+        rewards,
+        dones,
+        values,
+        next_states,
+        next_done,
+    ]
     # Call the learn method
     loss = ppo.learn(experiences)
 
@@ -691,8 +700,17 @@ def test_learns_from_experiences_continuous_accel():
         num_steps,
     )
     next_state = torch.rand(1, *observation_space.shape)
-
-    experiences = [states, actions, log_probs, rewards, dones, values, next_state]
+    next_done = np.zeros(1)
+    experiences = [
+        states,
+        actions,
+        log_probs,
+        rewards,
+        dones,
+        values,
+        next_state,
+        next_done,
+    ]
     # Call the learn method
     loss = ppo.learn(experiences)
 
@@ -897,7 +915,17 @@ def test_clone_after_learning():
     rewards = np.random.randint(0, 100, (max_env_steps, num_vec_envs))
     dones = np.zeros((max_env_steps, num_vec_envs))
     values = np.random.randn(max_env_steps, num_vec_envs)
-    experiences = states, actions, log_probs, rewards, dones, values, next_states
+    next_done = np.zeros((1, num_vec_envs))
+    experiences = (
+        states,
+        actions,
+        log_probs,
+        rewards,
+        dones,
+        values,
+        next_states,
+        next_done,
+    )
     ppo.learn(experiences)
     clone_agent = ppo.clone()
     assert clone_agent.observation_space == ppo.observation_space

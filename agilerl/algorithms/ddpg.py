@@ -50,8 +50,6 @@ class DDPG(RLAlgorithm):
     :type hp_config: HyperparameterConfig, optional
     :param net_config: Encoder configuration, defaults to None
     :type net_config: Optional[Dict[str, Any]], optional
-    :param head_config: Head configuration, defaults to None
-    :type head_config: Optional[Dict[str, Any]], optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
     :param lr_actor: Learning rate for actor optimizer, defaults to 1e-4

@@ -11,6 +11,7 @@ from agilerl.algorithms import (
     CQN,
     DDPG,
     DQN,
+    IPPO,
     MADDPG,
     MATD3,
     PPO,
@@ -154,6 +155,7 @@ def test_create_initial_population_multi_agent():
     algo_classes = {
         "MADDPG": MADDPG,
         "MATD3": MATD3,
+        "IPPO": IPPO,
     }
 
     for algo in algo_classes.keys():

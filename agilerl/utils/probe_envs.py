@@ -14,6 +14,7 @@ class ConstantRewardEnv(gym.Env):
         self.sample_obs = [np.zeros((1, 1))]
         self.q_values = [[1.0]]  # Correct Q values to learn, s x a table
         self.v_values = [[1.0]]  # Correct V values to learn, s table
+        self.policy_values = [None]  # Correct policy to learn
 
     def step(self, action):
         observation = 0
@@ -36,6 +37,7 @@ class ConstantRewardImageEnv(gym.Env):
         self.sample_obs = [np.zeros((1, 1, 3, 3))]
         self.q_values = [[1.0]]  # Correct Q values to learn, s x a table
         self.v_values = [[1.0]]  # Correct V values to learn, s table
+        self.policy_values = [None]  # Correct policy to learn
 
     def step(self, action):
         observation = np.zeros((1, 3, 3))
@@ -60,6 +62,7 @@ class ConstantRewardDictEnv(gym.Env):
         self.sample_obs = [{"discrete": np.array([[0]]), "box": np.zeros((1, 1, 3, 3))}]
         self.q_values = [[1.0]]  # Correct Q values to learn, s x a table
         self.v_values = [[1.0]]  # Correct V values to learn, s table
+        self.policy_values = [None]  # Correct policy to learn
 
     def step(self, action):
         observation = {"discrete": 0, "box": np.zeros((1, 3, 3))}
@@ -500,6 +503,7 @@ class FixedObsPolicyEnv(gym.Env):
         self.sample_obs = [np.array([[0]])]
         self.q_values = [[-1.0, 1.0]]  # Correct Q values to learn, s x a table
         self.v_values = [None]  # Correct V values to learn, s table
+        self.policy_values = [[0.0, 1.0]]  # Correct policy to learn
 
     def step(self, action):
         if isinstance(action, (np.ndarray, list)):
@@ -524,6 +528,7 @@ class FixedObsPolicyImageEnv(gym.Env):
         self.sample_obs = [np.zeros((1, 1, 3, 3))]
         self.q_values = [[-1.0, 1.0]]  # Correct Q values to learn, s x a table
         self.v_values = [None]  # Correct V values to learn, s table
+        self.policy_values = [[0.0, 1.0]]  # Correct policy to learn
 
     def step(self, action):
         observation = np.zeros((1, 3, 3))
@@ -550,6 +555,7 @@ class FixedObsPolicyDictEnv(gym.Env):
         self.sample_obs = [{"discrete": np.array([[0]]), "box": np.zeros((1, 1, 3, 3))}]
         self.q_values = [[-1.0, 1.0]]  # Correct Q values to learn, s x a table
         self.v_values = [None]  # Correct V values to learn, s table
+        self.policy_values = [[0.0, 1.0]]  # Correct policy to learn
 
     def step(self, action):
         observation = {"discrete": 0, "box": np.zeros((1, 3, 3))}
@@ -976,7 +982,12 @@ def check_policy_q_learning_with_probe_env(
 
 
 def check_policy_on_policy_with_probe_env(
-    env, algo_class, algo_args, learn_steps=5000, device="cpu"
+    env,
+    algo_class,
+    algo_args,
+    learn_steps=5000,
+    device="cpu",
+    discrete=True,
 ):
     print(f"Probe environment: {type(env).__name__}")
 
@@ -990,7 +1001,8 @@ def check_policy_on_policy_with_probe_env(
         rewards = []
         dones = []
         values = []
-        truncs = []
+
+        done = 0
 
         for j in range(100):
             if isinstance(state, dict):
@@ -1003,7 +1015,8 @@ def check_policy_on_policy_with_probe_env(
             action = action[0]
             log_prob = log_prob[0]
             value = value[0]
-            next_state, reward, done, trunc, _ = env.step(action)
+            next_state, reward, term, trunc, _ = env.step(action)
+            next_done = np.logical_or(term, trunc).astype(np.int8)
 
             states.append(state)
             actions.append(action)
@@ -1011,9 +1024,10 @@ def check_policy_on_policy_with_probe_env(
             rewards.append(reward)
             dones.append(done)
             values.append(value)
-            truncs.append(trunc)
 
             state = next_state
+            done = next_done
+
             if done:
                 state, _ = env.reset()
 
@@ -1025,12 +1039,15 @@ def check_policy_on_policy_with_probe_env(
             dones,
             values,
             next_state,
+            next_done,
         )
         loss = agent.learn(experiences)
         if i < 20:
             print("Loss = ", loss)
 
-    for sample_obs, v_values in zip(env.sample_obs, env.v_values):
+    for sample_obs, v_values, policy_values in zip(
+        env.sample_obs, env.v_values, env.policy_values
+    ):
         if isinstance(sample_obs, dict):
             state = {
                 k: torch.tensor(v).float().to(device) for k, v in sample_obs.items()
@@ -1046,17 +1063,17 @@ def check_policy_on_policy_with_probe_env(
                 v_values, predicted_v_values, atol=0.1
             ), f"{v_values} != {predicted_v_values}"
 
-    if hasattr(env, "sample_actions"):
-        for sample_action, policy_values in zip(env.sample_actions, env.policy_values):
-            action = torch.tensor(sample_action).float().to(device)
-            if policy_values is not None:
+        if policy_values is not None:
+            if discrete:
                 predicted_policy_values = (
-                    agent.actor(state).sample().detach().cpu().numpy()[0]
+                    agent.actor(state).probs.detach().cpu().numpy()
                 )
-                # print("pol", policy_values, predicted_policy_values)
-                assert np.allclose(
-                    policy_values, predicted_policy_values, atol=0.1
-                ), f"{policy_values} != {predicted_policy_values}"
+            else:
+                predicted_policy_values = agent.actor(state).loc.detach().cpu().numpy()
+            # print("pol", policy_values, predicted_policy_values)
+            assert np.allclose(
+                policy_values, predicted_policy_values, atol=0.1
+            ), f"{policy_values} != {predicted_policy_values}"
 
 
 # if __name__ == "__main__":
