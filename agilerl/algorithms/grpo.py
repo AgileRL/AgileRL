@@ -181,44 +181,6 @@ class GRPO(RLAlgorithm):
         self._initialize_actors(actor_network, not clone)
         del actor_network
 
-    # def get_action(
-    #     self, states: List[Dict[str, torch.Tensor]], training: bool = True
-    # ) -> Tuple[
-    #     Union[np.ndarray, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor
-    # ]:
-    #     """Returns the next action to take in the environment.
-
-    #     :param states: Environment observation, or multiple observations in a batch
-    #     :type states: numpy.ndarray[float]
-    #     :param training: Flag to indicate training mode, defaults to True
-    #     :type training: bool, optional
-    #     """
-    #     group_size = self.group_size if training else 1
-    #     self.actor.eval()
-    #     with torch.no_grad():
-    #         action_masks = []
-    #         completion_ids = []
-    #         for state in states:
-    #             state["input_ids"] = (
-    #                 state["input_ids"].repeat(group_size, 1).to(self.actor.device)
-    #             )
-    #             state["attention_mask"] = (
-    #                 state["attention_mask"].repeat(group_size, 1).to(self.actor.device)
-    #             )
-    #             completion_id = self.actor.generate(
-    #                 **state,
-    #                 generation_config=self.generation_config,
-    #             )
-    #             completion_ids.append(completion_id)
-    #             action_mask = torch.zeros_like(
-    #                 completion_id, dtype=torch.bool, device=self.device
-    #             )
-    #             action_mask[:, state["input_ids"].shape[1] :] = True
-    #             action_mask[completion_id == self.pad_token_id] = False
-    #             action_mask = action_mask[:, 1:]
-    #             action_masks.append(action_mask)
-    #     return completion_ids, action_masks
-
     def get_action(
         self, states: List[Dict[str, torch.Tensor]], training: bool = True
     ) -> Tuple[
@@ -234,74 +196,27 @@ class GRPO(RLAlgorithm):
         group_size = self.group_size if training else 1
         self.actor.eval()
         with torch.no_grad():
-            if self.reduce_memory_peak:
-                action_masks = []
-                completion_ids = []
-                for state in states:
-                    state["input_ids"] = (
-                        state["input_ids"].repeat(group_size, 1).to(self.actor.device)
-                    )
-                    state["attention_mask"] = (
-                        state["attention_mask"]
-                        .repeat(group_size, 1)
-                        .to(self.actor.device)
-                    )
-                    completion_id = self.actor.generate(
-                        **state,
-                        generation_config=self.generation_config,
-                    )
-                    completion_ids.append(completion_id)
-                    action_mask = torch.zeros_like(
-                        completion_id, dtype=torch.bool, device=self.device
-                    )
-                    action_mask[:, state["input_ids"].shape[1] :] = True
-                    action_mask[completion_id == self.pad_token_id] = False
-                    action_mask = action_mask[:, 1:]
-                    action_masks.append(action_mask)
-            else:
-                input_ids = stack_and_pad_experiences(
-                    [state["input_ids"] for state in states],
-                    padding_values=[self.pad_token_id],
-                    padding_side="left",
-                )[0]
-                attention_mask = stack_and_pad_experiences(
-                    [state["attention_mask"] for state in states],
-                    padding_values=[False],
-                    padding_side="left",
-                )[0]
-
-                # Repeat for group size
-                input_ids = (
-                    input_ids.repeat(1, group_size, 1)
-                    .reshape(-1, input_ids.size(-1))
-                    .to(self.actor.device)
+            action_masks = []
+            completion_ids = []
+            for state in states:
+                state["input_ids"] = (
+                    state["input_ids"].repeat(group_size, 1).to(self.actor.device)
                 )
-                attention_mask = (
-                    attention_mask.repeat(1, group_size, 1)
-                    .reshape(-1, attention_mask.size(-1))
-                    .to(self.actor.device)
+                state["attention_mask"] = (
+                    state["attention_mask"].repeat(group_size, 1).to(self.actor.device)
                 )
-
-                # Generate completions
-                completion_ids = self.actor.generate(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
+                completion_id = self.actor.generate(
+                    **state,
                     generation_config=self.generation_config,
                 )
-
-                # Create action masks
-                action_masks = torch.zeros_like(
-                    completion_ids, dtype=torch.bool, device=self.device
+                completion_ids.append(completion_id)
+                action_mask = torch.zeros_like(
+                    completion_id, dtype=torch.bool, device=self.device
                 )
-                action_masks[:, input_ids.size(1) :] = True
-                action_masks[completion_ids == self.pad_token_id] = False
-                action_masks = action_masks[:, 1:]
-
-                # Reshape back to original batch structure
-                completion_ids = completion_ids.reshape(len(states), group_size, -1)
-                action_masks = action_masks.reshape(len(states), group_size, -1)
-                completion_ids = [cid for cid in completion_ids]
-                action_masks = [am for am in action_masks]
+                action_mask[:, state["input_ids"].shape[1] :] = True
+                action_mask[completion_id == self.pad_token_id] = False
+                action_mask = action_mask[:, 1:]
+                action_masks.append(action_mask)
         return completion_ids, action_masks
 
     def learn(self, experiences: ExperiencesType) -> Tuple[float, float]:
@@ -541,14 +456,11 @@ class GRPO(RLAlgorithm):
             del log_probs_list
         else:
             logits = policy.forward(**model_kwargs).logits
-            selected_logits = logits[:, :-1].gather(
-                dim=-1, index=ids[:, 1:].unsqueeze(-1)
+            log_probs = (
+                F.log_softmax(logits[:, :-1], dim=-1)
+                .gather(dim=-1, index=ids[:, 1:].unsqueeze(-1))
+                .squeeze(-1)
             )
-            log_probs = F.log_softmax(selected_logits, dim=-1).squeeze(-1)
-            del logits
-            del selected_logits
-            torch.cuda.empty_cache()
-            policy = None
 
         return log_probs
 
@@ -566,25 +478,26 @@ class GRPO(RLAlgorithm):
         :return: Policy network and reference network
         :rtype: Tuple[Union[nn.Module, DeepSpeedEngine], Union[Optimizer, DeepSpeedOptimizerType]]
         """
-        if self.accelerator is not None and (
-            self.accelerator.state.deepspeed_plugin.deepspeed_config[
-                "train_micro_batch_size_per_gpu"
-            ]
-            == "auto"
-        ):
-            self.accelerator.state.deepspeed_plugin.deepspeed_config[
-                "train_micro_batch_size_per_gpu"
-            ] = 2
+        if self.accelerator is not None:
+            if (
+                self.accelerator.state.deepspeed_plugin.deepspeed_config[
+                    "train_micro_batch_size_per_gpu"
+                ]
+                == "auto"
+            ):
+                self.accelerator.state.deepspeed_plugin.deepspeed_config[
+                    "train_micro_batch_size_per_gpu"
+                ] = 2
 
-        if self.gradient_checkpointing:
-            self.accelerator.state.deepspeed_plugin.deepspeed_config[
-                "activation_checkpointing"
-            ] = {
-                "partition_activations": True,
-                "cpu_checkpointing": True,
-                "synchronize_checkpoint_boundary": True,
-                "number_checkpoints": 2,
-            }
+            if self.gradient_checkpointing:
+                self.accelerator.state.deepspeed_plugin.deepspeed_config[
+                    "activation_checkpointing"
+                ] = {
+                    "partition_activations": True,
+                    "cpu_checkpointing": True,
+                    "synchronize_checkpoint_boundary": True,
+                    "number_checkpoints": 2,
+                }
         self.actor = network
         self.optimizer = OptimizerWrapper(
             optim.AdamW, networks=[self.actor], lr=self.lr

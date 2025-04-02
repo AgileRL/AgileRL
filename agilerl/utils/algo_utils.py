@@ -673,7 +673,9 @@ def stack_experiences(
 
 
 def stack_and_pad_experiences(
-    *experiences: MaybeObsList, padding_values: List[Union[int, float, bool]]
+    *experiences: MaybeObsList,
+    padding_values: List[Union[int, float, bool]],
+    padding_side: str = "right",
 ) -> Tuple[ArrayOrTensor, ...]:
     """Stacks experiences into a single tensor, padding them to the maximum length.
 
@@ -681,6 +683,8 @@ def stack_and_pad_experiences(
     :type experiences: list[numpy.ndarray[float]] or list[dict[str, numpy.ndarray[float]]]
     :param to_torch: If True, convert the stacked experiences to a torch tensor, defaults to True
     :type to_torch: bool, optional
+    :param padding_side: Side to pad on, defaults to "right"
+    :type padding_side: str, optional
 
     :return: Stacked experiences
     :rtype: Tuple[ArrayOrTensor, ...]
@@ -694,7 +698,15 @@ def stack_and_pad_experiences(
             padding_sizes = [(max_size - e.shape[-1]) for e in exp]
             if sum(padding_sizes) != 0:
                 exp = [
-                    F.pad(e, (0, padding_size), value=padding)
+                    F.pad(
+                        e,
+                        (
+                            (0, padding_size)
+                            if padding_side == "right"
+                            else (padding_size, 0)
+                        ),
+                        value=padding,
+                    )
                     for e, padding_size in zip(exp, padding_sizes)
                 ]
 
