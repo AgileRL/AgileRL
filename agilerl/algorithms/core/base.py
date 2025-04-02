@@ -1382,74 +1382,29 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         return processed_obs
 
-    def disassemble_homogeneous_outputs(self, dict: Dict, vect_dim: int) -> Dict:
+    def disassemble_homogeneous_outputs(
+        self, homo_outputs: ArrayDict, vect_dim: int
+    ) -> ArrayDict:
         """Disassembles batched output by shared policies into their homogeneous agents' outputs.
 
-        :param dict: Dictionary to be disassembled, has the form {'agent': [4, 7, 8]}
-        :type dict: Dict
-        :return: isassembled dictionary, e.g. {'agent_0': 4, 'agent_1': 7, 'agent_2': 8}
-        :rtype: Dict
+        :param homo_outputs: Dictionary to be disassembled, has the form {'agent': [4, 7, 8]}
+        :type homo_outputs: Dict[str, np.ndarray]
+        :param vect_dim: Vectorization dimension size, i.e. number of vect envs
+        :type vect_dim: int
+        :return: Assembled dictionary, e.g. {'agent_0': 4, 'agent_1': 7, 'agent_2': 8}
+        :rtype: Dict[str, np.ndarray]
         """
         output_dict = {}
         for unique_id in self.shared_agent_ids:
-            dict[unique_id] = np.reshape(
-                dict[unique_id], (len(self.homogeneous_agents[unique_id]), vect_dim, -1)
+            homo_outputs[unique_id] = np.reshape(
+                homo_outputs[unique_id],
+                (len(self.homogeneous_agents[unique_id]), vect_dim, -1),
             )
             for i, homo_id in enumerate(self.homogeneous_agents[unique_id]):
-                output_dict[homo_id] = dict[unique_id][i]
+                output_dict[homo_id] = homo_outputs[unique_id][i]
         return output_dict
 
-    def vectorize_experiences_by_agent(self, experiences, dim=1):
-        """Reorganizes experiences into a tensor, vectorized by time step
-
-        Example input:
-        {'agent_0': [[1, 2, 3, 4]], 'agent_1': [[5, 6, 7, 8]]}
-        Example output:
-        torch.Tensor([[1, 2, 3, 4, 5, 6, 7, 8]])
-
-        :param experiences: Dictionaries containing experiences indexed by agent_id that share a policy agent.
-        :type experiences: Tuple[Dict[str, np.ndarray]]
-        :param dim: New dimension to stack along
-        :type dim: int
-        """
-        tensors = [
-            torch.Tensor(np.array(experiences[agent_id]))
-            for agent_id in experiences.keys()
-        ]
-        stacked_tensor = torch.stack(tensors, dim=dim)
-        return stacked_tensor
-
-    def concatenate_experiences_into_batches(self, experiences, shape):
-        """Reorganizes experiences into a batched tensor
-
-        Example input:
-        {'agent_0': [[[...1], [...2]], [[...5], [...6]]],
-         'agent_1': [[[...3], [...4]], [[...7], [...8]]]}
-
-        Example output:
-        torch.Tensor([...1], [...2], [...3], [...4], [...5], [...6], [...7], [...8])
-
-        :param experiences: Dictionaries containing experiences indexed by agent_id that share a policy agent.
-        :type experiences: Tuple[Dict[str, np.ndarray]]
-        :param shape: Observation/action/etc shape space to maintain
-        :type obs_space: Tuple(int)
-        """
-        tensors = []
-        for agent_id in experiences.keys():
-            exp = np.array(experiences[agent_id])
-            if len(exp.shape) < 2:
-                exp = np.expand_dims(exp, 0)
-            tensors.append(torch.Tensor(exp))
-        stacked_tensor = torch.cat(tensors, dim=0)
-        stacked_tensor = stacked_tensor.reshape(-1, *shape)
-        for squeeze_dim in [0, -1]:
-            if stacked_tensor.size(squeeze_dim) == 1:
-                stacked_tensor = stacked_tensor.squeeze(squeeze_dim)
-        return stacked_tensor
-
-    def sum_shared_rewards(
-        self, rewards: Dict[str, np.ndarray]
-    ) -> Dict[str, np.ndarray]:
+    def sum_shared_rewards(self, rewards: ArrayDict) -> ArrayDict:
         """Sums the rewards for homogeneous agents
 
         :param rewards: Reward dictionary from environment
