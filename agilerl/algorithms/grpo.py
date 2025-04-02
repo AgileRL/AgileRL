@@ -589,7 +589,7 @@ class GRPO(RLAlgorithm):
         """
         if self.accelerator is not None:
             os.makedirs(path, exist_ok=True)
-            self.actor.save_checkpoint(path)
+            self.actor.save_checkpoint(path, tag="checkpoint")
         else:
             warnings.warn(
                 "Distributed actor save not supported for non-distributed training."
@@ -603,10 +603,11 @@ class GRPO(RLAlgorithm):
         :type path: str
         """
         if self.accelerator is not None:
-            deepspeed_dirs = sorted(glob.glob(f"{path}/global_step*"))
+            deepspeed_dirs = sorted(glob.glob(f"{path}/checkpoint"))
             assert len(deepspeed_dirs) > 0
             self.actor.load_checkpoint(
                 path,
+                tag="checkpoint",
                 load_module_strict=True,
                 load_optimizer_states=True,
                 load_lr_scheduler_states=True,
@@ -673,6 +674,7 @@ class GRPO(RLAlgorithm):
             self.accelerator.free_memory()
             self.accelerator.wait_for_everyone()
             self._save_distributed_actor(f"GRPO_test/agent_{self.index}")
+            self.accelerator.wait_for_everyone()
             input_args = EvolvableAlgorithm.inspect_attributes(
                 self, input_args_only=True
             )
@@ -692,8 +694,8 @@ class GRPO(RLAlgorithm):
                 clone.index = index
             clone.accelerator.wait_for_everyone()
             clone._load_distributed_actor(f"GRPO_test/agent_{self.index}")
-            saved_state_files = glob.glob(f"GRPO_test/agent_{self.index}/*")
             clone.accelerator.wait_for_everyone()
+            saved_state_files = glob.glob(f"GRPO_test/agent_{self.index}/*")
             if clone.accelerator.is_main_process:
                 remove_nested_files(saved_state_files)
         else:

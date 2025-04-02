@@ -137,6 +137,12 @@ def test_finetune_llm_evolvable_training_loop(use_accelerator):
     mock_env.step.return_value = ("next_prompts", torch.tensor([2.0, 3.0]))
     mock_env.data_batch_size_per_gpu = 1
 
+    mutation = MagicMock()
+    mutation.architecture_mut = 0
+    mutation.new_layer_prob = 0
+    mutation.parameters_mut = 0
+    mutation.activation_mut = 0
+
     # Mock other dependencies
     with patch("agilerl.training.train_llm.trange"), patch(
         "agilerl.training.train_llm.aggregate_metrics_across_gpus"
@@ -155,7 +161,7 @@ def test_finetune_llm_evolvable_training_loop(use_accelerator):
             evo_steps=1,
             accelerator=None if use_accelerator else Accelerator(),
             tournament=Mock(),
-            mutation=Mock(),
+            mutation=mutation,
         )
         assert mock_env.reset.call_count == 1
         assert mock_env.reset.call_args == call(reset_dataloaders=True)
