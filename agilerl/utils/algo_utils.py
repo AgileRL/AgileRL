@@ -18,6 +18,7 @@ from torch.optim import Optimizer
 
 from agilerl.protocols import EvolvableAttributeType, EvolvableModule, OptimizerWrapper
 from agilerl.typing import (
+    ArrayDict,
     ArrayOrTensor,
     MaybeObsList,
     NetworkType,
@@ -753,3 +754,60 @@ def is_vectorized_experiences(*experiences: ArrayOrTensor) -> bool:
         is_vec_ls.append(is_vec)
 
     return all(is_vec_ls)
+
+
+def vectorize_experiences_by_agent(
+    experiences: ArrayDict, dim: int = 1
+) -> torch.Tensor:
+    """Reorganizes experiences into a tensor, vectorized by time step
+
+    Example input:
+    {'agent_0': [[1, 2, 3, 4]], 'agent_1': [[5, 6, 7, 8]]}
+    Example output:
+    torch.Tensor([[1, 2, 3, 4, 5, 6, 7, 8]])
+
+    :param experiences: Dictionaries containing experiences indexed by agent_id that share a policy agent.
+    :type experiences: Tuple[Dict[str, np.ndarray]]
+    :param dim: New dimension to stack along
+    :type dim: int
+    :return: Tensor of experiences, stacked along provided dimension
+    :rtype: torch.Tensor
+    """
+    tensors = [
+        torch.Tensor(np.array(experiences[agent_id])) for agent_id in experiences.keys()
+    ]
+    stacked_tensor = torch.stack(tensors, dim=dim)
+    return stacked_tensor
+
+
+def concatenate_experiences_into_batches(
+    experiences: ArrayDict, shape: Tuple[int]
+) -> torch.Tensor:
+    """Reorganizes experiences into a batched tensor
+
+    Example input:
+    {'agent_0': [[[...1], [...2]], [[...5], [...6]]],
+        'agent_1': [[[...3], [...4]], [[...7], [...8]]]}
+
+    Example output:
+    torch.Tensor([...1], [...2], [...3], [...4], [...5], [...6], [...7], [...8])
+
+    :param experiences: Dictionaries containing experiences indexed by agent_id that share a policy agent.
+    :type experiences: Dict[str, np.ndarray]
+    :param shape: Observation/action/etc shape space to maintain
+    :type obs_space: Tuple[int]
+    :return: Tensor of experiences, stacked along first dimension, with shape (num_experiences, *shape)
+    :rtype: torch.Tensor
+    """
+    tensors = []
+    for agent_id in experiences.keys():
+        exp = np.array(experiences[agent_id])
+        if len(exp.shape) < 2:
+            exp = np.expand_dims(exp, 0)
+        tensors.append(torch.Tensor(exp))
+    stacked_tensor = torch.cat(tensors, dim=0)
+    stacked_tensor = stacked_tensor.reshape(-1, *shape)
+    for squeeze_dim in [0, -1]:
+        if stacked_tensor.size(squeeze_dim) == 1:
+            stacked_tensor = stacked_tensor.squeeze(squeeze_dim)
+    return stacked_tensor

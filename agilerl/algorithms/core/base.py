@@ -40,8 +40,10 @@ from agilerl.protocols import (
 )
 from agilerl.typing import (
     ActionType,
+    ArrayDict,
     DeviceType,
     GymSpaceType,
+    InfosDict,
     NumpyObsType,
     ObservationType,
     TorchObsType,
@@ -52,6 +54,7 @@ from agilerl.utils.algo_utils import (
     compile_model,
     is_module_list,
     isroutine,
+    key_in_nested_dict,
     preprocess_observation,
     recursive_check_module_attrs,
     remove_compile_prefix,
@@ -595,6 +598,29 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
             setattr(self, name, compiled)
 
+    def to_device(self, *experiences: TorchObsType) -> Tuple[TorchObsType, ...]:
+        """Moves experiences to the device.
+
+        :param experiences: Experiences to move to device
+        :type experiences: Tuple[torch.Tensor[float], ...]
+
+        :return: Experiences on the device
+        :rtype: Tuple[torch.Tensor[float], ...]
+        """
+        device = self.device if self.accelerator is None else self.accelerator.device
+        on_device = []
+        for exp in experiences:
+            if isinstance(exp, dict):
+                exp = {key: val.to(device) for key, val in exp.items()}
+            elif isinstance(exp, (list, tuple)) and isinstance(exp[0], torch.Tensor):
+                exp = [val.to(device) for val in exp]
+            elif isinstance(exp, torch.Tensor):
+                exp = exp.to(device)
+
+            on_device.append(exp)
+
+        return on_device
+
     def evolvable_attributes(
         self, networks_only: bool = False
     ) -> EvolvableAttributeDict:
@@ -1054,10 +1080,14 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
             action_space, (spaces.Discrete, spaces.MultiDiscrete)
         )
         self.min_action = (
-            np.array(action_space.low) if hasattr(action_space, "low") else None
+            np.array(action_space.low).astype(np.float32)
+            if hasattr(action_space, "low")
+            else None
         )
         self.max_action = (
-            np.array(action_space.high) if hasattr(action_space, "high") else None
+            np.array(action_space.high).astype(np.float32)
+            if hasattr(action_space, "high")
+            else None
         )
 
     def preprocess_observation(self, observation: NumpyObsType) -> TorchObsType:
@@ -1075,29 +1105,6 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
             device=self.device,
             normalize_images=self.normalize_images,
         )
-
-    def to_device(self, *experiences: TorchObsType) -> Tuple[TorchObsType, ...]:
-        """Moves experiences to the device.
-
-        :param experiences: Experiences to move to device
-        :type experiences: Tuple[torch.Tensor[float], ...]
-
-        :return: Experiences on the device
-        :rtype: Tuple[torch.Tensor[float], ...]
-        """
-        device = self.device if self.accelerator is None else self.accelerator.device
-        on_device = []
-        for exp in experiences:
-            if isinstance(exp, dict):
-                exp = {key: val.to(device) for key, val in exp.items()}
-            elif isinstance(exp, (list, tuple)) and isinstance(exp[0], torch.Tensor):
-                exp = [val.to(device) for val in exp]
-            elif isinstance(exp, torch.Tensor):
-                exp = exp.to(device)
-
-            on_device.append(exp)
-
-        return on_device
 
 
 class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
@@ -1181,13 +1188,43 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         # For continuous action spaces, store the min and max action values
         if not self.discrete_actions:
-            self.min_action = [space.low for space in action_spaces]
-            self.max_action = [space.high for space in action_spaces]
+            self.min_action = [
+                np.array(space.low).astype(np.float32) for space in action_spaces
+            ]
+            self.max_action = [
+                np.array(space.high).astype(np.float32) for space in action_spaces
+            ]
         else:
             self.min_action, self.max_action = None, None
 
         self.agent_ids = agent_ids
         self.n_agents = len(agent_ids)
+
+        self.shared_agent_ids = []
+        self.homogeneous_agents = {}
+        self.unique_observation_spaces = {}
+        self.unique_action_spaces = {}
+        for agent_id, obs_space, action_space in zip(
+            self.agent_ids, observation_spaces, action_spaces
+        ):
+            # Split agent names on expected pattern of e.g. speaker_0, speaker_1,
+            # listener_0, listener_1, to determine which agents are homogeneous
+            homo_agent = agent_id.rsplit("_", 1)[0]
+            if homo_agent in self.homogeneous_agents:
+                self.homogeneous_agents[homo_agent].append(agent_id)
+                assert (
+                    obs_space == self.unique_observation_spaces[homo_agent]
+                ), f"Homogeneous agents, i.e. agents that share the prefix {homo_agent}, must have the same observation space. Found {self.unique_observation_spaces[homo_agent]} and {obs_space}."
+                assert (
+                    action_space == self.unique_action_spaces[homo_agent]
+                ), f"Homogeneous agents, i.e. agents that share the prefix {homo_agent}, must have the same action space. Found {self.unique_action_spaces[homo_agent]} and {action_space}."
+            else:
+                self.shared_agent_ids.append(homo_agent)
+                self.homogeneous_agents[homo_agent] = [agent_id]
+                self.unique_observation_spaces[homo_agent] = obs_space
+                self.unique_action_spaces[homo_agent] = action_space
+
+        self.n_unique_agents = len(self.shared_agent_ids)
         self.normalize_images = normalize_images
         self.observation_spaces = observation_spaces
         self.action_spaces = action_spaces
@@ -1231,6 +1268,78 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         return preprocessed
 
+    def extract_action_masks(self, infos: InfosDict) -> ArrayDict:
+        """Extract action masks from info dictionary
+
+        :param infos: Info dict
+        :type infos: Dict[str, Dict[...]]
+
+        :return: Action masks
+        :rtype: Dict[str, np.ndarray]
+        """
+        action_masks = {
+            agent: info.get("action_mask", None) if isinstance(info, dict) else None
+            for agent, info in infos.items()
+            if agent in self.agent_ids
+        }  # Get dict of form {"agent_id" : [1, 0, 0, 0]...} etc
+
+        return action_masks
+
+    def extract_agent_masks(self, infos: InfosDict) -> Tuple[ArrayDict, ArrayDict]:
+        """Extract env_defined_actions from info dictionary and determine agent masks
+
+        :param infos: Info dict
+        :type infos: Dict[str, Dict[...]]
+        """
+
+        # Deal with case of no env_defined_actions defined in the info dict
+        # Deal with empty info dicts for each sub agent
+        if not key_in_nested_dict(infos, "env_defined_actions") or all(
+            not info for agent, info in infos.items() if agent in self.agent_ids
+        ):
+            return None, None
+
+        env_defined_actions = {
+            agent: (
+                info.get("env_defined_actions", None)
+                if isinstance(info, dict)
+                else None
+            )
+            for agent, info in infos.items()
+            if agent in self.agent_ids
+        }
+        agent_masks = None
+        if env_defined_actions is not None:
+            agent_masks = {}
+            for idx, agent in enumerate(env_defined_actions.keys()):
+                # Handle None if environment isn't vectorized
+                if env_defined_actions[agent] is None:
+                    if not self.discrete_actions:
+                        nan_arr = np.empty(self.action_dims[idx])
+                        nan_arr[:] = np.nan
+                    else:
+                        nan_arr = np.array([[np.nan]])
+                    env_defined_actions[agent] = nan_arr
+
+                # Handle discrete actions + env not vectorized
+                if isinstance(env_defined_actions[agent], (int, float)):
+                    env_defined_actions[agent] = np.array(
+                        [[env_defined_actions[agent]]]
+                    )
+
+                # Ensure additional dimension is added in so shapes align for masking
+                if len(env_defined_actions[agent].shape) == 1:
+                    env_defined_actions[agent] = (
+                        env_defined_actions[agent][:, np.newaxis]
+                        if self.discrete_actions
+                        else env_defined_actions[agent][np.newaxis, :]
+                    )
+                agent_masks[agent] = np.where(
+                    np.isnan(env_defined_actions[agent]), 0, 1
+                ).astype(bool)
+
+        return env_defined_actions, agent_masks
+
     def stack_critic_observations(self, obs: Dict[str, TorchObsType]) -> TorchObsType:
         """Process observations for critic network input
 
@@ -1272,3 +1381,39 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             processed_obs = torch.cat(obs, dim=1)
 
         return processed_obs
+
+    def disassemble_homogeneous_outputs(
+        self, homo_outputs: ArrayDict, vect_dim: int
+    ) -> ArrayDict:
+        """Disassembles batched output by shared policies into their homogeneous agents' outputs.
+
+        :param homo_outputs: Dictionary to be disassembled, has the form {'agent': [4, 7, 8]}
+        :type homo_outputs: Dict[str, np.ndarray]
+        :param vect_dim: Vectorization dimension size, i.e. number of vect envs
+        :type vect_dim: int
+        :return: Assembled dictionary, e.g. {'agent_0': 4, 'agent_1': 7, 'agent_2': 8}
+        :rtype: Dict[str, np.ndarray]
+        """
+        output_dict = {}
+        for unique_id in self.shared_agent_ids:
+            homo_outputs[unique_id] = np.reshape(
+                homo_outputs[unique_id],
+                (len(self.homogeneous_agents[unique_id]), vect_dim, -1),
+            )
+            for i, homo_id in enumerate(self.homogeneous_agents[unique_id]):
+                output_dict[homo_id] = homo_outputs[unique_id][i]
+        return output_dict
+
+    def sum_shared_rewards(self, rewards: ArrayDict) -> ArrayDict:
+        """Sums the rewards for homogeneous agents
+
+        :param rewards: Reward dictionary from environment
+        :type rewards: Dict[str, np.ndarray]
+        :return: Summed rewards dictionary
+        :rtype: Dict[str, np.ndarray]
+        """
+        summed_rewards = {homo_id: 0 for homo_id in self.shared_agent_ids}
+        for agent_id, reward in rewards.items():
+            homo_id = agent_id.rsplit("_", 1)[0]
+            summed_rewards[homo_id] += reward
+        return summed_rewards

@@ -51,13 +51,24 @@ Example
   agent = PPO(observation_space, action_space)   # Create PPO agent
 
   while True:
+
+      states = []
+      actions = []
+      log_probs = []
+      rewards = []
+      dones = []
+      values = []
+
+      done = np.zeros(num_envs)
+
       for step in range(agent.learn_step):
           if channels_last:
               state = obs_channels_to_first(state)
 
           # Get next action from agent
           action, log_prob, _, value = agent.get_action(state)
-          next_state, reward, done, trunc, _ = env.step(action)  # Act in environment
+          next_state, reward, term, trunc, _ = env.step(action)  # Act in environment
+          next_done = np.logical_or(term, trunc).astype(np.int8)
 
           states.append(state)
           actions.append(action)
@@ -67,6 +78,7 @@ Example
           values.append(value)
 
           state = next_state
+          done = next_done
 
       experiences = (
           states,
@@ -76,6 +88,7 @@ Example
           dones,
           values,
           next_state,
+          next_done,
       )
       # Learn according to agent's RL algorithm
       agent.learn(experiences)
