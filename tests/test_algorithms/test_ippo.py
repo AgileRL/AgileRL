@@ -1660,7 +1660,7 @@ def test_ippo_learns_from_hardcoded_vectorized_experiences_mlp(
     compile_mode,
 ):
     states = {
-        agent: torch.Tensor(
+        agent: np.array(
             [
                 [[1, 1, 1], [2, 2, 2], [3, 3, 3]],
                 [[4, 4, 4], [5, 5, 5], [6, 6, 6]],
@@ -1672,7 +1672,7 @@ def test_ippo_learns_from_hardcoded_vectorized_experiences_mlp(
     }
 
     actions = {
-        agent: torch.Tensor(
+        agent: np.array(
             [
                 [[1, 1, 1], [2, 2, 2], [3, 3, 3]],
                 [[4, 4, 4], [5, 5, 5], [6, 6, 6]],
@@ -1683,32 +1683,27 @@ def test_ippo_learns_from_hardcoded_vectorized_experiences_mlp(
         for i, agent in enumerate(agent_ids)
     }
     log_probs = {
-        agent: torch.Tensor([[[1], [2], [3]], [[4], [5], [6]], [[7], [8], [9]]]).to(
-            device
-        )
+        agent: np.array([[[1], [2], [3]], [[4], [5], [6]], [[7], [8], [9]]]).to(device)
         * i
         for i, agent in enumerate(agent_ids)
     }
     rewards = {
-        agent: torch.Tensor([[1, 2, 3], [4, 5, 6], [7, 8, 9]]) * i
+        agent: np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9]]) * i
         for i, agent in enumerate(agent_ids)
     }
     dones = {
-        agent: torch.Tensor([[1, 0, 0], [0, 1, 0], [0, 0, 1]])
+        agent: np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]])
         for i, agent in enumerate(agent_ids)
     }
     values = {
-        agent: torch.Tensor([[[1], [2], [3]], [[4], [5], [6]], [[7], [8], [9]]]).to(
-            device
-        )
-        * i
+        agent: np.array([[[1], [2], [3]], [[4], [5], [6]], [[7], [8], [9]]]) * i
         for i, agent in enumerate(agent_ids)
     }
     next_state = {
-        agent: torch.Tensor([[4, 4, 4], [7, 7, 7], [10, 10, 10]]) * i
+        agent: np.array([[4, 4, 4], [7, 7, 7], [10, 10, 10]]) * i
         for i, agent in enumerate(agent_ids)
     }
-    next_done = {agent: torch.Tensor([[0, 1, 0]]) for i, agent in enumerate(agent_ids)}
+    next_done = {agent: np.array([[0, 1, 0]]) for i, agent in enumerate(agent_ids)}
 
     experiences = (
         states,
