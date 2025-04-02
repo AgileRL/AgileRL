@@ -371,7 +371,11 @@ class MADDPG(MultiAgentRLAlgorithm):
             )
         )
         self.register_network_group(
-            NetworkGroup(eval=self.critics, shared=self.critic_targets, multiagent=True)
+            NetworkGroup(
+                eval=self.critics,
+                shared=self.critic_targets,
+                multiagent=True,
+            )
         )
 
     def scale_to_action_space(self, action: ArrayLike, idx: int) -> torch.Tensor:

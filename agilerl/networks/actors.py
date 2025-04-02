@@ -146,8 +146,8 @@ class EvolvableDistribution(EvolvableWrapper):
         self.dist = None
         self.mask = None
 
-        # For continuous action spaces, we also learn the standard deviation (log_std)
-        # of the action distribution
+        # For continuous action spaces, we also learn the standard
+        # deviation (log_std) of the action distribution
         if isinstance(action_space, spaces.Box):
             self.log_std = torch.nn.Parameter(
                 torch.ones(self.action_dim) * log_std_init,

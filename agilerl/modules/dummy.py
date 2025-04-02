@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 
 from agilerl.modules import EvolvableModule
-from agilerl.typing import DeviceType, ObservationType
+from agilerl.typing import DeviceType
 
 
 def to_evolvable(
@@ -51,5 +51,12 @@ class DummyEvolvable(EvolvableModule):
     def change_activation(self, activation: str, output: bool) -> None:
         return
 
-    def forward(self, obs: ObservationType) -> torch.Tensor:
-        return self.module(obs)
+    def forward(self, *args, **kwargs) -> torch.Tensor:
+        return self.module(*args, **kwargs)
+
+    def generate(self, *args, **kwargs) -> torch.Tensor:
+        if not hasattr(self.module, "generate"):
+            raise AttributeError(
+                f"Module {self.module_fn} does not have a generate method."
+            )
+        return self.module.generate(*args, **kwargs)
