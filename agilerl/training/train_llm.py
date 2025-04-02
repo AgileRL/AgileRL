@@ -86,10 +86,18 @@ def finetune_llm(
         )
 
     if mutation is not None:
-        assert mutation.architecture_mut == 0, "Architecture mutation is not allowed for LLM finetuning."
-        assert mutation.new_layer_prob == 0, "New layer mutation is not allowed for LLM finetuning."
-        assert mutation.parameters_mut == 0, "Network parameters mutation is not allowed for LLM finetuning."
-        assert mutation.activation_mut == 0, "Activation mutation is not allowed for LLM finetuning."
+        assert (
+            mutation.architecture_mut == 0
+        ), "Architecture mutation is not allowed for LLM finetuning."
+        assert (
+            mutation.new_layer_prob == 0
+        ), "New layer mutation is not allowed for LLM finetuning."
+        assert (
+            mutation.parameters_mut == 0
+        ), "Network parameters mutation is not allowed for LLM finetuning."
+        assert (
+            mutation.activation_mut == 0
+        ), "Activation mutation is not allowed for LLM finetuning."
 
     if init_hp is None:
         init_hp = {}

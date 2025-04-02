@@ -328,7 +328,11 @@ class GRPO(RLAlgorithm):
                 self.reference_actor = self.reference_actor.to(self.device)
 
         # Register network groups for mutations
-        self.register_network_group(NetworkGroup(eval=self.actor, policy=True, shared=[self.reference_actor], llm=True))
+        self.register_network_group(
+            NetworkGroup(
+                eval=self.actor, policy=True, shared=[self.reference_actor], llm=True
+            )
+        )
         if create_reference_net:
             # self.register_network_group(
             #     NetworkGroup(eval=self.reference_actor, policy=True)
