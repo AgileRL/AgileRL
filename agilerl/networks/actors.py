@@ -231,6 +231,7 @@ class EvolvableDistribution(EvolvableWrapper):
             assert (
                 log_std is not None
             ), "log_std must be provided for continuous action spaces."
+
             log_std = log_std.expand_as(logits).clamp(min=-20)
             std = torch.exp(log_std)
             dist = Normal(loc=logits, scale=std)
@@ -445,8 +446,6 @@ class DeterministicActor(EvolvableNetwork):
             output_activation = head_config["output_activation"]
         elif isinstance(action_space, spaces.Discrete):
             output_activation = "Softmax"
-        elif isinstance(action_space, spaces.MultiDiscrete):
-            output_activation = None  # Output logits for MultiDiscrete action spaces
         elif np.any(self.min_action < 0):
             output_activation = "Tanh"
         else:

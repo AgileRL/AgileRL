@@ -463,7 +463,8 @@ class PPO(RLAlgorithm):
         # Move experiences to algo device
         experiences = self.to_device(*experiences)
 
-        num_samples = returns.size(0)
+        # Get number of samples from the returns tensor
+        num_samples = experiences[4].size(0)
         batch_idxs = np.arange(num_samples)
         mean_loss = 0
         for epoch in range(self.update_epochs):
