@@ -1683,8 +1683,7 @@ def test_ippo_learns_from_hardcoded_vectorized_experiences_mlp(
         for i, agent in enumerate(agent_ids)
     }
     log_probs = {
-        agent: np.array([[[1], [2], [3]], [[4], [5], [6]], [[7], [8], [9]]]).to(device)
-        * i
+        agent: np.array([[[1], [2], [3]], [[4], [5], [6]], [[7], [8], [9]]]) * i
         for i, agent in enumerate(agent_ids)
     }
     rewards = {
