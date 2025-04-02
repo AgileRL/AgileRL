@@ -210,9 +210,9 @@ def train_on_policy(
                 rewards = []
                 dones = []
                 values = []
-                truncs = []
 
-                learn_steps = 0
+                done = np.zeros(num_envs)
+
                 for idx_step in range(-(agent.learn_step // -num_envs)):
 
                     if swap_channels:
@@ -229,13 +229,12 @@ def train_on_policy(
                         log_prob = log_prob[0]
                         value = value[0]
 
-                    next_state, reward, done, trunc, info = env.step(
-                        action
-                    )  # Act in environment
+                    # Act in environment
+                    next_state, reward, term, trunc, info = env.step(action)
+                    next_done = np.logical_or(term, trunc).astype(np.int8)
 
                     total_steps += num_envs
                     steps += num_envs
-                    learn_steps += num_envs
 
                     states.append(state)
                     actions.append(action)
@@ -243,24 +242,22 @@ def train_on_policy(
                     rewards.append(reward)
                     dones.append(done)
                     values.append(value)
-                    truncs.append(trunc)
 
                     state = next_state
+                    done = next_done
                     scores += np.array(reward)
 
                     if not is_vectorised:
-                        done = [done]
+                        term = [term]
                         trunc = [trunc]
 
-                    for idx, (d, t) in enumerate(zip(done, trunc)):
+                    for idx, (d, t) in enumerate(zip(term, trunc)):
                         if d or t:
                             completed_episode_scores.append(scores[idx])
                             agent.scores.append(scores[idx])
                             scores[idx] = 0
 
                     pbar.update(num_envs)
-
-                # pbar.update(learn_steps // len(pop))
 
                 if swap_channels:
                     next_state = obs_channels_to_first(next_state)
@@ -273,6 +270,7 @@ def train_on_policy(
                     dones,
                     values,
                     next_state,
+                    next_done,
                 )
                 # Learn according to agent's RL algorithm
                 loss = agent.learn(experiences)

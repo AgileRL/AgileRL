@@ -74,6 +74,7 @@ Example
     from pettingzoo.mpe import simple_speaker_listener_v4
     from tqdm import trange
 
+    from agilerl.algorithms import MATD3
     from agilerl.utils.algo_utils import obs_channels_to_first
     from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
     from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv

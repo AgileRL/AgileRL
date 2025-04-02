@@ -119,12 +119,13 @@ class OptimizerWrapper:
         assert self.network_names, "No networks found in the parent container."
 
         # Initialize the optimizer/s
-        # For multi-agent algorithms, we want to have a different optimizer
+        # NOTE: For multi-agent algorithms, we want to have a different optimizer
         # for each of the networks in the passed list since they correspond to
         # different agents.
         multiple_attrs = len(self.network_names) > 1
         multiple_networks = len(self.networks) > 1
         if multiagent:
+            multiple_networks = isinstance(self.networks[0], list)
             self.optimizer = []
             for i, net in enumerate(self.networks):
                 optimizer = (
@@ -137,9 +138,14 @@ class OptimizerWrapper:
                     if isinstance(self.optimizer_kwargs, list)
                     else self.optimizer_kwargs
                 )
-                # Currently only support initialing optimizers from a single network
-                # for multi-agent algorithms
-                self.optimizer.append(init_from_single(net, optimizer, self.lr, kwargs))
+                if isinstance(net, list):
+                    self.optimizer.append(
+                        init_from_multiple(net, optimizer, self.lr, kwargs)
+                    )
+                else:
+                    self.optimizer.append(
+                        init_from_single(net, optimizer, self.lr, kwargs)
+                    )
 
         # Single-agent algorithms with multiple networks for a single optimizer
         elif multiple_networks and multiple_attrs:
