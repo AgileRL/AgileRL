@@ -132,7 +132,7 @@ class EvolvableDistribution(EvolvableWrapper):
         self,
         action_space: spaces.Space,
         network: EvolvableModule,
-        log_std_init: float = 0.0,
+        action_std_init: float = 0.0,
         device: DeviceType = "cpu",
     ):
 
@@ -140,7 +140,7 @@ class EvolvableDistribution(EvolvableWrapper):
 
         self.action_space = action_space
         self.action_dim = spaces.flatdim(action_space)
-        self.log_std_init = log_std_init
+        self.action_std_init = action_std_init
         self.device = device
 
         self.dist = None
@@ -150,7 +150,7 @@ class EvolvableDistribution(EvolvableWrapper):
         # deviation (log_std) of the action distribution
         if isinstance(action_space, spaces.Box):
             self.log_std = torch.nn.Parameter(
-                torch.ones(self.action_dim) * log_std_init,
+                torch.ones(np.prod(action_space.shape)) * action_std_init,
                 requires_grad=True,
             ).to(device)
         else:
@@ -182,8 +182,9 @@ class EvolvableDistribution(EvolvableWrapper):
             assert (
                 log_std is not None
             ), "log_std must be provided for continuous action spaces."
-            std = torch.ones_like(logits) * log_std.exp()
-            dist = Normal(loc=logits, scale=std)
+            action_logstd = log_std.expand_as(logits).clamp(min=-20)
+            action_std = torch.exp(action_logstd)
+            return Normal(loc=logits, scale=action_std)
 
         # Categorical distribution for Discrete action spaces
         elif isinstance(self.action_space, spaces.Discrete):
@@ -314,7 +315,7 @@ class EvolvableDistribution(EvolvableWrapper):
         return EvolvableDistribution(
             action_space=self.action_space,
             network=self.wrapped.clone(),
-            log_std_init=self.log_std_init,
+            action_std_init=self.action_std_init,
             device=self.device,
         )
 
@@ -391,11 +392,13 @@ class DeterministicActor(EvolvableNetwork):
         )
 
         # Set output activation based on action space
-        if isinstance(action_space, spaces.Discrete):
+        if isinstance(head_config, dict) and "output_activation" in head_config:
+            output_activation = head_config["output_activation"]
+        elif isinstance(action_space, spaces.Discrete):
             output_activation = "Softmax"
         elif isinstance(action_space, spaces.MultiDiscrete):
             output_activation = None  # Output logits for MultiDiscrete action spaces
-        elif isinstance(action_space, spaces.Box) and np.any(self.min_action < 0):
+        elif np.any(self.min_action < 0):
             output_activation = "Tanh"
         else:
             output_activation = "Sigmoid"
@@ -404,7 +407,7 @@ class DeterministicActor(EvolvableNetwork):
             head_config = MlpNetConfig(
                 hidden_size=[32], output_activation=output_activation
             )
-        elif "output_activation" not in head_config:
+        else:
             head_config["output_activation"] = output_activation
 
         self.build_network_head(head_config)
@@ -492,7 +495,7 @@ class StochasticActor(DeterministicActor):
         encoder_cls: Optional[Union[str, Type[EvolvableModule]]] = None,
         encoder_config: Optional[ConfigType] = None,
         head_config: Optional[ConfigType] = None,
-        log_std_init: float = 0.0,
+        action_std_init: float = 0.0,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
         n_agents: Optional[int] = None,
@@ -522,9 +525,9 @@ class StochasticActor(DeterministicActor):
             device=device,
         )
 
-        self.log_std_init = log_std_init
+        self.action_std_init = action_std_init
         self.head_net = EvolvableDistribution(
-            action_space, self.head_net, log_std_init=log_std_init, device=device
+            action_space, self.head_net, action_std_init=action_std_init, device=device
         )
 
     def forward(
@@ -577,7 +580,7 @@ class StochasticActor(DeterministicActor):
         head_net = EvolvableDistribution(
             self.action_space,
             head_net,
-            log_std_init=self.log_std_init,
+            action_std_init=self.action_std_init,
             device=self.device,
         )
 

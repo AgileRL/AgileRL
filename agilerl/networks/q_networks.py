@@ -396,13 +396,14 @@ class ContinuousQNetwork(EvolvableNetwork):
         if len(actions.shape) == 1:
             actions = actions.unsqueeze(0)
 
-        x = self.extract_features(obs)
+        # Extract features from the observation
+        latent = self.extract_features(obs)
 
         # Normalize actions
         if self.normalize_actions:
             actions = nn.functional.layer_norm(actions, [actions.size(-1)])
 
-        x = torch.cat([x, actions], dim=-1)
+        x = torch.cat([latent, actions], dim=-1)
         return self.head_net(x)
 
     def recreate_network(self) -> None:

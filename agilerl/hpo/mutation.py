@@ -582,7 +582,7 @@ class Mutations:
         # NOTE: Could set up an algorithm registry to make algo checks more robust
         # OR perform activation mutations within evolvable modules directly and disable
         # on an algorithm basis
-        if individual.algo in ["PPO", "DDPG", "TD3", "MADDPG", "MATD3"]:
+        if individual.algo in ["PPO", "DDPG", "TD3", "IPPO", "MADDPG", "MATD3"]:
             individual.mut = "None"
             return individual
 

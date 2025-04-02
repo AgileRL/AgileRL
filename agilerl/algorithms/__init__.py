@@ -5,6 +5,7 @@ from .dqn import DQN
 from .dqn_rainbow import RainbowDQN
 from .grpo import GRPO
 from .ilql import ILQL
+from .ippo import IPPO
 from .maddpg import MADDPG
 from .matd3 import MATD3
 from .neural_ts_bandit import NeuralTS
@@ -21,6 +22,7 @@ __all__ = [
     "DQN",
     "RainbowDQN",
     "ILQL",
+    "IPPO",
     "MADDPG",
     "MATD3",
     "NeuralTS",

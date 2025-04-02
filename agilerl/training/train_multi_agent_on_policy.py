@@ -6,15 +6,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import gymnasium as gym
 import numpy as np
+import wandb
 from accelerate import Accelerator
-from torch.utils.data import DataLoader
 from tqdm import trange
 
-import wandb
 from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
-from agilerl.components.data import ReplayDataset
-from agilerl.components.replay_buffer import ReplayBuffer
-from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.algo_utils import obs_channels_to_first
@@ -28,12 +24,11 @@ InitDictType = Optional[Dict[str, Any]]
 PopulationType = List[MultiAgentRLAlgorithm]
 
 
-def train_multi_agent(
+def train_multi_agent_on_policy(
     env: gym.Env,
     env_name: str,
     algo: str,
     pop: PopulationType,
-    memory: ReplayBuffer,
     sum_scores: bool = True,
     INIT_HP: InitDictType = None,
     MUT_P: InitDictType = None,
@@ -42,7 +37,6 @@ def train_multi_agent(
     evo_steps: int = 25,
     eval_steps: Optional[int] = None,
     eval_loop: int = 1,
-    learning_delay: int = 0,
     target: Optional[float] = None,
     tournament: Optional[TournamentSelection] = None,
     mutation: Optional[Mutations] = None,
@@ -56,7 +50,7 @@ def train_multi_agent(
     accelerator: Optional[Accelerator] = None,
     wandb_api_key: Optional[str] = None,
 ) -> Tuple[PopulationType, List[List[float]]]:
-    """The general online multi-agent RL training function. Returns trained population of agents
+    """The general on-policy multi-agent RL training function. Returns trained population of agents
     and their fitnesses.
 
     :param env: The environment to train in. Can be vectorized.
@@ -67,8 +61,6 @@ def train_multi_agent(
     :type algo: str
     :param pop: Population of agents
     :type pop: list[object]
-    :param memory: Experience Replay Buffer
-    :type memory: object
     :param sum_scores: Boolean flag indicating whether to sum sub-agents scores, typically True for co-operative environments, defaults to True
     :type sum_scores: bool, optional
     :param INIT_HP: Dictionary containing initial hyperparameters.
@@ -78,7 +70,7 @@ def train_multi_agent(
     :param swap_channels: Swap image channels dimension from last to first
         [H, W, C] -> [C, H, W], defaults to False
     :type swap_channels: bool, optional
-    :param max_steps: Maximum number of steps in environment, defaults to 50000
+    :param max_steps: Maximum number of steps in environment across the entire population, defaults to 50000
     :type max_steps: int, optional
     :param evo_steps: Evolution frequency (steps), defaults to 25
     :type evo_steps: int, optional
@@ -87,8 +79,6 @@ def train_multi_agent(
     :type eval_steps: int, optional
     :param eval_loop: Number of evaluation episodes, defaults to 1
     :type eval_loop: int, optional
-    :param learning_delay: Steps in environment before starting learning, defaults to 0
-    :type learning_delay: int, optional
     :param target: Target score for early stopping, defaults to None
     :type target: float, optional
     :param tournament: Tournament selection object, defaults to None
@@ -170,15 +160,6 @@ def train_multi_agent(
     )
 
     if accelerator is not None:
-        # Create dataloader from replay buffer
-        replay_dataset = ReplayDataset(memory, pop[0].batch_size)
-        replay_dataloader = DataLoader(replay_dataset, batch_size=None)
-        replay_dataloader = accelerator.prepare(replay_dataloader)
-        sampler = Sampler(dataset=replay_dataset, dataloader=replay_dataloader)
-    else:
-        sampler = Sampler(memory=memory)
-
-    if accelerator is not None:
         print(f"\nDistributed training on {accelerator.device}...")
     else:
         print("\nTraining...")
@@ -190,29 +171,32 @@ def train_multi_agent(
             unit="step",
             bar_format=bar_format,
             ascii=True,
+            dynamic_ncols=True,
             disable=not accelerator.is_local_main_process,
         )
     else:
-        pbar = trange(max_steps, unit="step", bar_format=bar_format, ascii=True)
+        pbar = trange(
+            max_steps,
+            unit="step",
+            bar_format=bar_format,
+            ascii=True,
+            dynamic_ncols=True,
+        )
 
-    agent_ids = deepcopy(env.agents)
-    pop_actor_loss = [{agent_id: [] for agent_id in agent_ids} for _ in pop]
-    pop_critic_loss = [{agent_id: [] for agent_id in agent_ids} for _ in pop]
-    pop_fitnesses = []
+    agent_ids = deepcopy(pop[0].shared_agent_ids)
+    pop_loss = [{agent_id: [] for agent_id in agent_ids} for _ in pop]
+    pop_fitnesses = [{agent_id: [] for agent_id in agent_ids} for _ in pop]
     total_steps = 0
     loss = None
     checkpoint_count = 0
 
     # Pre-training mutation
-    if accelerator is None:
-        if mutation is not None:
-            pop = mutation.mutation(pop, pre_training_mut=True)
-
+    if accelerator is None and mutation is not None:
+        pop = mutation.mutation(pop, pre_training_mut=True)
     # RL training loop
-    while np.less([agent.steps[-1] for agent in pop], max_steps).all():
+    while np.sum([agent.steps[-1] for agent in pop]) < max_steps:
         if accelerator is not None:
             accelerator.wait_for_everyone()
-
         pop_episode_scores = []
         pop_fps = []
         for agent_idx, agent in enumerate(pop):  # Loop through population
@@ -239,119 +223,108 @@ def train_multi_agent(
                     }
 
             start_time = time.time()
-            for idx_step in range(evo_steps // num_envs):
-                # Get next action from agent
-                cont_actions, discrete_action = agent.get_action(
-                    obs=obs, training=True, infos=info
-                )
-                if agent.discrete_actions:
-                    action = discrete_action
-                else:
-                    action = cont_actions
+            for _ in range(-(evo_steps // -agent.learn_step)):
 
-                if not is_vectorised:
-                    action = {agent: act[0] for agent, act in action.items()}
-                    cont_actions = {
-                        agent: act[0] for agent, act in cont_actions.items()
-                    }
+                states = {agent_id: [] for agent_id in agent.agent_ids}
+                actions = {agent_id: [] for agent_id in agent.agent_ids}
+                log_probs = {agent_id: [] for agent_id in agent.agent_ids}
+                rewards = {agent_id: [] for agent_id in agent.agent_ids}
+                dones = {agent_id: [] for agent_id in agent.agent_ids}
+                values = {agent_id: [] for agent_id in agent.agent_ids}
 
-                # Act in environment
-                next_obs, reward, termination, truncation, info = env.step(action)
-                score_increment = (
-                    (
-                        np.sum(np.array(list(reward.values())).transpose(), axis=-1)[
-                            :, np.newaxis
-                        ]
-                        if is_vectorised
-                        else np.sum(
-                            np.array(list(reward.values())).transpose(), axis=-1
-                        )
-                    )
-                    if sum_scores
-                    else np.array(list(reward.values())).transpose()
-                )
+                done = {agent_id: np.zeros(num_envs) for agent_id in agent.agent_ids}
 
-                scores += score_increment
-                total_steps += num_envs
-                steps += num_envs
-                # Save experience to replay buffer
-                if swap_channels:
+                for idx_step in range(-(agent.learn_step // -num_envs)):
+
+                    # Get next action from agent
+                    action, log_prob, _, value = agent.get_action(obs=obs, infos=info)
+
                     if not is_vectorised:
-                        obs = {agent_id: np.squeeze(s) for agent_id, s in obs.items()}
-                    next_obs = {
-                        agent_id: np.moveaxis(ns, [-1], [-3])
-                        for agent_id, ns in next_obs.items()
-                    }
+                        action = {agent: act[0] for agent, act in action.items()}
+                        log_prob = {agent: lp[0] for agent, lp in log_prob.items()}
+                        value = {agent: val[0] for agent, val in value.items()}
 
-                memory.save_to_memory(
-                    obs,
-                    cont_actions,
-                    reward,
+                    # Act in environment
+                    next_obs, reward, termination, truncation, info = env.step(action)
+                    score_increment = (
+                        (
+                            np.sum(
+                                np.array(list(reward.values())).transpose(), axis=-1
+                            )[:, np.newaxis]
+                            if is_vectorised
+                            else np.sum(
+                                np.array(list(reward.values())).transpose(), axis=-1
+                            )
+                        )
+                        if sum_scores
+                        else np.array(list(reward.values())).transpose()
+                    )
+
+                    scores += score_increment
+                    total_steps += num_envs
+                    steps += num_envs
+
+                    next_done = {}
+                    for agent_id in agent.agent_ids:
+                        states[agent_id].append(obs[agent_id])
+                        actions[agent_id].append(action[agent_id])
+                        log_probs[agent_id].append(log_prob[agent_id])
+                        rewards[agent_id].append(reward[agent_id])
+                        dones[agent_id].append(done[agent_id])
+                        values[agent_id].append(value[agent_id])
+                        next_done[agent_id] = np.logical_or(
+                            termination[agent_id], truncation[agent_id]
+                        ).astype(np.int8)
+
+                    if swap_channels:
+                        if not is_vectorised:
+                            next_obs = {
+                                agent_id: obs_channels_to_first(np.expand_dims(s, 0))
+                                for agent_id, s in next_obs.items()
+                            }
+                        else:
+                            next_obs = {
+                                agent_id: obs_channels_to_first(s)
+                                for agent_id, s in next_obs.items()
+                            }
+
+                    if not is_vectorised:
+                        next_done = {
+                            agent: np.array([n_d]) for agent, n_d in next_done.items()
+                        }
+
+                    obs = next_obs
+                    done = next_done
+
+                    for idx, agent_dones in enumerate(zip(*next_done.values())):
+                        if all(agent_dones):
+                            completed_score = (
+                                float(scores[idx]) if sum_scores else list(scores[idx])
+                            )
+                            completed_episode_scores.append(completed_score)
+                            agent.scores.append(completed_score)
+                            scores[idx].fill(0)
+                            if not is_vectorised:
+                                obs, info = env.reset()
+
+                    pbar.update(num_envs)
+
+                experiences = (
+                    states,
+                    actions,
+                    log_probs,
+                    rewards,
+                    # terms,
+                    dones,
+                    values,
                     next_obs,
-                    termination,
-                    is_vectorised=is_vectorised,
+                    next_done,
                 )
 
-                # Learn according to learning frequency
-                # Handle learn steps > num_envs
-                if agent.learn_step > num_envs:
-                    learn_step = agent.learn_step // num_envs
-                    if (
-                        idx_step % learn_step == 0
-                        and len(memory) >= agent.batch_size
-                        and memory.counter > learning_delay
-                    ):
-                        # Sample replay buffer
-                        experiences = sampler.sample(agent.batch_size)
-                        # Learn according to agent's RL algorithm
-                        loss = agent.learn(experiences)
-                        for agent_id in agent_ids:
-                            losses[agent_id].append(loss[agent_id])
-
-                # Handle num_envs > learn step; learn multiple times per step in env
-                elif (
-                    len(memory) >= agent.batch_size and memory.counter > learning_delay
-                ):
-                    for _ in range(num_envs // agent.learn_step):
-                        # Sample replay buffer
-                        experiences = sampler.sample(agent.batch_size)
-                        # Learn according to agent's RL algorithm
-                        loss = agent.learn(experiences)
-                        for agent_id in agent_ids:
-                            losses[agent_id].append(loss[agent_id])
-
-                # Update the state
-                if swap_channels and not is_vectorised:
-                    next_obs = {
-                        agent_id: np.expand_dims(ns, 0)
-                        for agent_id, ns in next_obs.items()
-                    }
-
-                obs = next_obs
-
-                reset_noise_indices = []
-                # Find which agents are "done" - i.e. terminated or truncated
-                dones = {
-                    agent_id: termination[agent_id] | truncation[agent_id]
-                    for agent_id in agent.agent_ids
-                }
-                if not is_vectorised:
-                    dones = {agent: np.array([done]) for agent, done in dones.items()}
-
-                for idx, agent_dones in enumerate(zip(*dones.values())):
-                    if all(agent_dones):
-                        completed_score = (
-                            float(scores[idx]) if sum_scores else list(scores[idx])
-                        )
-                        completed_episode_scores.append(completed_score)
-                        agent.scores.append(completed_score)
-                        scores[idx].fill(0)
-                        reset_noise_indices.append(idx)
-                        if not is_vectorised:
-                            obs, info = env.reset()
-                agent.reset_action_noise(reset_noise_indices)
-
-            pbar.update(evo_steps // len(pop))
+                # Learn according to agent's RL algorithm
+                loss = agent.learn(experiences)
+                for agent_id in agent_ids:
+                    losses[agent_id].append(loss[agent_id])
 
             agent.steps[-1] += steps
             fps = steps / (time.time() - start_time)
@@ -360,17 +333,10 @@ def train_multi_agent(
             if len(losses[agent_ids[0]]) > 0:
                 if all([losses[a_id] for a_id in agent_ids]):
                     for agent_id in agent_ids:
-                        actor_losses, critic_losses = list(zip(*losses[agent_id]))
-                        actor_losses = [
-                            loss for loss in actor_losses if loss is not None
+                        unique_loss = [
+                            loss for loss in losses[agent_id] if loss is not None
                         ]
-                        if actor_losses:
-                            pop_actor_loss[agent_idx][agent_id].append(
-                                np.mean(actor_losses)
-                            )
-                        pop_critic_loss[agent_idx][agent_id].append(
-                            np.mean(critic_losses)
-                        )
+                        pop_loss[agent_idx][agent_id].append(np.mean(unique_loss))
         # Evaluate population
         fitnesses = [
             agent.test(
@@ -446,25 +412,17 @@ def train_multi_agent(
             wandb_dict.update(fitness_dict)
             wandb_dict.update(mean_score_dict)
 
-            actor_loss_dict = {}
-            critic_loss_dict = {}
+            loss_dict = {}
 
             for agent_idx, agent in enumerate(pop):
-                for agent_id, actor_loss, critic_loss in zip(
-                    pop_actor_loss[agent_idx].keys(),
-                    pop_actor_loss[agent_idx].values(),
-                    pop_critic_loss[agent_idx].values(),
+                for agent_id, loss in zip(
+                    pop_loss[agent_idx].keys(),
+                    pop_loss[agent_idx].values(),
                 ):
-                    if actor_loss:
-                        actor_loss_dict[
-                            f"train/agent_{agent_idx}_{agent_id}_actor_loss"
-                        ] = np.mean(actor_loss[-10:])
-                        wandb_dict.update(actor_loss_dict)
-                    if critic_loss:
-                        critic_loss_dict[
-                            f"train/agent_{agent_idx}_{agent_id}_critic_loss"
-                        ] = np.mean(critic_loss[-10:])
-                        wandb_dict.update(critic_loss_dict)
+                    loss_dict[f"train/agent_{agent_idx}_{agent_id}_loss"] = np.mean(
+                        loss[-10:]
+                    )
+                    wandb_dict.update(loss_dict)
 
             if accelerator is not None:
                 accelerator.wait_for_everyone()
@@ -478,8 +436,7 @@ def train_multi_agent(
                 wandb.log(
                     {
                         f"learn_step_agent_{idx}": agent.learn_step,
-                        f"learning_rate_actor_agent_{idx}": agent.lr_actor,
-                        f"learning_rate_critic_agent_{idx}": agent.lr_critic,
+                        f"learning_rate_agent_{idx}": agent.lr,
                         f"batch_size_agent_{idx}": agent.batch_size,
                         f"indi_fitness_agent_{idx}": agent.fitness[-1],
                     }

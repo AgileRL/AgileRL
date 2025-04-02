@@ -43,8 +43,6 @@ class PPO(RLAlgorithm):
     :type hp_config: HyperparameterConfig, optional
     :param net_config: Network configuration, defaults to None
     :type net_config: dict, optional
-    :param head_config: Head network configuration, defaults to None
-    :type head_config: dict, optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
     :param lr: Learning rate for optimizer, defaults to 1e-4
@@ -57,7 +55,7 @@ class PPO(RLAlgorithm):
     :type gae_lambda: float, optional
     :param mut: Most recent mutation to agent, defaults to None
     :type mut: str, optional
-    :param action_std_init: Initial action standard deviation, defaults to 0.6
+    :param action_std_init: Initial action standard deviation, defaults to 0.0
     :type action_std_init: float, optional
     :param clip_coef: Surrogate clipping coefficient, defaults to 0.2
     :type clip_coef: float, optional
@@ -94,7 +92,6 @@ class PPO(RLAlgorithm):
         index: int = 0,
         hp_config: Optional[HyperparameterConfig] = None,
         net_config: Optional[Dict[str, Any]] = None,
-        head_config: Optional[Dict[str, Any]] = None,
         batch_size: int = 64,
         lr: float = 1e-4,
         learn_step: int = 2048,
@@ -184,12 +181,6 @@ class PPO(RLAlgorithm):
             wrap, bool
         ), "Wrap models flag must be boolean value True or False."
 
-        # For continuous action spaces
-        if not self.discrete_actions:
-            self.action_var = torch.full(
-                (self.action_dim,), action_std_init**2, device=self.device
-            )
-
         self.batch_size = batch_size
         self.lr = lr
         self.gamma = gamma
@@ -235,8 +226,8 @@ class PPO(RLAlgorithm):
             self.actor = StochasticActor(
                 observation_space,
                 action_space,
-                log_std_init=self.action_std_init,
-                device=self.device,
+                action_std_init=self.action_std_init,
+                device=device,
                 **net_config,
             )
 
@@ -389,6 +380,11 @@ class PPO(RLAlgorithm):
             action = action.to(self.device)
             log_prob = self.actor.action_log_prob(action)
 
+        if isinstance(self.action_space, spaces.Box) and self.action_space.shape == (
+            1,
+        ):
+            action = action.unsqueeze(1)
+
         if return_tensors:
             return (
                 (
@@ -415,10 +411,10 @@ class PPO(RLAlgorithm):
     def learn(self, experiences: ExperiencesType) -> float:
         """Updates agent network parameters to learn from experiences.
 
-        :param experience: List of batched states, actions, log_probs, rewards, dones, values, next_state in that order.
+        :param experience: List of batched states, actions, log_probs, rewards, dones, values, next_state, next_done in that order.
         :type experience: Tuple[Union[numpy.ndarray, Dict[str, numpy.ndarray]], ...]
         """
-        (states, actions, log_probs, rewards, dones, values, next_state) = (
+        (states, actions, log_probs, rewards, dones, values, next_state, next_done) = (
             stack_experiences(*experiences)
         )
 
@@ -429,23 +425,26 @@ class PPO(RLAlgorithm):
             next_state = self.preprocess_observation(next_state)
             next_value = self.critic(next_state).reshape(1, -1).cpu()
             advantages = torch.zeros_like(rewards).float()
-            for t in range(num_steps):
-                discount = 1
-                a_t = 0
-                for k in range(t, num_steps):
-                    if k != num_steps - 1:
-                        nextvalue = values[k + 1]
-                    else:
-                        nextvalue = next_value.squeeze()
+            last_gae_lambda = 0
+            for t in reversed(range(num_steps)):
+                if t == num_steps - 1:
+                    next_non_terminal = 1.0 - next_done
+                    nextvalue = next_value.squeeze()
+                else:
+                    next_non_terminal = 1.0 - dones[t + 1]
+                    nextvalue = values[t + 1]
 
-                    a_t += discount * (
-                        rewards[k]
-                        + self.gamma * nextvalue * (1.0 - dones[k])
-                        - values[k]
-                    )
-                    discount *= self.gamma * self.gae_lambda * (1.0 - dones[k])
+                # Calculate delta (TD error)
+                delta = (
+                    rewards[t] + self.gamma * nextvalue * next_non_terminal - values[t]
+                )
 
-                advantages[t] = a_t
+                # Use recurrence relation to compute advantage
+                advantages[t] = last_gae_lambda = (
+                    delta
+                    + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lambda
+                )
+
             returns = advantages + values
 
         # Flatten experiences from (batch_size, num_envs, ...) to (batch_size*num_envs, ...)
@@ -468,7 +467,6 @@ class PPO(RLAlgorithm):
 
         num_samples = returns.size(0)
         batch_idxs = np.arange(num_samples)
-        clipfracs = []
         mean_loss = 0
         for epoch in range(self.update_epochs):
             np.random.shuffle(batch_idxs)
@@ -499,9 +497,6 @@ class PPO(RLAlgorithm):
 
                     with torch.no_grad():
                         approx_kl = ((ratio - 1) - logratio).mean()
-                        clipfracs += [
-                            ((ratio - 1.0).abs() > self.clip_coef).float().mean().item()
-                        ]
 
                     minibatch_advs = batch_advantages
                     minibatch_advs = (minibatch_advs - minibatch_advs.mean()) / (
@@ -537,8 +532,8 @@ class PPO(RLAlgorithm):
                         self.accelerator.backward(loss)
                     else:
                         loss.backward()
-
                     clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+                    clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
                     self.optimizer.step()
 
                     mean_loss += loss.item()
