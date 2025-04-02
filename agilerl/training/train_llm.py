@@ -3,10 +3,10 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch.distributed as dist
-import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import GRPO
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.hpo.mutation import Mutations
@@ -187,7 +187,11 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                     aggregate_metrics_across_gpus(agent, metric)
                     for metric in test_metrics
                 ]
-                if verbose and (accelerator is None or accelerator.is_main_process):
+                if (
+                    verbose
+                    and (accelerator is None or accelerator.is_main_process)
+                    and agent_idx == len(pop) - 1
+                ):
                     fitness = [str(round(agent.fitness[-1], 2)) for agent in pop]
                     avg_fitness = [
                         "%.2f" % np.mean(agent.fitness[-5:]) for agent in pop
