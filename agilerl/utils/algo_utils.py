@@ -1,4 +1,3 @@
-import copy
 import glob
 import inspect
 import os
@@ -150,7 +149,9 @@ def multi_agent_sample_tensor_from_space(
     return sample_tensor
 
 
-def make_safe_deepcopies(*args: Union[Module, List[Module]]) -> List[Module]:
+def make_safe_deepcopies(
+    *args: Union[EvolvableModule, List[EvolvableModule]]
+) -> List[EvolvableModule]:
     """Makes deep copies of EvolvableModule objects and their attributes.
 
     :param args: EvolvableModule or lists of EvolvableModule objects to copy.
@@ -162,11 +163,9 @@ def make_safe_deepcopies(*args: Union[Module, List[Module]]) -> List[Module]:
     copies = []
     for arg in args:
         if isinstance(arg, list):
-            arg_copy = [
-                copy.deepcopy(inner_arg.cpu()).to(inner_arg.device) for inner_arg in arg
-            ]
+            arg_copy = [inner_arg.clone() for inner_arg in arg]
         else:
-            arg_copy = copy.deepcopy(arg.cpu()).to(arg.device)
+            arg_copy = arg.clone()
 
         copies.append(arg_copy)
 

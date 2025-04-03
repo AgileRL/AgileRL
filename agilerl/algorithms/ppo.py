@@ -227,12 +227,14 @@ class PPO(RLAlgorithm):
                 observation_space,
                 action_space,
                 action_std_init=self.action_std_init,
-                device=device,
+                device=self.device,
                 **net_config,
             )
 
             self.critic = ValueNetwork(
-                observation_space, device=self.device, **critic_net_config
+                observation_space,
+                device=self.device,
+                **critic_net_config,
             )
         # Share encoders between actor and critic
         self.share_encoders = share_encoders
@@ -355,7 +357,9 @@ class PPO(RLAlgorithm):
         dones = dones.long()
         with torch.no_grad():
             num_steps = rewards.size(0)
+            print("Device: ", self.device)
             next_state = self.preprocess_observation(next_state)
+            print(next(iter(self.critic.parameters())))
             next_value = self.critic(next_state).reshape(1, -1).cpu()
             advantages = torch.zeros_like(rewards).float()
             last_gae_lambda = 0

@@ -435,7 +435,6 @@ class IPPO(MultiAgentRLAlgorithm):
 
         action_masks, env_defined_actions, agent_masks = self.process_infos(infos)
 
-        print("obs", obs)
         first_obs_shape = list(obs.values())[0].shape
         vect_dim = (
             first_obs_shape[0]
@@ -467,11 +466,7 @@ class IPPO(MultiAgentRLAlgorithm):
                 action, log_prob, entropy = actor(obs, action_mask=action_mask)
                 state_values = critic(obs).squeeze(-1)
 
-            action_dict[agent_id] = (
-                self.scale_to_action_space(action, idx).cpu().data.numpy()
-                if not self.discrete_actions
-                else action.cpu().data.numpy()
-            )
+            action_dict[agent_id] = action.cpu().data.numpy()
             action_logprob_dict[agent_id] = log_prob.cpu().data.numpy()
             dist_entropy_dict[agent_id] = entropy.cpu().data.numpy()
             state_values_dict[agent_id] = state_values.cpu().data.numpy()
@@ -705,7 +700,7 @@ class IPPO(MultiAgentRLAlgorithm):
                     batch_states = preprocess_observation(
                         batch_states, obs_space, self.device, self.normalize_images
                     )
-                    _, log_prob, entropy = actor(batch_states)
+                    _, _, entropy = actor(batch_states)
                     value = critic(batch_states).squeeze(-1)
 
                     log_prob = actor.action_log_prob(batch_actions.to(self.device))

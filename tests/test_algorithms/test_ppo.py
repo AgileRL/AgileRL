@@ -564,8 +564,8 @@ def test_ppo_optimizer_parameters():
     dummy_action = torch.tensor([0])
     dummy_log_prob = torch.tensor([1.0])
 
-    dist = ppo.actor(dummy_input)
-    loss = (dummy_log_prob - dist.log_prob(dummy_action)) ** 2
+    _, _, _ = ppo.actor(dummy_input)
+    loss = (dummy_log_prob - ppo.actor.action_log_prob(dummy_action)) ** 2
     loss = loss.mean()
     ppo.optimizer.zero_grad()
     loss.backward()
