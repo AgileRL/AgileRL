@@ -1,7 +1,10 @@
 import copy
+import glob
 import inspect
+import os
 import warnings
 from collections import OrderedDict, defaultdict
+from dataclasses import dataclass
 from numbers import Number
 from typing import Any, Dict, Iterable, List, Optional, Tuple, TypeGuard, Union
 
@@ -15,6 +18,7 @@ from tensordict.nn import CudaGraphModule
 from torch._dynamo import OptimizedModule
 from torch.nn import Module
 from torch.optim import Optimizer
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
 from agilerl.protocols import EvolvableAttributeType, EvolvableModule, OptimizerWrapper
 from agilerl.typing import (
@@ -670,7 +674,9 @@ def stack_experiences(
 
 
 def stack_and_pad_experiences(
-    *experiences: MaybeObsList, padding_values: List[Union[int, float, bool]]
+    *experiences: MaybeObsList,
+    padding_values: List[Union[int, float, bool]],
+    padding_side: str = "right",
 ) -> Tuple[ArrayOrTensor, ...]:
     """Stacks experiences into a single tensor, padding them to the maximum length.
 
@@ -678,6 +684,8 @@ def stack_and_pad_experiences(
     :type experiences: list[numpy.ndarray[float]] or list[dict[str, numpy.ndarray[float]]]
     :param to_torch: If True, convert the stacked experiences to a torch tensor, defaults to True
     :type to_torch: bool, optional
+    :param padding_side: Side to pad on, defaults to "right"
+    :type padding_side: str, optional
 
     :return: Stacked experiences
     :rtype: Tuple[ArrayOrTensor, ...]
@@ -691,7 +699,15 @@ def stack_and_pad_experiences(
             padding_sizes = [(max_size - e.shape[-1]) for e in exp]
             if sum(padding_sizes) != 0:
                 exp = [
-                    F.pad(e, (0, padding_size), value=padding)
+                    F.pad(
+                        e,
+                        (
+                            (0, padding_size)
+                            if padding_side == "right"
+                            else (padding_size, 0)
+                        ),
+                        value=padding,
+                    )
                     for e, padding_size in zip(exp, padding_sizes)
                 ]
 
@@ -754,6 +770,76 @@ def is_vectorized_experiences(*experiences: ArrayOrTensor) -> bool:
         is_vec_ls.append(is_vec)
 
     return all(is_vec_ls)
+
+
+@dataclass
+class CosineLRScheduleConfig:
+    """Data class to configure a cosine LR scheduler."""
+
+    num_epochs: int
+    warmup_proportion: float
+
+
+def create_warmup_cosine_scheduler(
+    optimizer: Union[DeepSpeedOptimizerWrapper, OptimizerWrapper],
+    config: CosineLRScheduleConfig,
+    min_lr: float,
+    max_lr: float,
+) -> SequentialLR:
+    """Helper function to create cosine annealing lr scheduler with warm-up
+
+    :param optimizer: Optimizer
+    :type optimizer: Union[DeepSpeedOptimizerWrapper, OptimizerWrapper]
+    :param config: LR scheduler config
+    :type config: CosineLRScheduleConfig
+    :param min_lr: Minimum learning rate
+    :type min_lr: float
+    :param max_lr: Maximum learning rate
+    :type max_lr: float
+    :return: Return sequential learning rate scheduler
+    :rtype: SequentialLR
+    """
+    num_epochs = config.num_epochs
+    warmup_proportion = config.warmup_proportion
+    warmup_epochs = int(num_epochs * warmup_proportion)
+    remaining_epochs = num_epochs - warmup_epochs
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = max_lr
+    warmup_scheduler = LinearLR(
+        optimizer,
+        start_factor=min_lr / max_lr,  # Start factor to get from min_lr to max_lr
+        end_factor=1.0,  # End with the full max_lr
+        total_iters=warmup_epochs,
+    )
+    # Decay scheduler: Cosine decay from max_lr to min_lr
+    # Double T_max to ensure we only use the first half of the cosine curve (strictly decreasing)
+    cosine_scheduler = CosineAnnealingLR(
+        optimizer,
+        T_max=remaining_epochs * 2,  # Doubled to ensure strictly decreasing LR
+        eta_min=min_lr,
+    )
+    scheduler = SequentialLR(
+        optimizer,
+        schedulers=[warmup_scheduler, cosine_scheduler],
+        milestones=[warmup_epochs],
+    )
+    return scheduler
+
+
+def remove_nested_files(files: str) -> None:
+    """Remove nested files from a list of files.
+
+    :param files: List of files to remove nested files from
+    :type files: List[str]
+    :param depth: Depth of the nested files, defaults to 0
+    :type depth: int, optional
+    """
+    for _file in files:
+        if os.path.isdir(_file):
+            remove_nested_files(glob.glob(_file + "/*"))
+            os.rmdir(_file)
+        else:
+            os.remove(_file)
 
 
 def vectorize_experiences_by_agent(

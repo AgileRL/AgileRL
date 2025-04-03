@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from accelerate import Accelerator
+from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from numpy.random import Generator
 from torch._dynamo.eval_frame import OptimizedModule
 
@@ -498,30 +499,36 @@ class Mutations:
         """
 
         def _reinit_individual(config: OptimizerConfig) -> None:
-            opt: OptimizerWrapper = getattr(individual, config.name)
+            opt: Union[OptimizerWrapper, DeepSpeedOptimizerWrapper] = getattr(
+                individual, config.name
+            )
             optimizer = opt.optimizer
 
             # Multiple optimizers in a single attribute (i.e. multi-agent)
             # or one module optimized by a single optimizer
-            if isinstance(optimizer, list) or len(opt.network_names) == 1:
-                opt_nets = getattr(individual, opt.network_names[0])
-
-            # Multiple modules optimized by a single optimizer (e.g. PPO)
+            if isinstance(opt, DeepSpeedOptimizerWrapper):
+                for param_group in opt.param_groups:
+                    param_group["lr"] = individual.lr
             else:
-                opt_nets = [getattr(individual, net) for net in opt.network_names]
+                if isinstance(optimizer, list) or len(opt.network_names) == 1:
+                    opt_nets = getattr(individual, opt.network_names[0])
 
-            # Reinitialize optimizer with mutated nets
-            offspring_opt = OptimizerWrapper(
-                optimizer_cls=config.get_optimizer_cls(),
-                networks=opt_nets,
-                lr=getattr(individual, opt.lr_name),
-                optimizer_kwargs=opt.optimizer_kwargs,
-                network_names=opt.network_names,
-                lr_name=opt.lr_name,
-                multiagent=opt.multiagent,
-            )
+                # Multiple modules optimized by a single optimizer (e.g. PPO)
+                else:
+                    opt_nets = [getattr(individual, net) for net in opt.network_names]
 
-            setattr(individual, config.name, offspring_opt)
+                # Reinitialize optimizer with mutated nets
+                offspring_opt = OptimizerWrapper(
+                    optimizer_cls=config.get_optimizer_cls(),
+                    networks=opt_nets,
+                    lr=getattr(individual, opt.lr_name),
+                    optimizer_kwargs=opt.optimizer_kwargs,
+                    network_names=opt.network_names,
+                    lr_name=opt.lr_name,
+                    multiagent=opt.multiagent,
+                )
+
+                setattr(individual, config.name, offspring_opt)
 
         if optimizer is not None:
             _reinit_individual(optimizer)
@@ -545,11 +552,13 @@ class Mutations:
             return individual
 
         mutate_attr, mutate_param = hp_config.sample()
+
         if mutate_param.value is None:
             mutate_param.value = getattr(individual, mutate_attr)
 
         # Randomly grow or shrink hyperparameters by specified factors
         new_value = mutate_param.mutate()
+
         setattr(individual, mutate_attr, new_value)
 
         # Need to reinitialize respective optimizer if mutated learning rate

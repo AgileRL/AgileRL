@@ -164,8 +164,9 @@ def get_checkpoint_dict(agent: SelfEvolvableAlgorithm) -> Dict[str, Any]:
     network_info["optimizer_names"] = optimizer_attr_names
     attribute_dict["network_info"] = network_info
     attribute_dict["agilerl_version"] = version("agilerl")
-
     attribute_dict.pop("accelerator", None)
+    if attribute_dict.pop("lr_scheduler", None) is not None:
+        attribute_dict["lr_scheduler"] = agent.lr_scheduler.state_dict()
     return attribute_dict
 
 
@@ -202,7 +203,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         assert isinstance(
             accelerator, (type(None), Accelerator)
         ), "Accelerator must be an instance of Accelerator."
-
         if torch_compiler:
             assert torch_compiler in [
                 "default",
@@ -370,7 +370,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         else:
             # Remove the algo specific guarded variables (if specified)
             attributes = {k: v for k, v in attributes if k not in exclude}
-
         return attributes
 
     @staticmethod
@@ -421,7 +420,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                     setattr(clone, attribute, copy.deepcopy(getattr(agent, attribute)))
             else:
                 setattr(clone, attribute, copy.deepcopy(getattr(agent, attribute)))
-
         return clone
 
     @classmethod
@@ -691,6 +689,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         # Make copy using input arguments
         input_args = EvolvableAlgorithm.inspect_attributes(self, input_args_only=True)
         input_args["wrap"] = wrap
+
         clone = type(self)(**input_args)
 
         if self.accelerator is not None:
@@ -705,7 +704,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 cloned_modules[attr] = obj.clone()
 
             setattr(clone, attr, cloned_modules[attr])
-
         # Reinitialize optimizers
         for opt_config in self.registry.optimizers:
             orig_optimizer: OptimizerWrapper = getattr(self, opt_config.name)
@@ -879,7 +877,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         )
 
         # Reconstruct evolvable modules in algorithm
-        print("Checkpoint: ", checkpoint)
         network_info: Optional[Dict[str, Dict[str, Any]]] = checkpoint.get(
             "network_info"
         )
@@ -1209,20 +1206,22 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         ):
             # Split agent names on expected pattern of e.g. speaker_0, speaker_1,
             # listener_0, listener_1, to determine which agents are homogeneous
-            homo_agent = agent_id.rsplit("_", 1)[0]
-            if homo_agent in self.homogeneous_agents:
-                self.homogeneous_agents[homo_agent].append(agent_id)
+            homo_id = (
+                agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
+            )
+            if homo_id in self.homogeneous_agents:
+                self.homogeneous_agents[homo_id].append(agent_id)
                 assert (
-                    obs_space == self.unique_observation_spaces[homo_agent]
-                ), f"Homogeneous agents, i.e. agents that share the prefix {homo_agent}, must have the same observation space. Found {self.unique_observation_spaces[homo_agent]} and {obs_space}."
+                    obs_space == self.unique_observation_spaces[homo_id]
+                ), f"Homogeneous agents, i.e. agents that share the prefix {homo_id}, must have the same observation space. Found {self.unique_observation_spaces[homo_id]} and {obs_space}."
                 assert (
-                    action_space == self.unique_action_spaces[homo_agent]
-                ), f"Homogeneous agents, i.e. agents that share the prefix {homo_agent}, must have the same action space. Found {self.unique_action_spaces[homo_agent]} and {action_space}."
+                    action_space == self.unique_action_spaces[homo_id]
+                ), f"Homogeneous agents, i.e. agents that share the prefix {homo_id}, must have the same action space. Found {self.unique_action_spaces[homo_id]} and {action_space}."
             else:
-                self.shared_agent_ids.append(homo_agent)
-                self.homogeneous_agents[homo_agent] = [agent_id]
-                self.unique_observation_spaces[homo_agent] = obs_space
-                self.unique_action_spaces[homo_agent] = action_space
+                self.shared_agent_ids.append(homo_id)
+                self.homogeneous_agents[homo_id] = [agent_id]
+                self.unique_observation_spaces[homo_id] = obs_space
+                self.unique_action_spaces[homo_id] = action_space
 
         self.n_unique_agents = len(self.shared_agent_ids)
         self.normalize_images = normalize_images
@@ -1414,6 +1413,8 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         """
         summed_rewards = {homo_id: 0 for homo_id in self.shared_agent_ids}
         for agent_id, reward in rewards.items():
-            homo_id = agent_id.rsplit("_", 1)[0]
+            homo_id = (
+                agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
+            )
             summed_rewards[homo_id] += reward
         return summed_rewards

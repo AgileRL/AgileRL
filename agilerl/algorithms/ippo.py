@@ -390,7 +390,11 @@ class IPPO(MultiAgentRLAlgorithm):
         action_masks = {homo_id: [] for homo_id in self.shared_agent_ids}
         for agent_id, info in infos.items():
             if isinstance(info, dict):
-                homo_id = agent_id.rsplit("_", 1)[0]
+                homo_id = (
+                    agent_id.rsplit("_", 1)[0]
+                    if isinstance(agent_id, str)
+                    else agent_id
+                )
                 action_masks[homo_id].append(
                     info.get("action_mask", None) if isinstance(info, dict) else None
                 )
@@ -420,7 +424,9 @@ class IPPO(MultiAgentRLAlgorithm):
         """
         preprocessed = {homo_id: [] for homo_id in self.shared_agent_ids}
         for agent_id, obs in observation.items():
-            homo_id = agent_id.rsplit("_", 1)[0]
+            homo_id = (
+                agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
+            )
             preprocessed[homo_id].append(
                 preprocess_observation(
                     observation=obs,
@@ -556,10 +562,14 @@ class IPPO(MultiAgentRLAlgorithm):
         """
         shared = {homo_id: {} for homo_id in self.shared_agent_ids}
         for agent_id, inp in input.items():
-            homo_id = agent_id.rsplit("_", 1)[0]
+            homo_id = (
+                agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
+            )
             shared[homo_id][agent_id] = inp
         for agent_id, inp in input.items():
-            homo_id = agent_id.rsplit("_", 1)[0]
+            homo_id = (
+                agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
+            )
             shared[homo_id][agent_id] = np.stack(shared[homo_id][agent_id])
         return shared
 

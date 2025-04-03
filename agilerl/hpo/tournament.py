@@ -60,9 +60,7 @@ class TournamentSelection:
         """
         last_fitness = [np.mean(indi.fitness[-self.eval_loop :]) for indi in population]
         rank = np.argsort(last_fitness).argsort()
-
         max_id = max([ind.index for ind in population])
-
         model = population[int(np.argsort(rank)[-1])]
         elite = model.clone()
         return elite, rank, max_id
