@@ -16,7 +16,7 @@ from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
-MODEL_PATH = "Qwen/Qwen2.5-3B"
+MODEL_PATH = "Qwen/Qwen2.5-1.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
 
@@ -146,15 +146,15 @@ def combined_rewards(completion, solution, prompt):
         + format_reward_func([completion], [solution])[0]
     )
 
-    print(
-        f"""
-============================================ \n
-Completion: {completion}, \n
-Numbers: {prompt}, \n
-Correct Answer: {solution.item()} \n
-Reward: {reward}
-"""
-    )
+#     print(
+#         f"""
+# ============================================ \n
+# Completion: {completion}, \n
+# Numbers: {prompt}, \n
+# Correct Answer: {solution.item()} \n
+# Reward: {reward}
+# """
+#     )
 
     if reward == 2.0:
         with open("countdown_completions.txt", "a") as text_file:
@@ -251,7 +251,7 @@ def main(init_hp, mut_p):
         save_elite=True,
         elite_path="saved_llms",
         max_reward=2.0,
-        evo_steps=1,
+        evo_steps=2,
         mutation=mutations,
         tournament=tournament,
         accelerator=accelerators[0],

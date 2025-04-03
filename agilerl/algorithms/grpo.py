@@ -589,7 +589,7 @@ class GRPO(RLAlgorithm):
         """
         if self.accelerator is not None:
             os.makedirs(path, exist_ok=True)
-            self.actor.save_checkpoint(path, tag="checkpoint")
+            self.actor.save_checkpoint(path, tag=f"step_{self.steps[-1]}")
         else:
             warnings.warn(
                 "Distributed actor save not supported for non-distributed training."
@@ -602,12 +602,16 @@ class GRPO(RLAlgorithm):
         :param path: Output directory to load the checkpoint from
         :type path: str
         """
+        # path 
+        # tag = path.split("/")[-1]
+        # print("THIS IS THE TAG", tag)
+        # print("THIS IS THE PATH", f"{path}/{tag}")
         if self.accelerator is not None:
-            deepspeed_dirs = sorted(glob.glob(f"{path}/checkpoint"))
+            deepspeed_dirs = sorted(glob.glob(f"{path}"))
             assert len(deepspeed_dirs) > 0
             self.actor.load_checkpoint(
                 path,
-                tag="checkpoint",
+                # tag=tag,
                 load_module_strict=True,
                 load_optimizer_states=True,
                 load_lr_scheduler_states=True,
@@ -673,7 +677,9 @@ class GRPO(RLAlgorithm):
         if self.accelerator is not None:
             self.accelerator.free_memory()
             self.accelerator.wait_for_everyone()
-            self._save_distributed_actor(f"GRPO_test/agent_{self.index}")
+            print(f"================================= Saving agent for process {self.accelerator.process_index} =================================")
+            self._save_distributed_actor(f"GRPO/agent_{self.index}")
+            print(f"================================= Finished agent for process {self.accelerator.process_index} =================================")
             self.accelerator.wait_for_everyone()
             input_args = EvolvableAlgorithm.inspect_attributes(
                 self, input_args_only=True
@@ -693,11 +699,13 @@ class GRPO(RLAlgorithm):
             if index is not None:
                 clone.index = index
             clone.accelerator.wait_for_everyone()
-            clone._load_distributed_actor(f"GRPO_test/agent_{self.index}")
+            print(f"================================= Loading agent for process {self.accelerator.process_index} =================================")
+            clone._load_distributed_actor(f"GRPO/agent_{self.index}/step_{self.steps[-1]}")
+            print(f"================================= Finished loading agent for process {self.accelerator.process_index} =================================")
             clone.accelerator.wait_for_everyone()
-            saved_state_files = glob.glob(f"GRPO_test/agent_{self.index}/*")
-            if clone.accelerator.is_main_process:
-                remove_nested_files(saved_state_files)
+            # saved_state_files = glob.glob(f"GRPO/agent_{self.index}_step_{self.steps[-1]}/*")
+            # if clone.accelerator.is_main_process:
+            #     remove_nested_files(saved_state_files)
         else:
             actor_state_dict = self.actor.state_dict()
             optimizer_state_dict = self.optimizer.optimizer.state_dict()

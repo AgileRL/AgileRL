@@ -149,6 +149,8 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
             dynamic_ncols=True,
         )
 
+    print("AGENT INDICES", [agent.index for agent in pop])
+    assert False
     total_steps = 0
     # calling env.reset() supplies the first batch of training data
     prompts = env.reset(reset_dataloaders=True)
@@ -231,9 +233,10 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                         test_metrics_dict
                     )
                 pbar.update(effective_data_batch_size)
-                agent.steps.append(effective_data_batch_size)
                 agent.scores.append(agg_metrics[2])
-                total_steps += effective_data_batch_size
+            total_steps += effective_data_batch_size
+            agent.steps.append(effective_data_batch_size)
+
 
         if accelerator is not None:
             accelerator.wait_for_everyone()
