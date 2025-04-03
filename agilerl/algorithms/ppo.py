@@ -227,13 +227,14 @@ class PPO(RLAlgorithm):
                 observation_space,
                 action_space,
                 action_std_init=self.action_std_init,
-                device=device,
+                device=self.device,
                 **net_config,
             )
 
             self.critic = ValueNetwork(
                 observation_space, device=self.device, **critic_net_config
             )
+
         # Share encoders between actor and critic
         self.share_encoders = share_encoders
         if self.share_encoders and all(

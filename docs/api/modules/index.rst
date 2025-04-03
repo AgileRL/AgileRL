@@ -4,6 +4,7 @@ Modules
 Evolvable module architectures implemented: (More coming soon!)
     * MLP
     * CNN
+    * LSTM
     * MultiInput
     * Transformers - GPT and BERT
 
@@ -15,6 +16,7 @@ We are constantly adding more neural network architectures, with a view to add r
    base
    mlp
    cnn
+   lstm
    multi_input
    simba
    resnet
