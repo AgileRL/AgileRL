@@ -347,7 +347,8 @@ class TestOptimizerWrapper:
             original_methods.append(opt.zero_grad)
             opt.zero_grad = Mock()
 
-        multi_wrapper.zero_grad()
+        for opt in multi_wrapper.optimizer:
+            opt.zero_grad()
 
         # Each optimizer's zero_grad should be called once
         for opt in multi_wrapper.optimizer:
@@ -392,7 +393,8 @@ class TestOptimizerWrapper:
             original_methods.append(opt.step)
             opt.step = Mock()
 
-        multi_wrapper.step()
+        for opt in multi_wrapper.optimizer:
+            opt.step()
 
         # Each optimizer's step should be called once
         for opt in multi_wrapper.optimizer:
