@@ -328,22 +328,14 @@ class PPO(RLAlgorithm):
 
         if return_tensors:
             return (
-                (
-                    self.scale_to_action_space(action, convert_to_torch=True)
-                    if not self.discrete_actions
-                    else action
-                ),
+                action,
                 log_prob,
                 entropy,
                 state_values,
             )
         else:
             return (
-                (
-                    self.scale_to_action_space(action.cpu().data.numpy())
-                    if not self.discrete_actions
-                    else action.cpu().data.numpy()
-                ),
+                action.cpu().data.numpy(),
                 log_prob.cpu().data.numpy(),
                 entropy.cpu().data.numpy(),
                 state_values.cpu().data.numpy(),

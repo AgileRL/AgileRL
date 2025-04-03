@@ -164,8 +164,9 @@ def get_checkpoint_dict(agent: SelfEvolvableAlgorithm) -> Dict[str, Any]:
     network_info["optimizer_names"] = optimizer_attr_names
     attribute_dict["network_info"] = network_info
     attribute_dict["agilerl_version"] = version("agilerl")
-
     attribute_dict.pop("accelerator", None)
+    if attribute_dict.pop("lr_scheduler", None) is not None:
+        attribute_dict["lr_scheduler"] = agent.lr_scheduler.state_dict()
     return attribute_dict
 
 
@@ -202,7 +203,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         assert isinstance(
             accelerator, (type(None), Accelerator)
         ), "Accelerator must be an instance of Accelerator."
-
         if torch_compiler:
             assert torch_compiler in [
                 "default",
@@ -370,7 +370,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         else:
             # Remove the algo specific guarded variables (if specified)
             attributes = {k: v for k, v in attributes if k not in exclude}
-
         return attributes
 
     @staticmethod
@@ -421,7 +420,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                     setattr(clone, attribute, copy.deepcopy(getattr(agent, attribute)))
             else:
                 setattr(clone, attribute, copy.deepcopy(getattr(agent, attribute)))
-
         return clone
 
     @classmethod
@@ -691,6 +689,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         # Make copy using input arguments
         input_args = EvolvableAlgorithm.inspect_attributes(self, input_args_only=True)
         input_args["wrap"] = wrap
+
         clone = type(self)(**input_args)
 
         if self.accelerator is not None:
@@ -884,7 +883,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         )
 
         # Reconstruct evolvable modules in algorithm
-        print("Checkpoint: ", checkpoint)
         network_info: Optional[Dict[str, Dict[str, Any]]] = checkpoint.get(
             "network_info"
         )
@@ -1219,20 +1217,22 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         ):
             # Split agent names on expected pattern of e.g. speaker_0, speaker_1,
             # listener_0, listener_1, to determine which agents are homogeneous
-            homo_agent = agent_id.rsplit("_", 1)[0]
-            if homo_agent in self.homogeneous_agents:
-                self.homogeneous_agents[homo_agent].append(agent_id)
+            homo_id = (
+                agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
+            )
+            if homo_id in self.homogeneous_agents:
+                self.homogeneous_agents[homo_id].append(agent_id)
                 assert (
-                    obs_space == self.unique_observation_spaces[homo_agent]
-                ), f"Homogeneous agents, i.e. agents that share the prefix {homo_agent}, must have the same observation space. Found {self.unique_observation_spaces[homo_agent]} and {obs_space}."
+                    obs_space == self.unique_observation_spaces[homo_id]
+                ), f"Homogeneous agents, i.e. agents that share the prefix {homo_id}, must have the same observation space. Found {self.unique_observation_spaces[homo_id]} and {obs_space}."
                 assert (
-                    action_space == self.unique_action_spaces[homo_agent]
-                ), f"Homogeneous agents, i.e. agents that share the prefix {homo_agent}, must have the same action space. Found {self.unique_action_spaces[homo_agent]} and {action_space}."
+                    action_space == self.unique_action_spaces[homo_id]
+                ), f"Homogeneous agents, i.e. agents that share the prefix {homo_id}, must have the same action space. Found {self.unique_action_spaces[homo_id]} and {action_space}."
             else:
-                self.shared_agent_ids.append(homo_agent)
-                self.homogeneous_agents[homo_agent] = [agent_id]
-                self.unique_observation_spaces[homo_agent] = obs_space
-                self.unique_action_spaces[homo_agent] = action_space
+                self.shared_agent_ids.append(homo_id)
+                self.homogeneous_agents[homo_id] = [agent_id]
+                self.unique_observation_spaces[homo_id] = obs_space
+                self.unique_action_spaces[homo_id] = action_space
 
         self.n_unique_agents = len(self.shared_agent_ids)
         self.normalize_images = normalize_images
@@ -1394,76 +1394,29 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         return processed_obs
 
-    def disassemble_homogeneous_outputs(self, dict: Dict, vect_dim: int) -> Dict:
+    def disassemble_homogeneous_outputs(
+        self, homo_outputs: ArrayDict, vect_dim: int
+    ) -> ArrayDict:
         """Disassembles batched output by shared policies into their homogeneous agents' outputs.
 
-        :param dict: Dictionary to be disassembled, has the form {'agent': [4, 7, 8]}
-        :type dict: Dict
-        :return: isassembled dictionary, e.g. {'agent_0': 4, 'agent_1': 7, 'agent_2': 8}
-        :rtype: Dict
+        :param homo_outputs: Dictionary to be disassembled, has the form {'agent': [4, 7, 8]}
+        :type homo_outputs: Dict[str, np.ndarray]
+        :param vect_dim: Vectorization dimension size, i.e. number of vect envs
+        :type vect_dim: int
+        :return: Assembled dictionary, e.g. {'agent_0': 4, 'agent_1': 7, 'agent_2': 8}
+        :rtype: Dict[str, np.ndarray]
         """
         output_dict = {}
         for unique_id in self.shared_agent_ids:
-            dict[unique_id] = np.reshape(
-                dict[unique_id], (len(self.homogeneous_agents[unique_id]), vect_dim, -1)
+            homo_outputs[unique_id] = np.reshape(
+                homo_outputs[unique_id],
+                (len(self.homogeneous_agents[unique_id]), vect_dim, -1),
             )
             for i, homo_id in enumerate(self.homogeneous_agents[unique_id]):
-                output_dict[homo_id] = dict[unique_id][i]
+                output_dict[homo_id] = homo_outputs[unique_id][i]
         return output_dict
 
-    def vectorize_experiences_by_agent(self, experiences, dim=1):
-        """Reorganizes experiences into a tensor, vectorized by time step
-
-        Example input:
-        {'agent_0': [[1, 2, 3, 4]], 'agent_1': [[5, 6, 7, 8]]}
-        Example output:
-        torch.Tensor([[1, 2, 3, 4, 5, 6, 7, 8]])
-
-        :param experiences: Dictionaries containing experiences indexed by agent_id that share a policy agent.
-        :type experiences: Tuple[Dict[str, np.ndarray]]
-        :param dim: New dimension to stack along
-        :type dim: int
-        """
-        tensors = [
-            torch.Tensor(np.array(experiences[agent_id]))
-            for agent_id in experiences.keys()
-        ]
-        stacked_tensor = torch.stack(tensors, dim=dim)
-        return stacked_tensor
-
-    def concatenate_experiences_into_batches(
-        self, experiences: ExperiencesType, shape: Tuple[int, ...]
-    ) -> torch.Tensor:
-        """Reorganizes experiences into a batched tensor
-
-        Example input:
-        {'agent_0': [[[...1], [...2]], [[...5], [...6]]],
-         'agent_1': [[[...3], [...4]], [[...7], [...8]]]}
-
-        Example output:
-        torch.Tensor([...1], [...2], [...3], [...4], [...5], [...6], [...7], [...8])
-
-        :param experiences: Dictionaries containing experiences indexed by agent_id that share a policy agent.
-        :type experiences: Tuple[Dict[str, np.ndarray]]
-        :param shape: Observation/action/etc shape space to maintain
-        :type obs_space: Tuple(int)
-        """
-        tensors = []
-        for agent_id in experiences.keys():
-            exp = np.array(experiences[agent_id])
-            if len(exp.shape) < 2:
-                exp = np.expand_dims(exp, 0)
-            tensors.append(torch.Tensor(exp))
-        stacked_tensor = torch.cat(tensors, dim=0)
-        stacked_tensor = stacked_tensor.reshape(-1, *shape)
-        for squeeze_dim in [0, -1]:
-            if stacked_tensor.size(squeeze_dim) == 1:
-                stacked_tensor = stacked_tensor.squeeze(squeeze_dim)
-        return stacked_tensor
-
-    def sum_shared_rewards(
-        self, rewards: Dict[str, np.ndarray]
-    ) -> Dict[str, np.ndarray]:
+    def sum_shared_rewards(self, rewards: ArrayDict) -> ArrayDict:
         """Sums the rewards for homogeneous agents
 
         :param rewards: Reward dictionary from environment
@@ -1473,6 +1426,8 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         """
         summed_rewards = {homo_id: 0 for homo_id in self.shared_agent_ids}
         for agent_id, reward in rewards.items():
-            homo_id = agent_id.rsplit("_", 1)[0]
+            homo_id = (
+                agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
+            )
             summed_rewards[homo_id] += reward
         return summed_rewards

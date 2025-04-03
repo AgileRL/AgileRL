@@ -446,6 +446,8 @@ class DeterministicActor(EvolvableNetwork):
             output_activation = head_config["output_activation"]
         elif isinstance(action_space, spaces.Discrete):
             output_activation = "Softmax"
+        elif isinstance(head_config, dict) and "output_activation" in head_config:
+            output_activation = head_config["output_activation"]
         elif np.any(self.min_action < 0):
             output_activation = "Tanh"
         else:

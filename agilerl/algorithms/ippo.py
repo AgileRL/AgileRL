@@ -26,12 +26,14 @@ from agilerl.typing import (
     TorchObsType,
 )
 from agilerl.utils.algo_utils import (
+    concatenate_experiences_into_batches,
     contains_image_space,
     get_experiences_samples,
     key_in_nested_dict,
     make_safe_deepcopies,
     obs_channels_to_first,
     preprocess_observation,
+    vectorize_experiences_by_agent,
 )
 
 
@@ -267,6 +269,8 @@ class IPPO(MultiAgentRLAlgorithm):
 
                 critic_net_config["head_config"] = critic_head_config
 
+                # Create one actor and critic per inhomogeneous (unique) type of agent,
+                # which will be used by all homogeneous (identical) agents of that type
                 actor = StochasticActor(
                     obs_space,
                     action_space,
@@ -275,6 +279,8 @@ class IPPO(MultiAgentRLAlgorithm):
                     **copy.deepcopy(net_config),
                 )
 
+                # IPPO does not use a shared critic, so we don't
+                # need to pass n_agents to the ValueNetwork.
                 critic = ValueNetwork(
                     observation_space=obs_space,
                     device=self.device,
@@ -333,7 +339,11 @@ class IPPO(MultiAgentRLAlgorithm):
         action_masks = {homo_id: [] for homo_id in self.shared_agent_ids}
         for agent_id, info in infos.items():
             if isinstance(info, dict):
-                homo_id = agent_id.rsplit("_", 1)[0]
+                homo_id = (
+                    agent_id.rsplit("_", 1)[0]
+                    if isinstance(agent_id, str)
+                    else agent_id
+                )
                 action_masks[homo_id].append(
                     info.get("action_mask", None) if isinstance(info, dict) else None
                 )
@@ -366,7 +376,9 @@ class IPPO(MultiAgentRLAlgorithm):
         """
         preprocessed = {homo_id: [] for homo_id in self.shared_agent_ids}
         for agent_id, obs in observation.items():
-            homo_id = agent_id.rsplit("_", 1)[0]
+            homo_id = (
+                agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
+            )
             preprocessed[homo_id].append(
                 preprocess_observation(
                     observation=obs,
@@ -493,10 +505,14 @@ class IPPO(MultiAgentRLAlgorithm):
         """
         shared = {homo_id: {} for homo_id in self.shared_agent_ids}
         for agent_id, inp in input.items():
-            homo_id = agent_id.rsplit("_", 1)[0]
+            homo_id = (
+                agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
+            )
             shared[homo_id][agent_id] = inp
         for agent_id, inp in input.items():
-            homo_id = agent_id.rsplit("_", 1)[0]
+            homo_id = (
+                agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
+            )
             shared[homo_id][agent_id] = np.stack(shared[homo_id][agent_id])
         return shared
 
@@ -606,14 +622,14 @@ class IPPO(MultiAgentRLAlgorithm):
             experiences
         )
         log_probs, rewards, dones, values = map(
-            self.vectorize_experiences_by_agent, (log_probs, rewards, dones, values)
+            vectorize_experiences_by_agent, (log_probs, rewards, dones, values)
         )
         log_probs = log_probs.squeeze()
         rewards = rewards.squeeze()
         dones = dones.squeeze()
         values = values.squeeze()
-        next_state = self.vectorize_experiences_by_agent(next_state, dim=0)
-        next_done = self.vectorize_experiences_by_agent(next_done)
+        next_state = vectorize_experiences_by_agent(next_state, dim=0)
+        next_done = vectorize_experiences_by_agent(next_done)
 
         # Bootstrapping returns using GAE advantage estimation
         dones = dones.long()
@@ -653,8 +669,8 @@ class IPPO(MultiAgentRLAlgorithm):
             values = values.reshape((-1,))
             returns = advantages + values
 
-        states = self.concatenate_experiences_into_batches(states, obs_space.shape)
-        actions = self.concatenate_experiences_into_batches(actions, action_space.shape)
+        states = concatenate_experiences_into_batches(states, obs_space.shape)
+        actions = concatenate_experiences_into_batches(actions, action_space.shape)
         log_probs = log_probs.reshape((-1,))
         experiences = (states, actions, log_probs, advantages, returns, values)
 

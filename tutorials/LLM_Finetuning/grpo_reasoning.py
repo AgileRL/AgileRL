@@ -181,10 +181,13 @@ def custom_collate_fn(batch):
 
 def main():
     # Instantiate the model and the associated tokenizer
-    model = create_model(**{"pretrained_model_name_or_path": MODEL_PATH})
+    model = create_model(pretrained_model_name_or_path=MODEL_PATH)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
+
+    accelerator = Accelerator()
+
     # Convert the HuggingFace dataset into a Gymnasium environment
     env = HuggingFaceGym(
         train_dataset=train_dataset,
@@ -192,8 +195,7 @@ def main():
         tokenizer=tokenizer,
         reward_fn=combined_rewards,
         apply_chat_template_fn=countdown_chat_template,
-        max_answer_tokens=1024,
-        data_batch_size=1,
+        data_batch_size_per_gpu=1,
         custom_collate_fn=custom_collate_fn,
     )
     # Instantiate the grpo agent
@@ -203,18 +205,20 @@ def main():
         actor_network=model,
         pad_token_id=tokenizer.eos_token_id,
         batch_size=1,
+        max_output_tokens=1024,
         group_size=12,
         reduce_memory_peak=True,
-        accelerator=Accelerator(),
+        accelerator=accelerator,
     )
     finetune_llm(
-        agent=agent,
+        pop=[agent],
         env=env,
-        evaluation_interval=5,
+        evaluation_interval=10,
         wb=True,
-        checkpoint_interval=100,
-        checkpoint_path="saved_llms",
+        save_elite=True,
+        elite_path="checkpoints",
         max_reward=2.0,
+        accelerator=accelerator,
     )
 
 
