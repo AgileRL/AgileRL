@@ -1,3 +1,4 @@
+import copy
 import os
 import warnings
 from datetime import datetime
@@ -6,15 +7,18 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
-import wandb
+import torch
+import torch.distributed as dist
 from accelerate import Accelerator
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl.algorithms import (
     CQN,
     DDPG,
     DQN,
+    GRPO,
     IPPO,
     MADDPG,
     MATD3,
@@ -30,6 +34,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules.base import EvolvableModule
 from agilerl.typing import GymSpaceType, PopulationType
+from agilerl.utils.algo_utils import CosineLRScheduleConfig
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 SupportedObservationSpace = Union[
@@ -506,6 +511,37 @@ def create_population(
             )
             population.append(agent)
 
+    elif algo == "GRPO":
+        for idx in range(population_size):
+            agent = GRPO(
+                observation_space=observation_space,
+                action_space=action_space,
+                actor_network=copy.deepcopy(INIT_HP["actor_network"]),
+                pad_token_id=INIT_HP["pad_token_id"],
+                hp_config=hp_config,
+                index=idx,
+                batch_size=INIT_HP["BATCH_SIZE"],
+                beta=INIT_HP["BETA"],
+                lr=INIT_HP["LR"],
+                clip_coef=INIT_HP["CLIP_COEF"],
+                max_grad_norm=INIT_HP["MAX_GRAD_NORM"],
+                update_epochs=INIT_HP["UPDATE_EPOCHS"],
+                group_size=INIT_HP["GROUP_SIZE"],
+                temperature=INIT_HP["TEMPERATURE"],
+                calc_position_embeddings=INIT_HP["CALC_POSITION_EMBEDDINGS"],
+                reduce_memory_peak=INIT_HP["REDUCE_MEMORY_PEAK"],
+                max_output_tokens=INIT_HP["MAX_OUTPUT_TOKENS"],
+                min_output_tokens=INIT_HP["MIN_OUTPUT_TOKENS"],
+                cosine_lr_schedule_config=(
+                    CosineLRScheduleConfig(**INIT_HP["COSINE_lR_SCHEDULER"])
+                    if INIT_HP["COSINE_lR_SCHEDULER"] is not None
+                    else None
+                ),
+                accelerator=accelerator[idx],
+                device=device,
+            )
+            population.append(agent)
+
     return population
 
 
@@ -570,6 +606,7 @@ def tournament_selection_and_mutation(
     elite_path: Optional[str] = None,
     save_elite: bool = False,
     accelerator: Optional[Accelerator] = None,
+    language_model: Optional[bool] = False,
 ) -> PopulationType:
     """Performs tournament selection and mutation on a population of agents.
 
@@ -587,7 +624,8 @@ def tournament_selection_and_mutation(
     :type save_elite: bool, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
-
+    :param language_model: Flag to indicate if the environment is a language model, defaults to False
+    :type language_model: bool, optional
     :return: Population of agents after tournament selection and mutation
     :rtype: list[PopulationType]
     """
@@ -632,12 +670,15 @@ def tournament_selection_and_mutation(
         population = mutation.mutation(population)
 
     if save_elite:
-        elite_save_path = (
-            elite_path.split(".pt")[0]
-            if elite_path is not None
-            else f"{env_name}-elite_{algo}"
-        )
-        elite.save_checkpoint(f"{elite_save_path}.pt")
+        if language_model:
+            save_llm_checkpoint(elite, elite_path)
+        else:
+            elite_save_path = (
+                elite_path.split(".pt")[0]
+                if elite_path is not None
+                else f"{env_name}-elite_{algo}"
+            )
+            elite.save_checkpoint(f"{elite_save_path}.pt")
 
     return population
 
@@ -808,3 +849,65 @@ def get_env_defined_actions(info, agents):
         return
 
     return env_defined_actions
+
+
+def gather_tensor(tensor: torch.Tensor, agent: EvolvableAlgorithm) -> torch.Tensor:
+    """Gather tensors from gpus
+
+    :param tensor: Tensor to gather
+    :type tensor: torch.Tensor
+    :param agent: Agent object
+    :type agent: EvolvableAlgorithm
+    :return: Stacked tensors
+    :rtype: torch.Tensor
+    """
+    # Convert to tensor if it's a scalar
+    if not isinstance(tensor, torch.Tensor):
+        tensor = torch.tensor(tensor, device=f"cuda:{agent.local_rank}")
+
+    if tensor.device != agent.device:
+        tensor = tensor.to(agent.device)
+    # Ensure tensor is on correct device
+    tensor = tensor.detach().clone()
+    # Create a list to store tensors from all processes
+    world_size = dist.get_world_size()
+    gathered_tensors = [torch.zeros_like(tensor) for _ in range(world_size)]
+
+    # Gather the tensor from all processes
+    dist.all_gather(gathered_tensors, tensor)
+    return torch.stack(gathered_tensors)
+
+
+def aggregate_metrics_across_gpus(
+    agent: EvolvableAlgorithm, metric_tensor: torch.Tensor
+) -> float:
+    """Aggregate gathered tensors
+
+    :param agent: Agent
+    :type agent: EvolvableAlgorithm
+    :param metric_tensor: Metrics
+    :type metric_tensor: torch.Tensor
+    :return: Mean metric
+    :rtype: float
+    """
+    all_metrics = gather_tensor(metric_tensor, agent)
+    avg_metrics = all_metrics.mean().item()
+    return avg_metrics
+
+
+def save_llm_checkpoint(agent: EvolvableAlgorithm, checkpoint_path: str | None) -> None:
+    """Checkpoint the LLM
+
+    :param agent: Agent
+    :type agent: EvolvableAlgorithm
+    :param checkpoint_path: Checkpoint path
+    :type checkpoint_path: str
+    """
+    base_path = "./saved_checkpoints" if checkpoint_path is None else checkpoint_path
+    path = base_path + f"/{agent.algo}"
+    os.makedirs(path, exist_ok=True)
+    if agent.accelerator is not None:
+        unwrapped_model = agent.accelerator.unwrap_model(agent.actor)
+        unwrapped_model.save_pretrained(path)
+    else:
+        agent.actor.save_pretrained(path)
