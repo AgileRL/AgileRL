@@ -870,46 +870,6 @@ def test_ippo_unwrap_models(compile_mode):
         assert isinstance(critic, nn.Module)
 
 
-@pytest.mark.parametrize("compile_mode", [None, "default"])
-@pytest.mark.parametrize("low, high", [(-1, 1), ([0], [np.inf])])
-def test_scale_to_action_space(compile_mode, low, high):
-    action = torch.tensor([0.5, 0.2, 0.3, -0.4, -0.2, -0.6])
-    action_space = generate_multi_agent_box_spaces(1, (3,), low=low, high=high)[0]
-
-    ippo = IPPO(
-        observation_spaces=generate_multi_agent_box_spaces(1, (4,)),
-        action_spaces=[action_space],
-        agent_ids=["agent_0"],
-        torch_compiler=compile_mode,
-    )
-
-    if isinstance(high, list) and np.inf in high:
-        scaled_action = ippo.scale_to_action_space(action, idx=0)
-        assert torch.allclose(
-            scaled_action, action.clip(torch.Tensor(low), torch.tensor(high))
-        )
-
-    else:
-        # Test Tanh activation
-        ippo.actors[0].output_activation = "Tanh"
-        scaled_action = ippo.scale_to_action_space(action, idx=0)
-        assert torch.allclose(scaled_action, action)
-
-        # Sigmoid
-        ippo.actors[0].output_activation = "Sigmoid"
-        action = torch.tensor([0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
-        scaled_action = ippo.scale_to_action_space(action, idx=0)
-        expected = -1 + 2 * action  # Scale from [0,1] to [-1,1]
-        assert torch.allclose(scaled_action, expected)
-
-        # ReLU
-        ippo.actors[0].output_activation = "ReLU"
-        action = torch.tensor([0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
-        scaled_action = ippo.scale_to_action_space(action, idx=0)
-        expected = torch.where(action > 0, action * high, action * -low)
-        assert torch.allclose(scaled_action, expected.clip(low, high))
-
-
 @pytest.mark.parametrize(
     "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
 )

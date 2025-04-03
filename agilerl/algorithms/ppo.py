@@ -236,6 +236,7 @@ class PPO(RLAlgorithm):
                 device=self.device,
                 **critic_net_config,
             )
+
         # Share encoders between actor and critic
         self.share_encoders = share_encoders
         if self.share_encoders and all(

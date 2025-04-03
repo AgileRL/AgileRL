@@ -156,7 +156,7 @@ Explore our Algorithms!
       <a href="../multi_agent_training/index.html" class="tile multi-agent">
          <h2>Multi Agent</h2>
          <p>
-               Algorithms: MADDPG, MATD3
+               Algorithms: MADDPG, MATD3, IPPO
                <!-- Add more algorithms as needed -->
          </p>
       </a>
