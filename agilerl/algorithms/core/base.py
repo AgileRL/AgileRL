@@ -319,6 +319,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             )
         if isinstance(action_space, spaces.Discrete):
             return action_space.n
+        elif isinstance(action_space, spaces.MultiDiscrete):
+            return sum(action_space.nvec)
         elif isinstance(action_space, spaces.Box):
             # NOTE: Here we assume the action space only has one dimension
             #       (i.e. the actions correspond to a one-dimensional vector)
@@ -1186,10 +1188,12 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         self.state_dims = self.get_state_dim(observation_spaces)
         self.action_dims = self.get_action_dim(action_spaces)
         self.one_hot = all(
-            isinstance(space, spaces.Discrete) for space in observation_spaces
+            isinstance(space, (spaces.Discrete, spaces.MultiDiscrete))
+            for space in observation_spaces
         )
         self.discrete_actions = all(
-            isinstance(space, spaces.Discrete) for space in action_spaces
+            isinstance(space, (spaces.Discrete, spaces.MultiDiscrete))
+            for space in action_spaces
         )
 
         # For continuous action spaces, store the min and max action values
@@ -1427,7 +1431,9 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         stacked_tensor = torch.stack(tensors, dim=dim)
         return stacked_tensor
 
-    def concatenate_experiences_into_batches(self, experiences, shape):
+    def concatenate_experiences_into_batches(
+        self, experiences: ExperiencesType, shape: Tuple[int, ...]
+    ) -> torch.Tensor:
         """Reorganizes experiences into a batched tensor
 
         Example input:

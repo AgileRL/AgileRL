@@ -461,6 +461,20 @@ class DeterministicActor(EvolvableNetwork):
         self.build_network_head(head_config)
         self.output_activation = head_config.get("output_activation", output_activation)
 
+    def clip_action(self, action: torch.Tensor) -> torch.Tensor:
+        """Clip the action to the action space.
+
+        :param action: Action.
+        :type action: torch.Tensor
+        :return: Clipped action.
+        :rtype: torch.Tensor
+        """
+        return (
+            action.clamp(self.min_action, self.max_action)
+            if isinstance(self.action_space, spaces.Box)
+            else action
+        )
+
     def build_network_head(self, net_config: Optional[ConfigType] = None) -> None:
         """Builds the head of the network.
 
@@ -483,7 +497,7 @@ class DeterministicActor(EvolvableNetwork):
         :rtype: torch.Tensor
         """
         latent = self.extract_features(obs)
-        return self.head_net(latent)
+        return self.clip_action(self.head_net(latent))
 
     def recreate_network(self) -> None:
         """Recreates the network."""
@@ -588,6 +602,23 @@ class StochasticActor(DeterministicActor):
             device=device,
         )
 
+    def clip_action(self, action: torch.Tensor) -> torch.Tensor:
+        """Clip the action to the action space.
+
+        :param action: Action.
+        :type action: torch.Tensor
+        :return: Clipped action.
+        :rtype: torch.Tensor
+        """
+        low, high = self.min_action, self.max_action
+        if isinstance(self.action_space, spaces.Box):
+            if self.squash_output:
+                action = low + (0.5 * (action + 1.0) * (high - low))
+            else:
+                action = action.clamp(low, high)
+
+        return action
+
     def forward(
         self, obs: TorchObsType, action_mask: Optional[ArrayOrTensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -600,7 +631,7 @@ class StochasticActor(DeterministicActor):
         """
         latent = self.extract_features(obs)
         action, log_prob, entropy = self.head_net.forward(latent, action_mask)
-        return action, log_prob, entropy
+        return self.clip_action(action), log_prob, entropy
 
     def action_log_prob(self, action: torch.Tensor) -> torch.Tensor:
         """Get the log probability of the action.
