@@ -1206,20 +1206,22 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         ):
             # Split agent names on expected pattern of e.g. speaker_0, speaker_1,
             # listener_0, listener_1, to determine which agents are homogeneous
-            homo_agent = agent_id.rsplit("_", 1)[0]
-            if homo_agent in self.homogeneous_agents:
-                self.homogeneous_agents[homo_agent].append(agent_id)
+            homo_id = (
+                agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
+            )
+            if homo_id in self.homogeneous_agents:
+                self.homogeneous_agents[homo_id].append(agent_id)
                 assert (
-                    obs_space == self.unique_observation_spaces[homo_agent]
-                ), f"Homogeneous agents, i.e. agents that share the prefix {homo_agent}, must have the same observation space. Found {self.unique_observation_spaces[homo_agent]} and {obs_space}."
+                    obs_space == self.unique_observation_spaces[homo_id]
+                ), f"Homogeneous agents, i.e. agents that share the prefix {homo_id}, must have the same observation space. Found {self.unique_observation_spaces[homo_id]} and {obs_space}."
                 assert (
-                    action_space == self.unique_action_spaces[homo_agent]
-                ), f"Homogeneous agents, i.e. agents that share the prefix {homo_agent}, must have the same action space. Found {self.unique_action_spaces[homo_agent]} and {action_space}."
+                    action_space == self.unique_action_spaces[homo_id]
+                ), f"Homogeneous agents, i.e. agents that share the prefix {homo_id}, must have the same action space. Found {self.unique_action_spaces[homo_id]} and {action_space}."
             else:
-                self.shared_agent_ids.append(homo_agent)
-                self.homogeneous_agents[homo_agent] = [agent_id]
-                self.unique_observation_spaces[homo_agent] = obs_space
-                self.unique_action_spaces[homo_agent] = action_space
+                self.shared_agent_ids.append(homo_id)
+                self.homogeneous_agents[homo_id] = [agent_id]
+                self.unique_observation_spaces[homo_id] = obs_space
+                self.unique_action_spaces[homo_id] = action_space
 
         self.n_unique_agents = len(self.shared_agent_ids)
         self.normalize_images = normalize_images
@@ -1411,6 +1413,8 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         """
         summed_rewards = {homo_id: 0 for homo_id in self.shared_agent_ids}
         for agent_id, reward in rewards.items():
-            homo_id = agent_id.rsplit("_", 1)[0]
+            homo_id = (
+                agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
+            )
             summed_rewards[homo_id] += reward
         return summed_rewards
