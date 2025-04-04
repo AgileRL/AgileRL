@@ -483,7 +483,7 @@ class DummyMultiMemory:
         self.state_size = None
         self.action_size = None
         self.next_state_size = None
-        self.agents = ["agent_0", "other_agent_0"]
+        self.agents = ["agent_0", "other_agent_1"]
 
     def __len__(self):
         return 1000

@@ -85,6 +85,8 @@ def minari_to_agile_buffer(
                 next_obs=torch.tensor(next_observation),
                 done=torch.tensor(terminal),
             ).to_tensordict()
+            transition = transition.unsqueeze(0)
+            transition.batch_size = [1]
             memory.add(transition)
 
     return memory
