@@ -22,8 +22,10 @@ import torch
 from accelerate import Accelerator
 from gymnasium import spaces
 from numpy.typing import ArrayLike
+from peft import PeftModel
 from tensordict import TensorDict
 from torch._dynamo import OptimizedModule
+from transformers.modeling_utils import PreTrainedModel
 
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
@@ -61,12 +63,13 @@ from agilerl.utils.algo_utils import (
 )
 from agilerl.utils.evolvable_networks import is_image_space
 
-__all__ = ["EvolvableAlgorithm", "RLAlgorithm", "MultiAgentRLAlgorithm"]
+__all__ = ["EvolvableAlgorithm", "RLAlgorithm", "MultiAgentRLAlgorithm", "LLMAlgorithm"]
 
 SelfEvolvableAlgorithm = TypeVar("SelfEvolvableAlgorithm", bound="EvolvableAlgorithm")
 SelfRLAlgorithm = TypeVar("SelfRLAlgorithm", bound="RLAlgorithm")
 SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound="AgentWrapper")
 MARLObservationType = Dict[str, ObservationType]
+PreTrainedLanguageModel = Union[PreTrainedModel, PeftModel]
 
 
 class _RegistryMeta(type):
@@ -143,6 +146,67 @@ def get_checkpoint_dict(agent: SelfEvolvableAlgorithm) -> Dict[str, Any]:
                     f"{attr}_cls": obj_cls,
                     f"{attr}_init_dict": init_dict,
                     f"{attr}_state_dict": state_dict,
+                }
+            )
+        else:
+            raise TypeError(
+                f"Something went wrong. Identified '{attr}' as an evolvable module "
+                f"when it is of type {type(obj)}."
+            )
+
+    network_attr_names = [
+        name for name in agent.evolvable_attributes(networks_only=True)
+    ]
+    optimizer_attr_names = [
+        name
+        for name in agent.evolvable_attributes()
+        if isinstance(getattr(agent, name), OptimizerWrapper)
+    ]
+
+    network_info["network_names"] = network_attr_names
+    network_info["optimizer_names"] = optimizer_attr_names
+    attribute_dict["network_info"] = network_info
+    attribute_dict["agilerl_version"] = version("agilerl")
+    attribute_dict.pop("accelerator", None)
+    if attribute_dict.pop("lr_scheduler", None) is not None:
+        attribute_dict["lr_scheduler"] = agent.lr_scheduler.state_dict()
+    return attribute_dict
+
+
+def get_llm_checkpoint_dict(agent: SelfEvolvableAlgorithm) -> Dict[str, Any]:
+    """Returns a dictionary of the agent's attributes to save in a checkpoint.
+
+    :param agent: The agent to save.
+    :type agent: EvolvableAlgorithm
+
+    :return: A dictionary of the agent's attributes.
+    :rtype: dict[str, Any]
+    """
+    attribute_dict = EvolvableAlgorithm.inspect_attributes(agent)
+
+    # Extract info on evolvable modules and optimizers in the algorithm
+    network_info: Dict[str, Dict[str, Any]] = {"modules": {}, "optimizers": {}}
+
+    for attr in agent.evolvable_attributes():
+        obj: EvolvableAttributeType = getattr(agent, attr)
+        if isinstance(obj, OptimizerWrapper):
+            network_info["optimizers"].update(
+                {
+                    f"{attr}_cls": obj.optimizer_cls.__name__,
+                    f"{attr}_state_dict": obj.state_dict(),
+                    f"{attr}_networks": obj.network_names,
+                    f"{attr}_lr": obj.lr_name,
+                    f"{attr}_kwargs": obj.optimizer_kwargs,
+                    f"{attr}_multiagent": obj.multiagent,
+                }
+            )
+        elif isinstance(obj, (PreTrainedLanguageModel)) or is_module_list(obj):
+
+            obj_cls = obj.__class__
+            network_info["modules"].update(
+                {
+                    f"{attr}_cls": obj_cls,
+                    f"{attr}_state_dict": obj.state_dict(),
                 }
             )
         else:
@@ -332,7 +396,9 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
     @staticmethod
     def inspect_attributes(
-        agent: SelfEvolvableAlgorithm, input_args_only: bool = False
+        agent: SelfEvolvableAlgorithm,
+        input_args_only: bool = False,
+        exclude_evolvable: bool = True,
     ) -> Dict[str, Any]:
         """
         Inspect and retrieve the attributes of the current object, excluding attributes related to the
@@ -342,6 +408,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :param input_args_only: If True, only include attributes that are input arguments to the constructor.
                                 Defaults to False.
         :type input_args_only: bool
+        :param exclude_evolvable: If True, exclude attributes that are EvolvableModule or Optimizer objects.
+        :type exclude_evolvable: bool
         :return: A dictionary of attribute names and their values.
         :rtype: dict[str, Any]
         """
@@ -350,7 +418,9 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         # Exclude attributes that are EvolvableModule or Optimizer objects (also check for nested
         # module-related attributes for multi-agent algorithms)
-        exclude = list(agent.evolvable_attributes().keys())
+        exclude = []
+        if exclude_evolvable:
+            exclude = list(agent.evolvable_attributes().keys())
         exclude += [attr for attr, val in attributes if isinstance(val, TensorDict)]
 
         # Exclude private and built-in attributes
@@ -360,6 +430,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         # If input_args_only is True, only include attributes that are
         # input arguments to the constructor
+
         if input_args_only:
             constructor_params = inspect.signature(agent.__init__).parameters.keys()
             attributes = {
@@ -370,6 +441,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         else:
             # Remove the algo specific guarded variables (if specified)
             attributes = {k: v for k, v in attributes if k not in exclude}
+
         return attributes
 
     @staticmethod
@@ -713,7 +785,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 if opt_config.multiagent
                 else [cloned_modules[net] for net in opt_config.networks]
             )
-
             opt = OptimizerWrapper(
                 getattr(torch.optim, opt_config.optimizer_cls),
                 networks=networks,
@@ -738,7 +809,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         if index is not None:
             clone.index = index
 
-        # Run init hooks
         for hook in clone.registry.hooks:
             getattr(clone, hook)()
 
@@ -1414,3 +1484,222 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             homo_id = agent_id.rsplit("_", 1)[0]
             summed_rewards[homo_id] += reward
         return summed_rewards
+
+
+class LLMAlgorithm(EvolvableAlgorithm, ABC):
+    """Base object for all LLM algorithms in the AgileRL framework.
+
+    :param observation_space: The observation space of the environment.
+    :type observation_space: spaces.Space
+
+    """
+
+    def __init__(
+        self,
+        observation_space: spaces.Space,
+        action_space: spaces.Space,
+        index: int,
+        hp_config: Optional[HyperparameterConfig] = None,
+        device: Union[str, torch.device] = "cpu",
+        accelerator: Optional[Accelerator] = None,
+        name: Optional[str] = None,
+    ) -> None:
+        super().__init__(index, hp_config, device, accelerator, None, name)
+        self.observation_space = observation_space
+        self.action_space = action_space
+
+    @classmethod
+    def load(
+        cls,
+        path: str,
+        device: DeviceType = "cpu",
+        accelerator: Optional[Accelerator] = None,
+    ) -> None:
+        raise NotImplementedError(
+            "The load class method is not supported for this algorithm class."
+            """
+            To load a saved LLM, please load the model as follows, and then re-instantiate the GRPO
+            class, using the pre-trained model.
+
+            base_model = AutoModelForCausalLM.from_pretrained(
+                "Qwen/Qwen2.5-3B",
+                torch_dtype=torch.bfloat16,
+                device_map="auto"
+            )
+            tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B")
+            model = PeftModel.from_pretrained(base_model, "/path/to/adapter/folder")
+            """
+        )
+
+    def clone(
+        self: SelfEvolvableAlgorithm, index: Optional[int] = None, wrap: bool = True
+    ) -> SelfEvolvableAlgorithm:
+        """Creates a clone of the algorithm.
+
+        :param index: The index of the clone, defaults to None
+        :type index: Optional[int], optional
+        :param wrap: If True, wrap the models in the clone with the accelerator, defaults to False
+        :type wrap: bool, optional
+
+        :return: A clone of the algorithm
+        :rtype: EvolvableAlgorithm
+        """
+        # Make copy using input arguments
+        input_args = EvolvableAlgorithm.inspect_attributes(
+            self, input_args_only=True, exclude_evolvable=False
+        )
+        input_args["wrap"] = False
+
+        input_args["accelerator"] = self.accelerator
+        clone = type(self)(**input_args)
+        # Clone evolvable modules
+        cloned_modules = {}
+        for attr, obj in self.evolvable_attributes(networks_only=True).items():
+
+            cloned_modules[attr] = LLMAlgorithm.clone_llm(
+                obj.state_dict(), getattr(clone, attr)
+            )
+            setattr(clone, attr, cloned_modules[attr])
+
+        # Reinitialize optimizers
+        for opt_config in self.registry.optimizers:
+            orig_optimizer: OptimizerWrapper = getattr(self, opt_config.name)
+
+            networks = (
+                cloned_modules[opt_config.networks[0]]
+                if opt_config.multiagent
+                else [cloned_modules[net] for net in opt_config.networks]
+            )
+
+            opt = OptimizerWrapper(
+                getattr(torch.optim, opt_config.optimizer_cls),
+                networks=networks,
+                lr=orig_optimizer.lr,
+                network_names=opt_config.networks,
+                lr_name=opt_config.lr,
+                optimizer_kwargs=opt_config.optimizer_kwargs,
+                multiagent=opt_config.multiagent,
+            )
+            opt.load_state_dict(orig_optimizer.state_dict())
+
+        accelerator = clone.accelerator
+        # Copy non-evolvable attributes back to clone
+        clone = EvolvableAlgorithm.copy_attributes(self, clone)
+        if index is not None:
+            clone.index = index
+        clone.accelerator = accelerator
+
+        # Run init hooks
+        for hook in clone.registry.hooks:
+            getattr(clone, hook)()
+
+        return clone
+
+    def preprocess_observation(self, observation: NumpyObsType) -> TorchObsType:
+        """Dummy preprocess_observation method for LLM algorithms
+
+        :param observations: Observations of environment
+        :type observations: ObservationType
+
+        :return: Preprocessed observations
+        :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
+        """
+        return observation
+
+    @staticmethod
+    def clone_llm(
+        state_dict: Dict[str, torch.Tensor], clone: SelfEvolvableAlgorithm
+    ) -> None:
+        """Clone a LLM model
+
+        :param state_dict: State dictionary of the model to clone
+        :type state_dict: Dict[str, torch.Tensor]
+        :param clone: EvolvableAlgorithm to clone the model to
+        :type clone: SelfEvolvableAlgorithm
+        :return: Cloned model
+        :rtype: SelfEvolvableAlgorithm
+        """
+        clone.load_state_dict(state_dict)
+        return clone
+
+    def save_checkpoint(self, path: str) -> None:
+        """Saves a checkpoint of agent properties and network weights to path.
+
+        :param path: Location to save checkpoint at
+        :type path: string
+        """
+        torch.save(
+            get_llm_checkpoint_dict(self),
+            path,
+            pickle_module=dill,
+        )
+
+    def load_checkpoint(self, path: str) -> None:
+        """Loads saved agent properties and network weights from checkpoint.
+
+        :param path: Location to load checkpoint from
+        :type path: string
+        """
+        checkpoint: Dict[str, Any] = torch.load(
+            path, map_location=self.device, pickle_module=dill
+        )
+
+        # Recreate evolvable modules
+        network_info: Dict[str, Dict[str, Any]] = checkpoint["network_info"]
+        network_names = network_info["network_names"]
+        for name in network_names:
+            net_dict = {
+                k: v for k, v in network_info["modules"].items() if k.startswith(name)
+            }
+
+            state_dict = net_dict[f"{name}_state_dict"]
+            getattr(self, name).load_state_dict(state_dict)
+
+        optimizer_names = network_info["optimizer_names"]
+        for name in optimizer_names:
+            opt_dict = {
+                k: v
+                for k, v in network_info["optimizers"].items()
+                if k.startswith(name)
+            }
+
+            # Initialize optimizer
+            opt_kwargs = opt_dict[f"{name}_kwargs"]
+            optimizer_cls = opt_dict[f"{name}_cls"]
+            opt_networks = opt_dict[f"{name}_networks"]
+            opt_lr = opt_dict[f"{name}_lr"]
+            is_multiagent = opt_dict[f"{name}_multiagent"]
+            networks = (
+                getattr(self, opt_networks[0])
+                if is_multiagent
+                else [getattr(self, net) for net in opt_networks]
+            )
+            optimizer = OptimizerWrapper(
+                getattr(torch.optim, optimizer_cls),
+                networks=networks,
+                lr=getattr(self, opt_lr),
+                network_names=opt_networks,
+                lr_name=opt_lr,
+                optimizer_kwargs=opt_kwargs,
+                multiagent=is_multiagent,
+            )
+
+            # Load optimizer state
+            optimizer.load_state_dict(opt_dict[f"{name}_state_dict"])
+            setattr(self, name, optimizer)
+
+        # Check loaded registry is consistent with the algorithm
+        if checkpoint["registry"] != self.registry:
+            raise ValueError(
+                "Loaded registry does not match the algorithm's registry. Please make "
+                "sure you are loading the checkpoint with the correct algorithm."
+            )
+
+        # Load other attributes
+        checkpoint.pop("network_info")
+        for attribute in checkpoint.keys():
+            setattr(self, attribute, checkpoint[attribute])
+
+        # Init hooks
+        for hook in self.registry.hooks:
+            getattr(self, hook)()

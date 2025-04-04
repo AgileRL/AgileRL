@@ -344,28 +344,34 @@ function and is an example of how we might choose to train our agent to exhibit 
     from tqdm import trange
     import torch.distributed as dist
 
-    def gather_tensor(tensor: torch.Tensor, agent: GRPO) -> torch.Tensor:
-        # Convert to tensor if it's a scalar
+    def gather_tensor(tensor: torch.Tensor, accelerator: Accelerator) -> torch.Tensor:
+        """Gather tensors from gpus
+
+        :param tensor: Tensor to gather
+        :type tensor: torch.Tensor
+        :param accelerator: Accelerator object
+        :type accelerator: accelerate.Accelerator
+        :return: Stacked tensors
+        :rtype: torch.Tensor
+        """
         if not isinstance(tensor, torch.Tensor):
-            tensor = torch.tensor(tensor, device=f"cuda:{agent.local_rank}")
-
-        if tensor.device != agent.device:
-            tensor = tensor.to(agent.device)
-        # Ensure tensor is on correct device
-        tensor = tensor.detach().clone()
-        # Create a list to store tensors from all processes
-        world_size = dist.get_world_size()
-        gathered_tensors = [torch.zeros_like(tensor) for _ in range(world_size)]
-
-        # Gather the tensor from all processes
-        dist.all_gather(gathered_tensors, tensor)
-        return torch.stack(gathered_tensors)
+            tensor = torch.tensor(tensor, device=accelerator.device)
+        tensor = tensor.to(accelerator.device)
+        gathered_tensors = accelerator.gather(tensor)
+        return gathered_tensors
 
 
-    def aggregate_metrics_across_gpus(
-        agent: GRPO, metrics: torch.Tensor
-    ):
-        all_metrics = gather_tensor(metrics, agent)
+    def aggregate_metrics_across_gpus(accelerator: Accelerator, metric_tensor: torch.Tensor) -> float:
+        """Aggregate gathered tensors
+
+        :param accelerator: Accelerator object
+        :type accelerator: accelerate.Accelerator
+        :param metric_tensor: Metrics
+        :type metric_tensor: torch.Tensor
+        :return: Mean metric
+        :rtype: float
+        """
+        all_metrics = gather_tensor(metric_tensor, accelerator)
         avg_metrics = all_metrics.mean().item()
         return avg_metrics
 

@@ -8,12 +8,11 @@ import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.distributed as dist
-import wandb
 from accelerate import Accelerator
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl.algorithms import (
     CQN,
     DDPG,
@@ -484,7 +483,7 @@ def create_population(
             agent = GRPO(
                 observation_space=observation_space,
                 action_space=action_space,
-                actor_network=copy.deepcopy(INIT_HP["actor_network"]),
+                actor=copy.deepcopy(INIT_HP["actor_network"]),
                 pad_token_id=INIT_HP["pad_token_id"],
                 hp_config=hp_config,
                 index=idx,
@@ -612,7 +611,6 @@ def tournament_selection_and_mutation(
         accelerator.wait_for_everyone()
         for model in population:
             model.unwrap_models()
-
         accelerator.wait_for_everyone()
 
         # Perform tournament selection and mutation on main process
@@ -632,6 +630,8 @@ def tournament_selection_and_mutation(
         # Wrap models back to accelerator
         for model in population:
             model.wrap_models()
+        accelerator.wait_for_everyone()
+
     else:
         # Perform tournament selection and mutation
         elite, population = tournament.select(population)
@@ -639,7 +639,8 @@ def tournament_selection_and_mutation(
 
     if save_elite:
         if language_model:
-            save_llm_checkpoint(elite, elite_path)
+            if accelerator is None or accelerator.is_main_process:
+                save_llm_checkpoint(elite, elite_path)
         else:
             elite_save_path = (
                 elite_path.split(".pt")[0]
@@ -647,6 +648,9 @@ def tournament_selection_and_mutation(
                 else f"{env_name}-elite_{algo}"
             )
             elite.save_checkpoint(f"{elite_save_path}.pt")
+
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
 
     return population
 
@@ -819,46 +823,36 @@ def get_env_defined_actions(info, agents):
     return env_defined_actions
 
 
-def gather_tensor(tensor: torch.Tensor, agent: EvolvableAlgorithm) -> torch.Tensor:
+def gather_tensor(tensor: torch.Tensor, accelerator: Accelerator) -> torch.Tensor:
     """Gather tensors from gpus
 
     :param tensor: Tensor to gather
     :type tensor: torch.Tensor
-    :param agent: Agent object
-    :type agent: EvolvableAlgorithm
+    :param accelerator: Accelerator object
+    :type accelerator: accelerate.Accelerator
     :return: Stacked tensors
     :rtype: torch.Tensor
     """
-    # Convert to tensor if it's a scalar
     if not isinstance(tensor, torch.Tensor):
-        tensor = torch.tensor(tensor, device=f"cuda:{agent.local_rank}")
-
-    if tensor.device != agent.device:
-        tensor = tensor.to(agent.device)
-    # Ensure tensor is on correct device
-    tensor = tensor.detach().clone()
-    # Create a list to store tensors from all processes
-    world_size = dist.get_world_size()
-    gathered_tensors = [torch.zeros_like(tensor) for _ in range(world_size)]
-
-    # Gather the tensor from all processes
-    dist.all_gather(gathered_tensors, tensor)
-    return torch.stack(gathered_tensors)
+        tensor = torch.tensor(tensor, device=accelerator.device)
+    tensor = tensor.to(accelerator.device)
+    gathered_tensors = accelerator.gather(tensor)
+    return gathered_tensors
 
 
 def aggregate_metrics_across_gpus(
-    agent: EvolvableAlgorithm, metric_tensor: torch.Tensor
+    accelerator: Accelerator, metric_tensor: torch.Tensor
 ) -> float:
     """Aggregate gathered tensors
 
-    :param agent: Agent
-    :type agent: EvolvableAlgorithm
+    :param accelerator: Accelerator object
+    :type accelerator: accelerate.Accelerator
     :param metric_tensor: Metrics
     :type metric_tensor: torch.Tensor
     :return: Mean metric
     :rtype: float
     """
-    all_metrics = gather_tensor(metric_tensor, agent)
+    all_metrics = gather_tensor(metric_tensor, accelerator)
     avg_metrics = all_metrics.mean().item()
     return avg_metrics
 
@@ -874,8 +868,4 @@ def save_llm_checkpoint(agent: EvolvableAlgorithm, checkpoint_path: str | None) 
     base_path = "./saved_checkpoints" if checkpoint_path is None else checkpoint_path
     path = base_path + f"/{agent.algo}"
     os.makedirs(path, exist_ok=True)
-    if agent.accelerator is not None:
-        unwrapped_model = agent.accelerator.unwrap_model(agent.actor)
-        unwrapped_model.save_pretrained(path)
-    else:
-        agent.actor.save_pretrained(path)
+    agent.actor.save_pretrained(path)

@@ -215,7 +215,7 @@ def grpo(vocab_size, input_size, max_tokens, group_size, use_accelerator):
             grpo = GRPO(
                 observation_space,
                 action_space,
-                actor_network=create_module(
+                actor=create_module(
                     input_size=input_size,
                     max_tokens=max_tokens,
                     vocab_size=vocab_size,
@@ -235,7 +235,7 @@ def grpo(vocab_size, input_size, max_tokens, group_size, use_accelerator):
         return GRPO(
             observation_space,
             action_space,
-            actor_network=create_module(
+            actor=create_module(
                 input_size=input_size,
                 max_tokens=max_tokens,
                 vocab_size=vocab_size,
@@ -598,7 +598,7 @@ def test_grpo_save_load_checkpoint_with_accelerator(
         grpo = GRPO(
             gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
             gym.spaces.Box(low=0, high=vocab_size - 1),
-            actor_network=create_module(
+            actor=create_module(
                 input_size=input_size,
                 max_tokens=max_tokens,
                 vocab_size=vocab_size,
@@ -622,7 +622,7 @@ def test_grpo_save_load_checkpoint_with_accelerator(
         new_grpo = GRPO(
             gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
             gym.spaces.Box(low=0, high=vocab_size - 1),
-            actor_network=create_module(
+            actor=create_module(
                 input_size=input_size,
                 max_tokens=max_tokens,
                 vocab_size=vocab_size,
@@ -681,7 +681,7 @@ def test_grpo_clone_with_accelerator(
         grpo = GRPO(
             gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
             gym.spaces.Box(low=0, high=vocab_size - 1),
-            actor_network=create_module(
+            actor=create_module(
                 input_size=input_size,
                 max_tokens=max_tokens,
                 vocab_size=vocab_size,
@@ -749,7 +749,7 @@ def test_grpo_clone_with_no_accelerator(
     grpo = GRPO(
         gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
         gym.spaces.Box(low=0, high=vocab_size - 1),
-        actor_network=create_module(
+        actor=create_module(
             input_size=input_size,
             max_tokens=max_tokens,
             vocab_size=vocab_size,

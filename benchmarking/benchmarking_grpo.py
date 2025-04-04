@@ -16,7 +16,7 @@ from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
-MODEL_PATH = "Qwen/Qwen2.5-1.5B"
+MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
 
@@ -146,15 +146,15 @@ def combined_rewards(completion, solution, prompt):
         + format_reward_func([completion], [solution])[0]
     )
 
-#     print(
-#         f"""
-# ============================================ \n
-# Completion: {completion}, \n
-# Numbers: {prompt}, \n
-# Correct Answer: {solution.item()} \n
-# Reward: {reward}
-# """
-#     )
+    #     print(
+    #         f"""
+    # ============================================ \n
+    # Completion: {completion}, \n
+    # Numbers: {prompt}, \n
+    # Correct Answer: {solution.item()} \n
+    # Reward: {reward}
+    # """
+    #     )
 
     if reward == 2.0:
         with open("countdown_completions.txt", "a") as text_file:
@@ -191,6 +191,27 @@ def main(init_hp, mut_p):
 
     # Convert the HuggingFace dataset into a Gymnasium environment
     accelerators = [Accelerator() for _ in range(init_hp["POP_SIZE"])]
+
+    if (
+        accelerators[0].state.deepspeed_plugin.deepspeed_config[
+            "train_micro_batch_size_per_gpu"
+        ]
+        == "auto"
+    ):
+        accelerators[0].state.deepspeed_plugin.deepspeed_config[
+            "train_micro_batch_size_per_gpu"
+        ] = 2  # FIXME should this be related to batch size parameter ??? probably
+
+    # Add gradient checkpointing to the deepspeed config
+    accelerators[0].state.deepspeed_plugin.deepspeed_config[
+        "activation_checkpointing"
+    ] = {
+        "partition_activations": True,
+        "cpu_checkpointing": True,
+        "synchronize_checkpoint_boundary": True,
+        "number_checkpoints": 2,
+    }
+
     env = HuggingFaceGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
@@ -251,7 +272,7 @@ def main(init_hp, mut_p):
         save_elite=True,
         elite_path="saved_llms",
         max_reward=2.0,
-        evo_steps=2,
+        evo_steps=3,
         mutation=mutations,
         tournament=tournament,
         accelerator=accelerators[0],

@@ -21,7 +21,7 @@ from torch.optim import Optimizer
 from transformers import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
 
-from agilerl.algorithms.core import EvolvableAlgorithm, RLAlgorithm
+from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.typing import DeviceType, ExperiencesType
@@ -29,7 +29,6 @@ from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     create_warmup_cosine_scheduler,
     get_experiences_samples,
-    remove_nested_files,
     stack_and_pad_experiences,
 )
 from agilerl.utils.llm_utils import (
@@ -42,7 +41,7 @@ DeepSpeedOptimizerType = Union[
 ]
 
 
-class GRPO(RLAlgorithm):
+class GRPO(LLMAlgorithm):
     """The GRPO algorithm class. GRPO paper: https://arxiv.org/pdf/2402.03300
 
     :param observation_space: Observation space of the environment
@@ -79,8 +78,6 @@ class GRPO(RLAlgorithm):
     :type min_output_tokens: int, optional
     :param cosine_lr_schedule_config: Config for cosine lr scheduling, defaults to None
     :type cosine_lr_schedule_config: CosineLRScheduleConfig, optional
-    :param gradient_checkpointing: Flag to enable gradient checkpointing, defaults to False
-    :type gradient_checkpointing: bool, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
@@ -95,7 +92,7 @@ class GRPO(RLAlgorithm):
         self,
         observation_space: spaces.Space,
         action_space: spaces.Space,
-        actor_network: PreTrainedModel,
+        actor: PreTrainedModel,
         pad_token_id: int,
         hp_config: Optional[HyperparameterConfig] = None,
         index: int = 0,
@@ -112,11 +109,10 @@ class GRPO(RLAlgorithm):
         max_output_tokens: int = 1024,
         min_output_tokens: Optional[int] = None,
         cosine_lr_schedule_config: Optional[CosineLRScheduleConfig] = None,
-        gradient_checkpointing: bool = True,
         accelerator: Optional[Accelerator] = None,
         device: str = "cpu",
         clone: bool = False,
-        wrap: bool = False,
+        wrap: bool = True,
     ) -> None:
         device = (
             f"cuda:{os.getenv('LOCAL_RANK', '0')}"
@@ -130,7 +126,6 @@ class GRPO(RLAlgorithm):
             hp_config=hp_config,
             device=device,
             accelerator=None,
-            normalize_images=False,
             name="GRPO",
         )
         assert isinstance(batch_size, int), "Batch size must be an integer."
@@ -164,7 +159,8 @@ class GRPO(RLAlgorithm):
             min_new_tokens=min_output_tokens,
             pad_token_id=pad_token_id,
         )
-        self.gradient_checkpointing = gradient_checkpointing
+        self.min_output_tokens = min_output_tokens
+        self.max_output_tokens = max_output_tokens
         self.cosine_lr_schedule_config = cosine_lr_schedule_config
         self.wrap = wrap
         if max_grad_norm and accelerator is not None and device == "cuda:0":
@@ -178,8 +174,20 @@ class GRPO(RLAlgorithm):
         self.reduce_memory_peak = reduce_memory_peak
         self.local_rank = device.split(":")[-1]
         self.accelerator = accelerator
-        self._initialize_actors(actor_network, not clone)
-        del actor_network
+        self._initialize_actors(actor, not clone)
+        self.optimizer = OptimizerWrapper(
+            optim.AdamW, networks=[self.actor], lr=self.lr
+        )
+        self.lr_scheduler = (
+            create_warmup_cosine_scheduler(
+                self.optimizer.optimizer, self.cosine_lr_schedule_config, 1e-8, self.lr
+            )
+            if self.cosine_lr_schedule_config is not None
+            else None
+        )
+        if self.accelerator is not None and self.wrap:
+            self.wrap_models(not clone)
+        del actor
 
     def get_action(
         self, states: List[Dict[str, torch.Tensor]], training: bool = True
@@ -211,7 +219,7 @@ class GRPO(RLAlgorithm):
                 )
                 completion_ids.append(completion_id)
                 action_mask = torch.zeros_like(
-                    completion_id, dtype=torch.bool, device=self.device
+                    completion_id, dtype=torch.bool, device=self.actor.device
                 )
                 action_mask[:, state["input_ids"].shape[1] :] = True
                 action_mask[completion_id == self.pad_token_id] = False
@@ -230,7 +238,7 @@ class GRPO(RLAlgorithm):
         completion_ids, action_masks, rewards = stack_and_pad_experiences(
             *experiences, padding_values=[self.pad_token_id, False, None]
         )
-        advantages = self._calculate_advantage(rewards).to(self.device)
+        advantages = self._calculate_advantage(rewards).to(self.actor.device)
         with torch.no_grad():
             reference_log_probs = self._get_logprobs(
                 completion_ids, use_reference=True, eval_mode=True
@@ -276,6 +284,7 @@ class GRPO(RLAlgorithm):
                 self._backward_pass(loss)
                 mean_loss += loss.item()
                 mean_kl += kl.item()
+
         mean_loss /= len(completion_ids)
         mean_kl /= len(completion_ids)
         return mean_loss, mean_kl
@@ -318,24 +327,7 @@ class GRPO(RLAlgorithm):
         :type create_reference_net: bool
         """
         self._create_policy_network(actor_network)
-        if create_reference_net:
-            self._create_reference_policy_network(actor_network)
-        if self.accelerator is not None:
-            self.wrap_models(create_reference_net)
-        else:
-            self.actor = self.actor.to(self.device)
-            if self.gradient_checkpointing:
-                self.actor.gradient_checkpointing_enable()
-            if create_reference_net:
-                self.reference_actor = self.reference_actor.to(self.device)
-
-        # Register network groups for mutations
-        self.register_network_group(NetworkGroup(eval=self.actor, policy=True))
-        if create_reference_net:
-            self.register_network_group(
-                NetworkGroup(eval=self.reference_actor, policy=True)
-            )
-            self.reference_actor.eval()
+        self._create_reference_policy_network(actor_network)
 
     def _calculate_advantage(
         self, rewards: torch.Tensor, eps: float = 1e-8
@@ -478,37 +470,8 @@ class GRPO(RLAlgorithm):
         :return: Policy network and reference network
         :rtype: Tuple[Union[nn.Module, DeepSpeedEngine], Union[Optimizer, DeepSpeedOptimizerType]]
         """
-        if self.accelerator is not None:
-            if (
-                self.accelerator.state.deepspeed_plugin.deepspeed_config[
-                    "train_micro_batch_size_per_gpu"
-                ]
-                == "auto"
-            ):
-                self.accelerator.state.deepspeed_plugin.deepspeed_config[
-                    "train_micro_batch_size_per_gpu"
-                ] = 2
-
-            if self.gradient_checkpointing:
-                self.accelerator.state.deepspeed_plugin.deepspeed_config[
-                    "activation_checkpointing"
-                ] = {
-                    "partition_activations": True,
-                    "cpu_checkpointing": True,
-                    "synchronize_checkpoint_boundary": True,
-                    "number_checkpoints": 2,
-                }
         self.actor = network
-        self.optimizer = OptimizerWrapper(
-            optim.AdamW, networks=[self.actor], lr=self.lr
-        )
-        self.lr_scheduler = (
-            create_warmup_cosine_scheduler(
-                self.optimizer.optimizer, self.cosine_lr_schedule_config, 1e-8, self.lr
-            )
-            if self.cosine_lr_schedule_config is not None
-            else None
-        )
+        self.register_network_group(NetworkGroup(eval=self.actor, policy=True))
 
     def _create_reference_policy_network(
         self, network: PreTrainedModel
@@ -526,6 +489,9 @@ class GRPO(RLAlgorithm):
         self.reference_actor.eval()
         for param in self.reference_actor.parameters():
             param.requires_grad = False
+        self.register_network_group(
+            NetworkGroup(eval=self.reference_actor, policy=True)
+        )
 
     def _backward_pass(self, loss: float) -> None:
         """Perform a backward pass
@@ -545,40 +511,6 @@ class GRPO(RLAlgorithm):
         if self.lr_scheduler is not None:
             self.lr_scheduler.step()
             self.lr = self.lr_scheduler.get_last_lr()[0]
-
-    def save_checkpoint(self, path: str) -> None:
-        """
-        Override the save_checkpoint method to provide guidance on the correct method to use.
-        :param path: Location to save checkpoint at
-        :type path: string
-        """
-        raise NotImplementedError(
-            "The save_checkpoint method is not supported for this algorithm class. "
-            "Please use agent.actor.save_pretrained(checkpoint_path) instead."
-        )
-
-    def load_checkpoint(self, path: str) -> None:
-        """
-        Override the load_checkpoint method to provide guidance on the correct method to use.
-
-        :param path: Location to load checkpoint from
-        :type path: string
-        """
-        raise NotImplementedError(
-            "The load_checkpoint method is not supported for this algorithm class."
-            """
-            To load a saved LLM, please load the model as follows, and then re-instantiate the GRPO
-            class.
-
-            base_model = AutoModelForCausalLM.from_pretrained(
-                "Qwen/Qwen2.5-3B",
-                torch_dtype=torch.bfloat16,
-                device_map="auto"
-            )
-            tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B")
-            model = PeftModel.from_pretrained(base_model, "/path/to/adapter/folder")
-            """
-        )
 
     def _save_distributed_actor(self, path: str) -> None:
         """
@@ -602,21 +534,22 @@ class GRPO(RLAlgorithm):
         :param path: Output directory to load the checkpoint from
         :type path: str
         """
-        # path 
-        # tag = path.split("/")[-1]
-        # print("THIS IS THE TAG", tag)
-        # print("THIS IS THE PATH", f"{path}/{tag}")
+        split_path = path.split("/")
+        tag = split_path[-1]
+        path = "/".join(split_path[:-1])
         if self.accelerator is not None:
-            deepspeed_dirs = sorted(glob.glob(f"{path}"))
+            deepspeed_dirs = sorted(glob.glob(f"{path}/{tag}"))
             assert len(deepspeed_dirs) > 0
             self.actor.load_checkpoint(
                 path,
-                # tag=tag,
+                tag=tag,
                 load_module_strict=True,
                 load_optimizer_states=True,
                 load_lr_scheduler_states=True,
             )
-            self.accelerator.deepspeed_engine_wrapped.engine = self.actor
+            self.accelerator.deepspeed_engine_wrapped.engine = (
+                self.actor
+            )  # TODO should this go before self.actor.load_checkpoint?
         else:
             warnings.warn(
                 "Distributed actor load not supported for non-distributed training."
@@ -645,7 +578,7 @@ class GRPO(RLAlgorithm):
             """
         )
 
-    def wrap_models(self, create_reference_net):
+    def wrap_models(self, create_reference_net=True):
         """Wrap the models in the accelerator
 
         :param create_reference_net: Flag to indicate if the reference network should be wrapped
@@ -655,81 +588,21 @@ class GRPO(RLAlgorithm):
             self.actor, self.optimizer, self.lr_scheduler = self.accelerator.prepare(
                 self.actor, self.optimizer.optimizer, self.lr_scheduler
             )
-            if create_reference_net:
-                deepspeed_plugin = self.accelerator.state.deepspeed_plugin
-                config_kwargs = copy.deepcopy(deepspeed_plugin.deepspeed_config)
-                config_kwargs["zero_optimization"]["stage"] = 0
-                self.reference_actor, *_ = deepspeed.initialize(
-                    model=self.reference_actor, config=config_kwargs
-                )
+            self.accelerator.deepspeed_engine_wrapped.engine = self.actor
+            deepspeed_plugin = self.accelerator.state.deepspeed_plugin
+            config_kwargs = copy.deepcopy(deepspeed_plugin.deepspeed_config)
+            config_kwargs["zero_optimization"]["stage"] = 0
+            self.reference_actor, *_ = deepspeed.initialize(
+                model=self.reference_actor, config=config_kwargs
+            )
 
-    def clone(self, index: Optional[int] = None, wrap: bool = True):
-        """Creates a clone of the algorithm.
-
-        :param index: The index of the clone, defaults to None
-        :type index: Optional[int], optional
-        :param wrap: If True, wrap the models in the clone with the accelerator, defaults to False
-        :type wrap: bool, optional
-
-        :return: A clone of the algorithm
-        :rtype: EvolvableAlgorithm
-        """
+    def unwrap_models(self):
+        """Unwrap the models in the accelerator"""
         if self.accelerator is not None:
-            self.accelerator.free_memory()
-            self.accelerator.wait_for_everyone()
-            print(f"================================= Saving agent for process {self.accelerator.process_index} =================================")
-            self._save_distributed_actor(f"GRPO/agent_{self.index}")
-            print(f"================================= Finished agent for process {self.accelerator.process_index} =================================")
-            self.accelerator.wait_for_everyone()
-            input_args = EvolvableAlgorithm.inspect_attributes(
-                self, input_args_only=True
-            )
-            input_args["clone"] = True
-            input_args["actor_network"] = self.accelerator.unwrap_model(self.actor)
-            clone = type(self)(**input_args)
-            clone.reference_actor = self.reference_actor
-            clone.reference_actor.eval()
-            accelerator = clone.accelerator
+            self.actor = self.accelerator.unwrap_model(self.actor)
+            self.reference_actor = self.accelerator.unwrap_model(self.reference_actor)
+            self.optimizer = OptimizerWrapper(
+                optim.AdamW, networks=[self.actor], lr=self.lr
+            )  # It is not possible to unwrap the optimizer we therefore have to reset the optimizer each time we unwrap.
+            self.accelerator.unwrap_model(self.optimizer)
             self.lr_scheduler = self.accelerator.unwrap_model(self.lr_scheduler)
-            lr_scheduler = self.lr_scheduler
-            self.lr_scheduler = None
-            clone = EvolvableAlgorithm.copy_attributes(self, clone)
-            clone.accelerator = accelerator
-            clone.lr_scheduler = lr_scheduler
-            if index is not None:
-                clone.index = index
-            clone.accelerator.wait_for_everyone()
-            print(f"================================= Loading agent for process {self.accelerator.process_index} =================================")
-            clone._load_distributed_actor(f"GRPO/agent_{self.index}/step_{self.steps[-1]}")
-            print(f"================================= Finished loading agent for process {self.accelerator.process_index} =================================")
-            clone.accelerator.wait_for_everyone()
-            # saved_state_files = glob.glob(f"GRPO/agent_{self.index}_step_{self.steps[-1]}/*")
-            # if clone.accelerator.is_main_process:
-            #     remove_nested_files(saved_state_files)
-        else:
-            actor_state_dict = self.actor.state_dict()
-            optimizer_state_dict = self.optimizer.optimizer.state_dict()
-            lr_scheduler_state_dict = (
-                self.lr_scheduler.state_dict()
-                if self.lr_scheduler is not None
-                else None
-            )
-            input_args = EvolvableAlgorithm.inspect_attributes(
-                self, input_args_only=True
-            )
-            input_args["clone"] = True
-            input_args["actor_network"] = self.actor
-            clone = type(self)(**input_args)
-            clone.reference_actor = self.reference_actor
-            clone.reference_actor.eval()
-            lr_scheduler = self.lr_scheduler
-            self.lr_scheduler = None
-            clone = EvolvableAlgorithm.copy_attributes(self, clone)
-            clone.lr_scheduler = lr_scheduler
-            if index is not None:
-                clone.index = index
-            clone.actor.load_state_dict(actor_state_dict)
-            clone.optimizer.optimizer.load_state_dict(optimizer_state_dict)
-            if lr_scheduler_state_dict is not None:
-                clone.lr_scheduler.load_state_dict(lr_scheduler_state_dict)
-        return clone

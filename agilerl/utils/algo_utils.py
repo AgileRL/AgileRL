@@ -14,11 +14,13 @@ import torch.nn.functional as F
 from accelerate.optimizer import AcceleratedOptimizer
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from gymnasium import spaces
+from peft import PeftModel
 from tensordict.nn import CudaGraphModule
 from torch._dynamo import OptimizedModule
 from torch.nn import Module
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+from transformers.modeling_utils import PreTrainedModel
 
 from agilerl.protocols import EvolvableAttributeType, EvolvableModule, OptimizerWrapper
 from agilerl.typing import (
@@ -31,6 +33,8 @@ from agilerl.typing import (
     OptimizerType,
     TorchObsType,
 )
+
+PreTrainedLanguageModel = Union[PreTrainedModel, PeftModel]
 
 
 def is_image_space(space: spaces.Space) -> bool:
@@ -244,7 +248,7 @@ def recursive_check_module_attrs(obj: Any, networks_only: bool = False) -> bool:
     :param networks_only: If True, only check for EvolvableModule objects, defaults to False
     :type networks_only: bool, optional
     """
-    check_types = (OptimizedModule, EvolvableModule)
+    check_types = (OptimizedModule, EvolvableModule, PreTrainedLanguageModel)
     if not networks_only:
         check_types += (OptimizerWrapper, DeepSpeedOptimizerWrapper)
 

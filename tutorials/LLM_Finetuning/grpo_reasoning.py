@@ -202,7 +202,7 @@ def main():
     agent = GRPO(
         env.observation_space,
         env.action_space,
-        actor_network=model,
+        actor=model,
         pad_token_id=tokenizer.eos_token_id,
         batch_size=1,
         max_output_tokens=1024,

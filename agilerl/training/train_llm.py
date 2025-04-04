@@ -3,10 +3,10 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch.distributed as dist
-import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import GRPO
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.hpo.mutation import Mutations
@@ -149,8 +149,6 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
             dynamic_ncols=True,
         )
 
-    print("AGENT INDICES", [agent.index for agent in pop])
-    assert False
     total_steps = 0
     # calling env.reset() supplies the first batch of training data
     prompts = env.reset(reset_dataloaders=True)
@@ -173,7 +171,7 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                 accuracy = (rewards == max_reward).sum() / len(rewards.flatten())
                 metrics.append(accuracy)
             agg_metrics = [
-                aggregate_metrics_across_gpus(agent, metric) for metric in metrics
+                aggregate_metrics_across_gpus(accelerator, metric) for metric in metrics
             ]
             prompts = next_prompts
             agg_test_metrics = None
@@ -186,7 +184,7 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                     )
                     test_metrics.append(test_accuracy)
                 agg_test_metrics = [
-                    aggregate_metrics_across_gpus(agent, metric)
+                    aggregate_metrics_across_gpus(accelerator, metric)
                     for metric in test_metrics
                 ]
                 if (
@@ -235,8 +233,7 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                 pbar.update(effective_data_batch_size)
                 agent.scores.append(agg_metrics[2])
             total_steps += effective_data_batch_size
-            agent.steps.append(effective_data_batch_size)
-
+            agent.steps[-1] += effective_data_batch_size
 
         if accelerator is not None:
             accelerator.wait_for_everyone()
@@ -247,7 +244,7 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                     tournament=tournament,
                     mutation=mutation,
                     env_name=env.name,
-                    accelerator=None,  # Set as None for LLM finetuning as it does not require the same accelerator handling as standard RL models
+                    accelerator=accelerator,  # Set as None for LLM finetuning as it does not require the same accelerator handling as standard RL models
                     language_model=True,
                     elite_path=elite_path,
                     save_elite=save_elite,
