@@ -35,7 +35,8 @@ class NetConfig:
 
     def pop(self, key: str, default: Any = None) -> Any:
         attr = getattr(self, key, default)
-        delattr(self, key)
+        if attr is not default:
+            delattr(self, key)
         return attr
 
     def keys(self) -> List[str]:

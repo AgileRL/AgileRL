@@ -1,5 +1,6 @@
 import copy
 from collections import OrderedDict
+from dataclasses import asdict
 from typing import Any, Dict, Literal, Optional, Tuple, Union
 
 import numpy as np
@@ -9,7 +10,7 @@ from gymnasium import spaces
 
 from agilerl.modules import EvolvableCNN, EvolvableLSTM, EvolvableMLP
 from agilerl.modules.base import EvolvableModule, ModuleDict, MutationType, mutation
-from agilerl.modules.configs import CnnNetConfig, LstmNetConfig, MlpNetConfig
+from agilerl.modules.configs import CnnNetConfig, LstmNetConfig, MlpNetConfig, NetConfig
 from agilerl.typing import ArrayOrTensor, ConfigType
 from agilerl.utils.evolvable_networks import (
     get_activation,
@@ -297,7 +298,7 @@ class EvolvableMultiInput(EvolvableModule):
 
     def get_inner_init_dict(
         self, key: str, default: Literal["cnn", "mlp", "lstm"]
-    ) -> Dict[str, Any]:
+    ) -> ConfigType:
         """Returns the initialization dictionary for the specified key.
 
         :param key: Key of the observation space.
@@ -305,11 +306,14 @@ class EvolvableMultiInput(EvolvableModule):
         :param default: Default value to return if the key is not found.
         :type default: Literal["cnn", "mlp", "lstm"]
         :return: Initialization dictionary.
-        :rtype: Dict[str, Any]
+        :rtype: ConfigType
         """
         init_dicts = self.init_dicts
         if key in init_dicts:
-            return init_dicts[key]
+            init_dict = init_dicts[key]
+            init_dict["num_outputs"] = self.latent_dim
+            init_dict["device"] = self.device
+            return init_dict
 
         init_dict = {
             "cnn": self.cnn_init_dict,
@@ -328,6 +332,9 @@ class EvolvableMultiInput(EvolvableModule):
                 if nested_dict is not None
                 else copy.deepcopy(init_dict)
             )
+
+            if isinstance(init_dict, NetConfig):
+                init_dict = asdict(init_dict)
 
         init_dict["num_outputs"] = self.latent_dim
         init_dict["device"] = self.device

@@ -911,6 +911,8 @@ def check_q_learning_with_probe_env(
         transition = Transition(
             obs=state, action=action, reward=reward, next_obs=next_state, done=done
         ).to_tensordict()
+        transition = transition.unsqueeze(0)
+        transition.batch_size = [1]
         memory.add(transition)
         state = next_state
         if done:
@@ -949,6 +951,8 @@ def check_policy_q_learning_with_probe_env(
         transition = Transition(
             obs=state, action=action, reward=reward, next_obs=next_state, done=done
         ).to_tensordict()
+        transition = transition.unsqueeze(0)
+        transition.batch_size = [1]
         memory.add(transition)
         state = next_state
         if done:
@@ -1012,7 +1016,7 @@ def check_policy_on_policy_with_probe_env(
 
         done = 0
 
-        for j in range(100):
+        for j in range(200):
             if isinstance(state, dict):
                 state = {k: np.expand_dims(v, 0) for k, v in state.items()}
             else:
