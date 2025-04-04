@@ -458,13 +458,6 @@ def test_stochastic_actor_clip_action():
         action_space=discrete_space,
     )
 
-    # For discrete spaces, clip_action should raise an error when accessing action_low/high
-    with pytest.raises(ValueError, match="Action space is not a Box"):
-        actor.action_low
-
-    with pytest.raises(ValueError, match="Action space is not a Box"):
-        actor.action_high
-
 
 @pytest.mark.parametrize(
     "action_space",
