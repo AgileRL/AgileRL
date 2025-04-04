@@ -28,10 +28,24 @@ TupleorInt = Union[Tuple[int, ...], int]
 
 
 def tuple_to_dict_space(tuple_space: spaces.Tuple) -> spaces.Dict:
+    """Converts a Tuple observation space to a Dict observation space.
+
+    :param tuple_space: Tuple observation space
+    :type tuple_space: spaces.Tuple
+    :return: Dictionary observation space
+    :rtype: spaces.Dict
+    """
     return spaces.Dict({str(i): space for i, space in enumerate(tuple_space.spaces)})
 
 
 def tuple_to_dict_obs(tuple_obs: tuple) -> dict:
+    """Converts a tuple observation to a Python dictionary
+
+    :param tuple_obs: Tuple observation
+    :type tuple_obs: tuple
+    :return: Dictionary observation
+    :rtype: dict
+    """
     return {str(i): obs for i, obs in enumerate(tuple_obs)}
 
 
