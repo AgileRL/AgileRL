@@ -1239,6 +1239,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     td3 = TD3(
         observation_space=generate_random_box_space(shape=(4,), low=0, high=1),
         action_space=generate_random_box_space(shape=(2,), low=0, high=1),
+        actor_network=actor_network,
+        critic_networks=[critic_1_network, critic_2_network],
     )
     # Load checkpoint
     td3.load_checkpoint(checkpoint_path)

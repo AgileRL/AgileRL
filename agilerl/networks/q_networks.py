@@ -40,6 +40,12 @@ class QNetwork(EvolvableNetwork):
     :type n_agents: Optional[int]
     :param latent_dim: Dimension of the latent space representation.
     :type latent_dim: int
+    :param simba: If True, use a SimBa network for the encoder for vector spaces. Defaults to False.
+    :type simba: bool
+    :param recurrent: If True, use a recurrent network. Defaults to False. If False and the observation
+    space is a 2D Box space, an `EvolvableMLP` is used as an encoder whereby observations are flattened.
+    Otherwise, an `EvolvableLSTM` is used as an encoder.
+    :type recurrent: bool
     :param device: Device to use for the network.
     :type device: str
     """
@@ -56,6 +62,7 @@ class QNetwork(EvolvableNetwork):
         n_agents: Optional[int] = None,
         latent_dim: int = 32,
         simba: bool = False,
+        recurrent: bool = False,
         device: str = "cpu",
     ):
         super().__init__(
@@ -68,6 +75,7 @@ class QNetwork(EvolvableNetwork):
             n_agents=n_agents,
             latent_dim=latent_dim,
             simba=simba,
+            recurrent=recurrent,
             device=device,
         )
 
@@ -104,7 +112,7 @@ class QNetwork(EvolvableNetwork):
         :return: Output of the network.
         :rtype: torch.Tensor
         """
-        latent = self.encoder(obs)
+        latent = self.extract_features(obs)
         return self.head_net(latent)
 
     def recreate_network(self) -> None:
@@ -254,7 +262,7 @@ class RainbowQNetwork(EvolvableNetwork):
         :return: Output of the network.
         :rtype: torch.Tensor
         """
-        latent = self.encoder(obs)
+        latent = self.extract_features(obs)
         return self.head_net(latent, q=q, log=log)
 
     def recreate_network(self) -> None:
@@ -386,13 +394,14 @@ class ContinuousQNetwork(EvolvableNetwork):
         if len(actions.shape) == 1:
             actions = actions.unsqueeze(0)
 
-        x = self.encoder(obs)
+        # Extract features from the observation
+        latent = self.extract_features(obs)
 
         # Normalize actions
         if self.normalize_actions:
             actions = nn.functional.layer_norm(actions, [actions.size(-1)])
 
-        x = torch.cat([x, actions], dim=-1)
+        x = torch.cat([latent, actions], dim=-1)
         return self.head_net(x)
 
     def recreate_network(self) -> None:

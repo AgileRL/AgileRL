@@ -132,7 +132,8 @@ used with continuous action environments.
 
 .. code-block:: python
 
-    num_envs=8
+    # Create vectorized environment
+    num_envs = 8
     env = make_vect_envs("LunarLanderContinuous-v2", num_envs=num_envs)  # Create environment
 
     observation_space = env.single_observation_space
@@ -155,7 +156,10 @@ population. The sequence of evolution (tournament selection followed by mutation
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Define the network configuration of a simple mlp with two hidden layers, each with 64 nodes
-    net_config = {"head_config": {"hidden_size": [64, 64]}}
+    net_config = {
+        "encoder_config": {"hidden_size": [64, 64]},  # Encoder hidden size
+        "head_config": {"hidden_size": [64, 64]},  # Head hidden size
+    }
 
     # Mutation config for RL hyperparameters
     hp_config = HyperparameterConfig(
@@ -189,18 +193,20 @@ This reduces the exploration needed by an individual agent because it allows fas
 For example, if you were able to watch a bunch of people attempt to solve a maze, you could learn from their mistakes and successes
 without necessarily having to explore the entire maze yourself.
 
-The object used to store experiences collected by agents in the environment is called the Experience Replay Buffer, and is defined
-by the class ``ReplayBuffer()``. During training it can be added to using the ``ReplayBuffer.save_to_memory()`` function, or
-``ReplayBuffer.save_to_memory_vect_envs()`` for vectorized environments (recommended). To sample from the replay buffer, call ``ReplayBuffer.sample()``.
+The object used to store experiences collected by agents in the environment is called the Experience Replay Buffer, and is defined by
+the class ``ReplayBuffer()``. During training we use the ``ReplayBuffer.add()`` function to add experiences to the buffer as ``TensorDict``
+objects. Specifically, we wrap transitions through the ``Transition`` tensorclass that wraps the ``obs``, ``action``, ``reward``,
+``next_obs``, and ``done`` fields as ``torch.Tensor`` objects. To sample from the replay buffer, call ``ReplayBuffer.sample()``.
 
 .. code-block:: python
 
-    field_names = ["state", "action", "reward", "next_state", "terminated"]
+    from agilerl.components.replay_buffer import ReplayBuffer
+
     memory = ReplayBuffer(
-        memory_size=10_000,  # Max replay buffer size
-        field_names=field_names,  # Field names to store in memory
+        max_size=10000,  # Max replay buffer size
         device=device,
     )
+
 
 
 Creating Mutations and Tournament objects
@@ -324,8 +330,8 @@ function and is an example of how we might choose to make use of a population of
             steps = 0
 
             for idx_step in range(INIT_HP["EVO_STEPS"] // num_envs):
-                if INIT_HP["CHANNELS_LAST"]:
-                    state = obs_channels_to_first(state)
+                # Swap channels if channels last is True
+                state = obs_channels_to_first(state) if INIT_HP["CHANNELS_LAST"] else state
 
                 action = agent.get_action(state)  # Get next action from agent
 
@@ -343,30 +349,26 @@ function and is an example of how we might choose to make use of a population of
                         agent.scores.append(scores[idx])
                         scores[idx] = 0
                         reset_noise_indices.append(idx)
+
+                # Reset action noise
                 agent.reset_action_noise(reset_noise_indices)
 
                 # Save experience to replay buffer
-                if INIT_HP["CHANNELS_LAST"]:
-                    memory.save_to_memory(
-                        state,
-                        action,
-                        reward,
-                        obs_channels_to_first(next_state),
-                        terminated,
-                        is_vectorised=True,
-                    )
-                else:
-                    memory.save_to_memory(
-                        state,
-                        action,
-                        reward,
-                        next_state,
-                        terminated,
-                        is_vectorised=True,
-                    )
+                done = terminated or truncated
+                next_state = obs_channels_to_first(next_state) if INIT_HP["CHANNELS_LAST"] else next_state
+                transition = Transition(
+                    obs=state,
+                    action=action,
+                    reward=reward,
+                    next_obs=next_state,
+                    done=done,
+                    batch_size=[num_envs]
+                )
+                transition = transition.to_tensordict()
+                memory.add(transition)
 
                 # Learn according to learning frequency
-                if memory.counter > INIT_HP["LEARNING_DELAY"] and len(memory) >= agent.batch_size:
+                if memory.size > INIT_HP["LEARNING_DELAY"] and len(memory) >= agent.batch_size:
                     for _ in range(num_envs // agent.learn_step):
                         # Sample replay buffer
                         experiences = memory.sample(agent.batch_size)
@@ -451,8 +453,7 @@ Test loop for inference
 
             for step in range(max_testing_steps):
                 # If your state is an RGB image
-                if INIT_HP["CHANNELS_LAST"]:
-                    state = obs_channels_to_first(state)
+                state = obs_channels_to_first(state) if INIT_HP["CHANNELS_LAST"] else state
 
                 # Get next action from agent
                 action, *_ = td3.get_action(state, training=False)

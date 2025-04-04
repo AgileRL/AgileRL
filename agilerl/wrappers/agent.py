@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple, TypeVar, Union
 import dill
 import torch
 from gymnasium import spaces
+from tensordict import is_tensor_collection
 
 from agilerl.algorithms.core import (
     EvolvableAlgorithm,
@@ -435,13 +436,18 @@ class RSNorm(AgentWrapper):
         :return: Learning information
         :rtype: Any
         """
-        # NOTE: Hard assumption that the first element is the current observation
-        # and the fourth element is the next observation
-        experiences = (
-            self.normalize_observation(experiences[0]),  # State
-            experiences[1],
-            experiences[2],
-            self.normalize_observation(experiences[3]),  # Next state
-            *experiences[4:],
-        )
+        if is_tensor_collection(experiences):
+            experiences["obs"] = self.normalize_observation(experiences["obs"])
+            experiences["next_obs"] = self.normalize_observation(
+                experiences["next_obs"]
+            )
+        else:
+            experiences = (
+                self.normalize_observation(experiences[0]),  # State
+                experiences[1],
+                experiences[2],
+                self.normalize_observation(experiences[3]),  # Next state
+                *experiences[4:],
+            )
+
         return self.agent_learn(experiences, *args, **kwargs)

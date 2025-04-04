@@ -13,7 +13,7 @@ class Skill(gym.Wrapper, gym.utils.RecordConstructorArgs):
     :type env: Gymnasium-style environment
     """
 
-    def __init__(self, env):
+    def __init__(self, env: gym.Env):
         gym.utils.RecordConstructorArgs.__init__(self)
         gym.Wrapper.__init__(self, env)
 

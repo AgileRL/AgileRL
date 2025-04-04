@@ -38,6 +38,7 @@ Example
   import h5py
 
   from agilerl.components.replay_buffer import ReplayBuffer
+  from agilerl.components.data import Transition
   from agilerl.algorithms.cqn import CQN
   from agilerl.utils.algo_utils import obs_channels_to_first
 
@@ -46,8 +47,7 @@ Example
   observation_space = env.observation_space
   action_space = env.action_space
 
-  field_names = ["state", "action", "reward", "next_state", "done"]
-  memory = ReplayBuffer(memory_size=10000, field_names=field_names)
+  memory = ReplayBuffer(max_size=10000)
   dataset = h5py.File('data/cartpole/cartpole_random_v1.1.0.h5', 'r')  # Load dataset
 
   # Save transitions to replay buffer
@@ -62,7 +62,17 @@ Example
       action = dataset['actions'][i]
       reward = dataset['rewards'][i]
       done = bool(dataset['terminals'][i])
-      memory.save_to_memory(state, action, reward, next_state, done)
+      transition = Transition(
+          obs=state,
+          action=action,
+          reward=reward,
+          next_obs=next_state,
+          done=done,
+      )
+      transition = transition.unsqueeze(0)
+      transition.batch_size = [1]
+      transition = transition.to_tensordict()
+      memory.add(transition)
 
   agent = CQN(observation_space=observation_space, action_space=action_space)   # Create DQN agent
 
@@ -105,12 +115,22 @@ For dictionary / tuple observations containing any combination of image, discret
 
 .. code-block:: python
 
+  CNN_CONFIG = {
+      "channel_size": [32, 32], # CNN channel size
+      "kernel_size": [8, 4],   # CNN kernel size
+      "stride_size": [4, 2],   # CNN stride size
+  }
+
   NET_CONFIG = {
       "encoder_config": {
-        'hidden_size': [32, 32],  # Network head hidden size
-        'channel_size': [32, 32], # CNN channel size
-        'kernel_size': [8, 4],   # CNN kernel size
-        'stride_size': [4, 2],   # CNN stride size
+        "latent_dim": 32,
+        # Config for nested EvolvableCNN objects
+        "cnn_config": CNN_CONFIG,
+        # Config for nested EvolvableMLP objects
+        "mlp_config": {
+            "hidden_size": [32, 32]
+        },
+        "vector_space_mlp": True # Process vector observations with an MLP
       },
       "head_config": {'hidden_size': [32]}  # Network head hidden size
     }

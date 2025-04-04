@@ -11,23 +11,32 @@ import torch
 from accelerate import Accelerator
 from gymnasium.spaces import Box, Discrete
 from pettingzoo import ParallelEnv
+from tensordict import TensorDict
 
 import agilerl.training.train_bandits
 import agilerl.training.train_multi_agent_off_policy
 import agilerl.training.train_off_policy
 import agilerl.training.train_offline
 import agilerl.training.train_on_policy
-from agilerl.algorithms.cqn import CQN
-from agilerl.algorithms.ddpg import DDPG
-from agilerl.algorithms.dqn import DQN
-from agilerl.algorithms.dqn_rainbow import RainbowDQN
-from agilerl.algorithms.ippo import IPPO
-from agilerl.algorithms.maddpg import MADDPG
-from agilerl.algorithms.matd3 import MATD3
-from agilerl.algorithms.neural_ts_bandit import NeuralTS
-from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
-from agilerl.algorithms.ppo import PPO
-from agilerl.algorithms.td3 import TD3
+from agilerl.algorithms import (
+    CQN,
+    DDPG,
+    DQN,
+    IPPO,
+    MADDPG,
+    MATD3,
+    PPO,
+    TD3,
+    NeuralTS,
+    NeuralUCB,
+    RainbowDQN,
+)
+from agilerl.components.data import Transition
+from agilerl.components.replay_buffer import (
+    MultiStepReplayBuffer,
+    PrioritizedReplayBuffer,
+    ReplayBuffer,
+)
 from agilerl.training.train_bandits import train_bandits
 from agilerl.training.train_multi_agent_off_policy import train_multi_agent_off_policy
 from agilerl.training.train_multi_agent_on_policy import train_multi_agent_on_policy
@@ -97,10 +106,8 @@ class DummyAgentOffPolicy:
     def get_action(self, *args, **kwargs):
         return np.random.rand(self.action_size)
 
-    def learn(self, experiences, n_step=False, per=False):
-        if n_step and per:
-            return random.random(), None, None
-        elif n_step or per:
+    def learn(self, experiences, n_experiences=None, per=False):
+        if n_experiences is not None or per:
             return random.random(), None, None
         else:
             return random.random()
@@ -315,47 +322,40 @@ class DummyMutations:
         return pop
 
 
-class DummyMemory:
+class DummyMemory(ReplayBuffer):
     def __init__(self):
+        self.size = 0
         self.counter = 0
         self.state_size = None
         self.action_size = None
         self.next_state_size = None
 
-    def save_to_memory_vect_envs(self, states, actions, rewards, next_states, dones):
+    def add(self, data: TensorDict) -> None:
+        return self.save_to_memory_vect_envs(data)
+
+    def save_to_memory_vect_envs(self, data: TensorDict):
         if self.state_size is None:
-            self.state_size, *_ = (state.shape for state in states)
-            self.action_size, *_ = (action.shape for action in actions)
-            self.next_state_size, *_ = (next_state.shape for next_state in next_states)
-            self.counter += 1
+            self.state_size = data["obs"].shape
+            self.action_size = data["action"].shape
+            self.next_state_size = data["next_obs"].shape
 
-        one_step_transition = (
-            np.random.randn(*self.state_size),
-            np.random.randn(*self.action_size),
-            np.random.uniform(0, 400),
-            np.random.choice([True, False]),
-            np.random.randn(*self.next_state_size),
+        self.size += 1
+        self.counter += 1
+        one_step_transition = Transition(
+            obs=np.random.randn(*self.state_size),
+            action=np.random.randn(*self.action_size),
+            reward=np.random.uniform(0, 400),
+            done=np.random.choice([True, False]),
+            next_obs=np.random.randn(*self.next_state_size),
         )
-
-        return one_step_transition
-
-    def save_to_memory(
-        self, state, action, reward, next_state, done, is_vectorised=False
-    ):
-        if is_vectorised:
-            self.save_to_memory_vect_envs(state, action, reward, next_state, done)
-        else:
-            self.state_size = state.shape
-            self.action_size = action.shape
-            self.next_state_size = next_state.shape
-            self.counter += 1
+        return one_step_transition.to_tensordict()
 
     def __len__(self):
         return 1000
 
     def sample(self, batch_size, beta=None, *args):
         # Account for sample_from_indices
-        if isinstance(batch_size, list):
+        if isinstance(batch_size, (list, torch.Tensor)):
             batch_size = len(batch_size)
 
         if batch_size == 1:
@@ -379,40 +379,54 @@ class DummyMemory:
                 [np.random.randn(*self.next_state_size) for _ in range(batch_size)]
             )
 
+        sample_transition = TensorDict(
+            {
+                "obs": states,
+                "action": actions,
+                "reward": rewards,
+                "next_obs": next_states,
+                "done": dones,
+            },
+            batch_size=[batch_size],
+        )
         if beta is None:
-            return states, actions, rewards, dones, next_states
+            return sample_transition
 
         idxs = [np.random.randn(1) for _ in range(batch_size)]
         weights = [i for i in range(batch_size)]
 
-        return states, actions, rewards, dones, next_states, weights, idxs
+        sample_transition["weights"] = torch.tensor(weights)
+        sample_transition["idxs"] = torch.tensor(idxs)
+
+        return sample_transition
 
     def update_priorities(self, idxs, priorities):
         return
 
 
-class DummyNStepMemory(DummyMemory):
+class DummyNStepMemory(DummyMemory, MultiStepReplayBuffer):
     def __init__(self):
         super().__init__()
 
-    def save_to_memory(self, state, action, reward, next_state, done, is_vectorised):
-        return super().save_to_memory(state, action, reward, next_state, done)  #
+    def save_to_memory_vect_envs(self, data: TensorDict):
+        self.num_envs = data["obs"].shape[0]
+        self.state_size = data["obs"].shape
+        self.action_size = data["action"].shape
+        self.next_state_size = data["next_obs"].shape
+        self.size += 1
 
-    def save_to_memory_vect_envs(self, state, action, reward, next_state, done):
-        self.state_size = state.shape
-        self.action_size = action.shape
-        self.next_state_size = next_state.shape
-        self.counter += 1
-
-        one_step_transition = (
-            np.random.randn(*self.state_size),
-            np.random.randn(*self.action_size),
-            np.random.uniform(0, 400),
-            np.random.randn(*self.next_state_size),
-            np.random.choice([True, False]),
+        one_step_transition = Transition(
+            obs=np.random.randn(*self.state_size),
+            action=np.random.randn(*self.action_size),
+            reward=np.random.uniform(0, 400, self.num_envs),
+            next_obs=np.random.randn(*self.next_state_size),
+            done=np.random.choice([True, False], self.num_envs),
         )
+        one_step_transition.batch_size = [self.num_envs]
+        return one_step_transition.to_tensordict()
 
-        return one_step_transition
+    def add(self, data: TensorDict):
+        return self.save_to_memory_vect_envs(data)
 
     def __len__(self):
         return super().__len__()
@@ -427,23 +441,22 @@ class DummyNStepMemory(DummyMemory):
         return super().sample(*args)
 
 
-class DummyBanditMemory:
+class DummyBanditMemory(ReplayBuffer):
     def __init__(self):
         self.counter = 0
         self.state_size = None
+        self.size = 0
         self.action_size = 1
 
-    def save_to_memory_vect_envs(self, states, rewards):
+    def save_to_memory_vect_envs(self, data: TensorDict):
         if self.state_size is None:
-            self.state_size, *_ = (state.shape for state in states)
-            self.counter += 1
+            self.state_size, *_ = (state.shape for state in data["obs"])
 
-    def save_to_memory(self, state, reward, is_vectorised=False):
-        if is_vectorised:
-            self.save_to_memory_vect_envs(state, reward)
-        else:
-            self.state_size = state.shape
-            self.counter += 1
+        self.counter += 1
+        self.size += 1
+
+    def add(self, data: TensorDict):
+        self.save_to_memory_vect_envs(data)
 
     def __len__(self):
         return 1000
@@ -458,13 +471,22 @@ class DummyBanditMemory:
             )
             rewards = np.array([np.random.uniform(0, 400) for _ in range(batch_size)])
 
-        return states, rewards
+        sample_transition = TensorDict(
+            {"obs": states, "reward": rewards}, batch_size=[batch_size]
+        )
+        return sample_transition
 
 
-class DummyMultiMemory(DummyMemory):
+class DummyMultiMemory:
     def __init__(self):
-        super().__init__()
-        self.agents = ["agent_0", "other_agent_0"]
+        self.counter = 0
+        self.state_size = None
+        self.action_size = None
+        self.next_state_size = None
+        self.agents = ["agent_0", "other_agent_1"]
+
+    def __len__(self):
+        return 1000
 
     def save_to_memory(
         self, state, action, reward, next_state, done, is_vectorised=False
@@ -587,7 +609,9 @@ def mocked_agent_off_policy(env, algo):
     mock_agent.mut = "mutation"
     mock_agent.index = 1
     mock_agent.get_action.side_effect = (
-        lambda state, *args, **kwargs: np.random.randint(env.action_size, size=(1,))
+        lambda state, *args, **kwargs: np.random.randint(
+            env.action_size, size=(env.n_envs,)
+        )
     )
     mock_agent.test.side_effect = lambda *args, **kwargs: np.random.uniform(0, 400)
     if algo in [RainbowDQN]:
@@ -720,51 +744,40 @@ def mocked_multi_agent(multi_env, algo):
 
 
 @pytest.fixture
-def mocked_memory():
-    mock_memory = MagicMock()
+def mocked_per_memory():
+    mock_memory = MagicMock(spec=PrioritizedReplayBuffer)
     mock_memory.counter = 0
+    mock_memory.size = 0
     mock_memory.state_size = None
     mock_memory.action_size = None
     mock_memory.next_state_size = None
     mock_memory.__len__.return_value = 10
 
-    def save_to_memory_vect_envs(states, actions, rewards, next_states, dones):
+    def add(data: TensorDict):
         if mock_memory.state_size is None:
-            mock_memory.state_size, *_ = (state.shape for state in states)
-            mock_memory.action_size, *_ = (action.shape for action in actions)
-            mock_memory.next_state_size, *_ = (
-                next_state.shape for next_state in next_states
-            )
-            mock_memory.counter += 1
+            mock_memory.num_envs = data["obs"].shape[0]
+            mock_memory.state_size = data["obs"].shape
+            mock_memory.action_size = data["action"].shape
+            mock_memory.next_state_size = data["next_obs"].shape
 
-        one_step_transition = (
-            np.random.randn(*mock_memory.state_size),
-            np.random.randn(*mock_memory.action_size),
-            np.random.uniform(0, 400),
-            np.random.choice([True, False]),
-            np.random.randn(*mock_memory.next_state_size),
+        mock_memory.counter += 1
+        mock_memory.size += 1
+
+        one_step_transition = Transition(
+            obs=np.random.randn(*mock_memory.state_size),
+            action=np.random.randn(*mock_memory.action_size),
+            reward=np.random.uniform(0, 400, mock_memory.num_envs),
+            done=np.random.choice([True, False], mock_memory.num_envs),
+            next_obs=np.random.randn(*mock_memory.next_state_size),
         )
-        return one_step_transition
-
-    mock_memory.save_to_memory_vect_envs.side_effect = save_to_memory_vect_envs
-
-    def save_to_memory(state, action, reward, next_state, done, is_vectorised=False):
-        if is_vectorised:
-            mock_memory.save_to_memory_vect_envs(
-                state, action, reward, next_state, done
-            )
-        else:
-            mock_memory.state_size = state.shape
-            mock_memory.action_size = action.shape
-            mock_memory.next_state_size = next_state.shape
-            mock_memory.counter += 1
+        return one_step_transition.to_tensordict()
 
     # Assigning the save_to_memory function to the MagicMock
-    mock_memory.save_to_memory.side_effect = save_to_memory
+    mock_memory.add.side_effect = add
 
     def sample(batch_size, beta=None, *args):
         # Account for sample_from_indices
-        if isinstance(batch_size, list):
+        if isinstance(batch_size, (list, torch.Tensor)):
             batch_size = len(batch_size)
 
         if batch_size == 1:
@@ -796,7 +809,19 @@ def mocked_memory():
         idxs = [np.random.randn(1) for _ in range(batch_size)]
         weights = [i for i in range(batch_size)]
 
-        return states, actions, rewards, dones, next_states, weights, idxs
+        sample_transition = Transition(
+            obs=states,
+            action=actions,
+            reward=rewards,
+            done=dones,
+            next_obs=next_states,
+            batch_size=[batch_size],
+        ).to_tensordict()
+
+        sample_transition["weights"] = torch.tensor(weights)
+        sample_transition["idxs"] = torch.tensor(idxs)
+
+        return sample_transition
 
     # Assigning the sample function to the MagicMock
     mock_memory.sample.side_effect = sample
@@ -810,48 +835,125 @@ def mocked_memory():
 
 
 @pytest.fixture
-def mocked_n_step_memory():
-    mock_memory = MagicMock()
+def mocked_memory():
+    mock_memory = MagicMock(spec=ReplayBuffer)
     mock_memory.counter = 0
+    mock_memory.size = 0
+    mock_memory.state_size = None
+    mock_memory.action_size = None
+    mock_memory.next_state_size = None
+    mock_memory.__len__.return_value = 10
+
+    def add(data: TensorDict):
+        if mock_memory.state_size is None:
+            mock_memory.num_envs = data["obs"].shape[0]
+            mock_memory.state_size = data["obs"].shape
+            mock_memory.action_size = data["action"].shape
+            mock_memory.next_state_size = data["next_obs"].shape
+
+        mock_memory.counter += 1
+        mock_memory.size += 1
+
+        one_step_transition = Transition(
+            obs=np.random.randn(*mock_memory.state_size),
+            action=np.random.randn(*mock_memory.action_size),
+            reward=np.random.uniform(0, 400, mock_memory.num_envs),
+            done=np.random.choice([True, False], mock_memory.num_envs),
+            next_obs=np.random.randn(*mock_memory.next_state_size),
+        )
+        return one_step_transition.to_tensordict()
+
+    # Assigning the save_to_memory function to the MagicMock
+    mock_memory.add.side_effect = add
+
+    def sample(batch_size, beta=None, *args):
+        # Account for sample_from_indices
+        if isinstance(batch_size, (list, torch.Tensor)):
+            batch_size = len(batch_size)
+
+        if batch_size == 1:
+            states = np.random.randn(*mock_memory.state_size)
+            actions = np.random.randn(*mock_memory.action_size)
+            rewards = np.random.uniform(0, 400)
+            dones = np.random.choice([True, False])
+            next_states = np.random.randn(*mock_memory.next_state_size)
+        else:
+            states = np.array(
+                [np.random.randn(*mock_memory.state_size) for _ in range(batch_size)]
+            )
+            actions = np.array(
+                [np.random.randn(*mock_memory.action_size) for _ in range(batch_size)]
+            )
+            rewards = np.array([np.random.uniform(0, 400) for _ in range(batch_size)])
+            dones = np.array(
+                [np.random.choice([True, False]) for _ in range(batch_size)]
+            )
+            next_states = np.array(
+                [
+                    np.random.randn(*mock_memory.next_state_size)
+                    for _ in range(batch_size)
+                ]
+            )
+
+        sample_transition = Transition(
+            obs=states,
+            action=actions,
+            reward=rewards,
+            done=dones,
+            next_obs=next_states,
+            batch_size=[batch_size],
+        ).to_tensordict()
+
+        if beta is None:
+            return sample_transition
+
+        idxs = [np.random.randn(1) for _ in range(batch_size)]
+
+        sample_transition["idxs"] = torch.tensor(idxs)
+
+        return sample_transition
+
+    # Assigning the sample function to the MagicMock
+    mock_memory.sample.side_effect = sample
+
+    return mock_memory
+
+
+@pytest.fixture
+def mocked_n_step_memory():
+    mock_memory = MagicMock(spec=MultiStepReplayBuffer)
+    mock_memory.counter = 0
+    mock_memory.size = 0
     mock_memory.state_size = None
     mock_memory.action_size = None
     mock_memory.next_state_size = None
     mock_memory.__len__.return_value = 10000
 
-    def save_to_memory_vect_envs(state, action, reward, next_state, done):
-        mock_memory.state_size = state.shape
-        mock_memory.action_size = action.shape
-        mock_memory.next_state_size = next_state.shape
+    def add(data: TensorDict):
+        if mock_memory.state_size is None:
+            mock_memory.num_envs = data["obs"].shape[0]
+            mock_memory.state_size = data["obs"].shape
+            mock_memory.action_size = data["action"].shape
+            mock_memory.next_state_size = data["next_obs"].shape
+
+        mock_memory.size += 1
         mock_memory.counter += 1
 
-        one_step_transition = (
-            np.random.randn(*mock_memory.state_size),
-            np.random.randn(*mock_memory.action_size),
-            np.random.uniform(0, 400),
-            np.random.randn(*mock_memory.next_state_size),
-            np.random.choice([True, False]),
+        one_step_transition = Transition(
+            obs=np.random.randn(*mock_memory.state_size),
+            action=np.random.randn(*mock_memory.action_size),
+            reward=np.random.uniform(0, 400, mock_memory.num_envs),
+            done=np.random.choice([True, False], mock_memory.num_envs),
+            next_obs=np.random.randn(*mock_memory.next_state_size),
         )
-        return one_step_transition
-
-    mock_memory.save_to_memory_vect_envs.side_effect = save_to_memory_vect_envs
-
-    def save_to_memory(state, action, reward, next_state, done, is_vectorised):
-        if is_vectorised:
-            mock_memory.save_to_memory_vect_envs(
-                state, action, reward, next_state, done
-            )
-        else:
-            mock_memory.state_size = state.shape
-            mock_memory.action_size = action.shape
-            mock_memory.next_state_size = next_state.shape
-            mock_memory.counter += 1
+        return one_step_transition.to_tensordict()
 
     # Assigning the save_to_memory function to the MagicMock
-    mock_memory.save_to_memory.side_effect = save_to_memory
+    mock_memory.add.side_effect = add
 
     def sample(batch_size, beta=None, *args):
         # Account for sample_from_indices
-        if isinstance(batch_size, list):
+        if isinstance(batch_size, (list, torch.Tensor)):
             batch_size = len(batch_size)
 
         if batch_size == 1:
@@ -883,12 +985,22 @@ def mocked_n_step_memory():
         idxs = [np.random.randn(1) for _ in range(batch_size)]
         weights = [i for i in range(batch_size)]
 
-        return states, actions, rewards, dones, next_states, weights, idxs
+        sample_transition = Transition(
+            obs=states,
+            action=actions,
+            reward=rewards,
+            done=dones,
+            next_obs=next_states,
+            batch_size=[batch_size],
+        ).to_tensordict()
+
+        sample_transition["weights"] = torch.tensor(weights)
+        sample_transition["idxs"] = torch.tensor(idxs)
+
+        return sample_transition
 
     # Assigning the sample function to the MagicMock
     mock_memory.sample.side_effect = sample
-    mock_memory.sample_n_step.side_effect = sample
-    mock_memory.sample_per.side_effect = sample
     mock_memory.sample_from_indices.side_effect = sample
 
     return mock_memory
@@ -901,22 +1013,12 @@ def mocked_bandit_memory():
     mock_memory.state_size = None
     mock_memory.__len__.return_value = 10
 
-    def save_to_memory_vect_envs(states, rewards):
+    def add(data: TensorDict):
         if mock_memory.state_size is None:
-            mock_memory.state_size, *_ = (state.shape for state in states)
+            mock_memory.state_size = data["obs"].shape
             mock_memory.counter += 1
 
-    mock_memory.save_to_memory_vect_envs.side_effect = save_to_memory_vect_envs
-
-    def save_to_memory(state, reward, is_vectorised=False):
-        if is_vectorised:
-            mock_memory.save_to_memory_vect_envs(state, reward)
-        else:
-            mock_memory.state_size = state.shape
-            mock_memory.counter += 1
-
-    # Assigning the save_to_memory function to the MagicMock
-    mock_memory.save_to_memory.side_effect = save_to_memory
+    mock_memory.add.side_effect = add
 
     def sample(batch_size, *args):
         if batch_size == 1:
@@ -928,7 +1030,10 @@ def mocked_bandit_memory():
             )
             rewards = np.array([np.random.uniform(0, 400) for _ in range(batch_size)])
 
-        return states, rewards
+        sample_transition = TensorDict(
+            {"obs": states, "reward": rewards}, batch_size=[batch_size]
+        )
+        return sample_transition
 
     # Assigning the sample function to the MagicMock
     mock_memory.sample.side_effect = sample
@@ -1200,7 +1305,9 @@ def test_train_off_policy_agent_calls_made(
         mock_population = [mocked_agent_off_policy for _ in range(6)]
         for agent in mock_population:
             agent.learn_step = learn_step
-        env.num_envs = num_envs
+
+        if env.vect:
+            env.num_envs = num_envs
 
         pop, pop_fitnesses = train_off_policy(
             env,
@@ -1261,7 +1368,7 @@ def test_train_off_policy_agent_calls_made_rainbow(
     mock_population = [mocked_agent_off_policy for _ in range(6)]
     for agent in mock_population:
         agent.learn_step = learn_step
-    env.num_envs = num_envs
+    env.n_envs = num_envs
 
     pop, pop_fitnesses = train_off_policy(
         env,
@@ -1401,7 +1508,7 @@ def test_train_off_policy_replay_buffer_calls(
         mutation=mutations,
         wb=False,
     )
-    mocked_memory.save_to_memory.assert_called()
+    mocked_memory.add.assert_called()
     mocked_memory.sample.assert_called()
 
 
@@ -1412,12 +1519,14 @@ def test_train_off_policy_replay_buffer_calls(
 def test_train_off_policy_alternate_buffer_calls(
     env,
     mocked_memory,
+    mocked_per_memory,
     population_off_policy,
     tournament,
     mutations,
     mocked_n_step_memory,
     per,
 ):
+    mocked_memory = mocked_memory if not per else mocked_per_memory
     pop, pop_fitnesses = train_off_policy(
         env,
         "env_name",
@@ -1437,8 +1546,8 @@ def test_train_off_policy_alternate_buffer_calls(
         mutation=mutations,
         wb=False,
     )
-    mocked_n_step_memory.save_to_memory_vect_envs.assert_called()
-    mocked_memory.save_to_memory_vect_envs.assert_called()
+    mocked_n_step_memory.add.assert_called()
+    mocked_memory.add.assert_called()
     if per:
         mocked_n_step_memory.sample_from_indices.assert_called()
         mocked_memory.update_priorities.assert_called()
@@ -3604,11 +3713,7 @@ def test_offline_memory_calls(
     dummy_h5py_data,
 ):
     for accelerator_flag in [True, False]:
-        if accelerator_flag:
-            accelerator = Accelerator()
-        else:
-            accelerator = None
-
+        accelerator = Accelerator() if accelerator_flag else None
         pop, pop_fitnesses = train_offline(
             env,
             "env_name",
@@ -3627,7 +3732,7 @@ def test_offline_memory_calls(
             wb=False,
             accelerator=accelerator,
         )
-        mocked_memory.save_to_memory.assert_called()
+        mocked_memory.add.assert_called()
         mocked_memory.sample.assert_called()
 
 
@@ -3949,7 +4054,7 @@ def test_train_bandit_replay_buffer_calls(
         mutation=mutations,
         wb=False,
     )
-    mocked_bandit_memory.save_to_memory.assert_called()
+    mocked_bandit_memory.add.assert_called()
     mocked_bandit_memory.sample.assert_called()
 
 
@@ -4412,7 +4517,7 @@ def test_bandit_train_save_checkpoint(
 
 
 # LEAVE LAST, TEMPORARY TO DELETE SAVED MODELS
-# FIXME: Properly handle saving/deletion in tests
+# TODO: Properly handle saving/deletion in tests
 def test_remove_saved_models():
     if os.path.exists("models"):
         shutil.rmtree("models")

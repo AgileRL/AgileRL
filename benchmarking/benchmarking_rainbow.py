@@ -2,7 +2,7 @@ import torch
 import yaml
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-from agilerl.components.replay_buffer import (
+from agilerl.components import (
     MultiStepReplayBuffer,
     PrioritizedReplayBuffer,
     ReplayBuffer,
@@ -38,46 +38,36 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     if INIT_HP["CHANNELS_LAST"]:
         observation_space = observation_space_channels_to_first(observation_space)
 
-    field_names = ["state", "action", "reward", "next_state", "done"]
     n_step_memory = None
     per = INIT_HP["PER"]
-    n_step = True if INIT_HP["N_STEP"] > 1 else False
+    n_step = INIT_HP["N_STEP"] > 1
     if per:
         memory = PrioritizedReplayBuffer(
-            memory_size=INIT_HP["MEMORY_SIZE"],
-            field_names=field_names,
-            num_envs=INIT_HP["NUM_ENVS"],
+            max_size=INIT_HP["MEMORY_SIZE"],
             alpha=INIT_HP["ALPHA"],
-            gamma=INIT_HP["GAMMA"],
             device=device,
         )
         if n_step:
             n_step_memory = MultiStepReplayBuffer(
-                memory_size=INIT_HP["MEMORY_SIZE"],
-                field_names=field_names,
-                num_envs=INIT_HP["NUM_ENVS"],
+                max_size=INIT_HP["MEMORY_SIZE"],
                 n_step=INIT_HP["N_STEP"],
                 gamma=INIT_HP["GAMMA"],
                 device=device,
             )
     elif n_step:
         memory = ReplayBuffer(
-            memory_size=INIT_HP["MEMORY_SIZE"],
-            field_names=field_names,
+            max_size=INIT_HP["MEMORY_SIZE"],
             device=device,
         )
         n_step_memory = MultiStepReplayBuffer(
-            memory_size=INIT_HP["MEMORY_SIZE"],
-            field_names=field_names,
-            num_envs=INIT_HP["NUM_ENVS"],
+            max_size=INIT_HP["MEMORY_SIZE"],
             n_step=INIT_HP["N_STEP"],
             gamma=INIT_HP["GAMMA"],
             device=device,
         )
     else:
         memory = ReplayBuffer(
-            memory_size=INIT_HP["MEMORY_SIZE"],
-            field_names=field_names,
+            max_size=INIT_HP["MEMORY_SIZE"],
             device=device,
         )
 
@@ -172,7 +162,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
 
 
 if __name__ == "__main__":
-    with open("configs/training/dqn_rainbow.yaml") as file:
+    with open("configs/training/dqn/dqn_rainbow.yaml") as file:
         rainbow_dqn_config = yaml.safe_load(file)
     INIT_HP = rainbow_dqn_config["INIT_HP"]
     MUTATION_PARAMS = rainbow_dqn_config["MUTATION_PARAMS"]

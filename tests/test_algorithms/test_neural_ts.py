@@ -10,6 +10,7 @@ import torch.optim as optim
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
+from tensordict import TensorDict
 
 from agilerl.algorithms.neural_ts_bandit import NeuralTS
 from agilerl.modules.cnn import EvolvableCNN
@@ -297,7 +298,11 @@ def test_learns_from_experiences():
     states = torch.randn(batch_size, *observation_space.shape)
     rewards = torch.randn((batch_size, 1))
 
-    experiences = [states, rewards]
+    experiences = TensorDict(
+        {"obs": states, "reward": rewards},
+        batch_size=[batch_size],
+        device=bandit.device,
+    )
 
     # Copy state dict before learning - should be different to after updating weights
     actor = bandit.actor
@@ -329,7 +334,11 @@ def test_learns_from_experiences_if_cuda():
     states = torch.randn(batch_size, *observation_space.shape).to(device)
     rewards = torch.randn((batch_size, 1)).to(device)
 
-    experiences = [states, rewards]
+    experiences = TensorDict(
+        {"obs": states, "reward": rewards},
+        batch_size=[batch_size],
+        device=device,
+    )
 
     # Copy state dict before learning - should be different to after updating weights
     actor = bandit.actor
@@ -362,7 +371,11 @@ def test_learning_accelerator():
     states = torch.randn(batch_size, *observation_space.shape)
     rewards = torch.randn((batch_size, 1))
 
-    experiences = [states, rewards]
+    experiences = TensorDict(
+        {"obs": states, "reward": rewards},
+        batch_size=[batch_size],
+        device=accelerator.device,
+    )
 
     # Copy state dict before learning - should be different to after updating weights
     actor = bandit.actor
@@ -397,7 +410,10 @@ def test_learning_cnn():
     states = torch.randn(batch_size, *observation_space.shape)
     rewards = torch.randn((batch_size, 1))
 
-    experiences = [states, rewards]
+    experiences = TensorDict(
+        {"obs": states, "reward": rewards},
+        batch_size=[batch_size],
+    )
 
     # Copy state dict before learning - should be different to after updating weights
     actor = bandit.actor
@@ -576,7 +592,10 @@ def test_clone_after_learning():
     batch_size = 4
     states = torch.randn(batch_size, observation_space.shape[0])
     rewards = torch.rand(batch_size, 1)
-    experiences = states, rewards
+    experiences = TensorDict(
+        {"obs": states, "reward": rewards},
+        batch_size=[batch_size],
+    )
     bandit = NeuralTS(observation_space, action_space, batch_size=batch_size)
     bandit.learn(experiences)
     clone_agent = bandit.clone()

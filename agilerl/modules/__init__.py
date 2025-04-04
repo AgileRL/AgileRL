@@ -3,6 +3,7 @@ from .bert import EvolvableBERT
 from .cnn import EvolvableCNN
 from .custom_components import GumbelSoftmax, NewGELU, NoisyLinear
 from .gpt import EvolvableGPT
+from .lstm import EvolvableLSTM
 from .mlp import EvolvableMLP
 from .multi_input import EvolvableMultiInput
 from .resnet import EvolvableResNet
@@ -18,6 +19,7 @@ __all__ = [
     "NewGELU",
     "EvolvableGPT",
     "EvolvableMLP",
+    "EvolvableLSTM",
     "EvolvableSimBa",
     "EvolvableResNet",
     "EvolvableCNN",

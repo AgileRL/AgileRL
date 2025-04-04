@@ -362,7 +362,7 @@ class Mutations:
             self.load_state_dicts(ind_shared, state_dicts, remove_compile_prefix)
         else:
             ind_shared = self.reinit_module(offspring, offspring.init_dict)
-            ind_shared.load_state_dict(offspring.state_dict())
+            ind_shared.load_state_dict(offspring.state_dict(), strict=False)
 
         return ind_shared
 
@@ -385,7 +385,7 @@ class Mutations:
             state_dict = (
                 remove_compile_prefix(state_dict) if remove_prefix else state_dict
             )
-            module.load_state_dict(state_dict)
+            module.load_state_dict(state_dict, strict=False)
 
     def compile_modules(self, modules: OffspringType, compiler: str) -> OffspringType:
         """Compile the modules using the given compiler.
@@ -441,6 +441,7 @@ class Mutations:
 
         mutated_population = []
         for mutation, individual in zip(mutation_choice, population):
+            individual: SelfEvolvableAlgorithm = individual
             registry = individual.registry
 
             # Call mutation function for each individual
@@ -481,7 +482,7 @@ class Mutations:
                         setattr(individual, shared_name, ind_shared)
 
             # Call hooks specified by user
-            individual.init_hook()
+            individual.mutation_hook()
 
             mutated_population.append(individual)
 
@@ -577,6 +578,7 @@ class Mutations:
 
         return individual
 
+    # TODO: Activation mutations should really be integrated as architecture mutations
     def activation_mutation(
         self, individual: SelfEvolvableAlgorithm
     ) -> SelfEvolvableAlgorithm:
@@ -586,7 +588,7 @@ class Mutations:
         :type individual: EvolvableAlgorithm
         """
         # Needs to stay constant for policy gradient methods
-        # TODO: Could set up an algorithm registry to make algo checks more robust
+        # NOTE: Could set up an algorithm registry to make algo checks more robust
         # OR perform activation mutations within evolvable modules directly and disable
         # on an algorithm basis
         if individual.algo in ["PPO", "DDPG", "TD3", "IPPO", "MADDPG", "MATD3"]:
@@ -599,6 +601,9 @@ class Mutations:
         for network_group in registry.groups:
             eval_module: OffspringType = getattr(individual, network_group.eval)
             if isinstance(eval_module, list):
+                # TODO: Will need to modify when making multi-agent support more robust
+                # to different type sof settings (i.e. different observation spaces and thus
+                # network architectures for different agents)
                 if eval_module[0].activation is None:
                     no_activation = True
 
@@ -730,7 +735,7 @@ class Mutations:
             rand_vals_tensor = torch.tensor(rand_vals, dtype=W.dtype, device=W.device)
 
             # Get current weight values at the selected indices
-            current_vals = W[rows_tensor, cols_tensor]
+            current_vals: torch.Tensor = W[rows_tensor, cols_tensor]
             new_vals = current_vals.clone()
 
             # Create masks for the different mutation types
@@ -826,6 +831,8 @@ class Mutations:
             if isinstance(individual, (NeuralTS, NeuralUCB)):
                 old_exp_layer = get_exp_layer(offsprings)
                 self._reinit_bandit_grads(individual, offsprings, old_exp_layer)
+
+        individual.mutation_hook()  # Apply mutation hook
 
         self.reinit_opt(individual)  # Reinitialise optimizer
         individual.mut = (

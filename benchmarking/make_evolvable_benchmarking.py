@@ -7,8 +7,7 @@ from pettingzoo.atari import pong_v3
 from pettingzoo.mpe import simple_speaker_listener_v4
 
 from agilerl.algorithms.core.base import MultiAgentRLAlgorithm, RLAlgorithm
-from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
-from agilerl.components.replay_buffer import ReplayBuffer
+from agilerl.components import MultiAgentReplayBuffer, ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules.mlp import EvolvableMLP
@@ -370,7 +369,7 @@ if __name__ == "__main__":
     atari = False
 
     if dqn:
-        with open("configs/training/dqn.yaml") as file:
+        with open("configs/training/dqn/dqn.yaml") as file:
             dqn_config = yaml.safe_load(file)
         INIT_HP = dqn_config["INIT_HP"]
         MUTATION_PARAMS = dqn_config["MUTATION_PARAMS"]
@@ -388,7 +387,7 @@ if __name__ == "__main__":
         #     main(INIT_HP, MUTATION_PARAMS, atari=True, NET_CONFIG=net_config_cnn)
 
     if ppo:
-        with open("configs/training/ppo.yaml") as file:
+        with open("configs/training/ppo/ppo.yaml") as file:
             ppo_config = yaml.safe_load(file)
         INIT_HP = ppo_config["INIT_HP"]
         MUTATION_PARAMS = ppo_config["MUTATION_PARAMS"]
@@ -406,7 +405,7 @@ if __name__ == "__main__":
             main(INIT_HP, MUTATION_PARAMS, atari=True, NET_CONFIG=net_config_cnn)
 
     if ddpg:
-        with open("configs/training/ddpg.yaml") as file:
+        with open("configs/training/ddpg/ddpg.yaml") as file:
             ddpg_config = yaml.safe_load(file)
         INIT_HP = ddpg_config["INIT_HP"]
         MUTATION_PARAMS = ddpg_config["MUTATION_PARAMS"]
@@ -418,7 +417,7 @@ if __name__ == "__main__":
             # main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=net_config_mlp)
 
     if td3:
-        with open("configs/training/td3.yaml") as file:
+        with open("configs/training/td3/td3.yaml") as file:
             td3_config = yaml.safe_load(file)
         INIT_HP = td3_config["INIT_HP"]
         MUTATION_PARAMS = td3_config["MUTATION_PARAMS"]
@@ -430,7 +429,7 @@ if __name__ == "__main__":
             main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=net_config_mlp)
 
     if maddpg:
-        with open("configs/training/maddpg.yaml") as file:
+        with open("configs/training/multi_agent/maddpg.yaml") as file:
             maddpg_config = yaml.safe_load(file)
         INIT_HP = maddpg_config["INIT_HP"]
         MUTATION_PARAMS = maddpg_config["MUTATION_PARAMS"]
@@ -463,7 +462,7 @@ if __name__ == "__main__":
             )
 
     if matd3:
-        with open("configs/training/matd3.yaml") as file:
+        with open("configs/training/multi_agent/matd3.yaml") as file:
             matd3_config = yaml.safe_load(file)
         INIT_HP = matd3_config["INIT_HP"]
         MUTATION_PARAMS = matd3_config["MUTATION_PARAMS"]

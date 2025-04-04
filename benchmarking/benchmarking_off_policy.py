@@ -3,7 +3,7 @@ import yaml
 
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-from agilerl.components.replay_buffer import ReplayBuffer
+from agilerl.components import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules.dummy import DummyEvolvable
@@ -37,10 +37,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
     if INIT_HP["CHANNELS_LAST"]:
         observation_space = observation_space_channels_to_first(observation_space)
 
-    field_names = ["state", "action", "reward", "next_state", "done"]
-    memory = ReplayBuffer(
-        memory_size=INIT_HP["MEMORY_SIZE"], field_names=field_names, device=device
-    )
+    memory = ReplayBuffer(max_size=INIT_HP["MEMORY_SIZE"], device=device)
     tournament = TournamentSelection(
         INIT_HP["TOURN_SIZE"],
         INIT_HP["ELITISM"],
@@ -161,7 +158,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
 
 
 if __name__ == "__main__":
-    with open("configs/training/ddpg.yaml") as file:
+    with open("configs/training/ddpg/ddpg.yaml") as file:
         config = yaml.safe_load(file)
     INIT_HP = config["INIT_HP"]
     MUTATION_PARAMS = config["MUTATION_PARAMS"]

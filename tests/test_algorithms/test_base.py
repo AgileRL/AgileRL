@@ -36,7 +36,10 @@ def cnn_config():
 
 @pytest.fixture
 def multi_input_config():
-    return {"hidden_size": [8], "channel_size": [3], "kernel_size": [3]}
+    return {
+        "mlp_config": {"hidden_size": [8]},
+        "cnn_config": {"channel_size": [3], "kernel_size": [3]},
+    }
 
 
 class DummyRLAlgorithm(RLAlgorithm):
@@ -68,13 +71,16 @@ class DummyRLAlgorithm(RLAlgorithm):
             num_inputs = len(self.observation_space.nvec)
             self.dummy_actor = EvolvableMLP(num_inputs, num_outputs, hidden_size=[8])
         elif isinstance(self.observation_space, (spaces.Dict, spaces.Tuple)):
+            config = {
+                "mlp_config": {"hidden_size": [8]},
+                "cnn_config": {
+                    "channel_size": [3],
+                    "kernel_size": [3],
+                    "stride_size": [1],
+                },
+            }
             self.dummy_actor = EvolvableMultiInput(
-                self.observation_space,
-                num_outputs,
-                hidden_size=[8],
-                channel_size=[3],
-                kernel_size=[3],
-                stride_size=[1],
+                self.observation_space, num_outputs, **config
             )
 
         self.lr = 0.1
@@ -121,14 +127,15 @@ class DummyMARLAlgorithm(MultiAgentRLAlgorithm):
                 )
                 return EvolvableMLP(num_inputs, num_outputs, hidden_size=[8])
             elif isinstance(obs_space, (spaces.Dict, spaces.Tuple)):
-                return EvolvableMultiInput(
-                    obs_space,
-                    num_outputs,
-                    hidden_size=[8],
-                    channel_size=[3],
-                    kernel_size=[3],
-                    stride_size=[1],
-                )
+                config = {
+                    "mlp_config": {"hidden_size": [8]},
+                    "cnn_config": {
+                        "channel_size": [3],
+                        "kernel_size": [3],
+                        "stride_size": [1],
+                    },
+                }
+                return EvolvableMultiInput(obs_space, num_outputs, **config)
 
         self.dummy_actors = [create_actor(idx) for idx in range(self.n_agents)]
         self.lr = 0.1

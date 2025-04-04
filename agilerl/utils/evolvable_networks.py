@@ -27,26 +27,26 @@ from agilerl.typing import ConfigType, DeviceType
 TupleorInt = Union[Tuple[int, ...], int]
 
 
-def tuple_to_dict_space(observation_space: spaces.Tuple) -> spaces.Dict:
+def tuple_to_dict_space(tuple_space: spaces.Tuple) -> spaces.Dict:
     """Converts a Tuple observation space to a Dict observation space.
 
-    :param observation_space: Tuple observation space.
-    :type observation_space: spaces.Tuple
-    :return: Dictionary observation space.
+    :param tuple_space: Tuple observation space
+    :type tuple_space: spaces.Tuple
+    :return: Dictionary observation space
     :rtype: spaces.Dict
     """
-    num_image = 0
-    num_vector = 0
-    dict_space = OrderedDict()
-    for space in observation_space.spaces:
-        if is_image_space(space):
-            dict_space[f"image_{num_image}"] = space
-            num_image += 1
-        else:
-            dict_space[f"vector_{num_vector}"] = space
-            num_vector += 1
+    return spaces.Dict({str(i): space for i, space in enumerate(tuple_space.spaces)})
 
-    return spaces.Dict(dict_space)
+
+def tuple_to_dict_obs(tuple_obs: tuple) -> dict:
+    """Converts a tuple observation to a Python dictionary
+
+    :param tuple_obs: Tuple observation
+    :type tuple_obs: tuple
+    :return: Dictionary observation
+    :rtype: dict
+    """
+    return {str(i): obs for i, obs in enumerate(tuple_obs)}
 
 
 def get_default_encoder_config(
@@ -61,12 +61,7 @@ def get_default_encoder_config(
     :rtype: Dict[str, Any]
     """
     if isinstance(observation_space, (spaces.Dict, spaces.Tuple)):
-        return MultiInputNetConfig(
-            channel_size=[16, 16],
-            kernel_size=[3, 3],
-            stride_size=[1, 1],
-            output_activation=None,
-        )
+        return MultiInputNetConfig()
     elif is_image_space(observation_space):
         return CnnNetConfig(
             channel_size=[16, 16],
@@ -398,7 +393,36 @@ def is_image_space(space: spaces.Space) -> bool:
     :return: True if the space is an image space, False otherwise
     :rtype: bool
     """
-    return isinstance(space, spaces.Box) and len(space.shape) == 3
+    return is_box_space_ndim(space, 3)
+
+
+def is_box_space_ndim(space: spaces.Space, ndim: int) -> bool:
+    """Check if the space is a Box space with the given number of dimensions.
+
+    :param space: Input space
+    :type space: spaces.Space
+    :param ndim: Number of dimensions
+    :type ndim: int
+
+    :return: True if the space is a Box space with the given number of dimensions, False otherwise
+    """
+    return isinstance(space, spaces.Box) and len(space.shape) == ndim
+
+
+def is_vector_space(space: spaces.Space) -> bool:
+    """Check if the space is a vector space.
+
+    :param space: Input space
+    :type space: spaces.Space
+
+    :return: True if the space is a vector space, False otherwise
+    :rtype: bool
+    """
+    return (
+        (isinstance(space, spaces.Box) and len(space.shape) in [0, 1])
+        or isinstance(space, spaces.Discrete)
+        or isinstance(space, spaces.MultiDiscrete)
+    )
 
 
 def create_cnn(

@@ -25,7 +25,9 @@ SupportedEvolvable = Union[
 
 
 class NeuralTS(RLAlgorithm):
-    """The NeuralTS algorithm class. NeuralTS paper: https://arxiv.org/abs/2010.00827
+    """Neural Thompson Sampling (NeuralTS) algorithm.
+
+    Paper: https://arxiv.org/abs/2010.00827
 
     :param observation_space: Observation space of the environment
     :type observation_space: gym.spaces.Space
@@ -141,10 +143,11 @@ class NeuralTS(RLAlgorithm):
                 else net_config["encoder_config"]
             )
 
-            if not simba:
-                encoder_config["layer_norm"] = (
-                    False  # Layer norm is not used in the original implementation
-                )
+            if not simba and not isinstance(
+                observation_space, (spaces.Dict, spaces.Tuple)
+            ):
+                # Layer norm is not used in the original implementation
+                encoder_config["layer_norm"] = False
 
             net_config["encoder_config"] = encoder_config
 
@@ -164,7 +167,7 @@ class NeuralTS(RLAlgorithm):
         self.criterion = nn.MSELoss()
 
         # Register network groups for mutations
-        self.register_init_hook(self.init_params)
+        self.register_mutation_hook(self.init_params)
         self.register_network_group(
             NetworkGroup(eval=self.actor, shared=None, policy=True)
         )
@@ -239,12 +242,10 @@ class NeuralTS(RLAlgorithm):
         """Updates agent network parameters to learn from experiences.
 
         :param experiences: Batched states, rewards in that order.
-        :type obs: list[torch.Tensor[float]]
+        :type experiences: dict[str, torch.Tensor[float]]
         """
-        states, rewards = experiences
-
-        states = states.to(self.device)
-        rewards = rewards.to(self.device)
+        states = experiences["obs"]
+        rewards = experiences["reward"]
 
         pred_rewards = self.actor(states)
 

@@ -159,7 +159,7 @@ class EvolvableMLP(EvolvableModule):
         """Returns output of neural network.
 
         :param x: Neural network input
-        :type x: torch.Tensor()
+        :type x: torch.Tensor or np.ndarray
 
         :return: Neural network output
         :rtype: torch.Tensor

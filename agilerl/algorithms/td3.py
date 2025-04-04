@@ -14,13 +14,20 @@ from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import DeterministicActor
+from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.typing import ArrayLike, ExperiencesType, GymEnvType, NumpyObsType
-from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
+from agilerl.utils.algo_utils import (
+    make_safe_deepcopies,
+    obs_channels_to_first,
+    share_encoder_parameters,
+)
 
 
 class TD3(RLAlgorithm):
-    """The TD3 algorithm class. TD3 paper: https://arxiv.org/abs/1802.09477
+    """Twin Delayed Deep Deterministic Policy Gradient (TD3) algorithm.
+
+    Paper: https://arxiv.org/abs/1802.09477
 
     :param observation_space: Observation space of the environment
     :type observation_space: gym.spaces.Space
@@ -66,6 +73,8 @@ class TD3(RLAlgorithm):
     :type actor_network: nn.Module, optional
     :param critic_networks: List of two custom critic networks (one for each of the two critics), defaults to None
     :type critic_networks: list[nn.Module], optional
+    :param share_encoders: Share encoders between actor and critic, defaults to True
+    :type share_encoders: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -98,6 +107,7 @@ class TD3(RLAlgorithm):
         policy_freq: int = 2,
         actor_network: Optional[EvolvableModule] = None,
         critic_networks: Optional[list[EvolvableModule]] = None,
+        share_encoders: bool = True,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
@@ -223,7 +233,7 @@ class TD3(RLAlgorithm):
                 return DeterministicActor(
                     observation_space=observation_space,
                     action_space=action_space,
-                    device=device,
+                    device=self.device,
                     **net_config,
                 )
 
@@ -231,7 +241,7 @@ class TD3(RLAlgorithm):
                 return ContinuousQNetwork(
                     observation_space=observation_space,
                     action_space=action_space,
-                    device=device,
+                    device=self.device,
                     **critic_net_config,
                 )
 
@@ -241,6 +251,17 @@ class TD3(RLAlgorithm):
             self.critic_target_1 = create_critic()
             self.critic_2 = create_critic()
             self.critic_target_2 = create_critic()
+
+        # Share encoders between actor and critic
+        self.share_encoders = share_encoders
+        if self.share_encoders and all(
+            isinstance(net, EvolvableNetwork)
+            for net in [self.actor, self.critic_1, self.critic_2]
+        ):
+            self.share_encoder_parameters()
+
+            # Need to register a mutation hook that does this after every mutation
+            self.register_mutation_hook(self.share_encoder_parameters)
 
         self.actor_target.load_state_dict(self.actor.state_dict())
         self.critic_target_1.load_state_dict(self.critic_1.state_dict())
@@ -274,6 +295,24 @@ class TD3(RLAlgorithm):
         self.register_network_group(
             NetworkGroup(eval=self.critic_2, shared=self.critic_target_2)
         )
+
+    def share_encoder_parameters(self) -> None:
+        """Shares the encoder parameters between the actor and critic."""
+        if all(
+            isinstance(net, EvolvableNetwork)
+            for net in [self.actor, self.critic_1, self.critic_2]
+        ):
+            share_encoder_parameters(
+                self.actor,
+                self.critic_1,
+                self.critic_2,
+                self.critic_target_1,
+                self.critic_target_2,
+            )
+        else:
+            warnings.warn(
+                "Encoder sharing is disabled as actor or critic is not an EvolvableNetwork."
+            )
 
     def scale_to_action_space(
         self, action: ArrayLike, convert_to_torch: bool = False

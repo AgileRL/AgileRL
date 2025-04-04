@@ -4,6 +4,8 @@ from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 import torch
 import yaml
 
+from agilerl.typing import ConfigType
+
 
 @dataclass
 class NetConfig:
@@ -33,7 +35,8 @@ class NetConfig:
 
     def pop(self, key: str, default: Any = None) -> Any:
         attr = getattr(self, key, default)
-        delattr(self, key)
+        if attr is not default:
+            delattr(self, key)
         return attr
 
     def keys(self) -> List[str]:
@@ -121,29 +124,78 @@ class CnnNetConfig(NetConfig):
 
 
 @dataclass
-class MultiInputNetConfig(NetConfig):
-    channel_size: List[int]
-    kernel_size: List[int]
-    stride_size: List[int]
-    latent_dim: int = 16
-    cnn_block_type: Literal["Conv2d", "Conv3d"] = "Conv2d"
-    sample_input: Optional[torch.Tensor] = field(default=None)
-    vector_space_mlp: bool = False
-    hidden_size: Optional[List[int]] = field(default=None)
-    init_dicts: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    activation: str = "ReLU"
+class LstmNetConfig(NetConfig):
+    hidden_size: int
+    num_layers: int = field(default=1)
+    min_hidden_size: int = field(default=16)
+    max_hidden_size: int = field(default=500)
+    min_layers: int = field(default=1)
+    max_layers: int = field(default=4)
     output_activation: Optional[str] = field(default=None)
-    min_hidden_layers: int = 1
-    max_hidden_layers: int = 3
-    min_mlp_nodes: int = 64
-    max_mlp_nodes: int = 1024
-    min_cnn_hidden_layers: int = 1
-    max_cnn_hidden_layers: int = 6
-    min_channel_size: int = 32
-    max_channel_size: int = 256
+    dropout: float = field(default=0.0)
+
+
+@dataclass
+class MultiInputNetConfig(NetConfig):
+    """Configuration for the EvolvableMultiInput network.
+
+    This configuration class combines settings for the multi-input network,
+    including latent dimension settings and network-specific configurations.
+    """
+
+    latent_dim: int = 16
     min_latent_dim: int = 8
     max_latent_dim: int = 128
-    layer_norm: bool = False
-    noisy: bool = False
-    noise_std: float = 0.5
-    init_layers: bool = True
+    vector_space_mlp: bool = False
+    output_activation: Optional[str] = field(default=None)
+
+    # Network configurations
+    cnn_config: Optional[ConfigType] = field(default=None)
+    mlp_config: Optional[ConfigType] = field(default=None)
+    lstm_config: Optional[ConfigType] = field(default=None)
+
+    # Additional settings
+    init_dicts: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
+    def __post_init__(self):
+        """Validate configuration parameters after initialization."""
+        # Validate latent dimension
+        assert (
+            self.latent_dim >= self.min_latent_dim
+        ), f"Latent dimension {self.latent_dim} must be >= {self.min_latent_dim}"
+        assert (
+            self.latent_dim <= self.max_latent_dim
+        ), f"Latent dimension {self.latent_dim} must be <= {self.max_latent_dim}"
+
+        # Validate network configurations if provided
+        if self.cnn_config is not None:
+            assert isinstance(
+                self.cnn_config, CnnNetConfig
+            ), "CNN config must be an instance of CnnNetConfig"
+        else:
+            self.cnn_config = CnnNetConfig(
+                channel_size=[16, 16],
+                kernel_size=[3, 3],
+                stride_size=[1, 1],
+                output_activation="ReLU",
+            )
+        if self.mlp_config is not None:
+            assert isinstance(
+                self.mlp_config, MlpNetConfig
+            ), "MLP config must be an instance of MlpNetConfig"
+        else:
+            self.mlp_config = MlpNetConfig(
+                hidden_size=[64, 64],
+                output_activation="ReLU",
+            )
+
+        if self.lstm_config is not None:
+            assert isinstance(
+                self.lstm_config, LstmNetConfig
+            ), "LSTM config must be an instance of LstmNetConfig"
+        else:
+            self.lstm_config = LstmNetConfig(
+                hidden_size=64,
+                num_layers=2,
+                output_activation="ReLU",
+            )

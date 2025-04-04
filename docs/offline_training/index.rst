@@ -88,19 +88,19 @@ by an individual agent because it allows faster learning from the behaviour of o
 a maze, you could learn from their mistakes and successes without necessarily having to explore the entire maze yourself.
 
 The object used to store experiences collected by agents in the environment is called the Experience Replay Buffer, and is defined by the class ``ReplayBuffer()``.
-During training it can be added to using the ``ReplayBuffer.save_to_memory()`` function, or ``ReplayBuffer.save_to_memory_vect_envs()`` for vectorized environments (recommended).
-To sample from the replay buffer, call ``ReplayBuffer.sample()``.
+During training we use the ``ReplayBuffer.add()`` function to add experiences to the buffer as ``TensorDict`` objects. Specifically, we wrap transitions through the
+``Transition`` tensorclass that wraps the ``obs``, ``action``, ``reward``, ``next_obs``, and ``done`` fields as ``torch.Tensor`` objects. To sample from the replay
+buffer, call ``ReplayBuffer.sample()``.
 
 We must fill the replay buffer with our offline data so that we can sample and learn.
 
 .. code-block:: python
 
     from agilerl.components.replay_buffer import ReplayBuffer
+    from agilerl.components.data import Transition
 
-    field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
-        memory_size=10000,  # Max replay buffer size
-        field_names=field_names,  # Field names to store in memory
+        max_size=10000,  # Max replay buffer size
         device=device,
     )
 
@@ -116,8 +116,19 @@ We must fill the replay buffer with our offline data so that we can sample and l
         action = dataset["actions"][i]
         reward = dataset["rewards"][i]
         done = bool(dataset["terminals"][i])
+
+        transition = Transition(
+            obs=state,
+            action=action,
+            reward=reward,
+            next_obs=next_state,
+            done=done,
+        )
+        transition = transition.unsqueeze(0) # Add vectorized dimension
+        transition.batch_size = [1]
+
         # Save experience to replay buffer
-        memory.save_to_memory(state, action, reward, next_state, done)
+        memory.add(transition.to_tensordict())
 
 
 .. _trainloop_offline:
@@ -171,7 +182,8 @@ Alternatively, use a custom training loop. Combining all of the above:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     NET_CONFIG = {
-        "head_config": {"hidden_size": [32, 32]}  # Actor head hidden size
+        "encoder_config": {"hidden_size": [32, 32]},  # Encoder hidden size
+        "head_config": {"hidden_size": [32, 32]},  # Head hidden size
     }
 
     INIT_HP = {
@@ -186,6 +198,7 @@ Alternatively, use a custom training loop. Combining all of the above:
         "POP_SIZE": 4,  # Population size
     }
 
+    # Create vectorized environment
     num_envs = 1
     env = make_vect_envs("CartPole-v1", num_envs=num_envs)  # Create environment
     dataset = h5py.File("data/cartpole/cartpole_random_v1.1.0.h5", "r")  # Load dataset
@@ -206,10 +219,8 @@ Alternatively, use a custom training loop. Combining all of the above:
         device=device,
     )
 
-    field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
-        memory_size=10000,  # Max replay buffer size
-        field_names=field_names,  # Field names to store in memory
+        max_size=10000,  # Max replay buffer size
         device=device,
     )
 
@@ -225,8 +236,19 @@ Alternatively, use a custom training loop. Combining all of the above:
         action = dataset["actions"][i]
         reward = dataset["rewards"][i]
         done = bool(dataset["terminals"][i])
+
         # Save experience to replay buffer
-        memory.save_to_memory(state, action, reward, next_state, done)
+        transition = Transition(
+            obs=state,
+            action=action,
+            reward=reward,
+            next_obs=next_state,
+            done=done,
+        )
+        transition = transition.unsqueeze(0) # Add vectorized dimension
+        transition.batch_size = [1]
+
+        memory.add(transition.to_tensordict())
 
     tournament = TournamentSelection(
         tournament_size=2,  # Tournament selection size

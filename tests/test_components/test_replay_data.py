@@ -1,15 +1,14 @@
 import numpy as np
 import torch
 
+from agilerl.components.data import ReplayDataset, Transition
 from agilerl.components.replay_buffer import ReplayBuffer
-from agilerl.components.replay_data import ReplayDataset
 
 
 # The dataset can be initialized with a buffer and batch size
 def test_initialization_with_buffer_and_batch_size():
     buffer = ReplayBuffer(
-        memory_size=1000,
-        field_names=["state", "action", "reward", "next_state", "done"],
+        max_size=1000,
     )
     batch_size = 2
     dataset = ReplayDataset(buffer, batch_size=batch_size)
@@ -19,10 +18,8 @@ def test_initialization_with_buffer_and_batch_size():
 
 # Sampling a batch of experiences from the buffer works correctly
 def test_sampling_batch_from_buffer():
-    field_names = ["state", "action", "reward", "next_state", "done"]
     buffer = ReplayBuffer(
-        memory_size=1000,
-        field_names=field_names,
+        max_size=1000,
     )
 
     state1 = np.array([1, 2, 3])
@@ -31,23 +28,34 @@ def test_sampling_batch_from_buffer():
     next_state1 = np.array([4, 5, 6])
     done1 = np.array([False])
 
-    buffer.save_to_memory(state1, action1, reward1, next_state1, done1)
-    buffer.save_to_memory(state1, action1, reward1, next_state1, done1)
+    transition1 = Transition(
+        obs=state1,
+        action=action1,
+        reward=reward1,
+        next_obs=next_state1,
+        done=done1,
+    ).to_tensordict()
+
+    transition1 = transition1.unsqueeze(0)
+    transition1.batch_size = [1]
+    buffer.add(transition1)
+    buffer.add(transition1)
 
     batch_size = 2
     dataset = ReplayDataset(buffer, batch_size=batch_size)
     iterator = iter(dataset)
     batch = next(iterator)
 
-    assert len(batch) == len(field_names)
-    assert len(batch[0]) == batch_size
-    assert torch.equal(batch[0][0], torch.from_numpy(state1).float())
-    assert torch.equal(batch[0][1], torch.from_numpy(state1).float())
-    assert torch.equal(batch[1][0], torch.from_numpy(action1).float())
-    assert torch.equal(batch[1][1], torch.from_numpy(action1).float())
-    assert torch.equal(batch[2][0], torch.from_numpy(reward1).float())
-    assert torch.equal(batch[2][1], torch.from_numpy(reward1).float())
-    assert torch.equal(batch[3][0], torch.from_numpy(next_state1).float())
-    assert torch.equal(batch[3][1], torch.from_numpy(next_state1).float())
-    assert torch.equal(batch[4][0], torch.from_numpy(done1).float())
-    assert torch.equal(batch[4][1], torch.from_numpy(done1).float())
+    print(batch)
+    assert len(batch) == batch_size
+    assert len(batch["obs"]) == batch_size
+    assert torch.equal(batch["obs"][0], torch.from_numpy(state1).float())
+    assert torch.equal(batch["obs"][1], torch.from_numpy(state1).float())
+    assert torch.equal(batch["action"][0], torch.from_numpy(action1).float())
+    assert torch.equal(batch["action"][1], torch.from_numpy(action1).float())
+    assert torch.equal(batch["reward"][0], torch.from_numpy(reward1).float())
+    assert torch.equal(batch["reward"][1], torch.from_numpy(reward1).float())
+    assert torch.equal(batch["next_obs"][0], torch.from_numpy(next_state1).float())
+    assert torch.equal(batch["next_obs"][1], torch.from_numpy(next_state1).float())
+    assert torch.equal(batch["done"][0], torch.from_numpy(done1).float())
+    assert torch.equal(batch["done"][1], torch.from_numpy(done1).float())

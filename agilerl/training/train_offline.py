@@ -10,8 +10,8 @@ from torch.utils.data import DataLoader
 from tqdm import trange
 
 from agilerl.algorithms.core.base import RLAlgorithm
+from agilerl.components.data import ReplayDataset, Transition
 from agilerl.components.replay_buffer import ReplayBuffer
-from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -173,16 +173,6 @@ def train_offline(
     else:
         print("Loading buffer...")
         dataset_length = dataset["rewards"].shape[0]
-        # for i in range(dataset_length):
-        #     state = dataset['observations'][i]
-        #     next_state = dataset['next_observations'][i]
-        #     if swap_channels:
-        #         state = obs_channels_to_first(state)
-        #         next_state = obs_channels_to_first(next_state)
-        #     action = dataset['actions'][i]
-        #     reward = dataset['rewards'][i]
-        #     done = bool(dataset['terminals'][i])
-        #     memory.save_to_memory(state, action, next_state, reward, done)
         for i in range(dataset_length - 1):
             state = dataset["observations"][i]
             next_state = dataset["observations"][i + 1]
@@ -192,7 +182,22 @@ def train_offline(
             action = dataset["actions"][i]
             reward = dataset["rewards"][i]
             done = bool(dataset["terminals"][i])
-            memory.save_to_memory(state, action, reward, next_state, done)
+
+            # Add transition to memory
+            transition = (
+                Transition(
+                    obs=state,
+                    action=action,
+                    reward=reward,
+                    next_obs=next_state,
+                    done=done,
+                )
+                .to_tensordict()
+                .unsqueeze(0)
+            )
+            transition.batch_size = [1]
+            memory.add(transition)
+
         if accelerator is not None:
             if accelerator.is_main_process:
                 print("Loaded buffer.")
@@ -205,11 +210,9 @@ def train_offline(
         replay_dataset = ReplayDataset(memory, pop[0].batch_size)
         replay_dataloader = DataLoader(replay_dataset, batch_size=None)
         replay_dataloader = accelerator.prepare(replay_dataloader)
-        sampler = Sampler(
-            distributed=True, dataset=replay_dataset, dataloader=replay_dataloader
-        )
+        sampler = Sampler(dataset=replay_dataset, dataloader=replay_dataloader)
     else:
-        sampler = Sampler(distributed=False, memory=memory)
+        sampler = Sampler(memory=memory)
 
     if accelerator is not None:
         print(f"\nDistributed training on {accelerator.device}...")

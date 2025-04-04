@@ -45,8 +45,8 @@ OptimizerWrapper
 ----------------
 
 The last thing users should do when creating a custom algorithm is wrap their optimizers in an :class:`OptimizerWrapper <agilerl.algorithms.core.wrappers.OptimizerWrapper>`,
-specifying the networks that the optimizer is responsible for optimizing. Since we are mutating network architectures during training, we need to have knowledge of
-this in order to reinitiliaze the optimizers correctly when we do so. In the above example, we have a single optimizer that optimizes the parameters of both the actor and critic networks,
+specifying the networks that the optimizer is responsible for. Since we are mutating network architectures during training, we need to have knowledge of
+this in order to reinitiliaze the optimizers correctly when we do so. In the example below, we have a single optimizer that optimizes the parameters of both the actor and critic networks,
 so we can wrap it as follows:
 
 .. code-block:: python
@@ -58,7 +58,8 @@ so we can wrap it as follows:
     )
 
 .. note::
-    All of the network groups and optimizers of an algorithm should by convention all be defined in the ``__init__`` method of the algorithm.
+    All of the network groups and optimizers of an algorithm should by convention all be defined in the ``__init__`` method of the algorithm. When initializing
+    an ``OptimizerWrapper``, we require users to pass either a network or a list of networks that are stored as attributes in the algorithm (i.e. preceded by ``self.``).
 
 Finally, users only need to implement the following methods to train agents with the AgileRL framework:
 

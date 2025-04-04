@@ -37,7 +37,7 @@ def test_return_skill_reward():
 
 # Skill class is initialized with a non-gym environment
 def test_non_gym_environment():
-    class CustomEnv:
+    class CustomEnv(gym.Env):
         def __init__(self):
             self.observation_space = gym.spaces.Discrete(2)
             self.action_space = gym.spaces.Discrete(2)

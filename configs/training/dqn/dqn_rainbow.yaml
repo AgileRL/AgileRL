@@ -2,28 +2,37 @@
 # Define initial hyperparameters
 INIT_HP:
     ENV_NAME: LunarLander-v2   # Gym environment name
-    ALGO: DQN                  # Algorithm
-    DOUBLE: false
+    ALGO: Rainbow DQN          # Algorithm
     # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     CHANNELS_LAST: false
     NUM_ENVS: 16               # No. parallel environments for training
     BATCH_SIZE: 64             # Batch size
-    CUDAGRAPHS: false           # Cudagraph optimizations
-    LR: 0.001                  # Learning rate
+    LR: 0.0001                 # Learning rate
     MAX_STEPS: 1_000_000       # Max no. steps
-    TARGET_SCORE: 200.         # Early training stop at avg score of last 100 episodes
+    TARGET_SCORE: 470.         # Early training stop at avg score of last 100 episodes
     GAMMA: 0.99                # Discount factor
-    MEMORY_SIZE: 100000        # Max memory buffer size
+    MEMORY_SIZE: 100_000       # Max memory buffer size
     LEARN_STEP: 1              # Learning frequency
+    # NOTE: If using a population of agents, a standard replay buffer
+    # (i.e. not multi-step or prioritized) is often best, hence the defaults below
+    N_STEP: 4                  # Step number to calculate td error
+    PER: false                 # Use prioritized experience replay buffer
+    ALPHA: 0.6                 # Prioritized replay buffer parameter
+    BETA: 0.4                  # Importance sampling coefficient
     TAU: 0.001                 # For soft update of target parameters
+    PRIOR_EPS: 0.000001        # Minimum priority for sampling
+    NOISE_STD: 0.5             # Noise standard deviation
+    NUM_ATOMS: 51              # Unit number of support
+    V_MIN: -200.               # Minimum value of support
+    V_MAX: 200.                # Maximum value of support
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
-    POP_SIZE: 4                # Population size
+    POP_SIZE: 1                # Population size
     EVO_STEPS: 10_000          # Evolution frequency
     EVAL_STEPS:                # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
     LEARNING_DELAY: 1000       # Steps before learning
-    WANDB: true                # Log with Weights and Biases
+    WANDB: false               # Log with Weights and Biases
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation
@@ -36,7 +45,7 @@ MUTATION_PARAMS:
     RAND_SEED: 42                          # Random seed
     # Define max and min limits for mutating RL hyperparams
     MIN_LR: 0.0000625
-    MAX_LR: 0.01
+    MAX_LR: 0.001
     MIN_BATCH_SIZE: 8
     MAX_BATCH_SIZE: 512
     MIN_LEARN_STEP: 1
@@ -46,7 +55,15 @@ NET_CONFIG:
     latent_dim: 64
 
     encoder_config:
-        hidden_size: [64]
+        hidden_size: [128]
+        activation: ReLU
+        min_mlp_nodes: 64
+        max_mlp_nodes: 500
 
     head_config:
-        hidden_size: [64]
+        hidden_size: [128]
+        activation: ReLU
+        min_hidden_layers: 1
+        max_hidden_layers: 3
+        min_mlp_nodes: 64
+        max_mlp_nodes: 500

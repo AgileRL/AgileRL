@@ -16,6 +16,8 @@ Example
 
 .. code-block:: python
 
+  from tensordict import TensorDict
+
     from agilerl.algorithms.neural_ts import NeuralTS
     from agilerl.components.replay_buffer import ReplayBuffer
     from agilerl.wrappers.learning import BanditEnv
@@ -30,8 +32,7 @@ Example
     context_dim = env.context_dim
     action_dim = env.arms
 
-    field_names = ["state", "action", "reward", "next_state", "done"]
-    memory = ReplayBuffer(memory_size=10000, field_names=field_names)
+    memory = ReplayBuffer(max_size=10000)
 
     observation_space = spaces.Box(low=features.values.min(), high=features.values.max())
     action_space = spaces.Discrete(action_dim)
@@ -44,7 +45,13 @@ Example
         next_context, reward = env.step(action)  # Act in environment
 
         # Save experience to replay buffer
-        memory.save_to_memory(context[action], reward)
+        transition = TensorDict({
+          "obs": context[action],
+          "reward": reward,
+          },
+          batch_size=[1]
+        )
+        memory.add(transition)
 
         # Learn according to learning frequency
         if len(memory) >= agent.batch_size:
@@ -88,12 +95,22 @@ For dictionary / tuple observations containing any combination of image, discret
 
 .. code-block:: python
 
+  CNN_CONFIG = {
+      "channel_size": [32, 32], # CNN channel size
+      "kernel_size": [8, 4],   # CNN kernel size
+      "stride_size": [4, 2],   # CNN stride size
+  }
+
   NET_CONFIG = {
       "encoder_config": {
-        'hidden_size': [32, 32],  # Network head hidden size
-        'channel_size': [32, 32], # CNN channel size
-        'kernel_size': [8, 4],   # CNN kernel size
-        'stride_size': [4, 2],   # CNN stride size
+        "latent_dim": 32,
+        # Config for nested EvolvableCNN objects
+        "cnn_config": CNN_CONFIG,
+        # Config for nested EvolvableMLP objects
+        "mlp_config": {
+            "hidden_size": [32, 32]
+        },
+        "vector_space_mlp": True # Process vector observations with an MLP
       },
       "head_config": {'hidden_size': [32]}  # Network head hidden size
     }

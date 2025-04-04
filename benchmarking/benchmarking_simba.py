@@ -2,14 +2,13 @@ import torch
 import yaml
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-from agilerl.components.replay_buffer import ReplayBuffer
+from agilerl.components import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.utils.utils import (
     create_population,
     make_vect_envs,
-    observation_space_channels_to_first,
     print_hyperparams,
 )
 from agilerl.wrappers.agent import RSNorm
@@ -32,13 +31,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
     observation_space = env.single_observation_space
     action_space = env.single_action_space
-    if INIT_HP["CHANNELS_LAST"]:
-        observation_space = observation_space_channels_to_first(observation_space)
-
-    field_names = ["state", "action", "reward", "next_state", "done"]
-    memory = ReplayBuffer(
-        memory_size=INIT_HP["MEMORY_SIZE"], field_names=field_names, device=device
-    )
+    memory = ReplayBuffer(max_size=INIT_HP["MEMORY_SIZE"], device=device)
     tournament = TournamentSelection(
         INIT_HP["TOURN_SIZE"],
         INIT_HP["ELITISM"],
@@ -125,7 +118,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
 
 if __name__ == "__main__":
-    with open("configs/training/ddpg_simba.yaml") as file:
+    with open("configs/training/ddpg/ddpg_simba.yaml") as file:
         config = yaml.safe_load(file)
     INIT_HP = config["INIT_HP"]
     MUTATION_PARAMS = config["MUTATION_PARAMS"]

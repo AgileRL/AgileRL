@@ -12,6 +12,7 @@ from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 
 from agilerl.algorithms.ddpg import DDPG
+from agilerl.components.data import Transition
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.networks.actors import DeterministicActor
@@ -480,7 +481,14 @@ def test_learns_from_experiences(min_action, max_action):
         next_states = torch.rand(batch_size, *observation_space.shape)
         dones = torch.randint(0, 2, (batch_size, 1))
 
-        experiences = [states, actions, rewards, next_states, dones]
+        experiences = Transition(
+            obs=states,
+            action=actions,
+            reward=rewards,
+            next_obs=next_states,
+            done=dones,
+            batch_size=[batch_size],
+        ).to_tensordict()
 
         ddpg.scores.append(0)
 
@@ -521,7 +529,15 @@ def test_learns_from_experiences_with_accelerator():
     next_states = torch.randint(0, observation_space.n, (batch_size, 1)).float()
     dones = torch.randint(0, 2, (batch_size, 1))
 
-    experiences = [states, actions, rewards, next_states, dones]
+    experiences = Transition(
+        obs=states,
+        action=actions,
+        reward=rewards,
+        next_obs=next_states,
+        done=dones,
+        batch_size=[batch_size],
+        device=accelerator.device,
+    ).to_tensordict()
 
     # Copy state dict before learning - should be different to after updating weights
     actor = ddpg.actor
@@ -826,7 +842,15 @@ def test_clone_after_learning():
     next_states = torch.randn(batch_size, observation_space.shape[0])
     dones = torch.zeros(batch_size, 1)
 
-    experiences = states, actions, rewards, next_states, dones
+    experiences = Transition(
+        obs=states,
+        action=actions,
+        reward=rewards,
+        next_obs=next_states,
+        done=dones,
+        batch_size=[batch_size],
+    ).to_tensordict()
+
     ddpg.learn(experiences)
     clone_agent = ddpg.clone()
 
@@ -1075,6 +1099,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     ddpg = DDPG(
         observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
         action_space=generate_random_box_space(shape=(2,)),
+        actor_network=actor_network,
+        critic_network=critic_network,
     )
     # Load checkpoint
     ddpg.load_checkpoint(checkpoint_path)

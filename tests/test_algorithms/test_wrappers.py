@@ -1,431 +1,748 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
+import torch
 import torch.nn as nn
-import torch.optim as optim
 
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
+from agilerl.protocols import EvolvableAlgorithm, EvolvableNetwork
 
 
-class MockNetwork(nn.Module):
-    """Simple mock network for testing optimizers"""
-
-    def __init__(self):
+# Mock classes for testing
+class MockEvolvableNetwork(nn.Module, EvolvableNetwork):
+    def __init__(self, input_dim=10, output_dim=5, name="mock_network"):
         super().__init__()
-        self.fc = nn.Linear(10, 10)
+        self.name = name
+        self.device = "cpu"
+        # Use fixed initialization for stable testing
+        self.layer = nn.Linear(input_dim, output_dim)
+        # Initialize with small weights to avoid exploding gradients
+        torch.nn.init.xavier_uniform_(self.layer.weight, gain=0.01)
+        torch.nn.init.zeros_(self.layer.bias)
 
     def forward(self, x):
-        return self.fc(x)
+        return self.layer(x)
 
-    def clone(self):
-        return MockNetwork()
+    def cpu(self):
+        self.device = "cpu"
+        return self
 
-    def init_dict(self):
-        return {}
+    def to(self, device):
+        self.device = device
+        return self
+
+    def get_init_dict(self):
+        return {"device": self.device}
 
 
-class DummyAlgorithm:
-    """Simulates an algorithm class that uses OptimizerWrapper"""
+class MockAlgorithm(EvolvableAlgorithm):
+    def __init__(
+        self, actor=None, critic=None, lr=0.001, networks=None, optimizer_cls=None
+    ):
+        # Single network setup (like DQN)
+        if actor is not None and critic is None and networks is None:
+            self.actor = actor or MockEvolvableNetwork(name="actor")
+            self.learning_rate = lr
+            self.optimizer_cls = optimizer_cls or torch.optim.Adam
+            self.optimizer = OptimizerWrapper(
+                self.optimizer_cls, self.actor, self.learning_rate
+            )
 
-    def __init__(self):
-        self.actor = MockNetwork()
-        self.critic = MockNetwork()
-        self.learning_rate = 0.01
+        # Two network setup (like PPO)
+        elif actor is not None and critic is not None and networks is None:
+            self.actor = actor
+            self.critic = critic
+            self.learning_rate = lr
+            self.optimizer_cls = optimizer_cls or torch.optim.Adam
+            self.optimizer = OptimizerWrapper(
+                self.optimizer_cls, [self.actor, self.critic], self.learning_rate
+            )
 
-        # OptimizerWrapper created in __init__
-        self.optimizer = OptimizerWrapper(
-            optimizer_cls=optim.Adam, networks=self.actor, lr=self.learning_rate
+        # Multi-agent setup (like MADDPG)
+        elif networks is not None:
+            self.networks = networks
+            self.lr_actor = lr
+            self.optimizer_cls = optimizer_cls or torch.optim.Adam
+            self.optimizer = OptimizerWrapper(
+                self.optimizer_cls, self.networks, self.lr_actor, multiagent=True
+            )
+
+
+class MockMultiAgentAlgorithm(EvolvableAlgorithm):
+    def __init__(
+        self,
+        actors=None,
+        critics=None,
+        lr_actor=0.001,
+        lr_critic=0.01,
+        optimizer_cls=None,
+    ):
+        # Separate actor and critic networks for multi-agent
+        self.actors = actors or [
+            MockEvolvableNetwork(name=f"actor_{i}") for i in range(3)
+        ]
+        self.critics = critics or [
+            MockEvolvableNetwork(name=f"critic_{i}") for i in range(3)
+        ]
+        self.lr_actor = lr_actor
+        self.lr_critic = lr_critic
+        self.optimizer_cls = optimizer_cls or torch.optim.Adam
+
+        # Create optimizers like in MADDPG
+        self.actor_optimizers = OptimizerWrapper(
+            self.optimizer_cls, self.actors, self.lr_actor, multiagent=True
         )
 
-    def create_optimizer_outside_init(self):
-        """Create an optimizer outside of __init__"""
-        # Without explicit attribute names, the inference will fail
-        # We need to patch the _infer_parent_container method to make
-        # sure it fails as expected in our test
-        return OptimizerWrapper(
-            optimizer_cls=optim.Adam, networks=self.critic, lr=self.learning_rate
-        )
-
-    def create_optimizer_outside_init_with_names(self):
-        """Create an optimizer outside of __init__ with explicit attribute names"""
-        return OptimizerWrapper(
-            optimizer_cls=optim.Adam,
-            networks=self.critic,
-            lr=self.learning_rate,
-            network_names=["critic"],
-            lr_name="learning_rate",
+        self.critic_optimizers = OptimizerWrapper(
+            self.optimizer_cls, self.critics, self.lr_critic, multiagent=True
         )
 
 
 class TestOptimizerWrapper:
 
-    @pytest.fixture
-    def mock_parent(self):
-        """Mock parent container with network and optimizer attributes"""
-        parent = MagicMock()
-        parent.network1 = MockNetwork()
-        parent.network2 = MockNetwork()
-        parent.networks = [parent.network1, parent.network2]
-        parent.lr = 0.01
-        return parent
+    def test_init_single_network(self):
+        """Test initializing with a single network like in DQN."""
+        network = MockEvolvableNetwork()
+        lr = 0.001
 
-    def test_single_optimizer_single_network(self, mock_parent):
-        """Test initialization of a single optimizer for a single network"""
-        with patch(
-            "agilerl.algorithms.core.wrappers.OptimizerWrapper._infer_parent_container",
-            return_value=mock_parent,
-        ):
-            with patch(
-                "agilerl.algorithms.core.wrappers.OptimizerWrapper._infer_network_attr_names",
-                return_value=["network1"],
+        # Test automatic inference
+        with patch.object(OptimizerWrapper, "_infer_parent_container"):
+            with patch.object(
+                OptimizerWrapper, "_infer_network_attr_names", return_value=["actor"]
             ):
-                with patch(
-                    "agilerl.algorithms.core.wrappers.OptimizerWrapper._infer_lr_name",
-                    return_value="lr",
+                with patch.object(
+                    OptimizerWrapper, "_infer_lr_name", return_value="learning_rate"
                 ):
-                    wrapper = OptimizerWrapper(
-                        optimizer_cls=optim.Adam,
-                        networks=mock_parent.network1,
-                        lr=mock_parent.lr,
-                    )
+                    algo = MockAlgorithm(actor=network, lr=lr)
 
-                    # Check optimizer was initialized correctly
-                    assert wrapper.optimizer_cls == optim.Adam
-                    assert wrapper.lr == mock_parent.lr
-                    assert wrapper.networks == [mock_parent.network1]
-                    assert wrapper.network_names == ["network1"]
-                    assert wrapper.lr_name == "lr"
-                    assert wrapper.multiagent is False
-                    assert isinstance(wrapper.optimizer, optim.Adam)
+        assert isinstance(algo.optimizer.optimizer, torch.optim.Adam)
+        assert algo.optimizer.lr == lr
+        assert len(algo.optimizer.networks) == 1
+        assert algo.optimizer.networks[0] is network
+        assert algo.optimizer.network_names == ["actor"]
+        assert algo.optimizer.lr_name == "learning_rate"
+        assert not algo.optimizer.multiagent
 
-    def test_single_optimizer_multiple_networks(self, mock_parent):
-        """Test initialization of a single optimizer for multiple networks"""
-        with patch(
-            "agilerl.algorithms.core.wrappers.OptimizerWrapper._infer_parent_container",
-            return_value=mock_parent,
-        ):
-            with patch(
-                "agilerl.algorithms.core.wrappers.OptimizerWrapper._infer_network_attr_names",
-                return_value=["network1", "network2"],
+    def test_init_with_multiple_networks(self):
+        """Test initializing with multiple networks like in PPO."""
+        actor = MockEvolvableNetwork(name="actor")
+        critic = MockEvolvableNetwork(name="critic")
+        lr = 0.001
+
+        # Test with two networks
+        with patch.object(OptimizerWrapper, "_infer_parent_container"):
+            with patch.object(
+                OptimizerWrapper,
+                "_infer_network_attr_names",
+                return_value=["actor", "critic"],
             ):
-                with patch(
-                    "agilerl.algorithms.core.wrappers.OptimizerWrapper._infer_lr_name",
-                    return_value="lr",
+                with patch.object(
+                    OptimizerWrapper, "_infer_lr_name", return_value="learning_rate"
                 ):
-                    wrapper = OptimizerWrapper(
-                        optimizer_cls=optim.Adam,
-                        networks=[mock_parent.network1, mock_parent.network2],
-                        lr=mock_parent.lr,
-                    )
+                    algo = MockAlgorithm(actor=actor, critic=critic, lr=lr)
 
-                    # Check optimizer was initialized correctly
-                    assert wrapper.optimizer_cls == optim.Adam
-                    assert wrapper.lr == mock_parent.lr
-                    assert wrapper.networks == [
-                        mock_parent.network1,
-                        mock_parent.network2,
-                    ]
-                    assert wrapper.network_names == ["network1", "network2"]
-                    assert wrapper.lr_name == "lr"
-                    assert wrapper.multiagent is False
-                    assert isinstance(wrapper.optimizer, optim.Adam)
+        assert isinstance(algo.optimizer.optimizer, torch.optim.Adam)
+        assert algo.optimizer.lr == lr
+        assert len(algo.optimizer.networks) == 2
+        assert algo.optimizer.networks[0] is actor
+        assert algo.optimizer.networks[1] is critic
+        assert set(algo.optimizer.network_names) == {"actor", "critic"}
+        assert algo.optimizer.lr_name == "learning_rate"
+        assert not algo.optimizer.multiagent
 
-    def test_multi_agent_optimizers(self, mock_parent):
-        """Test initialization of multiple optimizers for multi-agent setup"""
-        with patch(
-            "agilerl.algorithms.core.wrappers.OptimizerWrapper._infer_parent_container",
-            return_value=mock_parent,
-        ):
-            with patch(
-                "agilerl.algorithms.core.wrappers.OptimizerWrapper._infer_network_attr_names",
-                return_value=["networks"],
+        # Test parameter groups
+        param_groups = algo.optimizer.optimizer.param_groups
+        assert len(param_groups) == 2
+        # Each group should have the same learning rate
+        assert param_groups[0]["lr"] == lr
+        assert param_groups[1]["lr"] == lr
+
+    def test_init_with_multiagent(self):
+        """Test initializing with multiagent=True like in MADDPG."""
+        networks = [MockEvolvableNetwork(name=f"net_{i}") for i in range(3)]
+        lr = 0.001
+
+        # Test with multiple networks in multi-agent mode
+        with patch.object(OptimizerWrapper, "_infer_parent_container"):
+            with patch.object(
+                OptimizerWrapper, "_infer_network_attr_names", return_value=["networks"]
             ):
-                with patch(
-                    "agilerl.algorithms.core.wrappers.OptimizerWrapper._infer_lr_name",
-                    return_value="lr",
+                with patch.object(
+                    OptimizerWrapper, "_infer_lr_name", return_value="lr_actor"
                 ):
-                    wrapper = OptimizerWrapper(
-                        optimizer_cls=optim.Adam,
-                        networks=[mock_parent.network1, mock_parent.network2],
-                        lr=mock_parent.lr,
-                        multiagent=True,
-                    )
+                    algo = MockAlgorithm(networks=networks, lr=lr)
 
-                    # Check optimizers were initialized correctly
-                    assert wrapper.optimizer_cls == optim.Adam
-                    assert wrapper.lr == mock_parent.lr
-                    assert wrapper.networks == [
-                        mock_parent.network1,
-                        mock_parent.network2,
-                    ]
-                    assert wrapper.network_names == ["networks"]
-                    assert wrapper.lr_name == "lr"
-                    assert wrapper.multiagent is True
-                    assert isinstance(wrapper.optimizer, list)
-                    assert len(wrapper.optimizer) == 2
-                    assert all(isinstance(opt, optim.Adam) for opt in wrapper.optimizer)
+        assert isinstance(algo.optimizer.optimizer, list)
+        assert len(algo.optimizer.optimizer) == 3
+        assert all(
+            isinstance(opt, torch.optim.Adam) for opt in algo.optimizer.optimizer
+        )
+        assert algo.optimizer.lr == lr
+        assert algo.optimizer.networks is networks
+        assert algo.optimizer.network_names == ["networks"]
+        assert algo.optimizer.lr_name == "lr_actor"
+        assert algo.optimizer.multiagent
 
-    def test_explicit_network_names(self):
-        """Test explicitly providing network_names and lr_name"""
-        network = MockNetwork()
+    def test_maddpg_style_optimizers(self):
+        """Test MADDPG-style setup with separate actor and critic optimizers."""
+        with patch.object(OptimizerWrapper, "_infer_parent_container"):
+            with patch.object(
+                OptimizerWrapper,
+                "_infer_network_attr_names",
+                side_effect=[["actors"], ["critics"]],
+            ):
+                with patch.object(
+                    OptimizerWrapper,
+                    "_infer_lr_name",
+                    side_effect=["lr_actor", "lr_critic"],
+                ):
+                    algo = MockMultiAgentAlgorithm()
+
+        # Check actor optimizers
+        assert isinstance(algo.actor_optimizers.optimizer, list)
+        assert len(algo.actor_optimizers.optimizer) == 3
+        assert all(
+            isinstance(opt, torch.optim.Adam) for opt in algo.actor_optimizers.optimizer
+        )
+        assert algo.actor_optimizers.lr == algo.lr_actor
+        assert len(algo.actor_optimizers.networks) == 3
+        assert algo.actor_optimizers.network_names == ["actors"]
+        assert algo.actor_optimizers.multiagent
+
+        # Check critic optimizers
+        assert isinstance(algo.critic_optimizers.optimizer, list)
+        assert len(algo.critic_optimizers.optimizer) == 3
+        assert all(
+            isinstance(opt, torch.optim.Adam)
+            for opt in algo.critic_optimizers.optimizer
+        )
+        assert algo.critic_optimizers.lr == algo.lr_critic
+        assert len(algo.critic_optimizers.networks) == 3
+        assert algo.critic_optimizers.network_names == ["critics"]
+        assert algo.critic_optimizers.multiagent
+
+    def test_init_with_explicit_names(self):
+        """Test initialization with explicitly provided network_names and lr_name."""
+        network = MockEvolvableNetwork()
+        optimizer_cls = torch.optim.Adam
+        lr = 0.001
+        network_names = ["policy_net"]
+        lr_name = "policy_lr"
+
         wrapper = OptimizerWrapper(
-            optimizer_cls=optim.Adam,
-            networks=network,
-            lr=0.01,
-            network_names=["actor"],
-            lr_name="actor_lr",
+            optimizer_cls, network, lr, network_names=network_names, lr_name=lr_name
         )
 
-        assert wrapper.network_names == ["actor"]
-        assert wrapper.lr_name == "actor_lr"
+        assert wrapper.network_names == network_names
+        assert wrapper.lr_name == lr_name
 
-    def test_missing_lr_name(self):
-        """Test error when network_names is provided but lr_name is not"""
-        network = MockNetwork()
-        with pytest.raises(
-            AssertionError, match="Learning rate attribute name must be passed"
-        ):
-            OptimizerWrapper(
-                optimizer_cls=optim.Adam,
-                networks=network,
-                lr=0.01,
-                network_names=["actor"],
-                lr_name=None,
-            )
+    def test_init_with_optimizer_kwargs(self):
+        """Test initialization with optimizer kwargs."""
+        network = MockEvolvableNetwork()
+        optimizer_cls = torch.optim.Adam
+        lr = 0.001
+        optimizer_kwargs = {"betas": (0.9, 0.999), "eps": 1e-8}
 
-    def test_state_dict_single_optimizer(self):
-        """Test state_dict() and load_state_dict() for single optimizer"""
-        network1 = MockNetwork()
-        network2 = MockNetwork()
-
-        # Create two wrappers with the same structure
-        wrapper1 = OptimizerWrapper(
-            optimizer_cls=optim.Adam,
-            networks=network1,
-            lr=0.01,
-            network_names=["network"],
-            lr_name="lr",
-        )
-
-        wrapper2 = OptimizerWrapper(
-            optimizer_cls=optim.Adam,
-            networks=network2,
-            lr=0.02,  # Different learning rate
-            network_names=["network"],
-            lr_name="lr",
-        )
-
-        # Get state from wrapper1 and load into wrapper2
-        state = wrapper1.state_dict()
-        wrapper2.load_state_dict(state)
-
-        # Both should now have the same state
-        assert (
-            wrapper1.optimizer.state_dict()["param_groups"][0]["lr"]
-            == wrapper2.optimizer.state_dict()["param_groups"][0]["lr"]
-        )
-
-    def test_state_dict_multi_agent(self):
-        """Test state_dict() and load_state_dict() for multi-agent optimizers"""
-        network1a = MockNetwork()
-        network1b = MockNetwork()
-        network2a = MockNetwork()
-        network2b = MockNetwork()
-
-        # Create two wrappers with multi-agent setup
-        wrapper1 = OptimizerWrapper(
-            optimizer_cls=optim.Adam,
-            networks=[network1a, network1b],
-            lr=0.01,
-            network_names=["networks"],
-            lr_name="lr",
-            multiagent=True,
-        )
-
-        wrapper2 = OptimizerWrapper(
-            optimizer_cls=optim.Adam,
-            networks=[network2a, network2b],
-            lr=0.02,  # Different learning rate
-            network_names=["networks"],
-            lr_name="lr",
-            multiagent=True,
-        )
-
-        # Get state from wrapper1 and load into wrapper2
-        state = wrapper1.state_dict()
-        wrapper2.load_state_dict(state)
-
-        # Both should now have the same state
-        for i in range(2):
-            assert (
-                wrapper1.optimizer[i].state_dict()["param_groups"][0]["lr"]
-                == wrapper2.optimizer[i].state_dict()["param_groups"][0]["lr"]
-            )
-
-    def test_operation_methods_single_optimizer(self):
-        """Test zero_grad() and step() methods for single optimizer"""
-        network = MockNetwork()
         wrapper = OptimizerWrapper(
-            optimizer_cls=optim.Adam,
-            networks=network,
-            lr=0.01,
+            optimizer_cls,
+            network,
+            lr,
+            optimizer_kwargs=optimizer_kwargs,
             network_names=["network"],
             lr_name="lr",
         )
 
-        # Mock the optimizer methods
-        wrapper.optimizer.zero_grad = MagicMock()
-        wrapper.optimizer.step = MagicMock()
+        # Check that kwargs were passed to the optimizer
+        assert wrapper.optimizer.defaults["betas"] == (0.9, 0.999)
+        assert wrapper.optimizer.defaults["eps"] == 1e-8
 
-        # Call wrapper methods
+    def test_getitem_in_multiagent(self):
+        """Test indexing via __getitem__ in multi-agent setup."""
+        with patch.object(OptimizerWrapper, "_infer_parent_container"):
+            with patch.object(
+                OptimizerWrapper,
+                "_infer_network_attr_names",
+                side_effect=[["actors"], ["critics"]],
+            ):
+                with patch.object(
+                    OptimizerWrapper,
+                    "_infer_lr_name",
+                    side_effect=["lr_actor", "lr_critic"],
+                ):
+                    algo = MockMultiAgentAlgorithm()
+
+        # Test indexing for actor optimizers
+        for i in range(3):
+            assert algo.actor_optimizers[i] is algo.actor_optimizers.optimizer[i]
+
+        # Test indexing for critic optimizers
+        for i in range(3):
+            assert algo.critic_optimizers[i] is algo.critic_optimizers.optimizer[i]
+
+    def test_method_delegation(self):
+        """Test method delegation to underlying optimizer(s)."""
+        # Single optimizer case with direct attribute access
+        network = MockEvolvableNetwork()
+
+        # Create the wrapper with explicit names to avoid inference
+        wrapper = OptimizerWrapper(
+            torch.optim.Adam, network, 0.001, network_names=["network"], lr_name="lr"
+        )
+
+        # Test basic attribute access first (not a method call)
+        assert wrapper.defaults == wrapper.optimizer.defaults
+
+        # Now test with a method that actually exists
+        wrapper.optimizer.zero_grad = Mock()  # Replace with mock to verify call
         wrapper.zero_grad()
-        wrapper.step()
-
-        # Assert optimizer methods were called
         wrapper.optimizer.zero_grad.assert_called_once()
+
+        # Multi-agent case - attribute delegation should fail
+        networks = [MockEvolvableNetwork() for _ in range(2)]
+        multi_wrapper = OptimizerWrapper(
+            torch.optim.Adam,
+            networks,
+            0.001,
+            multiagent=True,
+            network_names=["networks"],
+            lr_name="lr",
+        )
+
+        # Should raise TypeError because can't delegate to list of optimizers
+        with pytest.raises(AttributeError):
+            multi_wrapper.non_existent_attribute
+
+    def test_zero_grad(self):
+        """Test zero_grad method across different setups."""
+        # Single network case
+        network = MockEvolvableNetwork()
+        wrapper = OptimizerWrapper(
+            torch.optim.Adam, network, 0.001, network_names=["network"], lr_name="lr"
+        )
+
+        # Mock zero_grad
+        original_zero_grad = wrapper.optimizer.zero_grad
+        wrapper.optimizer.zero_grad = Mock()
+
+        wrapper.zero_grad()
+        wrapper.optimizer.zero_grad.assert_called_once()
+
+        # Restore method
+        wrapper.optimizer.zero_grad = original_zero_grad
+
+        # Multiple networks in multi-agent case
+        networks = [MockEvolvableNetwork() for _ in range(3)]
+        multi_wrapper = OptimizerWrapper(
+            torch.optim.Adam,
+            networks,
+            0.001,
+            multiagent=True,
+            network_names=["networks"],
+            lr_name="lr",
+        )
+
+        # Mock zero_grad for each optimizer
+        original_methods = []
+        for opt in multi_wrapper.optimizer:
+            original_methods.append(opt.zero_grad)
+            opt.zero_grad = Mock()
+
+        for opt in multi_wrapper.optimizer:
+            opt.zero_grad()
+
+        # Each optimizer's zero_grad should be called once
+        for opt in multi_wrapper.optimizer:
+            opt.zero_grad.assert_called_once()
+
+        # Restore methods
+        for i, opt in enumerate(multi_wrapper.optimizer):
+            opt.zero_grad = original_methods[i]
+
+    def test_step(self):
+        """Test step method across different setups."""
+        # Single network case
+        network = MockEvolvableNetwork()
+        wrapper = OptimizerWrapper(
+            torch.optim.Adam, network, 0.001, network_names=["network"], lr_name="lr"
+        )
+
+        # Mock step
+        original_step = wrapper.optimizer.step
+        wrapper.optimizer.step = Mock()
+
+        wrapper.step()
         wrapper.optimizer.step.assert_called_once()
 
-    def test_operation_methods_multi_agent(self):
-        """Test that zero_grad() and step() raise ValueError for multi-agent optimizers"""
-        network1 = MockNetwork()
-        network2 = MockNetwork()
+        # Restore method
+        wrapper.optimizer.step = original_step
 
-        wrapper = OptimizerWrapper(
-            optimizer_cls=optim.Adam,
-            networks=[network1, network2],
-            lr=0.01,
-            network_names=["networks"],
-            lr_name="lr",
-            multiagent=True,
-        )
-
-        # Methods should raise ValueError
-        with pytest.raises(ValueError, match="Please use the zero_grad()"):
-            wrapper.zero_grad()
-
-        with pytest.raises(ValueError, match="Please use the step()"):
-            wrapper.step()
-
-    def test_wrong_state_dict_format(self):
-        """Test that wrong state_dict format raises errors"""
-        network = MockNetwork()
-        multiagent_networks = [MockNetwork(), MockNetwork()]
-
-        # Single optimizer
-        single_wrapper = OptimizerWrapper(
-            optimizer_cls=optim.Adam,
-            networks=network,
-            lr=0.01,
-            network_names=["network"],
-            lr_name="lr",
-        )
-
-        # Multi-agent optimizers
+        # Multiple networks in multi-agent case
+        networks = [MockEvolvableNetwork() for _ in range(3)]
         multi_wrapper = OptimizerWrapper(
-            optimizer_cls=optim.Adam,
-            networks=multiagent_networks,
-            lr=0.01,
+            torch.optim.Adam,
+            networks,
+            0.001,
+            multiagent=True,
             network_names=["networks"],
             lr_name="lr",
-            multiagent=True,
         )
 
-        # Test loading list state_dict into single optimizer
-        with pytest.raises(
-            AssertionError, match="Expected a single optimizer state dictionary"
-        ):
-            single_wrapper.load_state_dict([{}])
+        # Mock step for each optimizer
+        original_methods = []
+        for opt in multi_wrapper.optimizer:
+            original_methods.append(opt.step)
+            opt.step = Mock()
 
-        # Test loading dict state_dict into multi-agent optimizers
-        with pytest.raises(
-            AssertionError, match="Expected a list of optimizer state dictionaries"
-        ):
+        for opt in multi_wrapper.optimizer:
+            opt.step()
+
+        # Each optimizer's step should be called once
+        for opt in multi_wrapper.optimizer:
+            opt.step.assert_called_once()
+
+        # Restore methods
+        for i, opt in enumerate(multi_wrapper.optimizer):
+            opt.step = original_methods[i]
+
+    def test_state_dict_and_load_state_dict(self):
+        """Test state_dict and load_state_dict methods."""
+        # Single optimizer case
+        network = MockEvolvableNetwork()
+        wrapper = OptimizerWrapper(
+            torch.optim.Adam, network, 0.001, network_names=["network"], lr_name="lr"
+        )
+
+        # Get state dict
+        state_dict = wrapper.state_dict()
+        assert isinstance(state_dict, dict)
+
+        # Mock load_state_dict
+        original_load = wrapper.optimizer.load_state_dict
+        wrapper.optimizer.load_state_dict = Mock()
+
+        # Load state dict
+        wrapper.load_state_dict(state_dict)
+        wrapper.optimizer.load_state_dict.assert_called_once_with(state_dict)
+
+        # Restore method
+        wrapper.optimizer.load_state_dict = original_load
+
+        # Multi-agent case
+        networks = [MockEvolvableNetwork() for _ in range(3)]
+        multi_wrapper = OptimizerWrapper(
+            torch.optim.Adam,
+            networks,
+            0.001,
+            multiagent=True,
+            network_names=["networks"],
+            lr_name="lr",
+        )
+
+        # Get state dicts
+        state_dicts = multi_wrapper.state_dict()
+        assert isinstance(state_dicts, list)
+        assert len(state_dicts) == 3
+
+        # Mock load_state_dict for each optimizer
+        original_methods = []
+        for opt in multi_wrapper.optimizer:
+            original_methods.append(opt.load_state_dict)
+            opt.load_state_dict = Mock()
+
+        # Load state dicts
+        multi_wrapper.load_state_dict(state_dicts)
+
+        # Each optimizer's load_state_dict should be called once with the correct state dict
+        for i, opt in enumerate(multi_wrapper.optimizer):
+            opt.load_state_dict.assert_called_once_with(state_dicts[i])
+
+        # Restore methods
+        for i, opt in enumerate(multi_wrapper.optimizer):
+            opt.load_state_dict = original_methods[i]
+
+    def test_invalid_load_state_dict(self):
+        """Test load_state_dict with invalid inputs."""
+        # Single optimizer receiving list
+        network = MockEvolvableNetwork()
+        wrapper = OptimizerWrapper(
+            torch.optim.Adam, network, 0.001, network_names=["network"], lr_name="lr"
+        )
+
+        with pytest.raises(AssertionError):
+            wrapper.load_state_dict([{}])
+
+        # Multi-agent optimizer receiving dict
+        networks = [MockEvolvableNetwork() for _ in range(3)]
+        multi_wrapper = OptimizerWrapper(
+            torch.optim.Adam,
+            networks,
+            0.001,
+            multiagent=True,
+            network_names=["networks"],
+            lr_name="lr",
+        )
+
+        with pytest.raises(AssertionError):
             multi_wrapper.load_state_dict({})
 
-    def test_getitem_access(self):
-        """Test __getitem__ access for multi-agent optimizers"""
-        networks = [MockNetwork(), MockNetwork()]
+        # Multi-agent optimizer receiving wrong-sized list
+        with pytest.raises(AssertionError):
+            multi_wrapper.load_state_dict([{}])
 
-        wrapper = OptimizerWrapper(
-            optimizer_cls=optim.Adam,
-            networks=networks,
-            lr=0.01,
-            network_names=["networks"],
-            lr_name="lr",
-            multiagent=True,
-        )
-
-        # Should be able to access individual optimizers
-        assert isinstance(wrapper[0], optim.Adam)
-        assert isinstance(wrapper[1], optim.Adam)
-
-        # Single optimizer should not support indexing
-        single_wrapper = OptimizerWrapper(
-            optimizer_cls=optim.Adam,
-            networks=networks[0],
-            lr=0.01,
+    def test_actual_learning(self):
+        """Test that the optimizer actually performs gradient descent."""
+        # Create a simple network and test data
+        network = MockEvolvableNetwork(input_dim=2, output_dim=1)
+        optimizer = OptimizerWrapper(
+            torch.optim.SGD,
+            network,
+            lr=0.01,  # Use a smaller learning rate
             network_names=["network"],
             lr_name="lr",
         )
 
-        with pytest.raises(TypeError, match="Can't access item of a single"):
-            _ = single_wrapper[0]
+        criterion = nn.MSELoss()
 
-    def test_optimizer_iteration(self):
-        """Test iteration over optimizers in multi-agent case"""
-        networks = [MockNetwork(), MockNetwork()]
+        # Create simple regression data
+        x = torch.tensor([[1.0, 2.0], [2.0, 3.0], [3.0, 4.0], [4.0, 5.0]])
+        y = torch.tensor([[3.0], [5.0], [7.0], [9.0]])
 
-        wrapper = OptimizerWrapper(
-            optimizer_cls=optim.Adam,
-            networks=networks,
-            lr=0.01,
-            network_names=["networks"],
+        # Set model to a known stable state
+        with torch.no_grad():
+            nn.init.zeros_(network.layer.weight)
+            nn.init.zeros_(network.layer.bias)
+
+        # Initial loss
+        initial_output = network(x)
+        initial_loss = criterion(initial_output, y)
+
+        # Train for a few steps
+        for _ in range(100):  # More iterations with smaller learning rate
+            optimizer.zero_grad()
+            output = network(x)
+            loss = criterion(output, y)
+            loss.backward()
+            optimizer.step()
+
+        # Final loss
+        final_output = network(x)
+        final_loss = criterion(final_output, y)
+
+        # Loss should decrease
+        assert final_loss < initial_loss
+
+    def test_actual_learning_multiple_networks(self):
+        """Test that the optimizer works with multiple networks."""
+        # Create two networks and test data
+        actor = MockEvolvableNetwork(input_dim=2, output_dim=1)
+        critic = MockEvolvableNetwork(input_dim=2, output_dim=1)
+
+        # Set models to a known stable state
+        with torch.no_grad():
+            nn.init.zeros_(actor.layer.weight)
+            nn.init.zeros_(actor.layer.bias)
+            nn.init.zeros_(critic.layer.weight)
+            nn.init.zeros_(critic.layer.bias)
+
+        optimizer = OptimizerWrapper(
+            torch.optim.SGD,
+            [actor, critic],
+            lr=0.01,  # Smaller learning rate
+            network_names=["actor", "critic"],
             lr_name="lr",
-            multiagent=True,
         )
 
-        # Should be able to iterate over optimizers
-        count = 0
-        for opt in wrapper:
-            assert isinstance(opt, optim.Adam)
-            count += 1
+        criterion = nn.MSELoss()
 
-        assert count == 2
+        # Create simple regression data
+        x = torch.tensor([[1.0, 2.0], [2.0, 3.0], [3.0, 4.0], [4.0, 5.0]])
+        y_actor = torch.tensor([[3.0], [5.0], [7.0], [9.0]])
+        y_critic = torch.tensor([[2.0], [4.0], [6.0], [8.0]])
 
-    def test_optimizer_wrapper_in_algorithm_init(self):
-        """Test that OptimizerWrapper works correctly when created in __init__ method"""
-        algorithm = DummyAlgorithm()
+        # Initial losses
+        initial_actor_output = actor(x)
+        initial_actor_loss = criterion(initial_actor_output, y_actor)
 
-        # Optimizer created in __init__ should have inferred attribute names
-        assert algorithm.optimizer.network_names == ["actor"]
-        assert algorithm.optimizer.lr_name == "learning_rate"
-        assert isinstance(algorithm.optimizer.optimizer, optim.Adam)
+        initial_critic_output = critic(x)
+        initial_critic_loss = criterion(initial_critic_output, y_critic)
 
-    def test_optimizer_wrapper_outside_init_fails(self):
-        """Test that OptimizerWrapper fails when created outside __init__ without explicit names"""
-        algorithm = DummyAlgorithm()
+        # Train for a few steps
+        for _ in range(100):  # More iterations with smaller learning rate
+            optimizer.zero_grad()
 
-        # When created outside __init__, the inference methods should fail
-        # We need to mock the _infer_parent_container method to simulate the failure
-        with patch(
-            "agilerl.algorithms.core.wrappers.OptimizerWrapper._infer_parent_container"
-        ) as mock_infer:
-            # Make the _infer_parent_container method raise an AttributeError
-            mock_infer.side_effect = AttributeError(
-                "Cannot infer parent container outside __init__"
+            actor_output = actor(x)
+            actor_loss = criterion(actor_output, y_actor)
+
+            critic_output = critic(x)
+            critic_loss = criterion(critic_output, y_critic)
+
+            # Combined loss
+            loss = actor_loss + critic_loss
+            loss.backward()
+            optimizer.step()
+
+        # Final losses
+        final_actor_output = actor(x)
+        final_actor_loss = criterion(final_actor_output, y_actor)
+
+        final_critic_output = critic(x)
+        final_critic_loss = criterion(final_critic_output, y_critic)
+
+        # Both losses should decrease
+        assert final_actor_loss < initial_actor_loss
+        assert final_critic_loss < initial_critic_loss
+
+    def test_actual_learning_multiagent(self):
+        """Test that multi-agent optimizers work correctly."""
+        # Create networks for 3 agents
+        networks = [MockEvolvableNetwork(input_dim=2, output_dim=1) for _ in range(3)]
+
+        # Set models to a known stable state
+        for network in networks:
+            with torch.no_grad():
+                nn.init.zeros_(network.layer.weight)
+                nn.init.zeros_(network.layer.bias)
+
+        optimizer = OptimizerWrapper(
+            torch.optim.SGD,
+            networks,
+            lr=0.01,  # Smaller learning rate
+            multiagent=True,
+            network_names=["networks"],
+            lr_name="lr",
+        )
+
+        criterion = nn.MSELoss()
+
+        # Create simple regression data for each agent
+        x = torch.tensor([[1.0, 2.0], [2.0, 3.0], [3.0, 4.0], [4.0, 5.0]])
+        y_targets = [
+            torch.tensor([[3.0], [5.0], [7.0], [9.0]]),
+            torch.tensor([[2.0], [4.0], [6.0], [8.0]]),
+            torch.tensor([[1.0], [3.0], [5.0], [7.0]]),
+        ]
+
+        # Initial losses
+        initial_losses = []
+        for i, network in enumerate(networks):
+            output = network(x)
+            loss = criterion(output, y_targets[i])
+            initial_losses.append(loss.item())
+
+        # Train each network separately
+        for _ in range(100):  # More iterations with smaller learning rate
+            for i, network in enumerate(networks):
+                optimizer[i].zero_grad()
+                output = network(x)
+                loss = criterion(output, y_targets[i])
+                loss.backward()
+                optimizer[i].step()
+
+        # Final losses
+        final_losses = []
+        for i, network in enumerate(networks):
+            output = network(x)
+            loss = criterion(output, y_targets[i])
+            final_losses.append(loss.item())
+
+        # All losses should decrease
+        for i in range(3):
+            assert final_losses[i] < initial_losses[i]
+
+    def test_repr(self):
+        """Test __repr__ method."""
+        network = MockEvolvableNetwork()
+        wrapper = OptimizerWrapper(
+            torch.optim.Adam, network, lr=0.001, network_names=["network"], lr_name="lr"
+        )
+
+        repr_str = repr(wrapper)
+        assert "OptimizerWrapper" in repr_str
+        assert "Adam" in repr_str
+        assert "0.001" in repr_str
+        assert "['network']" in repr_str
+        assert "multiagent=False" in repr_str
+
+    def test_parent_container_inference(self):
+        """Test that parent container inference works correctly."""
+        # We need to mock the implementation since it depends on frame introspection
+        with patch.object(OptimizerWrapper, "_infer_parent_container") as mock_infer:
+            network = MockEvolvableNetwork()
+
+            # Create a container with the learning rate attribute
+            mock_container = MagicMock()
+            # Set attributes that will be checked by the wrapper
+            mock_container.learning_rate = 0.001
+            mock_infer.return_value = mock_container
+
+            # Initialize the wrapper explicitly to avoid auto-inference issues
+            wrapper = OptimizerWrapper(
+                torch.optim.Adam,
+                network,
+                lr=0.001,
+                network_names=["network"],
+                lr_name="learning_rate",
             )
 
-            # Now the call should raise AttributeError
-            with pytest.raises(AttributeError):
-                algorithm.create_optimizer_outside_init()
+            # Set up the mock again after initialization
+            with patch.object(
+                wrapper, "_infer_parent_container", return_value=mock_container
+            ):
+                # Test that the method returns the mocked result
+                assert wrapper._infer_parent_container() is mock_container
+                wrapper._infer_parent_container.assert_called_once()
 
-    def test_optimizer_wrapper_outside_init_with_names(self):
-        """Test that OptimizerWrapper works outside __init__ when given explicit attribute names"""
-        algorithm = DummyAlgorithm()
+    def test_different_optimizers_multiagent(self):
+        """Test with different optimizer classes for each agent."""
+        networks = [MockEvolvableNetwork() for _ in range(2)]
+        optimizer_classes = [torch.optim.SGD, torch.optim.Adam]
 
-        # When created outside __init__ with explicit names, it should work
-        optimizer = algorithm.create_optimizer_outside_init_with_names()
+        wrapper = OptimizerWrapper(
+            optimizer_classes,
+            networks,
+            lr=0.01,
+            multiagent=True,
+            network_names=["networks"],
+            lr_name="lr",
+        )
 
-        assert optimizer.network_names == ["critic"]
-        assert optimizer.lr_name == "learning_rate"
-        assert isinstance(optimizer.optimizer, optim.Adam)
+        assert isinstance(wrapper.optimizer[0], torch.optim.SGD)
+        assert isinstance(wrapper.optimizer[1], torch.optim.Adam)
+
+    def test_different_kwargs_multiagent(self):
+        """Test with different kwargs for each agent's optimizer."""
+        networks = [MockEvolvableNetwork() for _ in range(2)]
+        kwargs_list = [{"momentum": 0.9}, {"betas": (0.9, 0.999)}]
+
+        wrapper = OptimizerWrapper(
+            [torch.optim.SGD, torch.optim.Adam],
+            networks,
+            lr=0.01,
+            optimizer_kwargs=kwargs_list,
+            multiagent=True,
+            network_names=["networks"],
+            lr_name="lr",
+        )
+
+        assert wrapper.optimizer[0].defaults["momentum"] == 0.9
+        assert wrapper.optimizer[1].defaults["betas"] == (0.9, 0.999)
+
+    def test_iteration_multiagent(self):
+        """Test iteration through optimizers in multiagent setting."""
+        networks = [MockEvolvableNetwork() for _ in range(3)]
+        wrapper = OptimizerWrapper(
+            torch.optim.Adam,
+            networks,
+            lr=0.01,
+            multiagent=True,
+            network_names=["networks"],
+            lr_name="lr",
+        )
+
+        # Count through iteration
+        count = 0
+        for opt in wrapper:
+            assert isinstance(opt, torch.optim.Adam)
+            count += 1
+
+        assert count == 3

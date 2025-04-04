@@ -24,7 +24,7 @@ Example distributed training loop:
 .. code-block:: python
 
     from agilerl.components.replay_buffer import ReplayBuffer
-    from agilerl.components.replay_data import ReplayDataset
+    from agilerl.components.data import ReplayDataset
     from agilerl.components.sampler import Sampler
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
@@ -43,7 +43,8 @@ Example distributed training loop:
     accelerator.wait_for_everyone()
 
     NET_CONFIG = {
-        "head_config": {"hidden_size": [32, 32]},  # Actor head hidden size
+        "encoder_config": {"hidden_size": [32, 32]},  # Encoder hidden size
+        "head_config": {"hidden_size": [32, 32]},  # Head hidden size
     }
 
     INIT_HP = {
@@ -58,11 +59,12 @@ Example distributed training loop:
         "POP_SIZE": 4,  # Population size
     }
 
+    # Create vectorized environment
     num_envs = 8
     env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
+
     observation_space = env.single_observation_space
     action_space = env.single_action_space
-
     if INIT_HP['CHANNELS_LAST']:
         observation_space = observation_space_channels_to_first(observation_space)
 
@@ -86,11 +88,11 @@ Example distributed training loop:
         accelerator=accelerator,  # Accelerator
     )
 
-    field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
-        memory_size=10000,  # Max replay buffer size
-        field_names=field_names,
-    )  # Field names to store in memory
+        max_size=10000,  # Max replay buffer size
+        device=accelerator.device,
+    )
+
     replay_dataset = ReplayDataset(memory, INIT_HP["BATCH_SIZE"])
     replay_dataloader = DataLoader(replay_dataset, batch_size=None)
     replay_dataloader = accelerator.prepare(replay_dataloader)

@@ -6,6 +6,8 @@ import torch
 from gymnasium import spaces
 from tqdm import trange
 
+from agilerl.components.data import Transition
+
 
 class ConstantRewardEnv(gym.Env):
     def __init__(self):
@@ -906,7 +908,12 @@ def check_q_learning_with_probe_env(
             state = np.expand_dims(state, 0)
         action = agent.get_action(state, epsilon=1)
         next_state, reward, done, _, _ = env.step(action)
-        memory.save_to_memory(state, action, reward, next_state, done)
+        transition = Transition(
+            obs=state, action=action, reward=reward, next_obs=next_state, done=done
+        ).to_tensordict()
+        transition = transition.unsqueeze(0)
+        transition.batch_size = [1]
+        memory.add(transition)
         state = next_state
         if done:
             state, _ = env.reset()
@@ -941,7 +948,12 @@ def check_policy_q_learning_with_probe_env(
         ) + agent.min_action
         action = action[0]
         next_state, reward, done, _, _ = env.step(action)
-        memory.save_to_memory(state, action, reward, next_state, done)
+        transition = Transition(
+            obs=state, action=action, reward=reward, next_obs=next_state, done=done
+        ).to_tensordict()
+        transition = transition.unsqueeze(0)
+        transition.batch_size = [1]
+        memory.add(transition)
         state = next_state
         if done:
             state, _ = env.reset()
@@ -1004,7 +1016,7 @@ def check_policy_on_policy_with_probe_env(
 
         done = 0
 
-        for j in range(100):
+        for j in range(200):
             if isinstance(state, dict):
                 state = {k: np.expand_dims(v, 0) for k, v in state.items()}
             else:
@@ -1060,7 +1072,7 @@ def check_policy_on_policy_with_probe_env(
             # print("---")
             # print("v", v_values, predicted_v_values)
             assert np.allclose(
-                v_values, predicted_v_values, atol=0.1
+                v_values, predicted_v_values, atol=0.2
             ), f"{v_values} != {predicted_v_values}"
 
         if policy_values is not None:

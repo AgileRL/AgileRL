@@ -57,7 +57,7 @@ def generate_dict_or_tuple_space(
     n_vector: int,
     image_shape: Tuple[int, ...] = (3, 32, 32),
     vector_shape: Tuple[int] = (4,),
-    dict_space: Optional[bool] = False,
+    dict_space: Optional[bool] = True,
 ) -> Union[spaces.Dict, spaces.Tuple]:
 
     if dict_space is None:

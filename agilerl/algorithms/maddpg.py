@@ -260,18 +260,43 @@ class MADDPG(MultiAgentRLAlgorithm):
 
             # For image spaces we need to give a sample input tensor to
             # build networks with Conv3d blocks appropriately
+            # NOTE: Currently AgileRL only supports Dict observation spaces
+            # with a unique image space (i.e. all agents and all subspaces
+            # contain the same image space).
             if self.is_image_space:
-                encoder_config["sample_input"] = multi_agent_sample_tensor_from_space(
+                actor_sample_input = multi_agent_sample_tensor_from_space(
                     self.single_space, self.n_agents, device=self.device
                 )
-                critic_encoder_config["sample_input"] = (
-                    multi_agent_sample_tensor_from_space(
-                        self.single_space,
-                        self.n_agents,
-                        device=self.device,
-                        critic=True,
-                    )
+                critic_sample_input = multi_agent_sample_tensor_from_space(
+                    self.single_space,
+                    self.n_agents,
+                    device=self.device,
+                    critic=True,
                 )
+
+                def get_first_sample_input(
+                    sample_input: Union[
+                        Tuple[torch.Tensor, ...], Dict[str, torch.Tensor]
+                    ],
+                ) -> torch.Tensor:
+                    if isinstance(self.single_space, spaces.Dict):
+                        return list(sample_input.values())[0]
+                    elif isinstance(self.single_space, spaces.Tuple):
+                        return sample_input[0]
+
+                    return sample_input
+
+                actor_sample_input = get_first_sample_input(actor_sample_input)
+                critic_sample_input = get_first_sample_input(critic_sample_input)
+
+                if isinstance(self.single_space, (spaces.Dict, spaces.Tuple)):
+                    encoder_config["cnn_config"]["sample_input"] = actor_sample_input
+                    critic_encoder_config["cnn_config"][
+                        "sample_input"
+                    ] = critic_sample_input
+                else:
+                    encoder_config["sample_input"] = actor_sample_input
+                    critic_encoder_config["sample_input"] = critic_sample_input
 
             net_config["encoder_config"] = encoder_config
             net_config["head_config"] = head_config

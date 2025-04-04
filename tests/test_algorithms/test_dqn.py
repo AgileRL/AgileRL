@@ -12,6 +12,7 @@ from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 
 from agilerl.algorithms.dqn import DQN
+from agilerl.components.data import Transition
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.networks.q_networks import QNetwork
@@ -395,7 +396,13 @@ def test_learns_from_experiences():
     next_states = torch.randn(batch_size, observation_space.shape[0])
     dones = torch.randint(0, 2, (batch_size, 1))
 
-    experiences = [states, actions, rewards, next_states, dones]
+    experiences = Transition(
+        obs=states,
+        action=actions,
+        reward=rewards,
+        next_obs=next_states,
+        done=dones,
+    ).to_tensordict()
 
     # Copy state dict before learning - should be different to after updating weights
     actor = dqn.actor
@@ -436,7 +443,14 @@ def test_handles_double_q_learning():
     next_states = torch.randint(0, observation_space.n, (batch_size, 1))
     dones = torch.randint(0, 2, (batch_size, 1))
 
-    experiences = [states, actions, rewards, next_states, dones]
+    experiences = Transition(
+        obs=states,
+        action=actions,
+        reward=rewards,
+        next_obs=next_states,
+        done=dones,
+        device=accelerator.device,
+    ).to_tensordict()
 
     # Copy state dict before learning - should be different to after updating weights
     actor = dqn.actor
@@ -479,7 +493,13 @@ def test_handles_double_q_learning_cnn():
     next_states = torch.randn(batch_size, *observation_space.shape)
     dones = torch.randint(0, 2, (batch_size, 1))
 
-    experiences = [states, actions, rewards, next_states, dones]
+    experiences = Transition(
+        obs=states,
+        action=actions,
+        reward=rewards,
+        next_obs=next_states,
+        done=dones,
+    ).to_tensordict()
 
     # Copy state dict before learning - should be different to after updating weights
     actor = dqn.actor
@@ -705,7 +725,13 @@ def test_clone_after_learning():
     next_states = torch.randn(batch_size, observation_space.shape[0])
     dones = torch.zeros(batch_size, 1)
 
-    experiences = states, actions, rewards, next_states, dones
+    experiences = Transition(
+        obs=states,
+        action=actions,
+        reward=rewards,
+        next_obs=next_states,
+        done=dones,
+    ).to_tensordict()
     dqn.learn(experiences)
     clone_agent = dqn.clone()
 

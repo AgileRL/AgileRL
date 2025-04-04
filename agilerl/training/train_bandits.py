@@ -7,12 +7,13 @@ import gymnasium as gym
 import numpy as np
 import wandb
 from accelerate import Accelerator
+from tensordict import TensorDict
 from torch.utils.data import DataLoader
 from tqdm import trange
 
 from agilerl.algorithms.core.base import RLAlgorithm
+from agilerl.components.data import ReplayDataset
 from agilerl.components.replay_buffer import ReplayBuffer
-from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -160,9 +161,7 @@ def train_bandits(
         replay_dataset = ReplayDataset(memory, pop[0].batch_size)
         replay_dataloader = DataLoader(replay_dataset, batch_size=None)
         replay_dataloader = accelerator.prepare(replay_dataloader)
-        sampler = Sampler(
-            distributed=True, dataset=replay_dataset, dataloader=replay_dataloader
-        )
+        sampler = Sampler(dataset=replay_dataset, dataloader=replay_dataloader)
     else:
         sampler = Sampler(memory=memory)
 
@@ -214,7 +213,15 @@ def train_bandits(
                 next_context, reward = env.step(action)  # Act in environment
 
                 # Save experience to replay buffer
-                memory.save_to_memory(context[action], reward, is_vectorised=False)
+                transition = TensorDict(
+                    {
+                        "obs": context,
+                        "reward": reward,
+                    }
+                )
+                transition = transition.unsqueeze(0)
+                transition.batch_size = [1]
+                memory.add(transition)
 
                 # Learn according to learning frequency
                 if len(memory) >= agent.batch_size:

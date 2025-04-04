@@ -5,10 +5,12 @@ from typing import Any, Dict, Optional, Type, TypeVar, Union
 
 import numpy as np
 import torch
+import torch.nn as nn
 from gymnasium import spaces
 
 from agilerl.modules import (
     EvolvableCNN,
+    EvolvableLSTM,
     EvolvableMLP,
     EvolvableMultiInput,
     EvolvableResNet,
@@ -21,7 +23,7 @@ from agilerl.utils.evolvable_networks import get_default_encoder_config, is_imag
 
 SelfEvolvableNetwork = TypeVar("SelfEvolvableNetwork", bound="EvolvableNetwork")
 DefaultEncoderType = Union[
-    EvolvableCNN, EvolvableMLP, EvolvableMultiInput, EvolvableSimBa
+    EvolvableCNN, EvolvableMLP, EvolvableMultiInput, EvolvableSimBa, EvolvableLSTM
 ]
 
 
@@ -83,14 +85,18 @@ def assert_correct_cnn_net_config(net_config: Dict[str, Any]) -> None:
             ), "Kernel size must be of type int, list, or tuple."
 
 
-def assert_correct_multi_input_net_config(net_config: Dict[str, Any]) -> None:
-    """Asserts that the MultiInput network configuration is correct.
+def assert_correct_lstm_net_config(net_config: Dict[str, Any]) -> None:
+    """Asserts that the LSTM network configuration is correct.
 
-    :param net_config: Configuration of the MultiInput network.
+    :param net_config: Configuration of the LSTM network.
     :type net_config: Dict[str, Any]
     """
-    # Multi-input networks contain at least one image space
-    assert_correct_cnn_net_config(net_config)
+    assert (
+        "hidden_size" in net_config.keys()
+    ), "Net config must contain hidden_size: int."
+    assert isinstance(
+        net_config["hidden_size"], (int, np.int64)
+    ), "Net config hidden_size must be an integer."
 
 
 # TODO: Need to think of a way to do this check without the metaclass
@@ -153,6 +159,9 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     :type latent_dim: int
     :param simba: If True, use a SimBa network for the encoder for vector spaces. Defaults to False.
     :type simba: bool
+    :param recurrent: If True, use a recurrent network for 2D observations. Defaults to False, whereby
+        the encoder is a nn.Flatten() followed by an `EvolvableMLP`.
+    :type recurrent: bool
     :param device: Device to use for the network. Defaults to "cpu".
     :type device: DeviceType
     """
@@ -176,6 +185,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         n_agents: Optional[int] = None,
         latent_dim: int = 32,
         simba: bool = False,
+        recurrent: bool = False,
         device: DeviceType = "cpu",
     ) -> None:
         super().__init__(device)
@@ -192,7 +202,10 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
 
         # NOTE: For multi-agent settings, we use a depth corresponding to that of the
         # sample input for the kernel of the first layer of CNN-based networks
-        if n_agents is not None and "kernel_size" in encoder_config.keys():
+        cnn_keys = ["cnn_config", "kernel_size"]
+        if n_agents is not None and any(
+            key in encoder_config.keys() for key in cnn_keys
+        ):
             encoder_config = EvolvableNetwork.modify_multi_agent_config(
                 net_config=encoder_config, observation_space=observation_space
             )
@@ -206,6 +219,8 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         self.encoder_cls = encoder_cls
         self.device = device
         self.simba = simba
+        self.recurrent = recurrent
+        self.flatten_obs = False
 
         encoder_config = (
             encoder_config
@@ -213,10 +228,10 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             else asdict(encoder_config)
         )
 
-        # Encoder processes an observation into a latent vector representation
-        output_activation = encoder_config.get("output_activation", None)
+        # By default we use same activation for encoder output as for the rest of the network
+        output_activation = encoder_config.get("output_activation")
         if output_activation is None:
-            activation = encoder_config.get("activation", "ReLU")
+            activation = encoder_config.get("activation")
             encoder_config["output_activation"] = activation
 
         if encoder_cls is not None:
@@ -280,7 +295,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         """
         return self.encoder.activation
 
-    def forward(self, x: TorchObsType) -> torch.Tensor:
+    def extract_features(self, x: TorchObsType) -> torch.Tensor:
         """Forward pass of the network.
 
         :param x: Input to the network.
@@ -289,7 +304,24 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         :return: Output of the network.
         :rtype: torch.Tensor
         """
-        raise NotImplementedError
+        if self.flatten_obs:
+            x = nn.Flatten()(x)
+
+        return self.encoder(x)
+
+    def forward_head(self, latent: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+        """Forward pass of the network head using pre-computed latent encodings.
+
+        :param latent: Latent encodings from the encoder.
+        :type latent: torch.Tensor
+
+        :return: Output of the network head.
+        :rtype: torch.Tensor
+        """
+        if not hasattr(self, "head_net"):
+            raise AttributeError("Network does not have a head_net attribute.")
+
+        return self.head_net(latent, *args, **kwargs)
 
     def build_network_head(self, *args, **kwargs) -> None:
         """Build the head of the network."""
@@ -309,7 +341,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         to receive a single output rather than `self.n_agents`
         """
         if isinstance(observation_space, (spaces.Dict, spaces.Tuple)):
-            net_config["cnn_block_type"] = "Conv3d"
+            net_config["cnn_config"]["block_type"] = "Conv3d"
         else:
             net_config["block_type"] = "Conv3d"
 
@@ -378,7 +410,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         :type output: bool, optional
         """
         for attr, module in self.modules().items():
-            _output = False if attr == "encoder" else output
+            _output = True if attr == "encoder" else output
             module.change_activation(activation, output=_output)
 
     @mutation(MutationType.NODE)
@@ -438,8 +470,6 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         :rtype: EvolvableModule
         """
         if isinstance(self.observation_space, (spaces.Dict, spaces.Tuple)):
-            assert_correct_multi_input_net_config(net_config)
-
             encoder = EvolvableMultiInput(
                 observation_space=self.observation_space,
                 num_outputs=self.latent_dim,
@@ -452,6 +482,20 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
 
             encoder = EvolvableCNN(
                 input_shape=self.observation_space.shape,
+                num_outputs=self.latent_dim,
+                device=self.device,
+                name="encoder",
+                **net_config,
+            )
+        elif (
+            isinstance(self.observation_space, spaces.Box)
+            and len(self.observation_space.shape) == 2
+            and self.recurrent
+        ):
+            assert_correct_lstm_net_config(net_config)
+
+            encoder = EvolvableLSTM(
+                input_size=self.observation_space.shape[1],
                 num_outputs=self.latent_dim,
                 device=self.device,
                 name="encoder",
@@ -480,5 +524,8 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                 name="encoder",
                 **net_config,
             )
+
+            # Need to flatten > 2D observations by default for MLPs
+            self.flatten_obs = len(self.observation_space.shape) > 1
 
         return encoder

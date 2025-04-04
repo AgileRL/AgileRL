@@ -148,10 +148,17 @@ def encoder_cnn_config():
 def encoder_multi_input_config():
     return {
         "encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1],
-            "hidden_size": [8],
+            "cnn_config": {
+                "channel_size": [3],
+                "kernel_size": [3],
+                "stride_size": [1],
+            },
+            "mlp_config": {
+                "hidden_size": [8],
+            },
+            "lstm_config": {
+                "hidden_size": 8,
+            },
         }
     }
 

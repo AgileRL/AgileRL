@@ -17,7 +17,9 @@ from agilerl.utils.evolvable_networks import get_default_encoder_config
 
 
 class NeuralUCB(RLAlgorithm):
-    """The NeuralUCB algorithm class. NeuralUCB paper: https://arxiv.org/abs/1911.04462
+    """Neural Upper Confidence Bound (UCB) algorithm.
+
+    Paper: https://arxiv.org/abs/1911.04462
 
     :param observation_space: Observation space of the environment
     :type observation_space: gym.spaces.Space
@@ -134,10 +136,11 @@ class NeuralUCB(RLAlgorithm):
                 else net_config["encoder_config"]
             )
 
-            if not simba:
-                encoder_config["layer_norm"] = (
-                    False  # Layer norm is not used in the original implementation
-                )
+            if not simba and not isinstance(
+                observation_space, (spaces.Dict, spaces.Tuple)
+            ):
+                # Layer norm is not used in the original implementation
+                encoder_config["layer_norm"] = False
 
             net_config["encoder_config"] = encoder_config
 
@@ -157,7 +160,7 @@ class NeuralUCB(RLAlgorithm):
         self.criterion = nn.MSELoss()
 
         # Register network groups for mutations
-        self.register_init_hook(self.init_params)
+        self.register_mutation_hook(self.init_params)
         self.register_network_group(
             NetworkGroup(eval=self.actor, shared=None, policy=True)
         )
@@ -236,10 +239,8 @@ class NeuralUCB(RLAlgorithm):
         :return: Loss value from training step
         :rtype: float
         """
-        states, rewards = experiences
-        if self.accelerator is not None:
-            states = states.to(self.accelerator.device)
-            rewards = rewards.to(self.accelerator.device)
+        states = experiences["obs"]
+        rewards = experiences["reward"]
 
         pred_rewards = self.actor(states)
 

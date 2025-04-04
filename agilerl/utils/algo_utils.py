@@ -14,13 +14,19 @@ import torch.nn.functional as F
 from accelerate.optimizer import AcceleratedOptimizer
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from gymnasium import spaces
+from tensordict import TensorDict, from_module
 from tensordict.nn import CudaGraphModule
 from torch._dynamo import OptimizedModule
 from torch.nn import Module
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
-from agilerl.protocols import EvolvableAttributeType, EvolvableModule, OptimizerWrapper
+from agilerl.protocols import (
+    EvolvableAttributeType,
+    EvolvableModule,
+    EvolvableNetwork,
+    OptimizerWrapper,
+)
 from agilerl.typing import (
     ArrayDict,
     ArrayOrTensor,
@@ -31,6 +37,33 @@ from agilerl.typing import (
     OptimizerType,
     TorchObsType,
 )
+
+
+def share_encoder_parameters(
+    policy: EvolvableNetwork, *others: EvolvableNetwork
+) -> None:
+    """Shares the encoder parameters between the policy and any number of other networks.
+
+    :param policy: The policy network whose encoder parameters will be used.
+    :type policy: EvolvableNetwork
+    :param others: The other networks whose encoder parameters will be pinned to the policy.
+    :type others: EvolvableNetwork
+    """
+    assert isinstance(policy, EvolvableNetwork), "Policy must be an EvolvableNetwork"
+    assert all(
+        isinstance(other, EvolvableNetwork) for other in others
+    ), "All others must be EvolvableNetwork"
+
+    # detaching encoder parameters from computation graph reduces
+    # memory overhead and speeds up training
+    param_vals: TensorDict = from_module(policy.encoder).detach()
+    for other in others:
+        target_params: TensorDict = param_vals.clone().lock_()
+        target_params.to_module(other.encoder)
+
+        # Disable architecture mutations since we will be
+        # reinitializing directly through a mutation hook
+        other.encoder.disable_mutations()
 
 
 def is_image_space(space: spaces.Space) -> bool:
@@ -282,6 +315,7 @@ def chkpt_attribute_to_device(
     for key, value in chkpt_dict.items():
         if isinstance(value, torch.Tensor):
             chkpt_dict[key] = value.to(device)
+
     return chkpt_dict
 
 
@@ -429,9 +463,11 @@ def obs_to_tensor(
     :return: PyTorch tensor of the observation on a desired device.
     :rtype: TorchObsType
     """
-    if isinstance(obs, torch.Tensor):
+    if isinstance(obs, TensorDict):
+        return obs if obs.device == device else obs.to(device)
+    elif isinstance(obs, torch.Tensor):
         return obs.float().to(device)
-    if isinstance(obs, np.ndarray):
+    elif isinstance(obs, np.ndarray):
         return torch.as_tensor(obs, device=device).float()
     elif isinstance(obs, dict):
         return {
@@ -494,7 +530,9 @@ def preprocess_observation(
 
     # Preprocess different spaces accordingly
     if isinstance(observation_space, spaces.Dict):
-        assert isinstance(observation, dict), f"Expected dict, got {type(observation)}"
+        assert isinstance(
+            observation, (dict, TensorDict)
+        ), f"Expected dict, got {type(observation)}"
         preprocessed_obs = {}
         for key, _obs in observation.items():
             preprocessed_obs[key] = preprocess_observation(

@@ -424,10 +424,8 @@ def test_q_learning_with_probe_env():
         "action_space": env.action_space,
         "lr": 1e-2,
     }
-    field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
-        memory_size=1000,  # Max replay buffer size
-        field_names=field_names,  # Field names to store in memory
+        max_size=1000,  # Max replay buffer size
         device=device,
     )
     check_q_learning_with_probe_env(env, DQN, algo_args, memory, learn_steps, device)
@@ -450,10 +448,8 @@ def test_q_learning_with_probe_env_cnn():
         "normalize_images": False,
         "lr": 1e-2,
     }
-    field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
-        memory_size=1000,  # Max replay buffer size
-        field_names=field_names,  # Field names to store in memory
+        max_size=1000,  # Max replay buffer size
         device=device,
     )
     check_q_learning_with_probe_env(env, DQN, algo_args, memory, learn_steps, device)
@@ -468,20 +464,22 @@ def test_q_learning_with_probe_env_dict():
         "action_space": env.action_space,
         "net_config": {
             "encoder_config": {
-                "channel_size": [32],  # CNN channel size
-                "kernel_size": [3],  # CNN kernel size
-                "stride_size": [1],  # CNN stride size
-                "hidden_size": [64],  # Network hidden size
+                "mlp_config": {
+                    "hidden_size": [64],  # Network hidden size
+                },
+                "cnn_config": {
+                    "channel_size": [32],  # CNN channel size
+                    "kernel_size": [3],  # CNN kernel size
+                    "stride_size": [1],  # CNN stride size
+                },
                 "latent_dim": 16,  # Latent dimension
             }
         },
         "normalize_images": False,
         "lr": 1e-2,
     }
-    field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
-        memory_size=1000,  # Max replay buffer size
-        field_names=field_names,  # Field names to store in memory
+        max_size=1000,  # Max replay buffer size
         device=device,
     )
     check_q_learning_with_probe_env(env, DQN, algo_args, memory, learn_steps, device)
@@ -497,10 +495,8 @@ def test_policy_q_learning_with_probe_env():
         "lr_actor": 1e-2,
         "lr_critic": 1e-2,
     }
-    field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
-        memory_size=1000,  # Max replay buffer size
-        field_names=field_names,  # Field names to store in memory
+        max_size=1000,  # Max replay buffer size
         device=device,
     )
     check_policy_q_learning_with_probe_env(
@@ -530,10 +526,8 @@ def test_policy_q_learning_with_probe_env_cnn():
         "lr_actor": 1e-2,
         "lr_critic": 1e-2,
     }
-    field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
-        memory_size=1000,  # Max replay buffer size
-        field_names=field_names,  # Field names to store in memory
+        max_size=1000,  # Max replay buffer size
         device=device,
     )
     check_policy_q_learning_with_probe_env(
@@ -550,11 +544,15 @@ def test_policy_q_learning_with_probe_env_dict():
         "action_space": env.action_space,
         "net_config": {
             "encoder_config": {
-                "hidden_size": [64],  # Network hidden size
+                "mlp_config": {
+                    "hidden_size": [64],  # Network hidden size
+                },
                 "latent_dim": 16,  # Latent dimension
-                "channel_size": [32],  # CNN channel size
-                "kernel_size": [3],  # CNN kernel size
-                "stride_size": [1],  # CNN stride size
+                "cnn_config": {
+                    "channel_size": [32],  # CNN channel size
+                    "kernel_size": [3],  # CNN kernel size
+                    "stride_size": [1],  # CNN stride size
+                },
             },
             "head_config": {
                 "hidden_size": [64],  # Network hidden size
@@ -565,10 +563,8 @@ def test_policy_q_learning_with_probe_env_dict():
         "lr_actor": 1e-2,
         "lr_critic": 1e-2,
     }
-    field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
-        memory_size=1000,  # Max replay buffer size
-        field_names=field_names,  # Field names to store in memory
+        max_size=1000,  # Max replay buffer size
         device=device,
     )
     check_policy_q_learning_with_probe_env(
@@ -638,11 +634,15 @@ def test_policy_on_policy_with_probe_env_dict():
         "action_space": env.action_space,
         "net_config": {
             "encoder_config": {
-                "hidden_size": [64],  # Network hidden size
+                "mlp_config": {
+                    "hidden_size": [64],  # Network hidden size
+                },
                 "latent_dim": 16,  # Latent dimension
-                "channel_size": [32],  # CNN channel size
-                "kernel_size": [3],  # CNN kernel size
-                "stride_size": [1],  # CNN stride size
+                "cnn_config": {
+                    "channel_size": [32],  # CNN channel size
+                    "kernel_size": [3],  # CNN kernel size
+                    "stride_size": [1],  # CNN stride size
+                },
             },
             "head_config": {
                 "hidden_size": [64],  # Network hidden size

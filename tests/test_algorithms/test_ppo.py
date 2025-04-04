@@ -996,6 +996,15 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
         action_space=generate_random_box_space(shape=(2,), low=0, high=1),
     )
     # Load checkpoint
+    print(
+        "Actor state dict: ",
+        checkpoint["network_info"]["modules"]["actor_state_dict"].keys(),
+    )
+    print(
+        "Critic state dict: ",
+        checkpoint["network_info"]["modules"]["critic_state_dict"].keys(),
+    )
+    print("Critic new state dict: ", ppo.critic.state_dict().keys())
     ppo.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
@@ -1158,6 +1167,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     ppo = PPO(
         observation_space=generate_random_box_space(shape=(4,), low=0, high=1),
         action_space=generate_random_box_space(shape=(2,), low=0, high=1),
+        actor_network=actor_network,
+        critic_network=critic_network,
     )
     # Load checkpoint
     ppo.load_checkpoint(checkpoint_path)

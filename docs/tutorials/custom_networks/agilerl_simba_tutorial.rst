@@ -367,11 +367,9 @@ to have access to the ``HalfCheetah-v4`` environment.
     action_space = env.single_action_space
 
     # Replay buffer for off-policy learning
-    field_names = ["state", "action", "reward", "next_state", "done"]
     memory_size = 100_000
     memory = ReplayBuffer(
-        memory_size=memory_size,
-        field_names=field_names,
+        max_size=memory_size,
         device=device
     )
 

@@ -1,21 +1,24 @@
 import time
 import warnings
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import gymnasium as gym
 import numpy as np
 import wandb
 from accelerate import Accelerator
+from tensordict import TensorDictBase
 from torch.utils.data import DataLoader
 from tqdm import trange
 
+from agilerl.algorithms import DDPG, DQN, TD3, RainbowDQN
 from agilerl.algorithms.core.base import RLAlgorithm
-from agilerl.components.replay_buffer import (
+from agilerl.components import (
     MultiStepReplayBuffer,
     PrioritizedReplayBuffer,
+    ReplayBuffer,
 )
-from agilerl.components.replay_data import ReplayDataset
+from agilerl.components.data import ReplayDataset, Transition
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -28,6 +31,7 @@ from agilerl.utils.utils import (
 
 InitDictType = Optional[Dict[str, Any]]
 PopulationType = List[RLAlgorithm]
+BufferType = Union[ReplayBuffer, PrioritizedReplayBuffer, MultiStepReplayBuffer]
 
 
 def train_off_policy(
@@ -35,7 +39,7 @@ def train_off_policy(
     env_name: str,
     algo: str,
     pop: PopulationType,
-    memory: PrioritizedReplayBuffer,
+    memory: BufferType,
     INIT_HP: InitDictType = None,
     MUT_P: InitDictType = None,
     swap_channels: bool = False,
@@ -179,8 +183,8 @@ def train_off_policy(
         num_envs = env.num_envs
         is_vectorised = True
     else:
-        is_vectorised = False
         num_envs = 1
+        is_vectorised = False
 
     save_path = (
         checkpoint_path.split(".pt")[0]
@@ -195,15 +199,11 @@ def train_off_policy(
         replay_dataset = ReplayDataset(memory, pop[0].batch_size)
         replay_dataloader = DataLoader(replay_dataset, batch_size=None)
         replay_dataloader = accelerator.prepare(replay_dataloader)
-        sampler = Sampler(
-            distributed=True, dataset=replay_dataset, dataloader=replay_dataloader
-        )
+        sampler = Sampler(dataset=replay_dataset, dataloader=replay_dataloader)
     else:
-        sampler = Sampler(distributed=False, per=per, memory=memory)
+        sampler = Sampler(memory=memory)
         if n_step_memory is not None:
-            n_step_sampler = Sampler(
-                distributed=False, n_step=True, memory=n_step_memory
-            )
+            n_step_sampler = Sampler(memory=n_step_memory)
 
     if accelerator is not None:
         print(f"\nDistributed training on {accelerator.device}...")
@@ -229,14 +229,14 @@ def train_off_policy(
     checkpoint_count = 0
 
     # Pre-training mutation
-    if accelerator is None:
-        if mutation is not None:
-            pop = mutation.mutation(pop, pre_training_mut=True)
+    if accelerator is None and mutation is not None:
+        pop = mutation.mutation(pop, pre_training_mut=True)
 
     # RL training loop
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         if accelerator is not None:
             accelerator.wait_for_everyone()
+
         pop_episode_scores = []
         pop_fps = []
         for agent_idx, agent in enumerate(pop):  # Loop through population
@@ -245,10 +245,10 @@ def train_off_policy(
             completed_episode_scores, losses = [], []
             steps = 0
 
-            if algo in ["DQN", "Rainbow DQN"]:
+            if isinstance(agent, (DQN, RainbowDQN)):
                 train_actions_hist = [0] * agent.action_dim
 
-            if algo in ["DQN"]:
+            if isinstance(agent, DQN):
                 epsilon = eps_start
 
             start_time = time.time()
@@ -257,18 +257,18 @@ def train_off_policy(
                     state = obs_channels_to_first(state)
 
                 # Get next action from agent
-                if algo in ["DQN"]:
+                if isinstance(agent, DQN):
                     action_mask = info.get("action_mask", None)
                     action = agent.get_action(state, epsilon, action_mask=action_mask)
                     # Decay epsilon for exploration
                     epsilon = max(eps_end, epsilon * eps_decay)
-                elif algo in ["Rainbow DQN"]:
+                elif isinstance(agent, RainbowDQN):
                     action_mask = info.get("action_mask", None)
                     action = agent.get_action(state, action_mask=action_mask)
                 else:
                     action = agent.get_action(state)
 
-                if algo in ["DQN", "Rainbow DQN"]:
+                if isinstance(agent, (DQN, RainbowDQN)):
                     for a in action:
                         if not isinstance(a, int):
                             a = int(a)
@@ -282,8 +282,8 @@ def train_off_policy(
                 scores += np.array(reward)
 
                 if not is_vectorised:
-                    done = [done]
-                    trunc = [trunc]
+                    done = np.array([done])
+                    trunc = np.array([trunc])
 
                 reset_noise_indices = []
                 for idx, (d, t) in enumerate(zip(done, trunc)):
@@ -293,52 +293,36 @@ def train_off_policy(
                         scores[idx] = 0
                         reset_noise_indices.append(idx)
 
-                if agent.algo in ["DDPG", "TD3"]:
+                if isinstance(agent, (DDPG, TD3)):
                     agent.reset_action_noise(reset_noise_indices)
 
                 total_steps += num_envs
                 steps += num_envs
 
                 # Save experience to replay buffer
-                if n_step_memory is not None:
-                    if swap_channels:
-                        one_step_transition = n_step_memory.save_to_memory_vect_envs(
-                            state,
-                            action,
-                            reward,
-                            obs_channels_to_first(next_state),
-                            done,
-                        )
-                    else:
-                        one_step_transition = n_step_memory.save_to_memory_vect_envs(
-                            state,
-                            action,
-                            reward,
-                            next_state,
-                            done,
-                        )
-                    if one_step_transition:
-                        memory.save_to_memory_vect_envs(*one_step_transition)
-                else:
-                    if swap_channels:
-                        memory.save_to_memory(
-                            state,
-                            action,
-                            reward,
-                            obs_channels_to_first(next_state),
-                            done,
-                            is_vectorised=is_vectorised,
-                        )
-                    else:
-                        memory.save_to_memory(
-                            state,
-                            action,
-                            reward,
-                            next_state,
-                            done,
-                            is_vectorised=is_vectorised,
-                        )
+                next_state = (
+                    obs_channels_to_first(next_state) if swap_channels else next_state
+                )
 
+                transition: TensorDictBase = Transition(
+                    obs=state,
+                    action=action,
+                    reward=reward,
+                    next_obs=next_state,
+                    done=done,
+                )
+                if not is_vectorised:
+                    transition = transition.unsqueeze(0)
+
+                # Add transition to replay buffer
+                transition = transition.to_tensordict()
+                transition.batch_size = [num_envs]
+                if n_step_memory is not None:
+                    one_step_transition = n_step_memory.add(transition)
+                    if one_step_transition is not None:
+                        memory.add(one_step_transition)
+                else:
+                    memory.add(transition)
                 if per:
                     fraction = min(
                         ((agent.steps[-1] + idx_step + 1) * num_envs / max_steps), 1.0
@@ -352,17 +336,19 @@ def train_off_policy(
                     if (
                         idx_step % learn_step == 0
                         and len(memory) >= agent.batch_size
-                        and memory.counter > learning_delay
+                        and memory.size > learning_delay
                     ):
                         if per:
                             experiences = sampler.sample(agent.batch_size, agent.beta)
                             if n_step_memory is not None:
                                 n_step_experiences = n_step_sampler.sample(
-                                    experiences[6]
+                                    experiences["idxs"]
                                 )
-                                experiences += n_step_experiences
+                            else:
+                                n_step_experiences = None
+
                             loss, idxs, priorities = agent.learn(
-                                experiences, n_step=n_step, per=per
+                                experiences, n_experiences=n_step_experiences, per=per
                             )
                             memory.update_priorities(idxs, priorities)
                         else:
@@ -372,18 +358,17 @@ def train_off_policy(
                             )
                             if n_step_memory is not None:
                                 n_step_experiences = n_step_sampler.sample(
-                                    experiences[5]
+                                    experiences["idxs"]
                                 )
-                                experiences += n_step_experiences
-                                loss, *_ = agent.learn(experiences, n_step=n_step)
+                                loss, *_ = agent.learn(
+                                    experiences, n_experiences=n_step_experiences
+                                )
                             else:
                                 loss = agent.learn(experiences)
-                                if algo == "Rainbow DQN":
+                                if isinstance(agent, RainbowDQN):
                                     loss, *_ = loss
 
-                elif (
-                    len(memory) >= agent.batch_size and memory.counter > learning_delay
-                ):
+                elif len(memory) >= agent.batch_size and memory.size > learning_delay:
                     for _ in range(num_envs // agent.learn_step):
                         # Sample replay buffer
                         # Learn according to agent's RL algorithm
@@ -391,11 +376,12 @@ def train_off_policy(
                             experiences = sampler.sample(agent.batch_size, agent.beta)
                             if n_step_memory is not None:
                                 n_step_experiences = n_step_sampler.sample(
-                                    experiences[6]
+                                    experiences["idxs"]
                                 )
-                                experiences += n_step_experiences
+                            else:
+                                n_step_experiences = None
                             loss, idxs, priorities = agent.learn(
-                                experiences, n_step=n_step, per=per
+                                experiences, n_experiences=n_step_experiences, per=per
                             )
                             memory.update_priorities(idxs, priorities)
                         else:
@@ -405,21 +391,23 @@ def train_off_policy(
                             )
                             if n_step_memory is not None:
                                 n_step_experiences = n_step_sampler.sample(
-                                    experiences[5]
+                                    experiences["idxs"]
                                 )
-                                experiences += n_step_experiences
-                                loss, *_ = agent.learn(experiences, n_step=n_step)
+                                loss, *_ = agent.learn(
+                                    experiences, n_experiences=n_step_experiences
+                                )
                             else:
                                 loss = agent.learn(experiences)
-                                if algo == "Rainbow DQN":
+                                if isinstance(agent, RainbowDQN):
                                     loss, *_ = loss
 
                 if loss is not None:
                     losses.append(loss)
 
                 state = next_state
+                pbar.update(num_envs)
 
-            pbar.update(evo_steps // len(pop))
+            # pbar.update(evo_steps // len(pop))
 
             agent.steps[-1] += steps
             fps = steps / (time.time() - start_time)
@@ -437,7 +425,7 @@ def train_off_policy(
 
                 pop_loss[agent_idx].append(mean_loss)
 
-        if algo in ["DQN"]:
+        if isinstance(agent, DQN):
             # Reset epsilon start to final epsilon value of this epoch
             eps_start = epsilon
 
@@ -478,13 +466,13 @@ def train_off_policy(
             }
 
             # Create the loss dictionaries
-            if algo in ["Rainbow DQN", "DQN"]:
+            if isinstance(agent, (DQN, RainbowDQN)):
                 actor_loss_dict = {
                     f"train/agent_{index}_actor_loss": np.mean(loss[-10:])
                     for index, loss in enumerate(pop_loss)
                 }
                 wandb_dict.update(actor_loss_dict)
-            elif algo in ["TD3", "DDPG"]:
+            elif isinstance(agent, (DDPG, TD3)):
                 actor_loss_dict = {
                     f"train/agent_{index}_actor_loss": np.mean(
                         list(zip(*loss_list))[0][-10:]
@@ -500,7 +488,7 @@ def train_off_policy(
                 wandb_dict.update(actor_loss_dict)
                 wandb_dict.update(critic_loss_dict)
 
-            if algo in ["DQN", "Rainbow DQN"]:
+            if isinstance(agent, (DQN, RainbowDQN)):
                 train_actions_hist = [
                     freq / sum(train_actions_hist) for freq in train_actions_hist
                 ]

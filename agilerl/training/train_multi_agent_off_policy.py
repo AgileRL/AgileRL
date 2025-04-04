@@ -12,8 +12,8 @@ from torch.utils.data import DataLoader
 from tqdm import trange
 
 from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
+from agilerl.components.data import ReplayDataset
 from agilerl.components.replay_buffer import ReplayBuffer
-from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -174,11 +174,9 @@ def train_multi_agent_off_policy(
         replay_dataset = ReplayDataset(memory, pop[0].batch_size)
         replay_dataloader = DataLoader(replay_dataset, batch_size=None)
         replay_dataloader = accelerator.prepare(replay_dataloader)
-        sampler = Sampler(
-            distributed=True, dataset=replay_dataset, dataloader=replay_dataloader
-        )
+        sampler = Sampler(dataset=replay_dataset, dataloader=replay_dataloader)
     else:
-        sampler = Sampler(distributed=False, memory=memory)
+        sampler = Sampler(memory=memory)
 
     if accelerator is not None:
         print(f"\nDistributed training on {accelerator.device}...")
@@ -216,10 +214,12 @@ def train_multi_agent_off_policy(
     if accelerator is None:
         if mutation is not None:
             pop = mutation.mutation(pop, pre_training_mut=True)
+
     # RL training loop
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         if accelerator is not None:
             accelerator.wait_for_everyone()
+
         pop_episode_scores = []
         pop_fps = []
         for agent_idx, agent in enumerate(pop):  # Loop through population

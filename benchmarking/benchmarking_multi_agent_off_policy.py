@@ -7,7 +7,7 @@ from accelerate import Accelerator
 
 from agilerl.algorithms.core import MultiAgentRLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
+from agilerl.components import MultiAgentReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules import EvolvableMLP
@@ -188,7 +188,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Tru
 
 
 if __name__ == "__main__":
-    with open("configs/training/maddpg.yaml") as file:
+    with open("configs/training/multi_agent/maddpg.yaml") as file:
         config = yaml.safe_load(file)
     INIT_HP = config["INIT_HP"]
     MUTATION_PARAMS = config["MUTATION_PARAMS"]

@@ -47,10 +47,8 @@ correctly functioning agent should be able to learn, and can be used to diagnose
                 "lr": 1e-2,
             }
 
-            field_names = ["state", "action", "reward", "next_state", "done"]
             memory = ReplayBuffer(
-                memory_size=1000,  # Max replay buffer size
-                field_names=field_names,  # Field names to store in memory
+                max_size=1000,  # Max replay buffer size
                 device=device,
             )
 
@@ -85,10 +83,8 @@ correctly functioning agent should be able to learn, and can be used to diagnose
                 "lr_critic": 1e-2,
             }
 
-            field_names = ["state", "action", "reward", "next_state", "done"]
             memory = ReplayBuffer(
-                memory_size=1000,  # Max replay buffer size
-                field_names=field_names,  # Field names to store in memory
+                max_size=1000,  # Max replay buffer size
                 device=device,
             )
 

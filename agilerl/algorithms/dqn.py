@@ -7,7 +7,6 @@ import torch._dynamo
 import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
-from numpy.typing import ArrayLike
 from tensordict import TensorDict, from_module
 from tensordict.nn import CudaGraphModule
 
@@ -21,7 +20,9 @@ from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 
 
 class DQN(RLAlgorithm):
-    """The DQN algorithm class. DQN paper: https://arxiv.org/abs/1312.5602
+    """Deep Q-Network (DQN) algorithm.
+
+    Paper: https://arxiv.org/abs/1312.5602
 
     :param observation_space: Observation space of the environment
     :type observation_space: gymnasium.spaces.Space
@@ -174,26 +175,36 @@ class DQN(RLAlgorithm):
 
         # Register DQN network groups and mutation hook
         self.register_network_group(
-            NetworkGroup(eval=self.actor, shared=[self.actor_target], policy=True)
+            NetworkGroup(eval=self.actor, shared=self.actor_target, policy=True)
         )
-        self.register_init_hook(self.init_hook)
+        self.register_mutation_hook(self.init_hook)
 
     def init_hook(self) -> None:
         """Resets module parameters for the detached and target networks."""
-        self.param_vals: TensorDict = from_module(self.actor).detach()
+        param_vals: TensorDict = from_module(self.actor).detach()
 
         # NOTE: This removes the target params from the computation graph which
         # reduces memory overhead and speeds up training, however these won't
         # appear in the modules parameters
-        self.target_params: TensorDict = self.param_vals.clone().lock_()
-        self.target_params.to_module(self.actor_target)
+        target_params: TensorDict = param_vals.clone().lock_()
+
+        # This hook is prompted after performing architecture mutations on policy / evaluation
+        # networks, which will fail since the target network is a shared network that won't be
+        # reintiialized until the end. We can bypass the error safely for this reason.
+        try:
+            target_params.to_module(self.actor_target)
+        except KeyError:
+            pass
+        finally:
+            self.param_vals = param_vals
+            self.target_params = target_params
 
     def get_action(
         self,
         obs: ObservationType,
         epsilon: float = 0.0,
         action_mask: Optional[np.ndarray] = None,
-    ) -> ArrayLike:
+    ) -> np.ndarray:
         """Returns the next action to take in the environment.
 
         :param obs: The current observation from the environment
@@ -296,6 +307,9 @@ class DQN(RLAlgorithm):
             # target, if terminal then y_j = rewards
             y_j = rewards + self.gamma * q_target * (1 - dones)
 
+        if actions.ndim == 1:
+            actions = actions.unsqueeze(-1)
+
         # Compute Q-values for actions taken and loss
         q_eval = self.actor(obs).gather(1, actions.long())
         loss: torch.Tensor = self.criterion(q_eval, y_j)
@@ -313,18 +327,19 @@ class DQN(RLAlgorithm):
     def learn(self, experiences: ExperiencesType) -> float:
         """Updates agent network parameters to learn from experiences.
 
-        :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
-        :type obs: list[torch.Tensor[float]]
+        :param experiences: TensorDict of batched observations, actions, rewards, next_observations, dones in that order.
+        :type experiences: tensordict.TensorDict
         """
-        states, actions, rewards, next_states, dones = experiences
-        actions = actions.to(self.device)
-        rewards = rewards.to(self.device)
-        dones = dones.to(self.device)
+        obs = experiences["obs"]
+        actions = experiences["action"]
+        rewards = experiences["reward"]
+        next_obs = experiences["next_obs"]
+        dones = experiences["done"]
 
-        states = self.preprocess_observation(states)
-        next_states = self.preprocess_observation(next_states)
+        obs = self.preprocess_observation(obs)
+        next_obs = self.preprocess_observation(next_obs)
 
-        loss = self.update(states, actions, rewards, next_states, dones)
+        loss = self.update(obs, actions, rewards, next_obs, dones)
 
         # soft update target network
         self.soft_update()
