@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 import torch
 from tensordict import TensorDict
@@ -740,13 +741,11 @@ def test_prioritized_buffer_update_priorities():
         data.batch_size = [1]
         buffer.add(data)
 
-    # Sample experiences
+    # 'Sample' experiences
     batch_size = 3
-    beta = 0.4
-    samples = buffer.sample(batch_size, beta)
+    indices = np.arange(batch_size)
 
     # Update priorities
-    indices = samples["idxs"]
     new_priorities = torch.tensor([2.0, 3.0, 4.0])
     buffer.update_priorities(indices, new_priorities)
 
