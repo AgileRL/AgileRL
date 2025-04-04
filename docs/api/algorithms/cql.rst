@@ -12,19 +12,21 @@ policy under this Q-function lower-bounds its true value
 Can I use it?
 --------------
 
+Action Space
+^^^^^^^^^^^^
+
 .. list-table::
-   :widths: 20 20 20
+   :widths: 20 20 20 20
    :header-rows: 1
 
-   * -
-     - Action
-     - Observation
    * - Discrete
+     - Continuous (Box)
+     - MultiDiscrete
+     - MultiBinary
+   * - ✔️
      - ✔️
-     - ✔️
-   * - Continuous
-     - ✔️
-     - ✔️
+     - ❌
+     - ❌
 
 So far, we have implemented CQN - CQL applied to DQN, which cannot be used on continuous action spaces. We will soon be
 adding other CQL extensions of algorithms for offline RL.
