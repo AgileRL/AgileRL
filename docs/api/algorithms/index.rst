@@ -44,10 +44,10 @@ Action Spaces
    :header-rows: 1
 
    * - Algorithm
-     - Discrete
-     - Continuous (Box)
-     - MultiDiscrete
-     - MultiBinary
+     - ``Discrete``
+     - ``Box``
+     - ``MultiDiscrete``
+     - ``MultiBinary``
    * - :ref:`CQL <cql>`
      - ✅
      - ❌
@@ -108,10 +108,10 @@ Action Spaces
    :header-rows: 1
 
    * - Algorithm
-     - Discrete
-     - Continuous (Box)
-     - MultiDiscrete
-     - MultiBinary
+     - ``Discrete``
+     - ``Box``
+     - ``MultiDiscrete``
+     - ``MultiBinary``
    * - :ref:`IPPO <ippo>`
      - ✅
      - ✅

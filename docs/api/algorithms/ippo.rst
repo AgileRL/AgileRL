@@ -20,10 +20,10 @@ Action Space
    :widths: 20 20 20 20
    :header-rows: 1
 
-   * - Discrete
-     - Continuous (Box)
-     - MultiDiscrete
-     - MultiBinary
+   * - ``Discrete``
+     - ``Box``
+     - ``MultiDiscrete``
+     - ``MultiBinary``
    * - ✔️
      - ✔️
      - ✔️
