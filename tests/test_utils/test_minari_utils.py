@@ -5,6 +5,7 @@ import torch
 from accelerate import Accelerator
 from minari import MinariDataset
 from minari.data_collector import EpisodeBuffer
+from requests import HTTPError
 
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.utils import minari_utils
@@ -135,7 +136,10 @@ def test_load_minari_dataset_errors(dataset_id):
     ["D4RL/door/human-v2"],
 )
 def test_load_remote_minari_dataset(dataset_id):
-    dataset = minari_utils.load_minari_dataset(dataset_id, remote=True)
+    try:
+        dataset = minari_utils.load_minari_dataset(dataset_id, remote=True)
+    except HTTPError as e:
+        pytest.skip(f"Skipping test due to remote dataset not being available: {e}")
 
     assert isinstance(dataset, MinariDataset)
 
@@ -149,9 +153,12 @@ def test_load_remote_minari_dataset(dataset_id):
 def test_load_remote_minari_dataset_accelerator(dataset_id):
     accelerator = Accelerator()
 
-    dataset = minari_utils.load_minari_dataset(
-        dataset_id, accelerator=accelerator, remote=True
-    )
+    try:
+        dataset = minari_utils.load_minari_dataset(
+            dataset_id, accelerator=accelerator, remote=True
+        )
+    except HTTPError as e:
+        pytest.skip(f"Skipping test due to remote dataset not being available: {e}")
 
     assert isinstance(dataset, MinariDataset)
 

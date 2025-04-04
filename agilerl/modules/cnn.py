@@ -570,8 +570,10 @@ class EvolvableCNN(EvolvableModule):
             numb_new_channels = np.random.choice([8, 16, 32], 1)[0]
 
         # HARD LIMIT
-        if self.channel_size[hidden_layer] - numb_new_channels > self.min_channel_size:
+        if self.channel_size[hidden_layer] - numb_new_channels >= self.min_channel_size:
             self.channel_size[hidden_layer] -= numb_new_channels
+        else:
+            numb_new_channels = 0
 
         return {"hidden_layer": hidden_layer, "numb_new_channels": numb_new_channels}
 

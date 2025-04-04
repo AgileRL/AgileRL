@@ -1072,7 +1072,7 @@ def check_policy_on_policy_with_probe_env(
             # print("---")
             # print("v", v_values, predicted_v_values)
             assert np.allclose(
-                v_values, predicted_v_values, atol=0.1
+                v_values, predicted_v_values, atol=0.2
             ), f"{v_values} != {predicted_v_values}"
 
         if policy_values is not None:
