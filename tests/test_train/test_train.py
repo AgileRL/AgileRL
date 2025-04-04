@@ -4517,7 +4517,7 @@ def test_bandit_train_save_checkpoint(
 
 
 # LEAVE LAST, TEMPORARY TO DELETE SAVED MODELS
-# FIXME: Properly handle saving/deletion in tests
+# TODO: Properly handle saving/deletion in tests
 def test_remove_saved_models():
     if os.path.exists("models"):
         shutil.rmtree("models")

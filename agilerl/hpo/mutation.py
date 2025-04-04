@@ -601,7 +601,7 @@ class Mutations:
         for network_group in registry.groups:
             eval_module: OffspringType = getattr(individual, network_group.eval)
             if isinstance(eval_module, list):
-                # FIXME: Will need to modify when making multi-agent support more robust
+                # TODO: Will need to modify when making multi-agent support more robust
                 # to different type sof settings (i.e. different observation spaces and thus
                 # network architectures for different agents)
                 if eval_module[0].activation is None:
