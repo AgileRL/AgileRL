@@ -719,7 +719,6 @@ def test_remove_channels(
     result = getattr(evolvable_composed, "feature_net.image_1.remove_channel")(
         numb_new_channels=numb_new_channels, hidden_layer=layer_index
     )
-    print(result)
     hidden_layer = result["hidden_layer"]
     numb_new_channels = result["numb_new_channels"]
     assert (
