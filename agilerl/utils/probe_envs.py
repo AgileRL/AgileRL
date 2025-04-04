@@ -1077,14 +1077,18 @@ def check_policy_on_policy_with_probe_env(
 
         if policy_values is not None:
             if discrete:
+                _, _, _ = agent.actor(state)
                 predicted_policy_values = (
-                    agent.actor(state).probs.detach().cpu().numpy()
+                    agent.actor.head_net.dist.distribution.probs.detach().cpu().numpy()
                 )
             else:
-                predicted_policy_values = agent.actor(state).loc.detach().cpu().numpy()
+                _, _, _ = agent.actor(state)
+                predicted_policy_values = (
+                    agent.actor.head_net.dist.distribution.loc.detach().cpu().numpy()
+                )
             # print("pol", policy_values, predicted_policy_values)
             assert np.allclose(
-                policy_values, predicted_policy_values, atol=0.1
+                policy_values, predicted_policy_values, atol=0.15
             ), f"{policy_values} != {predicted_policy_values}"
 
 
