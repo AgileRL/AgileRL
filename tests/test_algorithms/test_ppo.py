@@ -15,7 +15,11 @@ from agilerl.algorithms.ppo import PPO
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
-from tests.helper_functions import generate_discrete_space, generate_random_box_space
+from tests.helper_functions import (
+    generate_dict_or_tuple_space,
+    generate_discrete_space,
+    generate_random_box_space,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -487,22 +491,28 @@ def build_ppo(observation_space, action_space, accelerator):
 
 
 @pytest.mark.parametrize(
-    "observation_space, action_space, accelerator",
+    "observation_space",
     [
-        (
-            generate_random_box_space(shape=(4,), low=0, high=1),
-            generate_random_box_space(shape=(2,), low=0, high=1),
-            None,
-        ),
-        (generate_discrete_space(4), generate_discrete_space(2), Accelerator()),
+        generate_random_box_space(shape=(4,), low=0, high=1),
+        generate_random_box_space(shape=(3, 32, 32), low=0, high=1),
+        generate_discrete_space(4),
+        generate_dict_or_tuple_space(2, 3, dict_space=False),
+        generate_dict_or_tuple_space(2, 3, dict_space=True),
     ],
 )
+@pytest.mark.parametrize(
+    "action_space",
+    [
+        generate_random_box_space(shape=(2,), low=0, high=1),
+        generate_discrete_space(2),
+        spaces.MultiDiscrete([2, 3]),
+        spaces.MultiBinary(2),
+    ],
+)
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
 # Returns the expected action when given a state observation.
 def test_returns_expected_action(observation_space, action_space, build_ppo):
-    if isinstance(observation_space, spaces.Discrete):
-        state = np.array([[0]])
-    else:
-        state = np.array([[1, 2, 3, 4]])
+    state = observation_space.sample()
 
     # First with grad=False
     grad = False
@@ -519,11 +529,18 @@ def test_returns_expected_action(observation_space, action_space, build_ppo):
         for act in action:
             assert act.is_integer()
             assert act >= 0 and act < action_space.n
-    else:
-        action = action[0]
-        assert len(action) == action_space.shape[0]
-        for act in action:
+    elif isinstance(action_space, spaces.MultiDiscrete):
+        assert len(action[0]) == len(action_space.nvec)
+        for i, act in enumerate(action[0]):
+            assert act.is_integer()
+            assert act >= 0 and act < action_space.nvec[i]
+    elif isinstance(action_space, spaces.MultiBinary):
+        assert len(action[0]) == action_space.n
+        for act in action[0]:
             assert isinstance(act, np.float32)
+    else:
+        assert isinstance(action, np.ndarray)
+        assert action.shape == (1, *action_space.shape)
 
     # Now with grad=True, and eval_action
     grad = True

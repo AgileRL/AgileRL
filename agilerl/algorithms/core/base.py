@@ -317,7 +317,9 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             return tuple(
                 EvolvableAlgorithm.get_action_dim(space) for space in action_space
             )
-        if isinstance(action_space, spaces.Discrete):
+        elif isinstance(action_space, spaces.MultiBinary):
+            return action_space.n
+        elif isinstance(action_space, spaces.Discrete):
             return action_space.n
         elif isinstance(action_space, spaces.MultiDiscrete):
             return sum(action_space.nvec)
