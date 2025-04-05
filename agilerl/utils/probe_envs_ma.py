@@ -1884,12 +1884,16 @@ def check_on_policy_learning_with_probe_env(
 
                 if policy_values is not None:
                     if discrete:
+                        _, _, _ = actor(state[agent_id])
                         predicted_policy_values = (
-                            actor(state[agent_id]).probs.detach().cpu().numpy()
+                            actor.head_net.dist.distribution.probs.detach()
+                            .cpu()
+                            .numpy()
                         )
                     else:
+                        _, _, _ = actor(state[agent_id])
                         predicted_policy_values = (
-                            actor(state[agent_id]).loc.detach().cpu().numpy()
+                            actor.head_net.dist.distribution.loc.detach().cpu().numpy()
                         )
                     print(
                         agent_id,

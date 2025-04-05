@@ -14,10 +14,79 @@ Core algorithm tools:
    registry
    wrappers
 
-Reinforcement learning algorithms implemented:
+Implemented Algorithms:
+------------------------------------------------
+
+Observation Spaces
+~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :widths: 25 25 25 25
+   :header-rows: 1
+
+   * - Box (Continuous)
+     - Discrete
+     - Dict
+     - Tuple
+   * - ✅
+     - ✅
+     - ✅
+     - ✅
+
+Single-Agent Algorithms
+----------------------
+
+Action Spaces
+~~~~~~~~~~~~~
+
+.. list-table::
+   :widths: 30 17 17 17 17
+   :header-rows: 1
+
+   * - Algorithm
+     - ``Discrete``
+     - ``Box``
+     - ``MultiDiscrete``
+     - ``MultiBinary``
+   * - :ref:`CQL <cql>`
+     - ✅
+     - ❌
+     - ❌
+     - ❌
+   * - :ref:`DDPG <ddpg>`
+     - ❌
+     - ✅
+     - ❌
+     - ❌
+   * - :ref:`DQN <dqn>`
+     - ✅
+     - ❌
+     - ❌
+     - ❌
+   * - :ref:`DQN Rainbow <dqn_rainbow>`
+     - ✅
+     - ❌
+     - ❌
+     - ❌
+   * - :ref:`ILQL <ilql>`
+     - ✅
+     - ❌
+     - ❌
+     - ❌
+   * - :ref:`PPO <ppo>`
+     - ✅
+     - ✅
+     - ✅
+     - ✅
+   * - :ref:`TD3 <td3>`
+     - ❌
+     - ✅
+     - ❌
+     - ❌
 
 .. toctree::
    :maxdepth: 1
+   :hidden:
 
    cql
    ddpg
@@ -26,9 +95,60 @@ Reinforcement learning algorithms implemented:
    ilql
    ppo
    td3
+   grpo
+
+Multi-Agent Algorithms
+---------------------
+
+Action Spaces
+~~~~~~~~~~~~~
+
+.. list-table::
+   :widths: 30 17 17 17 17
+   :header-rows: 1
+
+   * - Algorithm
+     - ``Discrete``
+     - ``Box``
+     - ``MultiDiscrete``
+     - ``MultiBinary``
+   * - :ref:`IPPO <ippo>`
+     - ✅
+     - ✅
+     - ✅
+     - ✅
+   * - :ref:`MADDPG <maddpg>`
+     - ❌
+     - ✅
+     - ❌
+     - ❌
+   * - :ref:`MATD3 <matd3>`
+     - ❌
+     - ✅
+     - ❌
+     - ❌
+
+.. toctree::
+   :maxdepth: 1
+   :hidden:
+
    ippo
    maddpg
    matd3
-   grpo
+
+Bandit Algorithms
+----------------
+
+.. toctree::
+   :maxdepth: 1
+
    neural_ucb
    neural_ts
+
+LLM Algorithms
+--------------
+
+.. toctree::
+   :maxdepth: 1
+
+   grpo

@@ -435,7 +435,7 @@ def test_returns_expected_action_training():
 
     assert len(action) == action_space.shape[0]
     for act in action:
-        assert isinstance(act, np.float32)
+        assert isinstance(act, torch.Tensor)
         assert -1 <= act <= 1
 
     td3 = TD3(
@@ -480,7 +480,7 @@ def test_returns_expected_action_float64():
 
     assert len(action) == action_space.shape[0]
     for act in action:
-        assert isinstance(act, np.float32)
+        assert isinstance(act, torch.Tensor)
         assert -1 <= act <= 1
 
     td3 = TD3(
@@ -1327,56 +1327,6 @@ def test_initialize_td3_with_incorrect_actor_net():
             critic_networks=critic_networks,
         )
         assert td3
-
-
-@pytest.mark.parametrize(
-    "action_array_vals, min_max, activation_func",
-    [
-        ([0.1, 0.2, 0.3, -0.1], (-1, 1), "Tanh"),
-        ([0.1, 0.2, 0.3, -0.1], (-1, 1), "Sigmoid"),
-        ([0.1, 0.2, 0.3, 0], (0, 1), "Tanh"),
-        ([0.1, 0.2, 0.3, -0.1, -0.2, -0.3], (-2, 2), "Sigmoid"),
-        ([0.1, 0.2, 0.3, -0.1, -0.2, -0.3], (-1, 2), "Softmax"),
-        ([0.1, 0.2, 0.3, 0], ([-1, 0, -1, 0], 1), "Tanh"),
-        ([0.1, 0.2, 0.3, 0], (-2, [-1, 0, -1, 0]), "Tanh"),
-        ([0.1, 0.2, 0.3, 0], ([-1, 0, -1, 0], [1, 2, 3, 4]), "Tanh"),
-        ([0.1, 0.2, 0.3, 0], ([-1, 0, -1, 0], [1, 1, 1, 1]), "Sigmoid"),
-        ([0.1, 0.2, 0.3, 0], ([-2, -2, -2, -2], [-1, 0, -1, 0]), "Sigmoid"),
-        ([0.1, 0.2, 0.3, 0], ([-1, 0, -1, 0], [1, 2, 3, 4]), "Sigmoid"),
-    ],
-)
-def test_action_scaling_td3(action_array_vals, min_max, activation_func):
-    net_config = {
-        "head_config": {
-            "hidden_size": [64, 64],
-            "output_activation": activation_func,
-        }
-    }
-    min_action, max_action = min_max
-    if activation_func == "Tanh":
-        min_activation_val, max_activation_val = -1, 1
-    else:
-        min_activation_val, max_activation_val = 0, 1
-    action = np.array(action_array_vals)
-    min_action = np.array(min_action) if isinstance(min_action, list) else min_action
-    max_action = np.array(max_action) if isinstance(max_action, list) else max_action
-    td3 = TD3(
-        observation_space=generate_random_box_space(shape=(4,), low=0, high=1),
-        action_space=generate_random_box_space(
-            low=min_action, high=max_action, shape=(len(action),)
-        ),
-        net_config=net_config,
-    )
-    scaled_action = td3.scale_to_action_space(action)
-    min_action = np.array(min_action) if isinstance(min_action, list) else min_action
-    max_action = np.array(max_action) if isinstance(max_action, list) else max_action
-    expected_result = (
-        min_action
-        + (action - min_activation_val)
-        * (max_action - min_action)
-        / (max_activation_val - min_activation_val)
-    ).clip(min_action, max_action)
-    assert np.allclose(scaled_action, expected_result)
 
 
 @pytest.mark.parametrize(

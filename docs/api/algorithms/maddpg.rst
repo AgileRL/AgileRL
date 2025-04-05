@@ -12,19 +12,21 @@ stability and convergence of the learning process through decentralized actor an
 Can I use it?
 -------------
 
+Action Space
+^^^^^^^^^^^^
+
 .. list-table::
-   :widths: 20 20 20
+   :widths: 20 20 20 20
    :header-rows: 1
 
-   * -
-     - Action
-     - Observation
-   * - Discrete
+   * - ``Discrete``
+     - ``Box``
+     - ``MultiDiscrete``
+     - ``MultiBinary``
+   * - ❌
      - ✔️
-     - ✔️
-   * - Continuous
-     - ✔️
-     - ✔️
+     - ❌
+     - ❌
 
 Gumbel-Softmax
 --------------

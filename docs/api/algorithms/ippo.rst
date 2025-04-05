@@ -13,17 +13,19 @@ and is well-suited to problems with many homogeneous agents.
 Can I use it?
 -------------
 
+Action Space
+^^^^^^^^^^^^
+
 .. list-table::
-   :widths: 20 20 20
+   :widths: 20 20 20 20
    :header-rows: 1
 
-   * -
-     - Action
-     - Observation
-   * - Discrete
+   * - ``Discrete``
+     - ``Box``
+     - ``MultiDiscrete``
+     - ``MultiBinary``
+   * - ✔️
      - ✔️
-     - ✔️
-   * - Continuous
      - ✔️
      - ✔️
 

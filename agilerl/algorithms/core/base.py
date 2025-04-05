@@ -317,8 +317,12 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             return tuple(
                 EvolvableAlgorithm.get_action_dim(space) for space in action_space
             )
-        if isinstance(action_space, spaces.Discrete):
+        elif isinstance(action_space, spaces.MultiBinary):
             return action_space.n
+        elif isinstance(action_space, spaces.Discrete):
+            return action_space.n
+        elif isinstance(action_space, spaces.MultiDiscrete):
+            return sum(action_space.nvec)
         elif isinstance(action_space, spaces.Box):
             # NOTE: Here we assume the action space only has one dimension
             #       (i.e. the actions correspond to a one-dimensional vector)
@@ -609,7 +613,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             if isinstance(exp, dict):
                 exp = {key: val.to(device) for key, val in exp.items()}
             elif isinstance(exp, (list, tuple)) and isinstance(exp[0], torch.Tensor):
-                exp = [val.to(device) for val in exp]
+                exp = tuple(val.to(device) for val in exp)
             elif isinstance(exp, torch.Tensor):
                 exp = exp.to(device)
 
@@ -1184,10 +1188,12 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         self.state_dims = self.get_state_dim(observation_spaces)
         self.action_dims = self.get_action_dim(action_spaces)
         self.one_hot = all(
-            isinstance(space, spaces.Discrete) for space in observation_spaces
+            isinstance(space, (spaces.Discrete, spaces.MultiDiscrete))
+            for space in observation_spaces
         )
         self.discrete_actions = all(
-            isinstance(space, spaces.Discrete) for space in action_spaces
+            isinstance(space, (spaces.Discrete, spaces.MultiDiscrete))
+            for space in action_spaces
         )
 
         # For continuous action spaces, store the min and max action values

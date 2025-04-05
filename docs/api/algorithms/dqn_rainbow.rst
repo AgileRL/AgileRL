@@ -19,19 +19,21 @@ Rainbow DQN paper: https://arxiv.org/abs/1710.02298
 Can I use it?
 -------------
 
+Action Space
+^^^^^^^^^^^^
+
 .. list-table::
-   :widths: 20 20 20
+   :widths: 20 20 20 20
    :header-rows: 1
 
-   * -
-     - Action
-     - Observation
-   * - Discrete
-     - ✔️
-     - ✔️
-   * - Continuous
+   * - ``Discrete``
+     - ``Box``
+     - ``MultiDiscrete``
+     - ``MultiBinary``
+   * - ✔️
      - ❌
-     - ✔️
+     - ❌
+     - ❌
 
 Example
 ------------

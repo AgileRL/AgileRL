@@ -412,7 +412,7 @@ def test_returns_expected_action_training():
 
     assert len(action) == action_space.shape[0]
     for act in action:
-        assert isinstance(act, np.float32)
+        assert isinstance(act, torch.Tensor)
         assert -1 <= act <= 1
 
     ddpg = DDPG(observation_space, action_space, accelerator=accelerator)
@@ -1123,59 +1123,6 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert ddpg.scores == []
     assert ddpg.fitness == []
     assert ddpg.steps == [0]
-
-
-# Returns the input action scaled to the action space defined by self.min_action and self.max_action.
-@pytest.mark.parametrize(
-    "action_array_vals, min_max, activation_func",
-    [
-        ([0.1, 0.2, 0.3, -0.1], (-1, 1), "Tanh"),
-        ([0.1, 0.2, 0.3, -0.1], (-1, 1), "Sigmoid"),
-        ([0.1, 0.2, 0.3, 0], (0, 1), "Tanh"),
-        ([0.1, 0.2, 0.3, -0.1, -0.2, -0.3], (-2, 2), "Sigmoid"),
-        ([0.1, 0.2, 0.3, -0.1, -0.2, -0.3], (-1, 2), "Softmax"),
-        ([0.1, 0.2, 0.3, 0], ([-1, 0, -1, 0], 1), "Tanh"),
-        ([0.1, 0.2, 0.3, 0], (-2, [-1, 0, -1, 0]), "Tanh"),
-        ([0.1, 0.2, 0.3, 0], ([-1, 0, -1, 0], [1, 2, 3, 4]), "Tanh"),
-        ([0.1, 0.2, 0.3, 0], ([-1, 0, -1, 0], [1, 1, 1, 1]), "Sigmoid"),
-        ([0.1, 0.2, 0.3, 0], ([-2, -2, -2, -2], [-1, 0, -1, 0]), "Sigmoid"),
-        ([0.1, 0.2, 0.3, 0], ([-1, 0, -1, 0], [1, 2, 3, 4]), "Sigmoid"),
-    ],
-)
-def test_action_scaling_ddpg(action_array_vals, min_max, activation_func):
-    net_config = {
-        "head_config": {
-            "hidden_size": [64, 64],
-            "output_activation": activation_func,
-        }
-    }
-    min_action, max_action = min_max
-    if activation_func == "Tanh":
-        min_activation_val, max_activation_val = -1, 1
-    else:
-        min_activation_val, max_activation_val = 0, 1
-
-    action = np.array(action_array_vals)
-
-    min_action = np.array(min_action) if isinstance(min_action, list) else min_action
-    max_action = np.array(max_action) if isinstance(max_action, list) else max_action
-    ddpg = DDPG(
-        observation_space=generate_random_box_space(shape=(4,)),
-        action_space=generate_random_box_space(
-            low=min_action, high=max_action, shape=(len(action),)
-        ),
-        net_config=net_config,
-    )
-    scaled_action = ddpg.scale_to_action_space(action)
-    min_action = np.array(min_action) if isinstance(min_action, list) else min_action
-    max_action = np.array(max_action) if isinstance(max_action, list) else max_action
-    expected_result = (
-        min_action
-        + (action - min_activation_val)
-        * (max_action - min_action)
-        / (max_activation_val - min_activation_val)
-    ).clip(min_action, max_action)
-    assert np.allclose(scaled_action, expected_result)
 
 
 @pytest.mark.parametrize(

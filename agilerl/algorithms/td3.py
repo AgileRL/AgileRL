@@ -16,7 +16,7 @@ from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.q_networks import ContinuousQNetwork
-from agilerl.typing import ArrayLike, ExperiencesType, GymEnvType, NumpyObsType
+from agilerl.typing import ArrayOrTensor, ExperiencesType, GymEnvType, NumpyObsType
 from agilerl.utils.algo_utils import (
     make_safe_deepcopies,
     obs_channels_to_first,
@@ -285,19 +285,20 @@ class TD3(RLAlgorithm):
 
         self.criterion = nn.MSELoss()
 
-        # Register network groups for mutations
+        # Register network groups for actor and critics
         self.register_network_group(
             NetworkGroup(eval=self.actor, shared=self.actor_target, policy=True)
         )
         self.register_network_group(
-            NetworkGroup(eval=self.critic_1, shared=self.critic_target_1)
+            NetworkGroup(eval=self.critic_1, shared=self.critic_target_1, policy=False)
         )
         self.register_network_group(
-            NetworkGroup(eval=self.critic_2, shared=self.critic_target_2)
+            NetworkGroup(eval=self.critic_2, shared=self.critic_target_2, policy=False)
         )
 
     def share_encoder_parameters(self) -> None:
-        """Shares the encoder parameters between the actor and critic."""
+        """Shares the encoder parameters between the actor and critics.
+        Registered as a mutation hook when share_encoders=True."""
         if all(
             isinstance(net, EvolvableNetwork)
             for net in [self.actor, self.critic_1, self.critic_2]
@@ -313,70 +314,6 @@ class TD3(RLAlgorithm):
             warnings.warn(
                 "Encoder sharing is disabled as actor or critic is not an EvolvableNetwork."
             )
-
-    def scale_to_action_space(
-        self, action: ArrayLike, convert_to_torch: bool = False
-    ) -> ArrayLike:
-        """Scales actions to action space defined by self.min_action and self.max_action.
-
-        :param action: Action to be scaled
-        :type action: numpy.ndarray
-        :param convert_to_torch: Flag to convert array to torch, defaults to False
-        :type convert_to_torch: bool, optional
-
-        :return: Scaled action
-        :rtype: numpy.ndarray
-        """
-        if convert_to_torch:
-            max_action = (
-                torch.from_numpy(self.max_action).to(self.device)
-                if isinstance(self.max_action, (np.ndarray))
-                else self.max_action
-            )
-            min_action = (
-                torch.from_numpy(self.min_action).to(self.device)
-                if isinstance(self.min_action, (np.ndarray))
-                else self.min_action
-            )
-        else:
-            max_action = self.max_action
-            min_action = self.min_action
-
-        # True if min and max action limits are defined as arrays/tensors
-        array_limits = isinstance(max_action, (np.ndarray, torch.Tensor))
-
-        if (array_limits and (np.inf in max_action or -np.inf in min_action)) or (
-            not array_limits and (np.inf == max_action or -np.inf == min_action)
-        ):
-            # If infinity in action limits, impossible to scale
-            return action.clip(min_action, max_action)
-
-        mlp_output_activation = self.actor.output_activation
-        if mlp_output_activation in ["Tanh"]:
-            pre_scaled_min = -1
-            pre_scaled_max = 1
-        elif mlp_output_activation in ["Sigmoid", "Softmax"]:
-            pre_scaled_min = 0
-            pre_scaled_max = 1
-        else:
-            action = (
-                torch.where(action > 0, action * max_action, action * -min_action)
-                if convert_to_torch
-                else np.where(action > 0, action * max_action, action * -min_action)
-            )
-            return action.clip(min_action, max_action)
-
-        if not array_limits and (
-            pre_scaled_min == min_action and pre_scaled_max == max_action
-        ):
-            return action.clip(min_action, max_action)
-
-        return (
-            min_action
-            + (max_action - min_action)
-            * (action - pre_scaled_min)
-            / (pre_scaled_max - pre_scaled_min)
-        ).clip(min_action, max_action)
 
     def multi_dim_clamp(self, min: Any, max: Any, input: torch.Tensor) -> torch.Tensor:
         """Multi-dimensional clamp function
@@ -404,7 +341,7 @@ class TD3(RLAlgorithm):
 
         return torch.max(torch.min(input, max), min)
 
-    def get_action(self, obs: NumpyObsType, training: bool = True) -> ArrayLike:
+    def get_action(self, obs: NumpyObsType, training: bool = True) -> ArrayOrTensor:
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
@@ -413,18 +350,18 @@ class TD3(RLAlgorithm):
         :type obs: numpy.ndarray[float], dict, tuple
         :param training: Agent is training, use exploration noise, defaults to True
         :type training: bool, optional
+        :return: Action
+        :rtype: numpy.ndarray[float], torch.Tensor
         """
         obs = self.preprocess_observation(obs)
 
         self.actor.eval()
         with torch.no_grad():
-            action_values = self.actor(obs)
+            action = self.actor(obs)
 
         self.actor.train()
-        action = self.scale_to_action_space(action_values.cpu().data.numpy())
-
         if training:
-            action = (action + self.action_noise()).clip(
+            action = (action.cpu().data.numpy() + self.action_noise()).clip(
                 self.min_action, self.max_action
             )
 
@@ -488,16 +425,8 @@ class TD3(RLAlgorithm):
 
         with torch.no_grad():
             next_actions = self.actor_target(next_states)
-            # Scale actions
-            next_actions = self.scale_to_action_space(
-                next_actions, convert_to_torch=True
-            )
             noise = actions.data.normal_(0, policy_noise)
-            if self.accelerator is not None:
-                noise = noise.to(self.accelerator.device)
-            else:
-                noise = noise.to(self.device)
-            noise = self.multi_dim_clamp(-noise_clip, noise_clip, noise)
+            noise = self.multi_dim_clamp(-noise_clip, noise_clip, noise.to(self.device))
             next_actions = next_actions + noise
             next_actions = self.multi_dim_clamp(
                 self.min_action, self.max_action, next_actions
@@ -512,7 +441,9 @@ class TD3(RLAlgorithm):
         y_j = rewards + ((1 - dones) * self.gamma * q_value_next_state)
 
         # Loss equation needs to be updated to account for two q_values from two critics
-        critic_loss = self.criterion(q_value_1, y_j) + self.criterion(q_value_2, y_j)
+        critic_loss: torch.Tensor = self.criterion(q_value_1, y_j) + self.criterion(
+            q_value_2, y_j
+        )
 
         # critic loss backprop
         self.critic_1_optimizer.zero_grad()
@@ -521,16 +452,14 @@ class TD3(RLAlgorithm):
             self.accelerator.backward(critic_loss)
         else:
             critic_loss.backward()
+
         self.critic_1_optimizer.step()
         self.critic_2_optimizer.step()
 
         # update actor and targets every policy_freq learn steps
         self.learn_counter += 1
         if self.learn_counter % self.policy_freq == 0:
-            policy_actions = self.actor.forward(states)
-            policy_actions = self.scale_to_action_space(
-                policy_actions, convert_to_torch=True
-            )
+            policy_actions = self.actor(states)
 
             # Compute actor loss
             actor_loss = -self.critic_1(states, policy_actions).mean()
@@ -541,6 +470,7 @@ class TD3(RLAlgorithm):
                 self.accelerator.backward(actor_loss)
             else:
                 actor_loss.backward()
+
             self.actor_optimizer.step()
 
             # Add in a soft update for both critic_targets

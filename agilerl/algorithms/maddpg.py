@@ -17,7 +17,6 @@ from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.typing import (
     ArrayDict,
-    ArrayLike,
     ExperiencesType,
     GymEnvType,
     InfosDict,
@@ -376,40 +375,6 @@ class MADDPG(MultiAgentRLAlgorithm):
             )
         )
 
-    def scale_to_action_space(self, action: ArrayLike, idx: int) -> torch.Tensor:
-        """Scales actions to action space defined by self.min_action and self.max_action.
-
-        :param action: Action to be scaled
-        :type action: numpy.ndarray
-        """
-        mlp_output_activation = self.actors[idx].output_activation
-        if mlp_output_activation in ["Tanh"]:
-            pre_scaled_min = -1
-            pre_scaled_max = 1
-        elif mlp_output_activation in ["Sigmoid", "Softmax", "GumbelSoftmax"]:
-            pre_scaled_min = 0
-            pre_scaled_max = 1
-        else:
-            return torch.where(
-                action > 0,
-                action * self.max_action[idx][0],
-                action * -self.min_action[idx][0],
-            )
-
-        if not (
-            isinstance(self.min_action[idx][0], (np.ndarray, torch.Tensor))
-            or isinstance(self.max_action[idx][0], (np.ndarray, torch.Tensor))
-        ):
-            if (
-                pre_scaled_min == self.min_action[idx][0]
-                and pre_scaled_max == self.max_action[idx][0]
-            ):
-                return action
-
-        return self.min_action[idx][0] + (
-            self.max_action[idx][0] - self.min_action[idx][0]
-        ) * (action - pre_scaled_min) / (pre_scaled_max - pre_scaled_min)
-
     def process_infos(
         self, infos: Optional[InfosDict]
     ) -> Tuple[ArrayDict, ArrayDict, ArrayDict]:
@@ -467,17 +432,24 @@ class MADDPG(MultiAgentRLAlgorithm):
             else:
                 with torch.no_grad():
                     actions = actor(obs)
+
             actor.train()
-            if self.discrete_actions and training:
-                actions = torch.clamp(actions + self.action_noise(idx), 0, 1)
-            elif not self.discrete_actions:
-                actions = self.scale_to_action_space(actions, idx)
-                if training:
-                    actions = torch.clamp(
-                        actions + self.action_noise(idx),
+            if training:
+                if self.discrete_actions:
+                    min_action, max_action = 0, 1
+                else:
+                    min_action, max_action = (
                         self.min_action[idx][0],
                         self.max_action[idx][0],
                     )
+
+                # Add noise to actions for exploration
+                actions = torch.clamp(
+                    actions + self.action_noise(idx),
+                    min_action,
+                    max_action,
+                )
+
             action_dict[agent_id] = actions.cpu().numpy()
 
         if self.discrete_actions:
@@ -582,16 +554,7 @@ class MADDPG(MultiAgentRLAlgorithm):
         next_actions = []
         with torch.no_grad():
             for i, agent_id_label in enumerate(self.agent_ids):
-                unscaled_actions = self.actor_targets[i](next_states[agent_id_label])
-                if not self.discrete_actions:
-                    scaled_actions = torch.where(
-                        unscaled_actions > 0,
-                        unscaled_actions * self.max_action[i][0],
-                        unscaled_actions * -self.min_action[i][0],
-                    )
-                    next_actions.append(scaled_actions)
-                else:
-                    next_actions.append(unscaled_actions)
+                next_actions.append(self.actor_targets[i](next_states[agent_id_label]))
 
         # Stack states and actions
         stacked_states = self.stack_critic_observations(states)
@@ -736,14 +699,6 @@ class MADDPG(MultiAgentRLAlgorithm):
         else:
             action = actor(states[agent_id])
 
-        # Scale actions to action space
-        if not self.discrete_actions:
-            action = torch.where(
-                action > 0,
-                action * self.max_action[idx][0],
-                action * -self.min_action[idx][0],
-            )
-
         detached_actions = copy.deepcopy(actions)
         detached_actions[agent_id] = action
 
@@ -879,6 +834,7 @@ class MADDPG(MultiAgentRLAlgorithm):
                         ) and not finished[idx]:
                             completed_episode_scores[idx] = scores[idx]
                             finished[idx] = 1
+
                 rewards.append(np.mean(completed_episode_scores, axis=0))
         mean_fit = np.mean(rewards, axis=0)
         mean_fit = mean_fit[0] if sum_scores else mean_fit
