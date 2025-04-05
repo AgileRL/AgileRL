@@ -614,23 +614,22 @@ def test_returns_expected_action_mask_vectorized(build_ppo):
     assert np.array_equal(action, [1, 0]), action
 
 
-# learns from experiences and updates network parameters
-def test_learns_from_experiences():
-    observation_space = generate_random_box_space(shape=(3, 32, 32), low=0, high=1)
-    action_space = generate_discrete_space(2)
+@pytest.mark.parametrize(
+    "observation_space",
+    [
+        generate_random_box_space(shape=(4,), low=0, high=1),
+        generate_random_box_space(shape=(3, 32, 32), low=0, high=1),
+        generate_discrete_space(4),
+        generate_dict_or_tuple_space(2, 3, dict_space=False),
+        generate_dict_or_tuple_space(2, 3, dict_space=True),
+    ],
+)
+def test_learns_from_experiences(observation_space):
     batch_size = 45
-    net_config_cnn = {
-        "encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-
+    action_space = spaces.Discrete(2)
     ppo = PPO(
         observation_space=observation_space,
         action_space=action_space,
-        net_config=net_config_cnn,
         batch_size=batch_size,
     )
 
@@ -642,7 +641,36 @@ def test_learns_from_experiences():
     num_steps = batch_size + 1
 
     # Create a batch of experiences
-    states = torch.rand(num_steps, *observation_space.shape)
+    if isinstance(observation_space, spaces.Discrete):
+        states = torch.randint(0, observation_space.n, (num_steps,)).float()
+        next_states = torch.randint(0, observation_space.n, (1,)).float()
+    elif isinstance(observation_space, spaces.MultiDiscrete):
+        states = torch.randint(0, observation_space.nvec, (num_steps,)).float()
+        next_states = torch.randint(0, observation_space.nvec, (1,)).float()
+    elif isinstance(observation_space, spaces.MultiBinary):
+        states = torch.randint(0, 2, (num_steps,)).float()
+        next_states = torch.randint(0, 2, (1,)).float()
+    elif isinstance(observation_space, spaces.Box):
+        states = torch.rand(num_steps, *observation_space.shape)
+        next_states = torch.rand(1, *observation_space.shape)
+    elif isinstance(observation_space, spaces.Dict):
+        states = {
+            key: torch.rand(num_steps, *space.shape)
+            for key, space in observation_space.spaces.items()
+        }
+        next_states = {
+            key: torch.rand(1, *space.shape)
+            for key, space in observation_space.spaces.items()
+        }
+    elif isinstance(observation_space, spaces.Tuple):
+        states = tuple(
+            torch.rand(num_steps, *space.shape) for space in observation_space.spaces
+        )
+        next_states = tuple(
+            torch.rand(1, *space.shape) for space in observation_space.spaces
+        )
+
+    # Create a batch of experiences
     actions = torch.randint(0, action_space.n, (num_steps,)).float()
     log_probs = torch.randn(
         num_steps,
@@ -654,7 +682,6 @@ def test_learns_from_experiences():
     values = torch.randn(
         num_steps,
     )
-    next_states = torch.rand(1, *observation_space.shape)
     next_done = np.zeros(1)
     experiences = [
         states,
@@ -666,6 +693,7 @@ def test_learns_from_experiences():
         next_states,
         next_done,
     ]
+
     # Call the learn method
     loss = ppo.learn(experiences)
 
