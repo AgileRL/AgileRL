@@ -593,12 +593,7 @@ class GRPO(RLAlgorithm):
         """
         if self.accelerator is not None:
             os.makedirs(path, exist_ok=True)
-            self.actor.save_checkpoint(path, tag="checkpoint")
-        
-            # state_dict = self.accelerator.get_state_dict(self.actor)
-            # self.accelerator.unwrap_model(self.actor).save_pretrained(
-            #     path + "/latest", state_dict=state_dict, safe_serialization=False)
-        
+            self.actor.save_checkpoint(path, tag="checkpoint")    
         else:
             warnings.warn(
                 "Distributed actor save not supported for non-distributed training."
@@ -612,17 +607,18 @@ class GRPO(RLAlgorithm):
         :type path: str
         """
         if self.accelerator is not None:
-            # deepspeed_dirs = sorted(glob.glob(f"{path}/checkpoint"))
-            # assert len(deepspeed_dirs) > 0
-
+            deepspeed_dirs = sorted(glob.glob(f"{path}/checkpoint"))
+            assert len(deepspeed_dirs) > 0
             load_path, _ = self.actor.load_checkpoint(
                 path,
                 tag="checkpoint",
-                load_module_strict=not is_peft_model(self.accelerator.unwrap_model(self.actor)), # FIXME this should be not is_peft_model
+                load_module_strict=not is_peft_model(self.accelerator.unwrap_model(self.actor)), 
                 load_optimizer_states=True,
                 load_lr_scheduler_states=True,
             )
 
+            if load_path is None:
+                raise ValueError(f"[deepspeed] failed to resume from checkpoint {path}")
         else:
             warnings.warn(
                 "Distributed actor load not supported for non-distributed training."
@@ -717,6 +713,7 @@ class GRPO(RLAlgorithm):
             saved_state_files = glob.glob(f"GRPO_test_2/agent_{self.index}/*")
 
             # Add in shutil.rmtree(saved_state_files)
+                      
 
         else:
             actor_state_dict = self.actor.state_dict()

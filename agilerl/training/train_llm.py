@@ -242,11 +242,12 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                 pbar.update(effective_data_batch_size)
                 agent.scores.append(agg_metrics[2])
             
-
         if accelerator is not None:
             accelerator.wait_for_everyone()
         if tournament and mutation is not None:
             if (i + 1) % evo_steps == 0:
+                if accelerator is not None:
+                    accelerator.wait_for_everyone()
                 pop = tournament_selection_and_mutation(
                     population=pop,
                     tournament=tournament,
@@ -257,6 +258,8 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                     elite_path=elite_path,
                     save_elite=save_elite,
                 )
+                if accelerator is not None:
+                    accelerator.wait_for_everyone()
         else:
             if (i + 1) % max_steps == 0:
                 save_llm_checkpoint(agent, elite_path, i + 1)

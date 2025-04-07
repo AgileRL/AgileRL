@@ -109,33 +109,43 @@ def mock_initialize(model, config, **kwargs):
 # deepspeed.initialize = mock_initialize
 
 
-class DummyForwardOutput:
-    def __init__(self, tensor):
-        self.output = nn.Softmax(dim=-1)(tensor)
-        self.logits = tensor
+from transformers import PreTrainedModel, PretrainedConfig
+import torch.nn as nn
+import torch
 
-
-class DummyLLM(nn.Module):
-    def __init__(self, input_size, max_tokens, vocab_size, device):
-        super().__init__()
+class DummyConfig(PretrainedConfig):
+    def __init__(self, input_size=16, max_tokens=8, vocab_size=100, **kwargs):
+        super().__init__(**kwargs)
         self.input_size = input_size
         self.max_tokens = max_tokens
         self.vocab_size = vocab_size
-        self.net = nn.Sequential(
-            nn.Linear(
-                input_size + max_tokens,
-                32,
-                device=device,
-            ),
-            nn.Linear(32, (input_size + max_tokens) * vocab_size, device=device),
-        )
+
+class DummyForwardOutput:
+    def __init__(self, logits):
+        self.logits = logits
+
+class DummyLLM(PreTrainedModel):
+    config_class = DummyConfig
+
+    def __init__(self, config: DummyConfig, device="cpu"):
+        super().__init__(config)
+        self.input_size = config.input_size
+        self.max_tokens = config.max_tokens
+        self.vocab_size = config.vocab_size
         self.device = device
         self.gradient_checkpointing_enabled = False
 
+        self.net = nn.Sequential(
+            nn.Linear(self.input_size + self.max_tokens, 32, device=device),
+            nn.Linear(32, (self.input_size + self.max_tokens) * self.vocab_size, device=device),
+        )
+
     def forward(self, input_ids, *args, **kwargs):
         input_ids = input_ids.to(torch.float32)
-        output = self.net.forward(input_ids).reshape(
-            input_ids.shape[0], self.input_size + self.max_tokens, self.vocab_size
+        output = self.net(input_ids).reshape(
+            input_ids.shape[0],
+            self.input_size + self.max_tokens,
+            self.vocab_size,
         )
         return DummyForwardOutput(output)
 
@@ -150,7 +160,7 @@ class DummyLLM(nn.Module):
 
     def gradient_checkpointing_enable(self, *args, **kwargs):
         self.gradient_checkpointing_enabled = True
-        return
+
 
 
 class DummyHuggingFaceEnv:
@@ -191,7 +201,7 @@ class DummyHuggingFaceEnv:
 
 
 def create_module(input_size, max_tokens, vocab_size, device):
-    return DummyLLM(input_size, max_tokens, vocab_size, device)
+    return DummyLLM(config=DummyConfig(input_size=input_size, max_tokens=max_tokens, vocab_size=vocab_size), device=device)
 
 
 # Add the missing method to GRPO prototype
@@ -797,3 +807,25 @@ def test_grpo_clone_with_no_accelerator(
     assert new_grpo.cosine_lr_schedule_config == grpo.cosine_lr_schedule_config
     assert new_grpo.wrap == grpo.wrap
     assert new_grpo.device == grpo.device
+
+
+
+def test_grpo_load_path_none():
+    grpo = GRPO(
+        gym.spaces.Box(low=0, high=1000 - 1, shape=(1,)),
+        gym.spaces.Box(low=0, high=1000 - 1),
+        actor_network=create_module(
+            input_size=10,
+            max_tokens=20,
+            vocab_size=1000,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+        ),
+        pad_token_id=1000 - 1,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        group_size=5,
+        accelerator=Accelerator(),
+        lr=0.1,
+    )   
+    with pytest.raises(ValueError):
+        grpo.load("path")
+    

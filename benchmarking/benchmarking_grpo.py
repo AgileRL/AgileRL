@@ -123,7 +123,6 @@ def equation_reward_func(completions, target, nums, **kwargs):
 
             allowed_pattern = r"^[\d+\-*/().\s]+$"
             if not re.match(allowed_pattern, equation):
-                print(f"Equation format invalid: {equation}")
                 rewards.append(0.0)
                 continue
 
@@ -132,10 +131,8 @@ def equation_reward_func(completions, target, nums, **kwargs):
             if abs(float(result) - float(gt)) < 1e-5:
                 rewards.append(1.0)
             else:
-                print(f"Result {result} doesn't match target {gt}")
                 rewards.append(0.0)
         except Exception as e:
-            print(f"Equation error: {e}")
             rewards.append(0.0)
     return rewards
 
@@ -229,6 +226,7 @@ def main(init_hp, mut_p):
         init_hp["ELITISM"],
         init_hp["POP_SIZE"],
         init_hp["EVAL_LOOP"],
+        language_model=True,
     )
 
     mutations = Mutations(
@@ -248,7 +246,7 @@ def main(init_hp, mut_p):
         env=env,
         init_hp=init_hp,
         evaluation_interval=10,
-        wb=True,
+        wb=False,
         save_elite=True,
         elite_path="saved_llms",
         max_reward=2.0,

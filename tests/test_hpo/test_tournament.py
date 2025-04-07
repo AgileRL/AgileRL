@@ -1,3 +1,4 @@
+from accelerate import Accelerator
 from agilerl.algorithms.cqn import CQN
 from agilerl.algorithms.ddpg import DDPG
 from agilerl.algorithms.dqn import DQN
@@ -267,3 +268,54 @@ def test_returns_best_agent_and_new_population_without_elitism_multi_agent():
 
         # Check if the new population has the correct length
         assert len(new_population) == population_size
+
+
+
+def test_language_model_tournament():
+    tournament_selection = TournamentSelection(3, True, 4, 2, language_model=True)
+    assert tournament_selection.language_model == True
+
+    observation_space = generate_multi_agent_box_spaces(2, (4,))
+    action_space = generate_multi_agent_discrete_spaces(2, 2)
+    net_config = {"encoder_config": {"hidden_size": [8, 8]}}
+    population_size = 4
+    population_size = 5
+
+    # Initialize the class
+    tournament_selection = TournamentSelection(3, False, population_size, 2)
+
+    algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
+
+    for algo in algo_classes.keys():
+        population = create_population(
+            algo=algo,
+            observation_space=observation_space,
+            action_space=action_space,
+            net_config=net_config,
+            INIT_HP=INIT_HP,
+            population_size=population_size,
+            accelerator=Accelerator(),
+        )
+
+        population[0].fitness = [1, 2, 3]
+        population[1].fitness = [4, 5, 6]
+        population[2].fitness = [7, 8, 9]
+        population[3].fitness = [10, 11, 12]
+        population[4].fitness = [13, 14, 15]
+
+        # Call the select method
+        elite, new_population = tournament_selection.select(population)
+
+        # Check if the elite agent is the best agent in the population
+        assert elite.fitness == [13, 14, 15]
+        assert elite.index == 4
+
+        # Check if the new population has the correct length
+        assert len(new_population) == population_size
+
+        for agent in new_population:
+            assert not hasattr(agent, "accelerator")
+            assert not hasattr(agent, "actor")
+
+
+

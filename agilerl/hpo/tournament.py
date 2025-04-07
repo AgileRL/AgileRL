@@ -1,6 +1,7 @@
 from typing import List, Tuple
 
 import numpy as np
+import torch
 
 from agilerl.algorithms.core.base import EvolvableAlgorithm
 
@@ -18,10 +19,12 @@ class TournamentSelection:
     :type population_size: int
     :param eval_loop: Number of most recent fitness scores to use in evaluation
     :type eval_loop: int
+    :param language_model: Boolean flag to indicate if the agents are language models
+    :type language_model: bool
     """
 
     def __init__(
-        self, tournament_size: int, elitism: bool, population_size: int, eval_loop: int
+        self, tournament_size: int, elitism: bool, population_size: int, eval_loop: int, language_model: bool = False
     ) -> None:
         assert tournament_size > 0, "Tournament size must be greater than zero."
         assert isinstance(elitism, bool), "Elitism must be boolean value True or False."
@@ -32,7 +35,7 @@ class TournamentSelection:
         self.elitism = elitism
         self.population_size = population_size
         self.eval_loop = eval_loop
-
+        self.language_model = language_model
     def _tournament(self, fitness_values: List[float]) -> int:
         """
         Perform a tournament selection.
@@ -91,4 +94,19 @@ class TournamentSelection:
             actor_parent = population[self._tournament(rank)]
             new_individual = actor_parent.clone(max_id, wrap=False)
             new_population.append(new_individual)
+
+        if self.language_model:
+            for agent in population:
+                if hasattr(agent, "accelerator"):
+                    if agent.accelerator is not None:
+                        agent.accelerator.wait_for_everyone()
+                        agent.accelerator.free_memory()
+                    del agent.accelerator
+                if hasattr(agent, "actor"):
+                    try:
+                        agent.actor.empty_partition_cache()                
+                    finally:
+                        del agent.actor
+            torch.cuda.empty_cache()
+        
         return elite, new_population
