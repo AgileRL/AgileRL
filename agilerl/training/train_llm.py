@@ -84,6 +84,11 @@ def finetune_llm(
         raise ValueError(
             "'evo_steps' must be set if 'tournament' and 'mutation' are not None."
         )
+    
+    if evo_steps < evaluation_interval:
+        raise ValueError(
+            "'evo_steps' must be greater than or equal to 'evaluation_interval'."
+        )
 
     if mutation is not None:
         assert (
