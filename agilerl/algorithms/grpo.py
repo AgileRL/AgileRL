@@ -588,8 +588,13 @@ class GRPO(RLAlgorithm):
         :type path: str
         """
         if self.accelerator is not None:
-            os.makedirs(path, exist_ok=True)
-            self.actor.save_checkpoint(path, tag="checkpoint")
+            # os.makedirs(path, exist_ok=True)
+            # self.actor.save_checkpoint(path, tag="checkpoint")
+        
+            state_dict = self.accelerator.get_state_dict(self.actor)
+            self.accelerator.unwrap_model(self.actor).save_pretrained(
+                path + "/latest", state_dict=state_dict, safe_serialization=True)
+        
         else:
             warnings.warn(
                 "Distributed actor save not supported for non-distributed training."
@@ -603,12 +608,11 @@ class GRPO(RLAlgorithm):
         :type path: str
         """
         if self.accelerator is not None:
-            deepspeed_dirs = sorted(glob.glob(f"{path}/checkpoint"))
-            assert len(deepspeed_dirs) > 0
+            # deepspeed_dirs = sorted(glob.glob(f"{path}/checkpoint"))
+            # assert len(deepspeed_dirs) > 0
             self.actor.load_checkpoint(
                 path,
-                tag="checkpoint",
-                load_module_strict=True,
+                load_module_strict=False,
                 load_optimizer_states=True,
                 load_lr_scheduler_states=True,
             )
@@ -673,7 +677,7 @@ class GRPO(RLAlgorithm):
         if self.accelerator is not None:
             self.accelerator.free_memory()
             self.accelerator.wait_for_everyone()
-            self._save_distributed_actor(f"GRPO_test/agent_{self.index}")
+            self._save_distributed_actor(f"GRPO_test_2/agent_{self.index}")
             self.accelerator.wait_for_everyone()
             input_args = EvolvableAlgorithm.inspect_attributes(
                 self, input_args_only=True
@@ -682,7 +686,7 @@ class GRPO(RLAlgorithm):
             input_args["actor_network"] = self.accelerator.unwrap_model(self.actor)
             clone = type(self)(**input_args)
             clone.reference_actor = self.reference_actor
-            clone.reference_actor.eval()
+            # clone.reference_actor.eval()
             accelerator = clone.accelerator
             self.lr_scheduler = self.accelerator.unwrap_model(self.lr_scheduler)
             lr_scheduler = self.lr_scheduler
@@ -693,11 +697,11 @@ class GRPO(RLAlgorithm):
             if index is not None:
                 clone.index = index
             clone.accelerator.wait_for_everyone()
-            clone._load_distributed_actor(f"GRPO_test/agent_{self.index}")
+            clone._load_distributed_actor(f"GRPO_test_2/agent_{self.index}")
             clone.accelerator.wait_for_everyone()
-            saved_state_files = glob.glob(f"GRPO_test/agent_{self.index}/*")
-            if clone.accelerator.is_main_process:
-                remove_nested_files(saved_state_files)
+            saved_state_files = glob.glob(f"GRPO_test_2/agent_{self.index}/*")
+            # if clone.accelerator.is_main_process:
+            #     remove_nested_files(saved_state_files)
         else:
             actor_state_dict = self.actor.state_dict()
             optimizer_state_dict = self.optimizer.optimizer.state_dict()
