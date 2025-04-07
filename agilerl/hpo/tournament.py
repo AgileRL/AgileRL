@@ -91,5 +91,4 @@ class TournamentSelection:
             actor_parent = population[self._tournament(rank)]
             new_individual = actor_parent.clone(max_id, wrap=False)
             new_population.append(new_individual)
-
         return elite, new_population

@@ -179,6 +179,8 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                 aggregate_metrics_across_gpus(accelerator, metric) for metric in metrics
             ]
             prompts = next_prompts
+            agent.steps[-1] += effective_data_batch_size
+            total_steps += effective_data_batch_size
             agg_test_metrics = None
             if (i + 1) % evaluation_interval == 0:
                 test_reward = agent.test(env)
@@ -239,8 +241,7 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                     )
                 pbar.update(effective_data_batch_size)
                 agent.scores.append(agg_metrics[2])
-            agent.steps[-1] += effective_data_batch_size
-            total_steps += effective_data_batch_size
+            
 
         if accelerator is not None:
             accelerator.wait_for_everyone()

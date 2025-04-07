@@ -157,8 +157,11 @@ class GRPO(RLAlgorithm):
         self.update_epochs = update_epochs
         self.group_size = group_size
         self.beta = beta
-        self.pad_token_id = pad_token_id
         self.calc_position_embeddings = calc_position_embeddings
+        self.temperature = temperature
+        self.max_output_tokens = max_output_tokens
+        self.min_output_tokens = min_output_tokens
+        self.pad_token_id = pad_token_id
         self.generation_config = GenerationConfig(
             do_sample=True,
             temperature=temperature,
@@ -176,7 +179,6 @@ class GRPO(RLAlgorithm):
             self.max_grad_norm = None
         else:
             self.max_grad_norm = max_grad_norm
-        self.temperature = temperature
         self.reduce_memory_peak = reduce_memory_peak
         self.local_rank = device.split(":")[-1]
         self.accelerator = accelerator
@@ -686,7 +688,6 @@ class GRPO(RLAlgorithm):
                 self, input_args_only=True
             )
             input_args["clone"] = True
-
             # extract base model and peft config
             original_model = self.accelerator.unwrap_model(self.actor)
             model_config = original_model.config
@@ -703,21 +704,18 @@ class GRPO(RLAlgorithm):
 
             # Set the clone attributes
             clone.reference_actor = self.reference_actor
+            clone.reference_actor.eval() 
             clone.fitness = self.fitness
             clone.scores = self.scores
             clone.steps = self.steps
   
             if index is not None:
                 clone.index = index
-
-            self.accelerator.free_memory()
-            torch.cuda.empty_cache()
-
             clone.accelerator.wait_for_everyone()
             clone._load_distributed_actor(f"GRPO_test_2/agent_{self.index}")
             clone.accelerator.wait_for_everyone()
             saved_state_files = glob.glob(f"GRPO_test_2/agent_{self.index}/*")
-            
+
             # Add in shutil.rmtree(saved_state_files)
 
         else:

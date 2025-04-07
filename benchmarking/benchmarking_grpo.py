@@ -190,7 +190,8 @@ def main(init_hp, mut_p):
     train_dataset, test_dataset = make_dataset(DATASET)
 
     # Convert the HuggingFace dataset into a Gymnasium environment
-    accelerators = [Accelerator() for _ in range(init_hp["POP_SIZE"])]
+    env_accelerator = Accelerator()
+    algo_accelerators = [Accelerator() for _ in range(init_hp["POP_SIZE"])]
     env = HuggingFaceGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
@@ -199,7 +200,7 @@ def main(init_hp, mut_p):
         apply_chat_template_fn=countdown_chat_template,
         data_batch_size_per_gpu=2,
         custom_collate_fn=custom_collate_fn,
-        accelerator=accelerators[0],
+        accelerator=env_accelerator,
     )
     init_hp["actor_network"] = model
     init_hp["pad_token_id"] = tokenizer.eos_token_id
@@ -220,7 +221,7 @@ def main(init_hp, mut_p):
         INIT_HP=init_hp,
         hp_config=hp_config,
         population_size=init_hp["POP_SIZE"],
-        accelerator=accelerators,
+        accelerator=algo_accelerators,
     )
 
     tournament = TournamentSelection(
@@ -239,7 +240,7 @@ def main(init_hp, mut_p):
         rl_hp=mut_p["RL_HP_MUT"],
         mutation_sd=mut_p["MUT_SD"],
         rand_seed=mut_p["RAND_SEED"],
-        accelerator=accelerators[0],
+        accelerator=env_accelerator,
     )
 
     finetune_llm(
@@ -254,7 +255,7 @@ def main(init_hp, mut_p):
         evo_steps=10,
         mutation=mutations,
         tournament=tournament,
-        accelerator=accelerators[0],
+        accelerator=env_accelerator,
         verbose=True,
         max_steps=12000,
     )
