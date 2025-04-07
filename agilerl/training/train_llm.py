@@ -171,7 +171,7 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                 accuracy = (rewards == max_reward).sum() / len(rewards.flatten())
                 metrics.append(accuracy)
             agg_metrics = [
-                aggregate_metrics_across_gpus(agent, metric) for metric in metrics
+                aggregate_metrics_across_gpus(accelerator, metric) for metric in metrics
             ]
             prompts = next_prompts
             agg_test_metrics = None
@@ -184,7 +184,7 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                     )
                     test_metrics.append(test_accuracy)
                 agg_test_metrics = [
-                    aggregate_metrics_across_gpus(agent, metric)
+                    aggregate_metrics_across_gpus(accelerator, metric)
                     for metric in test_metrics
                 ]
                 if (
@@ -213,6 +213,8 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                         """,
                         end="\r",
                     )
+                if accelerator is not None:
+                    accelerator.wait_for_everyone()
             if accelerator is None or accelerator.is_main_process:
                 metrics_dict = {
                     "Train/Loss": agg_metrics[0],
@@ -231,9 +233,9 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                         test_metrics_dict
                     )
                 pbar.update(effective_data_batch_size)
-                agent.steps.append(effective_data_batch_size)
                 agent.scores.append(agg_metrics[2])
-                total_steps += effective_data_batch_size
+            agent.steps[-1] += effective_data_batch_size
+            total_steps += effective_data_batch_size
 
         if accelerator is not None:
             accelerator.wait_for_everyone()
