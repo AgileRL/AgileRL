@@ -684,14 +684,14 @@ def test_learns_from_experiences(observation_space):
     )
     next_done = np.zeros(1)
     experiences = [
-        states,
-        actions,
-        log_probs,
-        rewards,
-        dones,
-        values,
-        next_states,
-        next_done,
+        [states],
+        [actions],
+        [log_probs],
+        [rewards],
+        [dones],
+        [values],
+        [next_states],
+        [next_done],
     ]
 
     # Call the learn method

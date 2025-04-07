@@ -684,7 +684,10 @@ def stack_experiences(
             if to_torch and isinstance(exp, np.ndarray):
                 stacked_exp = torch.from_numpy(stacked_exp)
 
-        elif isinstance(exp[0], dict):
+            stacked_experiences.append(stacked_exp)
+            continue
+
+        if isinstance(exp[0], dict):
             stacked_exp = defaultdict(list)
             for it in exp:
                 for key, value in it.items():

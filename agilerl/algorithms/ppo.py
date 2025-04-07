@@ -358,9 +358,7 @@ class PPO(RLAlgorithm):
         dones = dones.long()
         with torch.no_grad():
             num_steps = rewards.size(0)
-            print("Device: ", self.device)
             next_state = self.preprocess_observation(next_state)
-            print(next(iter(self.critic.parameters())))
             next_value = self.critic(next_state).reshape(1, -1).cpu()
             advantages = torch.zeros_like(rewards).float()
             last_gae_lambda = 0

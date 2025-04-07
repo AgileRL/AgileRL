@@ -750,6 +750,7 @@ class IPPO(MultiAgentRLAlgorithm):
                         self.accelerator.backward(actor_loss)
                     else:
                         actor_loss.backward()
+
                     clip_grad_norm_(actor.parameters(), self.max_grad_norm)
                     actor_optimizer.step()
 
