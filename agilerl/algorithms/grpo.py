@@ -4,7 +4,7 @@ import glob
 import os
 import warnings
 from typing import Dict, List, Optional, Tuple, Union
-
+from peft import get_peft_model
 import deepspeed
 import numpy as np
 import torch
@@ -588,12 +588,12 @@ class GRPO(RLAlgorithm):
         :type path: str
         """
         if self.accelerator is not None:
-            # os.makedirs(path, exist_ok=True)
-            # self.actor.save_checkpoint(path, tag="checkpoint")
+            os.makedirs(path, exist_ok=True)
+            self.actor.save_checkpoint(path, tag="checkpoint")
         
-            state_dict = self.accelerator.get_state_dict(self.actor)
-            self.accelerator.unwrap_model(self.actor).save_pretrained(
-                path + "/latest", state_dict=state_dict, safe_serialization=True)
+            # state_dict = self.accelerator.get_state_dict(self.actor)
+            # self.accelerator.unwrap_model(self.actor).save_pretrained(
+            #     path + "/latest", state_dict=state_dict, safe_serialization=False)
         
         else:
             warnings.warn(
@@ -610,13 +610,15 @@ class GRPO(RLAlgorithm):
         if self.accelerator is not None:
             # deepspeed_dirs = sorted(glob.glob(f"{path}/checkpoint"))
             # assert len(deepspeed_dirs) > 0
-            self.actor.load_checkpoint(
+
+            load_path, _ = self.actor.load_checkpoint(
                 path,
-                load_module_strict=False,
+                tag="checkpoint",
+                load_module_strict=False, # FIXME this should be not is_peft_model
                 load_optimizer_states=True,
                 load_lr_scheduler_states=True,
             )
-            self.accelerator.deepspeed_engine_wrapped.engine = self.actor
+
         else:
             warnings.warn(
                 "Distributed actor load not supported for non-distributed training."
@@ -683,9 +685,23 @@ class GRPO(RLAlgorithm):
                 self, input_args_only=True
             )
             input_args["clone"] = True
-            input_args["actor_network"] = self.accelerator.unwrap_model(self.actor)
+
+            # extract base model and peft config
+            original_model = self.accelerator.unwrap_model(self.actor)
+            model_config = original_model.config
+            base_model = original_model.model
+            peft_config = original_model.peft_config[original_model.active_adapter]
+
+            # reconstruct model
+            new_base_model = type(base_model)(model_config)  # reconstruct base model
+            new_peft_model = get_peft_model(new_base_model, peft_config)
+            input_args["actor_network"] = new_peft_model
+
             clone = type(self)(**input_args)
             clone.reference_actor = self.reference_actor
+
+
+
             # clone.reference_actor.eval()
             accelerator = clone.accelerator
             self.lr_scheduler = self.accelerator.unwrap_model(self.lr_scheduler)
@@ -700,8 +716,10 @@ class GRPO(RLAlgorithm):
             clone._load_distributed_actor(f"GRPO_test_2/agent_{self.index}")
             clone.accelerator.wait_for_everyone()
             saved_state_files = glob.glob(f"GRPO_test_2/agent_{self.index}/*")
+            # FIXME add in shutil.rmtree
             # if clone.accelerator.is_main_process:
             #     remove_nested_files(saved_state_files)
+            # assert False
         else:
             actor_state_dict = self.actor.state_dict()
             optimizer_state_dict = self.optimizer.optimizer.state_dict()

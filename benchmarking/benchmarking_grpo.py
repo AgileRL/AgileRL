@@ -16,7 +16,7 @@ from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
-MODEL_PATH = "Qwen/Qwen2.5-1.5B"
+MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
 
