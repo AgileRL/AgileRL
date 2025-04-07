@@ -20,7 +20,7 @@ from torch.nn.utils import clip_grad_norm_
 from torch.optim import Optimizer
 from transformers import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
-
+from peft import PeftModel
 from agilerl.algorithms.core import EvolvableAlgorithm, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
@@ -31,6 +31,7 @@ from agilerl.utils.algo_utils import (
     get_experiences_samples,
     remove_nested_files,
     stack_and_pad_experiences,
+    is_peft_model,
 )
 from agilerl.utils.llm_utils import (
     HuggingFaceGym,
@@ -149,6 +150,7 @@ class GRPO(RLAlgorithm):
         assert (
             update_epochs >= 1
         ), "Policy update epochs must be greater than or equal to one."
+        assert isinstance(actor_network, (PeftModel, PreTrainedModel)), "Actor network must be a PeftModel or PreTrainedModel"
         self.batch_size = batch_size
         self.lr = lr
         self.clip_coef = clip_coef
@@ -614,7 +616,7 @@ class GRPO(RLAlgorithm):
             load_path, _ = self.actor.load_checkpoint(
                 path,
                 tag="checkpoint",
-                load_module_strict=False, # FIXME this should be not is_peft_model
+                load_module_strict=not is_peft_model(self.accelerator.unwrap_model(self.actor)), # FIXME this should be not is_peft_model
                 load_optimizer_states=True,
                 load_lr_scheduler_states=True,
             )
@@ -677,7 +679,6 @@ class GRPO(RLAlgorithm):
         :rtype: EvolvableAlgorithm
         """
         if self.accelerator is not None:
-            self.accelerator.free_memory()
             self.accelerator.wait_for_everyone()
             self._save_distributed_actor(f"GRPO_test_2/agent_{self.index}")
             self.accelerator.wait_for_everyone()
@@ -690,36 +691,35 @@ class GRPO(RLAlgorithm):
             original_model = self.accelerator.unwrap_model(self.actor)
             model_config = original_model.config
             base_model = original_model.model
-            peft_config = original_model.peft_config[original_model.active_adapter]
+            model = type(base_model)(model_config)  # reconstruct base model
 
-            # reconstruct model
-            new_base_model = type(base_model)(model_config)  # reconstruct base model
-            new_peft_model = get_peft_model(new_base_model, peft_config)
-            input_args["actor_network"] = new_peft_model
+            if is_peft_model(original_model):
+                peft_config = original_model.peft_config[original_model.active_adapter]
+                model = get_peft_model(model, peft_config)
 
+            input_args["actor_network"] = model
+            input_args["accelerator"] = Accelerator()
             clone = type(self)(**input_args)
+
+            # Set the clone attributes
             clone.reference_actor = self.reference_actor
-
-
-
-            # clone.reference_actor.eval()
-            accelerator = clone.accelerator
-            self.lr_scheduler = self.accelerator.unwrap_model(self.lr_scheduler)
-            lr_scheduler = self.lr_scheduler
-            self.lr_scheduler = None
-            clone = EvolvableAlgorithm.copy_attributes(self, clone)
-            clone.accelerator = accelerator
-            clone.lr_scheduler = lr_scheduler
+            clone.fitness = self.fitness
+            clone.scores = self.scores
+            clone.steps = self.steps
+  
             if index is not None:
                 clone.index = index
+
+            self.accelerator.free_memory()
+            torch.cuda.empty_cache()
+
             clone.accelerator.wait_for_everyone()
             clone._load_distributed_actor(f"GRPO_test_2/agent_{self.index}")
             clone.accelerator.wait_for_everyone()
             saved_state_files = glob.glob(f"GRPO_test_2/agent_{self.index}/*")
-            # FIXME add in shutil.rmtree
-            # if clone.accelerator.is_main_process:
-            #     remove_nested_files(saved_state_files)
-            # assert False
+            
+            # Add in shutil.rmtree(saved_state_files)
+
         else:
             actor_state_dict = self.actor.state_dict()
             optimizer_state_dict = self.optimizer.optimizer.state_dict()

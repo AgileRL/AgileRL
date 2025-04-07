@@ -146,15 +146,15 @@ def combined_rewards(completion, solution, prompt):
         + format_reward_func([completion], [solution])[0]
     )
 
-    print(
-        f"""
-============================================ \n
-Completion: {completion}, \n
-Numbers: {prompt}, \n
-Correct Answer: {solution.item()} \n
-Reward: {reward}
-"""
-    )
+#     print(
+#         f"""
+# ============================================ \n
+# Completion: {completion}, \n
+# Numbers: {prompt}, \n
+# Correct Answer: {solution.item()} \n
+# Reward: {reward}
+# """
+#     )
 
     if reward == 2.0:
         with open("countdown_completions.txt", "a") as text_file:

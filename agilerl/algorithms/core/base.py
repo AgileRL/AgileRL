@@ -396,12 +396,14 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 ):
                     if not torch.equal(attr, clone_attr):
                         try:
+                            print("Setting attribute:", attribute)
                             setattr(
                                 clone,
                                 attribute,
                                 copy.deepcopy(getattr(agent, attribute)),
                             )
                         except RuntimeError:
+                            print("Setting attribute:", attribute) 
                             # If the tensor is not a leaf tensor, we need to clone it using torch.clone
                             setattr(
                                 clone, attribute, torch.clone(getattr(agent, attribute))
@@ -409,14 +411,18 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
                 elif isinstance(attr, np.ndarray) or isinstance(clone_attr, np.ndarray):
                     if not np.array_equal(attr, clone_attr):
+                        print("Setting attribute:", attribute)
                         setattr(
                             clone, attribute, copy.deepcopy(getattr(agent, attribute))
                         )
                 elif isinstance(attr, list) or isinstance(clone_attr, list):
+                    print("Setting attribute:", attribute)
                     setattr(clone, attribute, [copy.deepcopy(el) for el in attr])
                 elif attr != clone_attr:
+                    print("Setting attribute:", attribute)
                     setattr(clone, attribute, copy.deepcopy(getattr(agent, attribute)))
             else:
+                print("Setting attribute:", attribute)
                 setattr(clone, attribute, copy.deepcopy(getattr(agent, attribute)))
         return clone
 

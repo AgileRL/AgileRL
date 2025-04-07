@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, TypeGuard, Union
 import numpy as np
 import torch
 import torch.nn.functional as F
+import torch.nn as nn 
 from accelerate.optimizer import AcceleratedOptimizer
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from gymnasium import spaces
@@ -20,6 +21,7 @@ from torch._dynamo import OptimizedModule
 from torch.nn import Module
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+from peft import PeftModel
 
 from agilerl.protocols import (
     EvolvableAttributeType,
@@ -935,3 +937,6 @@ def concatenate_experiences_into_batches(
         if stacked_tensor.size(squeeze_dim) == 1:
             stacked_tensor = stacked_tensor.squeeze(squeeze_dim)
     return stacked_tensor
+
+def is_peft_model(model: nn.Module) -> bool:
+    return isinstance(model, PeftModel)
