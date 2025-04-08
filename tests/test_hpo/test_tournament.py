@@ -279,10 +279,8 @@ def test_language_model_tournament():
     action_space = generate_multi_agent_discrete_spaces(2, 2)
     net_config = {"encoder_config": {"hidden_size": [8, 8]}}
     population_size = 4
-    population_size = 5
 
     # Initialize the class
-    tournament_selection = TournamentSelection(3, False, population_size, 2)
 
     algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
 
@@ -301,14 +299,13 @@ def test_language_model_tournament():
         population[1].fitness = [4, 5, 6]
         population[2].fitness = [7, 8, 9]
         population[3].fitness = [10, 11, 12]
-        population[4].fitness = [13, 14, 15]
 
         # Call the select method
         elite, new_population = tournament_selection.select(population)
 
         # Check if the elite agent is the best agent in the population
-        assert elite.fitness == [13, 14, 15]
-        assert elite.index == 4
+        assert elite.fitness == [10, 11, 12]
+        assert elite.index == 3
 
         # Check if the new population has the correct length
         assert len(new_population) == population_size
