@@ -202,6 +202,7 @@ class TournamentSelection:
             new_population_idxs.append((elite_idx, elite_idx, True))
             selection_size = self.population_size - 1
         else:
+            elite = population[old_population_idxs.index(elite_idx)]
             selection_size = self.population_size
 
         # select parents of next gen using tournament selection
@@ -222,7 +223,7 @@ class TournamentSelection:
 
         new_population = []
         index_tracker = {}
-        for idx_to_clone, new_idx, is_elite in sorted(new_population_idxs):
+        for idx_to_clone, new_idx, is_elite in new_population_idxs:
             if (agent := population[old_population_idxs.index(idx_to_clone)]) is not None:
                 actor_parent = agent.clone(new_idx, wrap=False)
                 population[old_population_idxs.index(idx_to_clone)] = None
