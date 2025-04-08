@@ -12,12 +12,12 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
+import wandb
 import yaml
 from pettingzoo import ParallelEnv
 from pettingzoo.classic import connect_four_v3
 from tqdm import tqdm, trange
 
-import wandb
 from agilerl.algorithms import DQN
 from agilerl.algorithms.core import OptimizerWrapper
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
