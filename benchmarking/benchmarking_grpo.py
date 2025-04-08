@@ -1,6 +1,6 @@
 import re
 from typing import Tuple
-
+import os
 import torch
 import yaml
 from accelerate import Accelerator
@@ -16,7 +16,7 @@ from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
-MODEL_PATH = "Qwen/Qwen2.5-0.5B"
+MODEL_PATH = "Qwen/Qwen2.5-1.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
 
@@ -185,10 +185,25 @@ def main(init_hp, mut_p):
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
     # Convert the HuggingFace dataset into a Gymnasium environment
     env_accelerator = Accelerator()
     algo_accelerators = [Accelerator() for _ in range(init_hp["POP_SIZE"])]
+
+    for accelerator in algo_accelerators:
+        accelerator.state.deepspeed_plugin.deepspeed_config[
+            "train_micro_batch_size_per_gpu"
+        ] = 2
+
+        accelerator.state.deepspeed_plugin.deepspeed_config[
+            "activation_checkpointing"
+        ] = {
+            "partition_activations": True,
+            "cpu_checkpointing": True,
+            "synchronize_checkpoint_boundary": True,
+            "number_checkpoints": 2,
+        }
     env = HuggingFaceGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
@@ -220,6 +235,8 @@ def main(init_hp, mut_p):
         population_size=init_hp["POP_SIZE"],
         accelerator=algo_accelerators,
     )
+
+    del model
 
     tournament = TournamentSelection(
         init_hp["TOURN_SIZE"],

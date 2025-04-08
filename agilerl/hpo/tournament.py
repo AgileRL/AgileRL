@@ -219,8 +219,6 @@ class TournamentSelection:
                 agent_ref = population[old_population_idxs.index(agent_idx)]
                 population[old_population_idxs.index(agent_idx)] = None
                 del agent_ref
-        gc.collect()
-        torch.cuda.empty_cache()
 
         new_population = []
         index_tracker = {}

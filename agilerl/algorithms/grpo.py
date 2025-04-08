@@ -229,8 +229,6 @@ class GRPO(RLAlgorithm):
         :param experiences: Batched completion_ids, action_masks and rewards
         :type experiences: ExperiencesType
         """
-        gc.collect()
-        torch.cuda.empty_cache()
         completion_ids, action_masks, rewards = stack_and_pad_experiences(
             *experiences, padding_values=[self.pad_token_id, False, None]
         )
@@ -482,26 +480,6 @@ class GRPO(RLAlgorithm):
         :return: Policy network and reference network
         :rtype: Tuple[Union[nn.Module, DeepSpeedEngine], Union[Optimizer, DeepSpeedOptimizerType]]
         """
-        if self.accelerator is not None:
-            if (
-                self.accelerator.state.deepspeed_plugin.deepspeed_config[
-                    "train_micro_batch_size_per_gpu"
-                ]
-                == "auto"
-            ):
-                self.accelerator.state.deepspeed_plugin.deepspeed_config[
-                    "train_micro_batch_size_per_gpu"
-                ] = 2
-
-            if self.gradient_checkpointing:
-                self.accelerator.state.deepspeed_plugin.deepspeed_config[
-                    "activation_checkpointing"
-                ] = {
-                    "partition_activations": True,
-                    "cpu_checkpointing": True,
-                    "synchronize_checkpoint_boundary": True,
-                    "number_checkpoints": 2,
-                }
         self.actor = network
         self.optimizer = OptimizerWrapper(
             optim.AdamW, networks=[self.actor], lr=self.lr
@@ -538,14 +516,14 @@ class GRPO(RLAlgorithm):
         :type loss: float
         """
         if self.accelerator is not None:
-            self.optimizer.zero_grad()
             self.accelerator.backward(loss)
             self.optimizer.step()
-        else:
             self.optimizer.zero_grad()
+        else:
             loss.backward()
             clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
             self.optimizer.step()
+            self.optimizer.zero_grad()
         if self.lr_scheduler is not None:
             self.lr_scheduler.step()
             self.lr = self.lr_scheduler.get_last_lr()[0]
