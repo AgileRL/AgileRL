@@ -305,6 +305,12 @@ class DummyMultiAgent(DummyAgentOffPolicy):
     def reset_action_noise(self, *args, **kwargs):
         return
 
+    def assemble_homogeneous_outputs(self, agent_outputs, vect_dim):
+        return {
+            "agent": np.random.randn(vect_dim, self.action_size),
+            "other_agent": np.random.randn(vect_dim, self.action_size),
+        }
+
 
 class DummyTournament:
     def __init__(self):
