@@ -28,6 +28,7 @@ from agilerl.utils.algo_utils import (
     key_in_nested_dict,
     make_safe_deepcopies,
     multi_agent_sample_tensor_from_space,
+    obs_channels_to_first,
 )
 from agilerl.utils.evolvable_networks import get_default_encoder_config
 
@@ -310,12 +311,15 @@ class MATD3(MultiAgentRLAlgorithm):
             critic_net_config["encoder_config"] = critic_encoder_config
             critic_net_config["head_config"] = critic_head_config
 
+            clip_actions = self.torch_compiler is None
+
             def create_actor(idx):
                 return DeterministicActor(
                     self.observation_spaces[idx],
                     self.action_spaces[idx],
                     n_agents=self.n_agents,
                     device=self.device,
+                    clip_actions=clip_actions,
                     **copy.deepcopy(net_config),
                 )
 
@@ -462,6 +466,16 @@ class MATD3(MultiAgentRLAlgorithm):
             else:
                 with torch.no_grad():
                     actions = actor(obs)
+
+            if self.torch_compiler is not None and isinstance(
+                self.action_spaces[idx], spaces.Box
+            ):
+                actions = DeterministicActor.rescale_action(
+                    action=actions,
+                    low=actor.action_low,
+                    high=actor.action_high,
+                    output_activation=actor.output_activation,
+                )
 
             actor.train()
             if training:
@@ -865,27 +879,21 @@ class MATD3(MultiAgentRLAlgorithm):
                 while not np.all(finished):
                     step += 1
                     if swap_channels:
-                        if is_vectorised:
-                            obs = {
-                                agent_id: np.moveaxis(s, [-1], [-3])
-                                for agent_id, s in obs.items()
-                            }
-                        else:
-                            obs = {
-                                agent_id: np.moveaxis(np.expand_dims(s, 0), [-1], [-3])
-                                for agent_id, s in obs.items()
-                            }
+                        expand_dims = not is_vectorised
+                        obs = {
+                            agent_id: obs_channels_to_first(s, expand_dims)
+                            for agent_id, s in obs.items()
+                        }
                     cont_actions, discrete_action = self.get_action(
                         obs,
                         training=False,
                         infos=info,
                     )
-                    if self.discrete_actions:
-                        action = discrete_action
-                    else:
-                        action = cont_actions
+
+                    action = discrete_action if self.discrete_actions else cont_actions
                     if not is_vectorised:
                         action = {agent: act[0] for agent, act in action.items()}
+
                     obs, reward, term, trunc, info = env.step(action)
                     score_increment = (
                         (
@@ -917,6 +925,7 @@ class MATD3(MultiAgentRLAlgorithm):
                             completed_episode_scores[idx] = scores[idx]
                             finished[idx] = 1
                 rewards.append(np.mean(completed_episode_scores, axis=0))
+
         mean_fit = np.mean(rewards, axis=0)
         mean_fit = mean_fit[0] if sum_scores else mean_fit
         self.fitness.append(mean_fit)

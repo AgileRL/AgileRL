@@ -510,11 +510,14 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                 assert_correct_simba_net_config(net_config)
                 encoder_mlp_cls = EvolvableSimBa
             else:
-                net_config["output_vanish"] = False
                 assert_correct_mlp_net_config(net_config)
                 encoder_mlp_cls = EvolvableMLP
 
-                # Need to disable output_vanish in MLP encoder
+                # For MLP encoders we want to:
+                # 1. Be consistent with layer normalization and apply after the final
+                # linear layer for further stability (see https://github.com/AgileRL/AgileRL/issues/337)
+                # 2. Disable output_vanish
+                net_config["output_layernorm"] = net_config.get("layer_norm", True)
                 net_config["output_vanish"] = False
 
             encoder = encoder_mlp_cls(

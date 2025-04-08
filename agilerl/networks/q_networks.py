@@ -391,7 +391,7 @@ class ContinuousQNetwork(EvolvableNetwork):
         :rtype: torch.Tensor
         """
         if not isinstance(actions, torch.Tensor):
-            actions = torch.tensor(actions, dtype=torch.float32).to(self.device)
+            actions = torch.as_tensor(actions, dtype=torch.float32).to(self.device)
 
         if len(actions.shape) == 1:
             actions = actions.unsqueeze(0)

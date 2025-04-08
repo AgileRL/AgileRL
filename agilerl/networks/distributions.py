@@ -35,9 +35,7 @@ def apply_action_mask_discrete(
     :return: Logits with mask applied.
     :rtype: torch.Tensor
     """
-    return torch.where(
-        mask, logits, torch.tensor(-1e8, dtype=logits.dtype, device=logits.device)
-    )
+    return torch.where(mask, logits, torch.full_like(logits, -1e8).to(logits.device))
 
 
 class DistributionHandler(Protocol):
@@ -69,7 +67,7 @@ class NormalHandler:
         :return: Sampled action.
         :rtype: torch.Tensor
         """
-        return distribution.rsample()
+        return distribution.sample()
 
     def log_prob(self, distribution: Normal, action: torch.Tensor) -> torch.Tensor:
         """Get the log probability of the action.
@@ -337,14 +335,12 @@ class EvolvableDistribution(EvolvableWrapper):
         self.squash_output = squash_output and isinstance(action_space, spaces.Box)
         self.dist = None
         self.mask = None
-        self.log_std = None
 
         # For continuous action spaces, we also learn the standard
         # deviation (log_std) of the action distribution
         if isinstance(action_space, spaces.Box):
             self.log_std = torch.nn.Parameter(
-                torch.ones(np.prod(action_space.shape)) * action_std_init,
-                requires_grad=True,
+                torch.ones(1, np.prod(action_space.shape)) * action_std_init
             ).to(device)
 
     @property
@@ -356,27 +352,19 @@ class EvolvableDistribution(EvolvableWrapper):
         """
         return self.wrapped.net_config
 
-    def get_distribution(
-        self, logits: torch.Tensor, log_std: Optional[torch.Tensor] = None
-    ) -> TorchDistribution:
+    def get_distribution(self, logits: torch.Tensor) -> TorchDistribution:
         """Get the distribution over the action space given an observation.
 
         :param logits: Output of the network, either logits or probabilities.
         :type logits: torch.Tensor
-        :param log_std: Log standard deviation of the action distribution. Defaults to None.
-        :type log_std: Optional[torch.Tensor]
         :return: Distribution over the action space.
         :rtype: Distribution
         """
         # Normal distribution for Continuous action spaces
         if isinstance(self.action_space, spaces.Box):
-            assert (
-                log_std is not None
-            ), "log_std must be provided for continuous action spaces."
-
-            log_std = log_std.expand_as(logits).clamp(min=-20)
-            std = torch.exp(log_std)
-            dist = Normal(loc=logits, scale=std)
+            log_std = self.log_std.expand_as(logits)
+            action_std = torch.exp(log_std)
+            dist = Normal(loc=logits, scale=action_std)
 
         # Categorical distribution for Discrete action spaces
         elif isinstance(self.action_space, spaces.Discrete):
@@ -490,7 +478,7 @@ class EvolvableDistribution(EvolvableWrapper):
             logits = self.apply_mask(logits, action_mask)
 
         # Distribution from logits
-        self.dist = self.get_distribution(logits, self.log_std)
+        self.dist = self.get_distribution(logits)
 
         # Sample action, compute log probability and entropy
         action = self.dist.sample()

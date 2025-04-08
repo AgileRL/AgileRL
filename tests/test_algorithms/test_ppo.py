@@ -515,10 +515,7 @@ def test_returns_expected_action(observation_space, action_space, build_ppo):
     state = observation_space.sample()
 
     # First with grad=False
-    grad = False
-    action, action_logprob, dist_entropy, state_values = build_ppo.get_action(
-        state, grad=grad
-    )
+    action, action_logprob, dist_entropy, state_values = build_ppo.get_action(state)
 
     assert isinstance(action, np.ndarray)
     assert isinstance(action_logprob, np.ndarray)
@@ -543,27 +540,14 @@ def test_returns_expected_action(observation_space, action_space, build_ppo):
         assert action.shape == (1, *action_space.shape)
 
     # Now with grad=True, and eval_action
-    grad = True
-    eval_action = torch.Tensor([[0, 1]])
-    action, action_logprob, dist_entropy, state_values = build_ppo.get_action(
-        state, action=eval_action, grad=grad
+    eval_action = torch.Tensor([[0, 1]]).to(build_ppo.device)
+    action_logprob, dist_entropy, state_values = build_ppo.evaluate_actions(
+        state, actions=eval_action
     )
 
-    assert isinstance(action, torch.Tensor)
     assert isinstance(action_logprob, torch.Tensor)
     assert isinstance(dist_entropy, torch.Tensor)
     assert isinstance(state_values, torch.Tensor)
-
-    if isinstance(action_space, spaces.Discrete):
-        action = torch.argmax(action, dim=-1)
-        assert act.is_integer()
-        assert act >= 0 and act < action_space.n
-    else:
-        action = action.cpu().data.numpy()
-        action = action[0]
-        assert len(action) == action_space.shape[0]
-        for act in action:
-            assert isinstance(act, np.float32)
 
 
 def test_ppo_optimizer_parameters():

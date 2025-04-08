@@ -291,7 +291,6 @@ class IPPO(MultiAgentRLAlgorithm):
                 self.critics.append(critic)
 
         # Optimizers
-        # self.optimizers = OptimizerWrapper(optim.Adam, networks=[[actor, critic] for actor, critic in zip(self.actors, self.critics)], lr=self.lr, multiagent=True)
         self.actor_optimizers = OptimizerWrapper(
             optim.Adam, networks=self.actors, lr=self.lr, multiagent=True
         )
@@ -703,7 +702,7 @@ class IPPO(MultiAgentRLAlgorithm):
                     _, _, entropy = actor(batch_states)
                     value = critic(batch_states).squeeze(-1)
 
-                    log_prob = actor.action_log_prob(batch_actions.to(self.device))
+                    log_prob = actor.action_log_prob(batch_actions)
 
                     if isinstance(action_space, spaces.Box) and action_space.shape == (
                         1,

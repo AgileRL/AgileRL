@@ -218,6 +218,7 @@ class PPO(RLAlgorithm):
             if head_config is not None:
                 critic_head_config = copy.deepcopy(head_config)
                 critic_head_config["output_activation"] = None
+                critic_net_config.pop("squash_output", None)
             else:
                 critic_head_config = MlpNetConfig(hidden_size=[16])
 
@@ -267,11 +268,59 @@ class PPO(RLAlgorithm):
                 "Encoder sharing is disabled as actor or critic is not an EvolvableNetwork."
             )
 
+    def _get_action_and_values(
+        self,
+        obs: ArrayOrTensor,
+        action_mask: Optional[ArrayOrTensor] = None,
+    ) -> Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Returns the next action to take in the environment and the values.
+
+        :param obs: Environment observation, or multiple observations in a batch
+        :type obs: numpy.ndarray[float]
+        :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
+        :type action_mask: numpy.ndarray, optional
+        :return: Action, log probability, entropy, and state values
+        :rtype: Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        """
+        latent_pi = self.actor.extract_features(obs)
+        action, log_prob, entropy = self.actor.forward_head(
+            latent_pi, action_mask=action_mask
+        )
+        values = (
+            self.critic.forward_head(latent_pi).squeeze(-1)
+            if self.share_encoders
+            else self.critic(obs).squeeze(-1)
+        )
+        return action, log_prob, entropy, values
+
+    def evaluate_actions(
+        self,
+        obs: ArrayOrTensor,
+        actions: ArrayOrTensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Evaluates the actions.
+
+        :param obs: Environment observation, or multiple observations in a batch
+        :type obs: numpy.ndarray[float]
+        :param actions: Actions to evaluate
+        :type actions: torch.Tensor
+        :return: Log probability, entropy, and state values
+        :rtype: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        """
+        obs = self.preprocess_observation(obs)
+        _, _, entropy, values = self._get_action_and_values(obs)
+
+        # log_prob of passed actions given the current policy
+        log_prob = self.actor.action_log_prob(actions)
+
+        # Use -log_prob as entropy when squashing output in continuous action spaces
+        entropy = -log_prob.mean() if entropy is None else entropy
+
+        return log_prob, entropy, values
+
     def get_action(
         self,
         obs: ArrayOrTensor,
-        action: Optional[ArrayOrTensor] = None,
-        grad: bool = False,
         action_mask: Optional[ArrayOrTensor] = None,
     ) -> Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Returns the next action to take in the environment.
@@ -284,42 +333,14 @@ class PPO(RLAlgorithm):
         :type grad: bool, optional
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: numpy.ndarray, optional
+        :return: Action, log probability, entropy, and state values
+        :rtype: Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor]
         """
         obs = self.preprocess_observation(obs)
-        if not grad:
-            self.actor.eval()
-            self.critic.eval()
-            with torch.no_grad():
-                latent_pi = self.actor.extract_features(obs)
-                action_pred, log_prob, entropy = self.actor.forward_head(
-                    latent_pi, action_mask=action_mask
-                )
-                state_values = (
-                    self.critic.forward_head(latent_pi).squeeze(-1)
-                    if self.share_encoders
-                    else self.critic(obs).squeeze(-1)
-                )
-        else:
-            self.actor.train()
-            self.critic.train()
-            latent_pi = self.actor.extract_features(obs)
-            action_pred, log_prob, entropy = self.actor.forward_head(
-                latent_pi, action_mask=action_mask
+        with torch.no_grad():
+            action, log_prob, entropy, values = self._get_action_and_values(
+                obs, action_mask
             )
-            state_values = (
-                self.critic.forward_head(latent_pi).squeeze(-1)
-                if self.share_encoders
-                else self.critic(obs).squeeze(-1)
-            )
-
-        # If no action is provided, use the predicted action
-        return_tensors = True
-        if action is None:
-            action = action_pred
-            return_tensors = False
-        else:
-            action = action.to(self.device)
-            log_prob = self.actor.action_log_prob(action)
 
         # Use -log_prob as entropy when squashing output in continuous action spaces
         entropy = -log_prob.mean() if entropy is None else entropy
@@ -329,20 +350,12 @@ class PPO(RLAlgorithm):
         ):
             action = action.unsqueeze(1)
 
-        if return_tensors:
-            return (
-                action,
-                log_prob,
-                entropy,
-                state_values,
-            )
-        else:
-            return (
-                action.cpu().data.numpy(),
-                log_prob.cpu().data.numpy(),
-                entropy.cpu().data.numpy(),
-                state_values.cpu().data.numpy(),
-            )
+        return (
+            action.cpu().data.numpy(),
+            log_prob.cpu().data.numpy(),
+            entropy.cpu().data.numpy(),
+            values.cpu().data.numpy(),
+        )
 
     def learn(self, experiences: ExperiencesType) -> float:
         """Updates agent network parameters to learn from experiences.
@@ -416,8 +429,8 @@ class PPO(RLAlgorithm):
                 batch_values = batch_values.squeeze()
 
                 if len(minibatch_idxs) > 1:
-                    _, log_prob, entropy, value = self.get_action(
-                        obs=batch_states, action=batch_actions, grad=True
+                    log_prob, entropy, value = self.evaluate_actions(
+                        obs=batch_states, actions=batch_actions
                     )
 
                     logratio = log_prob - batch_log_probs

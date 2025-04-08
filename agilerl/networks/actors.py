@@ -1,6 +1,5 @@
 from typing import Optional, Tuple, Type, Union
 
-import numpy as np
 import torch
 from gymnasium import spaces
 
@@ -26,6 +25,8 @@ class DeterministicActor(EvolvableNetwork):
     :type encoder_config: ConfigType
     :param head_config: Configuration of the network MLP head.
     :type head_config: Optional[ConfigType]
+    :param clip_actions: Whether to clip the actions to the action space.
+    :type clip_actions: bool
     :param min_latent_dim: Minimum dimension of the latent space representation.
     :type min_latent_dim: int
     :param max_latent_dim: Maximum dimension of the latent space representation.
@@ -52,6 +53,7 @@ class DeterministicActor(EvolvableNetwork):
         encoder_cls: Optional[Union[str, Type[EvolvableModule]]] = None,
         encoder_config: Optional[ConfigType] = None,
         head_config: Optional[ConfigType] = None,
+        clip_actions: bool = True,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
         n_agents: Optional[int] = None,
@@ -75,6 +77,13 @@ class DeterministicActor(EvolvableNetwork):
             device=device,
         )
 
+        if isinstance(action_space, spaces.Box):
+            self.action_low = torch.as_tensor(action_space.low, device=self.device)
+            self.action_high = torch.as_tensor(action_space.high, device=self.device)
+        else:
+            self.action_low = None
+            self.action_high = None
+
         # Set output activation based on action space
         if isinstance(head_config, dict) and "output_activation" in head_config:
             output_activation = head_config["output_activation"]
@@ -86,6 +95,7 @@ class DeterministicActor(EvolvableNetwork):
         else:
             output_activation = None
 
+        self.clip_actions = clip_actions
         if head_config is None:
             head_config = MlpNetConfig(
                 hidden_size=[32], output_activation=output_activation
@@ -96,26 +106,7 @@ class DeterministicActor(EvolvableNetwork):
         self.build_network_head(head_config)
         self.output_activation = head_config.get("output_activation", output_activation)
 
-    @property
-    def action_low(self) -> Optional[torch.Tensor]:
-        """Get the minimum action.
-
-        :return: Minimum action.
-        :rtype: torch.Tensor
-        """
-        if isinstance(self.action_space, spaces.Box):
-            return torch.tensor(self.action_space.low, device=self.device)
-
-    @property
-    def action_high(self) -> Optional[torch.Tensor]:
-        """Get the maximum action.
-
-        :return: Maximum action.
-        :rtype: torch.Tensor
-        """
-        if isinstance(self.action_space, spaces.Box):
-            return torch.tensor(self.action_space.high, device=self.device)
-
+    @torch.compiler.disable
     @staticmethod
     def rescale_action(
         action: torch.Tensor,
@@ -136,41 +127,23 @@ class DeterministicActor(EvolvableNetwork):
         :return: Rescaled action.
         :rtype: torch.Tensor
         """
-        if output_activation == "Tanh":
+        if output_activation in ["Tanh", "Softsign"]:
             prescaled_min, prescaled_max = -1.0, 1.0
-        elif output_activation in ["Sigmoid", "Softmax"]:
+        elif output_activation in ["Sigmoid", "Softmax", "GumbelSoftmax"]:
             prescaled_min, prescaled_max = 0.0, 1.0
         else:
-            # For unbounded network outputs, we just clamp the action to the action space
-            action = torch.where(action > 0, action * high, action * -low)
-            prescaled_min, prescaled_max = -np.inf, np.inf
+            # For unbounded network outputs, we just return the action
+            return action
 
-        if np.isinf(prescaled_min) or np.isinf(prescaled_max):
+        # If the action space is unbounded, we just return the action
+        if low.isinf().any() or high.isinf().any():
             rescaled_action = action
         else:
             rescaled_action = low + (high - low) * (action - prescaled_min) / (
                 prescaled_max - prescaled_min
             )
 
-        return torch.clamp(rescaled_action, low, high)
-
-    def clip_action(self, action: torch.Tensor) -> torch.Tensor:
-        """Clip the action to the action space.
-
-        :param action: Action.
-        :type action: torch.Tensor
-        :return: Clipped action.
-        :rtype: torch.Tensor
-        """
-        if isinstance(self.action_space, spaces.Box):
-            return DeterministicActor.rescale_action(
-                action=action,
-                low=self.action_low,
-                high=self.action_high,
-                output_activation=self.output_activation,
-            )
-        else:
-            return action
+        return rescaled_action
 
     def build_network_head(self, net_config: Optional[ConfigType] = None) -> None:
         """Builds the head of the network.
@@ -194,7 +167,18 @@ class DeterministicActor(EvolvableNetwork):
         :rtype: torch.Tensor
         """
         latent = self.extract_features(obs)
-        return self.clip_action(self.head_net(latent))
+        action = self.head_net(latent)
+
+        # Action scaling only relevant for continuous action spaces
+        if isinstance(self.action_space, spaces.Box) and self.clip_actions:
+            action = DeterministicActor.rescale_action(
+                action=action,
+                low=self.action_low,
+                high=self.action_high,
+                output_activation=self.output_activation,
+            )
+
+        return action
 
     def recreate_network(self) -> None:
         """Recreates the network."""
@@ -296,6 +280,15 @@ class StochasticActor(EvolvableNetwork):
         self.build_network_head(head_config)
         self.output_activation = None
 
+        if isinstance(self.action_space, spaces.Box):
+            self.action_low = torch.as_tensor(self.action_space.low, device=self.device)
+            self.action_high = torch.as_tensor(
+                self.action_space.high, device=self.device
+            )
+        else:
+            self.action_low = None
+            self.action_high = None
+
         # Wrap the network in an EvolvableDistribution
         self.head_net = EvolvableDistribution(
             action_space=action_space,
@@ -304,26 +297,6 @@ class StochasticActor(EvolvableNetwork):
             squash_output=squash_output,
             device=device,
         )
-
-    @property
-    def action_low(self) -> Optional[torch.Tensor]:
-        """Get the minimum action.
-
-        :return: Minimum action.
-        :rtype: torch.Tensor
-        """
-        if isinstance(self.action_space, spaces.Box):
-            return torch.tensor(self.action_space.low, device=self.device)
-
-    @property
-    def action_high(self) -> Optional[torch.Tensor]:
-        """Get the maximum action.
-
-        :return: Maximum action.
-        :rtype: torch.Tensor
-        """
-        if isinstance(self.action_space, spaces.Box):
-            return torch.tensor(self.action_space.high, device=self.device)
 
     def build_network_head(self, net_config: Optional[ConfigType] = None) -> None:
         """Builds the head of the network.
@@ -338,26 +311,17 @@ class StochasticActor(EvolvableNetwork):
             net_config=net_config,
         )
 
-    def clip_action(self, action: torch.Tensor) -> torch.Tensor:
-        """Clip the action to the action space.
+    def scale_action(self, action: torch.Tensor) -> torch.Tensor:
+        """Scale the action to the action space.
 
         :param action: Action.
         :type action: torch.Tensor
-        :return: Clipped action.
+        :return: Scaled action.
         :rtype: torch.Tensor
         """
-        # Action clipping only relevant for continuous action spaces
-        if isinstance(self.action_space, spaces.Box):
-            if self.squash_output:
-                action = self.action_low + (
-                    0.5 * (action + 1.0) * (self.action_high - self.action_low)
-                )
-            else:
-                # Sampling from a Gaussian distribution yields unbounded actions
-                # so we need to clip rather than rescale them
-                action = action.clamp(self.action_low, self.action_high)
-
-        return action
+        return self.action_low + (
+            0.5 * (action + 1.0) * (self.action_high - self.action_low)
+        )
 
     def forward(
         self, obs: TorchObsType, action_mask: Optional[ArrayOrTensor] = None
@@ -366,12 +330,19 @@ class StochasticActor(EvolvableNetwork):
 
         :param obs: Observation input.
         :type obs: TorchObsType
+        :param action_mask: Action mask.
+        :type action_mask: Optional[ArrayOrTensor]
         :return: Action and log probability of the action.
         :rtype: Tuple[torch.Tensor, torch.Tensor]
         """
         latent = self.extract_features(obs)
         action, log_prob, entropy = self.head_net.forward(latent, action_mask)
-        return self.clip_action(action), log_prob, entropy
+
+        # Action scaling only relevant for continuous action spaces with squashing
+        if isinstance(self.action_space, spaces.Box) and self.squash_output:
+            action = self.scale_action(action)
+
+        return action, log_prob, entropy
 
     def action_log_prob(self, action: torch.Tensor) -> torch.Tensor:
         """Get the log probability of the action.

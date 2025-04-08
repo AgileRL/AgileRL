@@ -1,7 +1,7 @@
 ---
 # Define initial hyperparameters
 INIT_HP:
-    ENV_NAME: LunarLanderContinuous-v2   # Gym environment name
+    ENV_NAME: LunarLanderContinuous-v3   # Gym environment name
     ALGO: DDPG                           # Algorithm
     # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     CHANNELS_LAST: false
@@ -29,7 +29,7 @@ INIT_HP:
     EVAL_LOOP: 1               # Evaluation episodes
     LEARNING_DELAY: 10_000     # Steps before learning
     SHARE_ENCODERS: false       # Share encoders between actor and critic
-    WANDB: false                # Log with Weights and Biases
+    WANDB: true                # Log with Weights and Biases
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation

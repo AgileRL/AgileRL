@@ -2044,82 +2044,6 @@ def test_ippo_get_action_cnn(
         (
             1,
             generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            "default",
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            "default",
-        ),
-    ],
-)
-def test_get_action_distributed(
-    training, observation_spaces, action_spaces, compile_mode
-):
-    accelerator = Accelerator()
-    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
-    state = {
-        agent: np.random.randn(*observation_spaces[idx].shape).astype(np.float32)
-        for idx, agent in enumerate(agent_ids)
-    }
-    ippo = IPPO(
-        observation_spaces,
-        action_spaces,
-        agent_ids=agent_ids,
-        accelerator=accelerator,
-        torch_compiler=compile_mode,
-        net_config={
-            "encoder_config": {"hidden_size": [16, 16], "init_layers": False},
-            "head_config": {"hidden_size": [16], "init_layers": False},
-        },
-    )
-    new_actors = [
-        DummyStochasticActor(
-            observation_space=actor.observation_space,
-            action_space=actor.action_space,
-            device=actor.device,
-            action_std_init=ippo.action_std_init,
-            encoder_config={"hidden_size": [16, 16], "init_layers": False},
-            head_config={"hidden_size": [16], "init_layers": False},
-        )
-        for actor in ippo.actors
-    ]
-    ippo.actors = new_actors
-    actions, log_probs, dist_entropy, state_values = ippo.get_action(obs=state)
-
-    # Check returns are the proper format
-    assert isinstance(actions, dict)
-    assert isinstance(log_probs, dict)
-    assert isinstance(dist_entropy, dict)
-    assert isinstance(state_values, dict)
-
-    for agent_id in agent_ids:
-        assert agent_id in actions
-        assert agent_id in log_probs
-        assert agent_id in dist_entropy
-        assert agent_id in state_values
-
-
-@pytest.mark.parametrize(
-    "training, observation_spaces, action_spaces, compile_mode",
-    [
-        (
-            1,
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            None,
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            None,
-        ),
-        (
-            1,
-            generate_multi_agent_box_spaces(3, (6,)),
             generate_multi_agent_box_spaces(3, (2,), low=-1, high=1),
             None,
         ),
@@ -3136,3 +3060,149 @@ def test_ippo_init_warning(
             device=device,
             torch_compiler=compile_mode,
         )
+
+
+@pytest.mark.parametrize(
+    "observation_spaces, action_spaces, compile_mode",
+    [
+        (
+            generate_multi_agent_box_spaces(3, (6,)),
+            generate_multi_agent_discrete_spaces(3, 2),
+            None,
+        ),
+    ],
+)
+def test_homogeneous_outputs_functions(observation_spaces, action_spaces, compile_mode):
+    """Test that the assemble_homogeneous_outputs and disassemble_homogeneous_outputs
+    functions work as expected and are inverses of each other."""
+
+    # Initialize agent with homogeneous agents
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    agent = IPPO(
+        observation_spaces,
+        action_spaces,
+        agent_ids=agent_ids,
+        device="cpu",
+        torch_compiler=compile_mode,
+    )
+
+    # Setting up homogeneous agent configuration
+    agent.shared_agent_ids = ["agent", "other_agent"]
+    agent.homogeneous_agents = {
+        "agent": ["agent_0", "agent_1"],
+        "other_agent": ["other_agent_0"],
+    }
+
+    # Create sample individual agent outputs
+    vect_dim = 4
+    output_dim = 5
+    agent_outputs = {
+        "agent_0": np.random.rand(vect_dim, output_dim),
+        "agent_1": np.random.rand(vect_dim, output_dim),
+        "other_agent_0": np.random.rand(vect_dim, output_dim),
+    }
+
+    # Test assemble_homogeneous_outputs
+    homo_outputs = agent.assemble_homogeneous_outputs(agent_outputs, vect_dim)
+
+    # Check that the homogeneous outputs have the correct keys
+    assert set(homo_outputs.keys()) == {"agent", "other_agent"}
+
+    # Check that the agent outputs are assembled correctly
+    assert homo_outputs["agent"].shape == (2 * vect_dim, output_dim)
+    assert homo_outputs["other_agent"].shape == (1 * vect_dim, output_dim)
+
+    # Test disassemble_homogeneous_outputs
+    disassembled_outputs = agent.disassemble_homogeneous_outputs(homo_outputs, vect_dim)
+
+    # Check that the disassembled outputs have the correct keys
+    assert set(disassembled_outputs.keys()) == {"agent_0", "agent_1", "other_agent_0"}
+
+    # Check that the outputs are correctly disassembled
+    for agent_id in agent_ids:
+        assert disassembled_outputs[agent_id].shape == (vect_dim, output_dim)
+
+    # Check the round trip consistency by comparing the original and disassembled outputs
+    for agent_id in agent_ids:
+        np.testing.assert_allclose(
+            agent_outputs[agent_id],
+            disassembled_outputs[agent_id],
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
+
+@pytest.mark.parametrize(
+    "training, observation_spaces, action_spaces, compile_mode",
+    [
+        (
+            1,
+            generate_multi_agent_box_spaces(3, (6,)),
+            generate_multi_agent_discrete_spaces(3, 2),
+            None,
+        ),
+        (
+            0,
+            generate_multi_agent_box_spaces(3, (6,)),
+            generate_multi_agent_discrete_spaces(3, 2),
+            None,
+        ),
+        (
+            1,
+            generate_multi_agent_box_spaces(3, (6,)),
+            generate_multi_agent_discrete_spaces(3, 2),
+            "default",
+        ),
+        (
+            0,
+            generate_multi_agent_box_spaces(3, (6,)),
+            generate_multi_agent_discrete_spaces(3, 2),
+            "default",
+        ),
+    ],
+)
+def test_get_action_distributed(
+    training, observation_spaces, action_spaces, compile_mode
+):
+    accelerator = Accelerator()
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    state = {
+        agent: np.random.randn(*observation_spaces[idx].shape).astype(np.float32)
+        for idx, agent in enumerate(agent_ids)
+    }
+    ippo = IPPO(
+        observation_spaces,
+        action_spaces,
+        agent_ids=agent_ids,
+        accelerator=accelerator,
+        torch_compiler=compile_mode,
+        net_config={
+            "encoder_config": {"hidden_size": [16, 16], "init_layers": False},
+            "head_config": {"hidden_size": [16], "init_layers": False},
+        },
+    )
+    new_actors = [
+        DummyStochasticActor(
+            observation_space=actor.observation_space,
+            action_space=actor.action_space,
+            device=actor.device,
+            action_std_init=ippo.action_std_init,
+            encoder_config={"hidden_size": [16, 16], "init_layers": False},
+            head_config={"hidden_size": [16], "init_layers": False},
+        )
+        for actor in ippo.actors
+    ]
+    ippo.actors = new_actors
+    actions, log_probs, dist_entropy, state_values = ippo.get_action(obs=state)
+
+    # Check returns are the proper format
+    assert isinstance(actions, dict)
+    assert isinstance(log_probs, dict)
+    assert isinstance(dist_entropy, dict)
+    assert isinstance(state_values, dict)
+
+    for agent_id in agent_ids:
+        assert agent_id in actions
+        assert agent_id in log_probs
+        assert agent_id in dist_entropy
+        assert agent_id in state_values
