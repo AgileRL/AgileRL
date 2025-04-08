@@ -429,15 +429,22 @@ def concatenate_spaces(space_list: List[SupportedSpace]) -> spaces.Space:
         )
 
 
-def obs_channels_to_first(observation: NumpyObsType) -> NumpyObsType:
+def obs_channels_to_first(
+    observation: NumpyObsType, expand_dims: bool = False
+) -> NumpyObsType:
     """Converts observation space from channels last to channels first format.
 
     :param observation_space: Observation space
     :type observation_space: Union[spaces.Box, spaces.Dict]
+    :param expand_dims: If True, expand the dimensions of the observation, defaults to False
+    :type expand_dims: bool, optional
     :return: Observation space with channels first format
     :rtype: Union[spaces.Box, spaces.Dict]
     """
     if isinstance(observation, np.ndarray):
+        if expand_dims:
+            observation = np.expand_dims(observation, axis=0)
+
         if observation.ndim == 3 or observation.ndim == 4:
             return np.moveaxis(observation, -1, -3)
         else:
