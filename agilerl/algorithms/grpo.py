@@ -679,12 +679,8 @@ class GRPO(RLAlgorithm):
             # clone.reference_actor = model  # Assign the newly created model as the reference_actor
             clone.reference_actor.load_state_dict(self.reference_actor.state_dict())
             clone.reference_actor.eval()
-            for param in clone.reference_actor.parameters():
-                assert not param.requires_grad
 
             # Set the clone attributes
-            clone.reference_actor = self.reference_actor
-            clone.reference_actor.eval() 
             clone.fitness = self.fitness
             clone.scores = self.scores
             clone.steps = self.steps
@@ -737,7 +733,7 @@ class GRPO(RLAlgorithm):
         if self.accelerator is not None:
             self.accelerator.free_memory()
             self.accelerator.wait_for_everyone()
-        self.reference_actor = None
+        del self.reference_actor 
         del self.actor 
         del self.optimizer
         del self.lr_scheduler
