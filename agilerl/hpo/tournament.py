@@ -8,7 +8,7 @@ from agilerl.algorithms.core.base import EvolvableAlgorithm
 PopulationType = List[EvolvableAlgorithm]
 
 
-class OldTournamentSelection:
+class TournamentSelection:
     """The tournament selection class.
 
     :param tournament_size: Tournament selection size
@@ -30,12 +30,14 @@ class OldTournamentSelection:
         assert isinstance(elitism, bool), "Elitism must be boolean value True or False."
         assert population_size > 0, "Population size must be greater than zero."
         assert eval_loop > 0, "Evo step must be greater than zero."
-
         self.tournament_size = tournament_size
         self.elitism = elitism
         self.population_size = population_size
         self.eval_loop = eval_loop
         self.language_model = language_model
+        self.select = self._select_llm_agents if language_model else self._select_standard_agents
+
+
     def _tournament(self, fitness_values: List[float]) -> int:
         """
         Perform a tournament selection.
@@ -46,12 +48,8 @@ class OldTournamentSelection:
         :rtype: int
         """
         selection = np.random.randint(0, len(fitness_values), size=self.tournament_size)    
-        print("SELCTION", selection)
         selection_values = [fitness_values[i] for i in selection]
-        print("SELECTION VALUES", selection_values)
         winner = selection[np.argmax(selection_values)]
-        print("WINNER", winner)
-        assert False
         return winner
 
     def _elitism(
@@ -69,10 +67,10 @@ class OldTournamentSelection:
         rank = np.argsort(last_fitness).argsort()
         max_id = max([ind.index for ind in population])
         model = population[int(np.argsort(rank)[-1])]
-        elite = model.clone()
+        elite = model.clone() if not self.language_model else model.index
         return elite, rank, max_id
 
-    def select(
+    def _select_standard_agents(
         self, population: PopulationType
     ) -> Tuple[EvolvableAlgorithm, PopulationType]:
         """
@@ -98,92 +96,10 @@ class OldTournamentSelection:
             actor_parent = population[self._tournament(rank)]
             new_individual = actor_parent.clone(max_id, wrap=False)
             new_population.append(new_individual)
-
-        if self.language_model:
-            for agent in population:
-                if hasattr(agent, "accelerator"):
-                    if agent.accelerator is not None:
-                        agent.accelerator.wait_for_everyone()
-                        agent.accelerator.free_memory()
-                    del agent.accelerator
-                if hasattr(agent, "actor"):
-                    try:
-                        agent.actor.empty_partition_cache()                
-                    finally:
-                        del agent.actor
-            torch.cuda.empty_cache()
         
         return elite, new_population
-
-
-
-class TournamentSelection:
-    """The tournament selection class.
-
-    :param tournament_size: Tournament selection size
-    :type tournament_size: int
-    :param elitism: Elitism in tournament selection
-    :type elitism: bool
-    :param population_size: Number of agents in population
-    :type population_size: int
-    :param eval_loop: Number of most recent fitness scores to use in evaluation
-    :type eval_loop: int
-    :param language_model: Boolean flag to indicate if the agents are language models
-    :type language_model: bool
-    """
-
-    def __init__(
-        self, tournament_size: int, elitism: bool, population_size: int, eval_loop: int, language_model: bool = False
-    ) -> None:
-        assert tournament_size > 0, "Tournament size must be greater than zero."
-        assert isinstance(elitism, bool), "Elitism must be boolean value True or False."
-        assert population_size > 0, "Population size must be greater than zero."
-        assert eval_loop > 0, "Evo step must be greater than zero."
-
-        self.tournament_size = tournament_size
-        self.elitism = elitism
-        self.population_size = population_size
-        self.eval_loop = eval_loop
-        self.language_model = language_model
-
-    def _tournament(self, fitness_values: List[float]) -> int:
-        """
-        Perform a tournament selection.
-
-        :param fitness_values: List of fitness values   
-        :type fitness_values: list[float]
-        :return: Index of the selected winner
-        :rtype: int
-        """
-        print("FITNESS VALUES", fitness_values)
-        selection = np.random.randint(0, len(fitness_values), size=self.tournament_size)    
-        print("SELCTION", selection)
-        selection_values = [fitness_values[i] for i in selection]
-        print("SELECTION VALUES", selection_values)
-        winner = selection[np.argmax(selection_values)]
-        print("WINNER", winner)
-        return winner
-
-    def _elitism(
-        self, population: PopulationType
-    ) -> Tuple[EvolvableAlgorithm, np.ndarray, int]:
-        """
-        Perform elitism selection.
-
-        :param population: Population of agents
-        :type population: PopulationType
-        :return: Elite member of population, rank array, and max id
-        :rtype: tuple[EvolvableAlgorithm, np.ndarray, int]
-        """
-        last_fitness = [np.mean(indi.fitness[-self.eval_loop :]) for indi in population]
-        rank = np.argsort(last_fitness).argsort()
-        print("RANK", rank)
-        max_id = max([ind.index for ind in population])
-        model = population[int(np.argsort(rank)[-1])]
-        elite_idx = model.index
-        return elite_idx, rank, max_id
-
-    def select(
+    
+    def _select_llm_agents(
         self, population: PopulationType
     ) -> Tuple[EvolvableAlgorithm, PopulationType]:
         """
