@@ -192,10 +192,8 @@ from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
 
-field_names = ["state", "action", "reward", "next_state", "done"]
 memory = ReplayBuffer(
-    memory_size=INIT_HP['MEMORY_SIZE'],   # Max replay buffer size
-    field_names=field_names,              # Field names to store in memory
+    max_size=INIT_HP['MEMORY_SIZE'],   # Max replay buffer size
     device=device,
 )
 

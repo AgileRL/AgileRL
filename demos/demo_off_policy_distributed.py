@@ -67,17 +67,11 @@ if __name__ == "__main__":
         accelerator=accelerator,  # Accelerator
     )
 
-    field_names = ["state", "action", "reward", "next_state", "done"]
-    memory = ReplayBuffer(
-        memory_size=10000,  # Max replay buffer size
-        field_names=field_names,
-    )  # Field names to store in memory
+    memory = ReplayBuffer(max_size=10000)
     replay_dataset = ReplayDataset(memory, INIT_HP["BATCH_SIZE"])
     replay_dataloader = DataLoader(replay_dataset, batch_size=None)
     replay_dataloader = accelerator.prepare(replay_dataloader)
-    sampler = Sampler(
-        distributed=True, dataset=replay_dataset, dataloader=replay_dataloader
-    )
+    sampler = Sampler(dataset=replay_dataset, dataloader=replay_dataloader)
 
     tournament = TournamentSelection(
         tournament_size=2,  # Tournament selection size
@@ -94,7 +88,6 @@ if __name__ == "__main__":
         parameters=0.2,  # Network parameters mutation
         activation=0,  # Activation layer mutation
         rl_hp=0.2,  # Learning HP mutation
-        rl_hp_selection=["lr", "batch_size"],  # Learning HPs to choose from
         mutation_sd=0.1,  # Mutation strength  # Network architecture
         rand_seed=1,  # Random seed
         accelerator=accelerator,

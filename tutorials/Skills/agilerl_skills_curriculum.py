@@ -3,9 +3,9 @@ from datetime import datetime
 
 import numpy as np
 import torch
-import wandb
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms.ppo import PPO
 from agilerl.training.train_on_policy import train_on_policy
 from agilerl.utils.utils import (
@@ -135,7 +135,7 @@ if __name__ == "__main__":
     }
 
     INIT_HP = {
-        "ENV_NAME": "LunarLander-v2",
+        "ENV_NAME": "LunarLander-v3",
         "ALGO": "PPO",
         "POPULATION_SIZE": 1,  # Population size
         "BATCH_SIZE": 128,  # Batch size
