@@ -1494,56 +1494,36 @@ def test_ippo_learns_from_experiences_mlp(
         assert old_critic_state_dict != str(updated_critic.state_dict())
 
 
+@pytest.mark.parametrize("agent_ids", [["agent_0", "agent_1", "other_agent_0"]])
+@pytest.mark.parametrize("batch_size", [32])
+@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("vect_dim", [1, 8])
 @pytest.mark.parametrize(
-    "observation_spaces, batch_size, vect_dim, action_spaces, agent_ids, compile_mode",
+    "observation_spaces, action_spaces",
     [
         (
             generate_multi_agent_discrete_spaces(3, 6),
-            64,
-            8,
             generate_multi_agent_discrete_spaces(3, 2),
-            ["agent_0", "agent_1", "other_agent_0"],
-            None,
         ),
         (
             generate_multi_agent_discrete_spaces(3, 6),
-            64,
-            8,
             generate_multi_agent_box_spaces(3, (6,)),
-            ["agent_0", "agent_1", "other_agent_0"],
-            None,
         ),
         (
             generate_multi_agent_discrete_spaces(3, 6),
-            64,
-            2,
             generate_multi_agent_discrete_spaces(3, 2),
-            ["agent_0", "agent_1", "other_agent_0"],
-            "default",
         ),
         (
             generate_multi_agent_box_spaces(3, (6,)),
-            32,
-            4,
             generate_multi_agent_discrete_spaces(3, 3),
-            ["agent_0", "agent_1", "other_agent_0"],
-            "default",
         ),
         (
             generate_multi_agent_box_spaces(3, (6,)),
-            4,
-            1,
             generate_multi_agent_discrete_spaces(3, 2),
-            ["agent_0", "agent_1", "other_agent_0"],
-            None,
         ),
         (
             generate_multi_agent_box_spaces(3, (6,)),
-            4,
-            3,
-            generate_multi_agent_box_spaces(3, (6,)),
-            ["agent_0", "agent_1", "other_agent_0"],
-            None,
+            generate_multi_agent_box_spaces(3, (1,)),
         ),
     ],
 )
