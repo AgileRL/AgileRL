@@ -1,11 +1,7 @@
-import copy
 import gc
-import glob
 import os
 import warnings
 from typing import Dict, List, Optional, Tuple, Union
-from peft import get_peft_model
-import deepspeed
 import numpy as np
 import torch
 import torch.nn as nn
@@ -21,7 +17,7 @@ from torch.optim import Optimizer
 from transformers import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
 from peft import PeftModel
-from agilerl.algorithms.core import EvolvableAlgorithm, RLAlgorithm
+from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.typing import DeviceType, ExperiencesType
@@ -29,10 +25,8 @@ from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     create_warmup_cosine_scheduler,
     get_experiences_samples,
-    remove_nested_files,
     stack_and_pad_experiences,
     clone_llm,
-    is_peft_model
 )
 from agilerl.utils.llm_utils import (
     HuggingFaceGym,
@@ -44,7 +38,7 @@ DeepSpeedOptimizerType = Union[
 ]
 
 
-class GRPO(RLAlgorithm):
+class GRPO(LLMAlgorithm):
     """The GRPO algorithm class. GRPO paper: https://arxiv.org/pdf/2402.03300
 
     :param observation_space: Observation space of the environment
@@ -128,8 +122,7 @@ class GRPO(RLAlgorithm):
             index=index,
             hp_config=hp_config,
             device=device,
-            accelerator=None,
-            normalize_images=False,
+            accelerator=accelerator,
             name="GRPO",
         )
         assert isinstance(batch_size, int), "Batch size must be an integer."
@@ -178,7 +171,6 @@ class GRPO(RLAlgorithm):
             self.max_grad_norm = max_grad_norm
         self.reduce_memory_peak = reduce_memory_peak
         self.local_rank = device.split(":")[-1]
-        self.accelerator = accelerator
         self._initialize_actors(actor_network, not clone)
         del actor_network
 
@@ -523,212 +515,5 @@ class GRPO(RLAlgorithm):
             self.lr_scheduler.step()
             self.lr = self.lr_scheduler.get_last_lr()[0]
 
-    def save_checkpoint(self, path: str) -> None:
-        """
-        Override the save_checkpoint method to provide guidance on the correct method to use.
-        :param path: Location to save checkpoint at
-        :type path: string
-        """
-        raise NotImplementedError(
-            "The save_checkpoint method is not supported for this algorithm class. "
-            "Please use agent.actor.save_pretrained(checkpoint_path) instead."
-        )
-
-    def load_checkpoint(self, path: str) -> None:
-        """
-        Override the load_checkpoint method to provide guidance on the correct method to use.
-
-        :param path: Location to load checkpoint from
-        :type path: string
-        """
-        raise NotImplementedError(
-            "The load_checkpoint method is not supported for this algorithm class."
-            """
-            To load a saved LLM, please load the model as follows, and then re-instantiate the GRPO
-            class.
-
-            base_model = AutoModelForCausalLM.from_pretrained(
-                "Qwen/Qwen2.5-3B",
-                torch_dtype=torch.bfloat16,
-                device_map="auto"
-            )
-            tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B")
-            model = PeftModel.from_pretrained(base_model, "/path/to/adapter/folder")
-            """
-        )
-
-    def _save_distributed_actor(self, path: str) -> None:
-        """
-        Override the save_checkpoint method to provide guidance on the correct method to use.
-
-        :param path: Output directory to save the checkpoint at
-        :type path: str
-        """
-        if self.accelerator is not None:
-            os.makedirs(path, exist_ok=True)
-            self.actor.save_checkpoint(path, tag="checkpoint")    
-        else:
-            warnings.warn(
-                "Distributed actor save not supported for non-distributed training."
-            )
-
-    def _load_distributed_actor(self, path: str) -> None:
-        """
-        Override the load_checkpoint method to provide guidance on the correct method to use.
-
-        :param path: Output directory to load the checkpoint from
-        :type path: str
-        """
-        if self.accelerator is not None:
-            deepspeed_dirs = sorted(glob.glob(f"{path}/checkpoint"))
-            assert len(deepspeed_dirs) > 0
-            load_path, _ = self.actor.load_checkpoint(
-                path,
-                tag="checkpoint",
-                load_module_strict=not is_peft_model(self.accelerator.unwrap_model(self.actor)), 
-                load_optimizer_states=True,
-                load_lr_scheduler_states=True,
-            )
-
-            if load_path is None:
-                raise ValueError(f"[deepspeed] failed to resume from checkpoint {path}")
-        else:
-            warnings.warn(
-                "Distributed actor load not supported for non-distributed training."
-            )
-
-    @classmethod
-    def load(
-        cls,
-        path: str,
-        device: DeviceType = "cpu",
-        accelerator: Optional[Accelerator] = None,
-    ) -> None:
-        raise NotImplementedError(
-            "The load class method is not supported for this algorithm class."
-            """
-            To load a saved LLM, please load the model as follows, and then re-instantiate the GRPO
-            class, using the pre-trained model.
-
-            base_model = AutoModelForCausalLM.from_pretrained(
-                "Qwen/Qwen2.5-3B",
-                torch_dtype=torch.bfloat16,
-                device_map="auto"
-            )
-            tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B")
-            model = PeftModel.from_pretrained(base_model, "/path/to/adapter/folder")
-            """
-        )
-
-    def wrap_models(self):
-        """Wrap the models in the accelerator
-        """
-        if self.accelerator is not None:
-            self.actor, self.optimizer, self.lr_scheduler = self.accelerator.prepare(
-                self.actor, self.optimizer.optimizer, self.lr_scheduler
-            )
-            deepspeed_plugin = self.accelerator.state.deepspeed_plugin
-            config_kwargs = copy.deepcopy(deepspeed_plugin.deepspeed_config)
-            config_kwargs["zero_optimization"]["stage"] = 0
-            self.reference_actor, *_ = deepspeed.initialize(
-                model=self.reference_actor, config=config_kwargs
-            )
-
-
-    def clone(self, index: Optional[int] = None, wrap: bool = True):
-        """Creates a clone of the algorithm.
-
-        :param index: The index of the clone, defaults to None
-        :type index: Optional[int], optional
-        :param wrap: If True, wrap the models in the clone with the accelerator, defaults to False
-        :type wrap: bool, optional
-
-        :return: A clone of the algorithm
-        :rtype: EvolvableAlgorithm
-        """
-        if self.accelerator is not None:
-            self.accelerator.wait_for_everyone()
-            self._save_distributed_actor(f"temporary_checkpoint/agent_{self.index}")
-            self.accelerator.wait_for_everyone()
-            input_args = EvolvableAlgorithm.inspect_attributes(
-                self, input_args_only=True
-            )
-            input_args["clone"] = True
-
-            # extract base model and peft config
-            original_model = self.accelerator.unwrap_model(self.actor)
-            model = clone_llm(original_model) # NOTE do we want to load this state dict given we load the checkpoint in?
-
-            input_args["actor_network"] = model
-            input_args["accelerator"] = Accelerator()
-            clone = type(self)(**input_args)
-
-            clone.reference_actor.load_state_dict(self.reference_actor.state_dict())
-            clone.reference_actor.eval()
-
-            # Set the clone attributes
-            clone.fitness = self.fitness
-            clone.scores = self.scores
-            clone.steps = self.steps
-  
-            if index is not None:
-                clone.index = index
-            clone.accelerator.wait_for_everyone()
-            clone._load_distributed_actor(f"temporary_checkpoint/agent_{self.index}")
-            clone.accelerator.wait_for_everyone()
-            saved_state_files = glob.glob(f"temporary_checkpoint/agent_{self.index}/*")
-            clone.accelerator.wait_for_everyone()
-            if self.accelerator.is_main_process:
-                remove_nested_files(saved_state_files)
-
-        else:
-            # Cloning without an accelerator
-            input_args = EvolvableAlgorithm.inspect_attributes(
-                self, input_args_only=True
-            )
-            input_args["clone"] = True
-
-            # extract base model and peft config
-            original_model = self.accelerator.unwrap_model(self.actor)
-            model = clone_llm(original_model) 
-
-            input_args["actor_network"] = model
-            input_args["accelerator"] = Accelerator()
-            clone = type(self)(**input_args)
-
-            # clone.reference_actor = model  # Assign the newly created model as the reference_actor
-            clone.reference_actor.load_state_dict(self.reference_actor.state_dict())
-            clone.reference_actor.eval()
-
-            clone.optimizer.optimizer.load_state_dict(self.optimizer.optimizer.state_dict())
-            if self.lr_scheduler is not None:
-                clone.lr_scheduler.load_state_dict(self.lr_scheduler.state_dict())
-
-            # Set the clone attributes
-            clone.fitness = self.fitness
-            clone.scores = self.scores
-            clone.steps = self.steps
-  
-            if index is not None:
-                clone.index = index
-           
-        return clone
-
-
-    def __del__(self) -> None:
-        """Delete the algorithm.
-
-        :return: None
-        :rtype: None
-        """
-        if self.accelerator is not None:
-            self.accelerator.free_memory()
-            self.accelerator.wait_for_everyone()
-        del self.reference_actor 
-        del self.actor 
-        del self.optimizer
-        del self.lr_scheduler
-        gc.collect()
-        torch.cuda.empty_cache()
-
+    
 

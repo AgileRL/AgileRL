@@ -132,7 +132,6 @@ class DummyLLM(PreTrainedModel):
         self.input_size = config.input_size
         self.max_tokens = config.max_tokens
         self.vocab_size = config.vocab_size
-        self.device = device
         self.gradient_checkpointing_enabled = False
 
         self.net = nn.Sequential(

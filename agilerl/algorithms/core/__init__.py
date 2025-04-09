@@ -1,4 +1,4 @@
-from .base import EvolvableAlgorithm, MultiAgentRLAlgorithm, RLAlgorithm
+from .base import EvolvableAlgorithm, MultiAgentRLAlgorithm, RLAlgorithm, LLMAlgorithm
 from .wrappers import OptimizerWrapper
 
 __all__ = [
@@ -6,4 +6,5 @@ __all__ = [
     "RLAlgorithm",
     "MultiAgentRLAlgorithm",
     "OptimizerWrapper",
+    "LLMAlgorithm",
 ]

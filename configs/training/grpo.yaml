@@ -29,5 +29,5 @@ INIT_HP:
     COSINE_lR_SCHEDULER:
     TOURN_SIZE: 2
     ELITISM: true
-    POP_SIZE: 4
+    POP_SIZE: 1
     EVAL_LOOP: 1
