@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import wandb
 from gymnasium import spaces
+from tensordict import TensorDict
 from tqdm import trange
 from ucimlrepo import fetch_ucirepo
 
@@ -67,12 +68,7 @@ if __name__ == "__main__":
         device=device,
     )
 
-    field_names = ["context", "reward"]
-    memory = ReplayBuffer(
-        memory_size=10000,  # Max replay buffer size
-        field_names=field_names,  # Field names to store in memory
-        device=device,
-    )
+    memory = ReplayBuffer(INIT_HP["MEMORY_SIZE"], device=device)
 
     tournament = TournamentSelection(
         tournament_size=2,  # Tournament selection size
@@ -130,7 +126,14 @@ if __name__ == "__main__":
                 next_context, reward = env.step(action)  # Act in environment
 
                 # Save experience to replay buffer
-                memory.save_to_memory(context[action], reward)
+                transition = TensorDict(
+                    {
+                        "obs": context[action],
+                        "reward": reward,
+                    },
+                ).float()
+                transition.batch_size = [1]
+                memory.add(transition)
 
                 # Learn according to learning frequency
                 if len(memory) >= agent.batch_size:

@@ -39,10 +39,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     if INIT_HP["CHANNELS_LAST"]:
         context_dim = (context_dim[2], context_dim[0], context_dim[1])
 
-    field_names = ["context", "action"]
-    memory = ReplayBuffer(
-        INIT_HP["MEMORY_SIZE"], field_names=field_names, device=device
-    )
+    memory = ReplayBuffer(INIT_HP["MEMORY_SIZE"], device=device)
     tournament = TournamentSelection(
         INIT_HP["TOURN_SIZE"],
         INIT_HP["ELITISM"],

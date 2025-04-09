@@ -135,7 +135,7 @@ if __name__ == "__main__":
     }
 
     INIT_HP = {
-        "ENV_NAME": "LunarLander-v2",
+        "ENV_NAME": "LunarLander-v3",
         "ALGO": "PPO",
         "POPULATION_SIZE": 1,  # Population size
         "BATCH_SIZE": 128,  # Batch size

@@ -170,12 +170,7 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
                     )
 
         if INIT_HP["ALGO"] != "PPO":
-            field_names = ["state", "action", "reward", "next_state", "done"]
-            memory = ReplayBuffer(
-                INIT_HP["MEMORY_SIZE"],
-                field_names=field_names,
-                device=device,
-            )
+            memory = ReplayBuffer(INIT_HP["MEMORY_SIZE"], device=device)
 
     else:
         ####

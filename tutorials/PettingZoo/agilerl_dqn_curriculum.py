@@ -121,7 +121,7 @@ class CurriculumEnv:
                         done=np.array([done, done, done, done]),
                         batch_size=[4],
                     )
-                    memory.add(transition.to_tensordict(), is_vectorised=True)
+                    memory.add(transition.to_tensordict())
                 else:  # Play continues
                     if p1_state is not None:
                         reward = self.reward(done=False, player=1)
@@ -135,7 +135,7 @@ class CurriculumEnv:
                             done=np.array([done, done]),
                             batch_size=[2],
                         )
-                        memory.add(transition.to_tensordict(), is_vectorised=True)
+                        memory.add(transition.to_tensordict())
 
                     # Player 1's turn
                     p1_action_mask = observation["action_mask"]
@@ -187,7 +187,7 @@ class CurriculumEnv:
                             done=np.array([done, done, done, done]),
                             batch_size=[4],
                         )
-                        memory.add(transition.to_tensordict(), is_vectorised=True)
+                        memory.add(transition.to_tensordict())
                     else:  # Play continues
                         reward = self.reward(done=False, player=0)
                         transition = Transition(
@@ -200,7 +200,7 @@ class CurriculumEnv:
                             done=np.array([done, done]),
                             batch_size=[2],
                         )
-                        memory.add(transition.to_tensordict(), is_vectorised=True)
+                        memory.add(transition.to_tensordict())
 
             pbar.update(len(memory) - mem_full)
         pbar.close()
@@ -822,7 +822,7 @@ if __name__ == "__main__":
                                 done=np.array([done, done, done, done]),
                                 batch_size=[4],
                             )
-                            memory.add(transition.to_tensordict(), is_vectorised=True)
+                            memory.add(transition.to_tensordict())
                         else:  # Play continues
                             if p1_state is not None:
                                 reward = env.reward(done=False, player=1)
@@ -836,9 +836,7 @@ if __name__ == "__main__":
                                     done=np.array([done, done]),
                                     batch_size=[2],
                                 )
-                                memory.add(
-                                    transition.to_tensordict(), is_vectorised=True
-                                )
+                                memory.add(transition.to_tensordict())
 
                             # Player 1"s turn
                             p1_action_mask = observation["action_mask"]
@@ -918,9 +916,7 @@ if __name__ == "__main__":
                                     done=np.array([done, done, done, done]),
                                     batch_size=[4],
                                 )
-                                memory.add(
-                                    transition.to_tensordict(), is_vectorised=True
-                                )
+                                memory.add(transition.to_tensordict())
                             else:  # Play continues
                                 reward = env.reward(done=False, player=0)
                                 transition = Transition(
@@ -933,9 +929,7 @@ if __name__ == "__main__":
                                     done=np.array([done, done]),
                                     batch_size=[2],
                                 )
-                                memory.add(
-                                    transition.to_tensordict(), is_vectorised=True
-                                )
+                                memory.add(transition.to_tensordict())
 
                         # Learn according to learning frequency
                         if (memory.counter % agent.learn_step == 0) and (

@@ -154,6 +154,7 @@ Alternatively, use a custom bandit training loop:
 
     import numpy as np
     import torch
+    from tensordict import TensorDict
     from tqdm import trange
     from ucimlrepo import fetch_ucirepo
 
@@ -207,12 +208,7 @@ Alternatively, use a custom bandit training loop:
         device=device,
     )
 
-    field_names = ["context", "reward"]
-    memory = ReplayBuffer(
-        memory_size=10000,  # Max replay buffer size
-        field_names=field_names,  # Field names to store in memory
-        device=device,
-    )
+    memory = ReplayBuffer(max_size=10000, device=device)
 
     tournament = TournamentSelection(
         tournament_size=2,  # Tournament selection size
@@ -267,8 +263,15 @@ Alternatively, use a custom bandit training loop:
                 action = agent.get_action(context)
                 next_context, reward = env.step(action)  # Act in environment
 
+                transition = TensorDict(
+                    {
+                        "obs": context[action],
+                        "reward": reward,
+                    },
+                ).float()
+                transition.batch_size = [1]
                 # Save experience to replay buffer
-                memory.save_to_memory(context[action], reward)
+                memory.add(transition)
 
                 # Learn according to learning frequency
                 if len(memory) >= agent.batch_size:
