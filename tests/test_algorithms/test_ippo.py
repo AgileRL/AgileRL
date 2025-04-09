@@ -1541,7 +1541,7 @@ def test_ippo_learns_from_experiences_mlp(
             generate_multi_agent_box_spaces(3, (6,)),
             4,
             3,
-            generate_multi_agent_box_spaces(3, (1,)),
+            generate_multi_agent_box_spaces(3, (6,)),
             ["agent_0", "agent_1", "other_agent_0"],
             None,
         ),
@@ -1568,10 +1568,12 @@ def test_ippo_learns_from_vectorized_experiences_mlp(
     )
 
     actors = ippo.actors
-    actors_pre_learn_sd = [copy.deepcopy(actor.state_dict()) for actor in ippo.actors]
+    actors_pre_learn_sd = [
+        str(copy.deepcopy(actor.state_dict())) for actor in ippo.actors
+    ]
     critics = ippo.critics
     critics_pre_learn_sd = [
-        str(copy.deepcopy(critic.state_dict())) for critic in ippo.critics
+        copy.deepcopy(critic.state_dict()) for critic in ippo.critics
     ]
 
     for _ in range(4):
