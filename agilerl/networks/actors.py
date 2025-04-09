@@ -1,154 +1,23 @@
-from typing import Optional, Type, Union
+from typing import Optional, Tuple, Type, Union
 
-import numpy as np
 import torch
 from gymnasium import spaces
-from torch.distributions import Bernoulli, Categorical, Distribution, Normal
 
-from agilerl.modules.base import EvolvableModule, EvolvableWrapper
+from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.base import EvolvableNetwork
-from agilerl.typing import ArrayOrTensor, ConfigType, DeviceType, TorchObsType
-
-
-class EvolvableDistribution(EvolvableWrapper):
-    """Wrapper to output a distribution over an action space for an evolvable module. It provides methods
-    to sample actions and compute log probabilities, relevant for many policy-gradient algorithms such as
-    PPO, A2C, TRPO.
-
-    :param action_space: Action space of the environment.
-    :type action_space: spaces.Space
-    :param network: Network that outputs the logits of the distribution.
-    :type network: EvolvableModule
-    """
-
-    wrapped: EvolvableModule
-
-    def __init__(
-        self,
-        action_space: spaces.Space,
-        network: EvolvableModule,
-        action_std_init: float = 0.0,
-        device: DeviceType = "cpu",
-    ):
-
-        super().__init__(network)
-
-        self.action_space = action_space
-        self.action_std_init = action_std_init
-        self.device = device
-
-        # For continuous action spaces, we also learn the standard deviation (log_std)
-        # of the action distribution
-        if isinstance(action_space, spaces.Box):
-            self.log_std = torch.nn.Parameter(
-                torch.ones(np.prod(action_space.shape)) * action_std_init,
-                requires_grad=True,
-            ).to(device)
-        else:
-            self.log_std = None
-
-    @property
-    def net_config(self) -> ConfigType:
-        """Configuration of the network.
-
-        :return: Configuration of the network.
-        :rtype: ConfigType
-        """
-        return self.wrapped.net_config
-
-    def get_distribution(
-        self, probs: torch.Tensor, log_std: Optional[torch.Tensor] = None
-    ) -> Distribution:
-        """Get the distribution over the action space given an observation.
-
-        :param probs: Logits output by the network.
-        :type probs: torch.Tensor
-        :param log_std: Log standard deviation of the action distribution. Defaults to None.
-        :type log_std: Optional[torch.Tensor]
-        :return: Distribution over the action space.
-        :rtype: Distribution
-        """
-        if isinstance(self.action_space, spaces.Box):
-            assert (
-                log_std is not None
-            ), "log_std must be provided for continuous action spaces."
-            action_logstd = log_std.expand_as(probs).clamp(min=-20)
-            action_std = torch.exp(action_logstd)
-            return Normal(loc=probs, scale=action_std)
-
-        elif isinstance(self.action_space, spaces.Discrete):
-            return Categorical(probs=probs)
-
-        elif isinstance(self.action_space, spaces.MultiDiscrete):
-            return [
-                Categorical(probs=split)
-                for split in torch.split(probs, list(self.action_space.nvec), dim=1)
-            ]
-
-        elif isinstance(self.action_space, spaces.MultiBinary):
-            return Bernoulli(probs=probs)
-
-        else:
-            raise NotImplementedError(
-                f"Action space {self.action_space} not supported."
-            )
-
-    def forward(
-        self, latent: torch.Tensor, action_mask: Optional[ArrayOrTensor] = None
-    ) -> Distribution:
-        """Forward pass of the network.
-
-        :param obs: Observation input.
-        :type obs: TorchObsType
-        :param action_mask: Mask to apply to the logits. Defaults to None.
-        :type action_mask: Optional[ArrayOrTensor]
-        :return: Distribution over the action space.
-        :rtype: Distribution
-        """
-        probs = self.wrapped(latent)
-
-        if action_mask is not None and isinstance(self.action_space, spaces.Discrete):
-            # Safe to assume the action masks will always be NumPy arrays
-            if isinstance(action_mask, np.ndarray):
-                action_mask = (
-                    np.stack(action_mask)
-                    if action_mask.dtype == np.object_ or isinstance(action_mask, list)
-                    else action_mask
-                )
-            action_mask = torch.as_tensor(
-                action_mask, dtype=torch.bool, device=self.device
-            ).reshape(probs.shape)
-            probs = torch.where(
-                action_mask,
-                probs,
-                torch.tensor(0.0, dtype=probs.dtype, device=self.device),
-            )
-
-        return self.get_distribution(probs, self.log_std)
-
-    def clone(self) -> "EvolvableDistribution":
-        """Clones the distribution.
-
-        :return: Cloned distribution.
-        :rtype: EvolvableDistribution
-        """
-        return EvolvableDistribution(
-            action_space=self.action_space,
-            network=self.wrapped.clone(),
-            action_std_init=self.action_std_init,
-            device=self.device,
-        )
+from agilerl.networks.distributions import EvolvableDistribution
+from agilerl.typing import ArrayOrTensor, ConfigType, TorchObsType
 
 
 class DeterministicActor(EvolvableNetwork):
-    """Deterministic actor network for policy-gradient algorithms. Given an observation, it outputs
-    the mean of the action distribution. This is useful for e.g. DDPG, SAC, TD3.
+    """Deterministic actor network for policy-gradient algorithms. Given an observation,
+    it outputs the mean of the action distribution. This is useful for e.g. DDPG, SAC, TD3.
 
     :param observation_space: Observation space of the environment.
     :type observation_space: spaces.Space
     :param action_space: Action space of the environment
-    :type action_space: spaces.Space
+    :type action_space: Union[spaces.Box, spaces.Discrete]
     :param encoder_cls: Encoder class to use for the network. Defaults to None, whereby it is
         automatically built using an AgileRL module according the observation space.
     :type encoder_cls: Optional[Union[str, Type[EvolvableModule]]]
@@ -156,6 +25,8 @@ class DeterministicActor(EvolvableNetwork):
     :type encoder_config: ConfigType
     :param head_config: Configuration of the network MLP head.
     :type head_config: Optional[ConfigType]
+    :param clip_actions: Whether to clip the actions to the action space.
+    :type clip_actions: bool
     :param min_latent_dim: Minimum dimension of the latent space representation.
     :type min_latent_dim: int
     :param max_latent_dim: Maximum dimension of the latent space representation.
@@ -173,13 +44,16 @@ class DeterministicActor(EvolvableNetwork):
     :type device: str
     """
 
+    supported_spaces = (spaces.Box, spaces.Discrete)
+
     def __init__(
         self,
         observation_space: spaces.Space,
-        action_space: spaces.Space,
+        action_space: Union[spaces.Box, spaces.Discrete],
         encoder_cls: Optional[Union[str, Type[EvolvableModule]]] = None,
         encoder_config: Optional[ConfigType] = None,
         head_config: Optional[ConfigType] = None,
+        clip_actions: bool = True,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
         n_agents: Optional[int] = None,
@@ -203,31 +77,73 @@ class DeterministicActor(EvolvableNetwork):
             device=device,
         )
 
-        self.min_action = (
-            action_space.low if isinstance(action_space, spaces.Box) else None
-        )
-        self.max_action = (
-            action_space.high if isinstance(action_space, spaces.Box) else None
-        )
+        if isinstance(action_space, spaces.Box):
+            self.action_low = torch.as_tensor(action_space.low, device=self.device)
+            self.action_high = torch.as_tensor(action_space.high, device=self.device)
+        else:
+            self.action_low = None
+            self.action_high = None
 
         # Set output activation based on action space
-        if isinstance(action_space, (spaces.Discrete, spaces.MultiDiscrete)):
-            output_activation = "Softmax"
-        elif isinstance(head_config, dict) and "output_activation" in head_config:
+        if isinstance(head_config, dict) and "output_activation" in head_config:
             output_activation = head_config["output_activation"]
-        elif np.any(self.min_action < 0):
+        elif isinstance(action_space, spaces.Box):
+            # Squash output by default if continuous action space
             output_activation = "Tanh"
+        elif isinstance(action_space, spaces.Discrete):
+            output_activation = "Softmax"
         else:
-            output_activation = "Sigmoid"
+            output_activation = None
 
+        self.clip_actions = clip_actions
         if head_config is None:
             head_config = MlpNetConfig(
-                hidden_size=[16], output_activation=output_activation
+                hidden_size=[32], output_activation=output_activation
             )
-        head_config["output_activation"] = output_activation
+        else:
+            head_config["output_activation"] = output_activation
 
         self.build_network_head(head_config)
         self.output_activation = head_config.get("output_activation", output_activation)
+
+    @torch.compiler.disable
+    @staticmethod
+    def rescale_action(
+        action: torch.Tensor,
+        low: torch.Tensor,
+        high: torch.Tensor,
+        output_activation: Optional[str] = None,
+    ) -> torch.Tensor:
+        """Rescale an action to the original action space.
+
+        :param action: Action.
+        :type action: torch.Tensor
+        :param low: Minimum action.
+        :type low: torch.Tensor
+        :param high: Maximum action.
+        :type high: torch.Tensor
+        :param output_activation: Output activation function.
+        :type output_activation: Optional[str]
+        :return: Rescaled action.
+        :rtype: torch.Tensor
+        """
+        if output_activation in ["Tanh", "Softsign"]:
+            prescaled_min, prescaled_max = -1.0, 1.0
+        elif output_activation in ["Sigmoid", "Softmax", "GumbelSoftmax"]:
+            prescaled_min, prescaled_max = 0.0, 1.0
+        else:
+            # For unbounded network outputs, we just return the action
+            return action
+
+        # If the action space is unbounded, we just return the action
+        if low.isinf().any() or high.isinf().any():
+            rescaled_action = action
+        else:
+            rescaled_action = low + (high - low) * (action - prescaled_min) / (
+                prescaled_max - prescaled_min
+            )
+
+        return rescaled_action
 
     def build_network_head(self, net_config: Optional[ConfigType] = None) -> None:
         """Builds the head of the network.
@@ -251,7 +167,18 @@ class DeterministicActor(EvolvableNetwork):
         :rtype: torch.Tensor
         """
         latent = self.extract_features(obs)
-        return self.head_net(latent)
+        action = self.head_net(latent)
+
+        # Action scaling only relevant for continuous action spaces
+        if isinstance(self.action_space, spaces.Box) and self.clip_actions:
+            action = DeterministicActor.rescale_action(
+                action=action,
+                low=self.action_low,
+                high=self.action_high,
+                output_activation=self.output_activation,
+            )
+
+        return action
 
     def recreate_network(self) -> None:
         """Recreates the network."""
@@ -267,10 +194,11 @@ class DeterministicActor(EvolvableNetwork):
         self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net)
 
 
-class StochasticActor(DeterministicActor):
-    """Stochastic actor network for policy-gradient algorithms. Given an observation, it outputs
-    a distribution over the action space. This is useful for on-policy policy-gradient algorithms
-    like PPO, A2C, TRPO.
+class StochasticActor(EvolvableNetwork):
+    """Stochastic actor network for policy-gradient algorithms. Given an observation, constructs
+    a distribution over the action space from the logits output by the network. Contains methods
+    to sample actions and compute log probabilities and the entropy of the action distribution,
+    relevant for many policy-gradient algorithms such as PPO, A2C, TRPO.
 
     :param observation_space: Observation space of the environment.
     :type observation_space: spaces.Space
@@ -283,6 +211,10 @@ class StochasticActor(DeterministicActor):
     :type encoder_config: ConfigType
     :param head_config: Configuration of the network MLP head.
     :type head_config: Optional[ConfigType]
+    :param action_std_init: Initial log standard deviation of the action distribution. Defaults to 0.0.
+    :type action_std_init: float
+    :param squash_output: Whether to squash the output to the action space.
+    :type squash_output: bool
     :param n_agents: Number of agents in the environment. Defaults to None, which corresponds to
         single-agent environments.
     :type n_agents: Optional[int]
@@ -297,6 +229,12 @@ class StochasticActor(DeterministicActor):
     """
 
     head_net: EvolvableDistribution
+    supported_spaces = (
+        spaces.Box,
+        spaces.Discrete,
+        spaces.MultiDiscrete,
+        spaces.MultiBinary,
+    )
 
     def __init__(
         self,
@@ -306,6 +244,7 @@ class StochasticActor(DeterministicActor):
         encoder_config: Optional[ConfigType] = None,
         head_config: Optional[ConfigType] = None,
         action_std_init: float = 0.0,
+        squash_output: bool = False,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
         n_agents: Optional[int] = None,
@@ -314,13 +253,11 @@ class StochasticActor(DeterministicActor):
         recurrent: bool = False,
         device: str = "cpu",
     ):
-
         super().__init__(
             observation_space,
-            action_space=action_space,
             encoder_cls=encoder_cls,
             encoder_config=encoder_config,
-            head_config=head_config,
+            action_space=action_space,
             min_latent_dim=min_latent_dim,
             max_latent_dim=max_latent_dim,
             n_agents=n_agents,
@@ -330,35 +267,100 @@ class StochasticActor(DeterministicActor):
             device=device,
         )
 
+        # Require the head to output logits to parameterize a distribution
+        if head_config is None:
+            head_config = MlpNetConfig(hidden_size=[32], output_activation=None)
+        else:
+            head_config["output_activation"] = None
+
         self.action_std_init = action_std_init
+        self.squash_output = squash_output
+        self.action_space = action_space
+
+        self.build_network_head(head_config)
+        self.output_activation = None
+
+        if isinstance(self.action_space, spaces.Box):
+            self.action_low = torch.as_tensor(self.action_space.low, device=self.device)
+            self.action_high = torch.as_tensor(
+                self.action_space.high, device=self.device
+            )
+        else:
+            self.action_low = None
+            self.action_high = None
+
+        # Wrap the network in an EvolvableDistribution
         self.head_net = EvolvableDistribution(
-            action_space, self.head_net, action_std_init=action_std_init, device=device
+            action_space=action_space,
+            network=self.head_net,
+            action_std_init=action_std_init,
+            squash_output=squash_output,
+            device=device,
+        )
+
+    def build_network_head(self, net_config: Optional[ConfigType] = None) -> None:
+        """Builds the head of the network.
+
+        :param net_config: Configuration of the head.
+        :type net_config: Optional[ConfigType]
+        """
+        self.head_net = self.create_mlp(
+            num_inputs=self.latent_dim,
+            num_outputs=spaces.flatdim(self.action_space),
+            name="actor",
+            net_config=net_config,
+        )
+
+    def scale_action(self, action: torch.Tensor) -> torch.Tensor:
+        """Scale the action to the action space.
+
+        :param action: Action.
+        :type action: torch.Tensor
+        :return: Scaled action.
+        :rtype: torch.Tensor
+        """
+        return self.action_low + (
+            0.5 * (action + 1.0) * (self.action_high - self.action_low)
         )
 
     def forward(
         self, obs: TorchObsType, action_mask: Optional[ArrayOrTensor] = None
-    ) -> Distribution:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward pass of the network.
 
         :param obs: Observation input.
         :type obs: TorchObsType
-        :return: Distribution over the action space.
-        :rtype: Distribution
+        :param action_mask: Action mask.
+        :type action_mask: Optional[ArrayOrTensor]
+        :return: Action and log probability of the action.
+        :rtype: Tuple[torch.Tensor, torch.Tensor]
         """
         latent = self.extract_features(obs)
-        return self.head_net.forward(latent, action_mask)
+        action, log_prob, entropy = self.head_net.forward(latent, action_mask)
 
-    def __call__(
-        self, obs: TorchObsType, action_mask: Optional[ArrayOrTensor] = None
-    ) -> Distribution:
-        """Calls the forward method.
+        # Action scaling only relevant for continuous action spaces with squashing
+        if isinstance(self.action_space, spaces.Box) and self.squash_output:
+            action = self.scale_action(action)
 
-        :param obs: Observation input.
-        :type obs: TorchObsType
-        :return: Distribution over the action space.
-        :rtype: Distribution
+        return action, log_prob, entropy
+
+    def action_log_prob(self, action: torch.Tensor) -> torch.Tensor:
+        """Get the log probability of the action.
+
+        :param action: Action.
+        :type action: torch.Tensor
+        :return: Log probability of the action.
+        :rtype: torch.Tensor
         """
-        return self.forward(obs, action_mask)
+        return self.head_net.log_prob(action)
+
+    def action_entropy(self) -> torch.Tensor:
+        """Get the entropy of the action distribution.
+
+        :return: Entropy of the action distribution.
+        :rtype: torch.Tensor
+        """
+        return self.head_net.entropy()
 
     def recreate_network(self) -> None:
         """Recreates the network with the same parameters as the current network.
@@ -379,6 +381,7 @@ class StochasticActor(DeterministicActor):
             self.action_space,
             head_net,
             action_std_init=self.action_std_init,
+            squash_output=self.squash_output,
             device=self.device,
         )
 

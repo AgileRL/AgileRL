@@ -24,7 +24,7 @@ from agilerl.utils.utils import (
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("============ AgileRL ============")
-    print(f"DEVICE: {device}")
+    print(f"DEVICE: {device}, ENV: {INIT_HP['ENV_NAME']}")
 
     env = make_vect_envs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
 
@@ -82,6 +82,15 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
             max=MUTATION_PARAMS["MAX_BATCH_SIZE"],
             dtype=int,
         ),
+        learn_step=RLParameter(
+            min=MUTATION_PARAMS["MIN_LEARN_STEP"],
+            max=MUTATION_PARAMS["MAX_LEARN_STEP"],
+            dtype=int,
+        ),
+        ent_coef=RLParameter(
+            min=MUTATION_PARAMS["MIN_ENT_COEF"],
+            max=MUTATION_PARAMS["MAX_ENT_COEF"],
+        ),
     )
 
     agent_pop = create_population(
@@ -98,8 +107,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         device=device,
     )
 
-    print("Sharing encoders:", agent_pop[0].share_encoders)
-    print("Actor:", agent_pop[0].actor)
+    print("Actor network: ", agent_pop[0].actor)
     trained_pop, pop_fitnesses = train_on_policy(
         env,
         INIT_HP["ENV_NAME"],

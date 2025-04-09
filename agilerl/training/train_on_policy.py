@@ -190,6 +190,9 @@ def train_on_policy(
     if accelerator is None and mutation is not None:
         pop = mutation.mutation(pop, pre_training_mut=True)
 
+    # Initialize list to store entropy values for each agent
+    pop_entropy = [[] for _ in pop]
+
     # RL training loop
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         if accelerator is not None:
@@ -212,7 +215,6 @@ def train_on_policy(
                 values = []
 
                 done = np.zeros(num_envs)
-
                 for idx_step in range(-(agent.learn_step // -num_envs)):
 
                     if swap_channels:
@@ -220,7 +222,7 @@ def train_on_policy(
 
                     # Get next action from agent
                     action_mask = info.get("action_mask", None)
-                    action, log_prob, _, value = agent.get_action(
+                    action, log_prob, entropy, value = agent.get_action(
                         state, action_mask=action_mask
                     )
 
@@ -228,6 +230,10 @@ def train_on_policy(
                         action = action[0]
                         log_prob = log_prob[0]
                         value = value[0]
+                        entropy = entropy[0] if hasattr(entropy, "__len__") else entropy
+
+                    # Store entropy value
+                    pop_entropy[agent_idx].append(entropy)
 
                     # Act in environment
                     next_state, reward, term, trunc, info = env.step(action)
@@ -322,6 +328,23 @@ def train_on_policy(
                 for index, loss_ in enumerate(pop_loss)
             }
             wandb_dict.update(agent_loss_dict)
+
+            # Add entropy metrics to wandb
+            agent_entropy_dict = {
+                f"train/agent_{index}_entropy": (
+                    np.mean(entropy_[-100:]) if len(entropy_) > 0 else 0
+                )
+                for index, entropy_ in enumerate(pop_entropy)
+            }
+            wandb_dict.update(agent_entropy_dict)
+
+            # Add mean entropy across all agents
+            all_entropies = [
+                np.mean(entropy_[-100:]) if len(entropy_) > 0 else 0
+                for entropy_ in pop_entropy
+            ]
+            if all_entropies:
+                wandb_dict["train/mean_entropy"] = np.mean(all_entropies)
 
             if accelerator is not None:
                 accelerator.wait_for_everyone()

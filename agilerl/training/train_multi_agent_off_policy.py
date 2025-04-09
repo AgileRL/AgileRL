@@ -13,7 +13,7 @@ from tqdm import trange
 
 from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
 from agilerl.components.data import ReplayDataset
-from agilerl.components.replay_buffer import ReplayBuffer
+from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -33,7 +33,7 @@ def train_multi_agent_off_policy(
     env_name: str,
     algo: str,
     pop: PopulationType,
-    memory: ReplayBuffer,
+    memory: MultiAgentReplayBuffer,
     sum_scores: bool = True,
     INIT_HP: InitDictType = None,
     MUT_P: InitDictType = None,
@@ -234,16 +234,11 @@ def train_multi_agent_off_policy(
             steps = 0
 
             if swap_channels:
-                if not is_vectorised:
-                    obs = {
-                        agent_id: obs_channels_to_first(np.expand_dims(s, 0))
-                        for agent_id, s in obs.items()
-                    }
-                else:
-                    obs = {
-                        agent_id: obs_channels_to_first(s)
-                        for agent_id, s in obs.items()
-                    }
+                expand_dims = not is_vectorised
+                obs = {
+                    agent_id: obs_channels_to_first(s, expand_dims=expand_dims)
+                    for agent_id, s in obs.items()
+                }
 
             start_time = time.time()
             for idx_step in range(evo_steps // num_envs):
@@ -285,6 +280,7 @@ def train_multi_agent_off_policy(
                 if swap_channels:
                     if not is_vectorised:
                         obs = {agent_id: np.squeeze(s) for agent_id, s in obs.items()}
+
                     next_obs = {
                         agent_id: np.moveaxis(ns, [-1], [-3])
                         for agent_id, ns in next_obs.items()

@@ -15,7 +15,11 @@ from agilerl.algorithms.ppo import PPO
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
-from tests.helper_functions import generate_discrete_space, generate_random_box_space
+from tests.helper_functions import (
+    generate_dict_or_tuple_space,
+    generate_discrete_space,
+    generate_random_box_space,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -487,28 +491,31 @@ def build_ppo(observation_space, action_space, accelerator):
 
 
 @pytest.mark.parametrize(
-    "observation_space, action_space, accelerator",
+    "observation_space",
     [
-        (
-            generate_random_box_space(shape=(4,), low=0, high=1),
-            generate_random_box_space(shape=(2,), low=0, high=1),
-            None,
-        ),
-        (generate_discrete_space(4), generate_discrete_space(2), Accelerator()),
+        generate_random_box_space(shape=(4,), low=0, high=1),
+        generate_random_box_space(shape=(3, 32, 32), low=0, high=1),
+        generate_discrete_space(4),
+        generate_dict_or_tuple_space(2, 3, dict_space=False),
+        generate_dict_or_tuple_space(2, 3, dict_space=True),
     ],
 )
+@pytest.mark.parametrize(
+    "action_space",
+    [
+        generate_random_box_space(shape=(2,), low=0, high=1),
+        generate_discrete_space(2),
+        spaces.MultiDiscrete([2, 3]),
+        spaces.MultiBinary(2),
+    ],
+)
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
 # Returns the expected action when given a state observation.
 def test_returns_expected_action(observation_space, action_space, build_ppo):
-    if isinstance(observation_space, spaces.Discrete):
-        state = np.array([[0]])
-    else:
-        state = np.array([[1, 2, 3, 4]])
+    state = observation_space.sample()
 
     # First with grad=False
-    grad = False
-    action, action_logprob, dist_entropy, state_values = build_ppo.get_action(
-        state, grad=grad
-    )
+    action, action_logprob, dist_entropy, state_values = build_ppo.get_action(state)
 
     assert isinstance(action, np.ndarray)
     assert isinstance(action_logprob, np.ndarray)
@@ -519,34 +526,28 @@ def test_returns_expected_action(observation_space, action_space, build_ppo):
         for act in action:
             assert act.is_integer()
             assert act >= 0 and act < action_space.n
-    else:
-        action = action[0]
-        assert len(action) == action_space.shape[0]
-        for act in action:
+    elif isinstance(action_space, spaces.MultiDiscrete):
+        assert len(action[0]) == len(action_space.nvec)
+        for i, act in enumerate(action[0]):
+            assert act.is_integer()
+            assert act >= 0 and act < action_space.nvec[i]
+    elif isinstance(action_space, spaces.MultiBinary):
+        assert len(action[0]) == action_space.n
+        for act in action[0]:
             assert isinstance(act, np.float32)
+    else:
+        assert isinstance(action, np.ndarray)
+        assert action.shape == (1, *action_space.shape)
 
     # Now with grad=True, and eval_action
-    grad = True
-    eval_action = torch.Tensor([[0, 1]])
-    action, action_logprob, dist_entropy, state_values = build_ppo.get_action(
-        state, action=eval_action, grad=grad
+    eval_action = torch.Tensor([[0, 1]]).to(build_ppo.device)
+    action_logprob, dist_entropy, state_values = build_ppo.evaluate_actions(
+        state, actions=eval_action
     )
 
-    assert isinstance(action, torch.Tensor)
     assert isinstance(action_logprob, torch.Tensor)
     assert isinstance(dist_entropy, torch.Tensor)
     assert isinstance(state_values, torch.Tensor)
-
-    if isinstance(action_space, spaces.Discrete):
-        action = torch.argmax(action, dim=-1)
-        assert act.is_integer()
-        assert act >= 0 and act < action_space.n
-    else:
-        action = action.cpu().data.numpy()
-        action = action[0]
-        assert len(action) == action_space.shape[0]
-        for act in action:
-            assert isinstance(act, np.float32)
 
 
 def test_ppo_optimizer_parameters():
@@ -564,8 +565,8 @@ def test_ppo_optimizer_parameters():
     dummy_action = torch.tensor([0])
     dummy_log_prob = torch.tensor([1.0])
 
-    dist = ppo.actor(dummy_input)
-    loss = (dummy_log_prob - dist.log_prob(dummy_action)) ** 2
+    _, _, _ = ppo.actor(dummy_input)
+    loss = (dummy_log_prob - ppo.actor.action_log_prob(dummy_action)) ** 2
     loss = loss.mean()
     ppo.optimizer.zero_grad()
     loss.backward()
@@ -597,23 +598,22 @@ def test_returns_expected_action_mask_vectorized(build_ppo):
     assert np.array_equal(action, [1, 0]), action
 
 
-# learns from experiences and updates network parameters
-def test_learns_from_experiences():
-    observation_space = generate_random_box_space(shape=(3, 32, 32), low=0, high=1)
-    action_space = generate_discrete_space(2)
+@pytest.mark.parametrize(
+    "observation_space",
+    [
+        generate_random_box_space(shape=(4,), low=0, high=1),
+        generate_random_box_space(shape=(3, 32, 32), low=0, high=1),
+        generate_discrete_space(4),
+        generate_dict_or_tuple_space(2, 3, dict_space=False),
+        generate_dict_or_tuple_space(2, 3, dict_space=True),
+    ],
+)
+def test_learns_from_experiences(observation_space):
     batch_size = 45
-    net_config_cnn = {
-        "encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-
+    action_space = spaces.Discrete(2)
     ppo = PPO(
         observation_space=observation_space,
         action_space=action_space,
-        net_config=net_config_cnn,
         batch_size=batch_size,
     )
 
@@ -625,7 +625,36 @@ def test_learns_from_experiences():
     num_steps = batch_size + 1
 
     # Create a batch of experiences
-    states = torch.rand(num_steps, *observation_space.shape)
+    if isinstance(observation_space, spaces.Discrete):
+        states = torch.randint(0, observation_space.n, (num_steps,)).float()
+        next_states = torch.randint(0, observation_space.n, (1,)).float()
+    elif isinstance(observation_space, spaces.MultiDiscrete):
+        states = torch.randint(0, observation_space.nvec, (num_steps,)).float()
+        next_states = torch.randint(0, observation_space.nvec, (1,)).float()
+    elif isinstance(observation_space, spaces.MultiBinary):
+        states = torch.randint(0, 2, (num_steps,)).float()
+        next_states = torch.randint(0, 2, (1,)).float()
+    elif isinstance(observation_space, spaces.Box):
+        states = torch.rand(num_steps, *observation_space.shape)
+        next_states = torch.rand(1, *observation_space.shape)
+    elif isinstance(observation_space, spaces.Dict):
+        states = {
+            key: torch.rand(num_steps, *space.shape)
+            for key, space in observation_space.spaces.items()
+        }
+        next_states = {
+            key: torch.rand(1, *space.shape)
+            for key, space in observation_space.spaces.items()
+        }
+    elif isinstance(observation_space, spaces.Tuple):
+        states = tuple(
+            torch.rand(num_steps, *space.shape) for space in observation_space.spaces
+        )
+        next_states = tuple(
+            torch.rand(1, *space.shape) for space in observation_space.spaces
+        )
+
+    # Create a batch of experiences
     actions = torch.randint(0, action_space.n, (num_steps,)).float()
     log_probs = torch.randn(
         num_steps,
@@ -637,18 +666,18 @@ def test_learns_from_experiences():
     values = torch.randn(
         num_steps,
     )
-    next_states = torch.rand(1, *observation_space.shape)
     next_done = np.zeros(1)
     experiences = [
-        states,
-        actions,
-        log_probs,
-        rewards,
-        dones,
-        values,
-        next_states,
-        next_done,
+        [states],
+        [actions],
+        [log_probs],
+        [rewards],
+        [dones],
+        [values],
+        [next_states],
+        [next_done],
     ]
+
     # Call the learn method
     loss = ppo.learn(experiences)
 

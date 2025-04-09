@@ -317,8 +317,12 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             return tuple(
                 EvolvableAlgorithm.get_action_dim(space) for space in action_space
             )
-        if isinstance(action_space, spaces.Discrete):
+        elif isinstance(action_space, spaces.MultiBinary):
             return action_space.n
+        elif isinstance(action_space, spaces.Discrete):
+            return action_space.n
+        elif isinstance(action_space, spaces.MultiDiscrete):
+            return sum(action_space.nvec)
         elif isinstance(action_space, spaces.Box):
             # NOTE: Here we assume the action space only has one dimension
             #       (i.e. the actions correspond to a one-dimensional vector)
@@ -609,7 +613,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             if isinstance(exp, dict):
                 exp = {key: val.to(device) for key, val in exp.items()}
             elif isinstance(exp, (list, tuple)) and isinstance(exp[0], torch.Tensor):
-                exp = [val.to(device) for val in exp]
+                exp = tuple(val.to(device) for val in exp)
             elif isinstance(exp, torch.Tensor):
                 exp = exp.to(device)
 
@@ -1184,10 +1188,12 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         self.state_dims = self.get_state_dim(observation_spaces)
         self.action_dims = self.get_action_dim(action_spaces)
         self.one_hot = all(
-            isinstance(space, spaces.Discrete) for space in observation_spaces
+            isinstance(space, (spaces.Discrete, spaces.MultiDiscrete))
+            for space in observation_spaces
         )
         self.discrete_actions = all(
-            isinstance(space, spaces.Discrete) for space in action_spaces
+            isinstance(space, (spaces.Discrete, spaces.MultiDiscrete))
+            for space in action_spaces
         )
 
         # For continuous action spaces, store the min and max action values
@@ -1218,12 +1224,14 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             )
             if homo_id in self.homogeneous_agents:
                 self.homogeneous_agents[homo_id].append(agent_id)
-                assert (
-                    obs_space == self.unique_observation_spaces[homo_id]
-                ), f"Homogeneous agents, i.e. agents that share the prefix {homo_id}, must have the same observation space. Found {self.unique_observation_spaces[homo_id]} and {obs_space}."
-                assert (
-                    action_space == self.unique_action_spaces[homo_id]
-                ), f"Homogeneous agents, i.e. agents that share the prefix {homo_id}, must have the same action space. Found {self.unique_action_spaces[homo_id]} and {action_space}."
+                assert obs_space == self.unique_observation_spaces[homo_id], (
+                    f"Homogeneous agents, i.e. agents that share the prefix {homo_id}, "
+                    f"must have the same observation space. Found {self.unique_observation_spaces[homo_id]} and {obs_space}."
+                )
+                assert action_space == self.unique_action_spaces[homo_id], (
+                    f"Homogeneous agents, i.e. agents that share the prefix {homo_id}, "
+                    f"must have the same action space. Found {self.unique_action_spaces[homo_id]} and {action_space}."
+                )
             else:
                 self.shared_agent_ids.append(homo_id)
                 self.homogeneous_agents[homo_id] = [agent_id]
@@ -1427,3 +1435,33 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             )
             summed_rewards[homo_id] += reward
         return summed_rewards
+
+    def assemble_homogeneous_outputs(
+        self, agent_outputs: ArrayDict, vect_dim: int
+    ) -> ArrayDict:
+        """Assembles individual agent outputs into batched outputs for shared policies.
+
+        :param agent_outputs: Dictionary with individual agent outputs, e.g. {'agent_0': 4, 'agent_1': 7, 'agent_2': 8}
+        :type agent_outputs: Dict[str, np.ndarray]
+        :param vect_dim: Vectorization dimension size, i.e. number of vect envs
+        :type vect_dim: int
+        :return: Assembled dictionary with the form {'agent': [4, 7, 8]}
+        :rtype: Dict[str, np.ndarray]
+        """
+        homo_outputs = {}
+        for unique_id in self.shared_agent_ids:
+            # Get all outputs for agents that share this ID
+            homo_agent_outputs = []
+            for homo_id in self.homogeneous_agents[unique_id]:
+                if homo_id in agent_outputs:
+                    homo_agent_outputs.append(agent_outputs[homo_id])
+
+            if homo_agent_outputs:
+                # Stack outputs along first dimension
+                stacked_outputs = np.stack(homo_agent_outputs, axis=0)
+                # Reshape into a form suitable for batch processing
+                homo_outputs[unique_id] = np.reshape(
+                    stacked_outputs, (len(homo_agent_outputs) * vect_dim, -1)
+                )
+
+        return homo_outputs

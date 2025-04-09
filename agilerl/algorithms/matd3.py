@@ -17,7 +17,6 @@ from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.typing import (
     ArrayDict,
-    ArrayLike,
     GymEnvType,
     InfosDict,
     ObservationType,
@@ -29,6 +28,7 @@ from agilerl.utils.algo_utils import (
     key_in_nested_dict,
     make_safe_deepcopies,
     multi_agent_sample_tensor_from_space,
+    obs_channels_to_first,
 )
 from agilerl.utils.evolvable_networks import get_default_encoder_config
 
@@ -281,8 +281,6 @@ class MATD3(MultiAgentRLAlgorithm):
                     critic=True,
                 )
 
-                print("Single space: ", self.single_space)
-
                 def get_first_sample_input(
                     sample_input: Union[
                         Tuple[torch.Tensor, ...], Dict[str, torch.Tensor]
@@ -313,12 +311,15 @@ class MATD3(MultiAgentRLAlgorithm):
             critic_net_config["encoder_config"] = critic_encoder_config
             critic_net_config["head_config"] = critic_head_config
 
+            clip_actions = self.torch_compiler is None
+
             def create_actor(idx):
                 return DeterministicActor(
                     self.observation_spaces[idx],
                     self.action_spaces[idx],
                     n_agents=self.n_agents,
                     device=self.device,
+                    clip_actions=clip_actions,
                     **copy.deepcopy(net_config),
                 )
 
@@ -411,45 +412,6 @@ class MATD3(MultiAgentRLAlgorithm):
             )
         )
 
-    def scale_to_action_space(self, action: ArrayLike, idx: int) -> torch.Tensor:
-        """Scales actions to action space defined by self.min_action and self.max_action.
-
-        :param action: Action to be scaled
-        :type action: numpy.ndarray
-        :param idx: Index of agent
-        :type idx: int
-
-        :return: Scaled action
-        :rtype: torch.Tensor
-        """
-        mlp_output_activation = self.actors[idx].output_activation
-        if mlp_output_activation in ["Tanh"]:
-            pre_scaled_min = -1
-            pre_scaled_max = 1
-        elif mlp_output_activation in ["Sigmoid", "Softmax", "GumbelSoftmax"]:
-            pre_scaled_min = 0
-            pre_scaled_max = 1
-        else:
-            return torch.where(
-                action > 0,
-                action * self.max_action[idx][0],
-                action * -self.min_action[idx][0],
-            )
-
-        if not (
-            isinstance(self.min_action[idx][0], (np.ndarray, torch.Tensor))
-            or isinstance(self.max_action[idx][0], (np.ndarray, torch.Tensor))
-        ):
-            if (
-                pre_scaled_min == self.min_action[idx][0]
-                and pre_scaled_max == self.max_action[idx][0]
-            ):
-                return action
-
-        return self.min_action[idx][0] + (
-            self.max_action[idx][0] - self.min_action[idx][0]
-        ) * (action - pre_scaled_min) / (pre_scaled_max - pre_scaled_min)
-
     def process_infos(self, infos: InfosDict) -> Tuple[ArrayDict, ArrayDict, ArrayDict]:
         """
         Process the information, extract env_defined_actions, action_masks and agent_masks
@@ -504,17 +466,34 @@ class MATD3(MultiAgentRLAlgorithm):
             else:
                 with torch.no_grad():
                     actions = actor(obs)
+
+            if self.torch_compiler is not None and isinstance(
+                self.action_spaces[idx], spaces.Box
+            ):
+                actions = DeterministicActor.rescale_action(
+                    action=actions,
+                    low=actor.action_low,
+                    high=actor.action_high,
+                    output_activation=actor.output_activation,
+                )
+
             actor.train()
-            if self.discrete_actions and training:
-                actions = torch.clamp(actions + self.action_noise(idx), 0, 1)
-            elif not self.discrete_actions:
-                actions = self.scale_to_action_space(actions, idx)
-                if training:
-                    actions = torch.clamp(
-                        actions + self.action_noise(idx),
+            if training:
+                if self.discrete_actions:
+                    min_action, max_action = 0, 1
+                else:
+                    min_action, max_action = (
                         self.min_action[idx][0],
                         self.max_action[idx][0],
                     )
+
+                # Add noise to actions for exploration
+                actions = torch.clamp(
+                    actions + self.action_noise(idx),
+                    min_action,
+                    max_action,
+                )
+
             action_dict[agent_id] = actions.cpu().numpy()
 
         discrete_action_dict = None
@@ -527,10 +506,8 @@ class MATD3(MultiAgentRLAlgorithm):
                     else None
                 )
                 action: np.ndarray = np.ma.array(action, mask=mask)
-                if self.one_hot:
-                    discrete_action_dict[agent] = action.argmax(axis=-1)
-                else:
-                    discrete_action_dict[agent] = action.argmax(axis=-1)
+
+                discrete_action_dict[agent] = action.argmax(axis=-1)
                 if len(discrete_action_dict[agent].shape) == 1:
                     discrete_action_dict[agent] = discrete_action_dict[agent][
                         :, np.newaxis
@@ -621,16 +598,7 @@ class MATD3(MultiAgentRLAlgorithm):
         next_actions = []
         with torch.no_grad():
             for i, agent_id_label in enumerate(self.agent_ids):
-                unscaled_actions = self.actor_targets[i](next_states[agent_id_label])
-                if not self.discrete_actions:
-                    scaled_actions = torch.where(
-                        unscaled_actions > 0,
-                        unscaled_actions * self.max_action[i][0],
-                        unscaled_actions * -self.min_action[i][0],
-                    )
-                    next_actions.append(scaled_actions)
-                else:
-                    next_actions.append(unscaled_actions)
+                next_actions.append(self.actor_targets[i](next_states[agent_id_label]))
 
         # Stack states and actions
         stacked_states = self.stack_critic_observations(states)
@@ -812,6 +780,7 @@ class MATD3(MultiAgentRLAlgorithm):
             self.accelerator.backward(critic_loss)
         else:
             critic_loss.backward()
+
         critic_1_optimizer.step()
         critic_2_optimizer.step()
 
@@ -823,12 +792,7 @@ class MATD3(MultiAgentRLAlgorithm):
                 action = actor(states[agent_id])
         else:
             action = actor(states[agent_id])
-        if not self.discrete_actions:
-            action = torch.where(
-                action > 0,
-                action * self.max_action[idx][0],
-                action * -self.min_action[idx][0],
-            )
+
         detached_actions = copy.deepcopy(actions)
         detached_actions[agent_id] = action
 
@@ -855,7 +819,13 @@ class MATD3(MultiAgentRLAlgorithm):
         return actor_loss.item() if actor_loss is not None else None, critic_loss.item()
 
     def soft_update(self, net: nn.Module, target: nn.Module) -> None:
-        """Soft updates target network."""
+        """Soft updates target network.
+
+        :param net: Network to be updated
+        :type net: nn.Module
+        :param target: Target network
+        :type target: nn.Module
+        """
         for eval_param, target_param in zip(net.parameters(), target.parameters()):
             target_param.data.copy_(
                 self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
@@ -909,27 +879,21 @@ class MATD3(MultiAgentRLAlgorithm):
                 while not np.all(finished):
                     step += 1
                     if swap_channels:
-                        if is_vectorised:
-                            obs = {
-                                agent_id: np.moveaxis(s, [-1], [-3])
-                                for agent_id, s in obs.items()
-                            }
-                        else:
-                            obs = {
-                                agent_id: np.moveaxis(np.expand_dims(s, 0), [-1], [-3])
-                                for agent_id, s in obs.items()
-                            }
+                        expand_dims = not is_vectorised
+                        obs = {
+                            agent_id: obs_channels_to_first(s, expand_dims)
+                            for agent_id, s in obs.items()
+                        }
                     cont_actions, discrete_action = self.get_action(
                         obs,
                         training=False,
                         infos=info,
                     )
-                    if self.discrete_actions:
-                        action = discrete_action
-                    else:
-                        action = cont_actions
+
+                    action = discrete_action if self.discrete_actions else cont_actions
                     if not is_vectorised:
                         action = {agent: act[0] for agent, act in action.items()}
+
                     obs, reward, term, trunc, info = env.step(action)
                     score_increment = (
                         (
@@ -961,6 +925,7 @@ class MATD3(MultiAgentRLAlgorithm):
                             completed_episode_scores[idx] = scores[idx]
                             finished[idx] = 1
                 rewards.append(np.mean(completed_episode_scores, axis=0))
+
         mean_fit = np.mean(rewards, axis=0)
         mean_fit = mean_fit[0] if sum_scores else mean_fit
         self.fitness.append(mean_fit)

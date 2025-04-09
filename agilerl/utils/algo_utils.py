@@ -1,4 +1,3 @@
-import copy
 import glob
 import inspect
 import os
@@ -150,7 +149,9 @@ def multi_agent_sample_tensor_from_space(
     return sample_tensor
 
 
-def make_safe_deepcopies(*args: Union[Module, List[Module]]) -> List[Module]:
+def make_safe_deepcopies(
+    *args: Union[EvolvableModule, List[EvolvableModule]]
+) -> List[EvolvableModule]:
     """Makes deep copies of EvolvableModule objects and their attributes.
 
     :param args: EvolvableModule or lists of EvolvableModule objects to copy.
@@ -162,11 +163,9 @@ def make_safe_deepcopies(*args: Union[Module, List[Module]]) -> List[Module]:
     copies = []
     for arg in args:
         if isinstance(arg, list):
-            arg_copy = [
-                copy.deepcopy(inner_arg.cpu()).to(inner_arg.device) for inner_arg in arg
-            ]
+            arg_copy = [inner_arg.clone() for inner_arg in arg]
         else:
-            arg_copy = copy.deepcopy(arg.cpu()).to(arg.device)
+            arg_copy = arg.clone()
 
         copies.append(arg_copy)
 
@@ -430,15 +429,22 @@ def concatenate_spaces(space_list: List[SupportedSpace]) -> spaces.Space:
         )
 
 
-def obs_channels_to_first(observation: NumpyObsType) -> NumpyObsType:
+def obs_channels_to_first(
+    observation: NumpyObsType, expand_dims: bool = False
+) -> NumpyObsType:
     """Converts observation space from channels last to channels first format.
 
     :param observation_space: Observation space
     :type observation_space: Union[spaces.Box, spaces.Dict]
+    :param expand_dims: If True, expand the dimensions of the observation, defaults to False
+    :type expand_dims: bool, optional
     :return: Observation space with channels first format
     :rtype: Union[spaces.Box, spaces.Dict]
     """
     if isinstance(observation, np.ndarray):
+        if expand_dims:
+            observation = np.expand_dims(observation, axis=0)
+
         if observation.ndim == 3 or observation.ndim == 4:
             return np.moveaxis(observation, -1, -3)
         else:
@@ -652,6 +658,8 @@ def get_experiences_samples(
     for exp in experiences:
         if isinstance(exp, dict):
             sampled_exp = {key: value[minibatch_indices] for key, value in exp.items()}
+        elif isinstance(exp, tuple):
+            sampled_exp = tuple(value[minibatch_indices] for value in exp)
         elif isinstance(exp, torch.Tensor):
             sampled_exp = exp[minibatch_indices]
         else:
@@ -683,7 +691,10 @@ def stack_experiences(
             if to_torch and isinstance(exp, np.ndarray):
                 stacked_exp = torch.from_numpy(stacked_exp)
 
-        elif isinstance(exp[0], dict):
+            stacked_experiences.append(stacked_exp)
+            continue
+
+        if isinstance(exp[0], dict):
             stacked_exp = defaultdict(list)
             for it in exp:
                 for key, value in it.items():
@@ -694,6 +705,17 @@ def stack_experiences(
                 stacked_exp = {
                     key: torch.from_numpy(value) for key, value in stacked_exp.items()
                 }
+        elif isinstance(exp[0], tuple):
+            stacked_exp = [[] for _ in exp[0]]
+            for it in exp:
+                for i, value in enumerate(it):
+                    stacked_exp[i].append(value)
+
+            stacked_exp = [np.array(value) for value in stacked_exp]
+            if to_torch:
+                stacked_exp = [torch.from_numpy(value) for value in stacked_exp]
+
+            stacked_exp = tuple(stacked_exp)
 
         elif isinstance(exp[0], (np.ndarray, Number)):
             stacked_exp = np.array(exp)
@@ -756,7 +778,7 @@ def stack_and_pad_experiences(
     return tuple(stacked_experiences)
 
 
-def flatten_experiences(*experiences: ArrayOrTensor) -> Tuple[ArrayOrTensor, ...]:
+def flatten_experiences(*experiences: ObservationType) -> Tuple[ArrayOrTensor, ...]:
     """Flattens experiences into a single array or tensor.
 
     :param experiences: Experiences to flatten
@@ -779,6 +801,8 @@ def flatten_experiences(*experiences: ArrayOrTensor) -> Tuple[ArrayOrTensor, ...
     for exp in experiences:
         if isinstance(exp, dict):
             flattened_exp = {key: flatten(value) for key, value in exp.items()}
+        elif isinstance(exp, tuple):
+            flattened_exp = tuple(flatten(value) for value in exp)
         elif isinstance(exp, (torch.Tensor, np.ndarray)):
             flattened_exp = flatten(exp)
         else:
@@ -789,7 +813,7 @@ def flatten_experiences(*experiences: ArrayOrTensor) -> Tuple[ArrayOrTensor, ...
     return tuple(flattened_experiences)
 
 
-def is_vectorized_experiences(*experiences: ArrayOrTensor) -> bool:
+def is_vectorized_experiences(*experiences: ObservationType) -> bool:
     """Checks if experiences are vectorised.
 
     :param experiences: Experiences to check
@@ -802,6 +826,8 @@ def is_vectorized_experiences(*experiences: ArrayOrTensor) -> bool:
     for exp in experiences:
         if isinstance(exp, dict):
             is_vec = all(value.ndim > 1 for value in exp.values())
+        elif isinstance(exp, tuple):
+            is_vec = all(value.ndim > 1 for value in exp)
         else:
             is_vec = exp.ndim > 1
 
