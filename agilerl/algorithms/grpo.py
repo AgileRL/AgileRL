@@ -31,7 +31,8 @@ from agilerl.utils.algo_utils import (
     get_experiences_samples,
     remove_nested_files,
     stack_and_pad_experiences,
-    clone_llm
+    clone_llm,
+    is_peft_model
 )
 from agilerl.utils.llm_utils import (
     HuggingFaceGym,
@@ -656,13 +657,12 @@ class GRPO(RLAlgorithm):
 
             # extract base model and peft config
             original_model = self.accelerator.unwrap_model(self.actor)
-            model = clone_llm(original_model) # NOTE do we want 
+            model = clone_llm(original_model) # NOTE do we want to load this state dict given we load the checkpoint in?
 
             input_args["actor_network"] = model
             input_args["accelerator"] = Accelerator()
             clone = type(self)(**input_args)
 
-            # clone.reference_actor = model  # Assign the newly created model as the reference_actor
             clone.reference_actor.load_state_dict(self.reference_actor.state_dict())
             clone.reference_actor.eval()
 
@@ -683,7 +683,35 @@ class GRPO(RLAlgorithm):
 
         else:
             # Cloning without an accelerator
-            pass
+            input_args = EvolvableAlgorithm.inspect_attributes(
+                self, input_args_only=True
+            )
+            input_args["clone"] = True
+
+            # extract base model and peft config
+            original_model = self.accelerator.unwrap_model(self.actor)
+            model = clone_llm(original_model) 
+
+            input_args["actor_network"] = model
+            input_args["accelerator"] = Accelerator()
+            clone = type(self)(**input_args)
+
+            # clone.reference_actor = model  # Assign the newly created model as the reference_actor
+            clone.reference_actor.load_state_dict(self.reference_actor.state_dict())
+            clone.reference_actor.eval()
+
+            clone.optimizer.optimizer.load_state_dict(self.optimizer.optimizer.state_dict())
+            if self.lr_scheduler is not None:
+                clone.lr_scheduler.load_state_dict(self.lr_scheduler.state_dict())
+
+            # Set the clone attributes
+            clone.fitness = self.fitness
+            clone.scores = self.scores
+            clone.steps = self.steps
+  
+            if index is not None:
+                clone.index = index
+           
         return clone
 
 
