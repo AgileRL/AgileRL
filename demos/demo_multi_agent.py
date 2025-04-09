@@ -49,8 +49,12 @@ if __name__ == "__main__":
 
     num_envs = 8
     # Define the simple speaker listener environment as a parallel environment
-    env = simple_speaker_listener_v4.parallel_env(continuous_actions=True)
-    env = AsyncPettingZooVecEnv([lambda: env for _ in range(num_envs)])
+    env = AsyncPettingZooVecEnv(
+        [
+            lambda: simple_speaker_listener_v4.parallel_env(continuous_actions=True)
+            for _ in range(num_envs)
+        ]
+    )
     env.reset()
 
     # Configure the multi-agent algo input arguments
