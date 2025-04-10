@@ -960,9 +960,14 @@ def clone_llm(original_model: PreTrainedModelType, load_state_dict: bool = True)
     model_config = original_model.config
     base_model = original_model.model
     model = type(base_model)(model_config)
+
+    print("MODEL", model)
+
     if is_peft_model(original_model):
         peft_config = original_model.peft_config[original_model.active_adapter]
         model = get_peft_model(model, peft_config)
+
     if load_state_dict:
         model.load_state_dict(original_model.state_dict())
+    
     return model

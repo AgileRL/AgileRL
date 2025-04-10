@@ -135,7 +135,7 @@ class TournamentSelection:
             if agent_idx in unwanted_agents:
                 agent_ref = population[old_population_idxs.index(agent_idx)]
                 population[old_population_idxs.index(agent_idx)] = None
-                del agent_ref
+                agent_ref.clean_up()
 
         new_population = []
         index_tracker = {}
@@ -143,7 +143,7 @@ class TournamentSelection:
             if (agent := population[old_population_idxs.index(idx_to_clone)]) is not None:
                 actor_parent = agent.clone(new_idx, wrap=False)
                 population[old_population_idxs.index(idx_to_clone)] = None
-                del agent
+                agent.clean_up()
                 index_tracker[idx_to_clone] = actor_parent
             else:
                 actor_parent = index_tracker[idx_to_clone].clone(new_idx, wrap=False)

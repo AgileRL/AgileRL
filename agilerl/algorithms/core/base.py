@@ -1463,7 +1463,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self.zero_stage = self.accelerator.state.deepspeed_plugin.deepspeed_config["zero_optimization"]["stage"]
         if self.zero_stage == 3 and self.accelerator.is_main_process:
             warnings.warn(
-                "Zero stage 3 is feature is nascent and has not been thoroughly tested. It may be unstable, incomplete, or subject to change. Use at your own risk. We recommend caution in production environments."
+                "Zero stage 3 is feature is nascent and has not been thoroughly tested. It may be unstable or subject to change. We recommend caution in production environments."
             )
 
 
@@ -1601,7 +1601,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: A clone of the algorithm
         :rtype: EvolvableAlgorithm
         """
-
         if self.zero_stage == 3:
             self.accelerator.wait_for_everyone()
             self._save_distributed_actor(f"temporary_checkpoint/agent_{self.index}")
@@ -1622,7 +1621,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         clone.reference_actor.load_state_dict(self.reference_actor.state_dict())
         clone.reference_actor.eval()
-
         clone.mutation_hook()
 
         # Clone attributes
@@ -1634,6 +1632,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             clone.optimizer.optimizer.load_state_dict(self.optimizer.optimizer.state_dict())
             if self.lr_scheduler is not None:
                 clone.lr_scheduler.load_state_dict(self.lr_scheduler.state_dict())
+
         # Set the index
         if index is not None:
             clone.index = index
@@ -1646,24 +1645,13 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             clone.accelerator.wait_for_everyone()
             if self.accelerator.is_main_process:
                 remove_nested_files(saved_state_files)
-
         return clone
+    
 
-
-    def __del__(self) -> None:
-        """Delete the algorithm.
-
-        :return: None
-        :rtype: None
+    def clean_up(self):
+        """Clean up the algorithm.
         """
         if self.accelerator is not None:
+            self.accelerator.wait_for_everyone()
             self.accelerator.free_memory()
             self.accelerator.wait_for_everyone()
-        del self.reference_actor 
-        del self.actor 
-        del self.optimizer
-        del self.lr_scheduler
-        gc.collect()
-        torch.cuda.empty_cache()
-
-        

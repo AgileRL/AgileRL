@@ -30,7 +30,7 @@ def finetune_llm(
     save_elite: Optional[bool] = None,
     elite_path: Optional[str] = None,
     wb: bool = False,
-    evo_steps: int = 20,
+    evo_steps: Optional[int] = 20,
     tournament: Optional[TournamentSelection] = None,
     mutation: Optional[Mutations] = None,
     wandb_api_key: Optional[str] = None,

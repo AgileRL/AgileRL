@@ -43,10 +43,6 @@ def create_model(pretrained_model_name_or_path):
             "q_proj",
             "k_proj",
             "v_proj",
-            # "o_proj",
-            # "up_proj",
-            # "down_proj",
-            # "gate_proj",
         ],
         task_type="CAUSAL_LM",
         lora_dropout=0.05,
@@ -198,22 +194,19 @@ def main(init_hp, mut_p):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
     # Convert the HuggingFace dataset into a Gymnasium environment
-    env_accelerator = Accelerator()
-    algo_accelerators = [Accelerator() for _ in range(init_hp["POP_SIZE"])]
+    accelerator = Accelerator()
+    accelerator.state.deepspeed_plugin.deepspeed_config[
+        "train_micro_batch_size_per_gpu"
+    ] = 2
 
-    for accelerator in algo_accelerators:
-        accelerator.state.deepspeed_plugin.deepspeed_config[
-            "train_micro_batch_size_per_gpu"
-        ] = 2
-
-        accelerator.state.deepspeed_plugin.deepspeed_config[
-            "activation_checkpointing"
-        ] = {
-            "partition_activations": True,
-            "cpu_checkpointing": True,
-            "synchronize_checkpoint_boundary": True,
-            "number_checkpoints": 2,
-        }
+    accelerator.state.deepspeed_plugin.deepspeed_config[
+        "activation_checkpointing"
+    ] = {
+        "partition_activations": True,
+        "cpu_checkpointing": True,
+        "synchronize_checkpoint_boundary": True,
+        "number_checkpoints": 2,
+    }
     env = HuggingFaceGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
@@ -222,8 +215,9 @@ def main(init_hp, mut_p):
         apply_chat_template_fn=countdown_chat_template,
         data_batch_size_per_gpu=2,
         custom_collate_fn=custom_collate_fn,
-        accelerator=env_accelerator,
+        accelerator=accelerator,
     )
+
     init_hp["actor_network"] = model
     init_hp["pad_token_id"] = tokenizer.eos_token_id
 
@@ -243,7 +237,7 @@ def main(init_hp, mut_p):
         INIT_HP=init_hp,
         hp_config=hp_config,
         population_size=init_hp["POP_SIZE"],
-        accelerator=algo_accelerators,
+        accelerator=accelerator,
     )
 
     del model
@@ -265,7 +259,7 @@ def main(init_hp, mut_p):
         rl_hp=mut_p["RL_HP_MUT"],
         mutation_sd=mut_p["MUT_SD"],
         rand_seed=mut_p["RAND_SEED"],
-        accelerator=env_accelerator,
+        accelerator=accelerator,
     )
 
     finetune_llm(
@@ -280,10 +274,11 @@ def main(init_hp, mut_p):
         evo_steps=1,
         mutation=mutations,
         tournament=tournament,
-        accelerator=env_accelerator,
+        accelerator=accelerator,
         verbose=True,
         max_steps=12000,
     )
+    accelerator.end_training()
 
 
 if __name__ == "__main__":
