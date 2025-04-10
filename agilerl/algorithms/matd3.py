@@ -255,9 +255,7 @@ class MATD3(MultiAgentRLAlgorithm):
                 critic_head_config = copy.deepcopy(head_config)
                 critic_head_config["output_activation"] = None
             else:
-                if self.discrete_actions:
-                    output_activation = "GumbelSoftmax"
-
+                output_activation = "GumbelSoftmax" if self.discrete_actions else None
                 head_config = MlpNetConfig(
                     hidden_size=[64], output_activation=output_activation
                 )
