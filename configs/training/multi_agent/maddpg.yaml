@@ -61,7 +61,7 @@ NET_CONFIG:
     head_config:
         hidden_size: [64]
         activation: ReLU
-        output_activation: Sigmoid
+        # output_activation: Sigmoid
         min_hidden_layers: 1
         max_hidden_layers: 2
         min_mlp_nodes: 64

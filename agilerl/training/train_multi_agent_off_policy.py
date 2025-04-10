@@ -6,11 +6,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import gymnasium as gym
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
 from agilerl.components.data import ReplayDataset
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
@@ -352,6 +352,7 @@ def train_multi_agent_off_policy(
                         reset_noise_indices.append(idx)
                         if not is_vectorised:
                             obs, info = env.reset()
+
                 agent.reset_action_noise(reset_noise_indices)
 
             pbar.update(evo_steps // len(pop))
@@ -533,10 +534,11 @@ def train_multi_agent_off_policy(
                     agent: fitness_arr[:, idx] for idx, agent in enumerate(agent_ids)
                 }
                 avg_fitness = {
-                    agent: avg_fitness_arr[idx] for idx, agent in enumerate(agent_ids)
+                    agent: avg_fitness_arr[:, idx]
+                    for idx, agent in enumerate(agent_ids)
                 }
                 avg_score = {
-                    agent: avg_score_arr[idx] for idx, agent in enumerate(agent_ids)
+                    agent: avg_score_arr[:, idx] for idx, agent in enumerate(agent_ids)
                 }
                 mean_scores = {
                     agent: mean_scores[:, idx] for idx, agent in enumerate(agent_ids)

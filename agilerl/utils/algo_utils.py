@@ -594,6 +594,9 @@ def preprocess_observation(
             dim=-1,
         )
         space_shape = (sum(observation_space.nvec),)
+    elif isinstance(observation_space, spaces.MultiBinary):
+        observation = observation.float()
+        space_shape = (observation_space.n,)
     else:
         raise TypeError(
             f"AgileRL currently doesn't support {type(observation_space)} spaces."
