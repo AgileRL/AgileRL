@@ -263,8 +263,6 @@ def train_on_policy(
                             agent.scores.append(scores[idx])
                             scores[idx] = 0
 
-                    pbar.update(num_envs)
-
                 if swap_channels:
                     next_state = obs_channels_to_first(next_state)
 
@@ -285,6 +283,7 @@ def train_on_policy(
             agent.steps[-1] += steps
             fps = steps / (time.time() - start_time)
             pop_fps.append(fps)
+            pbar.update(evo_steps // len(pop))
             pop_episode_scores.append(completed_episode_scores)
 
         # Evaluate population

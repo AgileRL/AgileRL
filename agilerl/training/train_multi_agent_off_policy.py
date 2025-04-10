@@ -352,6 +352,7 @@ def train_multi_agent_off_policy(
                         reset_noise_indices.append(idx)
                         if not is_vectorised:
                             obs, info = env.reset()
+
                 agent.reset_action_noise(reset_noise_indices)
 
             pbar.update(evo_steps // len(pop))
@@ -533,10 +534,11 @@ def train_multi_agent_off_policy(
                     agent: fitness_arr[:, idx] for idx, agent in enumerate(agent_ids)
                 }
                 avg_fitness = {
-                    agent: avg_fitness_arr[idx] for idx, agent in enumerate(agent_ids)
+                    agent: avg_fitness_arr[:, idx]
+                    for idx, agent in enumerate(agent_ids)
                 }
                 avg_score = {
-                    agent: avg_score_arr[idx] for idx, agent in enumerate(agent_ids)
+                    agent: avg_score_arr[:, idx] for idx, agent in enumerate(agent_ids)
                 }
                 mean_scores = {
                     agent: mean_scores[:, idx] for idx, agent in enumerate(agent_ids)

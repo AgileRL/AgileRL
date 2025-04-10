@@ -405,9 +405,8 @@ def train_off_policy(
                     losses.append(loss)
 
                 state = next_state
-                pbar.update(num_envs)
 
-            # pbar.update(evo_steps // len(pop))
+            pbar.update(evo_steps // len(pop))
 
             agent.steps[-1] += steps
             fps = steps / (time.time() - start_time)

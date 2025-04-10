@@ -895,6 +895,18 @@ def test_preprocess_observation():
     assert isinstance(processed_multidiscrete, torch.Tensor)
     assert processed_multidiscrete.shape[1] == 7  # 3 + 4 = 7 (sum of categories)
 
+    # Test with MultiBinary space
+    multibinary_space = spaces.MultiBinary(3)
+    multibinary_obs = np.array([[1, 0, 1]])
+
+    processed_multibinary = preprocess_observation(
+        multibinary_obs, multibinary_space, device
+    )
+    assert isinstance(processed_multibinary, torch.Tensor)
+    assert processed_multibinary.shape == (1, 3)
+    # check all values are floats
+    assert processed_multibinary.dtype == torch.float32
+
 
 def test_get_experiences_samples():
     # Create mock experiences

@@ -241,15 +241,19 @@ class MADDPG(MultiAgentRLAlgorithm):
             head_config = net_config.get("head_config", None)
 
             # Determine actor output activation from action space
-            output_activation = None if not self.discrete_actions else "GumbelSoftmax"
             if head_config is not None:
-                head_config["output_activation"] = output_activation
+                if self.discrete_actions:
+                    head_config["output_activation"] = "GumbelSoftmax"
+
                 critic_head_config = copy.deepcopy(head_config)
-                critic_head_config["output_activation"] = None
             else:
+                output_activation = "GumbelSoftmax" if self.discrete_actions else None
                 head_config = MlpNetConfig(
                     hidden_size=[64], output_activation=output_activation
                 )
+                if head_config.output_activation is None:
+                    head_config.pop("output_activation")
+
                 critic_head_config = MlpNetConfig(hidden_size=[64])
 
             if encoder_config is None:
