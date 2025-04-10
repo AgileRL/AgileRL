@@ -66,6 +66,7 @@ def train_off_policy(
     verbose: bool = True,
     accelerator: Optional[Accelerator] = None,
     wandb_api_key: Optional[str] = None,
+    wandb_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Tuple[PopulationType, List[List[float]]]:
     """The general online RL training function. Returns trained population of agents
     and their fitnesses.
@@ -135,7 +136,8 @@ def train_off_policy(
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
     :param wandb_api_key: API key for Weights & Biases, defaults to None
-    :type wandb_api_key: str, optional
+    :param wandb_kwargs: Additional kwargs to pass to wandb.init()
+    :type wand_kwargs: dict, optional
     """
     assert isinstance(
         algo, str
@@ -169,14 +171,17 @@ def train_off_policy(
         )
 
     if wb:
-        init_wandb(
-            algo=algo,
-            env_name=env_name,
-            init_hyperparams=INIT_HP,
-            mutation_hyperparams=MUT_P,
-            wandb_api_key=wandb_api_key,
-            accelerator=accelerator,
-        )
+        init_wandb_kwargs = {
+            "algo": algo,
+            "env_name": env_name,
+            "init_hyperparams": INIT_HP,
+            "mutation_hyperparams": MUT_P,
+            "wandb_api_key": wandb_api_key,
+            "accelerator": accelerator,
+        }
+        if wandb_kwargs is not None:
+            init_wandb_kwargs.update(wandb_kwargs)
+        init_wandb(**init_wandb_kwargs)
 
     # Detect if environment is vectorised
     if hasattr(env, "num_envs"):
