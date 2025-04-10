@@ -418,7 +418,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                         )
                 elif isinstance(attr, list) or isinstance(clone_attr, list):
                     setattr(clone, attribute, [copy.deepcopy(el) for el in attr])
-                elif attr != clone_attr:
+                elif attr != clone_attr or isinstance(attr, MutationRegistry):
                     setattr(clone, attribute, copy.deepcopy(getattr(agent, attribute)))
             else:
                 setattr(clone, attribute, copy.deepcopy(getattr(agent, attribute)))
