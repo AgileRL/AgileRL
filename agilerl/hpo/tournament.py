@@ -1,8 +1,7 @@
 from typing import List, Tuple
 
 import numpy as np
-import torch
-import gc
+
 from agilerl.algorithms.core.base import EvolvableAlgorithm
 
 PopulationType = List[EvolvableAlgorithm]
@@ -24,7 +23,12 @@ class TournamentSelection:
     """
 
     def __init__(
-        self, tournament_size: int, elitism: bool, population_size: int, eval_loop: int, language_model: bool = False
+        self,
+        tournament_size: int,
+        elitism: bool,
+        population_size: int,
+        eval_loop: int,
+        language_model: bool = False,
     ) -> None:
         assert tournament_size > 0, "Tournament size must be greater than zero."
         assert isinstance(elitism, bool), "Elitism must be boolean value True or False."
@@ -35,8 +39,9 @@ class TournamentSelection:
         self.population_size = population_size
         self.eval_loop = eval_loop
         self.language_model = language_model
-        self.select = self._select_llm_agents if language_model else self._select_standard_agents
-
+        self.select = (
+            self._select_llm_agents if language_model else self._select_standard_agents
+        )
 
     def _tournament(self, fitness_values: List[float]) -> int:
         """
@@ -47,7 +52,7 @@ class TournamentSelection:
         :return: Index of the selected winner
         :rtype: int
         """
-        selection = np.random.randint(0, len(fitness_values), size=self.tournament_size)    
+        selection = np.random.randint(0, len(fitness_values), size=self.tournament_size)
         selection_values = [fitness_values[i] for i in selection]
         winner = selection[np.argmax(selection_values)]
         return winner
@@ -96,9 +101,9 @@ class TournamentSelection:
             actor_parent = population[self._tournament(rank)]
             new_individual = actor_parent.clone(max_id, wrap=False)
             new_population.append(new_individual)
-        
+
         return elite, new_population
-    
+
     def _select_llm_agents(
         self, population: PopulationType
     ) -> Tuple[EvolvableAlgorithm, PopulationType]:
@@ -125,10 +130,14 @@ class TournamentSelection:
         for _ in range(selection_size):
             max_id += 1
             actor_parent_idx = old_population_idxs[self._tournament(rank)]
-            new_population_idxs.append((actor_parent_idx, max_id, False)) # (old_idx_to_clone, new_labelled_idx, is_elite)
+            new_population_idxs.append(
+                (actor_parent_idx, max_id, False)
+            )  # (old_idx_to_clone, new_labelled_idx, is_elite)
 
         # Isolate any agents that are not in the new population to be deleted
-        unwanted_agents = set(old_population_idxs) - set([idx for idx, *_ in new_population_idxs])
+        unwanted_agents = set(old_population_idxs) - set(
+            [idx for idx, *_ in new_population_idxs]
+        )
 
         # Delete any unwanted agents from memory
         for agent_idx in old_population_idxs:
@@ -140,7 +149,9 @@ class TournamentSelection:
         new_population = []
         index_tracker = {}
         for idx_to_clone, new_idx, is_elite in new_population_idxs:
-            if (agent := population[old_population_idxs.index(idx_to_clone)]) is not None:
+            if (
+                agent := population[old_population_idxs.index(idx_to_clone)]
+            ) is not None:
                 actor_parent = agent.clone(new_idx, wrap=False)
                 population[old_population_idxs.index(idx_to_clone)] = None
                 agent.clean_up()
@@ -150,5 +161,5 @@ class TournamentSelection:
             if is_elite:
                 elite = actor_parent
             new_population.append(actor_parent)
-        
+
         return elite, new_population

@@ -1441,7 +1441,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             )
             summed_rewards[homo_id] += reward
         return summed_rewards
-      
+
       def assemble_homogeneous_outputs(
           self, agent_outputs: ArrayDict, vect_dim: int
       ) -> ArrayDict:

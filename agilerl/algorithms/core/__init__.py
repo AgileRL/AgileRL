@@ -1,4 +1,4 @@
-from .base import EvolvableAlgorithm, MultiAgentRLAlgorithm, RLAlgorithm, LLMAlgorithm
+from .base import EvolvableAlgorithm, LLMAlgorithm, MultiAgentRLAlgorithm, RLAlgorithm
 from .wrappers import OptimizerWrapper
 
 __all__ = [

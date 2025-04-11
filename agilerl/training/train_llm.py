@@ -189,7 +189,7 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                     aggregate_metrics_across_gpus(accelerator, metric)
                     for metric in test_metrics
                 ]
-                
+
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
             if accelerator is None or accelerator.is_main_process:
@@ -211,7 +211,7 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                     )
                 pbar.update(effective_data_batch_size)
                 agent.scores.append(agg_metrics[2])
-            
+
         if accelerator is not None:
             accelerator.wait_for_everyone()
         if tournament and mutation is not None:
@@ -327,16 +327,14 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                     }
                 wandb_dict |= test_dict
             wandb.log(wandb_dict)
-    
+
     if (
         verbose
         and total_steps > evaluation_interval
         and (accelerator is None or accelerator.is_main_process)
     ):
         fitness = [str(round(agent.fitness[-1], 2)) for agent in pop]
-        avg_fitness = [
-            "%.2f" % np.mean(agent.fitness[-5:]) for agent in pop
-        ]
+        avg_fitness = ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
         avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
         agents = [agent.index for agent in pop]
         num_steps = [agent.steps[-1] for agent in pop]

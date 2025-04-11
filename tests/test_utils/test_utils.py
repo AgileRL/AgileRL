@@ -1,12 +1,13 @@
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import gymnasium as gym
 import numpy as np
 import pytest
 import torch
+from accelerate import Accelerator
 from gymnasium import spaces
 from pettingzoo.mpe import simple_speaker_listener_v4
-from accelerate import Accelerator
+
 from agilerl.algorithms import (
     CQN,
     DDPG,
