@@ -196,8 +196,7 @@ def main(init_hp, mut_p):
         accelerator=accelerator,
     )
 
-    init_hp["actor_network"] = model
-    init_hp["pad_token_id"] = tokenizer.eos_token_id
+    init_hp["PAD_TOKEN_ID"] = tokenizer.eos_token_id
 
     hp_config = HyperparameterConfig(
         beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),
@@ -212,6 +211,7 @@ def main(init_hp, mut_p):
         observation_space=env.observation_space,
         action_space=env.action_space,
         net_config=None,
+        actor_network=model,
         INIT_HP=init_hp,
         hp_config=hp_config,
         population_size=init_hp["POP_SIZE"],

@@ -514,25 +514,25 @@ def create_population(
             agent = GRPO(
                 observation_space=observation_space,
                 action_space=action_space,
-                actor_network=clone_llm(INIT_HP["actor_network"]),
-                pad_token_id=INIT_HP["pad_token_id"],
+                actor_network=clone_llm(actor_network),
+                pad_token_id=INIT_HP.get("PAD_TOKEN_ID"),
                 hp_config=hp_config,
                 index=idx,
-                batch_size=INIT_HP["BATCH_SIZE"],
-                beta=INIT_HP["BETA"],
-                lr=INIT_HP["LR"],
-                clip_coef=INIT_HP["CLIP_COEF"],
-                max_grad_norm=INIT_HP["MAX_GRAD_NORM"],
-                update_epochs=INIT_HP["UPDATE_EPOCHS"],
-                group_size=INIT_HP["GROUP_SIZE"],
-                temperature=INIT_HP["TEMPERATURE"],
-                calc_position_embeddings=INIT_HP["CALC_POSITION_EMBEDDINGS"],
-                reduce_memory_peak=INIT_HP["REDUCE_MEMORY_PEAK"],
-                max_output_tokens=INIT_HP["MAX_OUTPUT_TOKENS"],
-                min_output_tokens=INIT_HP["MIN_OUTPUT_TOKENS"],
+                batch_size=INIT_HP.get("BATCH_SIZE", 1),
+                beta=INIT_HP.get("BETA", 0.001),
+                lr=INIT_HP.get("LR", 5e-7),
+                clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
+                max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 0.1),
+                update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
+                group_size=INIT_HP.get("GROUP_SIZE", 8),
+                temperature=INIT_HP.get("TEMPERATURE", 0.9),
+                calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
+                reduce_memory_peak=INIT_HP.get("REDUCE_MEMORY_PEAK", False),
+                max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS", 1024),
+                min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS", None),
                 cosine_lr_schedule_config=(
-                    CosineLRScheduleConfig(**INIT_HP["COSINE_lR_SCHEDULER"])
-                    if INIT_HP["COSINE_lR_SCHEDULER"] is not None
+                    CosineLRScheduleConfig(**INIT_HP.get("COSINE_lR_SCHEDULER", None))
+                    if INIT_HP.get("COSINE_lR_SCHEDULER", None) is not None
                     else None
                 ),
                 accelerator=Accelerator() if accelerator is not None else None,

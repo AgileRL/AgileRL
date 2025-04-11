@@ -125,9 +125,9 @@ model, and the Countdown dataset, and initialise them as follows:
     # Instantiate the model and the associated tokenizer
     model = create_model(pretrained_model_name_or_path=MODEL_PATH)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.pad_token_id = tokenizer.eos_token_id
     train_dataset, test_dataset = make_dataset(DATASET)
-
+    INIT_HP["PAD_TOKEN_ID"] = tokenizer.pad_token_id
 
 Create the Reasoning Environment
 --------------------------------
@@ -321,8 +321,9 @@ the distribution and the GRPO class handles how the accelerator is used during t
         algo=init_hp["ALGO"],
         observation_space=env.observation_space,
         action_space=env.action_space,
+        actor_network=model,
         net_config=None,
-        INIT_HP=init_hp,
+        INIT_HP=INIT_HP,
         hp_config=hp_config,
         population_size=init_hp["POP_SIZE"],
         accelerator=accelerator,
