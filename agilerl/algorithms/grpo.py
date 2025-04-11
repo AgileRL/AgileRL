@@ -2,6 +2,7 @@ import gc
 import os
 import warnings
 from typing import Dict, List, Optional, Tuple, Union
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -12,21 +13,22 @@ from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from gymnasium import spaces
+from peft import PeftModel
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import Optimizer
 from transformers import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
-from peft import PeftModel
+
 from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.typing import DeviceType, ExperiencesType
+from agilerl.typing import ExperiencesType
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
+    clone_llm,
     create_warmup_cosine_scheduler,
     get_experiences_samples,
     stack_and_pad_experiences,
-    clone_llm,
 )
 from agilerl.utils.llm_utils import (
     HuggingFaceGym,
@@ -141,7 +143,9 @@ class GRPO(LLMAlgorithm):
         assert (
             update_epochs >= 1
         ), "Policy update epochs must be greater than or equal to one."
-        assert isinstance(actor_network, (PeftModel, PreTrainedModel)), "Actor network must be a PeftModel or PreTrainedModel"
+        assert isinstance(
+            actor_network, (PeftModel, PreTrainedModel)
+        ), "Actor network must be a PeftModel or PreTrainedModel"
         self.batch_size = batch_size
         self.lr = lr
         self.clip_coef = clip_coef
@@ -162,7 +166,7 @@ class GRPO(LLMAlgorithm):
         )
         self.cosine_lr_schedule_config = cosine_lr_schedule_config
         self.wrap = wrap
-        if max_grad_norm and accelerator is not None and device == "cuda:0":
+        if max_grad_norm and (accelerator is not None) and accelerator.is_main_process:
             warnings.warn(
                 "Argument 'max_grad_norm' will be overwritten by the 'gradient_clipping' value set in the deepspeed config."
             )
@@ -491,7 +495,9 @@ class GRPO(LLMAlgorithm):
         :return: Policy network and reference network
         :rtype: Union[nn.Module, DeepSpeedEngine]
         """
-        self.reference_actor = clone_llm(network, load_state_dict=load_reference_state_dict)
+        self.reference_actor = clone_llm(
+            network, load_state_dict=load_reference_state_dict
+        )
         self.reference_actor.eval()
         for param in self.reference_actor.parameters():
             param.requires_grad = False
@@ -514,6 +520,3 @@ class GRPO(LLMAlgorithm):
         if self.lr_scheduler is not None:
             self.lr_scheduler.step()
             self.lr = self.lr_scheduler.get_last_lr()[0]
-
-    
-

@@ -1,13 +1,14 @@
+import os
 import re
 from typing import Tuple
-import os
+
 import torch
 import yaml
 from accelerate import Accelerator
 from datasets import load_dataset
-from peft import LoraConfig, get_peft_model, PeftModel
+from peft import LoraConfig, get_peft_model
 from torch.utils.data import Dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
@@ -15,8 +16,6 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
-
-from transformers import BitsAndBytesConfig
 
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
@@ -138,7 +137,7 @@ def equation_reward_func(completions, target, nums, **kwargs):
                 rewards.append(1.0)
             else:
                 rewards.append(0.0)
-        except Exception as e:
+        except Exception:
             rewards.append(0.0)
     return rewards
 
@@ -149,15 +148,15 @@ def combined_rewards(completion, solution, prompt):
         + format_reward_func([completion], [solution])[0]
     )
 
-#     print(
-#         f"""
-# ============================================ \n
-# Completion: {completion}, \n
-# Numbers: {prompt}, \n
-# Correct Answer: {solution.item()} \n
-# Reward: {reward}
-# """
-#     )
+    #     print(
+    #         f"""
+    # ============================================ \n
+    # Completion: {completion}, \n
+    # Numbers: {prompt}, \n
+    # Correct Answer: {solution.item()} \n
+    # Reward: {reward}
+    # """
+    #     )
 
     if reward == 2.0:
         with open("countdown_completions.txt", "a") as text_file:
@@ -198,15 +197,13 @@ def main(init_hp, mut_p):
     accelerator.state.deepspeed_plugin.deepspeed_config[
         "train_micro_batch_size_per_gpu"
     ] = 2
-
-    accelerator.state.deepspeed_plugin.deepspeed_config[
-        "activation_checkpointing"
-    ] = {
+    accelerator.state.deepspeed_plugin.deepspeed_config["activation_checkpointing"] = {
         "partition_activations": True,
         "cpu_checkpointing": True,
         "synchronize_checkpoint_boundary": True,
         "number_checkpoints": 2,
     }
+
     env = HuggingFaceGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,

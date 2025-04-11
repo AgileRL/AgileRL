@@ -1,5 +1,4 @@
 import copy
-import glob
 import inspect
 import os
 import shutil
@@ -11,19 +10,20 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, TypeGuard, Union
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
-import torch.nn as nn 
 from accelerate.optimizer import AcceleratedOptimizer
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from gymnasium import spaces
+from peft import PeftModel, get_peft_model
 from tensordict import TensorDict, from_module
 from tensordict.nn import CudaGraphModule
 from torch._dynamo import OptimizedModule
 from torch.nn import Module
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
-from peft import PeftModel, get_peft_model
 from transformers import PreTrainedModel
+
 from agilerl.protocols import (
     EvolvableAttributeType,
     EvolvableModule,
@@ -42,6 +42,7 @@ from agilerl.typing import (
 )
 
 PreTrainedModelType = Union[PeftModel, PreTrainedModel]
+
 
 def share_encoder_parameters(
     policy: EvolvableNetwork, *others: EvolvableNetwork
@@ -939,6 +940,7 @@ def concatenate_experiences_into_batches(
             stacked_tensor = stacked_tensor.squeeze(squeeze_dim)
     return stacked_tensor
 
+
 def is_peft_model(model: nn.Module) -> bool:
     """Check if a model is a PEFT model.
 
@@ -950,7 +952,9 @@ def is_peft_model(model: nn.Module) -> bool:
     return isinstance(model, PeftModel)
 
 
-def clone_llm(original_model: PreTrainedModelType, load_state_dict: bool = True) -> PreTrainedModelType:
+def clone_llm(
+    original_model: PreTrainedModelType, load_state_dict: bool = True
+) -> PreTrainedModelType:
     """Clone the actor.
 
     :param model: Model to clone
@@ -961,13 +965,11 @@ def clone_llm(original_model: PreTrainedModelType, load_state_dict: bool = True)
     base_model = original_model.model
     model = type(base_model)(model_config)
 
-    print("MODEL", model)
-
     if is_peft_model(original_model):
         peft_config = original_model.peft_config[original_model.active_adapter]
         model = get_peft_model(model, peft_config)
 
     if load_state_dict:
         model.load_state_dict(original_model.state_dict())
-    
+
     return model

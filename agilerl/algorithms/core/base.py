@@ -1,10 +1,8 @@
 import copy
-import inspect
-import warnings
-import os 
 import glob
-import gc
-import deepspeed
+import inspect
+import os
+import warnings
 from abc import ABC, ABCMeta, abstractmethod
 from importlib.metadata import version
 from typing import (
@@ -20,6 +18,7 @@ from typing import (
     Union,
 )
 
+import deepspeed
 import dill
 import numpy as np
 import torch
@@ -55,16 +54,16 @@ from agilerl.typing import (
 from agilerl.utils.algo_utils import (
     assert_supported_space,
     chkpt_attribute_to_device,
+    clone_llm,
     compile_model,
     is_module_list,
+    is_peft_model,
     isroutine,
     key_in_nested_dict,
     preprocess_observation,
     recursive_check_module_attrs,
     remove_compile_prefix,
     remove_nested_files,
-    clone_llm,
-    is_peft_model
 )
 from agilerl.utils.evolvable_networks import is_image_space
 
@@ -1434,20 +1433,21 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             )
             summed_rewards[homo_id] += reward
         return summed_rewards
-    
+
 
 class LLMAlgorithm(EvolvableAlgorithm, ABC):
-    """Base object for all LLM algorithms in the AgileRL framework.
-    
-    """
-    def __init__(self, 
-                 observation_space: spaces.Space, 
-                 action_space: spaces.Space, 
-                 index: int, 
-                 hp_config: Optional[HyperparameterConfig] = None, 
-                 device: Union[str, torch.device] = "cpu", 
-                 accelerator: Optional[Accelerator] = None, 
-                 name: Optional[str] = None) -> None:
+    """Base object for all LLM algorithms in the AgileRL framework."""
+
+    def __init__(
+        self,
+        observation_space: spaces.Space,
+        action_space: spaces.Space,
+        index: int,
+        hp_config: Optional[HyperparameterConfig] = None,
+        device: Union[str, torch.device] = "cpu",
+        accelerator: Optional[Accelerator] = None,
+        name: Optional[str] = None,
+    ) -> None:
         super().__init__(index, hp_config, device, accelerator, None, name)
         assert isinstance(
             observation_space, spaces.Space
@@ -1460,12 +1460,13 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.action_space = action_space
         self.zero_stage = None
         if self.accelerator is not None:
-            self.zero_stage = self.accelerator.state.deepspeed_plugin.deepspeed_config["zero_optimization"]["stage"]
+            self.zero_stage = self.accelerator.state.deepspeed_plugin.deepspeed_config[
+                "zero_optimization"
+            ]["stage"]
         if self.zero_stage == 3 and self.accelerator.is_main_process:
             warnings.warn(
                 "Zero stage 3 is feature is nascent and has not been thoroughly tested. It may be unstable or subject to change. We recommend caution in production environments."
             )
-
 
     def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
         """Dummy preprocesses observations for forward pass through neural network.
@@ -1477,7 +1478,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
         """
         return observation
-    
+
     def save_checkpoint(self, path: str) -> None:
         """
         Override the save_checkpoint method to provide guidance on the correct method to use.
@@ -1521,7 +1522,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """
         if self.accelerator is not None:
             os.makedirs(path, exist_ok=True)
-            self.actor.save_checkpoint(path, tag="checkpoint")    
+            self.actor.save_checkpoint(path, tag="checkpoint")
         else:
             warnings.warn(
                 "Distributed actor save not supported for non-distributed training."
@@ -1540,7 +1541,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             load_path, _ = self.actor.load_checkpoint(
                 path,
                 tag="checkpoint",
-                load_module_strict=not is_peft_model(self.accelerator.unwrap_model(self.actor)), 
+                load_module_strict=not is_peft_model(
+                    self.accelerator.unwrap_model(self.actor)
+                ),
                 load_optimizer_states=True,
                 load_lr_scheduler_states=True,
             )
@@ -1576,8 +1579,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         )
 
     def wrap_models(self):
-        """Wrap the models in the accelerator
-        """
+        """Wrap the models in the accelerator"""
         if self.accelerator is not None:
             self.actor, self.optimizer, self.lr_scheduler = self.accelerator.prepare(
                 self.actor, self.optimizer.optimizer, self.lr_scheduler
@@ -1588,7 +1590,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self.reference_actor, *_ = deepspeed.initialize(
                 model=self.reference_actor, config=config_kwargs
             )
-
 
     def clone(self, index: Optional[int] = None, wrap: bool = True):
         """Creates a clone of the algorithm.
@@ -1606,17 +1607,23 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self._save_distributed_actor(f"temporary_checkpoint/agent_{self.index}")
             self.accelerator.wait_for_everyone()
 
-        input_args = EvolvableAlgorithm.inspect_attributes(
-                self, input_args_only=True
-        )
+        input_args = EvolvableAlgorithm.inspect_attributes(self, input_args_only=True)
         input_args["clone"] = True
 
         # extract base model and peft config
-        actor = self.accelerator.unwrap_model(self.actor) if self.accelerator is not None else self.actor
-        cloned_actor = clone_llm(actor, load_state_dict=(self.zero_stage != 3)) # NOTE do we want to load this state dict given we load the checkpoint in?
+        actor = (
+            self.accelerator.unwrap_model(self.actor)
+            if self.accelerator is not None
+            else self.actor
+        )
+        cloned_actor = clone_llm(
+            actor, load_state_dict=(self.zero_stage != 3)
+        )  # NOTE do we want to load this state dict given we load the checkpoint in?
 
         input_args["actor_network"] = cloned_actor
-        input_args["accelerator"] = Accelerator()
+        input_args["accelerator"] = (
+            Accelerator() if self.accelerator is not None else None
+        )
         clone = type(self)(**input_args)
 
         clone.reference_actor.load_state_dict(self.reference_actor.state_dict())
@@ -1624,12 +1631,23 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         clone.mutation_hook()
 
         # Clone attributes
-        accelerator = clone.accelerator 
+        accelerator = clone.accelerator
+        lr_scheduler = clone.lr_scheduler
+
+        cloned_lr_scheduler = clone.lr_scheduler
+        original_lr_scheduler = self.lr_scheduler
+        clone.lr_scheduler = None
+        self.lr_scheduler = None
         clone = EvolvableAlgorithm.copy_attributes(self, clone)
         clone.accelerator = accelerator
+        clone.lr_scheduler = lr_scheduler
+        clone.lr_scheduler = cloned_lr_scheduler
+        self.lr_scheduler = original_lr_scheduler
 
-        if self.accelerator is None:    
-            clone.optimizer.optimizer.load_state_dict(self.optimizer.optimizer.state_dict())
+        if self.accelerator is None:
+            clone.optimizer.optimizer.load_state_dict(
+                self.optimizer.optimizer.state_dict()
+            )
             if self.lr_scheduler is not None:
                 clone.lr_scheduler.load_state_dict(self.lr_scheduler.state_dict())
 
@@ -1646,11 +1664,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if self.accelerator.is_main_process:
                 remove_nested_files(saved_state_files)
         return clone
-    
 
     def clean_up(self):
-        """Clean up the algorithm.
-        """
+        """Clean up the algorithm."""
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
             self.accelerator.free_memory()
