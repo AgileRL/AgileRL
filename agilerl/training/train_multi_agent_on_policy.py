@@ -186,6 +186,7 @@ def train_multi_agent_on_policy(
     agent_ids = deepcopy(pop[0].shared_agent_ids)
     pop_loss = [{agent_id: [] for agent_id in agent_ids} for _ in pop]
     pop_fitnesses = [{agent_id: [] for agent_id in agent_ids} for _ in pop]
+    entropy_hist = [{agent_id: [] for agent_id in agent_ids} for _ in pop]
     total_steps = 0
     loss = None
     checkpoint_count = 0
@@ -209,18 +210,12 @@ def train_multi_agent_on_policy(
             losses = {agent_id: [] for agent_id in agent_ids}
             completed_episode_scores = []
             steps = 0
-
             if swap_channels:
-                if not is_vectorised:
-                    obs = {
-                        agent_id: obs_channels_to_first(np.expand_dims(s, 0))
-                        for agent_id, s in obs.items()
-                    }
-                else:
-                    obs = {
-                        agent_id: obs_channels_to_first(s)
-                        for agent_id, s in obs.items()
-                    }
+                expand_dims = not is_vectorised
+                obs = {
+                    agent_id: obs_channels_to_first(s, expand_dims)
+                    for agent_id, s in obs.items()
+                }
 
             start_time = time.time()
             for _ in range(-(evo_steps // -agent.learn_step)):
@@ -228,6 +223,7 @@ def train_multi_agent_on_policy(
                 states = {agent_id: [] for agent_id in agent.agent_ids}
                 actions = {agent_id: [] for agent_id in agent.agent_ids}
                 log_probs = {agent_id: [] for agent_id in agent.agent_ids}
+                entropies = {agent_id: [] for agent_id in agent.agent_ids}
                 rewards = {agent_id: [] for agent_id in agent.agent_ids}
                 dones = {agent_id: [] for agent_id in agent.agent_ids}
                 values = {agent_id: [] for agent_id in agent.agent_ids}
@@ -237,11 +233,14 @@ def train_multi_agent_on_policy(
                 for idx_step in range(-(agent.learn_step // -num_envs)):
 
                     # Get next action from agent
-                    action, log_prob, _, value = agent.get_action(obs=obs, infos=info)
+                    action, log_prob, entropy, value = agent.get_action(
+                        obs=obs, infos=info
+                    )
 
                     if not is_vectorised:
                         action = {agent: act[0] for agent, act in action.items()}
                         log_prob = {agent: lp[0] for agent, lp in log_prob.items()}
+                        entropy = {agent: ent[0] for agent, ent in entropy.items()}
                         value = {agent: val[0] for agent, val in value.items()}
 
                     # Act in environment
@@ -269,6 +268,7 @@ def train_multi_agent_on_policy(
                         states[agent_id].append(obs[agent_id])
                         actions[agent_id].append(action[agent_id])
                         log_probs[agent_id].append(log_prob[agent_id])
+                        entropies[agent_id].append(entropy[agent_id])
                         rewards[agent_id].append(reward[agent_id])
                         dones[agent_id].append(done[agent_id])
                         values[agent_id].append(value[agent_id])
@@ -277,16 +277,11 @@ def train_multi_agent_on_policy(
                         ).astype(np.int8)
 
                     if swap_channels:
-                        if not is_vectorised:
-                            next_obs = {
-                                agent_id: obs_channels_to_first(np.expand_dims(s, 0))
-                                for agent_id, s in next_obs.items()
-                            }
-                        else:
-                            next_obs = {
-                                agent_id: obs_channels_to_first(s)
-                                for agent_id, s in next_obs.items()
-                            }
+                        expand_dims = not is_vectorised
+                        next_obs = {
+                            agent_id: obs_channels_to_first(s, expand_dims)
+                            for agent_id, s in next_obs.items()
+                        }
 
                     if not is_vectorised:
                         next_done = {
@@ -295,7 +290,6 @@ def train_multi_agent_on_policy(
 
                     obs = next_obs
                     done = next_done
-
                     for idx, agent_dones in enumerate(zip(*next_done.values())):
                         if all(agent_dones):
                             completed_score = (
@@ -323,8 +317,12 @@ def train_multi_agent_on_policy(
 
                 # Learn according to agent's RL algorithm
                 loss = agent.learn(experiences)
+                entropies = agent.assemble_homogeneous_outputs(entropies, num_envs)
                 for agent_id in agent_ids:
                     losses[agent_id].append(loss[agent_id])
+                    entropy_hist[agent_idx][agent_id].append(
+                        np.mean(entropies[agent_id])
+                    )
 
             agent.steps[-1] += steps
             fps = steps / (time.time() - start_time)
@@ -337,6 +335,7 @@ def train_multi_agent_on_policy(
                             loss for loss in losses[agent_id] if loss is not None
                         ]
                         pop_loss[agent_idx][agent_id].append(np.mean(unique_loss))
+
         # Evaluate population
         fitnesses = [
             agent.test(
@@ -413,6 +412,7 @@ def train_multi_agent_on_policy(
             wandb_dict.update(mean_score_dict)
 
             loss_dict = {}
+            entropy_dict = {}
 
             for agent_idx, agent in enumerate(pop):
                 for agent_id, loss in zip(
@@ -423,6 +423,16 @@ def train_multi_agent_on_policy(
                         loss[-10:]
                     )
                     wandb_dict.update(loss_dict)
+
+                for agent_id, entropy_values in zip(
+                    entropy_hist[agent_idx].keys(),
+                    entropy_hist[agent_idx].values(),
+                ):
+                    if entropy_values:
+                        entropy_dict[f"train/agent_{agent_idx}_{agent_id}_entropy"] = (
+                            np.mean(entropy_values[-10:])
+                        )
+                wandb_dict.update(entropy_dict)
 
             if accelerator is not None:
                 accelerator.wait_for_everyone()
@@ -441,6 +451,7 @@ def train_multi_agent_on_policy(
                         f"indi_fitness_agent_{idx}": agent.fitness[-1],
                     }
                 )
+
         # Update step counter
         for agent in pop:
             agent.steps.append(agent.steps[-1])

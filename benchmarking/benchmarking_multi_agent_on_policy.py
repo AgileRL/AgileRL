@@ -4,6 +4,7 @@ import supersuit as ss
 import torch
 import yaml
 from accelerate import Accelerator
+from pettingzoo.utils import env_logger
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
@@ -24,6 +25,8 @@ from agilerl.utils.utils import (
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    env_logger.EnvLogger.suppress_output()
+
     print("============ AgileRL Multi-agent benchmarking ============")
 
     if DISTRIBUTED_TRAINING:
@@ -34,6 +37,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
         accelerator.wait_for_everyone()
     else:
         accelerator = None
+
     print(f"DEVICE: {device}")
 
     env = importlib.import_module(f"{INIT_HP['ENV_NAME']}").parallel_env
@@ -93,6 +97,10 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
             grow_factor=1.5,
             shrink_factor=0.75,
         ),
+        ent_coef=RLParameter(
+            min=MUTATION_PARAMS["MIN_ENT_COEF"],
+            max=MUTATION_PARAMS["MAX_ENT_COEF"],
+        ),
     )
 
     agent_pop = create_population(
@@ -136,7 +144,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
 
 
 if __name__ == "__main__":
-    with open("configs/training/ippo.yaml") as file:
+    with open("configs/training/multi_agent/ippo.yaml") as file:
         config = yaml.safe_load(file)
     INIT_HP = config["INIT_HP"]
     MUTATION_PARAMS = config["MUTATION_PARAMS"]

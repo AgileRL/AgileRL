@@ -36,8 +36,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
     dataset = h5py.File(INIT_HP["DATASET"], "r")
 
-    field_names = ["state", "action", "reward", "next_state", "done"]
-    memory = ReplayBuffer(INIT_HP["MEMORY_SIZE"], field_names=field_names)
+    memory = ReplayBuffer(INIT_HP["MEMORY_SIZE"], device=accelerator.device)
     tournament = TournamentSelection(
         INIT_HP["TOURN_SIZE"],
         INIT_HP["ELITISM"],

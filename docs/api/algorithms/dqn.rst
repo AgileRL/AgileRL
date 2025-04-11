@@ -10,19 +10,21 @@ DQN is an extension of Q-learning that makes use of a replay buffer and target n
 Can I use it?
 --------------
 
+Action Space
+^^^^^^^^^^^^
+
 .. list-table::
-   :widths: 20 20 20
+   :widths: 20 20 20 20
    :header-rows: 1
 
-   * -
-     - Action
-     - Observation
-   * - Discrete
-     - ✔️
-     - ✔️
-   * - Continuous
+   * - ``Discrete``
+     - ``Box``
+     - ``MultiDiscrete``
+     - ``MultiBinary``
+   * - ✔️
      - ❌
-     - ✔️
+     - ❌
+     - ❌
 
 Example
 ------------

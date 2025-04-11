@@ -13,17 +13,19 @@ and is well-suited to problems with many homogeneous agents.
 Can I use it?
 -------------
 
+Action Space
+^^^^^^^^^^^^
+
 .. list-table::
-   :widths: 20 20 20
+   :widths: 20 20 20 20
    :header-rows: 1
 
-   * -
-     - Action
-     - Observation
-   * - Discrete
+   * - ``Discrete``
+     - ``Box``
+     - ``MultiDiscrete``
+     - ``MultiBinary``
+   * - ✔️
      - ✔️
-     - ✔️
-   * - Continuous
      - ✔️
      - ✔️
 
@@ -100,8 +102,12 @@ Example Training Loop
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_envs = 8
-    env = simple_speaker_listener_v4.parallel_env(max_cycles=25, continuous_actions=True)
-    env = AsyncPettingZooVecEnv([lambda: env for _ in range(num_envs)])
+    env = AsyncPettingZooVecEnv(
+        [
+            lambda: simple_speaker_listener_v4.parallel_env(continuous_actions=True)
+            for _ in range(num_envs)
+        ]
+    )
     env.reset()
 
     # Configure the multi-agent algo input arguments
@@ -237,12 +243,22 @@ For dictionary / tuple observations containing any combination of image, discret
 
 .. code-block:: python
 
+  CNN_CONFIG = {
+      "channel_size": [32, 32], # CNN channel size
+      "kernel_size": [8, 4],   # CNN kernel size
+      "stride_size": [4, 2],   # CNN stride size
+  }
+
   NET_CONFIG = {
       "encoder_config": {
-        'hidden_size': [32, 32],  # Network head hidden size
-        'channel_size': [32, 32], # CNN channel size
-        'kernel_size': [8, 4],   # CNN kernel size
-        'stride_size': [4, 2],   # CNN stride size
+        "latent_dim": 32,
+        # Config for nested EvolvableCNN objects
+        "cnn_config": CNN_CONFIG,
+        # Config for nested EvolvableMLP objects
+        "mlp_config": {
+            "hidden_size": [32, 32]
+        },
+        "vector_space_mlp": True # Process vector observations with an MLP
       },
       "head_config": {'hidden_size': [32]}  # Network head hidden size
     }

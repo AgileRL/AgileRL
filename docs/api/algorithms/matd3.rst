@@ -12,19 +12,21 @@ enables superior performance when compared to MADDPG.
 Can I use it?
 -------------
 
+Action Space
+^^^^^^^^^^^^
+
 .. list-table::
-   :widths: 20 20 20
+   :widths: 20 20 20 20
    :header-rows: 1
 
-   * -
-     - Action
-     - Observation
-   * - Discrete
+   * - ``Discrete``
+     - ``Box``
+     - ``MultiDiscrete``
+     - ``MultiBinary``
+   * - ❌
      - ✔️
-     - ✔️
-   * - Continuous
-     - ✔️
-     - ✔️
+     - ❌
+     - ❌
 
 Gumbel-Softmax
 --------------
@@ -81,8 +83,12 @@ Example
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_envs = 8
-    env = simple_speaker_listener_v4.parallel_env(max_cycles=25, continuous_actions=True)
-    env = AsyncPettingZooVecEnv([lambda: env for _ in range(num_envs)])
+    env = AsyncPettingZooVecEnv(
+        [
+            lambda: simple_speaker_listener_v4.parallel_env(continuous_actions=True)
+            for _ in range(num_envs)
+        ]
+    )
     env.reset()
 
     # Configure the multi-agent algo input arguments

@@ -66,6 +66,9 @@ class OptimizerConfig:
         else:
             self.optimizer_cls = self.optimizer_cls.__name__
 
+    def __eq__(self, other: "OptimizerConfig") -> bool:
+        return self.name == other.name and self.networks == other.networks
+
     def get_optimizer_cls(self) -> Union[Optimizer, List[Optimizer]]:
         """Get the optimizer object/s from the stored configuration.
 
@@ -347,11 +350,16 @@ class MutationRegistry:
         return f"Network Groups:\n{groups_str}\n\nOptimizers:\n{optimizers_str}"
 
     def __eq__(self, other: Optional["MutationRegistry"]) -> bool:
-        return (
-            self.hp_config == other.hp_config
-            and self.groups == other.groups
-            and self.optimizers == other.optimizers
-        )
+        """Check if two MutationRegistry objects are equal. This involves checking
+        that the network groups and optimizer configurations are the same.
+
+        :param other: The other MutationRegistry object to compare with.
+        :type other: Optional[MutationRegistry]
+
+        :return: True if the two MutationRegistry objects are equal, False otherwise.
+        :rtype: bool
+        """
+        return self.groups == other.groups and self.optimizers == other.optimizers
 
     @property
     def optimizer_networks(self) -> Dict[str, List[str]]:

@@ -4,6 +4,7 @@ import torch.nn as nn
 from gymnasium import spaces
 from tqdm import trange
 
+from agilerl.components.data import Transition
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -82,12 +83,7 @@ if __name__ == "__main__":
     )
 
     # Create the replay buffer
-    field_names = ["state", "action", "reward", "next_state", "done"]
-    memory = ReplayBuffer(
-        memory_size=10000,  # Max replay buffer size
-        field_names=field_names,  # Field names to store in memory
-        device=device,
-    )
+    memory = ReplayBuffer(INIT_HP["MEMORY_SIZE"], device=device)
 
     tournament = TournamentSelection(
         tournament_size=2,  # Tournament selection size
@@ -104,7 +100,6 @@ if __name__ == "__main__":
         parameters=0.2,  # Network parameters mutation
         activation=0,  # Activation layer mutation
         rl_hp=0.2,  # Learning HP mutation
-        rl_hp_selection=["lr", "batch_size"],  # Learning HPs to choose from
         mutation_sd=0.1,  # Mutation strength
         rand_seed=1,  # Random seed
         device=device,
@@ -160,24 +155,20 @@ if __name__ == "__main__":
                         scores[idx] = 0
 
                 # Save experience to replay buffer
-                if INIT_HP["CHANNELS_LAST"]:
-                    memory.save_to_memory(
-                        state,
-                        action,
-                        reward,
-                        obs_channels_to_first(next_state),
-                        terminated,
-                        is_vectorised=True,
-                    )
-                else:
-                    memory.save_to_memory(
-                        state,
-                        action,
-                        reward,
-                        next_state,
-                        terminated,
-                        is_vectorised=True,
-                    )
+                next_state = (
+                    obs_channels_to_first(next_state)
+                    if INIT_HP["CHANNELS_LAST"]
+                    else next_state
+                )
+                transition = Transition(
+                    obs=state,
+                    action=action,
+                    reward=reward,
+                    next_obs=next_state,
+                    done=terminated,
+                    batch_size=[num_envs],
+                )
+                memory.add(transition.to_tensordict())
 
                 # Learn according to learning frequency
                 if memory.counter > learning_delay and len(memory) >= agent.batch_size:

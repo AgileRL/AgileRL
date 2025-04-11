@@ -29,6 +29,7 @@ INIT_HP:
     WANDB: true                # Log with Weights and Biases
     TORCH_COMPILE: default
 
+
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation
     ARCH_MUT: 0.2                          # Architecture mutation
@@ -46,6 +47,8 @@ MUTATION_PARAMS:
     MAX_BATCH_SIZE: 1024
     MIN_LEARN_STEP: 256
     MAX_LEARN_STEP: 8192
+    MIN_ENT_COEF: 0.001
+    MAX_ENT_COEF: 0.1
 
 NET_CONFIG:
     latent_dim: 64
@@ -55,7 +58,7 @@ NET_CONFIG:
         activation: Tanh
         min_mlp_nodes: 16
         max_mlp_nodes: 256
-        layer_norm: false
+        layer_norm: true
 
     head_config:
         hidden_size: [64]
@@ -66,6 +69,6 @@ NET_CONFIG:
         min_mlp_nodes: 16
         max_mlp_nodes: 256
         output_vanish: false
-        layer_norm: false
+        layer_norm: true
 
 DISTRIBUTED_TRAINING: false

@@ -50,10 +50,12 @@ class QNetwork(EvolvableNetwork):
     :type device: str
     """
 
+    supported_spaces = (spaces.Discrete, spaces.MultiDiscrete)
+
     def __init__(
         self,
         observation_space: spaces.Space,
-        action_space: spaces.Discrete,
+        action_space: Union[spaces.Discrete, spaces.MultiDiscrete],
         encoder_cls: Optional[Union[str, Type[EvolvableModule]]] = None,
         encoder_config: Optional[ConfigType] = None,
         head_config: Optional[ConfigType] = None,
@@ -79,7 +81,7 @@ class QNetwork(EvolvableNetwork):
             device=device,
         )
 
-        if not isinstance(action_space, (spaces.Discrete, spaces.MultiDiscrete)):
+        if not isinstance(action_space, self.supported_spaces):
             raise ValueError("Action space must be either Discrete or MultiDiscrete")
 
         if head_config is None:
@@ -351,7 +353,9 @@ class ContinuousQNetwork(EvolvableNetwork):
         )
 
         if head_config is None:
-            head_config = asdict(MlpNetConfig(hidden_size=[16], output_activation=None))
+            head_config = asdict(MlpNetConfig(hidden_size=[32], output_activation=None))
+        else:
+            head_config["output_activation"] = None
 
         self.num_actions = spaces.flatdim(action_space)
 
@@ -389,7 +393,7 @@ class ContinuousQNetwork(EvolvableNetwork):
         :rtype: torch.Tensor
         """
         if not isinstance(actions, torch.Tensor):
-            actions = torch.tensor(actions, dtype=torch.float32).to(self.device)
+            actions = torch.as_tensor(actions, dtype=torch.float32).to(self.device)
 
         if len(actions.shape) == 1:
             actions = actions.unsqueeze(0)

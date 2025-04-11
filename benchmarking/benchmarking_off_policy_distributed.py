@@ -34,8 +34,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     if INIT_HP["CHANNELS_LAST"]:
         observation_space = observation_space_channels_to_first(observation_space)
 
-    field_names = ["state", "action", "reward", "next_state", "done"]
-    memory = ReplayBuffer(INIT_HP["MEMORY_SIZE"], field_names=field_names)
+    memory = ReplayBuffer(INIT_HP["MEMORY_SIZE"], device=accelerator.device)
     tournament = TournamentSelection(
         INIT_HP["TOURN_SIZE"],
         INIT_HP["ELITISM"],

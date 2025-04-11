@@ -43,7 +43,7 @@ are more likely to remain present in the population. The sequence of evolution (
 
     import torch
 
-    from agilerl.algorithms.core.registry import HyperparamerConfig, RLParameter
+    from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
     from agilerl.utils.utils import (
         create_population,
         make_vect_envs,

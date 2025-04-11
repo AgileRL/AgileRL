@@ -4,6 +4,7 @@ import supersuit as ss
 import torch
 import yaml
 from accelerate import Accelerator
+from pettingzoo.utils import env_logger
 
 from agilerl.algorithms.core import MultiAgentRLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
@@ -28,6 +29,8 @@ from benchmarking.networks import SimpleCritic
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=True):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    env_logger.EnvLogger.suppress_output()
+
     print("============ AgileRL Multi-agent benchmarking ============")
 
     if DISTRIBUTED_TRAINING:
@@ -41,7 +44,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Tru
     print(f"DEVICE: {device}")
 
     env = importlib.import_module(f"{INIT_HP['ENV_NAME']}").parallel_env
-    env_kwargs = dict(max_cycles=25, continuous_actions=True)
+    env_kwargs = dict(max_cycles=25, continuous_actions=False)
     env = make_multi_agent_vect_envs(env, num_envs=INIT_HP["NUM_ENVS"], **env_kwargs)
 
     if INIT_HP["CHANNELS_LAST"]:

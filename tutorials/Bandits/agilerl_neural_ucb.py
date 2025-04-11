@@ -8,6 +8,7 @@ import numpy as np
 import torch
 from gymnasium import spaces
 from scipy.ndimage import gaussian_filter1d
+from tensordict import TensorDict
 from ucimlrepo import fetch_ucirepo
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
@@ -65,10 +66,8 @@ if __name__ == "__main__":
         device=device,
     )
 
-    field_names = ["context", "reward"]
     memory = ReplayBuffer(
-        memory_size=10000,  # Max replay buffer size
-        field_names=field_names,  # Field names to store in memory
+        max_size=10000,  # Max replay buffer size
         device=device,
     )
 
@@ -95,7 +94,14 @@ if __name__ == "__main__":
                 next_context, reward = env.step(action)  # Act in environment
 
                 # Save experience to replay buffer
-                memory.save_to_memory(context[action], reward)
+                transition = TensorDict(
+                    {
+                        "obs": context[action],
+                        "reward": reward,
+                    },
+                ).float()
+                transition = transition.unsqueeze(0)
+                transition.batch_size = [1]
 
                 # Learn according to learning frequency
                 if len(memory) >= agent.batch_size:

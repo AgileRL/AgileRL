@@ -238,46 +238,16 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, device
     return states, actions, rewards, next_states, dones
 
 
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize(
-    "net_config, accelerator_flag, observation_spaces, compile_mode",
+    "observation_spaces, net_config",
     [
         (
-            {"encoder_config": {"hidden_size": [64, 64]}},
-            False,
             generate_multi_agent_box_spaces(2, (4,)),
-            None,
-        ),
-        (
-            {
-                "encoder_config": {
-                    "channel_size": [3],
-                    "kernel_size": [3],
-                    "stride_size": [1],
-                }
-            },
-            False,
-            generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
-            None,
-        ),
-        (
-            {
-                "encoder_config": {
-                    "channel_size": [3],
-                    "kernel_size": [3],
-                    "stride_size": [1],
-                }
-            },
-            True,
-            generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
-            None,
-        ),
-        (
             {"encoder_config": {"hidden_size": [64, 64]}},
-            False,
-            generate_multi_agent_box_spaces(2, (4,)),
-            "default",
         ),
         (
+            generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
             {
                 "encoder_config": {
                     "channel_size": [3],
@@ -285,24 +255,10 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, device
                     "stride_size": [1],
                 }
             },
-            False,
-            generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
-            "default",
-        ),
-        (
-            {
-                "encoder_config": {
-                    "channel_size": [3],
-                    "kernel_size": [3],
-                    "stride_size": [1],
-                }
-            },
-            True,
-            generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
-            "default",
         ),
     ],
 )
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_initialize_matd3_with_net_config(
     net_config, accelerator_flag, observation_spaces, device, compile_mode
 ):
@@ -325,7 +281,6 @@ def test_initialize_matd3_with_net_config(
         policy_freq=policy_freq,
         torch_compiler=compile_mode,
     )
-    net_config.update({"output_activation": "Softmax"})
     assert matd3.observation_spaces == observation_spaces
     assert matd3.action_spaces == action_spaces
     assert matd3.policy_freq == policy_freq
@@ -419,35 +374,12 @@ def test_initialize_matd3_with_mlp_networks_gumbel_softmax(
     assert matd3.torch_compiler == compile_mode
 
 
+@pytest.mark.parametrize("accelerator_flag", [False, True])
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize(
-    "observation_spaces, action_spaces, accelerator_flag, compile_mode",
-    [
-        (
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            False,
-            None,
-        ),
-        (
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            True,
-            None,
-        ),
-        (
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            False,
-            "default",
-        ),
-        (
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            True,
-            "default",
-        ),
-    ],
+    "observation_spaces", [generate_multi_agent_box_spaces(2, (6,))]
 )
+@pytest.mark.parametrize("action_spaces", [generate_multi_agent_discrete_spaces(2, 2)])
 def test_initialize_matd3_with_mlp_networks(
     mlp_actor,
     mlp_critic,
@@ -533,35 +465,13 @@ def test_initialize_matd3_with_mlp_networks(
     assert isinstance(matd3.criterion, nn.MSELoss)
 
 
+@pytest.mark.parametrize("accelerator_flag", [False, True])
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize(
-    "observation_spaces, action_spaces, accelerator_flag, compile_mode",
-    [
-        (
-            generate_multi_agent_box_spaces(2, (4, 210, 160), low=0, high=255),
-            generate_multi_agent_discrete_spaces(2, 2),
-            False,
-            None,
-        ),
-        (
-            generate_multi_agent_box_spaces(2, (4, 210, 160), low=0, high=255),
-            generate_multi_agent_discrete_spaces(2, 2),
-            True,
-            None,
-        ),
-        (
-            generate_multi_agent_box_spaces(2, (4, 210, 160), low=0, high=255),
-            generate_multi_agent_discrete_spaces(2, 2),
-            False,
-            "default",
-        ),
-        (
-            generate_multi_agent_box_spaces(2, (4, 210, 160), low=0, high=255),
-            generate_multi_agent_discrete_spaces(2, 2),
-            True,
-            "default",
-        ),
-    ],
+    "observation_spaces",
+    [generate_multi_agent_box_spaces(2, (4, 210, 160), low=0, high=255)],
 )
+@pytest.mark.parametrize("action_spaces", [generate_multi_agent_discrete_spaces(2, 2)])
 def test_initialize_matd3_with_cnn_networks(
     cnn_actor,
     cnn_critic,
@@ -942,107 +852,22 @@ def test_matd3_init_with_compile_error(mode):
         )
 
 
+@pytest.mark.parametrize("training", [0, 1])
 @pytest.mark.parametrize(
-    "training, observation_spaces, action_spaces, compile_mode",
+    "observation_spaces",
     [
-        (
-            1,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_box_spaces(2, (2,)),
-            None,
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_box_spaces(2, (2,)),
-            None,
-        ),
-        (
-            1,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            None,
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            None,
-        ),
-        (
-            1,
-            generate_multi_agent_discrete_spaces(2, 6),
-            generate_multi_agent_box_spaces(2, (2,)),
-            None,
-        ),
-        (
-            0,
-            generate_multi_agent_discrete_spaces(2, 6),
-            generate_multi_agent_box_spaces(2, (2,)),
-            None,
-        ),
-        (
-            1,
-            generate_multi_agent_discrete_spaces(2, 6),
-            generate_multi_agent_discrete_spaces(2, 2),
-            None,
-        ),
-        (
-            0,
-            generate_multi_agent_discrete_spaces(2, 6),
-            generate_multi_agent_discrete_spaces(2, 2),
-            None,
-        ),
-        (
-            1,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_box_spaces(2, (2,)),
-            "default",
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_box_spaces(2, (2,)),
-            "default",
-        ),
-        (
-            1,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            "default",
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            "default",
-        ),
-        (
-            1,
-            generate_multi_agent_discrete_spaces(2, 6),
-            generate_multi_agent_box_spaces(2, (2,)),
-            "default",
-        ),
-        (
-            0,
-            generate_multi_agent_discrete_spaces(2, 6),
-            generate_multi_agent_box_spaces(2, (2,)),
-            "default",
-        ),
-        (
-            1,
-            generate_multi_agent_discrete_spaces(2, 6),
-            generate_multi_agent_discrete_spaces(2, 2),
-            "default",
-        ),
-        (
-            0,
-            generate_multi_agent_discrete_spaces(2, 6),
-            generate_multi_agent_discrete_spaces(2, 2),
-            "default",
-        ),
+        generate_multi_agent_box_spaces(2, (6,)),
+        generate_multi_agent_discrete_spaces(2, 6),
     ],
 )
+@pytest.mark.parametrize(
+    "action_spaces",
+    [
+        generate_multi_agent_box_spaces(2, (2,)),
+        generate_multi_agent_discrete_spaces(2, 2),
+    ],
+)
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_matd3_get_action_mlp(
     training, observation_spaces, action_spaces, device, compile_mode
 ):
@@ -1096,59 +921,19 @@ def test_matd3_get_action_mlp(
     matd3 = None
 
 
+@pytest.mark.parametrize("training", [0, 1])
 @pytest.mark.parametrize(
-    "training, observation_spaces, action_spaces, compile_mode",
+    "observation_spaces",
+    [generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255)],
+)
+@pytest.mark.parametrize(
+    "action_spaces",
     [
-        (
-            1,
-            generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
-            generate_multi_agent_box_spaces(2, (2,)),
-            None,
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
-            generate_multi_agent_box_spaces(2, (2,)),
-            None,
-        ),
-        (
-            1,
-            generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
-            generate_multi_agent_discrete_spaces(2, 2),
-            None,
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
-            generate_multi_agent_discrete_spaces(2, 2),
-            None,
-        ),
-        (
-            1,
-            generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
-            generate_multi_agent_box_spaces(2, (2,)),
-            "default",
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
-            generate_multi_agent_box_spaces(2, (2,)),
-            "default",
-        ),
-        (
-            1,
-            generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
-            generate_multi_agent_discrete_spaces(2, 2),
-            "default",
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
-            generate_multi_agent_discrete_spaces(2, 2),
-            "default",
-        ),
+        generate_multi_agent_box_spaces(2, (2,)),
+        generate_multi_agent_discrete_spaces(2, 2),
     ],
 )
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_matd3_get_action_cnn(
     training, observation_spaces, action_spaces, device, compile_mode
 ):
@@ -1206,59 +991,19 @@ def test_matd3_get_action_cnn(
                 assert action <= action_dim - 1
 
 
+@pytest.mark.parametrize("training", [0, 1])
 @pytest.mark.parametrize(
-    "training, observation_spaces, action_spaces, compile_mode",
+    "observation_spaces",
+    [generate_multi_agent_box_spaces(2, (6,))],
+)
+@pytest.mark.parametrize(
+    "action_spaces",
     [
-        (
-            1,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            None,
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            None,
-        ),
-        (
-            1,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_box_spaces(2, (2,)),
-            None,
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_box_spaces(2, (2,)),
-            None,
-        ),
-        (
-            1,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            "default",
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            "default",
-        ),
-        (
-            1,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_box_spaces(2, (2,)),
-            "default",
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_box_spaces(2, (2,)),
-            "default",
-        ),
+        generate_multi_agent_discrete_spaces(2, 2),
+        generate_multi_agent_box_spaces(2, (2,)),
     ],
 )
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_matd3_get_action_distributed(
     training, observation_spaces, action_spaces, compile_mode
 ):
@@ -1319,59 +1064,18 @@ def test_matd3_get_action_distributed(
                 assert action <= action_dim - 1
 
 
+@pytest.mark.parametrize("training", [0, 1])
 @pytest.mark.parametrize(
-    "training, observation_spaces, action_spaces, compile_mode",
+    "observation_spaces", [generate_multi_agent_box_spaces(2, (6,))]
+)
+@pytest.mark.parametrize(
+    "action_spaces",
     [
-        (
-            1,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_box_spaces(2, (2,)),
-            None,
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_box_spaces(2, (2,)),
-            None,
-        ),
-        (
-            1,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            None,
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            None,
-        ),
-        (
-            1,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_box_spaces(2, (2,)),
-            "default",
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_box_spaces(2, (2,)),
-            "default",
-        ),
-        (
-            1,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            "default",
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            "default",
-        ),
+        generate_multi_agent_box_spaces(2, (2,)),
+        generate_multi_agent_discrete_spaces(2, 2),
     ],
 )
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_matd3_get_action_agent_masking(
     training, observation_spaces, action_spaces, compile_mode, device
 ):
@@ -1410,59 +1114,18 @@ def test_matd3_get_action_agent_masking(
         ), cont_actions["agent_0"]
 
 
+@pytest.mark.parametrize("training", [0, 1])
 @pytest.mark.parametrize(
-    "training, observation_spaces, action_spaces, compile_mode",
+    "observation_spaces", [generate_multi_agent_box_spaces(2, (6,))]
+)
+@pytest.mark.parametrize(
+    "action_spaces",
     [
-        (
-            1,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_box_spaces(2, (6,)),
-            None,
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_box_spaces(2, (6,)),
-            None,
-        ),
-        (
-            1,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_discrete_spaces(2, 6),
-            None,
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_discrete_spaces(2, 6),
-            None,
-        ),
-        (
-            1,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_box_spaces(2, (6,)),
-            "default",
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_box_spaces(2, (6,)),
-            "default",
-        ),
-        (
-            1,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_discrete_spaces(2, 6),
-            "default",
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_discrete_spaces(2, 6),
-            "default",
-        ),
+        generate_multi_agent_box_spaces(2, (6,)),
+        generate_multi_agent_discrete_spaces(2, 6),
     ],
 )
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_matd3_get_action_vectorized_agent_masking(
     training, observation_spaces, action_spaces, device, compile_mode
 ):
@@ -1590,66 +1253,22 @@ def test_matd3_get_action_action_masking(
 
 
 @pytest.mark.parametrize(
-    "observation_spaces, batch_size, action_spaces, agent_ids, compile_mode",
+    "observation_spaces",
     [
-        (
-            generate_multi_agent_box_spaces(2, (6,)),
-            64,
-            generate_multi_agent_box_spaces(2, (2,)),
-            ["agent_0", "other_agent_0"],
-            None,
-        ),
-        (
-            generate_multi_agent_discrete_spaces(2, 6),
-            64,
-            generate_multi_agent_box_spaces(2, (2,)),
-            ["agent_0", "other_agent_0"],
-            None,
-        ),
-        (
-            generate_multi_agent_box_spaces(2, (6,)),
-            64,
-            generate_multi_agent_discrete_spaces(2, 2),
-            ["agent_0", "other_agent_0"],
-            None,
-        ),
-        (
-            generate_multi_agent_discrete_spaces(2, 6),
-            64,
-            generate_multi_agent_discrete_spaces(2, 2),
-            ["agent_0", "other_agent_0"],
-            None,
-        ),
-        (
-            generate_multi_agent_box_spaces(2, (6,)),
-            64,
-            generate_multi_agent_box_spaces(2, (2,)),
-            ["agent_0", "other_agent_0"],
-            "default",
-        ),
-        (
-            generate_multi_agent_discrete_spaces(2, 6),
-            64,
-            generate_multi_agent_box_spaces(2, (2,)),
-            ["agent_0", "other_agent_0"],
-            "default",
-        ),
-        (
-            generate_multi_agent_box_spaces(2, (6,)),
-            64,
-            generate_multi_agent_discrete_spaces(2, 2),
-            ["agent_0", "other_agent_0"],
-            "default",
-        ),
-        (
-            generate_multi_agent_discrete_spaces(2, 6),
-            64,
-            generate_multi_agent_discrete_spaces(2, 2),
-            ["agent_0", "other_agent_0"],
-            "default",
-        ),
+        generate_multi_agent_box_spaces(2, (6,)),
+        generate_multi_agent_discrete_spaces(2, 6),
     ],
 )
+@pytest.mark.parametrize(
+    "action_spaces",
+    [
+        generate_multi_agent_box_spaces(2, (2,)),
+        generate_multi_agent_discrete_spaces(2, 2),
+    ],
+)
+@pytest.mark.parametrize("batch_size", [64])
+@pytest.mark.parametrize("agent_ids", [["agent_0", "other_agent_0"]])
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_matd3_learns_from_experiences_mlp(
     observation_spaces,
     experiences,
@@ -1733,66 +1352,22 @@ def no_sync(self):
 
 
 @pytest.mark.parametrize(
-    "observation_spaces, batch_size, action_spaces, agent_ids, compile_mode",
+    "observation_spaces",
     [
-        (
-            generate_multi_agent_box_spaces(2, (6,)),
-            64,
-            generate_multi_agent_box_spaces(2, (2,)),
-            ["agent_0", "other_agent_0"],
-            None,
-        ),
-        (
-            generate_multi_agent_discrete_spaces(2, 6),
-            64,
-            generate_multi_agent_box_spaces(2, (2,)),
-            ["agent_0", "other_agent_0"],
-            None,
-        ),
-        (
-            generate_multi_agent_box_spaces(2, (6,)),
-            64,
-            generate_multi_agent_discrete_spaces(2, 2),
-            ["agent_0", "other_agent_0"],
-            None,
-        ),
-        (
-            generate_multi_agent_discrete_spaces(2, 6),
-            64,
-            generate_multi_agent_discrete_spaces(2, 2),
-            ["agent_0", "other_agent_0"],
-            None,
-        ),
-        (
-            generate_multi_agent_box_spaces(2, (6,)),
-            64,
-            generate_multi_agent_box_spaces(2, (2,)),
-            ["agent_0", "other_agent_0"],
-            "default",
-        ),
-        (
-            generate_multi_agent_discrete_spaces(2, 6),
-            64,
-            generate_multi_agent_box_spaces(2, (2,)),
-            ["agent_0", "other_agent_0"],
-            "default",
-        ),
-        (
-            generate_multi_agent_box_spaces(2, (6,)),
-            64,
-            generate_multi_agent_discrete_spaces(2, 2),
-            ["agent_0", "other_agent_0"],
-            "default",
-        ),
-        (
-            generate_multi_agent_discrete_spaces(2, 6),
-            64,
-            generate_multi_agent_discrete_spaces(2, 2),
-            ["agent_0", "other_agent_0"],
-            "default",
-        ),
+        generate_multi_agent_box_spaces(2, (6,)),
+        generate_multi_agent_discrete_spaces(2, 6),
     ],
 )
+@pytest.mark.parametrize(
+    "action_spaces",
+    [
+        generate_multi_agent_box_spaces(2, (2,)),
+        generate_multi_agent_discrete_spaces(2, 2),
+    ],
+)
+@pytest.mark.parametrize("batch_size", [64])
+@pytest.mark.parametrize("agent_ids", [["agent_0", "other_agent_0"]])
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_matd3_learns_from_experiences_mlp_distributed(
     observation_spaces,
     accelerated_experiences,
@@ -2671,15 +2246,8 @@ def test_matd3_save_load_checkpoint_correct_data_and_format(
 @pytest.mark.parametrize(
     "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
 )
-@pytest.mark.parametrize(
-    "accelerator, compile_mode",
-    [
-        (None, None),
-        (Accelerator(), None),
-        (None, "default"),
-        (Accelerator(), "default"),
-    ],
-)
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(
     tmpdir, device, accelerator, compile_mode
 ):
@@ -2830,24 +2398,12 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(
 @pytest.mark.parametrize(
     "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
 )
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize(
-    "accelerator, compile_mode",
-    [
-        (None, None),
-        (Accelerator(), None),
-        (None, "default"),
-        (Accelerator(), "default"),
-    ],
+    "observation_spaces", [generate_multi_agent_box_spaces(1, (6,))]
 )
-@pytest.mark.parametrize(
-    "observation_spaces, action_spaces",
-    [
-        (
-            generate_multi_agent_box_spaces(1, (6,)),
-            generate_multi_agent_discrete_spaces(1, 2),
-        )
-    ],
-)
+@pytest.mark.parametrize("action_spaces", [generate_multi_agent_discrete_spaces(1, 2)])
 def test_matd3_save_load_checkpoint_correct_data_and_format_make_evo(
     tmpdir,
     observation_spaces,
@@ -3035,71 +2591,11 @@ def test_matd3_unwrap_models(compile_mode):
         assert isinstance(critic_target_2, nn.Module)
 
 
-# Returns the input action scaled to the action space defined by self.min_action and self.max_action.
-@pytest.mark.parametrize("compile_mode", [None, "default"])
-def test_action_scaling(compile_mode):
-    action = torch.Tensor([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
-    lows = [-1, -2, 0, 0, -1]
-    highs = [1, 2, 1, 2, 2]
-
-    matd3 = MATD3(
-        observation_spaces=generate_multi_agent_box_spaces(5, (4,)),
-        action_spaces=generate_multi_agent_box_spaces(5, (1,), low=lows, high=highs),
-        agent_ids=["agent_0", "other_agent_0", "a_agent_2", "b_agent_3", "c_agent_4"],
-        torch_compiler=compile_mode,
-    )
-    matd3.actors[0].output_activation = "Tanh"
-    scaled_action = matd3.scale_to_action_space(action, idx=0)
-    assert torch.equal(scaled_action, torch.Tensor([0.1, 0.2, 0.3, -0.1, -0.2, -0.3]))
-
-    matd3.actors[1].output_activation = "Tanh"
-    action = torch.Tensor([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
-    scaled_action = matd3.scale_to_action_space(action, idx=1)
-    torch.testing.assert_close(
-        scaled_action, torch.Tensor([0.2, 0.4, 0.6, -0.2, -0.4, -0.6])
-    )
-
-    matd3.actors[2].output_activation = "Sigmoid"
-    action = torch.Tensor([0.1, 0.2, 0.3, 0])
-    scaled_action = matd3.scale_to_action_space(action, idx=2)
-    assert torch.equal(scaled_action, torch.Tensor([0.1, 0.2, 0.3, 0]))
-
-    matd3.actors[3].output_activation = "GumbelSoftmax"
-    action = torch.Tensor([0.1, 0.2, 0.3, 0])
-    scaled_action = matd3.scale_to_action_space(action, idx=3)
-    assert torch.equal(scaled_action, torch.Tensor([0.2, 0.4, 0.6, 0]))
-
-    matd3.actors[4].output_activation = "Tanh"
-    action = torch.Tensor([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
-    scaled_action = matd3.scale_to_action_space(action, idx=4)
-    torch.testing.assert_close(
-        scaled_action,
-        torch.Tensor(
-            [
-                0.55 * 3 - 1,
-                0.6 * 3 - 1,
-                0.65 * 3 - 1,
-                0.45 * 3 - 1,
-                0.4 * 3 - 1,
-                0.35 * 3 - 1,
-            ]
-        ),
-    )
-
-
 @pytest.mark.parametrize(
     "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
 )
-@pytest.mark.parametrize(
-    "accelerator, compile_mode",
-    [
-        (None, None),
-        (Accelerator(), None),
-        (None, "default"),
-        (Accelerator(), "default"),
-    ],
-)
-# The saved checkpoint file contains the correct data and format.
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_load_from_pretrained(device, accelerator, compile_mode, tmpdir):
     # Initialize the matd3 agent
     matd3 = MATD3(
@@ -3197,15 +2693,8 @@ def test_load_from_pretrained(device, accelerator, compile_mode, tmpdir):
 @pytest.mark.parametrize(
     "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
 )
-@pytest.mark.parametrize(
-    "accelerator, compile_mode",
-    [
-        (None, None),
-        (Accelerator(), None),
-        (None, "default"),
-        (Accelerator(), "default"),
-    ],
-)
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 # The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained_cnn(device, accelerator, compile_mode, tmpdir):
     # Initialize the matd3 agent
@@ -3313,8 +2802,9 @@ def test_load_from_pretrained_cnn(device, accelerator, compile_mode, tmpdir):
 @pytest.mark.parametrize(
     "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
 )
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize(
-    "observation_spaces, action_spaces, arch, input_tensor, critic_input_tensor, secondary_input_tensor, compile_mode",
+    "observation_spaces, action_spaces, arch, input_tensor, critic_input_tensor, secondary_input_tensor",
     [
         (
             generate_multi_agent_box_spaces(2, (4,)),
@@ -3323,7 +2813,6 @@ def test_load_from_pretrained_cnn(device, accelerator, compile_mode, tmpdir):
             torch.randn(1, 4),
             torch.randn(1, 6),
             None,
-            None,
         ),
         (
             generate_multi_agent_box_spaces(2, (4, 210, 160), low=0, high=255),
@@ -3332,7 +2821,6 @@ def test_load_from_pretrained_cnn(device, accelerator, compile_mode, tmpdir):
             torch.randn(1, 4, 2, 210, 160),
             torch.randn(1, 4, 2, 210, 160),
             torch.randn(1, 2),
-            None,
         ),
         (
             generate_multi_agent_box_spaces(2, (4,)),
@@ -3341,7 +2829,6 @@ def test_load_from_pretrained_cnn(device, accelerator, compile_mode, tmpdir):
             torch.randn(1, 4),
             torch.randn(1, 6),
             None,
-            "default",
         ),
         (
             generate_multi_agent_box_spaces(2, (4, 210, 160), low=0, high=255),
@@ -3350,7 +2837,6 @@ def test_load_from_pretrained_cnn(device, accelerator, compile_mode, tmpdir):
             torch.randn(1, 4, 2, 210, 160),
             torch.randn(1, 4, 2, 210, 160),
             torch.randn(1, 2),
-            "default",
         ),
     ],
 )

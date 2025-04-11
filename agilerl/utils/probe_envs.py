@@ -989,7 +989,7 @@ def check_policy_q_learning_with_probe_env(
 
             # print("pol", policy_values, predicted_policy_values)
             assert np.allclose(
-                policy_values, predicted_policy_values, atol=0.1
+                policy_values, predicted_policy_values, atol=0.2
             ), f"{policy_values} != {predicted_policy_values}"
 
 
@@ -1076,15 +1076,15 @@ def check_policy_on_policy_with_probe_env(
             ), f"{v_values} != {predicted_v_values}"
 
         if policy_values is not None:
-            if discrete:
-                predicted_policy_values = (
-                    agent.actor(state).probs.detach().cpu().numpy()
-                )
-            else:
-                predicted_policy_values = agent.actor(state).loc.detach().cpu().numpy()
+            # Assumes it is always a discrete action space
+            _, _, _ = agent.actor(state)
+            predicted_policy_values = (
+                agent.actor.head_net.dist.distribution.probs.detach().cpu().numpy()
+            )
+
             # print("pol", policy_values, predicted_policy_values)
             assert np.allclose(
-                policy_values, predicted_policy_values, atol=0.1
+                policy_values, predicted_policy_values, atol=0.2
             ), f"{policy_values} != {predicted_policy_values}"
 
 

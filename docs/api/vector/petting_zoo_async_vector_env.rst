@@ -10,8 +10,12 @@ Class for vectorizing pettingzoo parallel environments, for both custom and defa
   from pettingzoo.mpe import simple_speaker_listener_v4
 
   num_envs = 4
-  env = simple_speaker_listener_v4.parallel_env()
-  vec_env = AsyncPettingZooVecEnv([lambda : env for _ in range(num_envs)])
+  env = AsyncPettingZooVecEnv(
+        [
+            lambda: simple_speaker_listener_v4.parallel_env()
+            for _ in range(num_envs)
+        ]
+    )
   observations, infos = vec_env.reset()
   for step in range(25):
       actions = {
@@ -26,9 +30,9 @@ Class for vectorizing pettingzoo parallel environments, for both custom and defa
 
     # Custom pettingzoo environment
     from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
-    env = CustomEnv()
+
     num_envs = 4
-    AsyncPettingZooVecEnv([lambda : env for _ in range(num_envs)])
+    vec_env = AsyncPettingZooVecEnv([lambda: CustomEnv() for _ in range(num_envs)])
     observations, infos = vec_env.reset()
     for step in range(25):
         actions = {

@@ -68,8 +68,12 @@ hyper-parameter tuning is only compatible with **cooperative** multi-agent envir
 
     num_envs = 8
     # Define the simple speaker listener environment as a parallel environment
-    env = simple_speaker_listener_v4.parallel_env(continuous_actions=True)
-    env = AsyncPettingZooVecEnv([lambda: env for _ in range(num_envs)])
+    env = AsyncPettingZooVecEnv(
+        [
+            lambda: simple_speaker_listener_v4.parallel_env(continuous_actions=True)
+            for _ in range(num_envs)
+        ]
+    )
     env.reset()
 
     # Configure the multi-agent algo input arguments
@@ -208,8 +212,12 @@ Alternatively, use a custom training loop. Combining all of the above:
 
     num_envs = 8
     # Define the simple speaker listener environment as a parallel environment
-    env = simple_speaker_listener_v4.parallel_env(continuous_actions=True)
-    env = AsyncPettingZooVecEnv([lambda: env for _ in range(num_envs)])
+    env = AsyncPettingZooVecEnv(
+        [
+            lambda: simple_speaker_listener_v4.parallel_env(continuous_actions=True)
+            for _ in range(num_envs)
+        ]
+    )
     env.reset()
 
     # Configure the multi-agent algo input arguments

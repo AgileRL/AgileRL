@@ -16,7 +16,7 @@ from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import StochasticActor
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.value_networks import ValueNetwork
-from agilerl.typing import ArrayLike, ArrayOrTensor, ExperiencesType, GymEnvType
+from agilerl.typing import ArrayOrTensor, ExperiencesType, GymEnvType
 from agilerl.utils.algo_utils import (
     flatten_experiences,
     get_experiences_samples,
@@ -218,6 +218,7 @@ class PPO(RLAlgorithm):
             if head_config is not None:
                 critic_head_config = copy.deepcopy(head_config)
                 critic_head_config["output_activation"] = None
+                critic_net_config.pop("squash_output", None)
             else:
                 critic_head_config = MlpNetConfig(hidden_size=[16])
 
@@ -232,7 +233,9 @@ class PPO(RLAlgorithm):
             )
 
             self.critic = ValueNetwork(
-                observation_space, device=self.device, **critic_net_config
+                observation_space,
+                device=self.device,
+                **critic_net_config,
             )
 
         # Share encoders between actor and critic
@@ -265,72 +268,59 @@ class PPO(RLAlgorithm):
                 "Encoder sharing is disabled as actor or critic is not an EvolvableNetwork."
             )
 
-    def scale_to_action_space(
-        self, action: ArrayLike, convert_to_torch: bool = False
-    ) -> ArrayOrTensor:
-        """Scales actions to action space defined by self.min_action and self.max_action.
+    def _get_action_and_values(
+        self,
+        obs: ArrayOrTensor,
+        action_mask: Optional[ArrayOrTensor] = None,
+    ) -> Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Returns the next action to take in the environment and the values.
 
-        :param action: Action to be scaled
-        :type action: numpy.ndarray
-        :param convert_to_torch: Flag to convert array to torch, defaults to False
-        :type convert_to_torch: bool, optional
+        :param obs: Environment observation, or multiple observations in a batch
+        :type obs: numpy.ndarray[float]
+        :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
+        :type action_mask: numpy.ndarray, optional
+        :return: Action, log probability, entropy, and state values
+        :rtype: Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor]
         """
-        if convert_to_torch:
-            max_action = (
-                torch.from_numpy(self.max_action).to(self.device)
-                if isinstance(self.max_action, (np.ndarray))
-                else self.max_action
-            )
-            min_action = (
-                torch.from_numpy(self.min_action).to(self.device)
-                if isinstance(self.min_action, (np.ndarray))
-                else self.min_action
-            )
-        else:
-            max_action = self.max_action
-            min_action = self.min_action
+        latent_pi = self.actor.extract_features(obs)
+        action, log_prob, entropy = self.actor.forward_head(
+            latent_pi, action_mask=action_mask
+        )
+        values = (
+            self.critic.forward_head(latent_pi).squeeze(-1)
+            if self.share_encoders
+            else self.critic(obs).squeeze(-1)
+        )
+        return action, log_prob, entropy, values
 
-        # True if min and max action limits are defined as arrays/tensors
-        array_limits = isinstance(max_action, (np.ndarray, torch.Tensor))
+    def evaluate_actions(
+        self,
+        obs: ArrayOrTensor,
+        actions: ArrayOrTensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Evaluates the actions.
 
-        if (array_limits and (np.inf in max_action or -np.inf in min_action)) or (
-            not array_limits and (np.inf == max_action or -np.inf == min_action)
-        ):
-            # If infinity in action limits, impossible to scale
-            return action.clip(min_action, max_action)
+        :param obs: Environment observation, or multiple observations in a batch
+        :type obs: numpy.ndarray[float]
+        :param actions: Actions to evaluate
+        :type actions: torch.Tensor
+        :return: Log probability, entropy, and state values
+        :rtype: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        """
+        obs = self.preprocess_observation(obs)
+        _, _, entropy, values = self._get_action_and_values(obs)
 
-        mlp_output_activation = self.actor.output_activation
-        if mlp_output_activation in ["Tanh"]:
-            pre_scaled_min = -1
-            pre_scaled_max = 1
-        elif mlp_output_activation in ["Sigmoid", "Softmax"]:
-            pre_scaled_min = 0
-            pre_scaled_max = 1
-        else:
-            action = (
-                torch.where(action > 0, action * max_action, action * -min_action)
-                if convert_to_torch
-                else np.where(action > 0, action * max_action, action * -min_action)
-            )
-            return action.clip(min_action, max_action)
+        # log_prob of passed actions given the current policy
+        log_prob = self.actor.action_log_prob(actions)
 
-        if not array_limits and (
-            pre_scaled_min == min_action and pre_scaled_max == max_action
-        ):
-            return action.clip(min_action, max_action)
+        # Use -log_prob as entropy when squashing output in continuous action spaces
+        entropy = -log_prob.mean() if entropy is None else entropy
 
-        return (
-            min_action
-            + (max_action - min_action)
-            * (action - pre_scaled_min)
-            / (pre_scaled_max - pre_scaled_min)
-        ).clip(min_action, max_action)
+        return log_prob, entropy, values
 
     def get_action(
         self,
         obs: ArrayOrTensor,
-        action: Optional[ArrayOrTensor] = None,
-        grad: bool = False,
         action_mask: Optional[ArrayOrTensor] = None,
     ) -> Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Returns the next action to take in the environment.
@@ -343,80 +333,29 @@ class PPO(RLAlgorithm):
         :type grad: bool, optional
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: numpy.ndarray, optional
+        :return: Action, log probability, entropy, and state values
+        :rtype: Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor]
         """
         obs = self.preprocess_observation(obs)
-
-        if not grad:
-            self.actor.eval()
-            self.critic.eval()
-            with torch.no_grad():
-                latent_pi = self.actor.extract_features(obs)
-                action_dist = self.actor.forward_head(
-                    latent_pi, action_mask=action_mask
-                )
-                state_values = (
-                    self.critic.forward_head(latent_pi).squeeze(-1)
-                    if self.share_encoders
-                    else self.critic(obs).squeeze(-1)
-                )
-        else:
-            self.actor.train()
-            self.critic.train()
-            latent_pi = self.actor.extract_features(obs)
-            action_dist = self.actor.forward_head(latent_pi, action_mask=action_mask)
-            state_values = (
-                self.critic.forward_head(latent_pi).squeeze(-1)
-                if self.share_encoders
-                else self.critic(obs).squeeze(-1)
+        with torch.no_grad():
+            action, log_prob, entropy, values = self._get_action_and_values(
+                obs, action_mask
             )
 
-        if not isinstance(action_dist, torch.distributions.Distribution):
-            raise ValueError(
-                f"Expected action_dist to be a torch.distributions.Distribution, got {type(action_dist)}."
-            )
-
-        return_tensors = True
-        if action is None:
-            action = action_dist.sample()
-            return_tensors = False
-        else:
-            action = action.to(self.device)
+        # Use -log_prob as entropy when squashing output in continuous action spaces
+        entropy = -log_prob.mean() if entropy is None else entropy
 
         if isinstance(self.action_space, spaces.Box) and self.action_space.shape == (
             1,
         ):
             action = action.unsqueeze(1)
 
-        action_logprob = action_dist.log_prob(action)
-        dist_entropy = action_dist.entropy()
-
-        if len(action_logprob.shape) == 2:
-            action_logprob = action_logprob.sum(1)
-        if len(dist_entropy.shape) == 2:
-            dist_entropy = dist_entropy.sum(1)
-
-        if return_tensors:
-            return (
-                (
-                    self.scale_to_action_space(action, convert_to_torch=True)
-                    if not self.discrete_actions
-                    else action
-                ),
-                action_logprob,
-                dist_entropy,
-                state_values,
-            )
-        else:
-            return (
-                (
-                    self.scale_to_action_space(action.cpu().data.numpy())
-                    if not self.discrete_actions
-                    else action.cpu().data.numpy()
-                ),
-                action_logprob.cpu().data.numpy(),
-                dist_entropy.cpu().data.numpy(),
-                state_values.cpu().data.numpy(),
-            )
+        return (
+            action.cpu().data.numpy(),
+            log_prob.cpu().data.numpy(),
+            entropy.cpu().data.numpy(),
+            values.cpu().data.numpy(),
+        )
 
     def learn(self, experiences: ExperiencesType) -> float:
         """Updates agent network parameters to learn from experiences.
@@ -466,16 +405,8 @@ class PPO(RLAlgorithm):
         # Move experiences to algo device
         experiences = self.to_device(*experiences)
 
-        (
-            states,
-            actions,
-            log_probs,
-            advantages,
-            returns,
-            values,
-        ) = experiences
-
-        num_samples = returns.size(0)
+        # Get number of samples from the returns tensor
+        num_samples = experiences[4].size(0)
         batch_idxs = np.arange(num_samples)
         mean_loss = 0
         for epoch in range(self.update_epochs):
@@ -498,8 +429,8 @@ class PPO(RLAlgorithm):
                 batch_values = batch_values.squeeze()
 
                 if len(minibatch_idxs) > 1:
-                    _, log_prob, entropy, value = self.get_action(
-                        obs=batch_states, action=batch_actions, grad=True
+                    log_prob, entropy, value = self.evaluate_actions(
+                        obs=batch_states, actions=batch_actions
                     )
 
                     logratio = log_prob - batch_log_probs
@@ -518,6 +449,7 @@ class PPO(RLAlgorithm):
                     pg_loss2 = -minibatch_advs * torch.clamp(
                         ratio, 1 - self.clip_coef, 1 + self.clip_coef
                     )
+
                     pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
                     # Value loss
@@ -542,8 +474,11 @@ class PPO(RLAlgorithm):
                         self.accelerator.backward(loss)
                     else:
                         loss.backward()
+
+                    # Clip gradients
                     clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
                     clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+
                     self.optimizer.step()
 
                     mean_loss += loss.item()
