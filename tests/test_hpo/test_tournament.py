@@ -268,8 +268,7 @@ def test_returns_best_agent_and_new_population_without_elitism_multi_agent():
 
 @pytest.mark.parametrize("elitism", [True, False])
 def test_language_model_tournament(elitism):
-    tournament_selection = TournamentSelection(3, elitism, 4, 2, language_model=True)
-    assert tournament_selection.language_model
+    tournament_selection = TournamentSelection(3, elitism, 4, 2)
 
     observation_space = gym.spaces.Box(low=0, high=1000 - 1, shape=(1,))
     action_space = gym.spaces.Box(

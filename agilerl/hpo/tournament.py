@@ -18,8 +18,6 @@ class TournamentSelection:
     :type population_size: int
     :param eval_loop: Number of most recent fitness scores to use in evaluation
     :type eval_loop: int
-    :param language_model: Boolean flag to indicate if the agents are language models
-    :type language_model: bool
     """
 
     def __init__(
@@ -28,7 +26,6 @@ class TournamentSelection:
         elitism: bool,
         population_size: int,
         eval_loop: int,
-        language_model: bool = False,
     ) -> None:
         assert tournament_size > 0, "Tournament size must be greater than zero."
         assert isinstance(elitism, bool), "Elitism must be boolean value True or False."
@@ -38,10 +35,6 @@ class TournamentSelection:
         self.elitism = elitism
         self.population_size = population_size
         self.eval_loop = eval_loop
-        self.language_model = language_model
-        self.select = (
-            self._select_llm_agents if language_model else self._select_standard_agents
-        )
 
     def _tournament(self, fitness_values: List[float]) -> int:
         """
@@ -74,6 +67,16 @@ class TournamentSelection:
         model = population[int(np.argsort(rank)[-1])]
         elite = model.clone() if not self.language_model else model.index
         return elite, rank, max_id
+
+    def select(
+        self, population: PopulationType
+    ) -> Tuple[EvolvableAlgorithm, PopulationType]:
+        self.language_model = population[0].algo == "GRPO"
+        return (
+            self._select_llm_agents(population)
+            if self.language_model
+            else self._select_standard_agents(population)
+        )
 
     def _select_standard_agents(
         self, population: PopulationType

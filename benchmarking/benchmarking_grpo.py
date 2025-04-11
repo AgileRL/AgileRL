@@ -225,7 +225,6 @@ def main(init_hp, mut_p):
         init_hp["ELITISM"],
         init_hp["POP_SIZE"],
         init_hp["EVAL_LOOP"],
-        language_model=True,
     )
 
     mutations = Mutations(

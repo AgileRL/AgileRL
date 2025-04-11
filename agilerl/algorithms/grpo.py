@@ -438,9 +438,6 @@ class GRPO(LLMAlgorithm):
                     "use_cache": False,
                 }
                 logit = policy.forward(**kwargs).logits
-                print("REQUIRES GRAD", logit.requires_grad)
-
-                # assert False
                 log_prob = (
                     F.log_softmax(logit[:, :-1], dim=-1)
                     .gather(dim=-1, index=input_id[:, 1:].unsqueeze(-1))
@@ -452,8 +449,6 @@ class GRPO(LLMAlgorithm):
             del log_probs_list
         else:
             logits = policy.forward(**model_kwargs).logits
-            print("REQUIRES GRAD", logits.requires_grad)
-            # assert False
             log_probs = (
                 F.log_softmax(logits[:, :-1], dim=-1)
                 .gather(dim=-1, index=ids[:, 1:].unsqueeze(-1))
