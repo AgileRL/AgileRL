@@ -22,3 +22,9 @@ General Utils
 .. autofunction:: agilerl.utils.utils.print_hyperparams
 
 .. autofunction:: agilerl.utils.utils.plot_population_score
+
+.. autofunction:: agilerl.utils.utils.get_env_defined_actions
+
+.. autofunction:: agilerl.utils.utils.gather_tensor
+
+.. autofunction:: agilerl.utils.utils.aggregate_metrics_across_gpus

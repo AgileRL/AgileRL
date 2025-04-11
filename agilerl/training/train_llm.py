@@ -30,11 +30,11 @@ def finetune_llm(
     save_elite: Optional[bool] = None,
     elite_path: Optional[str] = None,
     wb: bool = False,
-    evo_steps: Optional[int] = None,
+    evo_steps: Optional[int] = 20,
     tournament: Optional[TournamentSelection] = None,
     mutation: Optional[Mutations] = None,
     wandb_api_key: Optional[str] = None,
-    evaluation_interval: Optional[int] = 10,
+    evaluation_interval: int = 10,
     max_reward: Optional[int] = None,
     verbose: bool = True,
     accelerator: Optional[Accelerator] = None,
@@ -171,9 +171,11 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                 accuracy = (rewards == max_reward).sum() / len(rewards.flatten())
                 metrics.append(accuracy)
             agg_metrics = [
-                aggregate_metrics_across_gpus(agent, metric) for metric in metrics
+                aggregate_metrics_across_gpus(accelerator, metric) for metric in metrics
             ]
             prompts = next_prompts
+            agent.steps[-1] += effective_data_batch_size
+            total_steps += effective_data_batch_size
             agg_test_metrics = None
             if (i + 1) % evaluation_interval == 0:
                 test_reward = agent.test(env)
@@ -184,35 +186,12 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                     )
                     test_metrics.append(test_accuracy)
                 agg_test_metrics = [
-                    aggregate_metrics_across_gpus(agent, metric)
+                    aggregate_metrics_across_gpus(accelerator, metric)
                     for metric in test_metrics
                 ]
-                if (
-                    verbose
-                    and (accelerator is None or accelerator.is_main_process)
-                    and agent_idx == len(pop) - 1
-                ):
-                    fitness = [str(round(agent.fitness[-1], 2)) for agent in pop]
-                    avg_fitness = [
-                        "%.2f" % np.mean(agent.fitness[-5:]) for agent in pop
-                    ]
-                    avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
-                    agents = [agent.index for agent in pop]
-                    num_steps = [agent.steps[-1] for agent in pop]
-                    muts = [agent.mut for agent in pop]
-                    print(
-                        f"""
-                        --- Global Steps {total_steps} ---
-                        Fitness:\t\t{fitness}
-                        Score:\t\t{agg_metrics[2]}
-                        5 fitness avgs:\t{avg_fitness}
-                        10 score avgs:\t{avg_score}
-                        Agents:\t\t{agents}
-                        Steps:\t\t{num_steps}
-                        Mutations:\t\t{muts}
-                        """,
-                        end="\r",
-                    )
+
+                if accelerator is not None:
+                    accelerator.wait_for_everyone()
             if accelerator is None or accelerator.is_main_process:
                 metrics_dict = {
                     "Train/Loss": agg_metrics[0],
@@ -231,14 +210,14 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                         test_metrics_dict
                     )
                 pbar.update(effective_data_batch_size)
-                agent.steps.append(effective_data_batch_size)
                 agent.scores.append(agg_metrics[2])
-                total_steps += effective_data_batch_size
 
         if accelerator is not None:
             accelerator.wait_for_everyone()
         if tournament and mutation is not None:
             if (i + 1) % evo_steps == 0:
+                if accelerator is not None:
+                    accelerator.wait_for_everyone()
                 pop = tournament_selection_and_mutation(
                     population=pop,
                     tournament=tournament,
@@ -249,6 +228,8 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                     elite_path=elite_path,
                     save_elite=save_elite,
                 )
+                if accelerator is not None:
+                    accelerator.wait_for_everyone()
         else:
             if (i + 1) % max_steps == 0:
                 save_llm_checkpoint(agent, elite_path, i + 1)
@@ -346,6 +327,31 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                     }
                 wandb_dict |= test_dict
             wandb.log(wandb_dict)
+
+    if (
+        verbose
+        and total_steps > evaluation_interval
+        and (accelerator is None or accelerator.is_main_process)
+    ):
+        fitness = [str(round(agent.fitness[-1], 2)) for agent in pop]
+        avg_fitness = ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
+        avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
+        agents = [agent.index for agent in pop]
+        num_steps = [agent.steps[-1] for agent in pop]
+        muts = [agent.mut for agent in pop]
+        print(
+            f"""
+            --- Global Steps {total_steps} ---
+            Fitness:\t\t{fitness}
+            Score:\t\t{agg_metrics[2]}
+            5 fitness avgs:\t{avg_fitness}
+            10 score avgs:\t{avg_score}
+            Agents:\t\t{agents}
+            Steps:\t\t{num_steps}
+            Mutations:\t\t{muts}
+            """,
+            end="\r",
+        )
 
     if accelerator is not None:
         accelerator.wait_for_everyone()

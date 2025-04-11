@@ -1,6 +1,6 @@
-import glob
 import inspect
 import os
+import shutil
 import warnings
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
@@ -9,16 +9,19 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, TypeGuard, Union
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from accelerate.optimizer import AcceleratedOptimizer
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from gymnasium import spaces
+from peft import PeftModel, get_peft_model
 from tensordict import TensorDict, from_module
 from tensordict.nn import CudaGraphModule
 from torch._dynamo import OptimizedModule
 from torch.nn import Module
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+from transformers import PreTrainedModel
 
 from agilerl.protocols import (
     EvolvableAttributeType,
@@ -36,6 +39,8 @@ from agilerl.typing import (
     OptimizerType,
     TorchObsType,
 )
+
+PreTrainedModelType = Union[PeftModel, PreTrainedModel]
 
 
 def share_encoder_parameters(
@@ -893,7 +898,7 @@ def create_warmup_cosine_scheduler(
     return scheduler
 
 
-def remove_nested_files(files: str) -> None:
+def remove_nested_files(files: List[str]) -> None:
     """Remove nested files from a list of files.
 
     :param files: List of files to remove nested files from
@@ -901,12 +906,11 @@ def remove_nested_files(files: str) -> None:
     :param depth: Depth of the nested files, defaults to 0
     :type depth: int, optional
     """
-    for _file in files:
-        if os.path.isdir(_file):
-            remove_nested_files(glob.glob(_file + "/*"))
-            os.rmdir(_file)
+    for f in files:
+        if os.path.isdir(f):
+            shutil.rmtree(f)
         else:
-            os.remove(_file)
+            os.remove(f)
 
 
 def vectorize_experiences_by_agent(
@@ -964,3 +968,37 @@ def concatenate_experiences_into_batches(
         if stacked_tensor.size(squeeze_dim) == 1:
             stacked_tensor = stacked_tensor.squeeze(squeeze_dim)
     return stacked_tensor
+
+
+def is_peft_model(model: nn.Module) -> bool:
+    """Check if a model is a PEFT model.
+
+    :param model: Model to check
+    :type model: nn.Module
+    :return: True if the model is a PEFT model, False otherwise
+    :rtype: bool
+    """
+    return isinstance(model, PeftModel)
+
+
+def clone_llm(
+    original_model: PreTrainedModelType, load_state_dict: bool = True
+) -> PreTrainedModelType:
+    """Clone the actor.
+
+    :param model: Model to clone
+    :type model: PreTrainedModelType
+    :return: Cloned model
+    """
+    model_config = original_model.config
+    base_model = original_model.model
+    model = type(base_model)(model_config)
+
+    if is_peft_model(original_model):
+        peft_config = original_model.peft_config[original_model.active_adapter]
+        model = get_peft_model(model, peft_config)
+
+    if load_state_dict:
+        model.load_state_dict(original_model.state_dict())
+
+    return model

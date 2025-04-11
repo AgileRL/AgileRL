@@ -194,20 +194,11 @@ for displaying these behaviours, the agent itself discovers the best way to achi
             + format_reward_func([completion], [solution])[0]
         )
 
-        print(
-            f"""
-        ============================================, \n
-        Completion: {completion}, \n
-        Numbers: {prompt}, \n
-        Gospel Answer: {solution.item()} \n
-        Reward: {reward}
-        """
-        )
-        # Save successful countdown  comletions
         if reward == 2.0:
             with open("countdown_completions.txt", "a") as text_file:
-                text_file.write(completion + "\n" + "="*50 + "\n")
-
+                text_file.write(
+                    f"Prompt {prompt}" + "\n" + completion + "\n" + "=" * 50 + "\n"
+                )
 
         return reward
 
@@ -266,8 +257,9 @@ Combining all these components, we can now initialise the HuggingFaceGym object.
         tokenizer=tokenizer,
         reward_fn=combined_rewards,
         apply_chat_template_fn=countdown_chat_template,
-        data_batch_size=8,
+        data_batch_size_per_gpu=2,
         custom_collate_fn=custom_collate_fn,
+        accelerator=accelerator,
     )
 
 Create a GRPO Agent
@@ -322,7 +314,7 @@ checkpoints of the trained agent that can be used later for inference. It also u
         save_elite=True,
         elite_path="path/to/model/directory",
         max_reward=2.0,
-        evo_steps=1,
+        evo_steps=10,
         accelerator=Accelerator()
     )
 
@@ -344,28 +336,36 @@ function and is an example of how we might choose to train our agent to exhibit 
     from tqdm import trange
     import torch.distributed as dist
 
-    def gather_tensor(tensor: torch.Tensor, agent: GRPO) -> torch.Tensor:
-        # Convert to tensor if it's a scalar
+    def gather_tensor(tensor: Union[torch.Tensor, float], accelerator: Accelerator) -> torch.Tensor:
+        """Gather tensors from gpus
+
+        :param tensor: Tensor to gather
+        :type tensor: torch.Tensor
+        :param accelerator: Accelerator object
+        :type accelerator: accelerate.Accelerator
+        :return: Stacked tensors
+        :rtype: torch.Tensor
+        """
         if not isinstance(tensor, torch.Tensor):
-            tensor = torch.tensor(tensor, device=f"cuda:{agent.local_rank}")
-
-        if tensor.device != agent.device:
-            tensor = tensor.to(agent.device)
-        # Ensure tensor is on correct device
-        tensor = tensor.detach().clone()
-        # Create a list to store tensors from all processes
-        world_size = dist.get_world_size()
-        gathered_tensors = [torch.zeros_like(tensor) for _ in range(world_size)]
-
-        # Gather the tensor from all processes
-        dist.all_gather(gathered_tensors, tensor)
-        return torch.stack(gathered_tensors)
+            tensor = torch.tensor(tensor, device=accelerator.device)
+        tensor = tensor.to(accelerator.device)
+        gathered_tensors = accelerator.gather(tensor)
+        return gathered_tensors
 
 
     def aggregate_metrics_across_gpus(
-        agent: GRPO, metrics: torch.Tensor
-    ):
-        all_metrics = gather_tensor(metrics, agent)
+        accelerator: Accelerator, metric_tensor: Union[torch.Tensor, float]
+    ) -> float:
+        """Aggregate gathered tensors
+
+        :param accelerator: Accelerator object
+        :type accelerator: accelerate.Accelerator
+        :param metric_tensor: Metrics
+        :type metric_tensor: torch.Tensor
+        :return: Mean metric
+        :rtype: float
+        """
+        all_metrics = gather_tensor(metric_tensor, accelerator)
         avg_metrics = all_metrics.mean().item()
         return avg_metrics
 
@@ -403,7 +403,7 @@ function and is an example of how we might choose to train our agent to exhibit 
         if max_reward is not None:
             accuracy = (rewards == max_reward).sum() / len(rewards.squeeze())
             metrics.append(accuracy)
-        agg_metrics = [aggregate_metrics_across_gpus(agent, metric) for metric in metrics]
+        agg_metrics = [aggregate_metrics_across_gpus(agent.accelerator, metric) for metric in metrics]
         prompts = next_prompts
         if agent.accelerator.is_main_process:
             metrics = {

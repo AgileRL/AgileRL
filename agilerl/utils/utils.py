@@ -1,4 +1,3 @@
-import copy
 import os
 import warnings
 from datetime import datetime
@@ -8,7 +7,6 @@ import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.distributed as dist
 import wandb
 from accelerate import Accelerator
 from gymnasium import spaces
@@ -34,7 +32,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules.base import EvolvableModule
 from agilerl.typing import GymSpaceType, PopulationType
-from agilerl.utils.algo_utils import CosineLRScheduleConfig
+from agilerl.utils.algo_utils import CosineLRScheduleConfig, clone_llm
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 SupportedObservationSpace = Union[
@@ -516,28 +514,28 @@ def create_population(
             agent = GRPO(
                 observation_space=observation_space,
                 action_space=action_space,
-                actor_network=copy.deepcopy(INIT_HP["actor_network"]),
-                pad_token_id=INIT_HP["pad_token_id"],
+                actor_network=clone_llm(actor_network),
+                pad_token_id=INIT_HP.get("PAD_TOKEN_ID"),
                 hp_config=hp_config,
                 index=idx,
-                batch_size=INIT_HP["BATCH_SIZE"],
-                beta=INIT_HP["BETA"],
-                lr=INIT_HP["LR"],
-                clip_coef=INIT_HP["CLIP_COEF"],
-                max_grad_norm=INIT_HP["MAX_GRAD_NORM"],
-                update_epochs=INIT_HP["UPDATE_EPOCHS"],
-                group_size=INIT_HP["GROUP_SIZE"],
-                temperature=INIT_HP["TEMPERATURE"],
-                calc_position_embeddings=INIT_HP["CALC_POSITION_EMBEDDINGS"],
-                reduce_memory_peak=INIT_HP["REDUCE_MEMORY_PEAK"],
-                max_output_tokens=INIT_HP["MAX_OUTPUT_TOKENS"],
-                min_output_tokens=INIT_HP["MIN_OUTPUT_TOKENS"],
+                batch_size=INIT_HP.get("BATCH_SIZE", 1),
+                beta=INIT_HP.get("BETA", 0.001),
+                lr=INIT_HP.get("LR", 5e-7),
+                clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
+                max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 0.1),
+                update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
+                group_size=INIT_HP.get("GROUP_SIZE", 8),
+                temperature=INIT_HP.get("TEMPERATURE", 0.9),
+                calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
+                reduce_memory_peak=INIT_HP.get("REDUCE_MEMORY_PEAK", False),
+                max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS", 1024),
+                min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS", None),
                 cosine_lr_schedule_config=(
-                    CosineLRScheduleConfig(**INIT_HP["COSINE_lR_SCHEDULER"])
-                    if INIT_HP["COSINE_lR_SCHEDULER"] is not None
+                    CosineLRScheduleConfig(**INIT_HP.get("COSINE_lR_SCHEDULER", None))
+                    if INIT_HP.get("COSINE_lR_SCHEDULER", None) is not None
                     else None
                 ),
-                accelerator=accelerator[idx],
+                accelerator=Accelerator() if accelerator is not None else None,
                 device=device,
             )
             population.append(agent)
@@ -578,7 +576,6 @@ def save_population_checkpoint(
                     else f"{save_path}_{i}_{agent.steps[-1]}.pt"
                 )
                 agent.save_checkpoint(current_checkpoint_path)
-            print("Saved checkpoint.")
         accelerator.wait_for_everyone()
 
         # Load models back to accelerator processes
@@ -594,7 +591,6 @@ def save_population_checkpoint(
                 else f"{save_path}_{i}_{agent.steps[-1]}.pt"
             )
             agent.save_checkpoint(current_checkpoint_path)
-        print("Saved checkpoint.")
 
 
 def tournament_selection_and_mutation(
@@ -851,46 +847,38 @@ def get_env_defined_actions(info, agents):
     return env_defined_actions
 
 
-def gather_tensor(tensor: torch.Tensor, agent: EvolvableAlgorithm) -> torch.Tensor:
+def gather_tensor(
+    tensor: Union[torch.Tensor, float], accelerator: Accelerator
+) -> torch.Tensor:
     """Gather tensors from gpus
 
     :param tensor: Tensor to gather
     :type tensor: torch.Tensor
-    :param agent: Agent object
-    :type agent: EvolvableAlgorithm
+    :param accelerator: Accelerator object
+    :type accelerator: accelerate.Accelerator
     :return: Stacked tensors
     :rtype: torch.Tensor
     """
-    # Convert to tensor if it's a scalar
     if not isinstance(tensor, torch.Tensor):
-        tensor = torch.tensor(tensor, device=f"cuda:{agent.local_rank}")
-
-    if tensor.device != agent.device:
-        tensor = tensor.to(agent.device)
-    # Ensure tensor is on correct device
-    tensor = tensor.detach().clone()
-    # Create a list to store tensors from all processes
-    world_size = dist.get_world_size()
-    gathered_tensors = [torch.zeros_like(tensor) for _ in range(world_size)]
-
-    # Gather the tensor from all processes
-    dist.all_gather(gathered_tensors, tensor)
-    return torch.stack(gathered_tensors)
+        tensor = torch.tensor(tensor, device=accelerator.device)
+    tensor = tensor.to(accelerator.device)
+    gathered_tensors = accelerator.gather(tensor)
+    return gathered_tensors
 
 
 def aggregate_metrics_across_gpus(
-    agent: EvolvableAlgorithm, metric_tensor: torch.Tensor
+    accelerator: Accelerator, metric_tensor: Union[torch.Tensor, float]
 ) -> float:
     """Aggregate gathered tensors
 
-    :param agent: Agent
-    :type agent: EvolvableAlgorithm
+    :param accelerator: Accelerator object
+    :type accelerator: accelerate.Accelerator
     :param metric_tensor: Metrics
     :type metric_tensor: torch.Tensor
     :return: Mean metric
     :rtype: float
     """
-    all_metrics = gather_tensor(metric_tensor, agent)
+    all_metrics = gather_tensor(metric_tensor, accelerator)
     avg_metrics = all_metrics.mean().item()
     return avg_metrics
 
