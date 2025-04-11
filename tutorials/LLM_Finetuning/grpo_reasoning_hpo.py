@@ -15,7 +15,7 @@ from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
-MODEL_PATH = "Qwen/Qwen2.5-3B"
+MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
 
@@ -26,8 +26,8 @@ def create_model(pretrained_model_name_or_path):
         attn_implementation="flash_attention_2",
     )
     peft_config = LoraConfig(
-        r=32,
-        lora_alpha=32,
+        r=16,
+        lora_alpha=64,
         target_modules=[
             "q_proj",
             "k_proj",
@@ -75,7 +75,7 @@ def make_dataset(dataset_name: str) -> Tuple[Dataset, Dataset]:
     )
     raw_dataset = raw_dataset.rename_column("target", "answer")
     raw_dataset = raw_dataset.rename_column("nums", "question")
-    train_test_split = raw_dataset.train_test_split(test_size=0.1)
+    train_test_split = raw_dataset.train_test_split(test_size=0.2)
     train_dataset = train_test_split["train"]
     test_dataset = train_test_split["test"]
     return train_dataset, test_dataset
@@ -131,8 +131,7 @@ def equation_reward_func(completions, target, nums, **kwargs):
                 rewards.append(1.0)
             else:
                 rewards.append(0.0)
-        except Exception as e:
-            print(f"Equation error: {e}")
+        except Exception:
             rewards.append(0.0)
     return rewards
 
@@ -141,16 +140,6 @@ def combined_rewards(completion, solution, prompt):
     reward = (
         equation_reward_func([completion], [solution], [prompt])[0]
         + format_reward_func([completion], [solution])[0]
-    )
-
-    print(
-        f"""
-    ============================================ \n
-    Completion: {completion}, \n
-    Numbers: {prompt}, \n
-    Correct Answer: {solution.item()} \n
-    Reward: {reward}
-    """
     )
 
     if reward == 2.0:
@@ -185,8 +174,19 @@ def main(init_hp, mut_p):
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
+
     # Convert the HuggingFace dataset into a Gymnasium environment
-    accelerators = [Accelerator() for _ in range(init_hp["POP_SIZE"])]
+    accelerator = Accelerator()
+    accelerator.state.deepspeed_plugin.deepspeed_config[
+        "train_micro_batch_size_per_gpu"
+    ] = 2
+    accelerator.state.deepspeed_plugin.deepspeed_config["activation_checkpointing"] = {
+        "partition_activations": True,
+        "cpu_checkpointing": True,
+        "synchronize_checkpoint_boundary": True,
+        "number_checkpoints": 2,
+    }
+
     env = HuggingFaceGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
@@ -195,7 +195,7 @@ def main(init_hp, mut_p):
         apply_chat_template_fn=countdown_chat_template,
         data_batch_size_per_gpu=2,
         custom_collate_fn=custom_collate_fn,
-        accelerator=accelerators[0],
+        accelerator=accelerator,
     )
 
     init_hp["actor_network"] = model
@@ -217,14 +217,17 @@ def main(init_hp, mut_p):
         INIT_HP=init_hp,
         hp_config=hp_config,
         population_size=init_hp["POP_SIZE"],
-        accelerator=accelerators,
+        accelerator=accelerator,
     )
+
+    del model
 
     tournament = TournamentSelection(
         init_hp["TOURN_SIZE"],
         init_hp["ELITISM"],
         init_hp["POP_SIZE"],
         init_hp["EVAL_LOOP"],
+        language_model=True,
     )
 
     mutations = Mutations(
@@ -236,7 +239,7 @@ def main(init_hp, mut_p):
         rl_hp=mut_p["RL_HP_MUT"],
         mutation_sd=mut_p["MUT_SD"],
         rand_seed=mut_p["RAND_SEED"],
-        accelerator=accelerators[0],
+        accelerator=accelerator,
     )
 
     finetune_llm(
@@ -251,9 +254,11 @@ def main(init_hp, mut_p):
         evo_steps=10,
         mutation=mutations,
         tournament=tournament,
-        accelerator=accelerators[0],
+        accelerator=accelerator,
         verbose=True,
+        max_steps=12000,
     )
+    accelerator.end_training()
 
 
 if __name__ == "__main__":
@@ -279,11 +284,11 @@ if __name__ == "__main__":
         "CLIP_COEF": 0.2,
         "MAX_GRAD_NORM": 0.1,
         "UPDATE_EPOCHS": 1,
-        "GROUP_SIZE": 2,
+        "GROUP_SIZE": 8,
         "TEMPERATURE": 0.9,
         "CALC_POSITION_EMBEDDINGS": True,
         "MIN_OUTPUT_TOKENS": None,
-        "MAX_OUTPUT_TOKENS": 10,
+        "MAX_OUTPUT_TOKENS": 1024,
         "COSINE_lR_SCHEDULER": None,
         "TOURN_SIZE": 2,
         "ELITISM": True,

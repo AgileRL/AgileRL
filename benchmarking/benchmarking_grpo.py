@@ -8,7 +8,7 @@ from accelerate import Accelerator
 from datasets import load_dataset
 from peft import LoraConfig, get_peft_model
 from torch.utils.data import Dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
@@ -16,13 +16,6 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
-
-bnb_config = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_quant_type="nf4",
-    bnb_4bit_use_double_quant=True,
-    bnb_4bit_compute_dtype=torch.bfloat16,
-)
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
@@ -33,7 +26,6 @@ def create_model(pretrained_model_name_or_path):
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         torch_dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
-        # quantization_config=bnb_config,
     )
     peft_config = LoraConfig(
         r=16,
@@ -148,16 +140,6 @@ def combined_rewards(completion, solution, prompt):
         + format_reward_func([completion], [solution])[0]
     )
 
-    #     print(
-    #         f"""
-    # ============================================ \n
-    # Completion: {completion}, \n
-    # Numbers: {prompt}, \n
-    # Correct Answer: {solution.item()} \n
-    # Reward: {reward}
-    # """
-    #     )
-
     if reward == 2.0:
         with open("countdown_completions.txt", "a") as text_file:
             text_file.write(
@@ -190,7 +172,6 @@ def main(init_hp, mut_p):
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
-    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
     # Convert the HuggingFace dataset into a Gymnasium environment
     accelerator = Accelerator()
@@ -273,12 +254,12 @@ def main(init_hp, mut_p):
         tournament=tournament,
         accelerator=accelerator,
         verbose=True,
-        max_steps=12000,
     )
     accelerator.end_training()
 
 
 if __name__ == "__main__":
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     with open("configs/training/grpo.yaml") as file:
         config = yaml.safe_load(file)
     init_hp = config["INIT_HP"]

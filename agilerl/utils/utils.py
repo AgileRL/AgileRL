@@ -1,4 +1,3 @@
-import copy
 import os
 import warnings
 from datetime import datetime
@@ -8,12 +7,11 @@ import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.distributed as dist
-import wandb
 from accelerate import Accelerator
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl.algorithms import (
     CQN,
     DDPG,
@@ -851,7 +849,9 @@ def get_env_defined_actions(info, agents):
     return env_defined_actions
 
 
-def gather_tensor(tensor: torch.Tensor, accelerator: Accelerator) -> torch.Tensor:
+def gather_tensor(
+    tensor: Union[torch.Tensor, float], accelerator: Accelerator
+) -> torch.Tensor:
     """Gather tensors from gpus
 
     :param tensor: Tensor to gather
@@ -869,7 +869,7 @@ def gather_tensor(tensor: torch.Tensor, accelerator: Accelerator) -> torch.Tenso
 
 
 def aggregate_metrics_across_gpus(
-    accelerator: Accelerator, metric_tensor: torch.Tensor
+    accelerator: Accelerator, metric_tensor: Union[torch.Tensor, float]
 ) -> float:
     """Aggregate gathered tensors
 
@@ -883,6 +883,7 @@ def aggregate_metrics_across_gpus(
     all_metrics = gather_tensor(metric_tensor, accelerator)
     avg_metrics = all_metrics.mean().item()
     return avg_metrics
+
 
 def save_llm_checkpoint(agent: EvolvableAlgorithm, checkpoint_path: str | None) -> None:
     """Checkpoint the LLM
