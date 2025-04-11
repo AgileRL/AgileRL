@@ -576,7 +576,6 @@ def save_population_checkpoint(
                     else f"{save_path}_{i}_{agent.steps[-1]}.pt"
                 )
                 agent.save_checkpoint(current_checkpoint_path)
-            print("Saved checkpoint.")
         accelerator.wait_for_everyone()
 
         # Load models back to accelerator processes
@@ -592,7 +591,6 @@ def save_population_checkpoint(
                 else f"{save_path}_{i}_{agent.steps[-1]}.pt"
             )
             agent.save_checkpoint(current_checkpoint_path)
-        print("Saved checkpoint.")
 
 
 def tournament_selection_and_mutation(
