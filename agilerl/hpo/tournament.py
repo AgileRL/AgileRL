@@ -135,9 +135,9 @@ class TournamentSelection:
             )  # (old_idx_to_clone, new_labelled_idx, is_elite)
 
         # Isolate any agents that are not in the new population to be deleted
-        unwanted_agents = set(old_population_idxs) - set(
-            [idx for idx, *_ in new_population_idxs]
-        )
+        unwanted_agents = set(old_population_idxs) - {
+            idx for idx, *_ in new_population_idxs
+        }
 
         # Delete any unwanted agents from memory
         for agent_idx in old_population_idxs:
