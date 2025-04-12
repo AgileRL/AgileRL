@@ -535,7 +535,7 @@ def create_population(
                     if INIT_HP.get("COSINE_lR_SCHEDULER", None) is not None
                     else None
                 ),
-                accelerator=Accelerator() if accelerator is not None else None,
+                accelerator=Accelerator() if accelerator else None,
                 device=device,
             )
             population.append(agent)
