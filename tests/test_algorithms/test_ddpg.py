@@ -412,7 +412,7 @@ def test_returns_expected_action_training():
 
     assert len(action) == action_space.shape[0]
     for act in action:
-        assert isinstance(act, torch.Tensor)
+        assert isinstance(act, np.float32)
         assert -1 <= act <= 1
 
     ddpg = DDPG(observation_space, action_space, accelerator=accelerator)

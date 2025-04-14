@@ -435,7 +435,7 @@ def test_returns_expected_action_training():
 
     assert len(action) == action_space.shape[0]
     for act in action:
-        assert isinstance(act, torch.Tensor)
+        assert isinstance(act, np.float32)
         assert -1 <= act <= 1
 
     td3 = TD3(
@@ -480,7 +480,7 @@ def test_returns_expected_action_float64():
 
     assert len(action) == action_space.shape[0]
     for act in action:
-        assert isinstance(act, torch.Tensor)
+        assert isinstance(act, np.float32)
         assert -1 <= act <= 1
 
     td3 = TD3(
