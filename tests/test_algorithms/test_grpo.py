@@ -1,4 +1,5 @@
 import copy
+import gc
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, Tuple
@@ -1228,3 +1229,6 @@ def test_load_distributed_actor_warning(
     grpo.accelerator = accelerator
     with pytest.raises(ValueError):
         grpo._load_distributed_actor(None)
+    del grpo
+    gc.collect()
+    torch.cuda.empty_cache()
