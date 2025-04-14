@@ -2,7 +2,7 @@ import copy
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, Tuple
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import gymnasium as gym
 import pytest
@@ -46,7 +46,7 @@ class DummyConfig(PretrainedConfig):
         max_tokens=8,
         vocab_size=100,
         intermediate_size=128,
-        **kwargs
+        **kwargs,
     ):
         super().__init__(**kwargs)
         self.input_size = input_size
@@ -895,7 +895,7 @@ def test_grpo_save_load_checkpoint_with_accelerator(
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize("batch_size", [8])
-@pytest.mark.parametrize("zero_stage", [2])
+@pytest.mark.parametrize("zero_stage", [1, 2, 3])
 def test_grpo_clone_with_accelerator(
     vocab_size,
     input_size,
@@ -1112,3 +1112,119 @@ def test_clone_llm_peft(vocab_size, input_size, max_tokens):
     # Verify the PEFT adapter is properly cloned
     assert cloned_model.active_adapter == peft_model.active_adapter
     assert cloned_model.peft_config[cloned_model.active_adapter] == peft_config
+
+
+@pytest.mark.parametrize("vocab_size", [1000])
+@pytest.mark.parametrize("input_size", [10])
+@pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize("group_size", [5])
+@pytest.mark.parametrize("batch_size", [8])
+def test_grpo_clean_up(
+    vocab_size, input_size, max_tokens, group_size, batch_size, tmpdir
+):
+    observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
+    action_space = gym.spaces.Box(
+        low=0,
+        high=vocab_size - 1,
+        shape=(20,),
+    )
+    grpo = GRPO(
+        observation_space,
+        action_space,
+        actor_network=create_module(
+            input_size=input_size,
+            max_tokens=max_tokens,
+            vocab_size=vocab_size,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+        ),
+        pad_token_id=vocab_size - 1,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        group_size=group_size,
+        cosine_lr_schedule_config=CosineLRScheduleConfig(
+            num_epochs=10, warmup_proportion=0.05
+        ),
+        accelerator=None,
+    )
+    accelerator = MagicMock(spec=Accelerator)
+    accelerator.state = MagicMock(spec=AcceleratorState)
+    grpo.accelerator = accelerator
+    grpo.clean_up()
+    assert not hasattr(grpo, "actor")
+    assert not hasattr(grpo, "reference_actor")
+    assert not hasattr(grpo, "optimizer")
+    assert not hasattr(grpo, "lr_scheduler")
+
+
+@pytest.mark.parametrize("vocab_size", [1000])
+@pytest.mark.parametrize("input_size", [10])
+@pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize("group_size", [5])
+@pytest.mark.parametrize("batch_size", [8])
+def test_grpo_preprocess_observation(
+    vocab_size, input_size, max_tokens, group_size, batch_size, tmpdir
+):
+    observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
+    action_space = gym.spaces.Box(
+        low=0,
+        high=vocab_size - 1,
+        shape=(20,),
+    )
+    grpo = GRPO(
+        observation_space,
+        action_space,
+        actor_network=create_module(
+            input_size=input_size,
+            max_tokens=max_tokens,
+            vocab_size=vocab_size,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+        ),
+        pad_token_id=vocab_size - 1,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        group_size=group_size,
+        cosine_lr_schedule_config=CosineLRScheduleConfig(
+            num_epochs=10, warmup_proportion=0.05
+        ),
+        accelerator=None,
+    )
+    obs = grpo.preprocess_observation(
+        orig_obs := torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+    )
+    assert torch.equal(obs, orig_obs)
+
+
+@pytest.mark.parametrize("vocab_size", [1000])
+@pytest.mark.parametrize("input_size", [10])
+@pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize("group_size", [5])
+@pytest.mark.parametrize("batch_size", [8])
+def test_load_distributed_actor_warning(
+    vocab_size, input_size, max_tokens, group_size, batch_size, tmpdir
+):
+    observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
+    action_space = gym.spaces.Box(
+        low=0,
+        high=vocab_size - 1,
+        shape=(20,),
+    )
+    accelerator = MagicMock(spec=Accelerator)
+    accelerator.state = MagicMock(spec=AcceleratorState)
+    grpo = GRPO(
+        observation_space,
+        action_space,
+        actor_network=create_module(
+            input_size=input_size,
+            max_tokens=max_tokens,
+            vocab_size=vocab_size,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+        ),
+        pad_token_id=vocab_size - 1,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        group_size=group_size,
+        cosine_lr_schedule_config=CosineLRScheduleConfig(
+            num_epochs=10, warmup_proportion=0.05
+        ),
+        accelerator=None,
+    )
+    grpo.accelerator = accelerator
+    with pytest.raises(ValueError):
+        grpo._load_distributed_actor(None)

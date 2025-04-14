@@ -1576,19 +1576,22 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """
         if self.accelerator is not None:
             deepspeed_dirs = sorted(glob.glob(f"{path}/checkpoint"))
-            assert len(deepspeed_dirs) > 0
-            load_path, _ = self.actor.load_checkpoint(
-                path,
-                tag="checkpoint",
-                load_module_strict=not is_peft_model(
-                    self.accelerator.unwrap_model(self.actor)
-                ),
-                load_optimizer_states=True,
-                load_lr_scheduler_states=True,
-            )
+            try:
+                assert len(deepspeed_dirs) > 0
+                load_path, _ = self.actor.load_checkpoint(
+                    path,
+                    tag="checkpoint",
+                    load_module_strict=not is_peft_model(
+                        self.accelerator.unwrap_model(self.actor)
+                    ),
+                    load_optimizer_states=True,
+                    load_lr_scheduler_states=True,
+                )
 
-            if load_path is None:
-                raise ValueError(f"[deepspeed] failed to resume from checkpoint {path}")
+            except Exception as e:
+                raise ValueError(
+                    f"Deepspeed failed to resume from checkpoint {path}"
+                ) from e
         else:
             warnings.warn(
                 "Distributed actor load not supported for non-distributed training."
