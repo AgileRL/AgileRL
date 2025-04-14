@@ -1154,6 +1154,9 @@ def test_grpo_clean_up(
     assert not hasattr(grpo, "reference_actor")
     assert not hasattr(grpo, "optimizer")
     assert not hasattr(grpo, "lr_scheduler")
+    del grpo
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @pytest.mark.parametrize("vocab_size", [1000])
@@ -1191,6 +1194,9 @@ def test_grpo_preprocess_observation(
         orig_obs := torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
     )
     assert torch.equal(obs, orig_obs)
+    del grpo
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @pytest.mark.parametrize("vocab_size", [1000])
