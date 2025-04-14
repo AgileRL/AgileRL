@@ -359,9 +359,11 @@ class TD3(RLAlgorithm):
         with torch.no_grad():
             action = self.actor(obs)
 
+        action = action.cpu().data.numpy()
+
         self.actor.train()
         if training:
-            action = (action.cpu().data.numpy() + self.action_noise()).clip(
+            action = (action + self.action_noise()).clip(
                 self.min_action, self.max_action
             )
 
