@@ -1,4 +1,5 @@
 import copy
+import gc
 import glob
 import inspect
 import os
@@ -1709,3 +1710,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self.accelerator.wait_for_everyone()
             self.accelerator.free_memory()
             self.accelerator.wait_for_everyone()
+        del self.actor
+        del self.reference_actor
+        del self.optimizer
+        del self.lr_scheduler
+        gc.collect()
+        torch.cuda.empty_cache()
