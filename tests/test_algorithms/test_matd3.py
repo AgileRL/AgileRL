@@ -31,6 +31,12 @@ from tests.helper_functions import (
 from tests.test_algorithms.test_maddpg import DummyMultiEnv
 
 
+@pytest.fixture(autouse=True)
+def cleanup():
+    yield  # Run the test first
+    torch.cuda.empty_cache()  # Free up GPU memory
+
+
 class MultiAgentCNNActor(nn.Module):
     def __init__(self):
         super().__init__()
