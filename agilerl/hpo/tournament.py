@@ -148,6 +148,7 @@ class TournamentSelection:
                 agent_ref = population[old_population_idxs.index(agent_idx)]
                 population[old_population_idxs.index(agent_idx)] = None
                 agent_ref.clean_up()
+                agent_ref = None
 
         new_population = []
         index_tracker = {}
@@ -158,6 +159,7 @@ class TournamentSelection:
                 actor_parent = agent.clone(new_idx, wrap=False)
                 population[old_population_idxs.index(idx_to_clone)] = None
                 agent.clean_up()
+                agent = None
                 index_tracker[idx_to_clone] = actor_parent
             else:
                 actor_parent = index_tracker[idx_to_clone].clone(new_idx, wrap=False)

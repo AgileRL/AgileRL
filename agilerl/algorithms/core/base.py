@@ -1658,9 +1658,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if self.accelerator is not None
             else self.actor
         )
-        cloned_actor = clone_llm(
-            actor, load_state_dict=(self.zero_stage != 3)
-        )  # NOTE do we want to load this state dict given we load the checkpoint in?
+        cloned_actor = clone_llm(actor, load_state_dict=(self.zero_stage != 3))
 
         input_args["actor_network"] = cloned_actor
         input_args["accelerator"] = (
@@ -1668,7 +1666,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         )
         clone = type(self)(**input_args)
 
-        clone.reference_actor.load_state_dict(self.reference_actor.state_dict())
+        # try:
+        clone.reference_actor.load_state_dict(self.reference_actor.module.state_dict())
+        # except Exception as e:
+        #     clone.reference_actor.load_state_dict(self.reference_actor.state_dict())
+
         clone.reference_actor.eval()
         clone.mutation_hook()
 

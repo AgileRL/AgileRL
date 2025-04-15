@@ -7,11 +7,11 @@ import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import wandb
 from accelerate import Accelerator
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl.algorithms import (
     CQN,
     DDPG,
@@ -895,7 +895,8 @@ def save_llm_checkpoint(agent: EvolvableAlgorithm, checkpoint_path: str | None) 
     path = base_path + f"/{agent.algo}"
     os.makedirs(path, exist_ok=True)
     if agent.accelerator is not None:
-        unwrapped_model = agent.accelerator.unwrap_model(agent.actor)
-        unwrapped_model.save_pretrained(path)
+        agent.accelerator.wait_for_everyone()
+        agent.actor.save_pretrained(path)
+        agent.accelerator.wait_for_everyone()
     else:
         agent.actor.save_pretrained(path)

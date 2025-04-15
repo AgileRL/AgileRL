@@ -999,6 +999,9 @@ def clone_llm(
         model = get_peft_model(model, peft_config)
 
     if load_state_dict:
-        model.load_state_dict(original_model.state_dict())
+        # try:
+        model.load_state_dict(original_model.module.state_dict())
+        # except Exception as e:
+        #     model.load_state_dict(original_model.state_dict())
 
     return model
