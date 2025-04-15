@@ -6,7 +6,7 @@ from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from numbers import Number
 from typing import Any, Dict, Iterable, List, Optional, Tuple, TypeGuard, Union
-
+from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 import numpy as np
 import torch
 import torch.nn as nn
@@ -993,15 +993,9 @@ def clone_llm(
     model_config = original_model.config
     base_model = original_model.model
     model = type(base_model)(model_config)
-
     if is_peft_model(original_model):
         peft_config = original_model.peft_config[original_model.active_adapter]
         model = get_peft_model(model, peft_config)
-
     if load_state_dict:
-        # try:
-        model.load_state_dict(original_model.module.state_dict())
-        # except Exception as e:
-        #     model.load_state_dict(original_model.state_dict())
-
+        model.load_state_dict(clone_tensors_for_torch_save(original_model.state_dict()))
     return model

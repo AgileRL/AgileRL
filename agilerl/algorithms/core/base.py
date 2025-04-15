@@ -19,6 +19,7 @@ from typing import (
     Union,
 )
 
+from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 import deepspeed
 import dill
 import numpy as np
@@ -1666,10 +1667,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         )
         clone = type(self)(**input_args)
 
-        # try:
-        clone.reference_actor.load_state_dict(self.reference_actor.module.state_dict())
-        # except Exception as e:
-        #     clone.reference_actor.load_state_dict(self.reference_actor.state_dict())
+        clone.reference_actor.load_state_dict(clone_tensors_for_torch_save(self.reference_actor.state_dict()))
 
         clone.reference_actor.eval()
         clone.mutation_hook()
