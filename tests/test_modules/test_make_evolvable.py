@@ -1,4 +1,5 @@
 import copy
+import gc
 
 import pytest
 import torch
@@ -69,7 +70,10 @@ def simple_mlp():
         nn.Linear(10, 1),
         nn.Tanh(),
     )
-    return network
+    yield network
+    del network
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @pytest.fixture
@@ -77,7 +81,10 @@ def simple_mlp_2():
     network = nn.Sequential(
         nn.Linear(10, 128), nn.ReLU(), nn.Linear(128, 128), nn.ReLU(), nn.Linear(128, 1)
     )
-    return network
+    yield network
+    del network
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @pytest.fixture
@@ -92,7 +99,10 @@ def mlp_norm_layers():
         nn.Linear(10, 1),
         nn.Sigmoid(),
     )
-    return network
+    yield network
+    del network
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @pytest.fixture
@@ -113,7 +123,10 @@ def simple_cnn():
         nn.ReLU(),
         nn.Linear(128, 1),  # Output layer with num_classes output features
     )
-    return network
+    yield network
+    del network
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @pytest.fixture
@@ -136,12 +149,19 @@ def cnn_norm_layers():
         nn.ReLU(),
         nn.Linear(128, 1),  # Output layer with num_classes output features
     )
-    return network
+    yield network
+    del network
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @pytest.fixture
 def two_arg_cnn():
-    return TwoArgCNN()
+    network = TwoArgCNN()
+    yield network
+    del network
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @pytest.fixture

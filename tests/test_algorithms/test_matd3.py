@@ -126,6 +126,9 @@ def mlp_actor(observation_spaces, action_spaces):
         GumbelSoftmax(),
     )
     yield net
+    del net
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @pytest.fixture
