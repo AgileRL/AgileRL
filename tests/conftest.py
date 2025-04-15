@@ -1,3 +1,5 @@
+import gc
+
 import pytest
 import torch
 
@@ -6,3 +8,4 @@ import torch
 def cleanup():
     yield  # Run the test first
     torch.cuda.empty_cache()  # Free up GPU memory
+    gc.collect()  # Collect garbage
