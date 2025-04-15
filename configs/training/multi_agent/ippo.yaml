@@ -22,11 +22,11 @@ INIT_HP:
     UPDATE_EPOCHS: 4           # Number of policy update epochs
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
-    POP_SIZE: 4                # Population size
+    POP_SIZE: 1                # Population size
     EVO_STEPS: 10_000          # Evolution frequency
     EVAL_STEPS:                # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
-    WANDB: true                # Log with Weights and Biases
+    WANDB: false                # Log with Weights and Biases
     TORCH_COMPILE: default
 
 

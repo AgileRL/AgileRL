@@ -18,7 +18,6 @@ from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.typing import (
     ArrayLike,
-    ArrayOrTensor,
     ExperiencesType,
     GymEnvType,
     ObservationType,
@@ -38,7 +37,7 @@ class DDPG(RLAlgorithm):
     :param observation_space: Environment observation space
     :type observation_space: gym.spaces.Space
     :param action_space: Environment action space
-    :type action_space: gym.spaces.Space
+    :type action_space: gym.spaces.Box
     :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
     :type O_U_noise: bool, optional
     :param expl_noise: Scale for Ornstein Uhlenbeck action noise, or standard deviation for Gaussian exploration noise, defaults to 0.1
@@ -89,10 +88,12 @@ class DDPG(RLAlgorithm):
     :type wrap: bool, optional
     """
 
+    action_space: spaces.Box
+
     def __init__(
         self,
         observation_space: spaces.Space,
-        action_space: spaces.Space,
+        action_space: spaces.Box,
         O_U_noise: bool = True,
         expl_noise: Union[float, ArrayLike] = 0.1,
         vect_noise_dim: int = 1,
@@ -287,10 +288,9 @@ class DDPG(RLAlgorithm):
                 "Encoder sharing is disabled as actor or critic is not an EvolvableNetwork."
             )
 
-    def get_action(self, obs: ObservationType, training: bool = True) -> ArrayOrTensor:
-        """Returns the next action to take in the environment.
-        Epsilon is the probability of taking a random action, used for exploration.
-        For epsilon-greedy behaviour, set epsilon to 0.
+    def get_action(self, obs: ObservationType, training: bool = True) -> np.ndarray:
+        """Returns the next action to take in the environment. If training, random noise
+        is added to the action to promote exploration.
 
         :param obs: Environment observation, or multiple observations in a batch
         :type obs: numpy.ndarray[float]
@@ -304,12 +304,13 @@ class DDPG(RLAlgorithm):
         with torch.no_grad():
             action: torch.Tensor = self.actor(obs)
 
+        action = action.cpu().data.numpy()
+
         self.actor.train()
         if training:
-            action = (action.cpu().data.numpy() + self.action_noise()).clip(
-                self.min_action, self.max_action
-            )
-        return action
+            action += self.action_noise()
+
+        return action.clip(self.action_space.low, self.action_space.high)
 
     def action_noise(self) -> ArrayLike:
         """Create action noise for exploration, either Ornstein Uhlenbeck or

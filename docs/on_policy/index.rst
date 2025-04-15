@@ -244,7 +244,6 @@ Alternatively, use a custom on-policy training loop:
                 done = np.zeros(num_envs)
 
                 learn_steps = 0
-
                 for idx_step in range(-(agent.learn_step // -num_envs)):
                     if INIT_HP["CHANNELS_LAST"]:
                         state = obs_channels_to_first(state)
@@ -252,8 +251,17 @@ Alternatively, use a custom on-policy training loop:
                     # Get next action from agent
                     action, log_prob, _, value = agent.get_action(state)
 
+                    # Clip to action space
+                    if isinstance(agent.action_space, spaces.Box):
+                        if agent.actor.squash_output:
+                            clipped_action = agent.actor.scale_action(action)
+                        else:
+                            clipped_action = np.clip(action, agent.action_space.low, agent.action_space.high)
+                    else:
+                        clipped_action = action
+
                     # Act in environment
-                    next_state, reward, terminated, truncated, info = env.step(action)
+                    next_state, reward, terminated, truncated, info = env.step(clipped_action)
                     next_done = np.logical_or(terminated, truncated).astype(np.int8)
 
                     total_steps += num_envs

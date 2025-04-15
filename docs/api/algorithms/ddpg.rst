@@ -40,7 +40,7 @@ Example
 
   # Create environment and Experience Replay Buffer
   num_envs = 1
-  env = make_vect_envs('LunarLanderContinuous-v2', num_envs=num_envs)
+  env = make_vect_envs('LunarLanderContinuous-v3', num_envs=num_envs)
   observation_space = env.observation_space
   action_space = env.action_space
 
