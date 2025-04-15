@@ -1705,6 +1705,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             clone.accelerator.wait_for_everyone()
             if self.accelerator.is_main_process:
                 remove_nested_files(saved_state_files)
+        else:
+            if self.accelerator is not None:
+                self.accelerator.wait_for_everyone()
         return clone
 
     def clean_up(self) -> None:
