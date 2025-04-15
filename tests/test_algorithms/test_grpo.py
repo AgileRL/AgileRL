@@ -158,6 +158,12 @@ def create_module(input_size, max_tokens, vocab_size, device):
     )
 
 
+@pytest.fixture(autouse=True)
+def cleanup():
+    yield  # Run the test first
+    torch.cuda.empty_cache()  # Free up GPU memory
+
+
 @pytest.fixture
 def grpo(vocab_size, input_size, max_tokens, group_size, use_accelerator):
     observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
