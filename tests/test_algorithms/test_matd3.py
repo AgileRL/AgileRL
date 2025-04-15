@@ -1,6 +1,6 @@
 import copy
+import gc
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import dill
 import numpy as np
@@ -29,12 +29,6 @@ from tests.helper_functions import (
     generate_multi_agent_discrete_spaces,
 )
 from tests.test_algorithms.test_maddpg import DummyMultiEnv
-
-
-@pytest.fixture(autouse=True)
-def cleanup():
-    yield  # Run the test first
-    torch.cuda.empty_cache()  # Free up GPU memory
 
 
 class MultiAgentCNNActor(nn.Module):
@@ -131,7 +125,7 @@ def mlp_actor(observation_spaces, action_spaces):
         nn.Linear(64, action_spaces[0].n),
         GumbelSoftmax(),
     )
-    return net
+    yield net
 
 
 @pytest.fixture
@@ -141,29 +135,33 @@ def mlp_critic(action_spaces, observation_spaces):
         nn.ReLU(),
         nn.Linear(64, 1),
     )
-    return net
+    yield net
+    del net
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @pytest.fixture
 def cnn_actor():
     net = MultiAgentCNNActor()
-    return net
+    yield net
+    del net
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @pytest.fixture
 def cnn_critic():
     net = MultiAgentCNNCritic()
-    return net
+    yield net
+    del net
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @pytest.fixture
 def device():
     return "cuda" if torch.cuda.is_available() else "cpu"
-
-
-@pytest.fixture
-def mocked_accelerator():
-    MagicMock(spec=Accelerator)
 
 
 @pytest.fixture
@@ -195,7 +193,7 @@ def accelerated_experiences(batch_size, observation_spaces, action_spaces, agent
             agent: torch.randn(batch_size, *state_size) for agent in agent_ids
         }
 
-    return states, actions, rewards, next_states, dones
+    yield states, actions, rewards, next_states, dones
 
 
 @pytest.fixture
@@ -235,7 +233,7 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, device
             for agent in agent_ids
         }
 
-    return states, actions, rewards, next_states, dones
+    yield states, actions, rewards, next_states, dones
 
 
 @pytest.mark.parametrize("accelerator_flag", [False, True])
