@@ -271,6 +271,7 @@ class IPPO(MultiAgentRLAlgorithm):
 
                 # Create one actor and critic per inhomogeneous (unique) type of agent,
                 # which will be used by all homogeneous (identical) agents of that type
+                print("Net config", net_config)
                 actor = StochasticActor(
                     obs_space,
                     action_space,

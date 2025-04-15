@@ -26,7 +26,12 @@ ArrayTuple = Tuple[ArrayLike, ...]
 NetConfigType = Dict[str, Any]
 KernelSizeType = Union[int, Tuple[int, ...]]
 SupportedGymSpaces = Union[
-    spaces.Box, spaces.Discrete, spaces.MultiDiscrete, spaces.Dict, spaces.Tuple
+    spaces.Box,
+    spaces.Discrete,
+    spaces.MultiDiscrete,
+    spaces.Dict,
+    spaces.Tuple,
+    spaces.MultiBinary,
 ]
 GymSpaceType = Union[SupportedGymSpaces, List[SupportedGymSpaces]]
 GymEnvType = Union[str, gym.Env, gym.vector.VectorEnv]

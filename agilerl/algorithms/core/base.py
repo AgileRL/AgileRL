@@ -286,18 +286,20 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             return tuple(
                 EvolvableAlgorithm.get_state_dim(space) for space in observation_space
             )
-        elif isinstance(observation_space, spaces.Discrete):
-            return (observation_space.n,)
-        elif isinstance(observation_space, spaces.MultiDiscrete):
-            return (sum(observation_space.nvec),)
-        elif isinstance(observation_space, spaces.Box):
-            return observation_space.shape
         elif isinstance(observation_space, spaces.Dict):
             assert_supported_space(observation_space)
             return {
                 key: EvolvableAlgorithm.get_state_dim(subspace)
                 for key, subspace in observation_space.spaces.items()
             }
+        elif isinstance(observation_space, spaces.Discrete):
+            return (observation_space.n,)
+        elif isinstance(observation_space, spaces.MultiDiscrete):
+            return (sum(observation_space.nvec),)
+        elif isinstance(observation_space, spaces.Box):
+            return observation_space.shape
+        elif isinstance(observation_space, spaces.MultiBinary):
+            return (observation_space.n,)
         else:
             raise AttributeError(
                 f"Can't access state dimensions for {type(observation_space)} spaces."
@@ -1197,7 +1199,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         )
 
         # For continuous action spaces, store the min and max action values
-        if not self.discrete_actions:
+        if all(isinstance(space, spaces.Box) for space in action_spaces):
             self.min_action = [
                 np.array(space.low).astype(np.float32) for space in action_spaces
             ]
