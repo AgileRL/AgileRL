@@ -644,16 +644,16 @@ def preprocess_observation(
 
 
 def apply_image_normalization(
-    observation: TorchObsType, observation_space: spaces.Box
-) -> TorchObsType:
+    observation: ArrayOrTensor, observation_space: spaces.Box
+) -> ArrayOrTensor:
     """Normalize images using minmax scaling
 
     :param observation: Observation
-    :type observation: TorchObsType
+    :type observation: ArrayOrTensor
     :param observation_space: Observation space
     :type observation_space: spaces.Box
     :return: Observation
-    :rtype: TorchObsType
+    :rtype: ArrayOrTensor
     """
     if not isinstance(observation_space, spaces.Box):
         raise TypeError(f"Expected spaces.Box, got {type(observation_space)}")
@@ -673,12 +673,16 @@ def apply_image_normalization(
     if np.all(observation_space.high == 1) and np.all(observation_space.low == 0):
         return observation
 
-    low = torch.tensor(
-        observation_space.low, device=observation.device, dtype=observation.dtype
-    )
-    high = torch.tensor(
-        observation_space.high, device=observation.device, dtype=observation.dtype
-    )
+    if isinstance(observation, torch.Tensor):
+        low = torch.tensor(
+            observation_space.low, device=observation.device, dtype=observation.dtype
+        )
+        high = torch.tensor(
+            observation_space.high, device=observation.device, dtype=observation.dtype
+        )
+    else:
+        low = observation_space.low
+        high = observation_space.high
 
     return (observation - low) / (high - low)
 
