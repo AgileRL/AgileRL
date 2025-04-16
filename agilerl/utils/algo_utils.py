@@ -512,7 +512,7 @@ def maybe_add_batch_dim(
             obs = obs.view(-1, *space_shape)
     elif len(obs.shape) != len(space_shape) + 1:
         raise ValueError(
-            f"Expected observation to have {len(space_shape) + 1} dimensions, got {obs.dim()}."
+            f"Expected observation to have {len(space_shape) + 1} dimensions, got {len(obs.shape)}."
         )
 
     return obs
@@ -598,7 +598,7 @@ def preprocess_observation(
     if isinstance(observation_space, spaces.Box):
         # Normalize images if applicable and specified
         if len(observation_space.shape) == 3 and normalize_images:
-            observation = observation / 255.0
+            observation = apply_image_normalization(observation, observation_space)
 
         space_shape = observation_space.shape
 
@@ -644,17 +644,20 @@ def preprocess_observation(
 
 
 def apply_image_normalization(
-    observation: NumpyObsType, observation_space: spaces.Space
-) -> NumpyObsType:
+    observation: TorchObsType, observation_space: spaces.Box
+) -> TorchObsType:
     """Normalize images using minmax scaling
 
     :param observation: Observation
-    :type observation: NumpyObsType
+    :type observation: TorchObsType
     :param observation_space: Observation space
-    :type observation_space: spaces.Space
+    :type observation_space: spaces.Box
     :return: Observation
-    :rtype: NumpyObsType
+    :rtype: TorchObsType
     """
+    if not isinstance(observation_space, spaces.Box):
+        raise TypeError(f"Expected spaces.Box, got {type(observation_space)}")
+
     if np.inf in observation_space.high:
         warnings.warn(
             "np.inf detected in observation_space.high, bypassing normalization."
@@ -668,13 +671,16 @@ def apply_image_normalization(
         return observation
 
     if np.all(observation_space.high == 1) and np.all(observation_space.low == 0):
-        # minmax scaling
         return observation
 
-    observation = (observation - observation_space.low) / (
-        observation_space.high - observation_space.low
+    low = torch.tensor(
+        observation_space.low, device=observation.device, dtype=observation.dtype
     )
-    return observation
+    high = torch.tensor(
+        observation_space.high, device=observation.device, dtype=observation.dtype
+    )
+
+    return (observation - low) / (high - low)
 
 
 # TODO: The following functions are currently used in PPO (on-policy) as a means of handling
@@ -997,23 +1003,53 @@ def vectorize_experiences_by_agent(
         return stacked_tensor
 
 
-def experience_to_tensors(experience: dict | tuple | np.ndarray) -> TorchObsType:
+def get_space_shape(space: spaces.Space) -> Tuple[int, ...]:
+    """Get the shape of a space
+
+    :param space: Space to get shape of
+    :type space: spaces.Space
+    :return: Shape of space
+    :rtype: Tuple[int, ...]
+    """
+    if isinstance(space, spaces.Discrete):
+        return (1,)
+    elif isinstance(space, spaces.Box):
+        return space.shape
+    elif isinstance(space, spaces.MultiDiscrete):
+        return (len(space.nvec),)
+    elif isinstance(space, spaces.MultiBinary):
+        return (space.n,)
+    else:
+        raise TypeError(f"Unsupported space type: {type(space)}")
+
+
+def experience_to_tensors(
+    experience: dict | tuple | np.ndarray, space: spaces.Space
+) -> TorchObsType:
     """Convert experience to numpy array
 
     :param experience: Experience to convert
     :type experience: dict | tuple | np.ndarray
+    :param space: Space to convert experience to
+    :type space: spaces.Space
     :return: Numpy array of experience
     :rtype: np.ndarray
     """
     if isinstance(experience, dict):
-        return {key: experience_to_tensors(value) for key, value in experience.items()}
+        return {
+            key: experience_to_tensors(value, space[key])
+            for key, value in experience.items()
+        }
     elif isinstance(experience, tuple):
-        return tuple(experience_to_tensors(exp) for exp in experience)
+        return tuple(
+            experience_to_tensors(exp, space[i]) for i, exp in enumerate(experience)
+        )
     else:
         array = np.array(experience)
 
-        # Ensure expreience has a batch dimension
-        array = maybe_add_batch_dim(array, (1,))
+        # Ensure experience has a batch dimension
+        space_shape = get_space_shape(space)
+        array = maybe_add_batch_dim(array, space_shape)
         return torch.from_numpy(array)
 
 
@@ -1057,6 +1093,7 @@ def reshape_from_space(tensor: TorchObsType, space: spaces.Space) -> TorchObsTyp
             reshape_from_space(value, space[i]) for i, value in enumerate(tensor)
         )
     else:
+        #
         reshaped: torch.Tensor = tensor.reshape(-1, *space.shape)
         for squeeze_dim in [0, -1]:
             if reshaped.size(squeeze_dim) == 1:
@@ -1085,7 +1122,7 @@ def concatenate_experiences_into_batches(
     """
     tensors = []
     for agent_id in experiences.keys():
-        exp = experience_to_tensors(experiences[agent_id])
+        exp = experience_to_tensors(experiences[agent_id], space)
         tensors.append(exp)
 
     stacked_tensor = concatenate_tensors(tensors)
