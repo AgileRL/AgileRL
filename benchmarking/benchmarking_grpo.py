@@ -1,4 +1,3 @@
-import os
 import re
 from typing import Tuple
 
@@ -246,12 +245,12 @@ def main(init_hp, mut_p):
         pop=pop,
         env=env,
         init_hp=init_hp,
-        evaluation_interval=10,
-        wb=True,
+        evaluation_interval=1,
+        wb=False,
         save_elite=True,
         elite_path="saved_llms",
         max_reward=2.0,
-        evo_steps=10,
+        evo_steps=1,
         mutation=mutations,
         tournament=tournament,
         accelerator=accelerator,
