@@ -1223,18 +1223,17 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 
 
 @pytest.mark.parametrize(
-    "device, accelerator",
-    [
-        ("cpu", None),
-        ("cpu", Accelerator()),
-    ],
+    "device", ["cpu", torch.device("cuda" if torch.cuda.is_available() else "cpu")]
 )
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
 # The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained(device, accelerator, tmpdir):
     # Initialize the ppo agent
     ppo = PPO(
         observation_space=generate_random_box_space(shape=(4,), low=0, high=1),
         action_space=generate_random_box_space(shape=(2,), low=0, high=1),
+        device=device,
+        accelerator=accelerator,
     )
 
     # Save the checkpoint to a file
@@ -1251,8 +1250,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     assert isinstance(new_ppo.actor.encoder, EvolvableMLP)
     assert isinstance(new_ppo.critic.encoder, EvolvableMLP)
     assert new_ppo.lr == ppo.lr
-    assert str(new_ppo.actor.to("cpu").state_dict()) == str(ppo.actor.state_dict())
-    assert str(new_ppo.critic.to("cpu").state_dict()) == str(ppo.critic.state_dict())
+    assert str(new_ppo.actor.state_dict()) == str(ppo.actor.state_dict())
+    assert str(new_ppo.critic.state_dict()) == str(ppo.critic.state_dict())
     assert new_ppo.batch_size == ppo.batch_size
     assert new_ppo.gamma == ppo.gamma
     assert new_ppo.mut == ppo.mut
@@ -1263,12 +1262,9 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
 
 
 @pytest.mark.parametrize(
-    "device, accelerator",
-    [
-        ("cpu", None),
-        ("cpu", Accelerator()),
-    ],
+    "device", ["cpu", torch.device("cuda" if torch.cuda.is_available() else "cpu")]
 )
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
 # The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     # Initialize the ppo agent
@@ -1282,6 +1278,8 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
                 "stride_size": [1],
             }
         },
+        device=device,
+        accelerator=accelerator,
     )
 
     # Save the checkpoint to a file
@@ -1298,8 +1296,8 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     assert isinstance(new_ppo.actor.encoder, EvolvableCNN)
     assert isinstance(new_ppo.critic.encoder, EvolvableCNN)
     assert new_ppo.lr == ppo.lr
-    assert str(new_ppo.actor.to("cpu").state_dict()) == str(ppo.actor.state_dict())
-    assert str(new_ppo.critic.to("cpu").state_dict()) == str(ppo.critic.state_dict())
+    assert str(new_ppo.actor.state_dict()) == str(ppo.actor.state_dict())
+    assert str(new_ppo.critic.state_dict()) == str(ppo.critic.state_dict())
     assert new_ppo.batch_size == ppo.batch_size
     assert new_ppo.gamma == ppo.gamma
     assert new_ppo.mut == ppo.mut

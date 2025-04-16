@@ -8,9 +8,10 @@ import gymnasium as gym
 import numpy as np
 import wandb
 from accelerate import Accelerator
+from gymnasium import spaces
 from tqdm import trange
 
-from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
+from agilerl.algorithms import IPPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.algo_utils import obs_channels_to_first
@@ -21,7 +22,8 @@ from agilerl.utils.utils import (
 )
 
 InitDictType = Optional[Dict[str, Any]]
-PopulationType = List[MultiAgentRLAlgorithm]
+MultiAgentOnPolicyAlgorithms = IPPO
+PopulationType = List[MultiAgentOnPolicyAlgorithms]
 
 
 def train_multi_agent_on_policy(
@@ -201,6 +203,8 @@ def train_multi_agent_on_policy(
         pop_episode_scores = []
         pop_fps = []
         for agent_idx, agent in enumerate(pop):  # Loop through population
+            agent.set_training_mode(True)
+
             obs, info = env.reset()  # Reset environment at start of episode
             scores = (
                 np.zeros((num_envs, 1))
@@ -243,8 +247,30 @@ def train_multi_agent_on_policy(
                         entropy = {agent: ent[0] for agent, ent in entropy.items()}
                         value = {agent: val[0] for agent, val in value.items()}
 
+                    # Clip to action space
+                    clipped_action = {}
+                    for agent_id, agent_action in action.items():
+                        shared_id = agent.get_homo_id(agent_id)
+                        actor_idx = agent.shared_agent_ids.index(shared_id)
+                        agent_space = agent.action_space[agent_id]
+                        if isinstance(agent_space, spaces.Box):
+                            if agent.actors[actor_idx].squash_output:
+                                clipped_agent_action = agent.actors[
+                                    actor_idx
+                                ].scale_action(agent_action)
+                            else:
+                                clipped_agent_action = np.clip(
+                                    agent_action, agent_space.low, agent_space.high
+                                )
+                        else:
+                            clipped_agent_action = agent_action
+
+                        clipped_action[agent_id] = clipped_agent_action
+
                     # Act in environment
-                    next_obs, reward, termination, truncation, info = env.step(action)
+                    next_obs, reward, termination, truncation, info = env.step(
+                        clipped_action
+                    )
                     score_increment = (
                         (
                             np.sum(
@@ -301,8 +327,6 @@ def train_multi_agent_on_policy(
                             if not is_vectorised:
                                 obs, info = env.reset()
 
-                    pbar.update(num_envs)
-
                 experiences = (
                     states,
                     actions,
@@ -325,6 +349,7 @@ def train_multi_agent_on_policy(
                     )
 
             agent.steps[-1] += steps
+            pbar.update(evo_steps // len(pop))
             fps = steps / (time.time() - start_time)
             pop_fps.append(fps)
             pop_episode_scores.append(completed_episode_scores)

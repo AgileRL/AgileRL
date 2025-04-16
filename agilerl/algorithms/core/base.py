@@ -274,7 +274,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
     @staticmethod
     def get_state_dim(observation_space: GymSpaceType) -> Tuple[int, ...]:
-        """Returns the dimension of the state space.
+        """Returns the dimension of the state space as it pertains to the underlying
+        networks (i.e. the input size of the networks).
 
         :param observation_space: The observation space of the environment.
         :type observation_space: spaces.Space or List[spaces.Space].
@@ -286,18 +287,20 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             return tuple(
                 EvolvableAlgorithm.get_state_dim(space) for space in observation_space
             )
-        elif isinstance(observation_space, spaces.Discrete):
-            return (observation_space.n,)
-        elif isinstance(observation_space, spaces.MultiDiscrete):
-            return (sum(observation_space.nvec),)
-        elif isinstance(observation_space, spaces.Box):
-            return observation_space.shape
         elif isinstance(observation_space, spaces.Dict):
             assert_supported_space(observation_space)
             return {
                 key: EvolvableAlgorithm.get_state_dim(subspace)
                 for key, subspace in observation_space.spaces.items()
             }
+        elif isinstance(observation_space, spaces.Discrete):
+            return (observation_space.n,)
+        elif isinstance(observation_space, spaces.MultiDiscrete):
+            return (sum(observation_space.nvec),)
+        elif isinstance(observation_space, spaces.Box):
+            return observation_space.shape
+        elif isinstance(observation_space, spaces.MultiBinary):
+            return (observation_space.n,)
         else:
             raise AttributeError(
                 f"Can't access state dimensions for {type(observation_space)} spaces."
@@ -305,7 +308,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
     @staticmethod
     def get_action_dim(action_space: GymSpaceType) -> int:
-        """Returns the dimension of the action space.
+        """Returns the dimension of the action space as it pertains to the underlying
+        networks (i.e. the output size of the networks).
 
         :param action_space: The action space of the environment.
         :type action_space: spaces.Space or List[spaces.Space].
@@ -1197,7 +1201,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         )
 
         # For continuous action spaces, store the min and max action values
-        if not self.discrete_actions:
+        if all(isinstance(space, spaces.Box) for space in action_spaces):
             self.min_action = [
                 np.array(space.low).astype(np.float32) for space in action_spaces
             ]
@@ -1219,9 +1223,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         ):
             # Split agent names on expected pattern of e.g. speaker_0, speaker_1,
             # listener_0, listener_1, to determine which agents are homogeneous
-            homo_id = (
-                agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
-            )
+            homo_id = self.get_homo_id(agent_id)
             if homo_id in self.homogeneous_agents:
                 self.homogeneous_agents[homo_id].append(agent_id)
                 assert obs_space == self.unique_observation_spaces[homo_id], (
@@ -1259,6 +1261,15 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         self.action_space = spaces.Dict(
             {agent_id: space for agent_id, space in zip(agent_ids, action_spaces)}
         )
+
+    def get_homo_id(self, agent_id: str) -> str:
+        """Get the homogeneous ID for an agent.
+
+        :param agent_id: The agent ID
+        :type agent_id: str
+        :return: The homogeneous ID
+        """
+        return agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
 
     def preprocess_observation(
         self, observation: ObservationType
@@ -1418,6 +1429,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             )
             for i, homo_id in enumerate(self.homogeneous_agents[unique_id]):
                 output_dict[homo_id] = homo_outputs[unique_id][i]
+
         return output_dict
 
     def sum_shared_rewards(self, rewards: ArrayDict) -> ArrayDict:
@@ -1430,9 +1442,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         """
         summed_rewards = {homo_id: 0 for homo_id in self.shared_agent_ids}
         for agent_id, reward in rewards.items():
-            homo_id = (
-                agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
-            )
+            homo_id = self.get_homo_id(agent_id)
             summed_rewards[homo_id] += reward
         return summed_rewards
 

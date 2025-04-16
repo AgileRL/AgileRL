@@ -18,7 +18,13 @@ from agilerl.modules.mlp import EvolvableMLP
 from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.wrappers.make_evolvable import MakeEvolvable
-from tests.helper_functions import generate_discrete_space, generate_random_box_space
+from tests.helper_functions import (
+    generate_dict_or_tuple_space,
+    generate_discrete_space,
+    generate_multidiscrete_space,
+    generate_random_box_space,
+    get_sample_from_space,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -398,25 +404,34 @@ def test_initialize_ddpg_with_actor_network_no_critic(
     assert isinstance(ddpg.criterion, nn.MSELoss)
 
 
-# Returns the expected action when given a state observation and epsilon=0 or 1.
-def test_returns_expected_action_training():
+@pytest.mark.parametrize(
+    "observation_space",
+    [
+        generate_discrete_space(4),
+        generate_random_box_space(shape=(4,)),
+        generate_multidiscrete_space(2, 2),
+        generate_dict_or_tuple_space(2, 2, dict_space=True),
+        generate_dict_or_tuple_space(2, 2, dict_space=False),
+    ],
+)
+def test_returns_expected_action_training(observation_space):
     accelerator = Accelerator()
-    observation_space = generate_discrete_space(4)
     action_space = generate_random_box_space(shape=(2,), low=-1, high=1)
 
     ddpg = DDPG(observation_space, action_space)
-    state = np.array([0, 1, 2, 3])
+    state = get_sample_from_space(observation_space)
 
+    print(state)
     training = False
     action = ddpg.get_action(state, training)[0]
 
     assert len(action) == action_space.shape[0]
     for act in action:
-        assert isinstance(act, torch.Tensor)
+        assert isinstance(act, np.float32)
         assert -1 <= act <= 1
 
     ddpg = DDPG(observation_space, action_space, accelerator=accelerator)
-    state = np.array([1])
+    state = get_sample_from_space(observation_space)
     training = True
     action = ddpg.get_action(state, training)[0]
 
@@ -428,7 +443,7 @@ def test_returns_expected_action_training():
     ddpg = DDPG(
         observation_space, action_space, O_U_noise=False, accelerator=accelerator
     )
-    state = np.array([1])
+    state = get_sample_from_space(observation_space)
     training = True
     action = ddpg.get_action(state, training)[0]
 

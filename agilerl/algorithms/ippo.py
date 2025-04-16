@@ -27,12 +27,15 @@ from agilerl.typing import (
 )
 from agilerl.utils.algo_utils import (
     concatenate_experiences_into_batches,
+    concatenate_tensors,
     contains_image_space,
     get_experiences_samples,
+    get_vect_dim,
     key_in_nested_dict,
     make_safe_deepcopies,
     obs_channels_to_first,
     preprocess_observation,
+    stack_experiences,
     vectorize_experiences_by_agent,
 )
 
@@ -338,11 +341,7 @@ class IPPO(MultiAgentRLAlgorithm):
         action_masks = {homo_id: [] for homo_id in self.shared_agent_ids}
         for agent_id, info in infos.items():
             if isinstance(info, dict):
-                homo_id = (
-                    agent_id.rsplit("_", 1)[0]
-                    if isinstance(agent_id, str)
-                    else agent_id
-                )
+                homo_id = self.get_homo_id(agent_id)
                 action_masks[homo_id].append(
                     info.get("action_mask", None) if isinstance(info, dict) else None
                 )
@@ -375,9 +374,7 @@ class IPPO(MultiAgentRLAlgorithm):
         """
         preprocessed = {homo_id: [] for homo_id in self.shared_agent_ids}
         for agent_id, obs in observation.items():
-            homo_id = (
-                agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
-            )
+            homo_id = self.get_homo_id(agent_id)
             preprocessed[homo_id].append(
                 preprocess_observation(
                     observation=obs,
@@ -387,7 +384,7 @@ class IPPO(MultiAgentRLAlgorithm):
                 )
             )
         for homo_id in self.shared_agent_ids:
-            preprocessed[homo_id] = torch.cat(preprocessed[homo_id], dim=0)
+            preprocessed[homo_id] = concatenate_tensors(preprocessed[homo_id])
 
         return preprocessed
 
@@ -418,11 +415,9 @@ class IPPO(MultiAgentRLAlgorithm):
         infos: Optional[InfosDict] = None,
     ) -> Tuple[ArrayDict, ArrayDict]:
         """Returns the next action to take in the environment.
-        Epsilon is the probability of taking a random action, used for exploration.
-        For epsilon-greedy behaviour, set epsilon to 0.
 
         :param obs: Environment observations: {'agent_0': state_dim_0, ..., 'agent_n': state_dim_n}
-        :type obs: Dict[str, numpy.Array]
+        :type obs: Dict[str, numpy.Array | Dict[str, numpy.Array] | Tuple[numpy.Array, ...]]
         :param infos: Information dictionary returned by env.step(actions)
         :type infos: Dict[str, Dict[str, ...]]
         :return: Tuple of actions for each agent
@@ -434,12 +429,7 @@ class IPPO(MultiAgentRLAlgorithm):
 
         action_masks, env_defined_actions, agent_masks = self.process_infos(infos)
 
-        first_obs_shape = list(obs.values())[0].shape
-        vect_dim = (
-            first_obs_shape[0]
-            if len(first_obs_shape) > len(self.observation_spaces[0].shape)
-            else 1
-        )
+        vect_dim = get_vect_dim(obs, self.observation_space)
 
         # Preprocess observations
         preprocessed = self.preprocess_observation(obs)
@@ -450,7 +440,7 @@ class IPPO(MultiAgentRLAlgorithm):
         action_logprob_dict = {}
         dist_entropy_dict = {}
         state_values_dict = {}
-        for idx, (agent_id, obs, action_mask, actor, critic) in enumerate(
+        for idx, (shared_id, obs, action_mask, actor, critic) in enumerate(
             zip(
                 shared_agent_ids,
                 preprocessed_states,
@@ -465,10 +455,20 @@ class IPPO(MultiAgentRLAlgorithm):
                 action, log_prob, entropy = actor(obs, action_mask=action_mask)
                 state_values = critic(obs).squeeze(-1)
 
-            action_dict[agent_id] = action.cpu().data.numpy()
-            action_logprob_dict[agent_id] = log_prob.cpu().data.numpy()
-            dist_entropy_dict[agent_id] = entropy.cpu().data.numpy()
-            state_values_dict[agent_id] = state_values.cpu().data.numpy()
+            # Clip to action space during inference
+            agent_id = self.homogeneous_agents[shared_id][0]
+            agent_space = self.action_space[agent_id]
+            action = action.cpu().data.numpy()
+            if not self.training and isinstance(agent_space, spaces.Box):
+                if actor.squash_output:
+                    action = actor.scale_action(action)
+                else:
+                    action = np.clip(action, agent_space.low, agent_space.high)
+
+            action_dict[shared_id] = action
+            action_logprob_dict[shared_id] = log_prob.cpu().data.numpy()
+            dist_entropy_dict[shared_id] = entropy.cpu().data.numpy()
+            state_values_dict[shared_id] = state_values.cpu().data.numpy()
 
         action_dict = self.disassemble_homogeneous_outputs(action_dict, vect_dim)
 
@@ -486,28 +486,20 @@ class IPPO(MultiAgentRLAlgorithm):
             self.disassemble_homogeneous_outputs(state_values_dict, vect_dim),
         )
 
-    def assemble_shared_inputs(
-        self, input: Dict[str, np.ndarray]
-    ) -> Dict[str, TorchObsType]:
+    def assemble_shared_inputs(self, input: ExperiencesType) -> ExperiencesType:
         """Preprocesses inputs by constructing dictionaries by shared agents
 
         :param input: input to reshape from environment
-        :type input: numpy.ndarray[float] or dict[str, numpy.ndarray[float]]
+        :type ExperiencesType
 
         :return: Preprocessed inputs
-        :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
+        :rtype: ExperiencesType
         """
         shared = {homo_id: {} for homo_id in self.shared_agent_ids}
         for agent_id, inp in input.items():
-            homo_id = (
-                agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
-            )
-            shared[homo_id][agent_id] = inp
-        for agent_id, inp in input.items():
-            homo_id = (
-                agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
-            )
-            shared[homo_id][agent_id] = np.stack(shared[homo_id][agent_id])
+            homo_id = self.get_homo_id(agent_id)
+            shared[homo_id][agent_id] = stack_experiences(inp, to_torch=False)[0]
+
         return shared
 
     def learn(self, experiences: ExperiencesType) -> TensorDict:
@@ -663,8 +655,8 @@ class IPPO(MultiAgentRLAlgorithm):
             values = values.reshape((-1,))
             returns = advantages + values
 
-        states = concatenate_experiences_into_batches(states, obs_space.shape)
-        actions = concatenate_experiences_into_batches(actions, action_space.shape)
+        states = concatenate_experiences_into_batches(states, obs_space)
+        actions = concatenate_experiences_into_batches(actions, action_space)
         log_probs = log_probs.reshape((-1,))
         experiences = (states, actions, log_probs, advantages, returns, values)
 
@@ -794,6 +786,7 @@ class IPPO(MultiAgentRLAlgorithm):
         :rtype: float
         """
         self.set_training_mode(False)
+
         with torch.no_grad():
             rewards = []
             if hasattr(env, "num_envs"):

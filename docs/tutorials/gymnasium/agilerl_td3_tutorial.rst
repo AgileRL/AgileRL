@@ -134,7 +134,7 @@ used with continuous action environments.
 
     # Create vectorized environment
     num_envs = 8
-    env = make_vect_envs("LunarLanderContinuous-v2", num_envs=num_envs)  # Create environment
+    env = make_vect_envs("LunarLanderContinuous-v3", num_envs=num_envs)  # Create environment
 
     observation_space = env.single_observation_space
     action_space = env.single_action_space
@@ -276,7 +276,7 @@ fitnesses (fitness is each agents test scores on the environment).
 
     trained_pop, pop_fitnesses = train_off_policy(
         env=env,
-        env_name="LunarLanderContinuous-v2",
+        env_name="LunarLanderContinuous-v3",
         algo="TD3",
         pop=pop,
         memory=memory,
@@ -441,7 +441,7 @@ Test loop for inference
 ~~~~~~~~~~~~~~~~~~~~~~~
 .. code-block:: python
 
-    test_env = gym.make("LunarLanderContinuous-v2", render_mode="rgb_array")
+    test_env = gym.make("LunarLanderContinuous-v3", render_mode="rgb_array")
     rewards = []
     frames = []
     testing_eps = 7

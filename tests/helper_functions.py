@@ -8,6 +8,7 @@ import torch.nn as nn
 from gymnasium import spaces
 
 from agilerl.protocols import EvolvableAlgorithm, EvolvableModule
+from agilerl.typing import NumpyObsType
 
 
 def unpack_network(model: nn.Sequential) -> List[nn.Module]:
@@ -63,8 +64,12 @@ def generate_dict_or_tuple_space(
     if dict_space is None:
         dict_space = True if random.random() < 0.5 else False
 
-    image_spaces = [generate_random_box_space(image_shape) for _ in range(n_image)]
-    vector_spaces = [generate_random_box_space(vector_shape) for _ in range(n_vector)]
+    image_spaces = [
+        generate_random_box_space(image_shape, low=0, high=255) for _ in range(n_image)
+    ]
+    vector_spaces = [
+        generate_random_box_space(vector_shape, low=-1, high=1) for _ in range(n_vector)
+    ]
 
     if dict_space:
         image_spaces = {f"image_{i}": space for i, space in enumerate(image_spaces)}
@@ -107,6 +112,12 @@ def generate_multi_agent_discrete_spaces(
     return [generate_discrete_space(m) for _ in range(n_agents)]
 
 
+def generate_multi_agent_multidiscrete_spaces(
+    n_agents: int, m: int
+) -> List[spaces.MultiDiscrete]:
+    return [generate_multidiscrete_space(m, m) for _ in range(n_agents)]
+
+
 def gen_multi_agent_dict_or_tuple_spaces(
     n_agents: int,
     n_image: int,
@@ -121,6 +132,34 @@ def gen_multi_agent_dict_or_tuple_spaces(
         )
         for _ in range(n_agents)
     ]
+
+
+def get_sample_from_space(
+    space: spaces.Space, batch_size: Optional[int] = None
+) -> NumpyObsType:
+    if isinstance(space, spaces.Box):
+        if batch_size is None:
+            return np.random.uniform(low=space.low, high=space.high, size=space.shape)
+        else:
+            return np.random.uniform(
+                low=space.low, high=space.high, size=(batch_size, *space.shape)
+            )
+    elif isinstance(space, spaces.Discrete):
+        if batch_size is None:
+            return np.random.randint(space.n, size=(1,))
+        else:
+            return np.random.randint(space.n, size=(batch_size, 1))
+    elif isinstance(space, spaces.MultiDiscrete):
+        if batch_size is None:
+            return np.random.randint(space.nvec, size=(len(space.nvec),))
+        else:
+            return np.random.randint(space.nvec, size=(batch_size, len(space.nvec)))
+    elif isinstance(space, spaces.Dict):
+        return {key: get_sample_from_space(value) for key, value in space.items()}
+    elif isinstance(space, spaces.Tuple):
+        return tuple(get_sample_from_space(value) for value in space)
+    else:
+        raise ValueError(f"Unsupported space type: {type(space)}")
 
 
 def check_equal_params_ind(

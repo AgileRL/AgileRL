@@ -28,8 +28,11 @@ from agilerl.utils.utils import (
 )
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
+    gen_multi_agent_dict_or_tuple_spaces,
     generate_multi_agent_box_spaces,
     generate_multi_agent_discrete_spaces,
+    generate_multi_agent_multidiscrete_spaces,
+    get_sample_from_space,
 )
 
 
@@ -1781,87 +1784,6 @@ def no_sync(self):
     [
         (
             1,
-            generate_multi_agent_box_spaces(3, (3, 32, 32), low=0, high=255),
-            generate_multi_agent_discrete_spaces(3, 2),
-            None,
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(3, (3, 32, 32), low=0, high=255),
-            generate_multi_agent_discrete_spaces(3, 2),
-            None,
-        ),
-        (
-            1,
-            generate_multi_agent_box_spaces(3, (3, 32, 32), low=0, high=255),
-            generate_multi_agent_discrete_spaces(3, 2),
-            "default",
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(3, (3, 32, 32), low=0, high=255),
-            generate_multi_agent_discrete_spaces(3, 2),
-            "default",
-        ),
-    ],
-)
-def test_ippo_get_action_distributed_cnn(
-    training, observation_spaces, action_spaces, compile_mode
-):
-    accelerator = Accelerator()
-    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
-    net_config = {
-        "encoder_config": {
-            "channel_size": [16],
-            "kernel_size": [3],
-            "stride_size": [1],
-            "init_layers": False,
-        },
-        "head_config": {"hidden_size": [32], "init_layers": False},
-    }
-    state = {
-        agent: np.random.randn(*observation_spaces[idx].shape).astype(np.float32)
-        for idx, agent in enumerate(agent_ids)
-    }
-    ippo = IPPO(
-        observation_spaces,
-        action_spaces,
-        agent_ids=agent_ids,
-        net_config=net_config,
-        accelerator=accelerator,
-        torch_compiler=compile_mode,
-    )
-    new_actors = [
-        DummyStochasticActor(
-            observation_space=actor.observation_space,
-            action_space=actor.action_space,
-            device=actor.device,
-            action_std_init=ippo.action_std_init,
-            **net_config
-        )
-        for actor in ippo.actors
-    ]
-    ippo.actors = new_actors
-    actions, log_probs, dist_entropy, state_values = ippo.get_action(obs=state)
-
-    # Check returns are the proper format
-    assert isinstance(actions, dict)
-    assert isinstance(log_probs, dict)
-    assert isinstance(dist_entropy, dict)
-    assert isinstance(state_values, dict)
-
-    for agent_id in agent_ids:
-        assert agent_id in actions
-        assert agent_id in log_probs
-        assert agent_id in dist_entropy
-        assert agent_id in state_values
-
-
-@pytest.mark.parametrize(
-    "training, observation_spaces, action_spaces, compile_mode",
-    [
-        (
-            1,
             generate_multi_agent_box_spaces(3, (6,)),
             generate_multi_agent_discrete_spaces(3, 2),
             None,
@@ -1940,155 +1862,54 @@ def test_ippo_get_action_agent_masking(
 
 
 @pytest.mark.parametrize(
-    "training, observation_spaces, action_spaces, compile_mode",
+    "observation_spaces",
     [
-        (
-            1,
-            generate_multi_agent_box_spaces(3, (3, 32, 32), low=0, high=255),
-            generate_multi_agent_discrete_spaces(3, 2),
-            None,
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(3, (3, 32, 32), low=0, high=255),
-            generate_multi_agent_discrete_spaces(3, 2),
-            None,
-        ),
-        (
-            1,
-            generate_multi_agent_box_spaces(3, (3, 32, 32), low=0, high=255),
-            generate_multi_agent_discrete_spaces(3, 2),
-            "default",
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(3, (3, 32, 32), low=0, high=255),
-            generate_multi_agent_discrete_spaces(3, 2),
-            "default",
-        ),
+        generate_multi_agent_discrete_spaces(3, 4),
+        generate_multi_agent_box_spaces(3, (4,)),
+        generate_multi_agent_box_spaces(3, (4, 32, 32), low=0, high=255),
+        generate_multi_agent_multidiscrete_spaces(3, 2),
+        gen_multi_agent_dict_or_tuple_spaces(3, 1, 1, dict_space=True),
+        gen_multi_agent_dict_or_tuple_spaces(3, 1, 1, dict_space=False),
     ],
 )
-def test_ippo_get_action_cnn(
-    training, observation_spaces, action_spaces, device, compile_mode
-):
-    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
-    net_config = {
-        "encoder_config": {
-            "channel_size": [16],
-            "kernel_size": [3],
-            "stride_size": [1],
-            "init_layers": False,
-        },
-        "head_config": {"hidden_size": [32], "init_layers": False},
-    }
-    state = {
-        agent: np.random.randn(*observation_spaces[idx].shape).astype(np.float32)
-        for idx, agent in enumerate(agent_ids)
-    }
-    ippo = IPPO(
-        observation_spaces,
-        action_spaces,
-        agent_ids=agent_ids,
-        net_config=net_config,
-        device=device,
-        torch_compiler=compile_mode,
-    )
-    actions, log_probs, dist_entropy, state_values = ippo.get_action(obs=state)
-
-    # Check returns are the proper format
-    assert isinstance(actions, dict)
-    assert isinstance(log_probs, dict)
-    assert isinstance(dist_entropy, dict)
-    assert isinstance(state_values, dict)
-
-    for agent_id in agent_ids:
-        assert agent_id in actions
-        assert agent_id in log_probs
-        assert agent_id in dist_entropy
-        assert agent_id in state_values
-
-
 @pytest.mark.parametrize(
-    "training, observation_spaces, action_spaces, compile_mode",
+    "action_spaces",
     [
-        (
-            1,
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            None,
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            None,
-        ),
-        (
-            1,
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_box_spaces(3, (2,), low=-1, high=1),
-            None,
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_box_spaces(3, (2,), low=-1, high=1),
-            None,
-        ),
-        (
-            1,
-            generate_multi_agent_discrete_spaces(3, 6),
-            generate_multi_agent_discrete_spaces(3, 2),
-            None,
-        ),
-        (
-            0,
-            generate_multi_agent_discrete_spaces(3, 6),
-            generate_multi_agent_discrete_spaces(3, 2),
-            None,
-        ),
-        (
-            1,
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            "default",
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            "default",
-        ),
+        generate_multi_agent_discrete_spaces(3, 2),
+        generate_multi_agent_box_spaces(3, (2,), low=-1, high=1),
+        [spaces.MultiBinary(2) for _ in range(3)],
+        generate_multi_agent_multidiscrete_spaces(3, 2),
     ],
 )
-def test_ippo_get_action_mlp(
-    training, observation_spaces, action_spaces, device, compile_mode
+@pytest.mark.parametrize(
+    "compile_mode",
+    [
+        None,
+        "default",
+    ],
+)
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+def test_ippo_get_action(
+    observation_spaces, action_spaces, device, compile_mode, accelerator
 ):
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
-    if all(isinstance(space, spaces.Discrete) for space in observation_spaces):
-        state = {
-            agent: np.random.randint(0, observation_spaces[idx].n, 1)
-            for idx, agent in enumerate(agent_ids)
-        }
-        info = None
-    else:
-        state = {
-            agent: np.random.randn(*observation_spaces[idx].shape).astype(np.float32)
-            for idx, agent in enumerate(agent_ids)
-        }
-        info = {agent: {"env_defined_actions": None} for agent in agent_ids}
-        # info["env_defined_actions"] = {}
+    state = {
+        agent_id: get_sample_from_space(observation_space)
+        for agent_id, observation_space in zip(agent_ids, observation_spaces)
+    }
+    info = (
+        {agent: {"env_defined_actions": None} for agent in agent_ids}
+        if all(isinstance(space, spaces.Box) for space in action_spaces)
+        else None
+    )
 
     ippo = IPPO(
         observation_spaces,
         action_spaces,
-        net_config={
-            "encoder_config": {"hidden_size": [64, 64], "init_layers": False},
-            "head_config": {"hidden_size": [32], "init_layers": False},
-        },
         agent_ids=agent_ids,
         device=device,
         torch_compiler=compile_mode,
+        accelerator=accelerator,
     )
     actions, log_probs, dist_entropy, state_values = ippo.get_action(
         obs=state, infos=info
@@ -2285,49 +2106,6 @@ def test_ippo_get_action_action_masking_exception(
         device=device,
     )
     with pytest.raises(AssertionError):
-        actions, log_probs, dist_entropy, state_values = ippo.get_action(obs=state)
-
-
-@pytest.mark.parametrize(
-    "training, observation_spaces, action_spaces",
-    [
-        (
-            1,
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 4),
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 4),
-        ),
-    ],
-)
-def test_ippo_get_action_no_distribution_error(
-    training, observation_spaces, action_spaces, device
-):
-    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
-    state = {
-        agent: np.random.randn(*observation_spaces[idx].shape)
-        for idx, agent in enumerate(agent_ids)
-    }
-    ippo = IPPO(
-        observation_spaces,
-        action_spaces,
-        net_config={
-            "encoder_config": {"hidden_size": [64, 64], "init_layers": False},
-            "head_config": {"hidden_size": [32], "init_layers": False},
-        },
-        agent_ids=agent_ids,
-        device=device,
-    )
-
-    class DummyNet(nn.Module):
-        def forward(self, input, action_mask):
-            return input
-
-    ippo.actors = [DummyNet() for actor in ippo.actors]
-    with pytest.raises(ValueError):
         actions, log_probs, dist_entropy, state_values = ippo.get_action(obs=state)
 
 

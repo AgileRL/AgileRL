@@ -17,7 +17,13 @@ from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.networks.q_networks import QNetwork
 from agilerl.wrappers.make_evolvable import MakeEvolvable
-from tests.helper_functions import generate_discrete_space, generate_random_box_space
+from tests.helper_functions import (
+    generate_dict_or_tuple_space,
+    generate_discrete_space,
+    generate_multidiscrete_space,
+    generate_random_box_space,
+    get_sample_from_space,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -283,12 +289,21 @@ def test_initialize_dqn_with_incorrect_actor_net_type():
 
 
 # Returns the expected action when given a state observation and epsilon=0 or 1.
-def test_returns_expected_action_epsilon_greedy():
-    observation_space = generate_random_box_space(shape=(4,))
+@pytest.mark.parametrize(
+    "observation_space",
+    [
+        generate_discrete_space(4),
+        generate_random_box_space(shape=(4,)),
+        generate_multidiscrete_space(2, 2),
+        generate_dict_or_tuple_space(2, 2, dict_space=True),
+        generate_dict_or_tuple_space(2, 2, dict_space=False),
+    ],
+)
+def test_returns_expected_action_epsilon_greedy(observation_space):
     action_space = generate_discrete_space(2)
 
     dqn = DQN(observation_space, action_space)
-    state = np.array([1, 2, 3, 4])
+    state = get_sample_from_space(observation_space)
 
     action_mask = None
 
@@ -312,7 +327,7 @@ def test_returns_expected_action_mask():
     action_space = generate_discrete_space(2)
 
     dqn = DQN(observation_space, action_space, accelerator=accelerator)
-    state = np.array([1])
+    state = get_sample_from_space(observation_space)
 
     action_mask = np.array([0, 1])
 
@@ -335,7 +350,7 @@ def test_returns_expected_action_mask_vectorized():
     action_space = generate_discrete_space(2)
 
     dqn = DQN(observation_space, action_space, accelerator=accelerator)
-    state = np.array([[1, 2, 4, 5], [2, 3, 5, 1]])
+    state = get_sample_from_space(observation_space, batch_size=2)
 
     action_mask = np.array([[0, 1], [1, 0]])
 
@@ -381,8 +396,15 @@ def test_dqn_optimizer_parameters():
 
 
 # learns from experiences and updates network parameters
-def test_learns_from_experiences():
-    observation_space = generate_random_box_space(shape=(4,))
+@pytest.mark.parametrize(
+    "observation_space",
+    [
+        generate_discrete_space(4),
+        generate_random_box_space(shape=(4,)),
+        generate_multidiscrete_space(2, 2),
+    ],
+)
+def test_learns_from_experiences(observation_space):
     action_space = generate_discrete_space(2)
     batch_size = 64
 
@@ -390,10 +412,10 @@ def test_learns_from_experiences():
     dqn = DQN(observation_space, action_space, batch_size=batch_size)
 
     # Create a batch of experiences
-    states = torch.randn(batch_size, observation_space.shape[0])
+    states = torch.from_numpy(get_sample_from_space(observation_space, batch_size))
     actions = torch.randint(0, action_space.n, (batch_size, 1))
     rewards = torch.randn((batch_size, 1))
-    next_states = torch.randn(batch_size, observation_space.shape[0])
+    next_states = torch.from_numpy(get_sample_from_space(observation_space, batch_size))
     dones = torch.randint(0, 2, (batch_size, 1))
 
     experiences = Transition(

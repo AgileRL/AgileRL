@@ -27,8 +27,8 @@ from agilerl.protocols import (
     OptimizerWrapper,
 )
 from agilerl.typing import (
-    ArrayDict,
     ArrayOrTensor,
+    ExperiencesType,
     MaybeObsList,
     NetworkType,
     NumpyObsType,
@@ -489,27 +489,59 @@ def obs_to_tensor(
 
 
 def maybe_add_batch_dim(
-    obs: TorchObsType, space_shape: Tuple[int, ...]
-) -> TorchObsType:
+    obs: ObservationType, space_shape: Tuple[int, ...]
+) -> ObservationType:
     """Adds batch dimension if necessary.
 
     :param obs: Observation tensor
-    :type obs: torch.Tensor[float]
+    :type obs: ObservationType
     :param space_shape: Observation space shape
     :type space_shape: Tuple[int, ...]
     :return: Observation tensor with batch dimension
-    :rtype: torch.Tensor[float]
+    :rtype: ObservationType
     """
-    if obs.dim() == len(space_shape):
-        obs = obs.unsqueeze(0)
-    elif obs.dim() == len(space_shape) + 2:
-        obs = obs.view(-1, *space_shape)
-    elif obs.dim() != len(space_shape) + 1:
+    if len(obs.shape) == len(space_shape):
+        if isinstance(obs, np.ndarray):
+            obs = np.expand_dims(obs, 0)
+        else:
+            obs = obs.unsqueeze(0)
+    elif len(obs.shape) == len(space_shape) + 2:
+        if isinstance(obs, np.ndarray):
+            obs = obs.reshape(-1, *space_shape)
+        else:
+            obs = obs.view(-1, *space_shape)
+    elif len(obs.shape) != len(space_shape) + 1:
         raise ValueError(
-            f"Expected observation to have {len(space_shape) + 1} dimensions, got {obs.dim()}."
+            f"Expected observation to have {len(space_shape) + 1} dimensions, got {len(obs.shape)}."
         )
 
     return obs
+
+
+def get_vect_dim(observation: NumpyObsType, observation_space: spaces.Space) -> int:
+    """Returns the number of vectorized environments given an observation and
+    its corresponding space.
+
+    :param observation: Observation
+    :type observation: NumpyObsType
+    :param observation_space: Observation space
+    :type observation_space: spaces.Space
+    :return: Number of vectorized environments
+    """
+    if isinstance(observation_space, spaces.Dict):
+        first_key, first_obs = next(iter(observation.items()))
+        return get_vect_dim(first_obs, observation_space[first_key])
+    elif isinstance(observation_space, spaces.Tuple):
+        return get_vect_dim(observation[0], observation_space[0])
+    elif isinstance(observation_space, spaces.MultiBinary):
+        return (
+            observation.shape[0]
+            if len(observation.shape) > observation_space.shape
+            else 1
+        )
+    else:
+        array_shape = observation.shape
+        return array_shape[0] if len(array_shape) > len(observation_space.shape) else 1
 
 
 def preprocess_observation(
@@ -566,7 +598,7 @@ def preprocess_observation(
     if isinstance(observation_space, spaces.Box):
         # Normalize images if applicable and specified
         if len(observation_space.shape) == 3 and normalize_images:
-            observation = observation / 255.0
+            observation = apply_image_normalization(observation, observation_space)
 
         space_shape = observation_space.shape
 
@@ -583,6 +615,10 @@ def preprocess_observation(
         space_shape = (observation_space.n,)
 
     elif isinstance(observation_space, spaces.MultiDiscrete):
+        # Need to add batch dimension prior to splitting
+        space_shape = (sum(observation_space.nvec),)
+        observation: torch.Tensor = maybe_add_batch_dim(observation, space_shape)
+
         # Tensor concatenation of one hot encodings of each Categorical sub-space
         observation = torch.cat(
             [
@@ -593,7 +629,6 @@ def preprocess_observation(
             ],
             dim=-1,
         )
-        space_shape = (sum(observation_space.nvec),)
     elif isinstance(observation_space, spaces.MultiBinary):
         observation = observation.float()
         space_shape = (observation_space.n,)
@@ -609,17 +644,20 @@ def preprocess_observation(
 
 
 def apply_image_normalization(
-    observation: NumpyObsType, observation_space: spaces.Space
-) -> NumpyObsType:
+    observation: TorchObsType, observation_space: spaces.Box
+) -> TorchObsType:
     """Normalize images using minmax scaling
 
     :param observation: Observation
-    :type observation: NumpyObsType
+    :type observation: TorchObsType
     :param observation_space: Observation space
-    :type observation_space: spaces.Space
+    :type observation_space: spaces.Box
     :return: Observation
-    :rtype: NumpyObsType
+    :rtype: TorchObsType
     """
+    if not isinstance(observation_space, spaces.Box):
+        raise TypeError(f"Expected spaces.Box, got {type(observation_space)}")
+
     if np.inf in observation_space.high:
         warnings.warn(
             "np.inf detected in observation_space.high, bypassing normalization."
@@ -633,13 +671,16 @@ def apply_image_normalization(
         return observation
 
     if np.all(observation_space.high == 1) and np.all(observation_space.low == 0):
-        # minmax scaling
         return observation
 
-    observation = (observation - observation_space.low) / (
-        observation_space.high - observation_space.low
+    low = torch.tensor(
+        observation_space.low, device=observation.device, dtype=observation.dtype
     )
-    return observation
+    high = torch.tensor(
+        observation_space.high, device=observation.device, dtype=observation.dtype
+    )
+
+    return (observation - low) / (high - low)
 
 
 # TODO: The following functions are currently used in PPO (on-policy) as a means of handling
@@ -675,7 +716,7 @@ def get_experiences_samples(
 
 def stack_experiences(
     *experiences: MaybeObsList, to_torch: bool = True
-) -> Tuple[ArrayOrTensor, ...]:
+) -> Tuple[ObservationType, ...]:
     """Stacks experiences into a single array or tensor.
 
     :param experiences: Experiences to stack
@@ -721,7 +762,7 @@ def stack_experiences(
             stacked_exp = tuple(stacked_exp)
 
         elif isinstance(exp[0], (np.ndarray, Number)):
-            stacked_exp = np.array(exp)
+            stacked_exp = np.stack(exp)
             if to_torch:
                 stacked_exp = torch.from_numpy(stacked_exp)
 
@@ -910,8 +951,8 @@ def remove_nested_files(files: str) -> None:
 
 
 def vectorize_experiences_by_agent(
-    experiences: ArrayDict, dim: int = 1
-) -> torch.Tensor:
+    experiences: ExperiencesType, dim: int = 1
+) -> Union[torch.Tensor, Dict[str, torch.Tensor], Tuple[torch.Tensor, ...]]:
     """Reorganizes experiences into a tensor, vectorized by time step
 
     Example input:
@@ -920,22 +961,149 @@ def vectorize_experiences_by_agent(
     torch.Tensor([[1, 2, 3, 4, 5, 6, 7, 8]])
 
     :param experiences: Dictionaries containing experiences indexed by agent_id that share a policy agent.
-    :type experiences: Tuple[Dict[str, np.ndarray]]
+    :type experiences: ExperiencesType
     :param dim: New dimension to stack along
     :type dim: int
-    :return: Tensor of experiences, stacked along provided dimension
-    :rtype: torch.Tensor
+    :return: Tensor, dict of tensors, or tuple of tensors of experiences, stacked along provided dimension
+    :rtype: Union[torch.Tensor, Dict[str, torch.Tensor], Tuple[torch.Tensor, ...]]
     """
-    tensors = [
-        torch.Tensor(np.array(experiences[agent_id])) for agent_id in experiences.keys()
-    ]
-    stacked_tensor = torch.stack(tensors, dim=dim)
-    return stacked_tensor
+    if not experiences:
+        return torch.tensor([])
+
+    # Get a sample value to determine the type
+    sample_value = next(iter(experiences.values()))
+
+    if isinstance(sample_value, dict):
+        # Handle dictionary observations
+        keys = sample_value.keys()
+        return {
+            k: vectorize_experiences_by_agent(
+                {agent_id: experiences[agent_id][k] for agent_id in experiences},
+                dim=dim,
+            )
+            for k in keys
+        }
+    elif isinstance(sample_value, tuple):
+        # Handle tuple observations
+        tuple_length = len(sample_value)
+        return tuple(
+            vectorize_experiences_by_agent(
+                {agent_id: experiences[agent_id][i] for agent_id in experiences},
+                dim=dim,
+            )
+            for i in range(tuple_length)
+        )
+    else:
+        # Original implementation for array/tensor observations
+        tensors = [
+            torch.Tensor(np.array(experiences[agent_id]))
+            for agent_id in experiences.keys()
+        ]
+        stacked_tensor = torch.stack(tensors, dim=dim)
+        return stacked_tensor
+
+
+def get_space_shape(space: spaces.Space) -> Tuple[int, ...]:
+    """Get the shape of a space
+
+    :param space: Space to get shape of
+    :type space: spaces.Space
+    :return: Shape of space
+    :rtype: Tuple[int, ...]
+    """
+    if isinstance(space, spaces.Discrete):
+        return (1,)
+    elif isinstance(space, spaces.Box):
+        return space.shape
+    elif isinstance(space, spaces.MultiDiscrete):
+        return (len(space.nvec),)
+    elif isinstance(space, spaces.MultiBinary):
+        return (space.n,)
+    else:
+        raise TypeError(f"Unsupported space type: {type(space)}")
+
+
+def experience_to_tensors(
+    experience: dict | tuple | np.ndarray, space: spaces.Space
+) -> TorchObsType:
+    """Convert experience to numpy array
+
+    :param experience: Experience to convert
+    :type experience: dict | tuple | np.ndarray
+    :param space: Space to convert experience to
+    :type space: spaces.Space
+    :return: Numpy array of experience
+    :rtype: np.ndarray
+    """
+    if isinstance(experience, dict):
+        return {
+            key: experience_to_tensors(value, space[key])
+            for key, value in experience.items()
+        }
+    elif isinstance(experience, tuple):
+        return tuple(
+            experience_to_tensors(exp, space[i]) for i, exp in enumerate(experience)
+        )
+    else:
+        array = np.array(experience)
+
+        # Ensure experience has a batch dimension
+        space_shape = get_space_shape(space)
+        array = maybe_add_batch_dim(array, space_shape)
+        return torch.from_numpy(array)
+
+
+def concatenate_tensors(tensors: List[TorchObsType]) -> TorchObsType:
+    """Concatenate tensors along first dimension
+
+    :param tensors: List of tensors to concatenate
+    :type tensors: List[TorchObsType]
+    :return: Concatenated tensor
+    :rtype: TorchObsType
+    """
+    if isinstance(tensors[0], dict):
+        return {
+            key: concatenate_tensors([t[key] for t in tensors])
+            for key in tensors[0].keys()
+        }
+    elif isinstance(tensors[0], tuple):
+        return tuple(
+            concatenate_tensors([t[i] for t in tensors]) for i in range(len(tensors[0]))
+        )
+    else:
+        return torch.cat(tensors, dim=0)
+
+
+def reshape_from_space(tensor: TorchObsType, space: spaces.Space) -> TorchObsType:
+    """Reshape tensor from space
+
+    :param tensor: Tensor to reshape
+    :type tensor: TorchObsType
+    :param space: Space to reshape tensor to
+    :type space: spaces.Space
+    :return: Reshaped tensor
+    :rtype: TorchObsType
+    """
+    if isinstance(tensor, dict):
+        return {
+            key: reshape_from_space(value, space[key]) for key, value in tensor.items()
+        }
+    elif isinstance(tensor, tuple):
+        return tuple(
+            reshape_from_space(value, space[i]) for i, value in enumerate(tensor)
+        )
+    else:
+        #
+        reshaped: torch.Tensor = tensor.reshape(-1, *space.shape)
+        for squeeze_dim in [0, -1]:
+            if reshaped.size(squeeze_dim) == 1:
+                reshaped = reshaped.squeeze(squeeze_dim)
+        return reshaped
 
 
 def concatenate_experiences_into_batches(
-    experiences: ArrayDict, shape: Tuple[int]
-) -> torch.Tensor:
+    experiences: ExperiencesType, space: spaces.Space
+) -> TorchObsType:
     """Reorganizes experiences into a batched tensor
 
     Example input:
@@ -946,21 +1114,16 @@ def concatenate_experiences_into_batches(
     torch.Tensor([...1], [...2], [...3], [...4], [...5], [...6], [...7], [...8])
 
     :param experiences: Dictionaries containing experiences indexed by agent_id that share a policy agent.
-    :type experiences: Dict[str, np.ndarray]
-    :param shape: Observation/action/etc shape space to maintain
-    :type obs_space: Tuple[int]
-    :return: Tensor of experiences, stacked along first dimension, with shape (num_experiences, *shape)
-    :rtype: torch.Tensor
+    :type experiences: ExperiencesType
+    :param space: Observation/action/etc space to maintain
+    :type space: spaces.Space
+    :return: Tensor, dict of tensors, or tuple of tensors of experiences, stacked along first dimension, with shape (num_experiences, *shape)
+    :rtype: Union[torch.Tensor, Dict[str, torch.Tensor], Tuple[torch.Tensor, ...]]
     """
     tensors = []
     for agent_id in experiences.keys():
-        exp = np.array(experiences[agent_id])
-        if len(exp.shape) < 2:
-            exp = np.expand_dims(exp, 0)
-        tensors.append(torch.Tensor(exp))
-    stacked_tensor = torch.cat(tensors, dim=0)
-    stacked_tensor = stacked_tensor.reshape(-1, *shape)
-    for squeeze_dim in [0, -1]:
-        if stacked_tensor.size(squeeze_dim) == 1:
-            stacked_tensor = stacked_tensor.squeeze(squeeze_dim)
-    return stacked_tensor
+        exp = experience_to_tensors(experiences[agent_id], space)
+        tensors.append(exp)
+
+    stacked_tensor = concatenate_tensors(tensors)
+    return reshape_from_space(stacked_tensor, space)

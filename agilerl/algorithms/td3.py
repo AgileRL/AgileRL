@@ -16,7 +16,7 @@ from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.q_networks import ContinuousQNetwork
-from agilerl.typing import ArrayOrTensor, ExperiencesType, GymEnvType, NumpyObsType
+from agilerl.typing import ExperiencesType, GymEnvType, NumpyObsType
 from agilerl.utils.algo_utils import (
     make_safe_deepcopies,
     obs_channels_to_first,
@@ -83,10 +83,12 @@ class TD3(RLAlgorithm):
     :type wrap: bool, optional
     """
 
+    action_space: spaces.Box
+
     def __init__(
         self,
         observation_space: spaces.Space,
-        action_space: spaces.Space,
+        action_space: spaces.Box,
         O_U_noise: bool = True,
         vect_noise_dim: int = 1,
         expl_noise: float = 0.1,
@@ -341,17 +343,16 @@ class TD3(RLAlgorithm):
 
         return torch.max(torch.min(input, max), min)
 
-    def get_action(self, obs: NumpyObsType, training: bool = True) -> ArrayOrTensor:
-        """Returns the next action to take in the environment.
-        Epsilon is the probability of taking a random action, used for exploration.
-        For epsilon-greedy behaviour, set epsilon to 0.
+    def get_action(self, obs: NumpyObsType, training: bool = True) -> np.ndarray:
+        """Returns the next action to take in the environment. If training, random noise
+        is added to the action to promote exploration.
 
         :param obs: Environment observation, or multiple observations in a batch
         :type obs: numpy.ndarray[float], dict, tuple
         :param training: Agent is training, use exploration noise, defaults to True
         :type training: bool, optional
         :return: Action
-        :rtype: numpy.ndarray[float], torch.Tensor
+        :rtype: numpy.ndarray[float]
         """
         obs = self.preprocess_observation(obs)
 
@@ -359,13 +360,13 @@ class TD3(RLAlgorithm):
         with torch.no_grad():
             action = self.actor(obs)
 
+        action = action.cpu().data.numpy()
+
         self.actor.train()
         if training:
-            action = (action.cpu().data.numpy() + self.action_noise()).clip(
-                self.min_action, self.max_action
-            )
+            action += self.action_noise()
 
-        return action
+        return action.clip(self.action_space.low, self.action_space.high)
 
     def action_noise(self) -> np.ndarray:
         """Create action noise for exploration, either Ornstein Uhlenbeck or

@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import torch
 from accelerate import Accelerator
-from gymnasium.spaces import Box, Discrete
+from gymnasium.spaces import Box, Dict, Discrete
 from pettingzoo import ParallelEnv
 from tensordict import TensorDict
 
@@ -50,6 +50,7 @@ class DummyEnv:
     def __init__(self, state_size, action_size, vect=True, num_envs=2):
         self.state_size = state_size
         self.action_size = action_size
+        self.action_space = Discrete(action_size)
         self.vect = vect
         if self.vect:
             self.state_size = (num_envs,) + self.state_size
@@ -95,6 +96,7 @@ class DummyAgentOffPolicy:
         self.action_size = env.action_size
         self.action_dim = env.action_size
         self.batch_size = batch_size
+        self.training = True
         self.beta = beta
         self.learn_step = 1
         self.scores = []
@@ -102,6 +104,9 @@ class DummyAgentOffPolicy:
         self.fitness = []
         self.mut = "mutation"
         self.index = 1
+
+    def set_training_mode(self, training):
+        self.training = training
 
     def get_action(self, *args, **kwargs):
         return np.random.rand(self.action_size)
@@ -139,6 +144,11 @@ class DummyAgentOnPolicy(DummyAgentOffPolicy):
     def __init__(self, batch_size, env):
         super().__init__(batch_size, env)
         self.learn_step = 128
+        self.action_space = Box(0, 1, (1,))
+        self.actor = MagicMock()
+        self.actor.squash_output = False
+        self.actor.scale_action = lambda x: x
+        self.actor.action_space = self.action_space
 
     def learn(self, *args, **kwargs):
         return random.random()
@@ -254,6 +264,20 @@ class DummyMultiAgent(DummyAgentOffPolicy):
         self.discrete_actions = False
         self.num_envs = 1
         self.on_policy = on_policy
+        self.actors = [MagicMock() for _ in range(2)]
+        self.actors[0].squash_output = False
+        self.actors[0].scale_action = lambda x: x
+        self.actors[1].squash_output = False
+        self.actors[1].scale_action = lambda x: x
+        self.action_space = Dict(
+            {
+                "agent_0": Discrete(2),
+                "other_agent_0": Discrete(2),
+            }
+        )
+
+    def get_homo_id(self, agent_id: str) -> str:
+        return agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
 
     def get_action(self, *args, **kwargs):
         output_dict = {
@@ -652,6 +676,7 @@ def mocked_agent_on_policy(env, algo):
     mock_agent.batch_size = 5
     mock_agent.state_size = env.state_size
     mock_agent.action_size = env.action_size
+    mock_agent.action_space = env.action_space
     mock_agent.beta = 0.4
     mock_agent.scores = []
     mock_agent.steps = [0]
@@ -716,6 +741,15 @@ def mocked_multi_agent(multi_env, algo):
     mock_agent.mut = "mutation"
     mock_agent.index = 1
     mock_agent.discrete_actions = False
+    mock_agent.action_space = Dict(
+        {
+            "agent_0": multi_env.action_space("agent_0"),
+            "other_agent_0": multi_env.action_space("other_agent_0"),
+        }
+    )
+    mock_agent.get_homo_id.side_effect = lambda x: (
+        x.rsplit("_", 1)[0] if isinstance(x, str) else x
+    )
 
     def get_action(*args, **kwargs):
         out = {
