@@ -17,7 +17,7 @@ from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
-MODEL_PATH = "Qwen/Qwen2.5-1.5B"
+MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
 
@@ -209,7 +209,6 @@ def main(init_hp, mut_p):
             min=mut_p["MIN_GROUP_SIZE"], max=mut_p["MAX_GROUP_SIZE"], dtype=int
         ),
     )
-
     pop = create_population(
         algo=init_hp["ALGO"],
         observation_space=env.observation_space,
@@ -262,7 +261,7 @@ def main(init_hp, mut_p):
 
 
 if __name__ == "__main__":
-    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+    # os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     with open("configs/training/grpo.yaml") as file:
         config = yaml.safe_load(file)
     init_hp = config["INIT_HP"]

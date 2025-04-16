@@ -77,6 +77,27 @@ SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound="AgentWrapper")
 MARLObservationType = Dict[str, ObservationType]
 
 
+import logging 
+
+logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        filename='myapp.log',  # Optional: log to a file
+        filemode='a'          # Optional: append to the file
+    )
+logger = logging.getLogger(__name__)
+# Create a console handler and set its format and level
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.DEBUG)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+console_handler.setFormatter(formatter)
+
+# Add the console handler to the logger
+logger.addHandler(console_handler)
+
+
+
+
 class _RegistryMeta(type):
     """Metaclass to wrap registry information after algorithm is done
     initializing with specified network groups and optimizers."""
@@ -679,7 +700,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         for attr in self.evolvable_attributes(networks_only=True):
             obj = getattr(self, attr)
             if isinstance(obj, list):
-                setattr(self, attr, [self.accelerator.unwrap_model(m) for m in obj])
+                setattr(self, attr, [self.accelerator.unwrap_model(m) for m in obj])ONE
             else:
                 setattr(self, attr, self.accelerator.unwrap_model(obj))
 
@@ -1645,37 +1666,49 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: A clone of the algorithm
         :rtype: EvolvableAlgorithm
         """
+        logger.debug(f"========= INITIATE CLONING | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__}=========")
         if self.zero_stage == 3:
             self.accelerator.wait_for_everyone()
             self._save_distributed_actor(f"temporary_checkpoint/agent_{self.index}")
             self.accelerator.wait_for_everyone()
 
+
+        logger.debug(f"========= INSPECT ATTRIBUTES | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} =========")
         input_args = EvolvableAlgorithm.inspect_attributes(self, input_args_only=True)
         input_args["clone"] = True
 
         # extract base model and peft config
+        logger.debug(f"========= UNWRAP MODEL | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} =========")
         actor = (
             self.accelerator.unwrap_model(self.actor)
             if self.accelerator is not None
             else self.actor
         )
+        logger.debug(f"========= CALLING CLONE LLM | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} =========")
         cloned_actor = clone_llm(actor, load_state_dict=(self.zero_stage != 3))
+        logger.debug(f"========= CLONE LLM COMPLETED | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} =========")
 
         input_args["actor_network"] = cloned_actor
         input_args["accelerator"] = (
             Accelerator() if self.accelerator is not None else None
         )
-        clone = type(self)(**input_args)
 
+        logger.debug(f"========= CREATE CLONE | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} =========")
+        clone = type(self)(**input_args)
+        logger.debug(f"========= CLONE CREATED | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} =========")
+
+        logger.debug(f"========= LOADING REFERENCE ACTOR | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} =========")
         clone.reference_actor.load_state_dict(clone_tensors_for_torch_save(self.reference_actor.state_dict()))
+        logger.debug(f"========= REFERENCE ACTOR LOADED | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} =========")
+
 
         clone.reference_actor.eval()
         clone.mutation_hook()
 
         # Clone attributes
+        logger.debug(f"========= CLONING ATTRIBUTES | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} =========")
         accelerator = clone.accelerator
         lr_scheduler = clone.lr_scheduler
-
         cloned_lr_scheduler = clone.lr_scheduler
         original_lr_scheduler = self.lr_scheduler
         clone.lr_scheduler = None
@@ -1685,6 +1718,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         clone.lr_scheduler = lr_scheduler
         clone.lr_scheduler = cloned_lr_scheduler
         self.lr_scheduler = original_lr_scheduler
+        logger.debug(f"========= CLONING ATTRIBUTES COMPLETED | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} =========")
 
         if self.accelerator is None:
             clone.optimizer.optimizer.load_state_dict(
@@ -1708,10 +1742,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         else:
             if self.accelerator is not None:
                 self.accelerator.wait_for_everyone()
+        logger.debug(f"========= CLONE METHOD COMPLETED | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} =========")
         return clone
 
     def clean_up(self) -> None:
         """Clean up the algorithm."""
+        logger.debug(f"========= CLEANING UP | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clean_up.__name__} =========")
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
             self.accelerator.free_memory()
@@ -1722,3 +1758,4 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         del self.lr_scheduler
         gc.collect()
         torch.cuda.empty_cache()
+        logger.debug(f"========= CLEANING UP COMPLETED | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clean_up.__name__} =========")
