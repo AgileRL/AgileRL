@@ -1423,7 +1423,6 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         """
         output_dict = {}
         for unique_id in self.shared_agent_ids:
-            print(unique_id, homo_outputs[unique_id].shape, vect_dim)
             homo_outputs[unique_id] = np.reshape(
                 homo_outputs[unique_id],
                 (len(self.homogeneous_agents[unique_id]), vect_dim, -1),

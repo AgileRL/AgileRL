@@ -255,15 +255,17 @@ def train_multi_agent_on_policy(
                         agent_space = agent.action_space[agent_id]
                         if isinstance(agent_space, spaces.Box):
                             if agent.actors[actor_idx].squash_output:
-                                agent_action = agent.actors[actor_idx].scale_action(
-                                    agent_action
-                                )
+                                clipped_agent_action = agent.actors[
+                                    actor_idx
+                                ].scale_action(agent_action)
                             else:
-                                agent_action = np.clip(
+                                clipped_agent_action = np.clip(
                                     agent_action, agent_space.low, agent_space.high
                                 )
+                        else:
+                            clipped_agent_action = agent_action
 
-                        clipped_action[agent_id] = agent_action
+                        clipped_action[agent_id] = clipped_agent_action
 
                     # Act in environment
                     next_obs, reward, termination, truncation, info = env.step(
