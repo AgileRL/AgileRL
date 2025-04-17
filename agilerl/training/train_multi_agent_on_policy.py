@@ -6,11 +6,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import gymnasium as gym
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from gymnasium import spaces
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import IPPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -290,7 +290,7 @@ def train_multi_agent_on_policy(
                     steps += num_envs
 
                     next_done = {}
-                    for agent_id in agent.agent_ids:
+                    for agent_id in obs.keys():
                         states[agent_id].append(obs[agent_id])
                         actions[agent_id].append(action[agent_id])
                         log_probs[agent_id].append(log_prob[agent_id])

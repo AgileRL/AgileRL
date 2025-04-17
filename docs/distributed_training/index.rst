@@ -61,7 +61,7 @@ Example distributed training loop:
 
     # Create vectorized environment
     num_envs = 8
-    env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
+    env = make_vect_envs("LunarLander-v3", num_envs=num_envs)  # Create environment
 
     observation_space = env.single_observation_space
     action_space = env.single_action_space
@@ -134,7 +134,7 @@ Example distributed training loop:
 
     total_steps = 0
 
-    accel_temp_models_path = "models/{}".format("LunarLander-v2")
+    accel_temp_models_path = "models/{}".format("LunarLander-v3")
     if accelerator.is_main_process:
         if not os.path.exists(accel_temp_models_path):
             os.makedirs(accel_temp_models_path)

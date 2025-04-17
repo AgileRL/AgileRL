@@ -1,5 +1,6 @@
 import copy
 import warnings
+from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -432,6 +433,11 @@ class IPPO(MultiAgentRLAlgorithm):
         vect_dim = get_vect_dim(obs, self.observation_space)
 
         # Preprocess observations
+        unique_agents_ids = list(obs.keys())
+        unique_ids = defaultdict(list)
+        for agent_id in unique_agents_ids:
+            unique_ids[self.get_homo_id(agent_id)].append(agent_id)
+
         preprocessed = self.preprocess_observation(obs)
         shared_agent_ids = list(preprocessed.keys())
         preprocessed_states = list(preprocessed.values())
@@ -470,7 +476,9 @@ class IPPO(MultiAgentRLAlgorithm):
             dist_entropy_dict[shared_id] = entropy.cpu().data.numpy()
             state_values_dict[shared_id] = state_values.cpu().data.numpy()
 
-        action_dict = self.disassemble_homogeneous_outputs(action_dict, vect_dim)
+        action_dict = self.disassemble_homogeneous_outputs(
+            action_dict, vect_dim, unique_ids
+        )
 
         # If using env_defined_actions replace actions
         if env_defined_actions is not None:
@@ -481,9 +489,15 @@ class IPPO(MultiAgentRLAlgorithm):
 
         return (
             action_dict,
-            self.disassemble_homogeneous_outputs(action_logprob_dict, vect_dim),
-            self.disassemble_homogeneous_outputs(dist_entropy_dict, vect_dim),
-            self.disassemble_homogeneous_outputs(state_values_dict, vect_dim),
+            self.disassemble_homogeneous_outputs(
+                action_logprob_dict, vect_dim, unique_ids
+            ),
+            self.disassemble_homogeneous_outputs(
+                dist_entropy_dict, vect_dim, unique_ids
+            ),
+            self.disassemble_homogeneous_outputs(
+                state_values_dict, vect_dim, unique_ids
+            ),
         )
 
     def assemble_shared_inputs(self, input: ExperiencesType) -> ExperiencesType:

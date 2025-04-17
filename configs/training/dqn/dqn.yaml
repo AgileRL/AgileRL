@@ -1,7 +1,7 @@
 ---
 # Define initial hyperparameters
 INIT_HP:
-    ENV_NAME: LunarLander-v2   # Gym environment name
+    ENV_NAME: LunarLander-v3   # Gym environment name
     ALGO: DQN                  # Algorithm
     DOUBLE: false
     # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
