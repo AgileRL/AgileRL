@@ -19,6 +19,7 @@ from typing import (
 )
 
 import deepspeed
+from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
 import dill
 import numpy as np
 import torch
@@ -1646,11 +1647,13 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 self.actor, self.optimizer.optimizer, self.lr_scheduler
             )
             deepspeed_plugin = self.accelerator.state.deepspeed_plugin
-            config_kwargs = copy.deepcopy(deepspeed_plugin.deepspeed_config)
-            config_kwargs["zero_optimization"]["stage"] = 0
-            self.reference_actor, *_ = deepspeed.initialize(
-                model=self.reference_actor, config=config_kwargs
-            )
+            config_kwargs = copy.deepcopy(deepspeed_plugin.deepspeed_config)["zero_optimization"]
+            self.reference_actor = deepspeed.init_inference(self.reference_actor,
+                                     tensor_parallel={"tp_size": self.accelerator.num_processes},
+                                     dtype=torch.half,
+                                     checkpoint=None,
+                                     replace_with_kernel_inject=True,
+                                     zero=DeepSpeedZeroConfig(**config_kwargs))
 
     def clone(self, index: Optional[int] = None, wrap: bool = True):
         """Creates a clone of the algorithm.
