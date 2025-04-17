@@ -80,6 +80,103 @@ class DummyMultiEnv(ParallelEnv):
         )
 
 
+class DummyMultiEnvAsync(ParallelEnv):
+    def __init__(self, observation_spaces, action_spaces):
+        super().__init__()
+        self.observation_spaces = observation_spaces
+        self.action_spaces = action_spaces
+        self.agents = ["agent_0", "agent_1", "other_agent_0"]
+        self.possible_agents = ["agent_0", "agent_1", "other_agent_0"]
+        self.metadata = None
+        self.render_mode = None
+        # Random probability for each agent to return observation at each step
+        self.observation_probabilities = {
+            "agent_0": 0.8,  # 80% chance to return observation
+            "agent_1": 0.6,  # 60% chance to return observation
+            "other_agent_0": 0.4,  # 40% chance to return observation
+        }
+        self.active_agents = self.agents.copy()  # Initially all agents are active
+
+    def action_space(self, agent):
+        idx = self.possible_agents.index(agent)
+        return self.action_spaces[idx]
+
+    def observation_space(self, agent):
+        idx = self.possible_agents.index(agent)
+        return self.observation_spaces[idx]
+
+    def reset(self, seed=None, options=None):
+        # Randomly select which agents are active initially
+        self.active_agents = [
+            agent
+            for agent in self.agents
+            if np.random.random() < self.observation_probabilities[agent]
+        ]
+
+        # Ensure at least one agent is active
+        if not self.active_agents:
+            self.active_agents = [np.random.choice(self.agents)]
+
+        observations = {
+            agent: np.random.rand(
+                *self.observation_spaces[self.possible_agents.index(agent)].shape
+            )
+            for agent in self.active_agents
+        }
+
+        infos = {agent: {} for agent in self.active_agents}
+        for agent in self.active_agents:
+            infos[agent]["env_defined_actions"] = None
+
+        # Always provide env_defined_actions for agent_0 if active
+        if "agent_0" in self.active_agents:
+            infos["agent_0"]["env_defined_actions"] = np.array([1])
+
+        return observations, infos
+
+    def step(self, action):
+        # Only process actions for active agents
+        for agent in list(action.keys()):
+            if agent not in self.active_agents:
+                # Remove actions for inactive agents
+                del action[agent]
+
+        # Randomly determine which agents are active for this step
+        self.active_agents = [
+            agent
+            for agent in self.agents
+            if np.random.random() < self.observation_probabilities[agent]
+        ]
+
+        # Ensure at least one agent is active
+        if not self.active_agents:
+            self.active_agents = [np.random.choice(self.agents)]
+
+        observations = {
+            agent: np.random.rand(
+                *self.observation_spaces[self.possible_agents.index(agent)].shape
+            )
+            for agent in self.active_agents
+        }
+
+        rewards = {agent: np.random.randint(0, 5) for agent in self.active_agents}
+        dones = {
+            agent: np.random.choice([0, 1], p=[0.9, 0.1])
+            for agent in self.active_agents
+        }
+        truncated = {agent: False for agent in self.active_agents}
+
+        infos = {agent: {} for agent in self.active_agents}
+        for agent in self.active_agents:
+            infos[agent]["env_defined_actions"] = None
+
+        # Always provide env_defined_actions for agent_0 if active
+        if "agent_0" in self.active_agents:
+            infos["agent_0"]["env_defined_actions"] = np.array([1])
+
+        return observations, rewards, dones, truncated, infos
+
+
 class MultiAgentCNNActor(nn.Module):
     def __init__(self):
         super().__init__()
@@ -438,7 +535,7 @@ def test_loop_cnn_vectorized(device, sum_score, compile_mode):
     env = make_multi_agent_vect_envs(
         DummyMultiEnv,
         2,
-        **dict(observation_spaces=env_observation_spaces, action_spaces=action_spaces)
+        **dict(observation_spaces=env_observation_spaces, action_spaces=action_spaces),
     )
     ippo = IPPO(
         agent_observation_spaces,
@@ -2873,7 +2970,9 @@ def test_homogeneous_outputs_functions(observation_spaces, action_spaces, compil
     assert homo_outputs["other_agent"].shape == (1 * vect_dim, output_dim)
 
     # Test disassemble_homogeneous_outputs
-    disassembled_outputs = agent.disassemble_homogeneous_outputs(homo_outputs, vect_dim)
+    disassembled_outputs = agent.disassemble_homogeneous_outputs(
+        homo_outputs, vect_dim, agent.homogeneous_agents
+    )
 
     # Check that the disassembled outputs have the correct keys
     assert set(disassembled_outputs.keys()) == {"agent_0", "agent_1", "other_agent_0"}
@@ -2966,3 +3065,146 @@ def test_get_action_distributed(
         assert agent_id in log_probs
         assert agent_id in dist_entropy
         assert agent_id in state_values
+
+
+@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize(
+    "observation_spaces, action_spaces",
+    [
+        (
+            generate_multi_agent_box_spaces(3, (6,)),
+            generate_multi_agent_discrete_spaces(3, 2),
+        ),
+        (
+            generate_multi_agent_box_spaces(3, (6,)),
+            generate_multi_agent_discrete_spaces(3, 2),
+        ),
+        (
+            generate_multi_agent_box_spaces(3, (6,)),
+            generate_multi_agent_discrete_spaces(3, 2),
+        ),
+        (
+            generate_multi_agent_box_spaces(3, (6,)),
+            generate_multi_agent_discrete_spaces(3, 2),
+        ),
+    ],
+)
+def test_ippo_custom_training_with_async_env(
+    observation_spaces, action_spaces, device, compile_mode
+):
+    """Test IPPO with a custom training loop on asynchronous environment for multiple iterations."""
+
+    # Create async environment with agents that return observations asynchronously
+    env = DummyMultiEnvAsync(observation_spaces, action_spaces)
+
+    # Make observation probabilities more extreme to ensure changing agent participation
+    env.observation_probabilities = {
+        "agent_0": 0.7,  # 70% chance to return observation
+        "agent_1": 0.5,  # 50% chance to return observation
+        "other_agent_0": 0.3,  # 30% chance to return observation
+    }
+
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+
+    # Initialize IPPO agent
+    agent = IPPO(
+        observation_spaces=observation_spaces,
+        action_spaces=action_spaces,
+        agent_ids=agent_ids,
+        device=device,
+        batch_size=64,
+        lr=0.001,
+        gamma=0.99,
+        gae_lambda=0.95,
+        clip_coef=0.2,
+        ent_coef=0.01,
+        vf_coef=0.5,
+        torch_compiler=compile_mode,
+    )
+
+    # Custom training loop for multiple iterations
+    n_iterations = 5
+
+    for iteration in range(n_iterations):
+        # Reset environment
+        observations, infos = env.reset()
+        states = {agent_id: [] for agent_id in agent_ids}
+        actions = {agent_id: [] for agent_id in agent_ids}
+        log_probs = {agent_id: [] for agent_id in agent_ids}
+        rewards = {agent_id: [] for agent_id in agent_ids}
+        dones = {agent_id: [] for agent_id in agent_ids}
+        values = {agent_id: [] for agent_id in agent_ids}
+
+        done = {agent_id: np.zeros((1,)) for agent_id in agent_ids}
+
+        # Collect experiences for multiple steps
+        max_steps = 10
+        for step in range(max_steps):
+            # Get actions for current active agents
+            action_dict, logprob_dict, entropy_dict, value_dict = agent.get_action(
+                observations, infos
+            )
+
+            # Verify actions are only for active agents
+            assert all(agent_id in observations for agent_id in action_dict)
+
+            # Step the environment
+            next_observations, reward_dict, terminated, truncated, next_infos = (
+                env.step(action_dict)
+            )
+
+            # Store experiences for active agents
+            next_dones = {}
+            for agent_id in observations:
+                states[agent_id].append(observations[agent_id])
+                actions[agent_id].append(action_dict[agent_id])
+                log_probs[agent_id].append(logprob_dict[agent_id])
+                values[agent_id].append(value_dict[agent_id])
+                dones[agent_id].append(done[agent_id])
+                rewards[agent_id].append(reward_dict[agent_id])
+                next_dones[agent_id] = np.logical_or(
+                    terminated[agent_id], truncated[agent_id]
+                ).astype(np.int8)
+
+            # Update for next step
+            observations = next_observations
+            done = next_dones
+            infos = next_infos
+
+            # Track agent participation changes to ensure we're testing async behavior
+            if step > 0:
+                # Print number of active agents at this step (for visual confirmation)
+                n_active = len(observations)
+                assert n_active > 0, f"No active agents at step {step}"
+
+            # Break if all agents report done
+            if all(done.values()):
+                break
+
+        # Create experience tuple for learning
+        experiences = (
+            states,
+            actions,
+            log_probs,
+            rewards,
+            dones,
+            values,
+            observations,  # next_states
+            next_dones,
+        )
+
+        # Train on collected experiences
+        loss_info = agent.learn(experiences)
+
+        # Verify that learning worked
+        assert "agent_0" in loss_info
+
+        # Verify that agent can still get actions after learning
+        if observations:
+            final_actions, _, _, _ = agent.get_action(observations, infos)
+            assert all(agent_id in observations for agent_id in final_actions)
+
+    # Final test: verify agent can handle completely different set of active agents
+    test_observations, test_infos = env.reset()
+    test_actions, _, _, _ = agent.get_action(test_observations, test_infos)
+    assert all(agent_id in test_observations for agent_id in test_actions)

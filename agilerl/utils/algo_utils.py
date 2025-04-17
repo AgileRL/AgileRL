@@ -999,11 +999,19 @@ def vectorize_experiences_by_agent(
         )
     else:
         # Original implementation for array/tensor observations
-        tensors = [
-            torch.Tensor(np.array(experiences[agent_id]))
-            for agent_id in experiences.keys()
-        ]
-        stacked_tensor = torch.stack(tensors, dim=dim)
+        tensors: List[torch.Tensor] = []
+        for experience in experiences.values():
+            if experience is None:
+                continue
+            tensors.append(torch.Tensor(np.array(experience)))
+
+        # Check if all tensors have the same shape
+        if all(t.shape == tensors[0].shape for t in tensors):
+            stacked_tensor = torch.stack(tensors, dim=dim)
+        else:
+            # Concatenate along the specified dimension
+            stacked_tensor = torch.cat(tensors)
+
         return stacked_tensor
 
 

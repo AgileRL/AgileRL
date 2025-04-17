@@ -12,19 +12,19 @@ lifting the block and building a tower, we can guide agents to perform the overa
 
 .. list-table::
 
-   * - .. figure:: LunarLander-v3_stabilize.gif
+   * - .. figure:: LunarLander-v2_stabilize.gif
 
           Stabilize skill
 
-     - .. figure:: LunarLander-v3_center.gif
+     - .. figure:: LunarLander-v2_center.gif
 
           Center skill
 
-   * - .. figure:: LunarLander-v3_landing.gif
+   * - .. figure:: LunarLander-v2_landing.gif
 
           Landing skill
 
-     - .. figure:: LunarLander-v3_selector.gif
+     - .. figure:: LunarLander-v2_selector.gif
 
           Selector - combining skills
 

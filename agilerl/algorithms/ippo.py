@@ -349,7 +349,7 @@ class IPPO(MultiAgentRLAlgorithm):
 
         # Check and stack masks
         for homo_id in self.shared_agent_ids:
-            if None in action_masks[homo_id]:
+            if None in action_masks[homo_id] or not action_masks[homo_id]:
                 assert all(mask is None for mask in action_masks[homo_id]), (
                     f"If action masks are provided for any agents, they must be provided for all agents. "
                     "Action masks can be defined as an array with the shape of the action space "
@@ -363,7 +363,7 @@ class IPPO(MultiAgentRLAlgorithm):
         return action_masks
 
     def preprocess_observation(
-        self, observation: ObservationType
+        self, observation: ObservationType, homo_ids: List[str]
     ) -> Dict[str, TorchObsType]:
         """Preprocesses observations for forward pass through neural network.
 
@@ -373,7 +373,7 @@ class IPPO(MultiAgentRLAlgorithm):
         :return: Preprocessed observations
         :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
         """
-        preprocessed = {homo_id: [] for homo_id in self.shared_agent_ids}
+        preprocessed = {homo_id: [] for homo_id in homo_ids}
         for agent_id, obs in observation.items():
             homo_id = self.get_homo_id(agent_id)
             preprocessed[homo_id].append(
@@ -384,7 +384,11 @@ class IPPO(MultiAgentRLAlgorithm):
                     normalize_images=self.normalize_images,
                 )
             )
-        for homo_id in self.shared_agent_ids:
+        for homo_id in homo_ids:
+            # Case where we have asynchronous agents
+            if not preprocessed[homo_id]:
+                continue
+
             preprocessed[homo_id] = concatenate_tensors(preprocessed[homo_id])
 
         return preprocessed
@@ -434,11 +438,11 @@ class IPPO(MultiAgentRLAlgorithm):
 
         # Preprocess observations
         unique_agents_ids = list(obs.keys())
-        unique_ids = defaultdict(list)
+        homogenous_agents = defaultdict(list)
         for agent_id in unique_agents_ids:
-            unique_ids[self.get_homo_id(agent_id)].append(agent_id)
+            homogenous_agents[self.get_homo_id(agent_id)].append(agent_id)
 
-        preprocessed = self.preprocess_observation(obs)
+        preprocessed = self.preprocess_observation(obs, list(homogenous_agents.keys()))
         shared_agent_ids = list(preprocessed.keys())
         preprocessed_states = list(preprocessed.values())
 
@@ -477,12 +481,12 @@ class IPPO(MultiAgentRLAlgorithm):
             state_values_dict[shared_id] = state_values.cpu().data.numpy()
 
         action_dict = self.disassemble_homogeneous_outputs(
-            action_dict, vect_dim, unique_ids
+            action_dict, vect_dim, homogenous_agents
         )
 
         # If using env_defined_actions replace actions
         if env_defined_actions is not None:
-            for agent in self.agent_ids:
+            for agent in unique_agents_ids:
                 action_dict[agent][agent_masks[agent]] = env_defined_actions[agent][
                     agent_masks[agent]
                 ]
@@ -490,29 +494,32 @@ class IPPO(MultiAgentRLAlgorithm):
         return (
             action_dict,
             self.disassemble_homogeneous_outputs(
-                action_logprob_dict, vect_dim, unique_ids
+                action_logprob_dict, vect_dim, homogenous_agents
             ),
             self.disassemble_homogeneous_outputs(
-                dist_entropy_dict, vect_dim, unique_ids
+                dist_entropy_dict, vect_dim, homogenous_agents
             ),
             self.disassemble_homogeneous_outputs(
-                state_values_dict, vect_dim, unique_ids
+                state_values_dict, vect_dim, homogenous_agents
             ),
         )
 
-    def assemble_shared_inputs(self, input: ExperiencesType) -> ExperiencesType:
+    def assemble_shared_inputs(self, experience: ExperiencesType) -> ExperiencesType:
         """Preprocesses inputs by constructing dictionaries by shared agents
 
-        :param input: input to reshape from environment
-        :type ExperiencesType
+        :param experience: experience to reshape from environment
+        :type experience: ExperiencesType
 
         :return: Preprocessed inputs
         :rtype: ExperiencesType
         """
         shared = {homo_id: {} for homo_id in self.shared_agent_ids}
-        for agent_id, inp in input.items():
+        for agent_id, inp in experience.items():
             homo_id = self.get_homo_id(agent_id)
-            shared[homo_id][agent_id] = stack_experiences(inp, to_torch=False)[0]
+
+            shared[homo_id][agent_id] = (
+                stack_experiences(inp, to_torch=False)[0] if len(inp) > 0 else None
+            )
 
         return shared
 
@@ -630,6 +637,13 @@ class IPPO(MultiAgentRLAlgorithm):
         values = values.squeeze()
         next_state = vectorize_experiences_by_agent(next_state, dim=0)
         next_done = vectorize_experiences_by_agent(next_done)
+
+        print("Rewards: ", rewards.shape)
+        print("Dones: ", dones.shape)
+        print("Values: ", values.shape)
+        print("Log probs: ", log_probs.shape)
+        print("Next state: ", next_state.shape)
+        print("Next done: ", next_done.shape)
 
         # Bootstrapping returns using GAE advantage estimation
         dones = dones.long()

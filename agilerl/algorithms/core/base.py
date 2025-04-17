@@ -1410,7 +1410,10 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         return processed_obs
 
     def disassemble_homogeneous_outputs(
-        self, homo_outputs: ArrayDict, vect_dim: int, unique_ids: Dict[str, List[str]]
+        self,
+        homo_outputs: ArrayDict,
+        vect_dim: int,
+        homogeneous_agents: Dict[str, List[str]],
     ) -> ArrayDict:
         """Disassembles batched output by shared policies into their homogeneous agents' outputs.
 
@@ -1418,18 +1421,18 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         :type homo_outputs: Dict[str, np.ndarray]
         :param vect_dim: Vectorization dimension size, i.e. number of vect envs
         :type vect_dim: int
-        :param unique_ids: Dictionary of unique agent IDs
-        :type unique_ids: Dict[str, List[str]]
+        :param homogeneous_agents: Dictionary of homogeneous agent IDs
+        :type homogeneous_agents: Dict[str, List[str]]
         :return: Assembled dictionary, e.g. {'agent_0': 4, 'agent_1': 7, 'agent_2': 8}
         :rtype: Dict[str, np.ndarray]
         """
         output_dict = {}
-        for homo_id in self.shared_agent_ids:
+        for homo_id in homogeneous_agents:
             homo_outputs[homo_id] = np.reshape(
                 homo_outputs[homo_id],
-                (len(unique_ids[homo_id]), vect_dim, -1),
+                (len(homogeneous_agents[homo_id]), vect_dim, -1),
             )
-            for i, agent_id in enumerate(unique_ids[homo_id]):
+            for i, agent_id in enumerate(homogeneous_agents[homo_id]):
                 output_dict[agent_id] = homo_outputs[homo_id][i]
 
         return output_dict
