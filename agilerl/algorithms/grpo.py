@@ -399,6 +399,10 @@ class GRPO(LLMAlgorithm):
         clipped_surrogate = clipped_log_probs_ratio * advantages
         loss = -torch.min(surrogate, clipped_surrogate) + self.beta * kl
         loss = (loss * mask).sum(dim=-1) / mask.sum(dim=-1)
+        log_probs_ratio = None
+        clipped_log_probs_ratio = None
+        surrogate = None
+        clipped_surrogate = None
         return loss.mean(), kl.mean()
 
     def _get_logprobs(

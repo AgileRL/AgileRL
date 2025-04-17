@@ -595,7 +595,7 @@ def save_population_checkpoint(
 import logging 
 import torch.distributed as dist
 logging.basicConfig(
-        level=logging.DEBUG,
+        level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         filename='myapp.log',  # Optional: log to a file
         filemode='a'          # Optional: append to the file
@@ -603,7 +603,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 # Create a console handler and set its format and level
 console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.DEBUG)
+console_handler.setLevel(logging.INFO)
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 console_handler.setFormatter(formatter)
 
@@ -917,8 +917,10 @@ def save_llm_checkpoint(agent: EvolvableAlgorithm, checkpoint_path: str | None) 
     path = base_path + f"/{agent.algo}"
     os.makedirs(path, exist_ok=True)
     if agent.accelerator is not None:
+        logger.debug(f"========= SAVING CHECKPOINT | Agent index {agent.index} | Process index {agent.accelerator.process_index} | Method {save_llm_checkpoint.__name__} =========")
         agent.accelerator.wait_for_everyone()
         agent.actor.save_pretrained(path)
         agent.accelerator.wait_for_everyone()
+        logger.debug(f"========= CHECKPOINT SAVED | Agent index {agent.index} | Process index {agent.accelerator.process_index} | Method {save_llm_checkpoint.__name__} =========")
     else:
         agent.actor.save_pretrained(path)

@@ -2,6 +2,7 @@ import copy
 import glob
 import inspect
 import os
+import gc
 import warnings
 from abc import ABC, ABCMeta, abstractmethod
 from importlib.metadata import version
@@ -80,7 +81,7 @@ MARLObservationType = Dict[str, ObservationType]
 import logging
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     filename="myapp.log",  # Optional: log to a file
     filemode="a",  # Optional: append to the file
@@ -88,7 +89,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 # Create a console handler and set its format and level
 console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.DEBUG)
+console_handler.setLevel(logging.INFO)
 formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 console_handler.setFormatter(formatter)
 
@@ -1650,7 +1651,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             config_kwargs = copy.deepcopy(deepspeed_plugin.deepspeed_config)["zero_optimization"]
             self.reference_actor = deepspeed.init_inference(self.reference_actor,
                                      tensor_parallel={"tp_size": self.accelerator.num_processes},
-                                     dtype=torch.half,
+                                     dtype=torch.bfloat16,
                                      checkpoint=None,
                                      replace_with_kernel_inject=True,
                                      zero=DeepSpeedZeroConfig(**config_kwargs))
@@ -1778,9 +1779,15 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             logger.debug(
                 f"========= ENTERING CLEANUP IF STATEMENT | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clean_up.__name__} ========="
             )
-            self.accelerator.free_memory(
+            self.accelerator.wait_for_everyone()
+            self.actor, self.reference_actor, self.optimizer, self.lr_scheduler = self.accelerator.free_memory(
                 self.actor, self.reference_actor, self.optimizer, self.lr_scheduler
             )
+            self.accelerator.wait_for_everyone()
+            self.accelerator = None 
+        gc.collect()
+        torch.cuda.empty_cache()
+
         logger.debug(
-            f"========= CLEANING UP COMPLETED | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clean_up.__name__} ========="
+            f"========= CLEANING UP COMPLETED | Agent index {self.index} | Method {self.clean_up.__name__} ========="
         )

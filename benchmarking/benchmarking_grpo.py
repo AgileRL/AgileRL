@@ -16,7 +16,7 @@ from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
-MODEL_PATH = "Qwen/Qwen2.5-0.5B"
+MODEL_PATH = "Qwen/Qwen2.5-1.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
 
@@ -245,12 +245,12 @@ def main(init_hp, mut_p):
         pop=pop,
         env=env,
         init_hp=init_hp,
-        evaluation_interval=1,
-        wb=False,
+        evaluation_interval=10,
+        wb=True,
         save_elite=True,
         elite_path="saved_llms",
         max_reward=2.0,
-        evo_steps=1,
+        evo_steps=10,
         mutation=mutations,
         tournament=tournament,
         accelerator=accelerator,
@@ -260,7 +260,8 @@ def main(init_hp, mut_p):
 
 
 if __name__ == "__main__":
-    # os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+    import os
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     with open("configs/training/grpo.yaml") as file:
         config = yaml.safe_load(file)
     init_hp = config["INIT_HP"]
