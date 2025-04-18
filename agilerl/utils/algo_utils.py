@@ -984,14 +984,14 @@ def is_peft_model(model: nn.Module) -> bool:
 import logging 
 import torch.distributed as dist
 logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         filename='myapp.log',  # Optional: log to a file
         filemode='a'          # Optional: append to the file
     )
 logger = logging.getLogger(__name__)
 console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
+console_handler.setLevel(logging.DEBUG)
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 console_handler.setFormatter(formatter)
 

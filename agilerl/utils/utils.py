@@ -595,7 +595,7 @@ def save_population_checkpoint(
 import logging 
 import torch.distributed as dist
 logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         filename='myapp.log',  # Optional: log to a file
         filemode='a'          # Optional: append to the file
@@ -603,7 +603,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 # Create a console handler and set its format and level
 console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
+console_handler.setLevel(logging.DEBUG)
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 console_handler.setFormatter(formatter)
 

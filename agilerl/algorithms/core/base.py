@@ -81,7 +81,7 @@ MARLObservationType = Dict[str, ObservationType]
 import logging
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     filename="myapp.log",  # Optional: log to a file
     filemode="a",  # Optional: append to the file
@@ -89,7 +89,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 # Create a console handler and set its format and level
 console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
+console_handler.setLevel(logging.DEBUG)
 formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 console_handler.setFormatter(formatter)
 
@@ -1697,7 +1697,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         logger.debug(
             f"========= CLONE LLM COMPLETED | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} ========="
         )
-
+        actor = None # De-reference the actor
         input_args["actor_network"] = cloned_actor
         input_args["accelerator"] = (
             Accelerator() if self.accelerator is not None else None
@@ -1784,7 +1784,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 self.actor, self.reference_actor, self.optimizer, self.lr_scheduler
             )
             self.accelerator.wait_for_everyone()
-            self.accelerator = None 
+            # self.accelerator = None 
         gc.collect()
         torch.cuda.empty_cache()
 
