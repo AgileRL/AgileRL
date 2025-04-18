@@ -1779,11 +1779,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             logger.debug(
                 f"========= ENTERING CLEANUP IF STATEMENT | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clean_up.__name__} ========="
             )
-            self.accelerator.wait_for_everyone()
+            # self.accelerator.wait_for_everyone()
             self.actor, self.reference_actor, self.optimizer, self.lr_scheduler = self.accelerator.free_memory(
                 self.actor, self.reference_actor, self.optimizer, self.lr_scheduler
             )
-            self.accelerator.wait_for_everyone()
+        self.accelerator.wait_for_everyone()
             # self.accelerator = None 
         gc.collect()
         torch.cuda.empty_cache()

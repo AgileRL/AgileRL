@@ -185,7 +185,6 @@ class TournamentSelection:
         for agent_idx in old_population_idxs:
             if agent_idx in unwanted_agents:
 
-                # NOTE Shall we add barriers here?
                 agent_ref = population[old_population_idxs.index(agent_idx)]
                 agent_ref.accelerator.wait_for_everyone()
                 agent_ref.clean_up()
