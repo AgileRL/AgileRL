@@ -186,10 +186,11 @@ class TournamentSelection:
             if agent_idx in unwanted_agents:
 
                 # NOTE Shall we add barriers here?
-                population[old_population_idxs.index(agent_idx)].accelerator.wait_for_everyone()
-                population[old_population_idxs.index(agent_idx)].clean_up()
-                # population[old_population_idxs.index(agent_idx)].accelerator.wait_for_everyone()
-                population[old_population_idxs.index(agent_idx)] = None
+                agent_ref = population[old_population_idxs.index(agent_idx)]
+                agent_ref.accelerator.wait_for_everyone()
+                agent_ref.clean_up()
+                agent_ref.accelerator.wait_for_everyone()
+                agent_ref = None
 
         logger.debug(
             f"========= UNWANTED AGENTS ISOLATED| Process {dist.get_rank()} | Function {self._select_llm_agents.__name__} ========="
@@ -207,13 +208,11 @@ class TournamentSelection:
             if (
                 agent_ref := population[old_population_idxs.index(idx_to_clone)]
             ) is not None:
+                agent_ref.accelerator.wait_for_everyone()
                 actor_parent = agent_ref.clone(new_idx, wrap=False)
-                population[old_population_idxs.index(idx_to_clone)] = None
-                if agent_ref.accelerator is not None:
-                    agent_ref.accelerator.wait_for_everyone()
+                agent_ref.accelerator.wait_for_everyone()
                 agent_ref.clean_up()
-                # if agent_ref.accelerator is not None:
-                #     agent_ref.accelerator.wait_for_everyone()
+                agent_ref.accelerator.wait_for_everyone()
                 agent_ref = None
                 index_tracker[idx_to_clone] = actor_parent
             else:
@@ -224,6 +223,6 @@ class TournamentSelection:
         logger.debug(
             f"========= NEW POPULATION CREATED | Process {dist.get_rank()} | Function {self._select_llm_agents.__name__} ========="
         )
-
-        assert False
         return elite, new_population
+    
+    

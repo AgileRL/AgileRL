@@ -1787,7 +1787,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             # self.accelerator = None 
         gc.collect()
         torch.cuda.empty_cache()
-
         logger.debug(
             f"========= CLEANING UP COMPLETED | Agent index {self.index} | Method {self.clean_up.__name__} ========="
         )
