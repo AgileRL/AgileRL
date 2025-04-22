@@ -12,6 +12,7 @@ from accelerate import Accelerator
 from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
+from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 from gymnasium import spaces
 from peft import PeftModel
 from torch.nn.utils import clip_grad_norm_
@@ -111,7 +112,7 @@ class GRPO(LLMAlgorithm):
         accelerator: Optional[Accelerator] = None,
         device: str = "cpu",
         clone: bool = False,
-        wrap: bool = False,
+        wrap: bool = True,
     ) -> None:
         device = (
             f"cuda:{os.getenv('LOCAL_RANK', '0')}"
@@ -176,6 +177,14 @@ class GRPO(LLMAlgorithm):
         self.reduce_memory_peak = reduce_memory_peak
         self.local_rank = device.split(":")[-1]
         self._initialize_actors(actor_network, not clone)
+
+        # Register network groups for mutations
+        self.register_network_group(NetworkGroup(eval=self.actor, policy=True))
+        self.register_network_group(
+            NetworkGroup(eval=self.reference_actor, policy=True)
+        )
+        if self.wrap:
+            self.wrap_models()
         del actor_network
 
     def get_action(
@@ -246,7 +255,7 @@ class GRPO(LLMAlgorithm):
         batch_idxs = np.arange(num_samples)
         mean_loss, mean_kl = 0, 0
         for _ in range(self.update_epochs):
-            np.random.shuffle(batch_idxs)
+            self.rng.shuffle(batch_idxs) # FIXME random has got to go, 
             for start in range(0, num_samples, self.batch_size):
                 minibatch_idxs = batch_idxs[
                     start : min((start + self.batch_size), num_samples)
@@ -302,6 +311,7 @@ class GRPO(LLMAlgorithm):
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
         reward_tensor = torch.cat(rewards)
+        reward_tensor = torch.randn(0, 2)
         return reward_tensor
 
     def _initialize_actors(
@@ -316,19 +326,12 @@ class GRPO(LLMAlgorithm):
         """
         self._create_policy_network(actor_network)
         self._create_reference_policy_network(actor_network, load_reference_state_dict)
-        if self.accelerator is not None:
-            self.wrap_models()
-        else:
+        if self.accelerator is None:
             self.actor = self.actor.to(self.device)
             self.actor.gradient_checkpointing_enable()
             self.reference_actor = self.reference_actor.to(self.device)
 
-        # Register network groups for mutations
-        self.register_network_group(NetworkGroup(eval=self.actor, policy=True))
-        self.register_network_group(
-            NetworkGroup(eval=self.reference_actor, policy=True)
-        )
-        self.reference_actor.eval()
+        
 
     def _calculate_advantage(
         self, rewards: torch.Tensor, eps: float = 1e-8
@@ -499,6 +502,7 @@ class GRPO(LLMAlgorithm):
         :return: Policy network and reference network
         :rtype: Union[nn.Module, DeepSpeedEngine]
         """
+        self.reference_actor_state_dict = clone_tensors_for_torch_save(network.state_dict()) 
         self.reference_actor = clone_llm(
             network, load_state_dict=load_reference_state_dict
         )

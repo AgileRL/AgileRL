@@ -884,7 +884,7 @@ def gather_tensor(
     if not isinstance(tensor, torch.Tensor):
         tensor = torch.tensor(tensor, device=accelerator.device)
     tensor = tensor.to(accelerator.device)
-    gathered_tensors = accelerator.gather(tensor)
+    gathered_tensors = accelerator.gather(tensor)   
     return gathered_tensors
 
 

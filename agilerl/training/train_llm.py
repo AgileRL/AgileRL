@@ -173,17 +173,23 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
     for i in range(training_steps):
         agent_metrics_dict = {}
         for agent_idx, agent in enumerate(pop):
+            logger.debug(f"========= ENTER GET ACTION | Process {dist.get_rank()} | Function {agent.get_action.__name__} =========")
             completion_ids, action_masks = agent.get_action(prompts)
+            logger.debug(f"========= EXIT GET ACTION | Process {dist.get_rank()} | Function {agent.get_action.__name__} =========")
             completion_lengths = np.mean([x.shape[1] for x in completion_ids])
 
             # Use the reward function stored in env.step to calculate reward of the each answer from the group
+            logger.debug(f"========= ENTER STEP | Process {dist.get_rank()} | Function {env.step.__name__} =========")
             next_prompts, rewards = env.step(completion_ids)
+            logger.debug(f"========= EXIT STEP | Process {dist.get_rank()} | Function {env.step.__name__} =========")
             experiences = (
                 completion_ids,
                 action_masks,
                 rewards,
             )
+            logger.debug(f"========= ENTER LEARN | Process {dist.get_rank()} | Function {agent.learn.__name__} =========")
             loss, kl = agent.learn(experiences)
+            logger.debug(f"========= EXIT LEARN | Process {dist.get_rank()} | Function {agent.learn.__name__} =========")
             metrics = [loss, kl, rewards, completion_lengths]
             if max_reward is not None:
                 accuracy = (rewards == max_reward).sum() / len(rewards.flatten())
@@ -250,6 +256,8 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                 logger.debug(f"========= EXIT TOURNAMENT SELECTION AND MUTATION | Process {dist.get_rank()} | Function {tournament_selection_and_mutation.__name__} =========")
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
+                print("MUTATIONS")
+                print([agent.mut for agent in pop])
         else:
             if (i + 1) % max_steps == 0:
                 save_llm_checkpoint(agent, elite_path, i + 1)

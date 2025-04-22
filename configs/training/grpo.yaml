@@ -1,6 +1,6 @@
 ---
 MUTATION_PARAMS:
-    NO_MUT: 0.1                          # No mutation
+    NO_MUT: 0                          # No mutation
     RL_HP_MUT: 0.6                       # Learning HP mutation
     MUT_SD: 0.1                          # Mutation strength
     RAND_SEED: 23                        # Random seed
@@ -16,18 +16,18 @@ INIT_HP:
     ALGO: GRPO
     BATCH_SIZE: 1
     REDUCE_MEMORY_PEAK: true
-    BETA: 0.001
+    BETA: 0.001 
     LR: 0.000005
     CLIP_COEF: 0.2
     MAX_GRAD_NORM: 0.1
     UPDATE_EPOCHS: 1
-    GROUP_SIZE: 1
+    GROUP_SIZE: 2
     TEMPERATURE: 0.9
     CALC_POSITION_EMBEDDINGS: true
     MIN_OUTPUT_TOKENS:
-    MAX_OUTPUT_TOKENS: 10
+    MAX_OUTPUT_TOKENS: 200
     COSINE_lR_SCHEDULER:
     TOURN_SIZE: 2
-    ELITISM: true
-    POP_SIZE: 1
+    ELITISM: true   
+    POP_SIZE: 3
     EVAL_LOOP: 1
