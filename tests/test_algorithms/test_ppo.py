@@ -14,6 +14,7 @@ from gymnasium import spaces
 from agilerl.algorithms.ppo import PPO
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
+from agilerl.utils.rollout_buffer import RolloutBuffer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
     generate_dict_or_tuple_space,
@@ -1361,3 +1362,379 @@ def test_load_from_pretrained_networks(
     assert new_ppo.scores == ppo.scores
     assert new_ppo.fitness == ppo.fitness
     assert new_ppo.steps == ppo.steps
+
+
+# Test the RolloutBuffer implementation
+def test_rollout_buffer_initialization():
+    observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
+    action_space = generate_discrete_space(2)
+
+    buffer = RolloutBuffer(
+        capacity=100,
+        observation_space=observation_space,
+        action_space=action_space,
+        device="cpu",
+        gae_lambda=0.95,
+        gamma=0.99,
+    )
+
+    assert buffer.capacity == 100
+    assert buffer.observation_space == observation_space
+    assert buffer.action_space == action_space
+    assert buffer.gamma == 0.99
+    assert buffer.gae_lambda == 0.95
+    assert buffer.recurrent == False
+    assert buffer.hidden_size is None
+    assert buffer.device == "cpu"
+    assert buffer.pos == 0
+    assert buffer.full == False
+
+    # Test with hidden states
+    buffer = RolloutBuffer(
+        capacity=100,
+        observation_space=observation_space,
+        action_space=action_space,
+        device="cpu",
+        gae_lambda=0.95,
+        gamma=0.99,
+        recurrent=True,
+        hidden_size=(64,),
+    )
+
+    assert buffer.recurrent == True
+    assert buffer.hidden_size == (64,)
+    assert buffer.hidden_states is not None
+    assert buffer.next_hidden_states is not None
+
+
+# Test adding samples to the buffer
+def test_rollout_buffer_add():
+    observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
+    action_space = generate_discrete_space(2)
+
+    buffer = RolloutBuffer(
+        capacity=100,
+        observation_space=observation_space,
+        action_space=action_space,
+    )
+
+    # Add a single sample
+    obs = np.random.rand(*observation_space.shape).astype(observation_space.dtype)
+    action = np.array([1])
+    reward = 1.0
+    done = False
+    value = 0.5
+    log_prob = -0.5
+    next_obs = np.random.rand(*observation_space.shape).astype(observation_space.dtype)
+
+    buffer.add(obs, action, reward, done, value, log_prob, next_obs)
+
+    assert buffer.pos == 1
+    assert not buffer.full
+    print(np.array_equal(buffer.observations[0], obs))
+    assert np.array_equal(buffer.observations[0], obs)
+    assert np.array_equal(buffer.actions[0], action[0])  # Discrete action space
+    assert buffer.rewards[0] == reward
+    assert buffer.dones[0] == done
+    assert buffer.values[0] == value
+    assert buffer.log_probs[0] == log_prob
+    assert np.array_equal(buffer.next_observations[0], next_obs)
+
+    # Add samples until buffer is full
+    for i in range(99):
+        buffer.add(obs, action, reward, done, value, log_prob, next_obs)
+
+    assert buffer.pos == 0  # Wrapped around
+    assert buffer.full == True
+
+
+# Test computing returns and advantages
+def test_rollout_buffer_compute_returns_and_advantages():
+    observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
+    action_space = generate_discrete_space(2)
+
+    buffer = RolloutBuffer(
+        capacity=5,
+        observation_space=observation_space,
+        action_space=action_space,
+        gamma=0.99,
+        gae_lambda=0.95,
+    )
+
+    # Add samples
+    for i in range(5):
+        obs = np.random.rand(*observation_space.shape)
+        action = np.array([1])
+        reward = 1.0
+        done = i == 4  # Last step is done
+        value = 0.5
+        log_prob = -0.5
+        next_obs = np.random.rand(*observation_space.shape)
+
+        buffer.add(obs, action, reward, done, value, log_prob, next_obs)
+
+    # Compute returns and advantages
+    buffer.compute_returns_and_advantages()
+
+    # Check that returns and advantages are computed
+    assert not np.array_equal(buffer.returns, np.zeros(5))
+    assert not np.array_equal(buffer.advantages, np.zeros(5))
+
+    # Check that returns are higher for earlier steps (due to discounting)
+    assert buffer.returns[0] > buffer.returns[4]
+
+
+# Test getting batch from buffer
+def test_rollout_buffer_get_batch():
+    observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
+    action_space = generate_discrete_space(2)
+
+    buffer = RolloutBuffer(
+        capacity=100,
+        observation_space=observation_space,
+        action_space=action_space,
+    )
+
+    # Add samples
+    for i in range(10):
+        obs = np.random.rand(*observation_space.shape)
+        action = np.array([1])
+        reward = 1.0
+        done = i == 9  # Last step is done
+        value = 0.5
+        log_prob = -0.5
+        next_obs = np.random.rand(*observation_space.shape)
+
+        buffer.add(obs, action, reward, done, value, log_prob, next_obs)
+
+    # Compute returns and advantages
+    buffer.compute_returns_and_advantages()
+
+    # Get all data
+    batch = buffer.get()
+
+    assert len(batch["observations"]) == 10
+    assert len(batch["actions"]) == 10
+    assert len(batch["rewards"]) == 10
+    assert len(batch["dones"]) == 10
+    assert len(batch["values"]) == 10
+    assert len(batch["log_probs"]) == 10
+    assert len(batch["advantages"]) == 10
+    assert len(batch["returns"]) == 10
+
+    # Get batch of specific size
+    batch = buffer.get(batch_size=5)
+
+    assert len(batch["observations"]) == 5
+    assert len(batch["actions"]) == 5
+
+    # Get tensor batch
+    tensor_batch = buffer.get_tensor_batch(batch_size=5)
+
+    assert isinstance(tensor_batch["observations"], torch.Tensor)
+    assert isinstance(tensor_batch["actions"], torch.Tensor)
+    assert isinstance(tensor_batch["advantages"], torch.Tensor)
+    assert tensor_batch["observations"].shape[0] == 5
+
+
+# Test PPO initialization with rollout buffer
+def test_ppo_with_rollout_buffer():
+    observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
+    action_space = generate_discrete_space(2)
+
+    ppo = PPO(
+        observation_space=observation_space,
+        action_space=action_space,
+        use_rollout_buffer=True,
+        learn_step=100,
+    )
+
+    assert ppo.use_rollout_buffer == True
+    assert hasattr(ppo, "rollout_buffer")
+    assert isinstance(ppo.rollout_buffer, RolloutBuffer)
+    assert ppo.rollout_buffer.capacity == ppo.learn_step
+    assert ppo.rollout_buffer.recurrent == False
+
+    # Test with hidden states
+    ppo = PPO(
+        observation_space=observation_space,
+        action_space=action_space,
+        use_rollout_buffer=True,
+        recurrent=True,
+        hidden_size=64,
+    )
+
+    assert ppo.recurrent == True
+    assert ppo.hidden_size == (64,)
+    assert ppo.rollout_buffer.recurrent == True
+    assert ppo.rollout_buffer.hidden_size == (64,)
+
+
+# Test PPO learning with rollout buffer
+def test_ppo_learn_with_rollout_buffer():
+    observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
+    action_space = generate_discrete_space(2)
+    batch_size = 32
+
+    ppo = PPO(
+        observation_space=observation_space,
+        action_space=action_space,
+        use_rollout_buffer=True,
+        learn_step=64,
+        batch_size=batch_size,
+    )
+
+    # Fill the buffer manually
+    for i in range(64):
+        obs = np.random.rand(*observation_space.shape)
+        action = np.array([1])
+        reward = 1.0
+        done = i == 63  # Last step is done
+        value = 0.5
+        log_prob = -0.5
+        next_obs = np.random.rand(*observation_space.shape)
+
+        ppo.rollout_buffer.add(obs, action, reward, done, value, log_prob, next_obs)
+
+    # Compute returns and advantages
+    ppo.rollout_buffer.compute_returns_and_advantages()
+
+    # Learn from rollout buffer
+    loss = ppo.learn()
+
+    assert isinstance(loss, float)
+    assert loss >= 0.0
+
+
+# Test PPO with hidden states
+def test_ppo_with_hidden_states():
+    observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
+    action_space = generate_discrete_space(2)
+
+    ppo = PPO(
+        observation_space=observation_space,
+        action_space=action_space,
+        use_rollout_buffer=True,
+        recurrent=True,
+        hidden_size=(64,),
+    )
+
+    # Get action with hidden state
+    obs = np.random.rand(*observation_space.shape)
+    hidden_state = np.zeros((1, 64))
+
+    action, log_prob, entropy, value, next_hidden = ppo.get_action(
+        obs, hidden_state=hidden_state
+    )
+
+    assert action.shape[0] == 1
+    assert isinstance(log_prob, np.ndarray)
+    assert isinstance(entropy, np.ndarray)
+    assert isinstance(value, np.ndarray)
+    assert next_hidden is not None
+    assert next_hidden.shape == (1, 64)
+
+
+# Test PPO collect_rollouts method
+def test_ppo_collect_rollouts():
+    observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
+    action_space = generate_discrete_space(2)
+
+    ppo = PPO(
+        observation_space=observation_space,
+        action_space=action_space,
+        use_rollout_buffer=True,
+        learn_step=5,
+    )
+
+    env = DummyEnv(state_size=observation_space.shape, vect=True, num_envs=1)
+
+    # Collect rollouts
+    ppo.collect_rollouts(env, n_steps=5)
+
+    # Check buffer contents
+    assert ppo.rollout_buffer.pos == 5
+    assert not np.array_equal(
+        ppo.rollout_buffer.observations[0], np.zeros(observation_space.shape)
+    )
+    assert not np.array_equal(ppo.rollout_buffer.actions[0], np.zeros(1))
+
+    # Compute returns and advantages should have been called
+    assert not np.array_equal(ppo.rollout_buffer.returns, np.zeros(5))
+    assert not np.array_equal(ppo.rollout_buffer.advantages, np.zeros(5))
+
+    # Learn from collected rollouts
+    loss = ppo.learn()
+
+    assert isinstance(loss, float)
+    assert loss >= 0.0
+
+
+# Test compatibility with old format
+def test_ppo_backward_compatibility():
+    observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
+    action_space = generate_discrete_space(2)
+
+    # Create PPO with rollout buffer
+    ppo_new = PPO(
+        observation_space=observation_space,
+        action_space=action_space,
+        use_rollout_buffer=True,
+    )
+
+    # Create PPO with old implementation
+    ppo_old = PPO(
+        observation_space=observation_space,
+        action_space=action_space,
+        use_rollout_buffer=False,
+    )
+
+    # Prepare experiences in old format
+    num_steps = 5
+    states = torch.rand(num_steps, *observation_space.shape)
+    actions = torch.randint(0, action_space.n, (num_steps,)).float()
+    log_probs = torch.randn(num_steps)
+    rewards = torch.randn(num_steps)
+    dones = torch.randint(0, 2, (num_steps,))
+    values = torch.randn(num_steps)
+    next_state = torch.rand(1, *observation_space.shape)
+    next_done = np.zeros(1)
+    experiences = [
+        [states],
+        [actions],
+        [log_probs],
+        [rewards],
+        [dones],
+        [values],
+        [next_state],
+        [next_done],
+    ]
+
+    # Both should work with old format
+    loss_old = ppo_old.learn(experiences)
+    loss_new = ppo_new.learn(experiences)
+
+    assert isinstance(loss_old, float)
+    assert isinstance(loss_new, float)
+
+    # Fill rollout buffer
+    for i in range(ppo_new.learn_step):
+        obs = np.random.rand(*observation_space.shape)
+        action = np.array([1])
+        reward = 1.0
+        done = i == ppo_new.learn_step - 1
+        value = 0.5
+        log_prob = -0.5
+        next_obs = np.random.rand(*observation_space.shape)
+
+        ppo_new.rollout_buffer.add(obs, action, reward, done, value, log_prob, next_obs)
+
+    ppo_new.rollout_buffer.compute_returns_and_advantages()
+
+    # New implementation should work without experiences
+    loss_from_buffer = ppo_new.learn()
+    assert isinstance(loss_from_buffer, float)
+
+    # Old implementation should fail without experiences
+    with pytest.raises(ValueError):
+        ppo_old.learn()

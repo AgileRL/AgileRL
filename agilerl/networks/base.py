@@ -1,7 +1,7 @@
 import inspect
 import warnings
 from dataclasses import asdict
-from typing import Any, Dict, Optional, Type, TypeVar, Union
+from typing import Any, Dict, Optional, Tuple, Type, TypeVar, Union
 
 import numpy as np
 import torch
@@ -114,9 +114,7 @@ class NetworkMeta(ModuleMeta):
                 attr = mut_method.split(".")[0]
                 if attr not in ["encoder", "head_net"]:
                     raise AttributeError(
-                        "Mutation methods of nested modules in EvolvableNetwork objects should only correspond "
-                        "to the 'encoder' or 'head_net'. This is done to ensure that equivalent architecture "
-                        "mutations can be applied across different evaluation networks (e.g. actor and critic)."
+                        "Mutation methods of nested modules in EvolvableNetwork objects should only correspond to the 'encoder' or 'head_net'. This is done to ensure that equivalent architecture mutations can be applied across different evaluation networks (e.g. actor and critic)."
                     )
 
         return instance
@@ -245,9 +243,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             input_args = inspect.getfullargspec(self.encoder_cls.__init__).args
             if "num_outputs" not in input_args:
                 warnings.warn(
-                    f"{self.encoder_cls.__name__} does not contain `num_outputs` as an input argument. "
-                    "Disabling latent space mutations. Make sure to set the number of outputs to the "
-                    "latent dimension in the encoder configuration."
+                    f"{self.encoder_cls.__name__} does not contain `num_outputs` as an input argument. Disabling latent space mutations. Make sure to set the number of outputs to the latent dimension in the encoder configuration."
                 )
                 self.filter_mutation_methods("latent")
             else:
@@ -299,19 +295,21 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         """Forward pass of the network."""
         return self.forward(*args, **kwargs)
 
-    def extract_features(self, x: TorchObsType) -> torch.Tensor:
-        """Forward pass of the network.
+    def extract_features(self, x: torch.Tensor, hidden_state=None) -> torch.Tensor:
+        """Extract features from the encoder part of the network.
 
-        :param x: Input to the network.
-        :type x: TorchObsType
-
-        :return: Output of the network.
+        :param x: Input tensor to extract features from
+        :type x: torch.Tensor
+        :param hidden_states: Hidden states for recurrent networks (unused in non-recurrent networks)
+        :type hidden_states: torch.Tensor, optional
+        :return: The encoded features
         :rtype: torch.Tensor
         """
-        if self.flatten_obs:
-            x = nn.Flatten()(x)
-
-        return self.encoder(x)
+        # For compatibility with both recurrent and non-recurrent networks
+        if hidden_state is None:
+            return self.encoder(x)
+        else:
+            return self.encoder(x, hidden_state=hidden_state)
 
     def forward_head(self, latent: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         """Forward pass of the network head using pre-computed latent encodings.
@@ -491,11 +489,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                 name="encoder",
                 **net_config,
             )
-        elif (
-            isinstance(self.observation_space, spaces.Box)
-            and len(self.observation_space.shape) == 2
-            and self.recurrent
-        ):
+        elif self.recurrent:
             assert_correct_lstm_net_config(net_config)
 
             encoder = EvolvableLSTM(

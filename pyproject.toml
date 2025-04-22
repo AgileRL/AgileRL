@@ -25,7 +25,7 @@ numpy = "^1.26.4"
 omegaconf = "^2.3.0"
 pandas = "^2.2.3"
 pettingzoo = "^1.23.1"
-jax = {version = "^0.4.31", extras = ["cpu"]}
+jax = { version = "^0.4.31", extras = ["cpu"] }
 pre-commit = "^3.4.0"
 pygame = "^2.6.0"
 pymunk = "^6.2.0"
@@ -44,3 +44,13 @@ wandb = "^0.17.6"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 88
+
+[tool.isort]
+profile = "black"
+
+[tool.ruff]
+# ignore = ["E501"]
+line-length = 88
