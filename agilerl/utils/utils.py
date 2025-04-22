@@ -9,11 +9,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.distributed as dist
-import wandb
 from accelerate import Accelerator
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl.algorithms import (
     CQN,
     DDPG,
@@ -436,6 +436,7 @@ def create_population(
                 update_epochs=INIT_HP["UPDATE_EPOCHS"],
                 actor_networks=actor_network,
                 critic_networks=critic_network,
+                action_batch_size=INIT_HP.get("ACTION_BATCH_SIZE", None),
                 device=device,
                 accelerator=accelerator,
                 torch_compiler=torch_compiler,

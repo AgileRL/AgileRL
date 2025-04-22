@@ -81,7 +81,7 @@ Contents
    llm_finetuning/index
    bandits/index
    distributed_training/index
-   custom_architecture/index
+   evolvable_networks/index
    custom_algorithms/index
    debugging_rl/index
 

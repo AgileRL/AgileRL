@@ -482,7 +482,7 @@ def obs_to_tensor(
         }
     elif isinstance(obs, tuple):
         return tuple(torch.as_tensor(_obs, device=device).float() for _obs in obs)
-    elif isinstance(obs, Number):
+    elif isinstance(obs, (list, Number)):
         return torch.tensor(obs, device=device).float()
     else:
         raise Exception(f"Unrecognized type of observation {type(obs)}")
@@ -534,12 +534,22 @@ def get_vect_dim(observation: NumpyObsType, observation_space: spaces.Space) -> 
     elif isinstance(observation_space, spaces.Tuple):
         return get_vect_dim(observation[0], observation_space[0])
     elif isinstance(observation_space, spaces.MultiBinary):
+        observation = (
+            observation
+            if isinstance(observation, np.ndarray)
+            else np.array(observation)
+        )
         return (
             observation.shape[0]
             if len(observation.shape) > observation_space.shape
             else 1
         )
     else:
+        observation = (
+            observation
+            if isinstance(observation, np.ndarray)
+            else np.array(observation)
+        )
         array_shape = observation.shape
         return array_shape[0] if len(array_shape) > len(observation_space.shape) else 1
 

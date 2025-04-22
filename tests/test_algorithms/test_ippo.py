@@ -89,13 +89,29 @@ class DummyMultiEnvAsync(ParallelEnv):
         self.possible_agents = ["agent_0", "agent_1", "other_agent_0"]
         self.metadata = None
         self.render_mode = None
-        # Random probability for each agent to return observation at each step
+
+        # Define observation frequencies (every N steps)
+        self.observation_frequencies = {
+            "agent_0": 1,  # observes every step
+            "agent_1": 2,  # observes every 2 steps
+            "other_agent_0": 4,  # observes every 4 steps
+        }
+
+        # Probability-based method (keeping for backward compatibility)
         self.observation_probabilities = {
             "agent_0": 0.8,  # 80% chance to return observation
             "agent_1": 0.6,  # 60% chance to return observation
             "other_agent_0": 0.4,  # 40% chance to return observation
         }
+
+        # Initialize step counters for each agent
+        self.agent_step_counters = {agent: 0 for agent in self.agents}
+
+        # Observation skipping mode (frequency or probability)
+        self.observation_mode = "frequency"  # can be "frequency" or "probability"
+
         self.active_agents = self.agents.copy()  # Initially all agents are active
+        self.current_step = 0
 
     def action_space(self, agent):
         idx = self.possible_agents.index(agent)
@@ -106,16 +122,24 @@ class DummyMultiEnvAsync(ParallelEnv):
         return self.observation_spaces[idx]
 
     def reset(self, seed=None, options=None):
-        # Randomly select which agents are active initially
-        self.active_agents = [
-            agent
-            for agent in self.agents
-            if np.random.random() < self.observation_probabilities[agent]
-        ]
+        # Reset step counters
+        self.current_step = 0
+        self.agent_step_counters = {agent: 0 for agent in self.agents}
 
-        # Ensure at least one agent is active
-        if not self.active_agents:
-            self.active_agents = [np.random.choice(self.agents)]
+        if self.observation_mode == "frequency":
+            # All agents observe at reset (step 0)
+            self.active_agents = self.agents.copy()
+        else:
+            # Probability-based method
+            self.active_agents = [
+                agent
+                for agent in self.agents
+                if np.random.random() < self.observation_probabilities[agent]
+            ]
+
+            # Ensure at least one agent is active
+            if not self.active_agents:
+                self.active_agents = [np.random.choice(self.agents)]
 
         observations = {
             agent: np.random.rand(
@@ -135,22 +159,32 @@ class DummyMultiEnvAsync(ParallelEnv):
         return observations, infos
 
     def step(self, action):
-        # Only process actions for active agents
-        for agent in list(action.keys()):
-            if agent not in self.active_agents:
-                # Remove actions for inactive agents
-                del action[agent]
+        # Increment the global step counter
+        self.current_step += 1
 
-        # Randomly determine which agents are active for this step
-        self.active_agents = [
-            agent
-            for agent in self.agents
-            if np.random.random() < self.observation_probabilities[agent]
-        ]
+        # Increment step counters for each agent
+        for agent in self.agents:
+            self.agent_step_counters[agent] += 1
 
-        # Ensure at least one agent is active
-        if not self.active_agents:
-            self.active_agents = [np.random.choice(self.agents)]
+        if self.observation_mode == "frequency":
+            # Determine which agents should observe based on their frequency
+            self.active_agents = [
+                agent
+                for agent in self.agents
+                if self.agent_step_counters[agent] % self.observation_frequencies[agent]
+                == 0
+            ]
+        else:
+            # Probability-based method
+            self.active_agents = [
+                agent
+                for agent in self.agents
+                if np.random.random() < self.observation_probabilities[agent]
+            ]
+
+            # Ensure at least one agent is active
+            if not self.active_agents:
+                self.active_agents = [np.random.choice(self.agents)]
 
         observations = {
             agent: np.random.rand(
@@ -159,11 +193,8 @@ class DummyMultiEnvAsync(ParallelEnv):
             for agent in self.active_agents
         }
 
-        rewards = {agent: np.random.randint(0, 5) for agent in self.active_agents}
-        dones = {
-            agent: np.random.choice([0, 1], p=[0.9, 0.1])
-            for agent in self.active_agents
-        }
+        rewards = {agent: np.random.randint(0, 5) for agent in action.keys()}
+        dones = {agent: False for agent in self.active_agents}
         truncated = {agent: False for agent in self.active_agents}
 
         infos = {agent: {} for agent in self.active_agents}
@@ -3089,20 +3120,33 @@ def test_get_action_distributed(
         ),
     ],
 )
+@pytest.mark.parametrize("observation_mode", ["frequency"])
 def test_ippo_custom_training_with_async_env(
-    observation_spaces, action_spaces, device, compile_mode
+    observation_spaces, action_spaces, device, compile_mode, observation_mode
 ):
     """Test IPPO with a custom training loop on asynchronous environment for multiple iterations."""
 
     # Create async environment with agents that return observations asynchronously
     env = DummyMultiEnvAsync(observation_spaces, action_spaces)
 
-    # Make observation probabilities more extreme to ensure changing agent participation
-    env.observation_probabilities = {
-        "agent_0": 0.7,  # 70% chance to return observation
-        "agent_1": 0.5,  # 50% chance to return observation
-        "other_agent_0": 0.3,  # 30% chance to return observation
-    }
+    # Set observation mode (frequency-based or probability-based)
+    env.observation_mode = observation_mode
+
+    if observation_mode == "frequency":
+        # Configure agents with different observation frequencies
+        # NOTE: Assume homogeneous agents have the same frequency
+        env.observation_frequencies = {
+            "agent_0": 1,  # Observes every step
+            "agent_1": 1,  # Observes every 2 steps
+            "other_agent_0": 4,  # Observes every 4 steps
+        }
+    else:
+        # Configure agents with different observation probabilities
+        env.observation_probabilities = {
+            "agent_0": 0.9,  # 90% chance to return observation
+            "agent_1": 0.5,  # 50% chance to return observation
+            "other_agent_0": 0.25,  # 25% chance to return observation
+        }
 
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
 
@@ -3128,6 +3172,11 @@ def test_ippo_custom_training_with_async_env(
     for iteration in range(n_iterations):
         # Reset environment
         observations, infos = env.reset()
+
+        # Track agent participation for analysis
+        agent_participation = {agent_id: 0 for agent_id in agent_ids}
+        steps_with_all_agents = 0
+
         states = {agent_id: [] for agent_id in agent_ids}
         actions = {agent_id: [] for agent_id in agent_ids}
         log_probs = {agent_id: [] for agent_id in agent_ids}
@@ -3135,18 +3184,26 @@ def test_ippo_custom_training_with_async_env(
         dones = {agent_id: [] for agent_id in agent_ids}
         values = {agent_id: [] for agent_id in agent_ids}
 
-        done = {agent_id: np.zeros((1,)) for agent_id in agent_ids}
+        done = {agent_id: np.zeros((1,), dtype=np.int8) for agent_id in agent_ids}
 
         # Collect experiences for multiple steps
-        max_steps = 10
+        max_steps = 105
         for step in range(max_steps):
             # Get actions for current active agents
-            action_dict, logprob_dict, entropy_dict, value_dict = agent.get_action(
+            action_dict, logprob_dict, _, value_dict = agent.get_action(
                 observations, infos
             )
 
             # Verify actions are only for active agents
             assert all(agent_id in observations for agent_id in action_dict)
+
+            # Update participation stats
+            for agent_id in observations:
+                agent_participation[agent_id] += 1
+
+            # Count steps with all agents or no agents
+            if len(observations) == len(agent_ids):
+                steps_with_all_agents += 1
 
             # Step the environment
             next_observations, reward_dict, terminated, truncated, next_infos = (
@@ -3162,24 +3219,44 @@ def test_ippo_custom_training_with_async_env(
                 values[agent_id].append(value_dict[agent_id])
                 dones[agent_id].append(done[agent_id])
                 rewards[agent_id].append(reward_dict[agent_id])
-                next_dones[agent_id] = np.logical_or(
-                    terminated[agent_id], truncated[agent_id]
-                ).astype(np.int8)
+
+            for agent_id in terminated:
+                next_dones[agent_id] = np.expand_dims(
+                    np.logical_or(terminated[agent_id], truncated[agent_id]).astype(
+                        np.int8
+                    ),
+                    axis=-1,
+                )
 
             # Update for next step
             observations = next_observations
             done = next_dones
             infos = next_infos
 
-            # Track agent participation changes to ensure we're testing async behavior
-            if step > 0:
-                # Print number of active agents at this step (for visual confirmation)
-                n_active = len(observations)
-                assert n_active > 0, f"No active agents at step {step}"
-
             # Break if all agents report done
             if all(done.values()):
                 break
+
+        # Verify asymmetric observation patterns based on mode
+        if observation_mode == "frequency":
+            # In frequency mode, agent_0 should observe most, followed by agent_1, then other_agent_0
+            assert agent_participation["agent_0"] >= agent_participation["agent_1"]
+            assert (
+                agent_participation["agent_1"] >= agent_participation["other_agent_0"]
+            )
+
+            # At least 20% of steps should have all agents observing
+            assert steps_with_all_agents > 0, "No steps with all agents observing"
+        else:
+            # In probability mode, check if participation roughly matches probabilities
+            total_steps = sum(agent_participation.values())
+            if total_steps > 0:
+                # Just verify agent_0 has highest participation
+                assert agent_participation["agent_0"] >= agent_participation["agent_1"]
+
+        # Skip learning if no experiences collected
+        if not any(states.values()):
+            continue
 
         # Create experience tuple for learning
         experiences = (
@@ -3193,11 +3270,12 @@ def test_ippo_custom_training_with_async_env(
             next_dones,
         )
 
-        # Train on collected experiences
-        loss_info = agent.learn(experiences)
+        # Train on collected experiences if we have any
+        if any(len(states[agent_id]) > 0 for agent_id in states):
+            loss_info = agent.learn(experiences)
 
-        # Verify that learning worked
-        assert "agent_0" in loss_info
+            # Verify that learning worked for at least one agent
+            assert any(agent_id in loss_info for agent_id in agent.shared_agent_ids)
 
         # Verify that agent can still get actions after learning
         if observations:

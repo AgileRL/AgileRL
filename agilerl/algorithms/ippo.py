@@ -127,6 +127,7 @@ class IPPO(MultiAgentRLAlgorithm):
         update_epochs: int = 4,
         actor_networks: Optional[list[EvolvableModule]] = None,
         critic_networks: Optional[list[EvolvableModule]] = None,
+        action_batch_size: Optional[int] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         torch_compiler: Optional[str] = None,
@@ -227,6 +228,7 @@ class IPPO(MultiAgentRLAlgorithm):
         self.max_grad_norm = max_grad_norm
         self.target_kl = target_kl
         self.update_epochs = update_epochs
+        self.action_batch_size = action_batch_size
 
         if actor_networks is not None and critic_networks is not None:
             assert (
@@ -442,28 +444,66 @@ class IPPO(MultiAgentRLAlgorithm):
         for agent_id in unique_agents_ids:
             homogenous_agents[self.get_homo_id(agent_id)].append(agent_id)
 
+        # Preprocess observations
         preprocessed = self.preprocess_observation(obs, list(homogenous_agents.keys()))
-        shared_agent_ids = list(preprocessed.keys())
-        preprocessed_states = list(preprocessed.values())
+
+        # Set all models to eval mode once before processing
+        for actor in self.actors:
+            actor.eval()
+        for critic in self.critics:
+            critic.eval()
 
         action_dict = {}
         action_logprob_dict = {}
         dist_entropy_dict = {}
         state_values_dict = {}
-        for idx, (shared_id, obs, action_mask, actor, critic) in enumerate(
-            zip(
-                shared_agent_ids,
-                preprocessed_states,
-                action_masks.values(),
-                self.actors,
-                self.critics,
-            )
-        ):
-            actor.eval()
-            critic.eval()
-            with torch.no_grad():
-                action, log_prob, entropy = actor(obs, action_mask=action_mask)
-                state_values = critic(obs).squeeze(-1)
+
+        batch_size = self.action_batch_size
+        for shared_id, obs in preprocessed.items():
+            agent_idx = self.shared_agent_ids.index(shared_id)
+            actor = self.actors[agent_idx]
+            critic = self.critics[agent_idx]
+            action_mask = action_masks[shared_id]
+
+            # Process in batches
+            if batch_size is not None and obs.shape[0] > batch_size:
+                actions = []
+                log_probs = []
+                entropies = []
+                values = []
+
+                num_batches = int(np.ceil(obs.shape[0] / batch_size))
+                for batch_idx in range(num_batches):
+                    start_idx = batch_idx * batch_size
+                    end_idx = min((batch_idx + 1) * batch_size, obs.shape[0])
+
+                    minibatch_indices = np.arange(start_idx, end_idx)
+                    batch_obs = get_experiences_samples(minibatch_indices, obs)[0]
+                    batch_mask = None
+                    if action_mask is not None:
+                        batch_mask = action_mask[minibatch_indices]
+
+                    with torch.no_grad():
+                        batch_action, batch_log_prob, batch_entropy = actor(
+                            batch_obs, action_mask=batch_mask
+                        )
+                        batch_state_values = critic(batch_obs).squeeze(-1)
+
+                    actions.append(batch_action)
+                    log_probs.append(batch_log_prob)
+                    entropies.append(batch_entropy)
+                    values.append(batch_state_values)
+
+                # Concatenate results
+                action = torch.cat(actions)
+                log_prob = torch.cat(log_probs)
+                entropy = torch.cat(entropies)
+                state_values = torch.cat(values)
+            else:
+                # Process all observations at once (original behavior)
+                with torch.no_grad():
+                    action, log_prob, entropy = actor(obs, action_mask=action_mask)
+                    state_values = critic(obs).squeeze(-1)
 
             # Clip to action space during inference
             agent_id = self.homogeneous_agents[shared_id][0]
@@ -516,7 +556,6 @@ class IPPO(MultiAgentRLAlgorithm):
         shared = {homo_id: {} for homo_id in self.shared_agent_ids}
         for agent_id, inp in experience.items():
             homo_id = self.get_homo_id(agent_id)
-
             shared[homo_id][agent_id] = (
                 stack_experiences(inp, to_torch=False)[0] if len(inp) > 0 else None
             )
@@ -540,52 +579,25 @@ class IPPO(MultiAgentRLAlgorithm):
         )
 
         loss_dict = {}
+        for shared_id, state in states.items():
+            agent_idx = self.shared_agent_ids.index(shared_id)
+            actor = self.actors[agent_idx]
+            critic = self.critics[agent_idx]
+            actor_optimizer = self.actor_optimizers[agent_idx]
+            critic_optimizer = self.critic_optimizers[agent_idx]
+            obs_space = self.unique_observation_spaces[shared_id]
+            action_space = self.unique_action_spaces[shared_id]
 
-        for idx, (
-            agent_id,
-            state,
-            action,
-            log_prob,
-            reward,
-            done,
-            value,
-            next_state,
-            next_done,
-            actor,
-            critic,
-            actor_optimizer,
-            critic_optimizer,
-            obs_space,
-            action_space,
-        ) in enumerate(
-            zip(
-                self.shared_agent_ids,
-                states.values(),
-                actions.values(),
-                log_probs.values(),
-                rewards.values(),
-                dones.values(),
-                values.values(),
-                next_states.values(),
-                next_dones.values(),
-                self.actors,
-                self.critics,
-                self.actor_optimizers,
-                self.critic_optimizers,
-                self.unique_observation_spaces.values(),
-                self.unique_action_spaces.values(),
-            )
-        ):
-            loss_dict[f"{agent_id}"] = self._learn_individual(
+            loss_dict[f"{shared_id}"] = self._learn_individual(
                 experiences=(
                     state,
-                    action,
-                    log_prob,
-                    reward,
-                    done,
-                    value,
-                    next_state,
-                    next_done,
+                    actions[shared_id],
+                    log_probs[shared_id],
+                    rewards[shared_id],
+                    dones[shared_id],
+                    values[shared_id],
+                    next_states[shared_id],
+                    next_dones[shared_id],
                 ),
                 actor=actor,
                 critic=critic,
@@ -610,7 +622,8 @@ class IPPO(MultiAgentRLAlgorithm):
         """Inner call to each agent for the learning/algo training steps,
         essentially the PPO learn method. Applies all forward/backward props.
 
-        :param experience: States, actions, log_probs, rewards, dones, values, next_state, next_done in that order, organised by shared agent id
+        :param experience: States, actions, log_probs, rewards, dones, values, next_state, next_done in
+            that order, organised by shared agent id
         :type experience: Tuple[Union[numpy.ndarray, Dict[str, numpy.ndarray]], ...]
         :param actor: Actor network
         :type actor: EvolvableModule
@@ -628,6 +641,21 @@ class IPPO(MultiAgentRLAlgorithm):
         (states, actions, log_probs, rewards, dones, values, next_state, next_done) = (
             experiences
         )
+
+        # Handle case where we haven't collected a next state for this set
+        # of homogeneous agents yet.
+        if not next_state:
+            next_state = {agent_id: state[-1] for agent_id, state in states.items()}
+            next_done = {agent_id: done[-1] for agent_id, done in dones.items()}
+            states = {agent_id: state[:-1] for agent_id, state in states.items()}
+            actions = {agent_id: action[:-1] for agent_id, action in actions.items()}
+            log_probs = {
+                agent_id: log_prob[:-1] for agent_id, log_prob in log_probs.items()
+            }
+            dones = {agent_id: done[:-1] for agent_id, done in dones.items()}
+            values = {agent_id: value[:-1] for agent_id, value in values.items()}
+            rewards = {agent_id: reward[:-1] for agent_id, reward in rewards.items()}
+
         log_probs, rewards, dones, values = map(
             vectorize_experiences_by_agent, (log_probs, rewards, dones, values)
         )
@@ -636,14 +664,7 @@ class IPPO(MultiAgentRLAlgorithm):
         dones = dones.squeeze()
         values = values.squeeze()
         next_state = vectorize_experiences_by_agent(next_state, dim=0)
-        next_done = vectorize_experiences_by_agent(next_done)
-
-        print("Rewards: ", rewards.shape)
-        print("Dones: ", dones.shape)
-        print("Values: ", values.shape)
-        print("Log probs: ", log_probs.shape)
-        print("Next state: ", next_state.shape)
-        print("Next done: ", next_done.shape)
+        next_done = vectorize_experiences_by_agent(next_done, dim=0)
 
         # Bootstrapping returns using GAE advantage estimation
         dones = dones.long()
@@ -797,6 +818,7 @@ class IPPO(MultiAgentRLAlgorithm):
         max_steps: Optional[int] = None,
         loop: int = 3,
         sum_scores: bool = True,
+        batch_size: Optional[int] = None,
     ) -> float:
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
@@ -810,6 +832,8 @@ class IPPO(MultiAgentRLAlgorithm):
         :type loop: int, optional
         :param sum_scores: Boolean flag to indicate whether to sum sub-agent scores, defaults to True
         :type sum_scores: book, optional
+        :param batch_size: Batch size for processing observations, helps reduce memory overhead with many agents
+        :type batch_size: int, optional
         :return: Mean test score
         :rtype: float
         """
@@ -865,9 +889,11 @@ class IPPO(MultiAgentRLAlgorithm):
                         else np.array(list(reward.values())).transpose()
                     )
                     scores += score_increment
-                    dones = {
-                        agent: term[agent] | trunc[agent] for agent in self.agent_ids
-                    }
+
+                    dones = {}
+                    for agent in term:
+                        dones[agent] = term[agent] | trunc[agent]
+
                     if not is_vectorised:
                         dones = {
                             agent: np.array([done]) for agent, done in dones.items()
@@ -880,7 +906,9 @@ class IPPO(MultiAgentRLAlgorithm):
                         ) and not finished[idx]:
                             completed_episode_scores[idx] = scores[idx]
                             finished[idx] = 1
+
                 rewards.append(np.mean(completed_episode_scores, axis=0))
+
         mean_fit = np.mean(rewards, axis=0)
         mean_fit = mean_fit[0] if sum_scores else mean_fit
         self.fitness.append(mean_fit)
