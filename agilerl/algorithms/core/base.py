@@ -1,8 +1,9 @@
 import copy
+import gc
 import glob
 import inspect
+import logging
 import os
-import gc
 import warnings
 from abc import ABC, ABCMeta, abstractmethod
 from importlib.metadata import version
@@ -20,12 +21,12 @@ from typing import (
 )
 
 import deepspeed
-from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
 import dill
 import numpy as np
 import torch
 from accelerate import Accelerator
 from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
+from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
 from gymnasium import spaces
 from numpy.typing import ArrayLike
 from tensordict import TensorDict
@@ -66,7 +67,6 @@ from agilerl.utils.algo_utils import (
     preprocess_observation,
     recursive_check_module_attrs,
     remove_compile_prefix,
-    remove_nested_files,
 )
 from agilerl.utils.evolvable_networks import is_image_space
 
@@ -77,8 +77,6 @@ SelfRLAlgorithm = TypeVar("SelfRLAlgorithm", bound="RLAlgorithm")
 SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound="AgentWrapper")
 MARLObservationType = Dict[str, ObservationType]
 
-
-import logging
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -1608,6 +1606,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     load_optimizer_states=True,
                     load_lr_scheduler_states=True,
                 )
+                if load_path is None:
+                    raise ValueError(
+                        f"Deepspeed failed to resume from checkpoint {path}"
+                    )
 
             except Exception as e:
                 raise ValueError(
@@ -1648,13 +1650,155 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 self.actor, self.optimizer.optimizer, self.lr_scheduler
             )
             deepspeed_plugin = self.accelerator.state.deepspeed_plugin
-            config_kwargs = copy.deepcopy(deepspeed_plugin.deepspeed_config)["zero_optimization"]
-            self.reference_actor = deepspeed.init_inference(self.reference_actor,
-                                     tensor_parallel={"tp_size": self.accelerator.num_processes},
-                                     dtype=torch.bfloat16,
-                                     checkpoint=None,
-                                     replace_with_kernel_inject=True,
-                                     zero=DeepSpeedZeroConfig(**config_kwargs))
+            config_kwargs = copy.deepcopy(deepspeed_plugin.deepspeed_config)[
+                "zero_optimization"
+            ]
+            self.reference_actor = deepspeed.init_inference(
+                self.reference_actor,
+                tensor_parallel={"tp_size": self.accelerator.num_processes},
+                dtype=torch.bfloat16,
+                checkpoint=None,
+                replace_with_kernel_inject=True,
+                zero=DeepSpeedZeroConfig(**config_kwargs),
+            )
+
+    # def _clone(self, index: Optional[int] = None, wrap: bool = True):
+    #     """Creates a clone of the algorithm.
+
+    #     :param index: The index of the clone, defaults to None
+    #     :type index: Optional[int], optional
+    #     :param wrap: If True, wrap the models in the clone with the accelerator, defaults to False
+    #     :type wrap: bool, optional
+
+    #     :return: A clone of the algorithm
+    #     :rtype: EvolvableAlgorithm
+    #     """
+    #     logger.debug(
+    #         f"========= INITIATE CLONING | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__}========="
+    #     )
+
+    #     if self.zero_stage >= 2:
+    #         self.accelerator.wait_for_everyone()
+    #         self._save_distributed_actor(f"temporary_checkpoint/agent_{self.index}")
+    #         self.accelerator.wait_for_everyone()
+
+    #     logger.debug(
+    #         f"========= INSPECT ATTRIBUTES | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} ========="
+    #     )
+    #     input_args = EvolvableAlgorithm.inspect_attributes(self, input_args_only=True)
+    #     input_args["clone"] = True
+
+    #     # extract base model and peft config
+    #     logger.debug(
+    #         f"========= UNWRAP MODEL | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} ========="
+    #     )
+    #     actor = (
+    #         self.accelerator.unwrap_model(self.actor)
+    #         if self.accelerator is not None
+    #         else self.actor
+    #     )
+    #     logger.debug(
+    #         f"========= CALLING CLONE LLM | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} ========="
+    #     )
+    #     cloned_actor = clone_llm(actor, load_state_dict=(self.zero_stage != 3))
+    #     logger.debug(
+    #         f"========= CLONE LLM COMPLETED | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} ========="
+    #     )
+    #     actor = None # De-reference the actor
+    #     input_args["actor_network"] = cloned_actor
+    #     input_args["accelerator"] = (
+    #         Accelerator() if self.accelerator is not None else None
+    #     )
+
+    #     logger.debug(
+    #         f"========= CREATE CLONE | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} ========="
+    #     )
+    #     clone = type(self)(**input_args)
+    #     logger.debug(
+    #         f"========= CLONE CREATED | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} ========="
+    #     )
+
+    #     logger.debug(
+    #         f"========= LOADING REFERENCE ACTOR | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} ========="
+    #     )
+    #     clone.reference_actor.load_state_dict(
+    #         clone_tensors_for_torch_save(self.reference_actor.state_dict())
+    #     )
+    #     logger.debug(
+    #         f"========= REFERENCE ACTOR LOADED | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} ========="
+    #     )
+
+    #     clone.reference_actor.eval()
+    #     clone.mutation_hook()
+
+    #     # Clone attributes
+    #     logger.debug(
+    #         f"========= CLONING ATTRIBUTES | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} ========="
+    #     )
+    #     accelerator = clone.accelerator
+    #     lr_scheduler = clone.lr_scheduler
+    #     cloned_lr_scheduler = clone.lr_scheduler
+    #     original_lr_scheduler = self.lr_scheduler
+    #     clone.lr_scheduler = None
+    #     self.lr_scheduler = None
+    #     clone = EvolvableAlgorithm.copy_attributes(self, clone)
+    #     clone.accelerator = accelerator
+    #     clone.lr_scheduler = lr_scheduler
+    #     clone.lr_scheduler = cloned_lr_scheduler
+    #     self.lr_scheduler = original_lr_scheduler
+    #     logger.debug(
+    #         f"========= CLONING ATTRIBUTES COMPLETED | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} ========="
+    #     )
+
+    #     if self.accelerator is None:
+    #         clone.optimizer.optimizer.load_state_dict(
+    #             self.optimizer.optimizer.state_dict()
+    #         )
+    #         if self.lr_scheduler is not None:
+    #             clone.lr_scheduler.load_state_dict(self.lr_scheduler.state_dict())
+
+    #     # Set the index
+    #     if index is not None:
+    #         clone.index = index
+
+    #     if self.zero_stage >= 3:
+    #         clone.accelerator.wait_for_everyone()
+    #         clone._load_distributed_actor(f"temporary_checkpoint/agent_{self.index}")
+    #         clone.accelerator.wait_for_everyone()
+    #         saved_state_files = glob.glob(f"temporary_checkpoint/agent_{self.index}/*")
+    #         clone.accelerator.wait_for_everyone()
+    #         if self.accelerator.is_main_process:
+    #             remove_nested_files(saved_state_files)
+    #     else:
+    #         if self.accelerator is not None:
+    #             self.accelerator.wait_for_everyone()
+    #     logger.debug(
+    #         f"========= CLONE METHOD COMPLETED | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} ========="
+    #     )
+    #     return clone
+
+    def clean_up(self) -> None:
+        """Clean up the algorithm."""
+        logger.debug(
+            f"========= CLEANING UP | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clean_up.__name__} ========="
+        )
+        if self.accelerator is not None:
+            logger.debug(
+                f"========= ENTERING CLEANUP IF STATEMENT | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clean_up.__name__} ========="
+            )
+            # self.accelerator.wait_for_everyone()
+            self.actor, self.reference_actor, self.optimizer, self.lr_scheduler = (
+                self.accelerator.free_memory(
+                    self.actor, self.reference_actor, self.optimizer, self.lr_scheduler
+                )
+            )
+        self.accelerator.wait_for_everyone()
+        # self.accelerator = None
+        gc.collect()
+        torch.cuda.empty_cache()
+        logger.debug(
+            f"========= CLEANING UP COMPLETED | Agent index {self.index} | Method {self.clean_up.__name__} ========="
+        )
 
     def clone(self, index: Optional[int] = None, wrap: bool = True):
         """Creates a clone of the algorithm.
@@ -1667,126 +1811,80 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: A clone of the algorithm
         :rtype: EvolvableAlgorithm
         """
-        logger.debug(
-            f"========= INITIATE CLONING | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__}========="
-        )
-        if self.zero_stage == 3:
-            self.accelerator.wait_for_everyone()
-            self._save_distributed_actor(f"temporary_checkpoint/agent_{self.index}")
-            self.accelerator.wait_for_everyone()
+        import tempfile
 
-        logger.debug(
-            f"========= INSPECT ATTRIBUTES | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} ========="
-        )
-        input_args = EvolvableAlgorithm.inspect_attributes(self, input_args_only=True)
-        input_args["clone"] = True
-
-        # extract base model and peft config
-        logger.debug(
-            f"========= UNWRAP MODEL | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} ========="
-        )
-        actor = (
-            self.accelerator.unwrap_model(self.actor)
-            if self.accelerator is not None
-            else self.actor
-        )
-        logger.debug(
-            f"========= CALLING CLONE LLM | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} ========="
-        )
-        cloned_actor = clone_llm(actor, load_state_dict=(self.zero_stage != 3))
-        logger.debug(
-            f"========= CLONE LLM COMPLETED | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} ========="
-        )
-        actor = None # De-reference the actor
-        input_args["actor_network"] = cloned_actor
-        input_args["accelerator"] = (
-            Accelerator() if self.accelerator is not None else None
-        )
-
-        logger.debug(
-            f"========= CREATE CLONE | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} ========="
-        )
-        clone = type(self)(**input_args)
-        logger.debug(
-            f"========= CLONE CREATED | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} ========="
-        )
-
-        logger.debug(
-            f"========= LOADING REFERENCE ACTOR | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} ========="
-        )
-        clone.reference_actor.load_state_dict(
-            clone_tensors_for_torch_save(self.reference_actor.state_dict())
-        )
-        logger.debug(
-            f"========= REFERENCE ACTOR LOADED | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} ========="
-        )
-
-        clone.reference_actor.eval()
-        clone.mutation_hook()
-
-        # Clone attributes
-        logger.debug(
-            f"========= CLONING ATTRIBUTES | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} ========="
-        )
-        accelerator = clone.accelerator
-        lr_scheduler = clone.lr_scheduler
-        cloned_lr_scheduler = clone.lr_scheduler
-        original_lr_scheduler = self.lr_scheduler
-        clone.lr_scheduler = None
-        self.lr_scheduler = None
-        clone = EvolvableAlgorithm.copy_attributes(self, clone)
-        clone.accelerator = accelerator
-        clone.lr_scheduler = lr_scheduler
-        clone.lr_scheduler = cloned_lr_scheduler
-        self.lr_scheduler = original_lr_scheduler
-        logger.debug(
-            f"========= CLONING ATTRIBUTES COMPLETED | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} ========="
-        )
-
-        if self.accelerator is None:
-            clone.optimizer.optimizer.load_state_dict(
-                self.optimizer.optimizer.state_dict()
-            )
-            if self.lr_scheduler is not None:
-                clone.lr_scheduler.load_state_dict(self.lr_scheduler.state_dict())
-
-        # Set the index
-        if index is not None:
-            clone.index = index
-
-        if self.zero_stage == 3:
-            clone.accelerator.wait_for_everyone()
-            clone._load_distributed_actor(f"temporary_checkpoint/agent_{self.index}")
-            clone.accelerator.wait_for_everyone()
-            saved_state_files = glob.glob(f"temporary_checkpoint/agent_{self.index}/*")
-            clone.accelerator.wait_for_everyone()
-            if self.accelerator.is_main_process:
-                remove_nested_files(saved_state_files)
-        else:
-            if self.accelerator is not None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            if self.zero_stage >= 2:
                 self.accelerator.wait_for_everyone()
-        logger.debug(
-            f"========= CLONE METHOD COMPLETED | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} ========="
-        )
-        return clone
+                self._save_distributed_actor(f"{temp_dir}/agent_{self.index}")
+                self.accelerator.wait_for_everyone()
 
-    def clean_up(self) -> None:
-        """Clean up the algorithm."""
-        logger.debug(
-            f"========= CLEANING UP | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clean_up.__name__} ========="
-        )
-        if self.accelerator is not None:
+            input_args = EvolvableAlgorithm.inspect_attributes(
+                self, input_args_only=True
+            )
+            input_args["clone"] = True
+
+            # extract base model and peft config
+            actor = (
+                self.accelerator.unwrap_model(self.actor)
+                if self.accelerator is not None
+                else self.actor
+            )
+
+            cloned_actor = clone_llm(actor, load_state_dict=(self.zero_stage < 2))
+            print("Cloned actor device: ", cloned_actor.device)
+            assert cloned_actor.device == torch.device("cpu")
+
+            actor = None  # De-reference the actor
+            input_args["actor_network"] = cloned_actor
+            input_args["accelerator"] = (
+                Accelerator() if self.accelerator is not None else None
+            )
+
+            clone = type(self)(**input_args)
             logger.debug(
-                f"========= ENTERING CLEANUP IF STATEMENT | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clean_up.__name__} ========="
+                f"========= CLONE CREATED | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} ========="
             )
-            # self.accelerator.wait_for_everyone()
-            self.actor, self.reference_actor, self.optimizer, self.lr_scheduler = self.accelerator.free_memory(
-                self.actor, self.reference_actor, self.optimizer, self.lr_scheduler
+
+            # Maybe this needs to change -> should really init deepspeed engine after state dict is loaded
+            clone.reference_actor.load_state_dict(
+                clone_tensors_for_torch_save(self.reference_actor.state_dict())
             )
-        self.accelerator.wait_for_everyone()
-            # self.accelerator = None 
-        gc.collect()
-        torch.cuda.empty_cache()
-        logger.debug(
-            f"========= CLEANING UP COMPLETED | Agent index {self.index} | Method {self.clean_up.__name__} ========="
-        )
+
+            print("Taking a look at the reference actor: ", clone.reference_actor)
+
+            clone.reference_actor.eval()
+            clone.mutation_hook()
+
+            # Clone attributes
+            accelerator = clone.accelerator
+            lr_scheduler = clone.lr_scheduler
+            cloned_lr_scheduler = clone.lr_scheduler
+            original_lr_scheduler = self.lr_scheduler
+            clone.lr_scheduler = None
+            self.lr_scheduler = None
+            clone = EvolvableAlgorithm.copy_attributes(self, clone)
+            clone.accelerator = accelerator
+            clone.lr_scheduler = lr_scheduler
+            clone.lr_scheduler = cloned_lr_scheduler
+            self.lr_scheduler = original_lr_scheduler
+
+            if self.accelerator is None:
+                clone.optimizer.optimizer.load_state_dict(
+                    self.optimizer.optimizer.state_dict()
+                )
+                if self.lr_scheduler is not None:
+                    clone.lr_scheduler.load_state_dict(self.lr_scheduler.state_dict())
+
+            # Set the index
+            if index is not None:
+                clone.index = index
+
+            if self.zero_stage >= 2:
+                clone.accelerator.wait_for_everyone()
+                clone._load_distributed_actor(f"{temp_dir}/agent_{self.index}")
+                clone.accelerator.wait_for_everyone()
+            else:
+                if self.accelerator is not None:
+                    self.accelerator.wait_for_everyone()
+        return clone
