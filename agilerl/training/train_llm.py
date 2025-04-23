@@ -248,7 +248,7 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {gra
                     tournament=tournament,
                     mutation=mutation,
                     env_name=env.name,
-                    accelerator=None,  # Set as None for LLM finetuning as it does not require the same accelerator handling as standard RL models
+                    accelerator=accelerator,  # Set as None for LLM finetuning as it does not require the same accelerator handling as standard RL models
                     language_model=True,
                     elite_path=elite_path,
                     save_elite=save_elite,

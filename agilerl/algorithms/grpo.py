@@ -311,7 +311,6 @@ class GRPO(LLMAlgorithm):
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
         reward_tensor = torch.cat(rewards)
-        reward_tensor = torch.randn(0, 2)
         return reward_tensor
 
     def _initialize_actors(

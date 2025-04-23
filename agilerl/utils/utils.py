@@ -9,6 +9,7 @@ import numpy as np
 import torch
 import wandb
 from accelerate import Accelerator
+from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
@@ -26,7 +27,7 @@ from agilerl.algorithms import (
     NeuralUCB,
     RainbowDQN,
 )
-from agilerl.algorithms.core import EvolvableAlgorithm
+from agilerl.algorithms.core import EvolvableAlgorithm, LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -645,52 +646,53 @@ def tournament_selection_and_mutation(
     if algo is None:
         algo = population[0].__class__.__name__
 
-    # Save temporary models for accelerator processes
-    if accelerator is not None:
-        accel_temp_models_path = f"models/{env_name}"
-        if accelerator.is_main_process:
-            if not os.path.exists(accel_temp_models_path):
-                os.makedirs(accel_temp_models_path)
+    if language_model:
+        elite, population = tournament.select(population)
+        if accelerator is None or (accelerator is not None and accelerator.is_main_process):
+            population = mutation.mutation(population)
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+            consolidate_mutations(population, accelerator)
+            accelerator.wait_for_everyone()
+        if save_elite:
+            save_llm_checkpoint(elite, elite_path)
+    else:
+        if accelerator is not None:
+            # Save temporary models for accelerator processes
+            accel_temp_models_path = f"models/{env_name}"
+            if accelerator.is_main_process:
+                if not os.path.exists(accel_temp_models_path):
+                    os.makedirs(accel_temp_models_path)
+            # Need to unwrap models from acccelerator before selecting and mutating
+            accelerator.wait_for_everyone()
+            for model in population:
+                model.unwrap_models()
 
-    if accelerator is not None:
-        # Need to unwrap models from acccelerator before selecting and mutating
-        accelerator.wait_for_everyone()
-        for model in population:
-            model.unwrap_models()
+            accelerator.wait_for_everyone()
 
-        accelerator.wait_for_everyone()
+            # Perform tournament selection and mutation on main process
+            if accelerator.is_main_process:
+                elite, population = tournament.select(population)
+                population = mutation.mutation(population)
+                for pop_i, model in enumerate(population):
+                    model.save_checkpoint(f"{accel_temp_models_path}/{algo}_{pop_i}.pt")
+            accelerator.wait_for_everyone()
 
-        # Perform tournament selection and mutation on main process
-        if accelerator.is_main_process:
+            # Load models back to accelerator processes
+            if not accelerator.is_main_process:
+                for pop_i, model in enumerate(population):
+                    model.load_checkpoint(f"{accel_temp_models_path}/{algo}_{pop_i}.pt")
+            accelerator.wait_for_everyone()
+
+            # Wrap models back to accelerator
+            for model in population:
+                model.wrap_models()
+        else:
+            # Perform tournament selection and mutation
             elite, population = tournament.select(population)
             population = mutation.mutation(population)
-            for pop_i, model in enumerate(population):
-                model.save_checkpoint(f"{accel_temp_models_path}/{algo}_{pop_i}.pt")
-        accelerator.wait_for_everyone()
 
-        # Load models back to accelerator processes
-        if not accelerator.is_main_process:
-            for pop_i, model in enumerate(population):
-                model.load_checkpoint(f"{accel_temp_models_path}/{algo}_{pop_i}.pt")
-        accelerator.wait_for_everyone()
-
-        # Wrap models back to accelerator
-        for model in population:
-            model.wrap_models()
-    else:
-        logger.debug(f"========= ENTER TOURNAMENT SELECTION AND MUTATION | Process {dist.get_rank()} | Function {tournament_selection_and_mutation.__name__} =========")
-        # Perform tournament selection and mutation
-        elite, population = tournament.select(population)
-        logger.debug(f"========= TOURNAMENT SELECTION COMPLETED | Process {dist.get_rank()} | Function {tournament_selection_and_mutation.__name__} =========")
-
-        logger.debug(f"========= ENTER MUTATION | Process {dist.get_rank()} | Function {tournament_selection_and_mutation.__name__} =========")
-        population = mutation.mutation(population)
-        logger.debug(f"========= MUTATION COMPLETED | Process {dist.get_rank()} | Function {tournament_selection_and_mutation.__name__} =========")
-
-    if save_elite:
-        if language_model:
-            save_llm_checkpoint(elite, elite_path)
-        else:
+        if save_elite:
             elite_save_path = (
                 elite_path.split(".pt")[0]
                 if elite_path is not None
@@ -924,3 +926,22 @@ def save_llm_checkpoint(agent: EvolvableAlgorithm, checkpoint_path: str | None) 
         logger.debug(f"========= CHECKPOINT SAVED | Agent index {agent.index} | Process index {agent.accelerator.process_index} | Method {save_llm_checkpoint.__name__} =========")
     else:
         agent.actor.save_pretrained(path)
+
+
+def consolidate_mutations(population: PopulationType, accelerator: Accelerator) -> None:
+    """Consolidate mutations across processes during LLM fintuning
+
+    :param population: Population of agents
+    :type population: list[EvolvableAlgorithm]
+    """
+    if not isinstance(population[0], LLMAlgorithm):
+        warnings.warn("Consolidate mutations is only supported for LLMAlgorithm.")
+        return
+
+    for agent in population:
+        index, mut, mut_attr = broadcast_object_list([agent.index, agent.mut, getattr(agent, agent.mut) if agent.mut is not None else None], from_process=0)
+        assert index == agent.index
+        agent.mut = mut
+        setattr(agent, mut, mut_attr)
+        if mut == "lr":
+            LLMAlgorithm.update_lr(agent.optimizer, getattr(agent, mut))

@@ -28,6 +28,7 @@ import torch
 from accelerate import Accelerator
 from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
+from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from gymnasium import spaces
 from numpy.typing import ArrayLike
 from tensordict import TensorDict
@@ -1916,3 +1917,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         )
         return clone
 
+    @staticmethod
+    def update_lr(optimizer: DeepSpeedOptimizerWrapper, lr: float) -> None:
+        """Update the learning rate of the optimizer
+
+        :param optimizer: Optimizer
+        :type optimizer: Optimizer
+        """
+        for param_group in optimizer.param_groups:  
+            param_group["lr"] = lr

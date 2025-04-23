@@ -10,8 +10,8 @@ from accelerate import Accelerator
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from numpy.random import Generator
 from torch._dynamo.eval_frame import OptimizedModule
-
-from agilerl.algorithms.core import EvolvableAlgorithm
+import torch.distributed as dist
+from agilerl.algorithms.core import EvolvableAlgorithm, LLMAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.algorithms.neural_ts_bandit import NeuralTS
 from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
@@ -508,8 +508,7 @@ class Mutations:
             # Multiple optimizers in a single attribute (i.e. multi-agent)
             # or one module optimized by a single optimizer
             if isinstance(opt, DeepSpeedOptimizerWrapper):
-                for param_group in opt.param_groups:
-                    param_group["lr"] = individual.lr
+                LLMAlgorithm.update_lr(opt, individual.lr)
             else:
                 if isinstance(optimizer, list) or len(opt.network_names) == 1:
                     opt_nets = getattr(individual, opt.network_names[0])
