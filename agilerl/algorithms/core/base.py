@@ -1445,10 +1445,14 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         :return: Summed rewards dictionary
         :rtype: Dict[str, np.ndarray]
         """
-        summed_rewards = {homo_id: 0 for homo_id in self.shared_agent_ids}
+        reward_shape = list(rewards.values())[0].shape
+        summed_rewards = {
+            agent_id: np.zeros(reward_shape) for agent_id in self.shared_agent_ids
+        }
         for agent_id, reward in rewards.items():
             homo_id = self.get_homo_id(agent_id)
             summed_rewards[homo_id] += reward
+
         return summed_rewards
 
     def assemble_homogeneous_outputs(

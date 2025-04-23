@@ -6,11 +6,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import gymnasium as gym
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from gymnasium import spaces
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import IPPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -241,6 +241,7 @@ def train_multi_agent_on_policy(
                         obs=obs, infos=info
                     )
 
+                    # print("action", {k:v for k,v in action.items() if "government" in k})
                     if not is_vectorised:
                         action = {agent: act[0] for agent, act in action.items()}
                         log_prob = {agent: lp[0] for agent, lp in log_prob.items()}
@@ -271,6 +272,8 @@ def train_multi_agent_on_policy(
                     next_obs, reward, termination, truncation, info = env.step(
                         clipped_action
                     )
+
+                    # print("next obs keys", list(next_obs.keys()))
                     score_increment = (
                         (
                             np.sum(
@@ -334,7 +337,7 @@ def train_multi_agent_on_policy(
                                     for agent_id in agent.agent_ids
                                 }
 
-                    pbar.update(num_envs)
+                    # pbar.update(num_envs)
 
                 experiences = (
                     states,
@@ -358,7 +361,7 @@ def train_multi_agent_on_policy(
                     )
 
             agent.steps[-1] += steps
-            # pbar.update(evo_steps // len(pop))
+            pbar.update(evo_steps // len(pop))
             fps = steps / (time.time() - start_time)
             pop_fps.append(fps)
             pop_episode_scores.append(completed_episode_scores)

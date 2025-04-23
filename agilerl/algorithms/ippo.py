@@ -90,6 +90,9 @@ class IPPO(MultiAgentRLAlgorithm):
     :type actor_networks: list[nn.Module], optional
     :param critic_networks: List of custom critic networks, defaults to None
     :type critic_networks: list[nn.Module], optional
+    :param action_batch_size: Size of batches to use when getting an action for stepping in the environment.
+        Defaults to None, whereby the entire observation is used at once.
+    :type action_batch_size: int, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -416,6 +419,51 @@ class IPPO(MultiAgentRLAlgorithm):
 
         return action_masks, env_defined_actions, agent_masks
 
+    def extract_inactive_agents(
+        self, obs: Dict[str, ObservationType]
+    ) -> Tuple[Dict[str, np.ndarray], Dict[str, ObservationType]]:
+        """Extract inactive agents from observation.
+
+        :param obs: Observation dictionary
+        :type obs: Dict[str, ObservationType]
+
+        :return: Tuple of inactive agents and filtered observations
+        :rtype: Tuple[Dict[str, np.ndarray], Dict[str, ObservationType]]
+        """
+        inactive_agents = {}
+        agents_to_remove = []
+        for agent_id, agent_obs in obs.items():
+            if isinstance(agent_obs, dict):
+                sample = next(iter(agent_obs.values()))
+            elif isinstance(agent_obs, tuple):
+                sample = agent_obs[0]
+            else:
+                sample = agent_obs
+
+            # Extract rows where all values are NaN
+            inactive_agent_indices = np.where(np.isnan(sample).all(axis=1))[0]
+
+            # If agent is active in all environments, don't need to save info
+            if inactive_agent_indices.shape[0] == 0:
+                continue
+
+            filtered_obs: np.ndarray = np.delete(
+                obs[agent_id], inactive_agent_indices, axis=0
+            )
+
+            # Don't need to save info if same agent is inactive in all environments
+            if filtered_obs.shape[0] == 0:
+                agents_to_remove.append(agent_id)
+                continue
+
+            obs[agent_id] = filtered_obs
+            inactive_agents[agent_id] = inactive_agent_indices
+
+        for agent_id in agents_to_remove:
+            obs.pop(agent_id)
+
+        return inactive_agents, obs
+
     def get_action(
         self,
         obs: Dict[str, ObservationType],
@@ -435,8 +483,10 @@ class IPPO(MultiAgentRLAlgorithm):
         ), "AgileRL requires action masks to be defined in the information dictionary."
 
         action_masks, env_defined_actions, agent_masks = self.process_infos(infos)
-
         vect_dim = get_vect_dim(obs, self.observation_space)
+
+        # Need to extract inactive agents from obs
+        inactive_agents, obs = self.extract_inactive_agents(obs)
 
         # Preprocess observations
         unique_agents_ids = list(obs.keys())
@@ -500,7 +550,6 @@ class IPPO(MultiAgentRLAlgorithm):
                 entropy = torch.cat(entropies)
                 state_values = torch.cat(values)
             else:
-                # Process all observations at once (original behavior)
                 with torch.no_grad():
                     action, log_prob, entropy = actor(obs, action_mask=action_mask)
                     state_values = critic(obs).squeeze(-1)
@@ -523,6 +572,18 @@ class IPPO(MultiAgentRLAlgorithm):
         action_dict = self.disassemble_homogeneous_outputs(
             action_dict, vect_dim, homogenous_agents
         )
+
+        # Place NaNs in actions for inactive agents
+        for agent_id, inactive_array in inactive_agents.items():
+            # Handle different action types (integers, floats, etc.)
+            placeholder = (
+                np.array([-999], dtype=action_dict[agent_id].dtype)
+                if np.issubdtype(action_dict[agent_id].dtype, np.integer)
+                else np.nan
+            )
+            action_dict[agent_id] = np.insert(
+                action_dict[agent_id], inactive_array, placeholder, axis=0
+            )
 
         # If using env_defined_actions replace actions
         if env_defined_actions is not None:
@@ -644,6 +705,7 @@ class IPPO(MultiAgentRLAlgorithm):
 
         # Handle case where we haven't collected a next state for this set
         # of homogeneous agents yet.
+        # TODO: Handle resets not being synchronised between homogeneous agents
         if not next_state:
             next_state = {agent_id: state[-1] for agent_id, state in states.items()}
             next_done = {agent_id: done[-1] for agent_id, done in dones.items()}
@@ -818,7 +880,6 @@ class IPPO(MultiAgentRLAlgorithm):
         max_steps: Optional[int] = None,
         loop: int = 3,
         sum_scores: bool = True,
-        batch_size: Optional[int] = None,
     ) -> float:
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 

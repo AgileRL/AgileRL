@@ -314,6 +314,112 @@ class ComplexTupleSpaceTestEnv(ParallelEnv):
         pass
 
 
+class DummyMultiEnvAsync(ParallelEnv):
+    def __init__(self):
+        super().__init__()
+        self.observation_spaces = [
+            spaces.Box(low=0, high=1, shape=(6,)),
+            spaces.Box(low=0, high=1, shape=(6,)),
+            spaces.Box(low=0, high=1, shape=(3,)),
+        ]
+        self.action_spaces = [
+            spaces.Discrete(2),
+            spaces.Discrete(2),
+            spaces.Discrete(3),
+        ]
+        self.agents = ["agent_0", "agent_1", "other_agent_0"]
+        self.possible_agents = ["agent_0", "agent_1", "other_agent_0"]
+        self.metadata = None
+        self.render_mode = None
+
+        # Define observation frequencies (every N steps)
+        self.observation_frequencies = {
+            "agent_0": 1,  # observes every step
+            "agent_1": 1,  # observes every 2 steps
+            "other_agent_0": 4,  # observes every 4 steps
+        }
+
+        # Initialize step counters for each agent
+        self.agent_step_counters = {agent: 0 for agent in self.agents}
+
+        self.active_agents = self.agents.copy()  # Initially all agents are active
+        self.current_step = 0
+
+    def action_space(self, agent):
+        idx = self.possible_agents.index(agent)
+        return self.action_spaces[idx]
+
+    def observation_space(self, agent):
+        idx = self.possible_agents.index(agent)
+        return self.observation_spaces[idx]
+
+    def reset(self, seed=None, options=None):
+        # Reset step counters
+        self.current_step = 0
+        self.agent_step_counters = {agent: 0 for agent in self.agents}
+
+        # All agents observe at reset (step 0)
+        self.active_agents = self.agents.copy()
+
+        # Ensure at least one agent is active
+        if not self.active_agents:
+            self.active_agents = [np.random.choice(self.agents)]
+
+        observations = {
+            agent: np.random.rand(
+                *self.observation_spaces[self.possible_agents.index(agent)].shape
+            )
+            for agent in self.active_agents
+        }
+
+        infos = {agent: {} for agent in self.active_agents}
+        for agent in self.active_agents:
+            infos[agent]["env_defined_actions"] = None
+
+        # Always provide env_defined_actions for agent_0 if active
+        if "agent_0" in self.active_agents:
+            infos["agent_0"]["env_defined_actions"] = np.array([1])
+
+        return observations, infos
+
+    def step(self, action):
+        # Increment the global step counter
+        self.current_step += 1
+
+        # Increment step counters for each agent
+        for agent in self.agents:
+            self.agent_step_counters[agent] += 1
+
+        # Determine which agents should observe based on their frequency
+        self.active_agents = [
+            agent
+            for agent in self.agents
+            if self.agent_step_counters[agent] % self.observation_frequencies[agent]
+            == 0
+        ]
+
+        observations = {
+            agent: np.random.rand(
+                *self.observation_spaces[self.possible_agents.index(agent)].shape
+            )
+            for agent in self.active_agents
+        }
+
+        rewards = {agent: np.random.randint(0, 5) for agent in action.keys()}
+        dones = {agent: False for agent in self.active_agents}
+        truncated = {agent: False for agent in self.active_agents}
+
+        infos = {agent: {} for agent in self.active_agents}
+        for agent in self.active_agents:
+            infos[agent]["env_defined_actions"] = None
+
+        # Always provide env_defined_actions for agent_0 if active
+        if "agent_0" in self.active_agents:
+            infos["agent_0"]["env_defined_actions"] = np.array([1])
+
+        return observations, rewards, dones, truncated, infos
+
+
 def actions_to_list_helper(actions):
     passed_actions_list = [[] for _ in list(actions.values())[0]]
     for env_idx, _ in enumerate(list(actions.values())[0]):
@@ -472,6 +578,41 @@ def test_step_async_pz_vector_env(use_single_action_space, env_fns):
         raise e
 
 
+def test_step_async_pz_vector_async_env():
+    try:
+        env_fns = [lambda: DummyMultiEnvAsync() for _ in range(8)]
+        env = AsyncPettingZooVecEnv(env_fns)
+        obs, infos = env.reset()
+
+        assert not np.isnan(obs["other_agent_0"]).any()
+        assert not np.isnan(obs["agent_0"]).any()
+        assert not np.isnan(obs["agent_1"]).any()
+
+        actions = {agent: env.action_space(agent).sample() for agent in env.agents}
+        observations, rewards, terminations, truncations, _ = env.step(actions)
+
+        for agent in env.agents:
+            assert isinstance(env.single_action_space(agent), Discrete)
+            assert isinstance(env.action_space(agent), MultiDiscrete)
+            assert isinstance(env.observation_space(agent), Box)
+
+        for transition in [observations, terminations, truncations]:
+            assert "other_agent_0" not in transition
+            assert not np.isnan(transition["agent_0"]).any()
+            assert not np.isnan(transition["agent_1"]).any()
+
+        # Rewards should correspond to the previous observation-action pair
+        assert not np.isnan(rewards["other_agent_0"]).any()
+        assert not np.isnan(rewards["agent_0"]).any()
+        assert not np.isnan(rewards["agent_1"]).any()
+
+        env.close()
+
+    except Exception as e:
+        env.close()
+        raise e
+
+
 @pytest.mark.parametrize(
     "env_fns",
     [
@@ -602,6 +743,7 @@ def test_async_vector_subenv_error():
     ]
     envs = AsyncPettingZooVecEnv(env_list * 3)
 
+    envs.reset()
     with pytest.raises(ValueError, match="Error in step"):
         envs.step({"agent_0": [0, 1, 2]})
 
