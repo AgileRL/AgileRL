@@ -1,6 +1,6 @@
 ---
 MUTATION_PARAMS:
-    NO_MUT: 0                          # No mutation
+    NO_MUT: 0.1                          # No mutation
     RL_HP_MUT: 0.6                       # Learning HP mutation
     MUT_SD: 0.1                          # Mutation strength
     RAND_SEED: 42                        # Random seed
@@ -21,11 +21,11 @@ INIT_HP:
     CLIP_COEF: 0.2
     MAX_GRAD_NORM: 0.1
     UPDATE_EPOCHS: 1
-    GROUP_SIZE: 2
+    GROUP_SIZE: 8
     TEMPERATURE: 0.9
     CALC_POSITION_EMBEDDINGS: true
     MIN_OUTPUT_TOKENS:
-    MAX_OUTPUT_TOKENS: 10
+    MAX_OUTPUT_TOKENS: 1024
     COSINE_lR_SCHEDULER:
     TOURN_SIZE: 2
     ELITISM: true   

@@ -40,7 +40,6 @@ DeepSpeedOptimizerType = Union[
     DeepSpeedZeroOptimizer_Stage3,  # ZeRO Stage 3 optimizer
 ]
 
-
 class GRPO(LLMAlgorithm):
     """The GRPO algorithm class. GRPO paper: https://arxiv.org/pdf/2402.03300
 
@@ -362,8 +361,6 @@ class GRPO(LLMAlgorithm):
         :return: Kl divergence between the current and reference log probabilities.
         :rtype: torch.Tensor
         """
-        print("REFERENCE LOG PROBS: ")
-        print(reference_log_probs , log_probs)
         return (
             torch.exp(reference_log_probs - log_probs)
             - (reference_log_probs - log_probs)
@@ -401,7 +398,9 @@ class GRPO(LLMAlgorithm):
         surrogate = log_probs_ratio * advantages
         clipped_surrogate = clipped_log_probs_ratio * advantages
         loss = -torch.min(surrogate, clipped_surrogate) + self.beta * kl
-        loss = (loss * mask).sum(dim=-1) / mask.sum(dim=-1)
+        denominator = mask.sum(dim=-1)
+        denominator = torch.where(denominator > 0, denominator, torch.ones_like(denominator))
+        loss = (loss * mask).sum(dim=-1) / denominator
         log_probs_ratio = None
         clipped_log_probs_ratio = None
         surrogate = None
