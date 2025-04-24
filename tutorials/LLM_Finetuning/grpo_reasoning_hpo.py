@@ -15,7 +15,7 @@ from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
-MODEL_PATH = "Qwen/Qwen2.5-0.5B"
+MODEL_PATH = "Qwen/Qwen2.5-1.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
 
@@ -71,7 +71,7 @@ def countdown_chat_template(q, a, tokenizer):
 
 def make_dataset(dataset_name: str) -> Tuple[Dataset, Dataset]:
     raw_dataset = (
-        load_dataset(DATASET, split="train").shuffle(seed=42).select(range(50000))
+        load_dataset(dataset_name, split="train").shuffle(seed=42).select(range(50000))
     )
     raw_dataset = raw_dataset.rename_column("target", "answer")
     raw_dataset = raw_dataset.rename_column("nums", "question")
@@ -261,6 +261,9 @@ def main(init_hp, mut_p):
 
 
 if __name__ == "__main__":
+    import os
+
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     MUTATION_PARAMS = {
         "NO_MUT": 0.1,
         "RL_HP_MUT": 0.6,

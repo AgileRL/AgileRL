@@ -2,30 +2,10 @@ from typing import List, Tuple
 
 import numpy as np
 from accelerate.utils import broadcast_object_list
+
 from agilerl.algorithms.core.base import EvolvableAlgorithm
 
 PopulationType = List[EvolvableAlgorithm]
-
-
-import logging
-
-import torch.distributed as dist
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    filename="myapp.log",  # Optional: log to a file
-    filemode="a",  # Optional: append to the file
-)
-logger = logging.getLogger(__name__)
-# Create a console handler and set its format and level
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
-formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-console_handler.setFormatter(formatter)
-
-# Add the console handler to the logger
-logger.addHandler(console_handler)
 
 
 class TournamentSelection:
@@ -84,10 +64,6 @@ class TournamentSelection:
         :rtype: tuple[EvolvableAlgorithm, np.ndarray, int]
         """
         last_fitness = [np.mean(indi.fitness[-self.eval_loop :]) for indi in population]
-
-        print(f"LAST FITNESSES: {last_fitness} | Process {dist.get_rank()}")
-        print(f"INDICES: {[ind.index for ind in population]} | Process {dist.get_rank()}")
-
         rank = np.argsort(last_fitness).argsort()
         max_id = max([ind.index for ind in population])
         model = population[int(np.argsort(rank)[-1])]
@@ -117,21 +93,18 @@ class TournamentSelection:
         :rtype: tuple[EvolvableAlgorithm, PopulationType]
         """
         elite, rank, max_id = self._elitism(population)
-
         new_population = []
         if self.elitism:  # keep top agent in population
             new_population.append(elite.clone(wrap=False))
             selection_size = self.population_size - 1
         else:
             selection_size = self.population_size
-
         # select parents of next gen using tournament selection
         for idx in range(selection_size):
             max_id += 1
             actor_parent = population[self._tournament(rank)]
             new_individual = actor_parent.clone(max_id, wrap=False)
             new_population.append(new_individual)
-
         return elite, new_population
 
     def _select_llm_agents(
@@ -145,31 +118,21 @@ class TournamentSelection:
         :return: Elite agent and new population
         :rtype: tuple[EvolvableAlgorithm, PopulationType]
         """
-        logger.debug(
-            f"========= ENTER TOURNAMENT SELECTION | Process {dist.get_rank()} | Function {self._select_llm_agents.__name__} ========="
-        )
-
         accelerator = population[0].accelerator
         new_population_idxs = []
-        old_population_idxs = [ind.index for ind in population] # = [0, 1, 2, 3]
-        unwanted_agents = {} 
+        old_population_idxs = [ind.index for ind in population]
+        unwanted_agents = {}
 
-        if accelerator is not None and accelerator.is_main_process:
-            
+        if accelerator is None or (
+            accelerator is not None and accelerator.is_main_process
+        ):
             elite_idx, rank, max_id = self._elitism(population)
-
-            logger.debug(f"Old population idxs: {old_population_idxs}")
-
-            
             if self.elitism:  # keep top agent in population
                 new_population_idxs.append((elite_idx, elite_idx, True))
                 selection_size = self.population_size - 1
             else:
                 elite = population[old_population_idxs.index(elite_idx)]
                 selection_size = self.population_size
-
-            logger.debug(f"New population idxs with only elite: {new_population_idxs}")
-
             # select parents of next gen using tournament selection
             for _ in range(selection_size):
                 max_id += 1
@@ -177,56 +140,45 @@ class TournamentSelection:
                 new_population_idxs.append(
                     (actor_parent_idx, max_id, False)
                 )  # (old_idx_to_clone, new_labelled_idx, is_elite)
-
-            logger.debug(f"New population idxs with all: {new_population_idxs}")
-
-            logger.debug(
-                f"========= INDEX SELECTION COMPLETED| Process {dist.get_rank()} | Function {self._select_llm_agents.__name__} ========="
-            )
-
             # Isolate any agents that are not in the new population to be deleted
             unwanted_agents = set(old_population_idxs) - {
                 idx for idx, *_ in new_population_idxs
             }
 
-            logger.debug(f"UNWANTED AGENTS: {unwanted_agents}")
-
         if accelerator is not None:
             accelerator.wait_for_everyone()
-            new_population_idxs, old_population_idxs, unwanted_agents = broadcast_object_list([new_population_idxs, old_population_idxs, unwanted_agents], from_process=0)
-
-
+            new_population_idxs, old_population_idxs, unwanted_agents = (
+                broadcast_object_list(
+                    [new_population_idxs, old_population_idxs, unwanted_agents],
+                    from_process=0,
+                )
+            )
 
         # Delete any unwanted agents from memory
         for agent_idx in old_population_idxs:
             if agent_idx in unwanted_agents:
                 agent_ref = population[old_population_idxs.index(agent_idx)]
-                agent_ref.accelerator.wait_for_everyone()
+                if agent_ref.accelerator is not None:
+                    agent_ref.accelerator.wait_for_everyone()
                 agent_ref.clean_up()
-                agent_ref.accelerator.wait_for_everyone()
+                if agent_ref.accelerator is not None:
+                    agent_ref.accelerator.wait_for_everyone()
                 agent_ref = None
-
-        logger.debug(
-            f"========= UNWANTED AGENTS ISOLATED| Process {dist.get_rank()} | Function {self._select_llm_agents.__name__} ========="
-        )
-
-        logger.debug(f"Population: {[pop is not None for pop in population]}")
 
         new_population = []
         index_tracker = {}
-
-
-        logger.debug(f"New population idxs before main cloning loop: {new_population_idxs}")
-        
         for idx_to_clone, new_idx, is_elite in new_population_idxs:
             if (
                 agent_ref := population[old_population_idxs.index(idx_to_clone)]
             ) is not None:
-                agent_ref.accelerator.wait_for_everyone()
+                if agent_ref.accelerator is not None:
+                    agent_ref.accelerator.wait_for_everyone()
                 actor_parent = agent_ref.clone(new_idx, wrap=False)
-                agent_ref.accelerator.wait_for_everyone()
+                if agent_ref.accelerator is not None:
+                    agent_ref.accelerator.wait_for_everyone()
                 agent_ref.clean_up()
-                agent_ref.accelerator.wait_for_everyone()
+                if agent_ref.accelerator is not None:
+                    agent_ref.accelerator.wait_for_everyone()
                 agent_ref = population[old_population_idxs.index(idx_to_clone)] = None
                 index_tracker[idx_to_clone] = actor_parent
             else:
@@ -234,7 +186,4 @@ class TournamentSelection:
             if is_elite:
                 elite = actor_parent
             new_population.append(actor_parent)
-        logger.debug(
-            f"========= NEW POPULATION CREATED | Process {dist.get_rank()} | Function {self._select_llm_agents.__name__} ========="
-        )
         return elite, new_population

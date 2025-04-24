@@ -1,8 +1,13 @@
+from unittest.mock import MagicMock
+
 import gymnasium as gym
 import pytest
+from accelerate import Accelerator
+from accelerate.state import AcceleratorState
 
-from agilerl.algorithms import CQN, DDPG, DQN, MADDPG, MATD3, PPO, TD3, RainbowDQN
+from agilerl.algorithms import CQN, DDPG, DQN, GRPO, MADDPG, MATD3, PPO, TD3, RainbowDQN
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.utils.algo_utils import clone_llm
 from agilerl.utils.utils import create_population
 from tests.helper_functions import (
     generate_discrete_space,
@@ -266,10 +271,11 @@ def test_returns_best_agent_and_new_population_without_elitism_multi_agent():
         assert len(new_population) == population_size
 
 
+@pytest.mark.parametrize("use_accelerator", [True, False])
 @pytest.mark.parametrize("elitism", [True, False])
-def test_language_model_tournament(elitism):
+def test_language_model_tournament(use_accelerator, elitism):
+    AcceleratorState._reset_state(True)
     tournament_selection = TournamentSelection(3, elitism, 4, 2)
-
     observation_space = gym.spaces.Box(low=0, high=1000 - 1, shape=(1,))
     action_space = gym.spaces.Box(
         low=0,
@@ -302,17 +308,58 @@ def test_language_model_tournament(elitism):
     actor_network = create_module(
         input_size=1, max_tokens=1024, vocab_size=1000, device="cpu"
     )
+    accelerator = MagicMock(spec=Accelerator)
+    accelerator.is_main_process = True
+    accelerator.wait_for_everyone = MagicMock()
+    accelerator.state = MagicMock()
+    accelerator.state.deepspeed_plugin = MagicMock()
+    accelerator.state.deepspeed_plugin.deepspeed_config = {
+        "zero_optimization": {"stage": 1}
+    }
+    accelerator.free_memory = lambda *args: args
+    accelerator.unwrap_model = lambda arg: arg
 
-    population = create_population(
-        algo="GRPO",
-        observation_space=observation_space,
-        action_space=action_space,
-        actor_network=actor_network,
-        INIT_HP=init_hp,
-        net_config=None,
-        population_size=population_size,
-        accelerator=None,
-    )
+    population = [
+        GRPO(
+            observation_space=observation_space,
+            action_space=action_space,
+            actor_network=clone_llm(actor_network),
+            pad_token_id=INIT_HP.get("PAD_TOKEN_ID"),
+            hp_config=None,
+            index=idx,
+            batch_size=INIT_HP.get("BATCH_SIZE", 1),
+            beta=INIT_HP.get("BETA", 0.001),
+            lr=INIT_HP.get("LR", 5e-7),
+            clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
+            max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 0.1),
+            update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
+            group_size=INIT_HP.get("GROUP_SIZE", 8),
+            temperature=INIT_HP.get("TEMPERATURE", 0.9),
+            calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
+            reduce_memory_peak=INIT_HP.get("REDUCE_MEMORY_PEAK", False),
+            max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS", 1024),
+            min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS", None),
+            cosine_lr_schedule_config=None,
+            accelerator=None,
+            device="cpu",
+        )
+        for idx in range(init_hp.get("POP_SIZE"))
+    ]
+    for agent in population:
+        if use_accelerator:
+            agent.accelerator = accelerator
+
+    for agent in population:
+        # Create a mock clone that returns a new mock agent
+        def mock_clone(new_idx, wrap=False):
+            mock_agent = MagicMock()
+            mock_agent.index = new_idx
+            mock_agent.accelerator = accelerator
+            mock_agent.clean_up = MagicMock()
+            mock_agent.fitness = agent.fitness
+            return mock_agent
+
+        agent.clone = MagicMock(side_effect=mock_clone)
 
     population[0].fitness = [1, 2, 3]
     population[1].fitness = [4, 5, 6]

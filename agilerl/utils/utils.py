@@ -7,12 +7,12 @@ import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl.algorithms import (
     CQN,
     DDPG,
@@ -593,23 +593,6 @@ def save_population_checkpoint(
             )
             agent.save_checkpoint(current_checkpoint_path)
 
-import logging 
-import torch.distributed as dist
-logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        filename='myapp.log',  # Optional: log to a file
-        filemode='a'          # Optional: append to the file
-    )
-logger = logging.getLogger(__name__)
-# Create a console handler and set its format and level
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-console_handler.setFormatter(formatter)
-
-# Add the console handler to the logger
-logger.addHandler(console_handler)
 
 def tournament_selection_and_mutation(
     population: PopulationType,
@@ -648,7 +631,9 @@ def tournament_selection_and_mutation(
 
     if language_model:
         elite, population = tournament.select(population)
-        if accelerator is None or (accelerator is not None and accelerator.is_main_process):
+        if accelerator is None or (
+            accelerator is not None and accelerator.is_main_process
+        ):
             population = mutation.mutation(population)
         if accelerator is not None:
             accelerator.wait_for_everyone()
@@ -885,7 +870,7 @@ def gather_tensor(
     if not isinstance(tensor, torch.Tensor):
         tensor = torch.tensor(tensor, device=accelerator.device)
     tensor = tensor.to(accelerator.device)
-    gathered_tensors = accelerator.gather(tensor)   
+    gathered_tensors = accelerator.gather(tensor)
     return gathered_tensors
 
 
@@ -918,13 +903,12 @@ def save_llm_checkpoint(agent: EvolvableAlgorithm, checkpoint_path: str | None) 
     path = base_path + f"/{agent.algo}"
     os.makedirs(path, exist_ok=True)
     if agent.accelerator is not None:
-        logger.debug(f"========= SAVING CHECKPOINT | Agent index {agent.index} | Process index {agent.accelerator.process_index} | Method {save_llm_checkpoint.__name__} =========")
         agent.accelerator.wait_for_everyone()
         agent.actor.save_pretrained(path)
         agent.accelerator.wait_for_everyone()
-        logger.debug(f"========= CHECKPOINT SAVED | Agent index {agent.index} | Process index {agent.accelerator.process_index} | Method {save_llm_checkpoint.__name__} =========")
     else:
         agent.actor.save_pretrained(path)
+
 
 def consolidate_mutations(population: PopulationType) -> None:
     """Consolidate mutations across processes during LLM fintuning
@@ -937,10 +921,16 @@ def consolidate_mutations(population: PopulationType) -> None:
         return
 
     for agent in population:
-        index, mut, mut_attr = broadcast_object_list([agent.index, agent.mut, getattr(agent, agent.mut) if agent.mut is not None else None], from_process=0)
+        index, mut, mut_attr = broadcast_object_list(
+            [
+                agent.index,
+                agent.mut,
+                getattr(agent, agent.mut) if agent.mut is not None else None,
+            ],
+            from_process=0,
+        )
         assert index == agent.index
         agent.mut = mut
         setattr(agent, mut, mut_attr)
         if mut == "lr":
             LLMAlgorithm.update_lr(agent.optimizer, getattr(agent, mut))
-

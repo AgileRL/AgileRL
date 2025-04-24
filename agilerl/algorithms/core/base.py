@@ -2,10 +2,9 @@ import copy
 import gc
 import glob
 import inspect
-import logging
 import os
-import warnings
 import tempfile
+import warnings
 from abc import ABC, ABCMeta, abstractmethod
 from importlib.metadata import version
 from typing import (
@@ -26,14 +25,14 @@ import dill
 import numpy as np
 import torch
 from accelerate import Accelerator
-from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
-from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
+from accelerate.utils import broadcast_object_list
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
+from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
 from gymnasium import spaces
 from numpy.typing import ArrayLike
 from tensordict import TensorDict
 from torch._dynamo import OptimizedModule
-from accelerate.utils import broadcast_object_list
+
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
     MutationRegistry,
@@ -63,7 +62,6 @@ from agilerl.utils.algo_utils import (
     clone_llm,
     compile_model,
     is_module_list,
-    is_peft_model,
     isroutine,
     key_in_nested_dict,
     preprocess_observation,
@@ -78,23 +76,6 @@ SelfEvolvableAlgorithm = TypeVar("SelfEvolvableAlgorithm", bound="EvolvableAlgor
 SelfRLAlgorithm = TypeVar("SelfRLAlgorithm", bound="RLAlgorithm")
 SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound="AgentWrapper")
 MARLObservationType = Dict[str, ObservationType]
-
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    filename="myapp.log",  # Optional: log to a file
-    filemode="a",  # Optional: append to the file
-)
-logger = logging.getLogger(__name__)
-# Create a console handler and set its format and level
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
-formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-console_handler.setFormatter(formatter)
-
-# Add the console handler to the logger
-logger.addHandler(console_handler)
 
 
 class _RegistryMeta(type):
@@ -447,7 +428,11 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 elif isinstance(attr, list) or isinstance(clone_attr, list):
                     setattr(clone, attribute, [copy.deepcopy(el) for el in attr])
                 elif isinstance(attr, dict) or isinstance(clone_attr, dict):
-                    setattr(clone, attribute, {key: copy.deepcopy(value) for key, value in attr.items()})
+                    setattr(
+                        clone,
+                        attribute,
+                        {key: copy.deepcopy(value) for key, value in attr.items()},
+                    )
                 elif attr != clone_attr or isinstance(attr, MutationRegistry):
                     setattr(clone, attribute, copy.deepcopy(getattr(agent, attribute)))
             else:
@@ -1290,7 +1275,6 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             {agent_id: space for agent_id, space in zip(agent_ids, action_spaces)}
         )
 
-
     def preprocess_observation(
         self, observation: ObservationType
     ) -> Dict[str, TorchObsType]:
@@ -1526,18 +1510,21 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self.zero_stage = self.accelerator.state.deepspeed_plugin.deepspeed_config[
                 "zero_optimization"
             ]["stage"]
-        if self.zero_stage == 3 and self.accelerator.is_main_process:
+        if (
+            self.zero_stage is not None
+            and self.zero_stage >= 2
+            and self.accelerator.is_main_process
+        ):
             warnings.warn(
                 "Zero stage 3 is feature is nascent and has not been thoroughly tested. It may be unstable or subject to change. We recommend caution in production environments."
             )
 
-        seed = 42  
+        seed = 42
         if self.accelerator is not None:
             if accelerator.is_main_process:
                 seed = np.random.randint(0, 2**32 - 1)
             seed = broadcast_object_list([seed], from_process=0)[0]
-        self.rng = np.random.RandomState(seed)  
-
+        self.rng = np.random.RandomState(seed)
 
     def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
         """Dummy preprocesses observations for forward pass through neural network.
@@ -1662,12 +1649,18 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             )
             deepspeed_plugin = self.accelerator.state.deepspeed_plugin
             config_kwargs = copy.deepcopy(deepspeed_plugin.deepspeed_config)
-            print("CONFIG KWARGS: ", config_kwargs)
-            print("CONFIG KWARGS BF16:" , torch.bfloat16 if config_kwargs.get("bf16", {}).get("enabled", False) else (torch.float16 if config_kwargs.get("fp16", {}).get("enabled", False) else torch.float32))
             self.reference_actor = deepspeed.init_inference(
                 self.reference_actor,
                 tensor_parallel={"tp_size": self.accelerator.num_processes},
-                dtype=torch.bfloat16 if config_kwargs.get("bf16", {}).get("enabled", False) else (torch.float16 if config_kwargs.get("fp16", {}).get("enabled", False) else torch.float32),
+                dtype=(
+                    torch.bfloat16
+                    if config_kwargs.get("bf16", {}).get("enabled", False)
+                    else (
+                        torch.float16
+                        if config_kwargs.get("fp16", {}).get("enabled", False)
+                        else torch.float32
+                    )
+                ),
                 checkpoint=None,
                 replace_with_kernel_inject=True,
                 zero=DeepSpeedZeroConfig(**config_kwargs["zero_optimization"]),
@@ -1676,18 +1669,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     def clean_up(self) -> None:
         """Clean up the algorithm."""
-        # logger.debug(
-        #     f"========= CLEANING UP | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clean_up.__name__} ========="
-        # )
-
 
         if self.accelerator is not None:
-        
-        
-            # logger.debug(
-            #     f"========= ENTERING CLEANUP IF STATEMENT | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clean_up.__name__} ========="
-            # )
-            # self.accelerator.wait_for_everyone()
             self.actor, self.reference_actor, self.optimizer, self.lr_scheduler = (
                 self.accelerator.free_memory(
                     self.actor, self.reference_actor, self.optimizer, self.lr_scheduler
@@ -1697,12 +1680,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         gc.collect()
         torch.cuda.empty_cache()
 
-
-        # logger.debug(
-        #     f"========= CLEANING UP COMPLETED | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clean_up.__name__} ========="
-        # )
-
-        
     def clone(self, index: Optional[int] = None, wrap: bool = True):
         """Creates a clone of the algorithm.
 
@@ -1718,18 +1695,15 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
             # We need to use the same temp_dir for all processes, so we broadcast the temp_dir from the main process
             temp_dir = broadcast_object_list([temp_dir], from_process=0)[0]
-        
-            if self.zero_stage >= 2:
+
+            if self.zero_stage is not None and self.zero_stage >= 2:
                 self.accelerator.wait_for_everyone()
                 self._save_distributed_actor(f"{temp_dir}/agent_{self.index}")
-                self.accelerator.wait_for_everyone()    
-                # logger.debug(
-                #     f"========= SAVED DISTRIBUTED ACTOR | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} ========="
-                # )
+                self.accelerator.wait_for_everyone()
 
             input_args = EvolvableAlgorithm.inspect_attributes(
                 self, input_args_only=True
-            )   
+            )
             input_args["clone"] = True
             input_args["wrap"] = False
 
@@ -1740,9 +1714,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 else self.actor
             )
 
-            cloned_actor = clone_llm(actor, load_state_dict=(self.zero_stage < 2))
-            print("Cloned actor device: ", cloned_actor.device)
-            assert cloned_actor.device == torch.device("cpu")
+            cloned_actor = clone_llm(
+                actor, load_state_dict=(self.zero_stage is None or self.zero_stage < 2)
+            )
 
             actor = None  # De-reference the actor
             input_args["actor_network"] = cloned_actor
@@ -1751,17 +1725,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             )
 
             clone = type(self)(**input_args)
-            # logger.debug(
-            #     f"========= CLONE CREATED | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} ========="
-            # )
 
             # Maybe this needs to change -> should really init deepspeed engine after state dict is loaded
-            clone.reference_actor.load_state_dict(
-                self.reference_actor_state_dict
-            )
-
-            print("Taking a look at the reference actor: ", clone.reference_actor)
-
+            clone.reference_actor.load_state_dict(self.reference_actor_state_dict)
             clone.reference_actor.eval()
             clone.mutation_hook()
 
@@ -1790,23 +1756,18 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 clone.index = index
 
             clone.wrap_models()
-            for param, cloned_param in zip(self.reference_actor.parameters(), clone.reference_actor.parameters()):
+            for param, cloned_param in zip(
+                self.reference_actor.parameters(), clone.reference_actor.parameters()
+            ):
                 cloned_param.data = param.data
 
-            if self.zero_stage >= 2:
+            if self.zero_stage is not None and self.zero_stage >= 2:
                 clone.accelerator.wait_for_everyone()
                 clone._load_distributed_actor(f"{temp_dir}/agent_{self.index}")
                 clone.accelerator.wait_for_everyone()
-                # logger.debug(
-                #     f"========= LOADED DISTRIBUTED ACTOR | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} ========="
-                # )
             else:
                 if self.accelerator is not None:
                     self.accelerator.wait_for_everyone()
-
-        # logger.debug(
-        #     f"========= CLONE METHOD COMPLETED | Agent index {self.index} | Process index {self.accelerator.process_index} | Method {self.clone.__name__} ========="
-        # )
         return clone
 
     @staticmethod
@@ -1816,5 +1777,5 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :param optimizer: Optimizer
         :type optimizer: Optimizer
         """
-        for param_group in optimizer.param_groups:  
+        for param_group in optimizer.param_groups:
             param_group["lr"] = lr

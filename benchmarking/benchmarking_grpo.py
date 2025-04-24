@@ -72,7 +72,7 @@ def countdown_chat_template(q, a, tokenizer):
 
 def make_dataset(dataset_name: str) -> Tuple[Dataset, Dataset]:
     raw_dataset = (
-        load_dataset(DATASET, split="train").shuffle(seed=42).select(range(50000))
+        load_dataset(dataset_name, split="train").shuffle(seed=42).select(range(50000))
     )
     raw_dataset = raw_dataset.rename_column("target", "answer")
     raw_dataset = raw_dataset.rename_column("nums", "question")
@@ -261,6 +261,7 @@ def main(init_hp, mut_p):
 
 if __name__ == "__main__":
     import os
+
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     with open("configs/training/grpo.yaml") as file:
         config = yaml.safe_load(file)

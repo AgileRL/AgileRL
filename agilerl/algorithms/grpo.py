@@ -9,10 +9,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from accelerate import Accelerator
+from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
-from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 from gymnasium import spaces
 from peft import PeftModel
 from torch.nn.utils import clip_grad_norm_
@@ -39,6 +39,7 @@ DeepSpeedOptimizerType = Union[
     DeepSpeedZeroOptimizer,  # ZeRO Stage 1 & 2 optimizer
     DeepSpeedZeroOptimizer_Stage3,  # ZeRO Stage 3 optimizer
 ]
+
 
 class GRPO(LLMAlgorithm):
     """The GRPO algorithm class. GRPO paper: https://arxiv.org/pdf/2402.03300
@@ -253,11 +254,12 @@ class GRPO(LLMAlgorithm):
         num_samples = advantages.shape[0]
         batch_idxs = np.arange(num_samples)
         mean_loss, mean_kl = 0, 0
+        batch_size = min(num_samples, self.batch_size)
         for _ in range(self.update_epochs):
-            self.rng.shuffle(batch_idxs) # FIXME random has got to go, 
-            for start in range(0, num_samples, self.batch_size):
+            self.rng.shuffle(batch_idxs)
+            for start in range(0, num_samples, batch_size):
                 minibatch_idxs = batch_idxs[
-                    start : min((start + self.batch_size), num_samples)
+                    start : min((start + batch_size), num_samples)
                 ]
                 (
                     batch_ids,
@@ -329,7 +331,6 @@ class GRPO(LLMAlgorithm):
             self.actor.gradient_checkpointing_enable()
             self.reference_actor = self.reference_actor.to(self.device)
 
-        
     def _calculate_advantage(
         self, rewards: torch.Tensor, eps: float = 1e-8
     ) -> torch.Tensor:
@@ -399,12 +400,16 @@ class GRPO(LLMAlgorithm):
         clipped_surrogate = clipped_log_probs_ratio * advantages
         loss = -torch.min(surrogate, clipped_surrogate) + self.beta * kl
         denominator = mask.sum(dim=-1)
-        denominator = torch.where(denominator > 0, denominator, torch.ones_like(denominator))
+        denominator = torch.where(
+            denominator > 0, denominator, torch.ones_like(denominator)
+        )
         loss = (loss * mask).sum(dim=-1) / denominator
-        log_probs_ratio = None
-        clipped_log_probs_ratio = None
-        surrogate = None
-        clipped_surrogate = None
+        log_probs_ratio, clipped_log_probs_ratio, surrogate, clipped_surrogate = (
+            None,
+            None,
+            None,
+            None,
+        )
         return loss.mean(), kl.mean()
 
     def _get_logprobs(
@@ -454,7 +459,6 @@ class GRPO(LLMAlgorithm):
             log_probs = torch.cat(log_probs_list)
             del log_probs_list
         else:
-            print([val for key, val in model_kwargs.items() if isinstance(val, torch.Tensor)])
             logits = policy.forward(**model_kwargs).logits
             log_probs = (
                 F.log_softmax(logits[:, :-1], dim=-1)
@@ -501,7 +505,9 @@ class GRPO(LLMAlgorithm):
         :return: Policy network and reference network
         :rtype: Union[nn.Module, DeepSpeedEngine]
         """
-        self.reference_actor_state_dict = clone_tensors_for_torch_save(network.state_dict()) 
+        self.reference_actor_state_dict = clone_tensors_for_torch_save(
+            network.state_dict()
+        )
         self.reference_actor = clone_llm(
             network, load_state_dict=load_reference_state_dict
         )
