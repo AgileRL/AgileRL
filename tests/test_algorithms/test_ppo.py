@@ -2,6 +2,7 @@ import copy
 from pathlib import Path
 
 import dill
+import gymnasium
 import numpy as np
 import pytest
 import torch
@@ -1759,6 +1760,45 @@ def test_ppo_with_hidden_states_multiple_obs():
     # Get action with hidden state (multiple observations)
     obs = np.zeros((2, *observation_space.shape))
     hidden_state = ppo.get_initial_hidden_state(num_envs=2)
+
+    action, log_prob, entropy, value, next_hidden = ppo.get_action(
+        obs, hidden_state=hidden_state
+    )
+
+    print(action.shape)
+    print(next_hidden.get("h", None).shape)
+
+    assert action.shape[0] == 2
+    assert isinstance(log_prob, np.ndarray)
+    assert isinstance(entropy, np.ndarray)
+    assert isinstance(value, np.ndarray)
+    assert next_hidden is not None
+    assert next_hidden.get("h", None).shape == (1, 2, 64)
+    assert next_hidden.get("c", None).shape == (1, 2, 64)
+
+
+# Test PPO with hidden states
+def test_ppo_with_hidden_states_multiple_envs():
+    num_envs = 2
+    env = gymnasium.vector.SyncVectorEnv(
+        [lambda: gymnasium.make("CartPole-v1")] * num_envs
+    )
+
+    observation_space = env.single_observation_space  # Use single env space
+    action_space = env.single_action_space  # Use single env space
+
+    ppo = PPO(
+        observation_space=observation_space,
+        action_space=action_space,
+        use_rollout_buffer=True,
+        recurrent=True,
+        hidden_state_size=64,
+        num_envs=num_envs,
+    )
+
+    # Get action with hidden state (multiple observations)
+    obs, _ = env.reset()
+    hidden_state = ppo.get_initial_hidden_state(num_envs=num_envs)
 
     action, log_prob, entropy, value, next_hidden = ppo.get_action(
         obs, hidden_state=hidden_state

@@ -468,7 +468,9 @@ class PPO(RLAlgorithm):
         :return: Action, log probability, entropy, state values, and next hidden state
         :rtype: Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[ArrayOrTensor]]
         """
+        print("pre-obs", obs)
         obs = self.preprocess_observation(obs)
+        print("post-obs", obs)
         with torch.no_grad():
             if self.recurrent and hidden_state is not None:
                 action, log_prob, entropy, values, next_hidden = (
@@ -515,6 +517,7 @@ class PPO(RLAlgorithm):
         self,
         env: GymEnvType,
         n_steps: int = None,
+        listify_actions: bool = False,
     ) -> None:
         """
         Collect rollouts from the environment and store them in the rollout buffer.
@@ -523,6 +526,8 @@ class PPO(RLAlgorithm):
         :type env: GymEnvType
         :param n_steps: Number of steps to collect, defaults to self.learn_step
         :type n_steps: int, optional
+        :param listify_actions: Whether to listify the actions, defaults to False. This is useful for environments that expect a list of actions rather than a numpy array.
+        :type listify_actions: bool, defaults to False
         """
         if not self.use_rollout_buffer:
             raise RuntimeError(
@@ -534,6 +539,7 @@ class PPO(RLAlgorithm):
 
         # Initial reset
         obs, info = env.reset()
+
         self.hidden_state = (
             self.get_initial_hidden_state(self.num_envs) if self.recurrent else None
         )
@@ -554,10 +560,23 @@ class PPO(RLAlgorithm):
                 )
 
             # Execute action
-            next_obs, reward, done, truncated, next_info = env.step(action)
+            next_obs, reward, done, truncated, next_info = env.step(
+                (action.tolist() if listify_actions else action)
+            )
 
             # Add to buffer
-            is_terminal = done or truncated
+            # Handle both single environment and vectorized environments
+            if isinstance(done, list) or isinstance(done, np.ndarray):
+                is_terminal = (
+                    np.logical_or(done, truncated)
+                    if isinstance(truncated, (list, np.ndarray))
+                    else done
+                )
+
+            else:
+                is_terminal = done or truncated
+
+            print(is_terminal)
 
             # Ensure shapes are correct (num_envs, ...)
             reward = np.atleast_1d(reward)

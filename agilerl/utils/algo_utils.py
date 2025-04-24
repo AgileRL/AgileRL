@@ -49,9 +49,9 @@ def share_encoder_parameters(
     :type others: EvolvableNetwork
     """
     assert isinstance(policy, EvolvableNetwork), "Policy must be an EvolvableNetwork"
-    assert all(
-        isinstance(other, EvolvableNetwork) for other in others
-    ), "All others must be EvolvableNetwork"
+    assert all(isinstance(other, EvolvableNetwork) for other in others), (
+        "All others must be EvolvableNetwork"
+    )
 
     # detaching encoder parameters from computation graph reduces
     # memory overhead and speeds up training
@@ -150,7 +150,7 @@ def multi_agent_sample_tensor_from_space(
 
 
 def make_safe_deepcopies(
-    *args: Union[EvolvableModule, List[EvolvableModule]]
+    *args: Union[EvolvableModule, List[EvolvableModule]],
 ) -> List[EvolvableModule]:
     """Makes deep copies of EvolvableModule objects and their attributes.
 
@@ -568,9 +568,9 @@ def preprocess_observation(
 
     # Preprocess different spaces accordingly
     if isinstance(observation_space, spaces.Dict):
-        assert isinstance(
-            observation, (dict, TensorDict)
-        ), f"Expected dict, got {type(observation)}"
+        assert isinstance(observation, (dict, TensorDict)), (
+            f"Expected dict, got {type(observation)}"
+        )
         preprocessed_obs = {}
         for key, _obs in observation.items():
             preprocessed_obs[key] = preprocess_observation(
@@ -583,17 +583,17 @@ def preprocess_observation(
         return preprocessed_obs
 
     elif isinstance(observation_space, spaces.Tuple):
-        assert isinstance(
-            observation, tuple
-        ), f"Expected tuple, got {type(observation)}"
+        assert isinstance(observation, tuple), (
+            f"Expected tuple, got {type(observation)}"
+        )
         return tuple(
             preprocess_observation(_obs, _space, device, normalize_images)
             for _obs, _space in zip(observation, observation_space.spaces)
         )
 
-    assert isinstance(
-        observation, torch.Tensor
-    ), f"Expected torch.Tensor, got {type(observation)}"
+    assert isinstance(observation, torch.Tensor), (
+        f"Expected torch.Tensor, got {type(observation)}"
+    )
 
     if isinstance(observation_space, spaces.Box):
         # Normalize images if applicable and specified
