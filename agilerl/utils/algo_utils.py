@@ -1154,6 +1154,7 @@ def concatenate_experiences_into_batches(
     stacked_tensor = concatenate_tensors(tensors)
     return reshape_from_space(stacked_tensor, space)
 
+
 def is_peft_model(model: nn.Module) -> bool:
     """Check if a model is a PEFT model.
 
@@ -1183,4 +1184,3 @@ def clone_llm(
     if load_state_dict:
         model.load_state_dict(clone_tensors_for_torch_save(original_model.state_dict()))
     return model
-

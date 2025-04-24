@@ -308,7 +308,7 @@ class DDPG(RLAlgorithm):
 
         self.actor.train()
         if training:
-          
+
             action += self.action_noise()
 
         return action.clip(self.action_space.low, self.action_space.high)

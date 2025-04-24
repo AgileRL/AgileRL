@@ -10,7 +10,7 @@ from accelerate import Accelerator
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from numpy.random import Generator
 from torch._dynamo.eval_frame import OptimizedModule
-import torch.distributed as dist
+
 from agilerl.algorithms.core import EvolvableAlgorithm, LLMAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.algorithms.neural_ts_bandit import NeuralTS
