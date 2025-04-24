@@ -340,8 +340,9 @@ class EvolvableDistribution(EvolvableWrapper):
         # deviation (log_std) of the action distribution
         if isinstance(action_space, spaces.Box):
             self.log_std = torch.nn.Parameter(
-                torch.ones(1, np.prod(action_space.shape)) * action_std_init
-            ).to(device)
+                torch.ones(1, np.prod(action_space.shape), device=device)
+                * action_std_init
+            )
 
     @property
     def net_config(self) -> ConfigType:

@@ -17,7 +17,13 @@ from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.networks.q_networks import RainbowQNetwork
 from agilerl.wrappers.make_evolvable import MakeEvolvable
-from tests.helper_functions import generate_discrete_space, generate_random_box_space
+from tests.helper_functions import (
+    generate_dict_or_tuple_space,
+    generate_discrete_space,
+    generate_multidiscrete_space,
+    generate_random_box_space,
+    get_sample_from_space,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -272,43 +278,21 @@ def test_initialize_dqn_with_actor_network(
         Accelerator(),
     ],
 )
-# Returns the expected action when given a state observation and action mask
-def test_returns_expected_action(accelerator):
-    observation_space = generate_random_box_space(shape=(4,))
-    action_space = generate_discrete_space(2)
-
-    dqn = RainbowDQN(observation_space, action_space, accelerator=accelerator)
-    state = np.array([1, 2, 3, 4])
-
-    action_mask = None
-
-    action = dqn.get_action(state, action_mask)[0]
-
-    assert action.is_integer()
-    assert action >= 0 and action < action_space.n
-
-    action_mask = np.array([0, 1])
-
-    action = dqn.get_action(state, action_mask)[0]
-
-    assert action.is_integer()
-    assert action == 1
-
-
 @pytest.mark.parametrize(
-    "accelerator",
+    "observation_space",
     [
-        None,
-        Accelerator(),
+        generate_discrete_space(4),
+        generate_random_box_space(shape=(4,)),
+        generate_multidiscrete_space(2, 2),
+        generate_dict_or_tuple_space(2, 2, dict_space=True),
+        generate_dict_or_tuple_space(2, 2, dict_space=False),
     ],
 )
-# Returns the expected action when given a state observation and action mask
-def test_returns_expected_action_one_hot(accelerator):
-    observation_space = spaces.Discrete(4)
+def test_returns_expected_action(accelerator, observation_space):
     action_space = generate_discrete_space(2)
 
     dqn = RainbowDQN(observation_space, action_space, accelerator=accelerator)
-    state = np.array([1])
+    state = get_sample_from_space(observation_space)
 
     action_mask = None
 
@@ -341,91 +325,12 @@ def test_returns_expected_action_mask_vectorized():
 
 
 @pytest.mark.parametrize(
-    "accelerator, net_config, observation_space",
+    "observation_space",
     [
-        (
-            None,
-            {
-                "encoder_config": {
-                    "hidden_size": [64, 64],
-                }
-            },
-            generate_random_box_space(shape=(4,)),
-        ),
-        (
-            None,
-            {
-                "encoder_config": {
-                    "channel_size": [16, 32, 32],
-                    "kernel_size": [8, 4, 3],
-                    "stride_size": [4, 2, 1],
-                }
-            },
-            spaces.Box(0, 1, shape=(4, 84, 84)),
-        ),
-        (
-            Accelerator(),
-            {
-                "encoder_config": {
-                    "hidden_size": [64, 64],
-                }
-            },
-            generate_random_box_space(shape=(4,)),
-        ),
+        generate_discrete_space(4),
+        generate_random_box_space(shape=(4,)),
     ],
 )
-# learns from experiences and updates network parameters
-def test_learns_from_experiences(accelerator, net_config, observation_space):
-    torch.autograd.set_detect_anomaly(True)
-    action_space = generate_discrete_space(2)
-    batch_size = 64
-
-    # Create an instance of the DQN class
-    dqn = RainbowDQN(
-        observation_space,
-        action_space,
-        net_config=net_config,
-        batch_size=batch_size,
-        accelerator=accelerator,
-    )
-
-    # Create a batch of experiences
-    states = torch.randn(batch_size, *observation_space.shape)
-    actions = torch.randint(0, action_space.n, (batch_size, 1))
-    rewards = torch.randn((batch_size, 1))
-    next_states = torch.randn(batch_size, *observation_space.shape)
-    dones = torch.randint(0, 2, (batch_size, 1))
-
-    experiences = TensorDict(
-        {
-            "obs": states,
-            "action": actions,
-            "reward": rewards,
-            "next_obs": next_states,
-            "done": dones,
-        },
-        batch_size=[batch_size],
-        device=accelerator.device if accelerator else "cpu",
-    )
-
-    # Copy state dict before learning - should be different to after updating weights
-    actor = dqn.actor
-    actor_target = dqn.actor_target
-    actor_pre_learn_sd = str(copy.deepcopy(dqn.actor.state_dict()))
-    actor_target_pre_learn_sd = str(copy.deepcopy(dqn.actor_target.state_dict()))
-
-    # Call the learn method
-    loss, new_idxs, new_priorities = dqn.learn(experiences, per=False)
-
-    assert loss > 0.0
-    assert new_idxs is None
-    assert new_priorities is None
-    assert actor == dqn.actor
-    assert actor_target == dqn.actor_target
-    assert actor_pre_learn_sd != str(dqn.actor.state_dict())
-    assert actor_target_pre_learn_sd != str(dqn.actor_target.state_dict())
-
-
 @pytest.mark.parametrize(
     "accelerator",
     [
@@ -434,21 +339,24 @@ def test_learns_from_experiences(accelerator, net_config, observation_space):
     ],
 )
 # learns from experiences and updates network parameters
-def test_learns_from_experiences_one_hot(accelerator):
-    observation_space = generate_discrete_space(4)
+def test_learns_from_experiences(accelerator, observation_space):
+    torch.autograd.set_detect_anomaly(True)
     action_space = generate_discrete_space(2)
     batch_size = 64
 
     # Create an instance of the DQN class
     dqn = RainbowDQN(
-        observation_space, action_space, batch_size=batch_size, accelerator=accelerator
+        observation_space,
+        action_space,
+        batch_size=batch_size,
+        accelerator=accelerator,
     )
 
     # Create a batch of experiences
-    states = torch.randint(0, observation_space.n, (batch_size, 1))
+    states = torch.from_numpy(get_sample_from_space(observation_space, batch_size))
     actions = torch.randint(0, action_space.n, (batch_size, 1))
     rewards = torch.randn((batch_size, 1))
-    next_states = torch.randint(0, observation_space.n, (batch_size, 1))
+    next_states = torch.from_numpy(get_sample_from_space(observation_space, batch_size))
     dones = torch.randint(0, 2, (batch_size, 1))
 
     experiences = TensorDict(

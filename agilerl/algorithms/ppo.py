@@ -327,10 +327,6 @@ class PPO(RLAlgorithm):
 
         :param obs: Environment observation, or multiple observations in a batch
         :type obs: numpy.ndarray[float]
-        :param action: Action in environment to evaluate, defaults to None
-        :type action: torch.Tensor(), optional
-        :param grad: Calculate gradients on actions, defaults to False
-        :type grad: bool, optional
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: numpy.ndarray, optional
         :return: Action, log probability, entropy, and state values
@@ -350,8 +346,16 @@ class PPO(RLAlgorithm):
         ):
             action = action.unsqueeze(1)
 
+        # Clip to action space during inference
+        action = action.cpu().data.numpy()
+        if not self.training and isinstance(self.action_space, spaces.Box):
+            if self.actor.squash_output:
+                action = self.actor.scale_action(action)
+            else:
+                action = np.clip(action, self.action_space.low, self.action_space.high)
+
         return (
-            action.cpu().data.numpy(),
+            action,
             log_prob.cpu().data.numpy(),
             entropy.cpu().data.numpy(),
             values.cpu().data.numpy(),

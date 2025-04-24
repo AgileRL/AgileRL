@@ -35,13 +35,15 @@ Example
 .. code-block:: python
 
   import gymnasium as gym
+  import numpy as np
+
   from agilerl.utils.algo_utils import obs_channels_to_first
   from agilerl.utils.utils import make_vect_envs, observation_space_channels_first
   from agilerl.algorithms.ppo import PPO
 
   # Create environment
   num_envs = 1
-  env = make_vect_envs('LunarLanderContinuous-v2', num_envs=num_envs)
+  env = make_vect_envs('LunarLanderContinuous-v3', num_envs=num_envs)
   observation_space = env.observation_space
   action_space = env.action_space
 
@@ -53,7 +55,6 @@ Example
   agent = PPO(observation_space, action_space)   # Create PPO agent
 
   while True:
-
       states = []
       actions = []
       log_probs = []
@@ -69,7 +70,17 @@ Example
 
           # Get next action from agent
           action, log_prob, _, value = agent.get_action(state)
-          next_state, reward, term, trunc, _ = env.step(action)  # Act in environment
+
+          # Clip to action space
+          if isinstance(agent.action_space, spaces.Box):
+              if agent.actor.squash_output:
+                  clipped_action = agent.actor.scale_action(action)
+              else:
+                  clipped_action = np.clip(action, agent.action_space.low, agent.action_space.high)
+          else:
+              clipped_action = action
+
+          next_state, reward, term, trunc, _ = env.step(clipped_action)  # Act in environment
           next_done = np.logical_or(term, trunc).astype(np.int8)
 
           states.append(state)

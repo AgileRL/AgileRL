@@ -154,8 +154,24 @@ Example Training Loop
                 # Get next action from agent
                 action, log_prob, _, value = agent.get_action(obs=state, infos=info)
 
+                # Clip to action space
+                clipped_action = {}
+                for agent_id, agent_action in action.items():
+                    shared_id = agent.get_homo_id(agent_id)
+                    actor_idx = agent.shared_agent_ids.index(shared_id)
+                    agent_space = agent.action_space[agent_id]
+                    if isinstance(agent_space, spaces.Box):
+                        if agent.actors[actor_idx].squash_output:
+                            clipped_agent_action = agent.actors[actor_idx].scale_action(agent_action)
+                        else:
+                            clipped_agent_action = np.clip(agent_action, agent_space.low, agent_space.high)
+                    else:
+                        clipped_agent_action = agent_action
+
+                    clipped_action[agent_id] = clipped_agent_action
+
                 # Act in environment
-                next_state, reward, termination, truncation, info = env.step(action)
+                next_state, reward, termination, truncation, info = env.step(clipped_action)
                 scores += np.array(list(reward.values())).transpose()
 
                 steps += num_envs

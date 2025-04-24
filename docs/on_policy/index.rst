@@ -66,7 +66,7 @@ are more likely to remain present in the population. The sequence of evolution (
     }
 
     num_envs = 16
-    env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
+    env = make_vect_envs("LunarLander-v3", num_envs=num_envs)  # Create environment
 
     observation_space = env.single_observation_space
     action_space = env.single_action_space
@@ -102,7 +102,7 @@ The easiest way to train a population of agents using PPO is to use our online t
 
     trained_pop, pop_fitnesses = train_on_policy(
         env=env,                              # Gym-style environment
-        env_name="LunarLander-v2",  # Environment name
+        env_name="LunarLander-v3",  # Environment name
         pop=agent_pop,  # Population of agents
         swap_channels=INIT_HP['CHANNELS_LAST'],  # Swap image channel from last to first
         max_steps=200000,  # Max number of training steps
@@ -168,7 +168,7 @@ Alternatively, use a custom on-policy training loop:
     }
 
     num_envs = 16
-    env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
+    env = make_vect_envs("LunarLander-v3", num_envs=num_envs)  # Create environment
 
     observation_space = env.single_observation_space
     action_space = env.single_action_space
@@ -244,7 +244,6 @@ Alternatively, use a custom on-policy training loop:
                 done = np.zeros(num_envs)
 
                 learn_steps = 0
-
                 for idx_step in range(-(agent.learn_step // -num_envs)):
                     if INIT_HP["CHANNELS_LAST"]:
                         state = obs_channels_to_first(state)
@@ -252,8 +251,17 @@ Alternatively, use a custom on-policy training loop:
                     # Get next action from agent
                     action, log_prob, _, value = agent.get_action(state)
 
+                    # Clip to action space
+                    if isinstance(agent.action_space, spaces.Box):
+                        if agent.actor.squash_output:
+                            clipped_action = agent.actor.scale_action(action)
+                        else:
+                            clipped_action = np.clip(action, agent.action_space.low, agent.action_space.high)
+                    else:
+                        clipped_action = action
+
                     # Act in environment
-                    next_state, reward, terminated, truncated, info = env.step(action)
+                    next_state, reward, terminated, truncated, info = env.step(clipped_action)
                     next_done = np.logical_or(terminated, truncated).astype(np.int8)
 
                     total_steps += num_envs

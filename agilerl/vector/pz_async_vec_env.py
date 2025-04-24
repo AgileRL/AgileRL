@@ -30,6 +30,50 @@ PzEnvType = Union[PettingZooVecEnv, ParallelEnv]
 SharedMemoryType: TypeAlias = Union[RawArray, Tuple[RawArray, ...], Dict[str, RawArray]]
 
 
+def reshape_observation(
+    raw_data: NumpyObsType, space: spaces.Space, num_envs: int
+) -> Any:
+    """Reshape the raw data to the correct shape for the observation space.
+
+    :param raw_data: The raw data to reshape
+    :type raw_data: np.ndarray, Dict[str, np.ndarray], Tuple[np.ndarray, ...]
+    :param space: The observation space
+    :type space: gymnasium.spaces.Space
+    :param num_envs: The number of environments
+    :type num_envs: int
+
+    :return: The reshaped data
+    :rtype: Any
+    """
+    if isinstance(space, spaces.Dict):
+        result = OrderedDict()
+        for key, subspace in space.spaces.items():
+            subspace_data = raw_data[key]
+            shape = subspace.shape if subspace.shape != () else (1,)
+
+            # Reshape to [num_envs, *shape]
+            reshaped = subspace_data.reshape((num_envs, *shape))
+            result[key] = reshaped.astype(subspace.dtype)
+
+    elif isinstance(space, spaces.Tuple):
+        result = []
+        for i, subspace in enumerate(space.spaces):
+            subspace_data = raw_data[i]
+            shape = subspace.shape if subspace.shape != () else (1,)
+
+            reshaped = subspace_data.reshape((num_envs, *subspace.shape))
+            result.append(reshaped.astype(subspace.dtype))
+
+        result = tuple(result)
+    else:
+        shape = space.shape if space.shape != () else (1,)
+
+        reshaped = raw_data.reshape((num_envs, *shape))
+        result = reshaped.astype(space.dtype)
+
+    return result
+
+
 class AsyncState(Enum):
     """The AsyncVectorEnv possible states given the different actions."""
 
@@ -46,6 +90,8 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
     :type env_fns: list[Callable]
     :param copy: Boolean flag to copy the observation data when it is returned with either .step() or .reset(), recommended, defaults to True
     :type copy: bool, optional
+    :param shared_critic: Boolean flag to share the critic between agents, defaults to False
+    :type shared_critic: bool, optional
     :param context: Context for multiprocessing
 
     """
@@ -59,6 +105,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         self,
         env_fns: List[Callable[[], PzEnvType]],
         copy: bool = True,
+        shared_critic: bool = False,
         context: Optional[str] = None,
     ):
         # Core class attributes
@@ -77,7 +124,10 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             else dummy_env.unwrapped.render_mode
         )
         self.possible_agents = dummy_env.possible_agents
+        self.active_agents = None
+        self.previous_active = None
         self.copy = copy
+        self.shared_critic = shared_critic
         self.agents = dummy_env.possible_agents[:]
         action_spaces = {
             agent: dummy_env.action_space(agent) for agent in dummy_env.possible_agents
@@ -122,6 +172,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
                         child_pipe,
                         parent_pipe,
                         self._obs_buffer,
+                        self.shared_critic,
                         self.error_queue,
                         self.agents,
                     ),
@@ -185,6 +236,25 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
 
         self._state = AsyncState.WAITING_RESET
 
+    def filter_nans(
+        self, observation: Dict[str, NumpyObsType], copy: bool = False
+    ) -> Dict[str, NumpyObsType]:
+        """Filter out NaN values from the observations"""
+        filtered_obs = {}
+        for agent_id in observation.keys():
+            obs = observation[agent_id] if not copy else deepcopy(observation[agent_id])
+            if isinstance(obs, dict):
+                sample = next(iter(obs.values()))
+            elif isinstance(obs, tuple):
+                sample = obs[0]
+            else:
+                sample = obs
+
+            if not np.isnan(sample).all():
+                filtered_obs[agent_id] = obs
+
+        return filtered_obs
+
     def reset_wait(
         self, timeout: Optional[float] = None
     ) -> Tuple[Dict[str, NumpyObsType], Dict[str, Any]]:
@@ -219,15 +289,18 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             infos = self._add_info(infos, info, i)
 
         self._state = AsyncState.DEFAULT
+
+        observations = self.filter_nans(self.observations, self.copy)
         return (
-            (
-                {
-                    agent: deepcopy(self.observations[agent])
-                    for agent in self.observations.keys()
-                }
-                if self.copy
-                else self.observations
-            ),
+            # (
+            #     {
+            #         agent: deepcopy(self.observations[agent])
+            #         for agent in self.observations.keys()
+            #     }
+            #     if self.copy
+            #     else self.observations
+            # ),
+            observations,
             infos,
         )
 
@@ -284,26 +357,37 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             env_step_return, success = pipe.recv()
             successes.append(success)
             if success:
+                reward, term, trunc, info = env_step_return
+
+                # Here we handle the case where we have asynchronous agents
+                # (i.e. the environment doesn't return an observation for all agents each timestep)
                 for agent in self.agents:
-                    rewards[agent].append(env_step_return[0][agent])
-                    terminations[agent].append(env_step_return[1][agent])
-                    truncations[agent].append(env_step_return[2][agent])
-                infos = self._add_info(infos, env_step_return[3], env_idx)
+                    rewards[agent].append(reward.get(agent, np.nan))
+                    terminations[agent].append(term.get(agent, np.nan))
+                    truncations[agent].append(trunc.get(agent, np.nan))
+
+                infos = self._add_info(infos, info, env_idx)
 
         self._raise_if_errors(successes)
         self._state = AsyncState.DEFAULT
+
+        rewards = {agent: np.array(rew) for agent, rew in rewards.items()}
+        terminations = {agent: np.array(term) for agent, term in terminations.items()}
+        truncations = {agent: np.array(trunc) for agent, trunc in truncations.items()}
+
         return (
-            (
-                {
-                    agent: deepcopy(self.observations[agent])
-                    for agent in self.observations.keys()
-                }
-                if self.copy
-                else self.observations
-            ),
-            {agent: np.array(rew) for agent, rew in rewards.items()},
-            {agent: np.array(term) for agent, term in terminations.items()},
-            {agent: np.array(trunc) for agent, trunc in truncations.items()},
+            # (
+            #     {
+            #         agent: deepcopy(self.observations[agent])
+            #         for agent in self.observations.keys()
+            #     }
+            #     if self.copy
+            #     else self.observations
+            # ),
+            self.filter_nans(self.observations, self.copy),
+            self.filter_nans(rewards),
+            self.filter_nans(terminations),
+            self.filter_nans(truncations),
             infos,
         )
 
@@ -612,35 +696,9 @@ class Observations:
         """
         Get agent observation given a key (agent_id)
         """
-        space = self.obs_spaces[agent]
-        raw_data = self.obs_view[agent]
-        if isinstance(space, spaces.Dict):
-            result = OrderedDict()
-            for key, subspace in space.spaces.items():
-                subspace_data = raw_data[key]
-                shape = subspace.shape if subspace.shape != () else (1,)
-
-                # Reshape to [num_envs, *shape]
-                reshaped = subspace_data.reshape((self.num_envs, *shape))
-                result[key] = reshaped.astype(subspace.dtype)
-
-        elif isinstance(space, spaces.Tuple):
-            result = []
-            for i, subspace in enumerate(space.spaces):
-                subspace_data = raw_data[i]
-                shape = subspace.shape if subspace.shape != () else (1,)
-
-                reshaped = subspace_data.reshape((self.num_envs, *subspace.shape))
-                result.append(reshaped.astype(subspace.dtype))
-
-            result = tuple(result)
-        else:
-            shape = space.shape if space.shape != () else (1,)
-
-            reshaped = raw_data.reshape((self.num_envs, *shape))
-            result = reshaped.astype(space.dtype)
-
-        return result
+        return reshape_observation(
+            self.obs_view[agent], self.obs_spaces[agent], self.num_envs
+        )
 
     def __str__(self) -> str:
         return f"{self.obs_view}"
@@ -730,6 +788,7 @@ def get_placeholder_value(
     agent: str,
     transition_name: str,
     obs_spaces: Optional[Dict[str, spaces.Space]] = None,
+    use_nan: bool = False,
 ) -> Any:
     """When an agent is killed, used to obtain a placeholder value to return for associated experience.
 
@@ -739,7 +798,19 @@ def get_placeholder_value(
     :type transition_name: str
     :param obs_spaces: Observation spaces
     :type obs_spaces: Dict[str, gymnasium.spaces.Space]
+    :param use_nan: Whether to use NaN as a placeholder value
+    :type use_nan: bool
+
+    :return: Placeholder value
+    :rtype: Any
     """
+
+    def get_placeholder(value: np.ndarray) -> np.ndarray:
+        if use_nan:
+            return np.full(value.shape, np.nan)
+        else:
+            return -np.ones(value.shape)
+
     match transition_name:
         case "reward":
             return 0
@@ -756,43 +827,73 @@ def get_placeholder_value(
             agent_space = obs_spaces[agent]
             if isinstance(agent_space, spaces.Dict):
                 # For Dict spaces, create a dictionary of -1 arrays
-                return {k: -np.ones(v.shape) for k, v in agent_space.items()}
+                return {k: get_placeholder(v) for k, v in agent_space.items()}
             elif isinstance(agent_space, spaces.Tuple):
                 # For Tuple spaces, create a tuple of -1 arrays
-                return tuple(-np.ones(s.shape) for s in agent_space)
+                return tuple(get_placeholder(s) for s in agent_space)
             else:
                 # For normal spaces
-                return -np.ones_like(agent_space.shape)
+                return get_placeholder(agent_space)
 
 
 def process_transition(
-    transitions: Tuple[Any],
+    transitions: Tuple[Dict[str, NumpyObsType], ...],
     obs_spaces: Dict[str, spaces.Space],
     transition_names: List[str],
     agents: List[str],
-) -> List[Dict[str, Any]]:
+    shared_critic: bool,
+) -> List[Dict[str, NumpyObsType]]:
     """Process transition, adds in placeholder values for killed sub-agents.
 
     :param transitions: Tuple of environment transition
-    :type transitions: Tuple[Any]
+    :type transitions: Tuple[Dict[str, NumpyObsType], ...]
     :param obs_spaces: Observation spaces
     :type obs_spaces: Dict[str, gymnasium.spaces.Space]
     :param transition_names: Names associated to transitions
     :type transition_names: List[str]
     :param agents: List of sub-agent names
     :type agents: List[str]
+    :param shared_critic: Boolean flag to share the critic between agents, defaults to False
+    :type shared_critic: bool, optional
     """
-    transition_list = list(transitions)
-    for transition, name in zip(transition_list, transition_names):
+    transition_list = []
+    for transition, name in zip(list(transitions), transition_names):
         transition = {
             agent: (
                 transition[agent]
                 if agent in transition.keys()
-                else get_placeholder_value(agent, name, obs_spaces)
+                else get_placeholder_value(agent, name, obs_spaces, not shared_critic)
             )
             for agent in agents
         }
+        transition_list.append(transition)
     return transition_list
+
+
+def write_vector_observation(
+    index: int,
+    observation: np.ndarray,
+    shared_memory: RawArray,
+    obs_space: spaces.Space,
+) -> None:
+    """Write a vector observation to the shared memory.
+
+    :param index: Environment index
+    :type index: int
+    :param observation: Observation from env.step or env.reset
+    :type observation: np.ndarray
+    :param shared_memory: Shared memory
+    :type shared_memory: multiprocessing.RawArray
+    :param obs_space: Observation space
+    :type obs_space: gymnasium.spaces.Space
+    """
+    size = int(np.prod(obs_space.shape))
+    dtype = obs_space.dtype
+    dest = np.frombuffer(shared_memory.get_obj(), dtype=dtype)
+    np.copyto(
+        dest[index * size : (index + 1) * size],
+        np.asarray(observation, dtype=dtype).flatten(),
+    )
 
 
 def write_to_shared_memory(
@@ -808,38 +909,26 @@ def write_to_shared_memory(
     :param observation: Observation from env.step or env.reset
     :type observation: Dict[str, np.ndarray]
     :param shared_memory: Shared memory
-    :type shared_memory: Dict[str, mp.Array]
+    :type shared_memory: Dict[str, mp.Array | Tuple[mp.Array, ...] | Dict[str, mp.Array]]
     :param obs_space: Observation space dictionary
     :type obs_space: Dict[str, gymnasium.spaces.Space]
     """
-    for agent, obs in observation.items():
+    for agent in shared_memory.keys():
         agent_space = obs_space[agent]
+        obs = observation[agent]
         if isinstance(agent_space, spaces.Dict):
             for key, subspace in agent_space.spaces.items():
-                size = int(np.prod(subspace.shape))
-                dtype = subspace.dtype
-                dest = np.frombuffer(shared_memory[agent][key].get_obj(), dtype=dtype)
-                np.copyto(
-                    dest[index * size : (index + 1) * size],
-                    np.asarray(obs[key], dtype=dtype).flatten(),
+                write_vector_observation(
+                    index, obs[key], shared_memory[agent][key], subspace
                 )
+
         elif isinstance(agent_space, spaces.Tuple):
             for i, subspace in enumerate(agent_space.spaces):
-                size = int(np.prod(subspace.shape))
-                dtype = subspace.dtype
-                dest = np.frombuffer(shared_memory[agent][i].get_obj(), dtype=dtype)
-                np.copyto(
-                    dest[index * size : (index + 1) * size],
-                    np.asarray(obs[i], dtype=dtype).flatten(),
+                write_vector_observation(
+                    index, obs[i], shared_memory[agent][i], subspace
                 )
         else:
-            size = int(np.prod(agent_space.shape))
-            dtype = agent_space.dtype
-            dest = np.frombuffer(shared_memory[agent].get_obj(), dtype=dtype)
-            np.copyto(
-                dest[index * size : (index + 1) * size],
-                np.asarray(obs, dtype=dtype).flatten(),
-            )
+            write_vector_observation(index, obs, shared_memory[agent], agent_space)
 
 
 def _async_worker(
@@ -848,6 +937,7 @@ def _async_worker(
     pipe: Connection,
     parent_pipe: Connection,
     shared_memory: Dict[str, RawArray],
+    shared_critic: bool,
     error_queue: mp.Queue,
     agents: List[str],
 ) -> None:
@@ -864,6 +954,8 @@ def _async_worker(
     :type parent_pipe: Connection
     :param shared_memory: List of shared memories.
     :type shared_memory: List[multiprocessing.Array]
+    :param shared_critic: Boolean flag to share the critic between agents, defaults to False
+    :type shared_critic: bool, optional
     :param error_queue: Queue object for collecting subprocess errors to communicate back to the main process
     :type error_queue: mp.Queue
     :param observation_shapes: Shapes of observations
@@ -880,21 +972,27 @@ def _async_worker(
     observation_space = {agent: env.observation_space(agent) for agent in agents}
     parent_pipe.close()
 
+    # Need to keep track of the active agents in the environment
+    # For the edge case of asynchronous agents
+    current_active = None
     try:
         while True:
             command, data = pipe.recv()
             if command == "reset":
-                transition = env.reset(**data)
+                obs, info = env.reset(**data)
+                current_active = list(obs.keys())
+                transition = obs, info
                 observation, info = process_transition(
                     transition,
                     observation_space,
                     ["observation", "info"],
                     agents,
+                    shared_critic,
                 )
                 write_to_shared_memory(
                     index, observation, shared_memory, observation_space
                 )
-                pipe.send(((info), True))
+                pipe.send((info, True))
             elif command == "step":
                 data = {
                     possible_agent: (
@@ -902,10 +1000,9 @@ def _async_worker(
                         if not isinstance(data[idx], int)
                         else data[idx]
                     )
-                    for idx, possible_agent in enumerate(agents)
+                    for idx, possible_agent in enumerate(current_active)
                 }
                 observation, reward, terminated, truncated, info = env.step(data)
-                transition = observation, reward, terminated, truncated, info
                 if all(
                     [
                         term | trunc
@@ -913,6 +1010,9 @@ def _async_worker(
                     ]
                 ):
                     observation, info = env.reset()
+
+                current_active = list(observation.keys())
+                transition = observation, reward, terminated, truncated, info
                 observation, reward, terminated, truncated, info = process_transition(
                     transition,
                     observation_space,
@@ -924,6 +1024,7 @@ def _async_worker(
                         "info",
                     ],
                     agents,
+                    shared_critic,
                 )
                 write_to_shared_memory(
                     index, observation, shared_memory, observation_space

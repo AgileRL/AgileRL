@@ -107,7 +107,7 @@ We are constantly updating our tutorials to showcase the latest features of Agil
 Before starting training, there are some meta-hyperparameters and settings that must be set. These are defined in <code>INIT_HP</code>, for general parameters, and <code>MUTATION_PARAMS</code>, which define the evolutionary probabilities, and <code>NET_CONFIG</code>, which defines the network architecture. For example:
 ```python
 INIT_HP = {
-    'ENV_NAME': 'LunarLander-v2',   # Gym environment name
+    'ENV_NAME': 'LunarLander-v3',   # Gym environment name
     'ALGO': 'DQN',                  # Algorithm
     'DOUBLE': True,                 # Use double Q-learning
     'CHANNELS_LAST': False,         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
