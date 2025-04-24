@@ -174,6 +174,11 @@ class EvolvableLSTM(EvolvableModule):
             )
 
         # Use provided hidden state if available
+
+        print(
+            f"x.shape: {x.shape}, hidden_state.get('h', None).shape: {hidden_state.get('h', None).shape}, hidden_state.get('c', None).shape: {hidden_state.get('c', None).shape}"
+        )
+
         if hidden_state is not None:
             h0 = hidden_state.get("h", None)
             c0 = hidden_state.get("c", None)

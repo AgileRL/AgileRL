@@ -412,7 +412,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                     std_coeff=std_coeff, output_coeff=output_coeff
                 )
 
-    def initialize_hidden_state(self) -> Dict[str, torch.Tensor]:
+    def initialize_hidden_state(self, batch_size: int = 1) -> Dict[str, torch.Tensor]:
         """Initialize the hidden state for the network.
 
         :param env: The environment to initialize the hidden state for
@@ -424,10 +424,10 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                 raise ValueError(
                     "Hidden state size must be specified for recurrent networks."
                 )
+
             # Assuming num_layers=1 and bidirectional=False for EvolvableLSTM
             num_layers = 1
             directions = 1
-            batch_size = 1  # Initialize for a single instance/batch
             shape = (num_layers * directions, batch_size, hidden_size)
 
             if (

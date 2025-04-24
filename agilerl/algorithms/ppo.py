@@ -391,7 +391,7 @@ class PPO(RLAlgorithm):
             )
             return action, log_prob, entropy, values, None
 
-    def get_initial_hidden_state(self, env: GymEnvType) -> ArrayOrTensor:
+    def get_initial_hidden_state(self, num_envs: int) -> ArrayOrTensor:
         """
         Get the initial hidden state for the environment.
         """
@@ -399,24 +399,10 @@ class PPO(RLAlgorithm):
             raise ValueError(
                 "Cannot get initial hidden state for non-recurrent networks."
             )
+
         # Return a batch of initial hidden states
         # Assuming self.actor.initialize_hidden_state() returns a single state (e.g., zeros)
-        single_hidden_state = self.actor.initialize_hidden_state()
-        if isinstance(single_hidden_state, torch.Tensor):
-            # Stack for num_envs
-            return single_hidden_state.repeat(
-                env.num_envs, 1
-            )  # Assuming hidden state dim is last
-        elif isinstance(single_hidden_state, dict):
-            # Stack each tensor in the dict
-            return {
-                k: v.repeat(env.num_envs, 1) for k, v in single_hidden_state.items()
-            }
-        else:
-            # Handle numpy arrays or other types if needed
-            raise TypeError(
-                f"Unsupported hidden state type: {type(single_hidden_state)}"
-            )
+        return self.actor.initialize_hidden_state(batch_size=num_envs)
 
     def evaluate_actions(
         self,
@@ -549,7 +535,7 @@ class PPO(RLAlgorithm):
         # Initial reset
         obs, info = env.reset()
         self.hidden_state = (
-            self.get_initial_hidden_state(env) if self.recurrent else None
+            self.get_initial_hidden_state(self.num_envs) if self.recurrent else None
         )
 
         for _ in range(n_steps):
@@ -598,7 +584,9 @@ class PPO(RLAlgorithm):
                 num_finished = finished_mask.sum()
                 # Need a way to get initial state for a subset of envs
                 # For simplicity, re-initialize all and mask later, or handle dicts/tensors carefully
-                initial_hidden_states_for_reset = self.get_initial_hidden_state(env)
+                initial_hidden_states_for_reset = self.get_initial_hidden_state(
+                    self.num_envs
+                )
 
                 if isinstance(self.hidden_state, torch.Tensor):
                     reset_states = initial_hidden_states_for_reset[finished_mask]
@@ -921,7 +909,7 @@ class PPO(RLAlgorithm):
                 finished = np.zeros(num_envs, dtype=bool)
                 step = 0
                 test_hidden_state = (
-                    self.get_initial_hidden_state(env) if self.recurrent else None
+                    self.get_initial_hidden_state(num_envs) if self.recurrent else None
                 )
 
                 while not np.all(finished):

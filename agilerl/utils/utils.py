@@ -163,6 +163,7 @@ def create_population(
     device: str = "cpu",
     accelerator: Optional[Any] = None,
     torch_compiler: Optional[Any] = None,
+    algo_kwargs: Optional[Dict[str, Any]] = None,
 ) -> PopulationType:
     """Returns population of identical agents.
 
@@ -194,7 +195,10 @@ def create_population(
     :type torch_compiler: Any, optional
     :return: Population of agents
     :rtype: list[EvolvableAlgorithm]
+    :param algo_kwargs: Additional keyword arguments for the algorithm
+    :type algo_kwargs: dict, optional
     """
+
     population = []
     if algo == "DQN":
         for idx in range(population_size):
@@ -214,6 +218,7 @@ def create_population(
                 actor_network=actor_network,
                 device=device,
                 accelerator=accelerator,
+                **algo_kwargs,
             )
             population.append(agent)
 
@@ -239,6 +244,7 @@ def create_population(
                 actor_network=actor_network,
                 device=device,
                 accelerator=accelerator,
+                **algo_kwargs,
             )
             population.append(agent)
 
@@ -268,6 +274,7 @@ def create_population(
                 share_encoders=INIT_HP.get("SHARE_ENCODERS", True),
                 device=device,
                 accelerator=accelerator,
+                **algo_kwargs,
             )
 
             agent = (
@@ -302,6 +309,8 @@ def create_population(
                 critic_network=critic_network,
                 device=device,
                 accelerator=accelerator,
+                num_envs=num_envs,
+                **algo_kwargs,
             )
             population.append(agent)
 
@@ -322,6 +331,7 @@ def create_population(
                 actor_network=actor_network,
                 device=device,
                 accelerator=accelerator,
+                **algo_kwargs,
             )
             population.append(agent)
 
@@ -351,6 +361,7 @@ def create_population(
                 share_encoders=INIT_HP.get("SHARE_ENCODERS", True),
                 device=device,
                 accelerator=accelerator,
+                **algo_kwargs,
             )
             population.append(agent)
 
@@ -380,6 +391,7 @@ def create_population(
                 device=device,
                 accelerator=accelerator,
                 torch_compiler=torch_compiler,
+                **algo_kwargs,
             )
             population.append(agent)
 
@@ -410,6 +422,7 @@ def create_population(
                 device=device,
                 accelerator=accelerator,
                 torch_compiler=torch_compiler,
+                **algo_kwargs,
             )
             population.append(agent)
 
@@ -439,6 +452,7 @@ def create_population(
                 device=device,
                 accelerator=accelerator,
                 torch_compiler=torch_compiler,
+                **algo_kwargs,
             )
             population.append(agent)
 
@@ -468,6 +482,7 @@ def create_population(
                 device=device,
                 accelerator=accelerator,
                 torch_compiler=torch_compiler,
+                **algo_kwargs,
             )
             population.append(agent)
 
@@ -488,6 +503,7 @@ def create_population(
                 actor_network=actor_network,
                 device=device,
                 accelerator=accelerator,
+                **algo_kwargs,
             )
             population.append(agent)
 
@@ -508,6 +524,7 @@ def create_population(
                 actor_network=actor_network,
                 device=device,
                 accelerator=accelerator,
+                **algo_kwargs,
             )
             population.append(agent)
 
@@ -539,6 +556,7 @@ def create_population(
                 ),
                 accelerator=accelerator[idx],
                 device=device,
+                **algo_kwargs,
             )
             population.append(agent)
 
