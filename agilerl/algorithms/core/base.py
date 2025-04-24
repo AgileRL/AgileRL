@@ -1445,7 +1445,10 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         :return: Summed rewards dictionary
         :rtype: Dict[str, np.ndarray]
         """
-        reward_shape = list(rewards.values())[0].shape
+        reward_shape = list(rewards.values())[0]
+        reward_shape = (
+            reward_shape.shape if isinstance(reward_shape, np.ndarray) else (1,)
+        )
         summed_rewards = {
             agent_id: np.zeros(reward_shape) for agent_id in self.shared_agent_ids
         }
