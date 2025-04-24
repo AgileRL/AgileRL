@@ -494,11 +494,7 @@ def test_prepare_state_cnn_accelerator():
 
 @pytest.fixture
 def build_ppo(observation_space, action_space, accelerator):
-    return PPO(
-        observation_space,
-        action_space,
-        accelerator=accelerator,
-    )
+    return PPO(observation_space, action_space, accelerator=accelerator)
 
 
 @pytest.mark.parametrize(
@@ -548,7 +544,6 @@ def test_returns_expected_action(observation_space, action_space, build_ppo):
             assert isinstance(act, np.float32)
     else:
         assert isinstance(action, np.ndarray)
-
         assert action.shape == (1, *action_space.shape)
 
     # Now with grad=True, and eval_action
