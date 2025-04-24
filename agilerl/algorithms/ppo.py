@@ -120,6 +120,7 @@ class PPO(RLAlgorithm):
         share_encoders: bool = True,
         num_envs: int = 1,
         use_rollout_buffer: bool = False,
+        rollout_buffer_config: Optional[Dict[str, Any]] = {},
         recurrent: bool = False,
         hidden_state_size: Optional[int] = None,
         device: str = "cpu",
@@ -325,6 +326,7 @@ class PPO(RLAlgorithm):
                 gamma=self.gamma,
                 recurrent=self.recurrent,
                 hidden_state_size=self.hidden_state_size,
+                **rollout_buffer_config,
             )
 
         if self.accelerator is not None and wrap:
@@ -364,18 +366,15 @@ class PPO(RLAlgorithm):
         :return: Action, log probability, entropy, state values, and next hidden state
         :rtype: Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[ArrayOrTensor]]
         """
-        obs = self.preprocess_observation(obs)
         if hidden_state is not None:
             latent_pi, next_hidden = self.actor.extract_features(
                 obs, hidden_state=hidden_state
             )
             action, log_prob, entropy = self.actor.forward_head(
-                latent_pi, action_mask=action_mask, hidden_state=next_hidden
+                latent_pi, action_mask=action_mask
             )
             values = (
-                self.critic.forward_head(latent_pi, hidden_state=next_hidden).squeeze(
-                    -1
-                )
+                self.critic.forward_head(latent_pi).squeeze(-1)
                 if self.share_encoders
                 else self.critic(obs, hidden_state=next_hidden).squeeze(-1)
             )
@@ -461,7 +460,7 @@ class PPO(RLAlgorithm):
         self,
         obs: ArrayOrTensor,
         action_mask: Optional[ArrayOrTensor] = None,
-        hidden_state: Optional[ArrayOrTensor] = None,
+        hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
     ) -> Union[
         Tuple[
             ArrayOrTensor,
@@ -516,7 +515,7 @@ class PPO(RLAlgorithm):
                 log_prob.cpu().data.numpy(),
                 entropy.cpu().data.numpy(),
                 values.cpu().data.numpy(),
-                next_hidden.cpu().data.numpy() if next_hidden is not None else None,
+                next_hidden if next_hidden is not None else None,
             )
         else:
             return (
@@ -911,18 +910,15 @@ class PPO(RLAlgorithm):
         :return: Mean test score of agent in environment
         :rtype: float
         """
-        if not self.use_rollout_buffer:
-            raise RuntimeError("test() can only be used when use_rollout_buffer=True")
-
         self.set_training_mode(False)
         with torch.no_grad():
             rewards = []
             num_envs = env.num_envs if hasattr(env, "num_envs") else 1
-            for i in range(loop):
+            for _ in range(loop):
                 obs, info = env.reset()
                 scores = np.zeros(num_envs)
                 completed_episode_scores = np.zeros(num_envs)
-                finished = np.zeros(num_envs)
+                finished = np.zeros(num_envs, dtype=bool)
                 step = 0
                 test_hidden_state = (
                     self.get_initial_hidden_state(env) if self.recurrent else None
@@ -934,25 +930,34 @@ class PPO(RLAlgorithm):
 
                     action_mask = info.get("action_mask", None)
                     if self.recurrent:
-                        action, _, _, _, next_hidden = self.get_action(
+                        action, _, _, _, test_hidden_state = self.get_action(
                             obs, action_mask=action_mask, hidden_state=test_hidden_state
                         )
-                        test_hidden_state = next_hidden
                     else:
-                        action, _, _, _ = self.get_action(
-                            obs, action_mask=action_mask
-                        )  # Doesn't return the hidden state because it isn't passed
+                        action, _, _, _ = self.get_action(obs, action_mask=action_mask)
 
                     obs, reward, done, trunc, info = env.step(action)
                     step += 1
+
                     scores += np.array(reward)
-                    for idx, (d, t) in enumerate(zip(done, trunc)):
-                        if (
-                            d or t or (max_steps is not None and step == max_steps)
-                        ) and not finished[idx]:
-                            completed_episode_scores[idx] = scores[idx]
-                            finished[idx] = 1
+
+                    # Check for episode termination
+                    newly_finished = (
+                        np.logical_or(
+                            np.logical_or(done, trunc),
+                            (max_steps is not None and step == max_steps),
+                        )
+                        & ~finished
+                    )
+
+                    if np.any(newly_finished):
+                        completed_episode_scores[newly_finished] = scores[
+                            newly_finished
+                        ]
+                        finished[newly_finished] = True
+
                 rewards.append(np.mean(completed_episode_scores))
+
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
         return mean_fit

@@ -500,9 +500,9 @@ def build_ppo(observation_space, action_space, accelerator):
 @pytest.mark.parametrize(
     "observation_space",
     [
+        generate_discrete_space(4),
         generate_random_box_space(shape=(4,), low=0, high=1),
         generate_random_box_space(shape=(3, 32, 32), low=0, high=1),
-        generate_discrete_space(4),
         generate_dict_or_tuple_space(2, 3, dict_space=False),
         generate_dict_or_tuple_space(2, 3, dict_space=True),
     ],
@@ -543,6 +543,7 @@ def test_returns_expected_action(observation_space, action_space, build_ppo):
         for act in action[0]:
             assert isinstance(act, np.float32)
     else:
+        print(action, action_space)
         assert isinstance(action, np.ndarray)
         assert action.shape == (1, *action_space.shape)
 
@@ -1662,8 +1663,8 @@ def test_ppo_with_rollout_buffer():
     ppo = PPO(
         observation_space=observation_space,
         action_space=action_space,
-        use_rollout_buffer=True,
         recurrent=True,
+        use_rollout_buffer=True,
         hidden_state_size=64,
     )
 
@@ -1721,12 +1722,12 @@ def test_ppo_with_hidden_states():
         action_space=action_space,
         use_rollout_buffer=True,
         recurrent=True,
-        hidden_size=(64,),
+        hidden_state_size=64,
     )
 
     # Get action with hidden state
     obs = np.random.rand(*observation_space.shape)
-    hidden_state = np.zeros((1, 64))
+    hidden_state = ppo.actor.initialize_hidden_state()
 
     action, log_prob, entropy, value, next_hidden = ppo.get_action(
         obs, hidden_state=hidden_state
@@ -1737,7 +1738,8 @@ def test_ppo_with_hidden_states():
     assert isinstance(entropy, np.ndarray)
     assert isinstance(value, np.ndarray)
     assert next_hidden is not None
-    assert next_hidden.shape == (1, 64)
+    assert next_hidden.get("h", None).shape == (1, 1, 64)
+    assert next_hidden.get("c", None).shape == (1, 1, 64)
 
 
 # Test PPO collect_rollouts method
@@ -1785,7 +1787,7 @@ def test_ppo_wrap_at_capacity():
         action_space=action_space,
         use_rollout_buffer=True,
         learn_step=10,
-        wrap_at_capacity=True,
+        rollout_buffer_config={"wrap_at_capacity": True},
     )
 
     env = DummyEnv(state_size=observation_space.shape, vect=True, num_envs=1)
@@ -1867,12 +1869,14 @@ def test_ppo_backward_compatibility():
 
         ppo_new.rollout_buffer.add(obs, action, reward, done, value, log_prob, next_obs)
 
-    ppo_new.rollout_buffer.compute_returns_and_advantages()
+    ppo_new.rollout_buffer.compute_returns_and_advantages(
+        last_value=0.0, last_done=np.zeros(1)
+    )
 
-    # New implementation should work without experiences
+    # New implementation should work without experiences (from buffer)
     loss_from_buffer = ppo_new.learn()
     assert isinstance(loss_from_buffer, float)
 
-    # Old implementation should fail without experiences
+    # Old implementation should fail without experiences (no buffer)
     with pytest.raises(ValueError):
         ppo_old.learn()

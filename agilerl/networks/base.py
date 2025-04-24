@@ -186,6 +186,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         latent_dim: int = 32,
         simba: bool = False,
         recurrent: bool = False,
+        hidden_state_size: Optional[int] = None,
         device: DeviceType = "cpu",
     ) -> None:
         super().__init__(device)
@@ -221,6 +222,12 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         self.simba = simba
         self.recurrent = recurrent
         self.flatten_obs = False
+        self.hidden_state_size = hidden_state_size
+
+        if self.recurrent:
+            assert encoder_config.get("hidden_state_size", None) is not None, (
+                "Hidden state size must be specified for recurrent networks."
+            )
 
         encoder_config = (
             encoder_config
@@ -412,12 +419,34 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         :type env: GymEnvType
         """
         if self.recurrent:
-            if self.cached_hidden_state is None:
+            hidden_size = self.encoder_config.get("hidden_state_size", None)
+            if hidden_size is None:
+                raise ValueError(
+                    "Hidden state size must be specified for recurrent networks."
+                )
+            # Assuming num_layers=1 and bidirectional=False for EvolvableLSTM
+            num_layers = 1
+            directions = 1
+            batch_size = 1  # Initialize for a single instance/batch
+            shape = (num_layers * directions, batch_size, hidden_size)
+
+            if (
+                hasattr(self, "cached_hidden_state")
+                and self.cached_hidden_state is not None
+            ):
+                # Ensure cached state has the correct shape or reinitialize
+                if self.cached_hidden_state["h"].shape != shape:
+                    self.cached_hidden_state = {
+                        "h": torch.zeros(shape).to(self.device),
+                        "c": torch.zeros(shape).to(self.device),
+                    }
+                return self.cached_hidden_state.copy()
+            else:
                 self.cached_hidden_state = {
-                    "h": torch.zeros(self.encoder.hidden_size).to(self.device),
-                    "c": torch.zeros(self.encoder.hidden_size).to(self.device),
+                    "h": torch.zeros(shape).to(self.device),
+                    "c": torch.zeros(shape).to(self.device),
                 }
-            return self.cached_hidden_state.clone()
+            return self.cached_hidden_state.copy()
         else:
             raise ValueError(
                 "Cannot initialize hidden state for non-recurrent networks."

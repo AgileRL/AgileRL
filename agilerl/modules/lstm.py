@@ -150,27 +150,44 @@ class EvolvableLSTM(EvolvableModule):
     def forward(
         self,
         x: ArrayOrTensor,
-        states: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-    ) -> torch.Tensor:
+        hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """Forward pass of the network.
 
         :param x: Input tensor
         :type x: ArrayOrTensor
-        :param states: Tuple of hidden and cell states, defaults to None
-        :type states: Tuple[torch.Tensor, torch.Tensor], optional
-        :return: Output tensor
-        :rtype: torch.Tensor
+        :param hidden_state: Dict containing hidden and cell states, defaults to None
+        :type hidden_state: Optional[Dict[str, torch.Tensor]]
+        :return: Output tensor and next hidden state
+        :rtype: Tuple[torch.Tensor, Dict[str, torch.Tensor]]
         """
         if not isinstance(x, torch.Tensor):
             x = torch.tensor(x, dtype=torch.float32, device=self.device)
 
-        if len(x.shape) == 2:
-            x = x.unsqueeze(0)
+        # If input is 2D (batch_size, features), add sequence length dimension
+        if x.dim() == 2:
+            # Reshape to (batch_size, seq_len=1, features)
+            x = x.unsqueeze(1)
+        elif x.dim() != 3:
+            raise ValueError(
+                f"Expected 2D (batch_size, features) or 3D (batch_size, seq_len, features) input, but got {x.dim()}D"
+            )
 
-        lstm_output, lstm_states = self.model[f"{self.name}_lstm"](x)
+        # Use provided hidden state if available
+        if hidden_state is not None:
+            h0 = hidden_state.get("h", None)
+            c0 = hidden_state.get("c", None)
+            lstm_output, (h_n, c_n) = self.model[f"{self.name}_lstm"](x, (h0, c0))
+        else:
+            lstm_output, (h_n, c_n) = self.model[f"{self.name}_lstm"](x)
+
+        # Process output
         lstm_output = self.model[f"{self.name}_lstm_output"](lstm_output[:, -1, :])
         lstm_output = self.model[f"{self.name}_output_activation"](lstm_output)
-        return lstm_output
+
+        # Return output and new hidden state
+        next_hidden = {"h": h_n, "c": c_n}
+        return lstm_output, next_hidden
 
     def get_output_dense(self) -> torch.nn.Module:
         """Returns output layer of neural network."""
