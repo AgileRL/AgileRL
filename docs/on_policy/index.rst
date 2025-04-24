@@ -66,7 +66,7 @@ are more likely to remain present in the population. The sequence of evolution (
     }
 
     num_envs = 16
-    env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
+    env = make_vect_envs("LunarLander-v3", num_envs=num_envs)  # Create environment
 
     observation_space = env.single_observation_space
     action_space = env.single_action_space
@@ -102,7 +102,7 @@ The easiest way to train a population of agents using PPO is to use our online t
 
     trained_pop, pop_fitnesses = train_on_policy(
         env=env,                              # Gym-style environment
-        env_name="LunarLander-v2",  # Environment name
+        env_name="LunarLander-v3",  # Environment name
         pop=agent_pop,  # Population of agents
         swap_channels=INIT_HP['CHANNELS_LAST'],  # Swap image channel from last to first
         max_steps=200000,  # Max number of training steps
@@ -168,7 +168,7 @@ Alternatively, use a custom on-policy training loop:
     }
 
     num_envs = 16
-    env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
+    env = make_vect_envs("LunarLander-v3", num_envs=num_envs)  # Create environment
 
     observation_space = env.single_observation_space
     action_space = env.single_action_space

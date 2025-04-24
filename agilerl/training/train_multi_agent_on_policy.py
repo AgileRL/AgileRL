@@ -241,6 +241,7 @@ def train_multi_agent_on_policy(
                         obs=obs, infos=info
                     )
 
+                    # print("action", {k:v for k,v in action.items() if "government" in k})
                     if not is_vectorised:
                         action = {agent: act[0] for agent, act in action.items()}
                         log_prob = {agent: lp[0] for agent, lp in log_prob.items()}
@@ -271,6 +272,8 @@ def train_multi_agent_on_policy(
                     next_obs, reward, termination, truncation, info = env.step(
                         clipped_action
                     )
+
+                    # print("next obs keys", list(next_obs.keys()))
                     score_increment = (
                         (
                             np.sum(
@@ -290,14 +293,17 @@ def train_multi_agent_on_policy(
                     steps += num_envs
 
                     next_done = {}
-                    for agent_id in agent.agent_ids:
+                    for agent_id in obs:
                         states[agent_id].append(obs[agent_id])
+                        rewards[agent_id].append(reward[agent_id])
                         actions[agent_id].append(action[agent_id])
                         log_probs[agent_id].append(log_prob[agent_id])
                         entropies[agent_id].append(entropy[agent_id])
-                        rewards[agent_id].append(reward[agent_id])
-                        dones[agent_id].append(done[agent_id])
                         values[agent_id].append(value[agent_id])
+                        dones[agent_id].append(done[agent_id])
+
+                    # Handle asynchronous agents
+                    for agent_id in termination:
                         next_done[agent_id] = np.logical_or(
                             termination[agent_id], truncation[agent_id]
                         ).astype(np.int8)
@@ -326,6 +332,12 @@ def train_multi_agent_on_policy(
                             scores[idx].fill(0)
                             if not is_vectorised:
                                 obs, info = env.reset()
+                                done = {
+                                    agent_id: np.zeros(num_envs)
+                                    for agent_id in agent.agent_ids
+                                }
+
+                    pbar.update(num_envs)
 
                 experiences = (
                     states,
@@ -349,7 +361,7 @@ def train_multi_agent_on_policy(
                     )
 
             agent.steps[-1] += steps
-            pbar.update(evo_steps // len(pop))
+            # pbar.update(evo_steps // len(pop))
             fps = steps / (time.time() - start_time)
             pop_fps.append(fps)
             pop_episode_scores.append(completed_episode_scores)
