@@ -6,11 +6,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import gymnasium as gym
 import numpy as np
+import wandb
 from accelerate import Accelerator
 from gymnasium import spaces
 from tqdm import trange
 
-import wandb
 from agilerl.algorithms import IPPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
