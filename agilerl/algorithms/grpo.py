@@ -70,7 +70,7 @@ class GRPO(LLMAlgorithm):
     :type temperature: float, optional
     :param calc_position_embeddings: Flag indicating whether to calculate position embeddings, defaults to True
     :type calc_position_embeddings: bool, optional
-    :param reduce_memory_peak: Flag to reduce memory peak in the _get_log_probs method, defaults to False
+    :param reduce_memory_peak: Flag to reduce memory peak in the _get_logprobs method, defaults to False
     :type reduce_memory_peak: bool, optional
     :param max_output_tokens: Max number of answer tokens, defaults to 512
     :type max_output_tokens: int, optional
@@ -331,7 +331,6 @@ class GRPO(LLMAlgorithm):
             self.reference_actor = self.reference_actor.to(self.device)
 
         
-
     def _calculate_advantage(
         self, rewards: torch.Tensor, eps: float = 1e-8
     ) -> torch.Tensor:
@@ -363,6 +362,8 @@ class GRPO(LLMAlgorithm):
         :return: Kl divergence between the current and reference log probabilities.
         :rtype: torch.Tensor
         """
+        print("REFERENCE LOG PROBS: ")
+        print(reference_log_probs , log_probs)
         return (
             torch.exp(reference_log_probs - log_probs)
             - (reference_log_probs - log_probs)
@@ -454,13 +455,13 @@ class GRPO(LLMAlgorithm):
             log_probs = torch.cat(log_probs_list)
             del log_probs_list
         else:
+            print([val for key, val in model_kwargs.items() if isinstance(val, torch.Tensor)])
             logits = policy.forward(**model_kwargs).logits
             log_probs = (
                 F.log_softmax(logits[:, :-1], dim=-1)
                 .gather(dim=-1, index=ids[:, 1:].unsqueeze(-1))
                 .squeeze(-1)
             )
-
         return log_probs
 
     def _create_policy_network(

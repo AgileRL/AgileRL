@@ -596,7 +596,7 @@ def save_population_checkpoint(
 import logging 
 import torch.distributed as dist
 logging.basicConfig(
-        level=logging.DEBUG,
+        level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         filename='myapp.log',  # Optional: log to a file
         filemode='a'          # Optional: append to the file
@@ -604,7 +604,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 # Create a console handler and set its format and level
 console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.DEBUG)
+console_handler.setLevel(logging.INFO)
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 console_handler.setFormatter(formatter)
 
@@ -652,53 +652,52 @@ def tournament_selection_and_mutation(
             population = mutation.mutation(population)
         if accelerator is not None:
             accelerator.wait_for_everyone()
-            consolidate_mutations(population, accelerator)
+            consolidate_mutations(population)
             accelerator.wait_for_everyone()
         if save_elite:
             save_llm_checkpoint(elite, elite_path)
-    else:
-        if accelerator is not None:
-            # Save temporary models for accelerator processes
-            accel_temp_models_path = f"models/{env_name}"
-            if accelerator.is_main_process:
-                if not os.path.exists(accel_temp_models_path):
-                    os.makedirs(accel_temp_models_path)
-            # Need to unwrap models from acccelerator before selecting and mutating
-            accelerator.wait_for_everyone()
-            for model in population:
-                model.unwrap_models()
+        return population
 
-            accelerator.wait_for_everyone()
-
-            # Perform tournament selection and mutation on main process
-            if accelerator.is_main_process:
-                elite, population = tournament.select(population)
-                population = mutation.mutation(population)
-                for pop_i, model in enumerate(population):
-                    model.save_checkpoint(f"{accel_temp_models_path}/{algo}_{pop_i}.pt")
-            accelerator.wait_for_everyone()
-
-            # Load models back to accelerator processes
-            if not accelerator.is_main_process:
-                for pop_i, model in enumerate(population):
-                    model.load_checkpoint(f"{accel_temp_models_path}/{algo}_{pop_i}.pt")
-            accelerator.wait_for_everyone()
-
-            # Wrap models back to accelerator
-            for model in population:
-                model.wrap_models()
-        else:
-            # Perform tournament selection and mutation
+    if accelerator is not None:
+        # Save temporary models for accelerator processes
+        accel_temp_models_path = f"models/{env_name}"
+        if accelerator.is_main_process:
+            if not os.path.exists(accel_temp_models_path):
+                os.makedirs(accel_temp_models_path)
+        # Need to unwrap models from acccelerator before selecting and mutating
+        accelerator.wait_for_everyone()
+        for model in population:
+            model.unwrap_models()
+        accelerator.wait_for_everyone()
+        # Perform tournament selection and mutation on main process
+        if accelerator.is_main_process:
             elite, population = tournament.select(population)
             population = mutation.mutation(population)
+            for pop_i, model in enumerate(population):
+                model.save_checkpoint(f"{accel_temp_models_path}/{algo}_{pop_i}.pt")
+        accelerator.wait_for_everyone()
 
-        if save_elite:
-            elite_save_path = (
-                elite_path.split(".pt")[0]
-                if elite_path is not None
-                else f"{env_name}-elite_{algo}"
-            )
-            elite.save_checkpoint(f"{elite_save_path}.pt")
+        # Load models back to accelerator processes
+        if not accelerator.is_main_process:
+            for pop_i, model in enumerate(population):
+                model.load_checkpoint(f"{accel_temp_models_path}/{algo}_{pop_i}.pt")
+        accelerator.wait_for_everyone()
+
+        # Wrap models back to accelerator
+        for model in population:
+            model.wrap_models()
+    else:
+        # Perform tournament selection and mutation
+        elite, population = tournament.select(population)
+        population = mutation.mutation(population)
+
+    if save_elite:
+        elite_save_path = (
+            elite_path.split(".pt")[0]
+            if elite_path is not None
+            else f"{env_name}-elite_{algo}"
+        )
+        elite.save_checkpoint(f"{elite_save_path}.pt")
 
     return population
 
@@ -927,8 +926,7 @@ def save_llm_checkpoint(agent: EvolvableAlgorithm, checkpoint_path: str | None) 
     else:
         agent.actor.save_pretrained(path)
 
-
-def consolidate_mutations(population: PopulationType, accelerator: Accelerator) -> None:
+def consolidate_mutations(population: PopulationType) -> None:
     """Consolidate mutations across processes during LLM fintuning
 
     :param population: Population of agents
@@ -945,3 +943,4 @@ def consolidate_mutations(population: PopulationType, accelerator: Accelerator) 
         setattr(agent, mut, mut_attr)
         if mut == "lr":
             LLMAlgorithm.update_lr(agent.optimizer, getattr(agent, mut))
+

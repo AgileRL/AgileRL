@@ -984,14 +984,14 @@ def is_peft_model(model: nn.Module) -> bool:
 import logging 
 import torch.distributed as dist
 logging.basicConfig(
-        level=logging.DEBUG,
+        level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         filename='myapp.log',  # Optional: log to a file
         filemode='a'          # Optional: append to the file
     )
 logger = logging.getLogger(__name__)
 console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.DEBUG)
+console_handler.setLevel(logging.INFO)
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 console_handler.setFormatter(formatter)
 
@@ -1007,20 +1007,20 @@ def clone_llm(
     :type model: PreTrainedModelType
     :return: Cloned model
     """
-    logger.debug(f"========= ENTER CLONE LLM | Process {dist.get_rank()} | Function {clone_llm.__name__} =========")
+    # logger.debug(f"========= ENTER CLONE LLM | Process {dist.get_rank()} | Function {clone_llm.__name__} =========")
     model_config = original_model.config
     base_model = original_model.model
-    logger.debug(f"========= BASE MODEL INSTANTIATED | Process {dist.get_rank()} | Function {clone_llm.__name__} =========")
+    # logger.debug(f"========= BASE MODEL INSTANTIATED | Process {dist.get_rank()} | Function {clone_llm.__name__} =========")
     model = type(base_model)(model_config)
-    logger.debug(f"========= MODEL INSTANTIATED | Process {dist.get_rank()} | Function {clone_llm.__name__} =========")
+    # logger.debug(f"========= MODEL INSTANTIATED | Process {dist.get_rank()} | Function {clone_llm.__name__} =========")
     if is_peft_model(original_model):
-        logger.debug(f"========= PEFT MODEL DETECTED | Process {dist.get_rank()} | Function {clone_llm.__name__} =========")
+        # logger.debug(f"========= PEFT MODEL DETECTED | Process {dist.get_rank()} | Function {clone_llm.__name__} =========")
         peft_config = original_model.peft_config[original_model.active_adapter]
         model = get_peft_model(model, peft_config)
-        logger.debug(f"========= PEFT MODEL CONFIGURED | Process {dist.get_rank()} | Function {clone_llm.__name__} =========")
+        # logger.debug(f"========= PEFT MODEL CONFIGURED | Process {dist.get_rank()} | Function {clone_llm.__name__} =========")
     if load_state_dict:
-        logger.debug(f"========= LOADING STATE DICT | Process {dist.get_rank()} | Function {clone_llm.__name__} =========")
+        # logger.debug(f"========= LOADING STATE DICT | Process {dist.get_rank()} | Function {clone_llm.__name__} =========")
         model.load_state_dict(clone_tensors_for_torch_save(original_model.state_dict()))
-        logger.debug(f"========= STATE DICT LOADED | Process {dist.get_rank()} | Function {clone_llm.__name__} =========")
-    logger.debug(f"========= EXIT CLONE LLM | Process {dist.get_rank()} | Function {clone_llm.__name__} =========")
+        # logger.debug(f"========= STATE DICT LOADED | Process {dist.get_rank()} | Function {clone_llm.__name__} =========")
+    # logger.debug(f"========= EXIT CLONE LLM | Process {dist.get_rank()} | Function {clone_llm.__name__} =========")
     return model

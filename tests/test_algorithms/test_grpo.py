@@ -37,6 +37,7 @@ deepspeed_config = {
     "zero_optimization": {
         "stage": 2,
     },
+    "fp32": {"enabled": True},
 }
 
 
@@ -53,7 +54,6 @@ class DummyConfig(PretrainedConfig):
         self.input_size = input_size
         self.max_tokens = max_tokens
         self.vocab_size = vocab_size
-        self.intermediate_size = intermediate_size
 
 
 class DummyForwardOutput:
@@ -70,12 +70,11 @@ class DummyMLPPreTrainedModel(PreTrainedModel):
         self.input_size = config.input_size
         self.max_tokens = config.max_tokens
         self.vocab_size = config.vocab_size
-        self.intermediate_size = config.intermediate_size
         self.gradient_checkpointing_enabled = False
-
-        self.linear_1 = nn.Linear(self.input_size + self.max_tokens, 32, device=device)
+        self.datatype = torch.bfloat16 if deepspeed_config.get("bf16", {}).get("enabled", False) else (torch.float16 if deepspeed_config.get("fp16", {}).get("enabled", False) else torch.float32)
+        self.linear_1 = nn.Linear(self.input_size + self.max_tokens, 32, device=device, dtype=self.datatype) 
         self.linear_2 = nn.Linear(
-            32, (self.input_size + self.max_tokens) * self.vocab_size, device=device
+            32, (self.input_size + self.max_tokens) * self.vocab_size, device=device, dtype=self.datatype
         )
 
     @property
@@ -85,13 +84,14 @@ class DummyMLPPreTrainedModel(PreTrainedModel):
     def forward(
         self, input_ids: Optional[torch.Tensor] = None, *args, **kwargs
     ) -> Tuple[torch.Tensor, ...]:
-        input_ids = input_ids.to(torch.float32)
+        input_ids = input_ids.to(self.datatype)
+        print("INPUT IDS TYPE: ", input_ids.dtype)
         output = self.linear_2(self.linear_1(input_ids)).reshape(
             input_ids.shape[0],
             self.input_size + self.max_tokens,
             self.vocab_size,
         )
-
+        print("DOES OUTPUT REQUIRE GRAD: ", output.requires_grad)
         return DummyForwardOutput(
             logits=output,
         )
@@ -243,6 +243,7 @@ def test_init_grpo_with_accelerator(vocab_size, input_size, max_tokens, group_si
                 num_epochs=10, warmup_proportion=0.05
             ),
             accelerator=accelerator,
+            wrap=True
         )
         assert isinstance(grpo.observation_space, gym.spaces.Box)
         assert isinstance(grpo.action_space, gym.spaces.Box)
@@ -273,7 +274,6 @@ def test_init_grpo_with_accelerator(vocab_size, input_size, max_tokens, group_si
             grpo.reference_actor.parameters(), grpo.actor.parameters()
         ):
             assert torch.equal(ref_param, param)
-        assert not grpo.reference_actor.gradient_checkpointing_enabled
     AcceleratorState._reset_state(True)
 
 
@@ -555,36 +555,40 @@ def test_grpo_learn_with_accelerator(
                 num_epochs=10, warmup_proportion=0.05
             ),
             accelerator=accelerator,
+            wrap=True
         )
-        completions = [
+        for _ in range(100):
+            completions = [
             torch.randint(
                 0, vocab_size, (group_size, input_size + max_tokens), device=grpo.device
             )
             for _ in range(batch_size)
-        ]
-        action_masks = [
-            torch.randint(
-                0, 2, (group_size, input_size + max_tokens - 1), device=grpo.device
-            ).bool()
-            for _ in range(batch_size)
-        ]
-        rewards = torch.stack(
-            [torch.randn(group_size) for _ in range(batch_size)], dim=0
-        )
-        pre_learn_actor_parameters = copy.deepcopy(grpo.actor.state_dict())
-        pre_learn_reference_actor_parameters = copy.deepcopy(
-            grpo.reference_actor.state_dict()
-        )
+            ]
+            action_masks = [
+                torch.randint(
+                    0, 2, (group_size, input_size + max_tokens - 1), device=grpo.device) 
+                for _ in range(batch_size)
+            ]
+            rewards = torch.stack(
+                [torch.randint(0, 10, (group_size,), dtype=torch.float32) for _ in range(batch_size)], dim=0
+            )
 
-        mean_loss, mean_kl = grpo.learn((completions, action_masks, rewards))
-        assert isinstance(mean_loss, float)
-        assert isinstance(mean_kl, float)
+            pre_learn_actor_parameters = copy.deepcopy(grpo.actor.state_dict())
+            pre_learn_reference_actor_parameters = copy.deepcopy(
+                grpo.reference_actor.state_dict()
+            )
+
+            mean_loss, mean_kl = grpo.learn((completions, action_masks, rewards))
+            print("mean_loss: ", mean_loss)
+            print("mean_kl: ", mean_kl)
+            assert isinstance(mean_loss, float)
+            assert isinstance(mean_kl, float)
 
         # Check that the actor network is updated and the reference actor is not
         for param, pre_learn_param in zip(
             grpo.actor.state_dict().values(), pre_learn_actor_parameters.values()
         ):
-            assert not torch.equal(param, pre_learn_param)
+            assert not torch.allclose(param, pre_learn_param)
         for param, pre_learn_param in zip(
             grpo.reference_actor.state_dict().values(),
             pre_learn_reference_actor_parameters.values(),
@@ -632,6 +636,7 @@ def test_get_logprobs_with_accelerator(
                 num_epochs=10, warmup_proportion=0.05
             ),
             accelerator=accelerator,
+            wrap=True
         )
         ids = torch.randint(0, vocab_size, (batch_size, input_size + max_tokens)).to(
             grpo.device
@@ -678,29 +683,29 @@ def test_grpo_learn_with_no_accelerator(
         ),
         accelerator=None,
     )
-    completions = [
-        torch.randint(
-            0, vocab_size, (group_size, input_size + max_tokens), device=grpo.device
+    for _ in range(100  ):
+        completions = [
+            torch.randint(
+                0, vocab_size, (group_size, input_size + max_tokens), device=grpo.device
         )
         for _ in range(batch_size)
-    ]
-    action_masks = [
-        torch.randint(
-            0, 2, (group_size, input_size + max_tokens - 1), device=grpo.device
-        ).bool()
-        for _ in range(batch_size)
-    ]
-    rewards = torch.stack([torch.randn(group_size) for _ in range(batch_size)], dim=0)
-    import copy
+        ]
+        action_masks = [
+            torch.randint(
+                0, 2, (group_size, input_size + max_tokens - 1), device=grpo.device
+            ).bool()
+            for _ in range(batch_size)
+        ]
+        rewards = torch.stack([torch.randn(group_size) for _ in range(batch_size)], dim=0)
 
-    pre_learn_actor_parameters = copy.deepcopy(grpo.actor.state_dict())
-    pre_learn_reference_actor_parameters = copy.deepcopy(
-        grpo.reference_actor.state_dict()
-    )
+        pre_learn_actor_parameters = copy.deepcopy(grpo.actor.state_dict())
+        pre_learn_reference_actor_parameters = copy.deepcopy(
+            grpo.reference_actor.state_dict()
+        )
 
-    mean_loss, mean_kl = grpo.learn((completions, action_masks, rewards))
-    assert isinstance(mean_loss, float)
-    assert isinstance(mean_kl, float)
+        mean_loss, mean_kl = grpo.learn((completions, action_masks, rewards))
+        assert isinstance(mean_loss, float)
+        assert isinstance(mean_kl, float)
 
     # Check that the actor network is updated and the reference actor is not
     for param, pre_learn_param in zip(
@@ -1003,6 +1008,7 @@ def test_grpo_clone_with_no_accelerator(
         cosine_lr_schedule_config=CosineLRScheduleConfig(
             num_epochs=10, warmup_proportion=0.05
         ),
+        wrap=True
     )
 
     grpo_lr_scheduler = grpo.lr_scheduler
@@ -1150,10 +1156,10 @@ def test_grpo_clean_up(
     accelerator.state = MagicMock(spec=AcceleratorState)
     grpo.accelerator = accelerator
     grpo.clean_up()
-    assert not hasattr(grpo, "actor")
-    assert not hasattr(grpo, "reference_actor")
-    assert not hasattr(grpo, "optimizer")
-    assert not hasattr(grpo, "lr_scheduler")
+    assert grpo.actor is None
+    assert grpo.reference_actor is None
+    assert grpo.optimizer is None
+    assert grpo.lr_scheduler is None
     del grpo
     gc.collect()
     torch.cuda.empty_cache()

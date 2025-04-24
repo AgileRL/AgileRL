@@ -230,7 +230,7 @@ def main(init_hp, mut_p):
     )
 
     mutations = Mutations(
-        no_mutation=0, # mut_p["NO_MUT"],
+        no_mutation=mut_p["NO_MUT"],
         architecture=0,
         new_layer_prob=0,
         parameters=0,
