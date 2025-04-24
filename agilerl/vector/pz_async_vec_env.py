@@ -5,6 +5,7 @@ import sys
 import time
 import traceback
 from collections import OrderedDict, defaultdict
+from copy import deepcopy
 from enum import Enum
 from multiprocessing.connection import Connection
 from multiprocessing.sharedctypes import RawArray
@@ -89,6 +90,8 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
     :type env_fns: list[Callable]
     :param copy: Boolean flag to copy the observation data when it is returned with either .step() or .reset(), recommended, defaults to True
     :type copy: bool, optional
+    :param shared_critic: Boolean flag to share the critic between agents, defaults to False
+    :type shared_critic: bool, optional
     :param context: Context for multiprocessing
 
     """
@@ -102,6 +105,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         self,
         env_fns: List[Callable[[], PzEnvType]],
         copy: bool = True,
+        shared_critic: bool = False,
         context: Optional[str] = None,
     ):
         # Core class attributes
@@ -123,6 +127,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         self.active_agents = None
         self.previous_active = None
         self.copy = copy
+        self.shared_critic = shared_critic
         self.agents = dummy_env.possible_agents[:]
         action_spaces = {
             agent: dummy_env.action_space(agent) for agent in dummy_env.possible_agents
@@ -167,6 +172,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
                         child_pipe,
                         parent_pipe,
                         self._obs_buffer,
+                        self.shared_critic,
                         self.error_queue,
                         self.agents,
                     ),
@@ -236,7 +242,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         """Filter out NaN values from the observations"""
         filtered_obs = {}
         for agent_id in observation.keys():
-            obs = observation[agent_id]
+            obs = observation[agent_id] if not copy else deepcopy(observation[agent_id])
             if isinstance(obs, dict):
                 sample = next(iter(obs.values()))
             elif isinstance(obs, tuple):
@@ -831,32 +837,36 @@ def get_placeholder_value(
 
 
 def process_transition(
-    transitions: Tuple[Any],
+    transitions: Tuple[Dict[str, NumpyObsType], ...],
     obs_spaces: Dict[str, spaces.Space],
     transition_names: List[str],
     agents: List[str],
-) -> List[Dict[str, Any]]:
+    shared_critic: bool,
+) -> List[Dict[str, NumpyObsType]]:
     """Process transition, adds in placeholder values for killed sub-agents.
 
     :param transitions: Tuple of environment transition
-    :type transitions: Tuple[Any]
+    :type transitions: Tuple[Dict[str, NumpyObsType], ...]
     :param obs_spaces: Observation spaces
     :type obs_spaces: Dict[str, gymnasium.spaces.Space]
     :param transition_names: Names associated to transitions
     :type transition_names: List[str]
     :param agents: List of sub-agent names
     :type agents: List[str]
+    :param shared_critic: Boolean flag to share the critic between agents, defaults to False
+    :type shared_critic: bool, optional
     """
-    transition_list = list(transitions)
-    for transition, name in zip(transition_list, transition_names):
+    transition_list = []
+    for transition, name in zip(list(transitions), transition_names):
         transition = {
             agent: (
                 transition[agent]
                 if agent in transition.keys()
-                else get_placeholder_value(agent, name, obs_spaces)
+                else get_placeholder_value(agent, name, obs_spaces, not shared_critic)
             )
             for agent in agents
         }
+        transition_list.append(transition)
     return transition_list
 
 
@@ -905,13 +915,7 @@ def write_to_shared_memory(
     """
     for agent in shared_memory.keys():
         agent_space = obs_space[agent]
-
-        # If the agent is not in the observation, then we use the placeholder value
-        obs = (
-            get_placeholder_value(agent, "observation", obs_space, use_nan=True)
-            if agent not in observation
-            else observation[agent]
-        )
+        obs = observation[agent]
         if isinstance(agent_space, spaces.Dict):
             for key, subspace in agent_space.spaces.items():
                 write_vector_observation(
@@ -933,6 +937,7 @@ def _async_worker(
     pipe: Connection,
     parent_pipe: Connection,
     shared_memory: Dict[str, RawArray],
+    shared_critic: bool,
     error_queue: mp.Queue,
     agents: List[str],
 ) -> None:
@@ -949,6 +954,8 @@ def _async_worker(
     :type parent_pipe: Connection
     :param shared_memory: List of shared memories.
     :type shared_memory: List[multiprocessing.Array]
+    :param shared_critic: Boolean flag to share the critic between agents, defaults to False
+    :type shared_critic: bool, optional
     :param error_queue: Queue object for collecting subprocess errors to communicate back to the main process
     :type error_queue: mp.Queue
     :param observation_shapes: Shapes of observations
@@ -972,14 +979,16 @@ def _async_worker(
         while True:
             command, data = pipe.recv()
             if command == "reset":
-                transition = env.reset(**data)
+                obs, info = env.reset(**data)
+                current_active = list(obs.keys())
+                transition = obs, info
                 observation, info = process_transition(
                     transition,
                     observation_space,
                     ["observation", "info"],
                     agents,
+                    shared_critic,
                 )
-                current_active = list(observation.keys())
                 write_to_shared_memory(
                     index, observation, shared_memory, observation_space
                 )
@@ -994,7 +1003,6 @@ def _async_worker(
                     for idx, possible_agent in enumerate(current_active)
                 }
                 observation, reward, terminated, truncated, info = env.step(data)
-                transition = observation, reward, terminated, truncated, info
                 if all(
                     [
                         term | trunc
@@ -1003,6 +1011,8 @@ def _async_worker(
                 ):
                     observation, info = env.reset()
 
+                current_active = list(observation.keys())
+                transition = observation, reward, terminated, truncated, info
                 observation, reward, terminated, truncated, info = process_transition(
                     transition,
                     observation_space,
@@ -1014,9 +1024,8 @@ def _async_worker(
                         "info",
                     ],
                     agents,
+                    shared_critic,
                 )
-
-                current_active = list(observation.keys())
                 write_to_shared_memory(
                     index, observation, shared_memory, observation_space
                 )

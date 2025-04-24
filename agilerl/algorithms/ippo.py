@@ -486,7 +486,7 @@ class IPPO(MultiAgentRLAlgorithm):
         vect_dim = get_vect_dim(obs, self.observation_space)
 
         # Need to extract inactive agents from obs
-        inactive_agents, obs = self.extract_inactive_agents(obs)
+        # inactive_agents, obs = self.extract_inactive_agents(obs)
 
         # Preprocess observations
         unique_agents_ids = list(obs.keys())
@@ -574,16 +574,18 @@ class IPPO(MultiAgentRLAlgorithm):
         )
 
         # Place NaNs in actions for inactive agents
-        for agent_id, inactive_array in inactive_agents.items():
-            # Handle different action types (integers, floats, etc.)
-            placeholder = (
-                np.array([-999], dtype=action_dict[agent_id].dtype)
-                if np.issubdtype(action_dict[agent_id].dtype, np.integer)
-                else np.nan
-            )
-            action_dict[agent_id] = np.insert(
-                action_dict[agent_id], inactive_array, placeholder, axis=0
-            )
+        # NOTE: With the current implementation of `AsyncPettingZooVecEnv`
+        # this is never used -> will need to take a second look in the future
+        # for agent_id, inactive_array in inactive_agents.items():
+        #     # Handle different action types (integers, floats, etc.)
+        #     placeholder = (
+        #         np.array([-999], dtype=action_dict[agent_id].dtype)
+        #         if np.issubdtype(action_dict[agent_id].dtype, np.integer)
+        #         else np.nan
+        #     )
+        #     action_dict[agent_id] = np.insert(
+        #         action_dict[agent_id], inactive_array, placeholder, axis=0
+        #     )
 
         # If using env_defined_actions replace actions
         if env_defined_actions is not None:

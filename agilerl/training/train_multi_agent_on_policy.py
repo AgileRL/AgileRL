@@ -337,7 +337,7 @@ def train_multi_agent_on_policy(
                                     for agent_id in agent.agent_ids
                                 }
 
-                    # pbar.update(num_envs)
+                    pbar.update(num_envs)
 
                 experiences = (
                     states,
@@ -361,7 +361,7 @@ def train_multi_agent_on_policy(
                     )
 
             agent.steps[-1] += steps
-            pbar.update(evo_steps // len(pop))
+            # pbar.update(evo_steps // len(pop))
             fps = steps / (time.time() - start_time)
             pop_fps.append(fps)
             pop_episode_scores.append(completed_episode_scores)
