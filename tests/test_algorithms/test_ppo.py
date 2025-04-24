@@ -40,10 +40,10 @@ class DummyEnv:
     def __init__(self, state_size, vect=True, num_envs=2):
         self.state_size = state_size
         self.vect = vect
+        self.num_envs = num_envs
         if self.vect:
             self.state_size = (num_envs,) + self.state_size
             self.n_envs = num_envs
-            self.num_envs = num_envs
         else:
             self.n_envs = 1
 
@@ -163,6 +163,7 @@ def test_initializes_with_default_values():
     ppo = PPO(observation_space, action_space, net_config=net_config)
 
     assert ppo.algo == "PPO"
+    assert ppo.num_envs == 1
     assert ppo.observation_space == generate_random_box_space(shape=(4,), low=0, high=1)
     assert ppo.action_space == generate_random_box_space(shape=(2,), low=-1, high=1)
     assert not ppo.discrete_actions
@@ -216,12 +217,14 @@ def test_initialize_ppo_with_cnn_accelerator():
     critic_network = None
     accelerator = Accelerator()
     wrap = True
+    num_envs = 3
 
     ppo = PPO(
         observation_space=observation_space,
         action_space=action_space,
         net_config=net_config_cnn,
         batch_size=batch_size,
+        num_envs=num_envs,
         lr=lr,
         gamma=gamma,
         gae_lambda=gae_lambda,
@@ -245,6 +248,7 @@ def test_initialize_ppo_with_cnn_accelerator():
     assert ppo.action_space == action_space
     assert ppo.discrete_actions
     assert ppo.batch_size == batch_size
+    assert ppo.num_envs == num_envs
     assert ppo.lr == lr
     assert ppo.gamma == gamma
     assert ppo.gae_lambda == gae_lambda
@@ -319,6 +323,7 @@ def test_initialize_ppo_with_actor_network(
     assert ppo.fitness == []
     assert ppo.steps == [0]
     assert isinstance(ppo.optimizer.optimizer, optim.Adam)
+    assert ppo.num_envs == 1
 
 
 @pytest.mark.parametrize(
@@ -392,6 +397,7 @@ def test_initialize_ppo_with_actor_network_evo_net(observation_space, net_type):
     assert ppo.fitness == []
     assert ppo.steps == [0]
     assert isinstance(ppo.optimizer.optimizer, optim.Adam)
+    assert ppo.num_envs == 1
 
 
 def test_initialize_ppo_with_incorrect_actor_net():
@@ -488,7 +494,11 @@ def test_prepare_state_cnn_accelerator():
 
 @pytest.fixture
 def build_ppo(observation_space, action_space, accelerator):
-    return PPO(observation_space, action_space, accelerator=accelerator)
+    return PPO(
+        observation_space,
+        action_space,
+        accelerator=accelerator,
+    )
 
 
 @pytest.mark.parametrize(
@@ -538,6 +548,7 @@ def test_returns_expected_action(observation_space, action_space, build_ppo):
             assert isinstance(act, np.float32)
     else:
         assert isinstance(action, np.ndarray)
+
         assert action.shape == (1, *action_space.shape)
 
     # Now with grad=True, and eval_action
@@ -710,6 +721,8 @@ def test_learns_from_experiences_continuous_accel():
         accelerator=accelerator,
     )
 
+    assert ppo.num_envs == 1
+
     # Copy state dict before learning - should be different to after updating weights
     actor = ppo.actor
     actor_pre_learn_sd = str(copy.deepcopy(ppo.actor.state_dict()))
@@ -759,7 +772,11 @@ def test_algorithm_test_loop():
     env = DummyEnv(state_size=observation_space.shape, vect=True, num_envs=num_envs)
 
     # env = make_vect_envs("CartPole-v1", num_envs=num_envs)
-    agent = PPO(observation_space=observation_space, action_space=action_space)
+    agent = PPO(
+        observation_space=observation_space,
+        action_space=action_space,
+        num_envs=num_envs,
+    )
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
 
@@ -771,7 +788,9 @@ def test_algorithm_test_loop_unvectorized():
 
     env = DummyEnv(state_size=observation_space.shape, vect=False)
 
-    agent = PPO(observation_space=observation_space, action_space=action_space)
+    agent = PPO(
+        observation_space=observation_space, action_space=action_space, num_envs=1
+    )
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
 
@@ -795,6 +814,7 @@ def test_algorithm_test_loop_images():
         observation_space=observation_space,
         action_space=action_space,
         net_config=net_config_cnn,
+        num_envs=env.num_envs,
     )
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
@@ -818,6 +838,7 @@ def test_algorithm_test_loop_images_unvectorized():
     agent = PPO(
         observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=1),
         action_space=action_space,
+        num_envs=1,
         net_config=net_config_cnn,
     )
     mean_score = agent.test(env, max_steps=10, swap_channels=True)
@@ -830,6 +851,7 @@ def test_clone_returns_identical_agent():
     action_space = generate_discrete_space(2)
 
     ppo = DummyPPO(observation_space, action_space)
+    ppo.num_envs = 1
     ppo.fitness = [200, 200, 200]
     ppo.scores = [94, 94, 94]
     ppo.steps = [2500]
@@ -860,6 +882,8 @@ def test_clone_returns_identical_agent():
     assert clone_agent.scores == ppo.scores
     assert clone_agent.tensor_attribute == ppo.tensor_attribute
     assert clone_agent.tensor_test == ppo.tensor_test
+    assert clone_agent.num_envs == ppo.num_envs
+    assert clone_agent.index == ppo.index
 
     accelerator = Accelerator()
     ppo = PPO(observation_space, action_space, accelerator=accelerator)
@@ -887,6 +911,8 @@ def test_clone_returns_identical_agent():
     assert clone_agent.fitness == ppo.fitness
     assert clone_agent.steps == ppo.steps
     assert clone_agent.scores == ppo.scores
+    assert clone_agent.num_envs == ppo.num_envs
+    assert clone_agent.index == ppo.index
 
     accelerator = Accelerator()
     ppo = PPO(
@@ -919,6 +945,8 @@ def test_clone_returns_identical_agent():
     assert clone_agent.fitness == ppo.fitness
     assert clone_agent.steps == ppo.steps
     assert clone_agent.scores == ppo.scores
+    assert clone_agent.num_envs == ppo.num_envs
+    assert clone_agent.index == ppo.index
 
 
 def test_clone_new_index():
@@ -937,6 +965,10 @@ def test_clone_after_learning():
     max_env_steps = 20
     num_vec_envs = 2
     ppo = PPO(observation_space, action_space)
+
+    # Manually set num_envs for this test, as default is 1
+    ppo.num_envs = num_vec_envs
+
     states = np.random.randn(max_env_steps, num_vec_envs, observation_space.shape[0])
 
     next_states = np.random.randn(num_vec_envs, observation_space.shape[0])
@@ -944,7 +976,10 @@ def test_clone_after_learning():
     log_probs = -np.random.rand(max_env_steps, num_vec_envs)
     rewards = np.random.randint(0, 100, (max_env_steps, num_vec_envs))
     dones = np.zeros((max_env_steps, num_vec_envs))
-    values = np.random.randn(max_env_steps, num_vec_envs)
+    values = np.random.randn(
+        max_env_steps,
+        num_vec_envs,
+    )
     next_done = np.zeros((1, num_vec_envs))
     experiences = (
         states,
@@ -980,6 +1015,8 @@ def test_clone_after_learning():
     assert clone_agent.fitness == ppo.fitness
     assert clone_agent.steps == ppo.steps
     assert clone_agent.scores == ppo.scores
+    assert clone_agent.num_envs == ppo.num_envs
+    assert clone_agent.index == ppo.index
 
 
 # The saved checkpoint file contains the correct data and format.
@@ -1020,6 +1057,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "scores" in checkpoint
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
+    assert "num_envs" in checkpoint
 
     ppo = PPO(
         observation_space=generate_random_box_space(shape=(4,), low=0, high=1),
@@ -1041,6 +1079,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert isinstance(ppo.actor.encoder, EvolvableMLP)
     assert isinstance(ppo.critic.encoder, EvolvableMLP)
     assert ppo.lr == 1e-4
+    assert ppo.num_envs == 1
     assert ppo.batch_size == 64
     assert ppo.gamma == 0.99
     assert ppo.mut is None
@@ -1103,6 +1142,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "scores" in checkpoint
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
+    assert "num_envs" in checkpoint
 
     ppo = PPO(
         observation_space=generate_random_box_space(shape=(4,), low=0, high=1),
@@ -1115,6 +1155,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert isinstance(ppo.actor.encoder, EvolvableCNN)
     assert isinstance(ppo.critic.encoder, EvolvableCNN)
     assert ppo.lr == 1e-4
+    assert ppo.num_envs == 1
     assert ppo.batch_size == 64
     assert ppo.gamma == 0.99
     assert ppo.mut is None
@@ -1193,6 +1234,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "scores" in checkpoint
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
+    assert "num_envs" in checkpoint
 
     ppo = PPO(
         observation_space=generate_random_box_space(shape=(4,), low=0, high=1),
@@ -1207,6 +1249,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert isinstance(ppo.actor, nn.Module)
     assert isinstance(ppo.critic, nn.Module)
     assert ppo.lr == 1e-4
+    assert ppo.num_envs == 1
     assert ppo.batch_size == 64
     assert ppo.gamma == 0.99
     assert ppo.mut is None
@@ -1260,6 +1303,7 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     assert new_ppo.scores == ppo.scores
     assert new_ppo.fitness == ppo.fitness
     assert new_ppo.steps == ppo.steps
+    assert new_ppo.num_envs == ppo.num_envs
 
 
 @pytest.mark.parametrize(
@@ -1306,6 +1350,7 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     assert new_ppo.scores == ppo.scores
     assert new_ppo.fitness == ppo.fitness
     assert new_ppo.steps == ppo.steps
+    assert new_ppo.num_envs == ppo.num_envs
 
 
 @pytest.mark.parametrize(
@@ -1362,6 +1407,7 @@ def test_load_from_pretrained_networks(
     assert new_ppo.scores == ppo.scores
     assert new_ppo.fitness == ppo.fitness
     assert new_ppo.steps == ppo.steps
+    assert new_ppo.num_envs == ppo.num_envs
 
 
 # Test the RolloutBuffer implementation
@@ -1371,6 +1417,7 @@ def test_rollout_buffer_initialization():
 
     buffer = RolloutBuffer(
         capacity=100,
+        num_envs=1,
         observation_space=observation_space,
         action_space=action_space,
         device="cpu",
@@ -1383,26 +1430,71 @@ def test_rollout_buffer_initialization():
     assert buffer.action_space == action_space
     assert buffer.gamma == 0.99
     assert buffer.gae_lambda == 0.95
-    assert buffer.recurrent == False
-    assert buffer.hidden_size is None
+    assert buffer.recurrent is False
+    assert buffer.hidden_state_size is None
     assert buffer.device == "cpu"
     assert buffer.pos == 0
-    assert buffer.full == False
+    assert buffer.full is False
 
     # Test with hidden states
     buffer = RolloutBuffer(
         capacity=100,
+        num_envs=1,
+        observation_space=observation_space,
+        action_space=action_space,
+        device="cpu",
+        gae_lambda=0.95,
+        gamma=0.99,
+        recurrent=False,
+    )
+
+    assert buffer.recurrent is False
+    assert buffer.hidden_state_size is None
+    assert buffer.hidden_states is None
+    assert buffer.next_hidden_states is None
+
+
+# Test the RolloutBuffer implementation
+def test_rollout_buffer_initialization_recurrent():
+    observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
+    action_space = generate_discrete_space(2)
+
+    buffer = RolloutBuffer(
+        capacity=100,
+        num_envs=1,
+        observation_space=observation_space,
+        action_space=action_space,
+        device="cpu",
+        gae_lambda=0.95,
+        gamma=0.99,
+    )
+
+    assert buffer.capacity == 100
+    assert buffer.observation_space == observation_space
+    assert buffer.action_space == action_space
+    assert buffer.gamma == 0.99
+    assert buffer.gae_lambda == 0.95
+    assert buffer.recurrent is False
+    assert buffer.hidden_state_size is None
+    assert buffer.device == "cpu"
+    assert buffer.pos == 0
+    assert buffer.full is False
+
+    # Test with hidden states
+    buffer = RolloutBuffer(
+        capacity=100,
+        num_envs=1,
         observation_space=observation_space,
         action_space=action_space,
         device="cpu",
         gae_lambda=0.95,
         gamma=0.99,
         recurrent=True,
-        hidden_size=(64,),
+        hidden_state_size=64,
     )
 
-    assert buffer.recurrent == True
-    assert buffer.hidden_size == (64,)
+    assert buffer.recurrent is True
+    assert buffer.hidden_state_size == 64
     assert buffer.hidden_states is not None
     assert buffer.next_hidden_states is not None
 
@@ -1414,6 +1506,7 @@ def test_rollout_buffer_add():
 
     buffer = RolloutBuffer(
         capacity=100,
+        num_envs=1,
         observation_space=observation_space,
         action_space=action_space,
     )
@@ -1431,21 +1524,26 @@ def test_rollout_buffer_add():
 
     assert buffer.pos == 1
     assert not buffer.full
-    print(np.array_equal(buffer.observations[0], obs))
-    assert np.array_equal(buffer.observations[0], obs)
-    assert np.array_equal(buffer.actions[0], action[0])  # Discrete action space
-    assert buffer.rewards[0] == reward
-    assert buffer.dones[0] == done
-    assert buffer.values[0] == value
-    assert buffer.log_probs[0] == log_prob
-    assert np.array_equal(buffer.next_observations[0], next_obs)
+    # where X is the environment index, and Y is the position in the buffer
+    assert np.array_equal(buffer.observations[0][0], obs)
+    assert np.array_equal(buffer.actions[0][0], action)  # Discrete action space
+    assert buffer.rewards[0][0] == reward
+    assert buffer.dones[0][0] == done
+    assert buffer.values[0][0] == value
+    assert buffer.log_probs[0][0] == log_prob
+    assert np.array_equal(buffer.next_observations[0][0], next_obs)
 
     # Add samples until buffer is full
     for i in range(99):
         buffer.add(obs, action, reward, done, value, log_prob, next_obs)
 
-    assert buffer.pos == 0  # Wrapped around
-    assert buffer.full == True
+    assert buffer.pos == 100  # Wrapped around
+    assert buffer.full is True
+
+    buffer.reset()
+
+    assert buffer.pos == 0
+    assert buffer.full is False
 
 
 # Test computing returns and advantages
@@ -1455,6 +1553,7 @@ def test_rollout_buffer_compute_returns_and_advantages():
 
     buffer = RolloutBuffer(
         capacity=5,
+        num_envs=1,
         observation_space=observation_space,
         action_space=action_space,
         gamma=0.99,
@@ -1474,14 +1573,18 @@ def test_rollout_buffer_compute_returns_and_advantages():
         buffer.add(obs, action, reward, done, value, log_prob, next_obs)
 
     # Compute returns and advantages
-    buffer.compute_returns_and_advantages()
+    last_value = 0.0
+    last_done = np.zeros(1)
+    buffer.compute_returns_and_advantages(
+        last_value, last_done
+    )  # Already done by the add method at the end of the collection
 
     # Check that returns and advantages are computed
-    assert not np.array_equal(buffer.returns, np.zeros(5))
-    assert not np.array_equal(buffer.advantages, np.zeros(5))
+    assert not np.array_equal(buffer.returns[:, 0], np.zeros(5))
+    assert not np.array_equal(buffer.advantages[:, 0], np.zeros(5))
 
     # Check that returns are higher for earlier steps (due to discounting)
-    assert buffer.returns[0] > buffer.returns[4]
+    assert buffer.returns[0, 0] > buffer.returns[4, 0]
 
 
 # Test getting batch from buffer
@@ -1491,6 +1594,7 @@ def test_rollout_buffer_get_batch():
 
     buffer = RolloutBuffer(
         capacity=100,
+        num_envs=1,
         observation_space=observation_space,
         action_space=action_space,
     )
@@ -1508,7 +1612,11 @@ def test_rollout_buffer_get_batch():
         buffer.add(obs, action, reward, done, value, log_prob, next_obs)
 
     # Compute returns and advantages
-    buffer.compute_returns_and_advantages()
+    last_value = np.zeros(1)
+    last_done = np.zeros(1)
+    buffer.compute_returns_and_advantages(
+        last_value, last_done
+    )  # Already done by the add method at the end of the collection
 
     # Get all data
     batch = buffer.get()
@@ -1549,11 +1657,11 @@ def test_ppo_with_rollout_buffer():
         learn_step=100,
     )
 
-    assert ppo.use_rollout_buffer == True
+    assert ppo.use_rollout_buffer
     assert hasattr(ppo, "rollout_buffer")
     assert isinstance(ppo.rollout_buffer, RolloutBuffer)
     assert ppo.rollout_buffer.capacity == ppo.learn_step
-    assert ppo.rollout_buffer.recurrent == False
+    assert not ppo.rollout_buffer.recurrent
 
     # Test with hidden states
     ppo = PPO(
@@ -1561,13 +1669,13 @@ def test_ppo_with_rollout_buffer():
         action_space=action_space,
         use_rollout_buffer=True,
         recurrent=True,
-        hidden_size=64,
+        hidden_state_size=64,
     )
 
-    assert ppo.recurrent == True
-    assert ppo.hidden_size == (64,)
-    assert ppo.rollout_buffer.recurrent == True
-    assert ppo.rollout_buffer.hidden_size == (64,)
+    assert ppo.recurrent
+    assert ppo.hidden_state_size == 64
+    assert ppo.rollout_buffer.recurrent
+    assert ppo.rollout_buffer.hidden_state_size == 64
 
 
 # Test PPO learning with rollout buffer
@@ -1597,7 +1705,9 @@ def test_ppo_learn_with_rollout_buffer():
         ppo.rollout_buffer.add(obs, action, reward, done, value, log_prob, next_obs)
 
     # Compute returns and advantages
-    ppo.rollout_buffer.compute_returns_and_advantages()
+    last_value = np.zeros(1)
+    last_done = np.zeros(1)
+    ppo.rollout_buffer.compute_returns_and_advantages(last_value, last_done)
 
     # Learn from rollout buffer
     loss = ppo.learn()
@@ -1653,21 +1763,54 @@ def test_ppo_collect_rollouts():
     ppo.collect_rollouts(env, n_steps=5)
 
     # Check buffer contents
+    print(ppo.rollout_buffer.pos)
     assert ppo.rollout_buffer.pos == 5
     assert not np.array_equal(
-        ppo.rollout_buffer.observations[0], np.zeros(observation_space.shape)
+        ppo.rollout_buffer.observations[0][0], np.zeros(observation_space.shape)
     )
     assert not np.array_equal(ppo.rollout_buffer.actions[0], np.zeros(1))
 
     # Compute returns and advantages should have been called
-    assert not np.array_equal(ppo.rollout_buffer.returns, np.zeros(5))
-    assert not np.array_equal(ppo.rollout_buffer.advantages, np.zeros(5))
+    assert not np.array_equal(ppo.rollout_buffer.returns[:, 0], np.zeros(5))
+    assert not np.array_equal(ppo.rollout_buffer.advantages[:, 0], np.zeros(5))
 
     # Learn from collected rollouts
     loss = ppo.learn()
 
     assert isinstance(loss, float)
     assert loss >= 0.0
+
+
+def test_ppo_wrap_at_capacity():
+    observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
+    action_space = generate_discrete_space(2)
+
+    ppo = PPO(
+        observation_space=observation_space,
+        action_space=action_space,
+        use_rollout_buffer=True,
+        learn_step=10,
+        wrap_at_capacity=True,
+    )
+
+    env = DummyEnv(state_size=observation_space.shape, vect=True, num_envs=1)
+
+    ppo.collect_rollouts(env, n_steps=10)
+
+    assert ppo.rollout_buffer.pos == 10
+    assert ppo.rollout_buffer.full is True
+
+    ppo.collect_rollouts(env, n_steps=7)
+
+    assert ppo.rollout_buffer.pos == 7
+    assert ppo.rollout_buffer.full is False
+
+    # Collect rollouts resets the buffer
+    ppo.collect_rollouts(env, n_steps=14)
+
+    # Wrapped around, so pos is 4
+    assert ppo.rollout_buffer.pos == 4
+    assert ppo.rollout_buffer.full is True
 
 
 # Test compatibility with old format

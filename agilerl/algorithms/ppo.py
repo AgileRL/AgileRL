@@ -78,12 +78,14 @@ class PPO(RLAlgorithm):
     :type critic_network: nn.Module, optional
     :param share_encoders: Flag to share encoder parameters between actor and critic, defaults to False
     :type share_encoders: bool, optional
+    :param num_envs: Number of parallel environments, defaults to 1
+    :type num_envs: int, optional
     :param use_rollout_buffer: Flag to use the rollout buffer instead of tuple experiences, defaults to False
     :type use_rollout_buffer: bool, optional
     :param recurrent: Flag to use hidden states for recurrent policies, defaults to False
     :type recurrent: bool, optional
-    :param hidden_size: Size of hidden states if used, defaults to None
-    :type hidden_size: Tuple[int], optional
+    :param hidden_state_size: Size of hidden states if used, defaults to None
+    :type hidden_state_size: int, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -116,14 +118,14 @@ class PPO(RLAlgorithm):
         actor_network: Optional[EvolvableModule] = None,
         critic_network: Optional[EvolvableModule] = None,
         share_encoders: bool = True,
+        num_envs: int = 1,
         use_rollout_buffer: bool = False,
         recurrent: bool = False,
-        hidden_size: Optional[Tuple[int]] = None,
+        hidden_state_size: Optional[int] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
     ) -> None:
-
         super().__init__(
             observation_space,
             action_space,
@@ -144,63 +146,63 @@ class PPO(RLAlgorithm):
         assert isinstance(gamma, (float, int, torch.Tensor)), "Gamma must be a float."
         assert isinstance(gae_lambda, (float, int)), "Lambda must be a float."
         assert gae_lambda >= 0, "Lambda must be greater than or equal to zero."
-        assert isinstance(
-            action_std_init, (float, int)
-        ), "Action standard deviation must be a float."
-        assert (
-            action_std_init >= 0
-        ), "Action standard deviation must be greater than or equal to zero."
-        assert isinstance(
-            clip_coef, (float, int)
-        ), "Clipping coefficient must be a float."
-        assert (
-            clip_coef >= 0
-        ), "Clipping coefficient must be greater than or equal to zero."
-        assert isinstance(
-            ent_coef, (float, int)
-        ), "Entropy coefficient must be a float."
-        assert (
-            ent_coef >= 0
-        ), "Entropy coefficient must be greater than or equal to zero."
-        assert isinstance(
-            vf_coef, (float, int)
-        ), "Value function coefficient must be a float."
-        assert (
-            vf_coef >= 0
-        ), "Value function coefficient must be greater than or equal to zero."
-        assert isinstance(
-            max_grad_norm, (float, int)
-        ), "Maximum norm for gradient clipping must be a float."
-        assert (
-            max_grad_norm >= 0
-        ), "Maximum norm for gradient clipping must be greater than or equal to zero."
-        assert (
-            isinstance(target_kl, (float, int)) or target_kl is None
-        ), "Target KL divergence threshold must be a float."
+        assert isinstance(action_std_init, (float, int)), (
+            "Action standard deviation must be a float."
+        )
+        assert action_std_init >= 0, (
+            "Action standard deviation must be greater than or equal to zero."
+        )
+        assert isinstance(clip_coef, (float, int)), (
+            "Clipping coefficient must be a float."
+        )
+        assert clip_coef >= 0, (
+            "Clipping coefficient must be greater than or equal to zero."
+        )
+        assert isinstance(ent_coef, (float, int)), (
+            "Entropy coefficient must be a float."
+        )
+        assert ent_coef >= 0, (
+            "Entropy coefficient must be greater than or equal to zero."
+        )
+        assert isinstance(vf_coef, (float, int)), (
+            "Value function coefficient must be a float."
+        )
+        assert vf_coef >= 0, (
+            "Value function coefficient must be greater than or equal to zero."
+        )
+        assert isinstance(max_grad_norm, (float, int)), (
+            "Maximum norm for gradient clipping must be a float."
+        )
+        assert max_grad_norm >= 0, (
+            "Maximum norm for gradient clipping must be greater than or equal to zero."
+        )
+        assert isinstance(target_kl, (float, int)) or target_kl is None, (
+            "Target KL divergence threshold must be a float."
+        )
         if target_kl is not None:
-            assert (
-                target_kl >= 0
-            ), "Target KL divergence threshold must be greater than or equal to zero."
-        assert isinstance(
-            update_epochs, int
-        ), "Policy update epochs must be an integer."
-        assert (
-            update_epochs >= 1
-        ), "Policy update epochs must be greater than or equal to one."
-        assert isinstance(
-            wrap, bool
-        ), "Wrap models flag must be boolean value True or False."
+            assert target_kl >= 0, (
+                "Target KL divergence threshold must be greater than or equal to zero."
+            )
+        assert isinstance(update_epochs, int), (
+            "Policy update epochs must be an integer."
+        )
+        assert update_epochs >= 1, (
+            "Policy update epochs must be greater than or equal to one."
+        )
+        assert isinstance(wrap, bool), (
+            "Wrap models flag must be boolean value True or False."
+        )
 
         # New parameters for using RolloutBuffer
-        assert isinstance(
-            use_rollout_buffer, bool
-        ), "Use rollout buffer flag must be boolean value True or False."
-        assert isinstance(
-            recurrent, bool
-        ), "Has hidden states flag must be boolean value True or False."
-        if recurrent and hidden_size is None:
+        assert isinstance(use_rollout_buffer, bool), (
+            "Use rollout buffer flag must be boolean value True or False."
+        )
+        assert isinstance(recurrent, bool), (
+            "Has hidden states flag must be boolean value True or False."
+        )
+        if recurrent and hidden_state_size is None:
             warnings.warn(
-                "Hidden states enabled but hidden_size not provided. Using default hidden_size."
+                "Hidden states enabled but hidden_state_size not provided. Using default hidden_state_size."
             )
 
         if not use_rollout_buffer:
@@ -217,9 +219,7 @@ class PPO(RLAlgorithm):
             )
 
         if recurrent and not use_rollout_buffer:
-            raise ValueError(
-                "use_rollout_buffer=True but recurrent=False. This is not allowed."
-            )
+            raise ValueError("use_rollout_buffer must be True if recurrent=True.")
 
         self.batch_size = batch_size
         self.lr = lr
@@ -236,8 +236,9 @@ class PPO(RLAlgorithm):
         self.target_kl = target_kl
         self.update_epochs = update_epochs
         self.use_rollout_buffer = use_rollout_buffer
+        self.num_envs = num_envs
         self.recurrent = recurrent
-        self.hidden_size = hidden_size
+        self.hidden_state_size = hidden_state_size
 
         if actor_network is not None and critic_network is not None:
             if not isinstance(actor_network, EvolvableModule):
@@ -252,21 +253,25 @@ class PPO(RLAlgorithm):
             self.actor, self.critic = make_safe_deepcopies(
                 actor_network, critic_network
             )
-
         else:
             net_config = {} if net_config is None else net_config
-            critic_net_config = copy.deepcopy(net_config)
-
             if (
                 (
                     net_config.get("encoder_config", None) is None
-                    or net_config.get("encoder_config", None).get("hidden_size", None)
+                    or net_config.get("encoder_config", None).get(
+                        "hidden_state_size", None
+                    )
                     is None
                 )
-                and self.recurrent is True
-                and self.hidden_size is not None
+                and self.recurrent
+                and self.hidden_state_size is not None
             ):
-                net_config["encoder_config"] = {"hidden_size": self.hidden_size}
+                # Set hidden state size for recurrent networks
+                net_config["encoder_config"] = {
+                    "hidden_state_size": self.hidden_state_size
+                }
+
+            critic_net_config = copy.deepcopy(net_config)
 
             head_config = net_config.get("head_config", None)
             if head_config is not None:
@@ -315,10 +320,11 @@ class PPO(RLAlgorithm):
                 observation_space=self.observation_space,
                 action_space=self.action_space,
                 device=self.device,
+                num_envs=self.num_envs,
                 gae_lambda=self.gae_lambda,
                 gamma=self.gamma,
                 recurrent=self.recurrent,
-                hidden_size=self.hidden_size,
+                hidden_state_size=self.hidden_state_size,
             )
 
         if self.accelerator is not None and wrap:
@@ -327,6 +333,8 @@ class PPO(RLAlgorithm):
         # Register network groups for mutations
         self.register_network_group(NetworkGroup(eval=self.actor, policy=True))
         self.register_network_group(NetworkGroup(eval=self.critic))
+
+        self.hidden_state = None
 
     def share_encoder_parameters(self) -> None:
         """Shares the encoder parameters between the actor and critic."""
@@ -356,6 +364,7 @@ class PPO(RLAlgorithm):
         :return: Action, log probability, entropy, state values, and next hidden state
         :rtype: Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[ArrayOrTensor]]
         """
+        obs = self.preprocess_observation(obs)
         if hidden_state is not None:
             latent_pi, next_hidden = self.actor.extract_features(
                 obs, hidden_state=hidden_state
@@ -382,6 +391,33 @@ class PPO(RLAlgorithm):
                 else self.critic(obs).squeeze(-1)
             )
             return action, log_prob, entropy, values, None
+
+    def get_initial_hidden_state(self, env: GymEnvType) -> ArrayOrTensor:
+        """
+        Get the initial hidden state for the environment.
+        """
+        if not self.recurrent:
+            raise ValueError(
+                "Cannot get initial hidden state for non-recurrent networks."
+            )
+        # Return a batch of initial hidden states
+        # Assuming self.actor.initialize_hidden_state() returns a single state (e.g., zeros)
+        single_hidden_state = self.actor.initialize_hidden_state()
+        if isinstance(single_hidden_state, torch.Tensor):
+            # Stack for num_envs
+            return single_hidden_state.repeat(
+                env.num_envs, 1
+            )  # Assuming hidden state dim is last
+        elif isinstance(single_hidden_state, dict):
+            # Stack each tensor in the dict
+            return {
+                k: v.repeat(env.num_envs, 1) for k, v in single_hidden_state.items()
+            }
+        else:
+            # Handle numpy arrays or other types if needed
+            raise TypeError(
+                f"Unsupported hidden state type: {type(single_hidden_state)}"
+            )
 
     def evaluate_actions(
         self,
@@ -513,7 +549,9 @@ class PPO(RLAlgorithm):
 
         # Initial reset
         obs, info = env.reset()
-        hidden_state = None
+        self.hidden_state = (
+            self.get_initial_hidden_state(env) if self.recurrent else None
+        )
 
         for _ in range(n_steps):
             # Get action
@@ -521,10 +559,12 @@ class PPO(RLAlgorithm):
                 action, log_prob, _, value, next_hidden = self.get_action(
                     obs,
                     action_mask=info.get("action_mask", None),
-                    hidden_state=hidden_state,
+                    hidden_state=self.hidden_state,
                 )
+                self.hidden_state = next_hidden
             else:
-                action, log_prob, _, value, _ = self.get_action(
+                # No need for next_hidden in non-recurrent networks, so we're not even returning it
+                action, log_prob, _, value = self.get_action(
                     obs, action_mask=info.get("action_mask", None)
                 )
 
@@ -532,11 +572,13 @@ class PPO(RLAlgorithm):
             next_obs, reward, done, truncated, next_info = env.step(action)
 
             # Add to buffer
-            is_terminal = done
-            if isinstance(is_terminal, np.ndarray):
-                # Handle vectorized environment
-                is_terminal = is_terminal.reshape(-1)
-                reward = reward.reshape(-1)
+            is_terminal = done or truncated
+
+            # Ensure shapes are correct (num_envs, ...)
+            reward = np.atleast_1d(reward)
+            is_terminal = np.atleast_1d(is_terminal)
+            value = np.atleast_1d(value)
+            log_prob = np.atleast_1d(log_prob)
 
             self.rollout_buffer.add(
                 obs=obs,
@@ -544,34 +586,54 @@ class PPO(RLAlgorithm):
                 reward=reward,
                 done=is_terminal,
                 value=value.reshape(-1),
-                log_prob=log_prob.reshape(-1),
+                log_prob=log_prob,
                 next_obs=next_obs,
-                hidden_state=hidden_state,
-                next_hidden_state=next_hidden,
+                hidden_state=self.hidden_state,
             )
+
+            # Reset hidden state for finished environments
+            if self.recurrent and np.any(is_terminal):
+                # Create a mask for finished environments
+                finished_mask = is_terminal.astype(bool)
+                # Get initial hidden states only for the finished environments
+                num_finished = finished_mask.sum()
+                # Need a way to get initial state for a subset of envs
+                # For simplicity, re-initialize all and mask later, or handle dicts/tensors carefully
+                initial_hidden_states_for_reset = self.get_initial_hidden_state(env)
+
+                if isinstance(self.hidden_state, torch.Tensor):
+                    reset_states = initial_hidden_states_for_reset[finished_mask]
+                    if reset_states.shape[0] > 0:  # Only update if any finished
+                        self.hidden_state[finished_mask] = reset_states
+                elif isinstance(self.hidden_state, dict):
+                    for key in self.hidden_state:
+                        reset_states = initial_hidden_states_for_reset[key][
+                            finished_mask
+                        ]
+                        if reset_states.shape[0] > 0:
+                            self.hidden_state[key][finished_mask] = reset_states
+                # Add handling for numpy if needed
 
             # Update for next step
             obs = next_obs
             info = next_info
-            hidden_state = next_hidden
 
         # Compute advantages and returns
         with torch.no_grad():
             # Get value for last observation
             if self.recurrent:
                 _, _, _, last_value, _ = self._get_action_and_values(
-                    self.preprocess_observation(obs), hidden_state=hidden_state
+                    obs, hidden_state=self.hidden_state
                 )
             else:
-                _, _, _, last_value, _ = self._get_action_and_values(
-                    self.preprocess_observation(obs)
-                )
+                _, _, _, last_value, _ = self._get_action_and_values(obs)
 
             last_value = last_value.cpu().numpy()
+            last_done = np.atleast_1d(done)  # Ensure last_done has shape (num_envs,)
 
         # Compute returns and advantages
         self.rollout_buffer.compute_returns_and_advantages(
-            last_value=last_value, last_done=done
+            last_value=last_value, last_done=last_done
         )
 
     def learn(self, experiences: Union[ExperiencesType, None] = None) -> float:
@@ -745,6 +807,9 @@ class PPO(RLAlgorithm):
         # Prepare for minibatch updates
         batch_size = self.batch_size
         num_samples = observations.size(0)
+        assert num_samples == self.rollout_buffer.size(), (
+            f"Expected {self.rollout_buffer.size()} samples, but got {num_samples}"
+        )
         indices = np.arange(num_samples)
 
         mean_loss = 0
@@ -765,9 +830,15 @@ class PPO(RLAlgorithm):
                 mb_returns = returns[minibatch_indices]
                 mb_old_values = values[minibatch_indices]
 
+                mb_hidden_states = (
+                    buffer_data["hidden_states"][minibatch_indices]
+                    if self.recurrent
+                    else None
+                )
+
                 # Evaluate actions and calculate policy loss
                 new_log_probs, entropy, new_values = self.evaluate_actions(
-                    mb_obs, mb_actions
+                    mb_obs, mb_actions, hidden_state=mb_hidden_states
                 )
 
                 # Policy loss
@@ -840,6 +911,9 @@ class PPO(RLAlgorithm):
         :return: Mean test score of agent in environment
         :rtype: float
         """
+        if not self.use_rollout_buffer:
+            raise RuntimeError("test() can only be used when use_rollout_buffer=True")
+
         self.set_training_mode(False)
         with torch.no_grad():
             rewards = []
@@ -850,7 +924,9 @@ class PPO(RLAlgorithm):
                 completed_episode_scores = np.zeros(num_envs)
                 finished = np.zeros(num_envs)
                 step = 0
-                hidden_state = None
+                test_hidden_state = (
+                    self.get_initial_hidden_state(env) if self.recurrent else None
+                )
 
                 while not np.all(finished):
                     if swap_channels:
@@ -859,9 +935,9 @@ class PPO(RLAlgorithm):
                     action_mask = info.get("action_mask", None)
                     if self.recurrent:
                         action, _, _, _, next_hidden = self.get_action(
-                            obs, action_mask=action_mask, hidden_state=hidden_state
+                            obs, action_mask=action_mask, hidden_state=test_hidden_state
                         )
-                        hidden_state = next_hidden
+                        test_hidden_state = next_hidden
                     else:
                         action, _, _, _ = self.get_action(
                             obs, action_mask=action_mask

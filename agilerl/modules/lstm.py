@@ -14,18 +14,18 @@ class EvolvableLSTM(EvolvableModule):
 
     :param input_size: Size of input features
     :type input_size: int
-    :param hidden_size: Size of hidden state
-    :type hidden_size: int
+    :param hidden_state_size: Size of hidden state
+    :type hidden_state_size: int
     :param num_outputs: Output dimension
     :type num_outputs: int
     :param num_layers: Number of LSTM layers stacked together
     :type num_layers: int
     :param output_activation: Output activation layer, defaults to None
     :type output_activation: str, optional
-    :param min_hidden_size: Minimum hidden state size, defaults to 32
-    :type min_hidden_size: int, optional
-    :param max_hidden_size: Maximum hidden state size, defaults to 512
-    :type max_hidden_size: int, optional
+    :param min_hidden_state_size: Minimum hidden state size, defaults to 32
+    :type min_hidden_state_size: int, optional
+    :param max_hidden_state_size: Maximum hidden state size, defaults to 512
+    :type max_hidden_state_size: int, optional
     :param min_layers: Minimum number of LSTM layers, defaults to 1
     :type min_layers: int, optional
     :param max_layers: Maximum number of LSTM layers, defaults to 3
@@ -41,12 +41,12 @@ class EvolvableLSTM(EvolvableModule):
     def __init__(
         self,
         input_size: int,
-        hidden_size: int,
+        hidden_state_size: int,
         num_outputs: int,
         num_layers: int = 1,
         output_activation: str = None,
-        min_hidden_size: int = 32,
-        max_hidden_size: int = 512,
+        min_hidden_state_size: int = 32,
+        max_hidden_state_size: int = 512,
         min_layers: int = 1,
         max_layers: int = 3,
         dropout: float = 0.0,
@@ -55,32 +55,32 @@ class EvolvableLSTM(EvolvableModule):
     ):
         super().__init__(device)
 
-        assert (
-            input_size > 0
-        ), "'input_size' cannot be less than or equal to zero, please enter a valid integer."
-        assert (
-            hidden_size > 0
-        ), "'hidden_size' cannot be less than or equal to zero, please enter a valid integer."
-        assert (
-            num_outputs > 0
-        ), "'num_outputs' cannot be less than or equal to zero, please enter a valid integer."
-        assert (
-            num_layers > 0
-        ), "'num_layers' cannot be less than or equal to zero, please enter a valid integer."
-        assert (
-            min_hidden_size < max_hidden_size
-        ), "'min_hidden_size' must be less than 'max_hidden_size'."
+        assert input_size > 0, (
+            "'input_size' cannot be less than or equal to zero, please enter a valid integer."
+        )
+        assert hidden_state_size > 0, (
+            "'hidden_state_size' cannot be less than or equal to zero, please enter a valid integer."
+        )
+        assert num_outputs > 0, (
+            "'num_outputs' cannot be less than or equal to zero, please enter a valid integer."
+        )
+        assert num_layers > 0, (
+            "'num_layers' cannot be less than or equal to zero, please enter a valid integer."
+        )
+        assert min_hidden_state_size < max_hidden_state_size, (
+            "'min_hidden_state_size' must be less than 'max_hidden_state_size'."
+        )
         assert min_layers < max_layers, "'min_layers' must be less than 'max_layers'."
         assert 0 <= dropout < 1, "'dropout' must be between 0 and 1."
 
         self.name = name
         self.input_size = input_size
-        self.hidden_size = hidden_size
+        self.hidden_state_size = hidden_state_size
         self.num_outputs = num_outputs
         self.num_layers = num_layers
         self.output_activation = output_activation
-        self.min_hidden_size = min_hidden_size
-        self.max_hidden_size = max_hidden_size
+        self.min_hidden_state_size = min_hidden_state_size
+        self.max_hidden_state_size = max_hidden_state_size
         self.min_layers = min_layers
         self.max_layers = max_layers
         self.dropout = dropout
@@ -98,7 +98,7 @@ class EvolvableLSTM(EvolvableModule):
         model_dict = nn.ModuleDict()
         model_dict[f"{self.name}_lstm"] = nn.LSTM(
             input_size=self.input_size,
-            hidden_size=int(self.hidden_size),
+            hidden_size=int(self.hidden_state_size),
             num_layers=self.num_layers,
             batch_first=True,
             dropout=self.dropout if self.num_layers > 1 else 0,
@@ -107,7 +107,7 @@ class EvolvableLSTM(EvolvableModule):
 
         # Add activation if specified
         model_dict[f"{self.name}_lstm_output"] = nn.Linear(
-            self.hidden_size, self.num_outputs, device=self.device
+            self.hidden_state_size, self.num_outputs, device=self.device
         )
         model_dict[f"{self.name}_output_activation"] = get_activation(
             self.output_activation
@@ -206,8 +206,10 @@ class EvolvableLSTM(EvolvableModule):
         if numb_new_nodes is None:
             numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
 
-        if self.hidden_size + numb_new_nodes <= self.max_hidden_size:  # HARD LIMIT
-            self.hidden_size += numb_new_nodes
+        if (
+            self.hidden_state_size + numb_new_nodes <= self.max_hidden_state_size
+        ):  # HARD LIMIT
+            self.hidden_state_size += numb_new_nodes
 
         return {"numb_new_nodes": numb_new_nodes}
 
@@ -223,8 +225,10 @@ class EvolvableLSTM(EvolvableModule):
         if numb_new_nodes is None:
             numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
 
-        if self.hidden_size - numb_new_nodes >= self.min_hidden_size:  # HARD LIMIT
-            self.hidden_size -= numb_new_nodes
+        if (
+            self.hidden_state_size - numb_new_nodes >= self.min_hidden_state_size
+        ):  # HARD LIMIT
+            self.hidden_state_size -= numb_new_nodes
 
         return {"numb_new_nodes": numb_new_nodes}
 
