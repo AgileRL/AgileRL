@@ -98,13 +98,11 @@ class DummyMLPPreTrainedModel(PreTrainedModel):
         self, input_ids: Optional[torch.Tensor] = None, *args, **kwargs
     ) -> Tuple[torch.Tensor, ...]:
         input_ids = input_ids.to(self.datatype)
-        print("INPUT IDS TYPE: ", input_ids.dtype)
         output = self.linear_2(self.linear_1(input_ids)).reshape(
             input_ids.shape[0],
             self.input_size + self.max_tokens,
             self.vocab_size,
         )
-        print("DOES OUTPUT REQUIRE GRAD: ", output.requires_grad)
         return DummyForwardOutput(
             logits=output,
         )

@@ -162,7 +162,6 @@ def test_interact_environment():
 
     assert isinstance(obs, int)
     assert isinstance(obs_sequence, list)
-    print(obs_sequence)
     assert len(obs_sequence) == 2
 
 

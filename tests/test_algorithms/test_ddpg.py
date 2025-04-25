@@ -421,7 +421,6 @@ def test_returns_expected_action_training(observation_space):
     ddpg = DDPG(observation_space, action_space)
     state = get_sample_from_space(observation_space)
 
-    print(state)
     training = False
     action = ddpg.get_action(state, training)[0]
 
@@ -812,9 +811,6 @@ def test_clone_returns_identical_agent():
     assert clone_agent.mut == ddpg.mut
     assert clone_agent.device == ddpg.device
     assert clone_agent.accelerator == ddpg.accelerator
-    print(clone_agent.wrap, ddpg.wrap)
-    print("1 = ", clone_agent.actor.state_dict())
-    print("\n\n2 = ", ddpg.actor.state_dict())
     assert str(clone_agent.actor.state_dict()) == str(ddpg.actor.state_dict())
     assert str(clone_agent.actor_target.state_dict()) == str(
         ddpg.actor_target.state_dict()
