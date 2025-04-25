@@ -1700,6 +1700,13 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 )
             )
             self.accelerator.wait_for_everyone()
+        else:
+            self.actor, self.reference_actor, self.optimizer, self.lr_scheduler = (
+                None,
+                None,
+                None,
+                None,
+            )
         gc.collect()
         torch.cuda.empty_cache()
 
