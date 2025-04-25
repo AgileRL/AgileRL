@@ -2,6 +2,8 @@ import gymnasium as gym
 import numpy as np
 import torch
 from tqdm import trange
+import os
+from gymnasium.wrappers import RecordVideo
 
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -16,37 +18,10 @@ from agilerl.utils.utils import create_population, make_vect_envs
 
 # Define the Noisy Observation Wrapper
 class NoisyObsWrapper(gym.ObservationWrapper):
-    def __init__(self, env, real_every=5):
+    def __init__(self, env, real_every=2):
         super().__init__(env)
         self.real_every = real_every
         self.step_count = 0
-        self._initialize_noise_params()
-
-    def _initialize_noise_params(self):
-        # Handle single and multi-env spaces
-        if hasattr(self.env, "single_observation_space"):
-            self.single_obs_space = self.env.single_observation_space
-        else:
-            self.single_obs_space = self.env.observation_space
-
-        obs_low_unclipped = self.single_obs_space.low
-        obs_high_unclipped = self.single_obs_space.high
-
-        # Clip infinite bounds to prevent OverflowError in np.random.uniform
-        # Use finfo for max/min float values, but also clip to a reasonable large range
-        finfo = np.finfo(self.single_obs_space.dtype)
-        large_finite_val = 100  # Define a large but finite value for clipping
-        self.obs_low = np.clip(obs_low_unclipped, -large_finite_val, large_finite_val)
-        self.obs_high = np.clip(obs_high_unclipped, -large_finite_val, large_finite_val)
-
-        # Replace any remaining infinities just in case (e.g., if large_finite_val was inf)
-        self.obs_low[self.obs_low == -np.inf] = finfo.min
-        self.obs_high[self.obs_high == np.inf] = finfo.max
-
-        # Ensure low < high after clipping
-        self.obs_high = np.maximum(self.obs_low + 1e-6, self.obs_high)
-
-        self.obs_shape = self.single_obs_space.shape
 
     def reset(self, **kwargs):
         self.step_count = 0
@@ -55,38 +30,14 @@ class NoisyObsWrapper(gym.ObservationWrapper):
         return obs, info
 
     def observation(self, obs):
-        # Handle vectorized environments
-        if hasattr(self.env, "num_envs"):
-            num_envs = self.env.num_envs
-            noisy_obs = np.zeros_like(obs)
-            for i in range(num_envs):
-                if self.step_count % self.real_every == 0:
-                    # Store the real observation for this specific env
-                    # We need a way to store last_real_obs per environment
-                    # For simplicity in this example, we'll just use the current one
-                    # A better implementation would store this in info or a separate dict
-                    self.last_real_obs = obs  # This is approximate for vect envs
-                    noisy_obs[i] = obs[i]
-                else:
-                    noisy_obs[i] = np.random.uniform(
-                        low=self.obs_low,
-                        high=self.obs_high,
-                        size=self.obs_shape,
-                    ).astype(self.single_obs_space.dtype)
-        else:
-            # Handle single environment
-            if self.step_count % self.real_every == 0:
-                self.last_real_obs = obs
-                noisy_obs = obs
-            else:
-                noisy_obs = np.random.uniform(
-                    low=self.obs_low,
-                    high=self.obs_high,
-                    size=self.obs_shape,
-                ).astype(self.single_obs_space.dtype)
-
         self.step_count += 1
-        return noisy_obs
+        if self.step_count % self.real_every == 0:
+            self.last_real_obs = obs
+            return obs
+        else:
+            return np.array(
+                [0.0, 0.0, 0.0, 0.0]
+            )  # Noise observation that needs to be filtered out by the LSTM
 
 
 if __name__ == "__main__":
@@ -97,8 +48,8 @@ if __name__ == "__main__":
     NET_CONFIG = {
         "encoder_config": {
             "hidden_state_size": 64,  # LSTM hidden state size
-        }
-        # No need for MLP hidden_size here as LSTM acts as encoder
+            # "hidden_size": [64],  # MLP hidden size if not recurrent
+        },
     }
 
     INIT_HP = {
@@ -121,9 +72,9 @@ if __name__ == "__main__":
         "CHANNELS_LAST": False,  # CartPole obs are 1D
     }
 
-    num_envs = 8  # Number of parallel environments
+    num_envs = 1  # Number of parallel environments
     env = gym.vector.SyncVectorEnv(
-        [lambda: NoisyObsWrapper(gym.make("CartPole-v1"), real_every=5)] * num_envs
+        [lambda: NoisyObsWrapper(gym.make("CartPole-v1"), real_every=1)] * num_envs
     )
 
     observation_space = env.single_observation_space
@@ -175,7 +126,7 @@ if __name__ == "__main__":
 
     # TRAINING LOOP
     print("Training...")
-    pbar = trange(max_steps, unit="step")
+    pbar = trange(max_steps * num_envs, unit="step")
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         pop_episode_scores = []
         for agent in pop:  # Loop through population
@@ -184,7 +135,10 @@ if __name__ == "__main__":
 
             total_steps += agent.learn_step
             agent.steps[-1] += agent.learn_step
-            pbar.update(agent.learn_step // len(pop))
+
+            # printing is pretty slow...
+            if total_steps % (agent.learn_step * 5) == 0:
+                pbar.update(agent.learn_step * num_envs * 5 // len(pop))
 
             # Store scores from completed episodes during rollouts
             # Access buffer info if needed (optional)
@@ -225,3 +179,45 @@ if __name__ == "__main__":
 
     pbar.close()
     env.close()
+
+    # Export render after training
+    print("Recording video of best agent...")
+
+    # Create videos directory if it doesn't exist
+    videos_dir = "videos"
+    os.makedirs(videos_dir, exist_ok=True)
+
+    # Find the best agent based on fitness
+    best_agent_idx = np.argmax([np.mean(agent.fitness[-5:]) for agent in pop])
+    best_agent = pop[best_agent_idx]
+
+    # Create a new environment with video recording
+    render_env = RecordVideo(
+        NoisyObsWrapper(gym.make("CartPole-v1", render_mode="rgb_array"), real_every=5),
+        videos_dir,
+        episode_trigger=lambda x: True,  # Record all episodes
+        name_prefix="rnn_noisy_cartpole",
+    )
+
+    # Run the best agent for a few episodes
+    for episode in range(3):
+        obs, _ = render_env.reset()
+        done = False
+        episode_reward = 0
+        hidden_state = np.zeros((1, 1, INIT_HP["HIDDEN_STATE_SIZE"]))
+
+        while not done:
+            # Get action from the agent with RNN state
+            action, hidden_state = best_agent.get_action(
+                obs, deterministic=True, hidden_state=hidden_state
+            )
+
+            # Take step in environment
+            obs, reward, terminated, truncated, _ = render_env.step(action)
+            done = terminated or truncated
+            episode_reward += reward
+
+        print(f"Recorded Episode {episode + 1} Reward: {episode_reward}")
+
+    render_env.close()
+    print(f"Videos saved to {os.path.abspath(videos_dir)}")
