@@ -1,4 +1,5 @@
 import copy
+import gc
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -168,7 +169,10 @@ def mlp_actor(observation_spaces, action_spaces):
         nn.Linear(64, action_spaces[0].n),
         GumbelSoftmax(),
     )
-    return net
+    yield net
+    del net
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @pytest.fixture
@@ -178,19 +182,28 @@ def mlp_critic(action_spaces, observation_spaces):
         nn.ReLU(),
         nn.Linear(64, 1),
     )
-    return net
+    yield net
+    del net
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @pytest.fixture
 def cnn_actor():
     net = MultiAgentCNNActor()
-    return net
+    yield net
+    del net
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @pytest.fixture
 def cnn_critic():
     net = MultiAgentCNNCritic()
-    return net
+    yield net
+    del net
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @pytest.fixture
