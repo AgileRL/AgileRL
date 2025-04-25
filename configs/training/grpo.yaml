@@ -28,6 +28,6 @@ INIT_HP:
     MAX_OUTPUT_TOKENS: 10
     COSINE_lR_SCHEDULER:
     TOURN_SIZE: 2
-    ELITISM: true   
+    ELITISM: true
     POP_SIZE: 2
     EVAL_LOOP: 1

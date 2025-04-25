@@ -768,9 +768,10 @@ def test_grpo_value_error_with_nan_loss(grpo, accelerator, request, batch_size):
     def mock_grpo_loss(*args, **kwargs):
         return torch.tensor(float("nan")), torch.tensor(1.0)
 
-    with patch.object(grpo, "_grpo_loss", side_effect=mock_grpo_loss), pytest.raises(ValueError):
+    with patch.object(grpo, "_grpo_loss", side_effect=mock_grpo_loss), pytest.raises(
+        ValueError
+    ):
         mean_loss, mean_kl = grpo.learn((completions, action_masks, rewards))
-
 
 
 def test_grpo_load():

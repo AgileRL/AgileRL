@@ -148,7 +148,6 @@ class GRPO(LLMAlgorithm):
             actor_network, (PeftModel, PreTrainedModel)
         ), "Actor network must be a PeftModel or PreTrainedModel"
 
-
         if self.accelerator is not None and not clone:
             self.batch_size = 1
             if (
