@@ -746,7 +746,7 @@ def test_get_logprobs(grpo, accelerator, request, batch_size):
     indirect=["accelerator", "grpo"],
 )
 @pytest.mark.parametrize("batch_size", [8])
-def test_grpo_learn_with_nan_loss(grpo, accelerator, request, batch_size):
+def test_grpo_value_error_with_nan_loss(grpo, accelerator, request, batch_size):
     vocab_size = request.node.callspec.params["grpo"]["vocab_size"]
     input_size = request.node.callspec.params["grpo"]["input_size"]
     max_tokens = request.node.callspec.params["grpo"]["max_tokens"]
@@ -768,14 +768,9 @@ def test_grpo_learn_with_nan_loss(grpo, accelerator, request, batch_size):
     def mock_grpo_loss(*args, **kwargs):
         return torch.tensor(float("nan")), torch.tensor(1.0)
 
-    with patch.object(grpo, "_grpo_loss", side_effect=mock_grpo_loss):
+    with patch.object(grpo, "_grpo_loss", side_effect=mock_grpo_loss), pytest.raises(ValueError):
         mean_loss, mean_kl = grpo.learn((completions, action_masks, rewards))
 
-    # Since all loss values were NaN, mean_loss should be 0
-    assert mean_loss == 0.0
-    # KL values weren't accumulated since we hit the continue statement
-    assert mean_kl == 0.0
-    AcceleratorState._reset_state(True)
 
 
 def test_grpo_load():

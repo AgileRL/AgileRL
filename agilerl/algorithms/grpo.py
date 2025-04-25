@@ -148,7 +148,8 @@ class GRPO(LLMAlgorithm):
             actor_network, (PeftModel, PreTrainedModel)
         ), "Actor network must be a PeftModel or PreTrainedModel"
 
-        if self.accelerator is not None:
+
+        if self.accelerator is not None and not clone:
             self.batch_size = 1
             if (
                 self.accelerator.state.deepspeed_plugin.deepspeed_config[
@@ -299,7 +300,7 @@ class GRPO(LLMAlgorithm):
                     batch_advantages,
                 )
                 if not loss.isfinite():
-                    continue
+                    raise ValueError(f"Loss is not finite: {loss}")
                 self._backward_pass(loss)
                 mean_loss += loss.item()
                 mean_kl += kl.item()
