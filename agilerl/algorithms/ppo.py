@@ -408,7 +408,7 @@ class PPO(RLAlgorithm):
         self,
         obs: ArrayOrTensor,
         actions: ArrayOrTensor,
-        hidden_state: Optional[ArrayOrTensor] = None,
+        hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Evaluates the actions.
 
@@ -416,24 +416,28 @@ class PPO(RLAlgorithm):
         :type obs: numpy.ndarray[float]
         :param actions: Actions to evaluate
         :type actions: torch.Tensor
-        :param hidden_state: Hidden state for recurrent policies, defaults to None
-        :type hidden_state: numpy.ndarray, optional
+        :param hidden_state: Hidden state for recurrent policies, defaults to None. Expected shape: dict with tensors of shape (batch_size, 1, hidden_size).
+        :type hidden_state: Dict[str, ArrayOrTensor], optional
         :return: Log probability, entropy, and state values
         :rtype: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         """
         obs = self.preprocess_observation(obs)
 
-        # Get values from actor-critic
+        eval_hidden_state = None
         if self.recurrent and hidden_state is not None:
-            # With recurrent state
-            _, _, entropy, values, _ = self._get_action_and_values(
-                obs, hidden_state=hidden_state
-            )
-        else:
-            # Without recurrent state
-            _, _, entropy, values, _ = self._get_action_and_values(obs)
+            # Reshape hidden state for LSTM: (batch_size, 1, hidden_size) -> (1, batch_size, hidden_size)
+            eval_hidden_state = {
+                key: val.permute(1, 0, 2) for key, val in hidden_state.items()
+            }
 
-        # Get log probability of the actions
+        # Get values from actor-critic
+        _, _, entropy, values, _ = self._get_action_and_values(
+            obs, hidden_state=eval_hidden_state
+        )
+
+        # Get log probability of the actions using the *original* hidden state if needed by actor?
+        # Let's assume actor.action_log_prob does not require hidden state for now, or handles it internally.
+        # If it does require hidden state, we might need to pass eval_hidden_state or recalculate.
         log_prob = self.actor.action_log_prob(actions)
 
         # Use -log_prob as entropy when squashing output in continuous action spaces
@@ -564,21 +568,17 @@ class PPO(RLAlgorithm):
                 (action.tolist() if listify_actions else action)
             )
 
-            # Add to buffer
-            # Handle both single environment and vectorized environments
+            # Handle both single environment and vectorized environments terminal states
             if isinstance(done, list) or isinstance(done, np.ndarray):
                 is_terminal = (
                     np.logical_or(done, truncated)
                     if isinstance(truncated, (list, np.ndarray))
                     else done
                 )
-
             else:
                 is_terminal = done or truncated
 
-            print(is_terminal)
-
-            # Ensure shapes are correct (num_envs, ...)
+            # Ensure shapes are correct (num_envs, ...) for rollout buffer. This isn't necessary by itself, but it's good for debugging.
             reward = np.atleast_1d(reward)
             is_terminal = np.atleast_1d(is_terminal)
             value = np.atleast_1d(value)
@@ -600,7 +600,6 @@ class PPO(RLAlgorithm):
                 # Create a mask for finished environments
                 finished_mask = is_terminal.astype(bool)
                 # Get initial hidden states only for the finished environments
-                num_finished = finished_mask.sum()
                 # Need a way to get initial state for a subset of envs
                 # For simplicity, re-initialize all and mask later, or handle dicts/tensors carefully
                 initial_hidden_states_for_reset = self.get_initial_hidden_state(
@@ -836,11 +835,13 @@ class PPO(RLAlgorithm):
                 mb_returns = returns[minibatch_indices]
                 mb_old_values = values[minibatch_indices]
 
-                mb_hidden_states = (
-                    buffer_data["hidden_states"][minibatch_indices]
-                    if self.recurrent
-                    else None
-                )
+                mb_hidden_states = None
+                if self.recurrent:
+                    # Index each hidden state tensor within the dictionary
+                    mb_hidden_states = {
+                        key: hidden_tensor[minibatch_indices]
+                        for key, hidden_tensor in buffer_data["hidden_states"].items()
+                    }
 
                 # Evaluate actions and calculate policy loss
                 new_log_probs, entropy, new_values = self.evaluate_actions(

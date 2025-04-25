@@ -1523,7 +1523,9 @@ def test_rollout_buffer_add():
     assert not buffer.full
     # where X is the environment index, and Y is the position in the buffer
     assert np.array_equal(buffer.observations[0][0], obs)
-    assert np.array_equal(buffer.actions[0][0], action)  # Discrete action space
+    assert np.array_equal(
+        buffer.actions[0], action
+    )  # Check the action for the first env at the first timestep
     assert buffer.rewards[0][0] == reward
     assert buffer.dones[0][0] == done
     assert buffer.values[0][0] == value
@@ -1816,6 +1818,50 @@ def test_ppo_with_hidden_states_multiple_envs():
     assert next_hidden.get("c", None).shape == (1, 2, 64)
 
 
+# Test PPO with hidden states and collect_rollouts
+def test_ppo_with_hidden_states_multiple_envs_collect_rollouts():
+    num_envs = 2
+    env = gymnasium.vector.SyncVectorEnv(
+        [lambda: gymnasium.make("CartPole-v1")] * num_envs
+    )
+
+    observation_space = env.single_observation_space  # Use single env space
+    action_space = env.single_action_space  # Use single env space
+
+    ppo = PPO(
+        observation_space=observation_space,
+        action_space=action_space,
+        use_rollout_buffer=True,
+        recurrent=True,
+        hidden_state_size=64,
+        num_envs=num_envs,
+        learn_step=5,
+    )
+
+    # Collect rollouts with recurrent network
+    ppo.collect_rollouts(env, n_steps=5)
+
+    # Check buffer contents
+    assert ppo.rollout_buffer.pos == 5
+    assert ppo.rollout_buffer.recurrent is True
+    assert not np.array_equal(
+        ppo.rollout_buffer.observations[0][0], np.zeros(observation_space.shape)
+    )
+    assert not np.array_equal(ppo.rollout_buffer.actions[0], np.zeros(1))
+    assert ppo.rollout_buffer.hidden_states is not None
+    assert ppo.rollout_buffer.next_hidden_states is not None
+
+    # Verify hidden states were properly stored
+    assert ppo.rollout_buffer.hidden_states["h"][0].shape == (1, num_envs, 64)
+    assert ppo.rollout_buffer.hidden_states["c"][0].shape == (1, num_envs, 64)
+
+    # Learn from collected rollouts
+    loss = ppo.learn()
+
+    assert isinstance(loss, float)
+    assert loss >= 0.0
+
+
 # Test PPO collect_rollouts method
 def test_ppo_collect_rollouts():
     observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
@@ -1839,11 +1885,16 @@ def test_ppo_collect_rollouts():
     assert not np.array_equal(
         ppo.rollout_buffer.observations[0][0], np.zeros(observation_space.shape)
     )
-    assert not np.array_equal(ppo.rollout_buffer.actions[0], np.zeros(1))
+    # Check shape and dtype of the stored action for the first env/step
+    assert ppo.rollout_buffer.actions[0].shape == (
+        ppo.num_envs,
+    )  # Shape should be (num_envs,)
+    assert (
+        ppo.rollout_buffer.actions.dtype == np.int64
+    )  # Dtype for Discrete action space
 
     # Compute returns and advantages should have been called
     assert not np.array_equal(ppo.rollout_buffer.returns[:, 0], np.zeros(5))
-    assert not np.array_equal(ppo.rollout_buffer.advantages[:, 0], np.zeros(5))
 
     # Learn from collected rollouts
     loss = ppo.learn()

@@ -1,3 +1,4 @@
+from copy import deepcopy
 import warnings
 from typing import Dict, List, Optional, Union, Tuple, Any
 
@@ -37,8 +38,8 @@ class RolloutBuffer:
     :type wrap_at_capacity: bool, optional
     """
 
-    hidden_states: Optional[np.ndarray] = None
-    next_hidden_states: Optional[np.ndarray] = None
+    hidden_states: Optional[Dict[str, np.ndarray]] = None
+    next_hidden_states: Optional[Dict[str, np.ndarray]] = None
 
     def __init__(
         self,
@@ -50,6 +51,7 @@ class RolloutBuffer:
         gae_lambda: float = 0.95,
         gamma: float = 0.99,
         recurrent: bool = False,
+        recurrent_state_keys: Optional[List[str]] = ["h", "c"],
         hidden_state_size: Optional[int] = None,
         use_gae: bool = True,
         wrap_at_capacity: bool = False,
@@ -62,6 +64,7 @@ class RolloutBuffer:
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.recurrent = recurrent
+        self.recurrent_state_keys = recurrent_state_keys if recurrent else []
         self.hidden_state_size = hidden_state_size
         self.use_gae = use_gae
         self.wrap_at_capacity = wrap_at_capacity
@@ -107,7 +110,7 @@ class RolloutBuffer:
 
         # Initialize action buffer based on action space type
         if isinstance(self.action_space, spaces.Discrete):
-            action_shape = (1,)
+            action_shape = ()
             action_dtype = np.int64
         elif isinstance(self.action_space, spaces.Box):
             action_shape = self.action_space.shape
@@ -119,22 +122,49 @@ class RolloutBuffer:
             action_shape = (self.action_space.n,)
             action_dtype = np.int64
         else:
-            action_shape = self.action_space.shape
-            action_dtype = np.float32
+            # Attempt to handle other spaces, assuming they have a shape attribute
+            try:
+                action_shape = self.action_space.shape
+                action_dtype = getattr(
+                    self.action_space, "dtype", np.float32
+                )  # Use float32 as default
+            except AttributeError:
+                raise TypeError(
+                    f"Unsupported action space type without shape: {type(self.action_space)}"
+                )
 
+        # Initialize actions buffer based on determined shape and dtype
+        # For Discrete spaces, action_shape is now empty, resulting in shape (capacity, num_envs)
         self.actions = np.zeros(
             (self.capacity, self.num_envs, *action_shape), dtype=action_dtype
         )
 
         if self.recurrent:
+            # Initialize hidden states buffer as dict of numpy arrays
             if self.hidden_state_size is None:
                 raise ValueError("hidden_state_size must be provided if recurrent=True")
-            self.hidden_states = np.zeros(
-                (self.capacity, self.num_envs, self.hidden_state_size), dtype=np.float32
-            )
-            self.next_hidden_states = np.zeros(
-                (self.capacity, self.num_envs, self.hidden_state_size), dtype=np.float32
-            )
+            if not self.recurrent_state_keys:
+                raise ValueError(
+                    "recurrent_state_keys must be provided if recurrent=True"
+                )
+
+            # Assuming num_layers * directions = 1 based on EvolvableLSTM implementation
+            hidden_layer_shape = (1, self.num_envs, self.hidden_state_size)
+
+            self.hidden_states = {
+                key: np.zeros(
+                    (self.capacity, *hidden_layer_shape),
+                    dtype=np.float32,
+                )
+                for key in self.recurrent_state_keys
+            }
+            self.next_hidden_states = {
+                key: np.zeros(
+                    (self.capacity, *hidden_layer_shape),
+                    dtype=np.float32,
+                )
+                for key in self.recurrent_state_keys
+            }
 
     def add(
         self,
@@ -145,8 +175,8 @@ class RolloutBuffer:
         value: Union[float, np.ndarray],
         log_prob: Union[float, np.ndarray],
         next_obs: Optional[ObservationType] = None,
-        hidden_state: Optional[ArrayOrTensor] = None,
-        next_hidden_state: Optional[ArrayOrTensor] = None,
+        hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
+        next_hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
         episode_start: Optional[Union[bool, np.ndarray]] = None,
     ) -> None:
         """
@@ -237,10 +267,36 @@ class RolloutBuffer:
 
         # Store hidden states if enabled
         if self.recurrent:
+            expected_shape = (1, self.num_envs, self.hidden_state_size)
             if hidden_state is not None:
-                self.hidden_states[self.pos] = hidden_state
+                for key in self.recurrent_state_keys:
+                    state = hidden_state.get(key)
+                    if state is None:
+                        raise ValueError(f"Hidden state missing key: {key}")
+                    # Convert state to numpy if it's a tensor
+                    if isinstance(state, torch.Tensor):
+                        state = state.cpu().numpy()
+                    # Validate shape before storing
+                    if state.shape != expected_shape:
+                        raise ValueError(
+                            f"Hidden state['{key}'] shape {state.shape} does not match expected {expected_shape}"
+                        )
+                    self.hidden_states[key][self.pos] = state
+
             if next_hidden_state is not None:
-                self.next_hidden_states[self.pos] = next_hidden_state
+                for key in self.recurrent_state_keys:
+                    next_state = next_hidden_state.get(key)
+                    if next_state is None:
+                        raise ValueError(f"Next hidden state missing key: {key}")
+                    # Convert state to numpy if it's a tensor
+                    if isinstance(next_state, torch.Tensor):
+                        next_state = next_state.cpu().numpy()
+                    # Validate shape before storing
+                    if next_state.shape != expected_shape:
+                        raise ValueError(
+                            f"Next hidden state['{key}'] shape {next_state.shape} does not match expected {expected_shape}"
+                        )
+                    self.next_hidden_states[key][self.pos] = next_state
 
         # Update buffer position
         self.pos += 1
@@ -302,7 +358,9 @@ class RolloutBuffer:
                 self.returns - self.values[:buffer_size]
             )  # Only assign up to current size
 
-    def get(self, batch_size: Optional[int] = None) -> Dict[str, np.ndarray]:
+    def get(
+        self, batch_size: Optional[int] = None
+    ) -> Dict[str, Union[np.ndarray, Dict[str, np.ndarray]]]:
         """
         Get data from the buffer, flattened and optionally sampled into minibatches.
 
@@ -358,16 +416,33 @@ class RolloutBuffer:
         )
 
         if self.recurrent:
-            if self.hidden_states is not None:
-                hidden_shape = self.hidden_states.shape[2:]
-                flattened_data["hidden_states"] = self.hidden_states[
-                    :buffer_size
-                ].reshape(total_samples, *hidden_shape)
-            if self.next_hidden_states is not None:
-                next_hidden_shape = self.next_hidden_states.shape[2:]
-                flattened_data["next_hidden_states"] = self.next_hidden_states[
-                    :buffer_size
-                ].reshape(total_samples, *next_hidden_shape)
+            flattened_data["hidden_states"] = {}
+            flattened_data["next_hidden_states"] = {}
+            total_samples = (
+                buffer_size * self.num_envs
+            )  # Recalculate or ensure it's available
+
+            for key in self.recurrent_state_keys:
+                if self.hidden_states is not None and key in self.hidden_states:
+                    data = self.hidden_states[key][
+                        :buffer_size
+                    ]  # Shape: (buffer_size, 1, num_envs, hidden_size)
+                    # Swap num_envs and layer_dim axes, then reshape
+                    flattened_data["hidden_states"][key] = data.swapaxes(1, 2).reshape(
+                        total_samples, 1, self.hidden_state_size
+                    )
+
+                if (
+                    self.next_hidden_states is not None
+                    and key in self.next_hidden_states
+                ):
+                    next_data = self.next_hidden_states[key][
+                        :buffer_size
+                    ]  # Shape: (buffer_size, 1, num_envs, hidden_size)
+                    # Swap num_envs and layer_dim axes, then reshape
+                    flattened_data["next_hidden_states"][key] = next_data.swapaxes(
+                        1, 2
+                    ).reshape(total_samples, 1, self.hidden_state_size)
 
         # Sample a minibatch if batch_size is specified
         if batch_size is not None:
@@ -381,7 +456,20 @@ class RolloutBuffer:
                     total_samples, size=batch_size, replace=False
                 )
 
-            sampled_batch = {key: data[indices] for key, data in flattened_data.items()}
+            # Sample from flattened data, handling the dict structure for hidden states
+            sampled_batch = {}
+            for key, data in flattened_data.items():
+                if key in ["hidden_states", "next_hidden_states"] and isinstance(
+                    data, dict
+                ):
+                    sampled_batch[key] = {
+                        sub_key: sub_data[indices] for sub_key, sub_data in data.items()
+                    }
+                elif isinstance(data, np.ndarray):
+                    sampled_batch[key] = data[indices]
+                else:
+                    sampled_batch[key] = data  # Should not happen ideally
+
             return sampled_batch
         else:
             # Return all flattened data
@@ -389,7 +477,7 @@ class RolloutBuffer:
 
     def get_tensor_batch(
         self, batch_size: Optional[int] = None, device: Optional[str] = None
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Dict[str, Union[torch.Tensor, Dict[str, torch.Tensor]]]:
         """
         Get data from the buffer as PyTorch tensors, flattened and optionally sampled.
 
@@ -400,9 +488,16 @@ class RolloutBuffer:
         np_batch = self.get(batch_size)
         device = device or self.device
 
-        tensor_batch = {}
+        tensor_batch: Dict[str, Union[torch.Tensor, Dict[str, torch.Tensor]]] = {}
         for key, data in np_batch.items():
-            if isinstance(data, np.ndarray):
+            if key in ["hidden_states", "next_hidden_states"] and isinstance(
+                data, dict
+            ):
+                tensor_batch[key] = {
+                    sub_key: torch.from_numpy(sub_data).to(device)
+                    for sub_key, sub_data in data.items()
+                }
+            elif isinstance(data, np.ndarray):
                 # Handle potential object dtype for observations (Dict/Tuple)
                 # This requires knowing how to convert the specific dict/tuple structure to tensors
                 if data.dtype == object:
@@ -422,12 +517,14 @@ class RolloutBuffer:
                         warnings.warn(
                             f"Cannot automatically convert object array '{key}' to tensor. Skipping."
                         )
-                        tensor_batch[key] = data  # Keep as numpy object array
+                        tensor_batch[key] = (
+                            data  # Keep as numpy object array? Or handle specific types
+                        )
                 else:
                     tensor_batch[key] = torch.from_numpy(data).to(device)
             else:
-                # Should not happen if get() returns numpy arrays, but handle just in case
-                tensor_batch[key] = data
+                # Should not happen if get() returns numpy arrays/dicts, but handle just in case
+                tensor_batch[key] = data  # Or raise error?
 
         return tensor_batch
 
