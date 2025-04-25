@@ -258,6 +258,7 @@ def main(init_hp, mut_p):
 
 if __name__ == "__main__":
     import os
+
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     with open("configs/training/grpo.yaml") as file:
         config = yaml.safe_load(file)
