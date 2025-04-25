@@ -178,6 +178,12 @@ def main(init_hp, mut_p):
 
     # Convert the HuggingFace dataset into a Gymnasium environment
     accelerator = Accelerator()
+    accelerator.state.deepspeed_plugin.deepspeed_config["activation_checkpointing"] = {
+        "partition_activations": True,
+        "cpu_checkpointing": True,
+        "synchronize_checkpoint_boundary": True,
+        "number_checkpoints": 2,
+    }
 
     env = HuggingFaceGym(
         train_dataset=train_dataset,
