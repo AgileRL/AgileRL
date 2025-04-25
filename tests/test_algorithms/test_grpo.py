@@ -678,6 +678,7 @@ def test_get_logprobs_with_accelerator(
 def test_grpo_learn_with_no_accelerator(
     vocab_size, input_size, max_tokens, group_size, batch_size, use_accelerator
 ):
+    AcceleratorState._reset_state(True)
     observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
     action_space = gym.spaces.Box(
         low=0,
