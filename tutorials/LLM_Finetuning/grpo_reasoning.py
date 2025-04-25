@@ -12,7 +12,7 @@ from agilerl.algorithms import GRPO
 from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 
-MODEL_PATH = "Qwen/Qwen2.5-0.5B"
+MODEL_PATH = "Qwen/Qwen2.5-3B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
 
@@ -68,7 +68,7 @@ def countdown_chat_template(q, a, tokenizer):
 
 def make_dataset(dataset_name: str) -> Tuple[Dataset, Dataset]:
     raw_dataset = (
-        load_dataset(DATASET, split="train").shuffle(seed=42).select(range(50000))
+        load_dataset(dataset_name, split="train").shuffle(seed=42).select(range(50000))
     )
     raw_dataset = raw_dataset.rename_column("target", "answer")
     raw_dataset = raw_dataset.rename_column("nums", "question")
@@ -174,15 +174,6 @@ def main():
 
     # Convert the HuggingFace dataset into a Gymnasium environment
     accelerator = Accelerator()
-    accelerator.state.deepspeed_plugin.deepspeed_config[
-        "train_micro_batch_size_per_gpu"
-    ] = 2
-    accelerator.state.deepspeed_plugin.deepspeed_config["activation_checkpointing"] = {
-        "partition_activations": True,
-        "cpu_checkpointing": True,
-        "synchronize_checkpoint_boundary": True,
-        "number_checkpoints": 2,
-    }
 
     # Convert the HuggingFace dataset into a Gymnasium environment
     env = HuggingFaceGym(
@@ -202,7 +193,7 @@ def main():
         env.action_space,
         actor_network=model,
         pad_token_id=tokenizer.eos_token_id,
-        batch_size=1,
+        batch_size=4,
         max_output_tokens=1024,
         group_size=12,
         reduce_memory_peak=True,

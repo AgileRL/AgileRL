@@ -273,7 +273,8 @@ def test_returns_best_agent_and_new_population_without_elitism_multi_agent():
 
 @pytest.mark.parametrize("use_accelerator", [True, False])
 @pytest.mark.parametrize("elitism", [True, False])
-def test_language_model_tournament(use_accelerator, elitism):
+@pytest.mark.parametrize("num_processes", [1, 2])
+def test_language_model_tournament(use_accelerator, elitism, num_processes):
     AcceleratorState._reset_state(True)
     tournament_selection = TournamentSelection(3, elitism, 4, 2)
     observation_space = gym.spaces.Box(low=0, high=1000 - 1, shape=(1,))
@@ -318,6 +319,7 @@ def test_language_model_tournament(use_accelerator, elitism):
     }
     accelerator.free_memory = lambda *args: args
     accelerator.unwrap_model = lambda arg: arg
+    accelerator.num_processes = num_processes
 
     population = [
         GRPO(

@@ -52,6 +52,7 @@ To save an agent, use the :ref:`save_llm_checkpoint<save_llm_checkpoint>` functi
 
   from agilerl.algorithms.grpo import GRPO
   from agilerl.utils.utils import save_llm_checkpoint
+
   agent = GRPO(
     env.observation_space,
     env.action_space,

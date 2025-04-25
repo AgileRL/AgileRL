@@ -96,7 +96,7 @@ class GRPO(LLMAlgorithm):
         pad_token_id: int,
         hp_config: Optional[HyperparameterConfig] = None,
         index: int = 0,
-        batch_size: int = 8,
+        batch_size: int = 1,
         beta: float = 0.001,
         lr: float = 5e-7,
         clip_coef: float = 0.2,
@@ -147,7 +147,27 @@ class GRPO(LLMAlgorithm):
         assert isinstance(
             actor_network, (PeftModel, PreTrainedModel)
         ), "Actor network must be a PeftModel or PreTrainedModel"
-        self.batch_size = batch_size
+
+        if self.accelerator is not None:
+            self.batch_size = 1
+            if (
+                self.accelerator.state.deepspeed_plugin.deepspeed_config[
+                    "train_micro_batch_size_per_gpu"
+                ]
+                == "auto"
+            ):
+                self.accelerator.state.deepspeed_plugin.deepspeed_config[
+                    "train_micro_batch_size_per_gpu"
+                ] = batch_size
+            else:
+                warnings.warn(
+                    "Argument 'batch_size' will be overwritten by the 'train_micro_batch_size_per_gpu' value set in the deepspeed config."
+                )
+                self.accelerator.state.deepspeed_plugin.deepspeed_config[
+                    "train_micro_batch_size_per_gpu"
+                ] = batch_size
+        else:
+            self.batch_size = batch_size
         self.lr = lr
         self.clip_coef = clip_coef
         self.update_epochs = update_epochs

@@ -178,15 +178,6 @@ def main(init_hp, mut_p):
 
     # Convert the HuggingFace dataset into a Gymnasium environment
     accelerator = Accelerator()
-    accelerator.state.deepspeed_plugin.deepspeed_config[
-        "train_micro_batch_size_per_gpu"
-    ] = 2
-    accelerator.state.deepspeed_plugin.deepspeed_config["activation_checkpointing"] = {
-        "partition_activations": True,
-        "cpu_checkpointing": True,
-        "synchronize_checkpoint_boundary": True,
-        "number_checkpoints": 2,
-    }
 
     env = HuggingFaceGym(
         train_dataset=train_dataset,
@@ -246,7 +237,7 @@ def main(init_hp, mut_p):
         env=env,
         init_hp=init_hp,
         evaluation_interval=10,
-        wb=True,
+        wb=False,
         save_elite=True,
         elite_path="saved_llms",
         max_reward=2.0,

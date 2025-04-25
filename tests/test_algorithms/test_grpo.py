@@ -230,7 +230,10 @@ def grpo(vocab_size, input_size, max_tokens, group_size, use_accelerator):
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize("group_size", [5])
-def test_init_grpo_with_accelerator(vocab_size, input_size, max_tokens, group_size):
+@pytest.mark.parametrize("micro_batch_size_per_gpu", ["auto", 8])
+def test_init_grpo_with_accelerator(
+    vocab_size, input_size, max_tokens, group_size, micro_batch_size_per_gpu
+):
     observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
     action_space = gym.spaces.Box(
         low=0,
@@ -238,7 +241,9 @@ def test_init_grpo_with_accelerator(vocab_size, input_size, max_tokens, group_si
         shape=(20,),
     )
     AcceleratorState._reset_state(True)
-    deepspeed_plugin = DeepSpeedPlugin(hf_ds_config=deepspeed_config)
+    deepspeed_config_copy = copy.deepcopy(deepspeed_config)
+    deepspeed_config_copy["train_micro_batch_size_per_gpu"] = micro_batch_size_per_gpu
+    deepspeed_plugin = DeepSpeedPlugin(hf_ds_config=deepspeed_config_copy)
     with patch_environment(**dist_env):
         accelerator = Accelerator(deepspeed_plugin=deepspeed_plugin)
         grpo = GRPO(
@@ -261,7 +266,7 @@ def test_init_grpo_with_accelerator(vocab_size, input_size, max_tokens, group_si
         )
         assert isinstance(grpo.observation_space, gym.spaces.Box)
         assert isinstance(grpo.action_space, gym.spaces.Box)
-        assert grpo.batch_size == 8
+        assert grpo.batch_size == 1
         assert grpo.beta == 0.001
         assert grpo.lr == 5e-7
         assert grpo.clip_coef == 0.2
@@ -321,7 +326,7 @@ def test_init_grpo_without_accelerator(vocab_size, input_size, max_tokens, group
     )
     assert isinstance(grpo.observation_space, gym.spaces.Box)
     assert isinstance(grpo.action_space, gym.spaces.Box)
-    assert grpo.batch_size == 8
+    assert grpo.batch_size == 1
     assert grpo.beta == 0.001
     assert grpo.lr == 5e-7
     assert grpo.clip_coef == 0.2

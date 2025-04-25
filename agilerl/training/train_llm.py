@@ -3,10 +3,10 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch.distributed as dist
-import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import GRPO
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.hpo.mutation import Mutations
@@ -101,14 +101,16 @@ def finetune_llm(
 
     if init_hp is None:
         init_hp = {}
-        init_hp["BATCH_SIZE"] = pop[0].batch_size
+        init_hp["BATCH_SIZE_PER_GPU"] = pop[0].batch_size
         init_hp["ALGO"] = pop[0].algo
     data_increment = (
         getattr(dist, "get_world_size", lambda: 1)() if dist.is_initialized() else 1
     )
     grad_accum = getattr(pop[0].actor, "gradient_accumulation_steps", lambda: 1)()
     effective_data_batch_size = data_increment * env.data_batch_size_per_gpu
-    effective_learning_batch_size = data_increment * init_hp["BATCH_SIZE"] * grad_accum
+    effective_learning_batch_size = (
+        data_increment * init_hp["BATCH_SIZE_PER_GPU"] * grad_accum
+    )
     if accelerator is None or accelerator.is_main_process:
         print(
             f"""
@@ -119,7 +121,7 @@ Data batch size per gpu: {env.data_batch_size_per_gpu}
 Number of GPUs: {data_increment}
 Gradient accumulation: {grad_accum}
 Effective data batch size: {data_increment} * {env.data_batch_size_per_gpu} = {effective_data_batch_size}
-Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE"]} * {grad_accum} = {effective_learning_batch_size}
+Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE_PER_GPU"]} * {grad_accum} = {effective_learning_batch_size}
 =========================================================================
         """
         )

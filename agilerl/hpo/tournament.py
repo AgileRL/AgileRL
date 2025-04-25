@@ -147,12 +147,13 @@ class TournamentSelection:
 
         if accelerator is not None:
             accelerator.wait_for_everyone()
-            new_population_idxs, old_population_idxs, unwanted_agents = (
-                broadcast_object_list(
-                    [new_population_idxs, old_population_idxs, unwanted_agents],
-                    from_process=0,
+            if accelerator.num_processes > 1:
+                new_population_idxs, old_population_idxs, unwanted_agents = (
+                    broadcast_object_list(
+                        [new_population_idxs, old_population_idxs, unwanted_agents],
+                        from_process=0,
+                    )
                 )
-            )
 
         # Delete any unwanted agents from memory
         for agent_idx in old_population_idxs:

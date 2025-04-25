@@ -71,8 +71,8 @@ model, and the Countdown dataset, and initialise them as follows:
             attn_implementation="flash_attention_2",
         )
         peft_config = LoraConfig(
-            r=32,
-            lora_alpha=32,
+            r=16,
+            lora_alpha=64,
             target_modules=[
                 "q_proj",
                 "k_proj",
@@ -90,7 +90,7 @@ model, and the Countdown dataset, and initialise them as follows:
 
     def make_dataset(dataset_name: str) -> Tuple[Dataset, Dataset]:
         raw_dataset = (
-            load_dataset(DATASET, split="train").shuffle(seed=42).select(range(50000))
+            load_dataset(dataset_name, split="train").shuffle(seed=42).select(range(50000))
         )
         raw_dataset = raw_dataset.rename_column("target", "answer")
         raw_dataset = raw_dataset.rename_column("nums", "question")
@@ -165,13 +165,11 @@ for displaying these behaviours, the agent itself discovers the best way to achi
                 used_numbers = [int(n) for n in re.findall(r"\d+", equation)]
 
                 if sorted(used_numbers) != sorted(numbers):
-                    print(f"Numbers mismatch: {used_numbers} vs {numbers}")
                     rewards.append(0.0)
                     continue
 
                 allowed_pattern = r"^[\d+\-*/().\s]+$"
                 if not re.match(allowed_pattern, equation):
-                    print(f"Equation format invalid: {equation}")
                     rewards.append(0.0)
                     continue
 
@@ -180,10 +178,8 @@ for displaying these behaviours, the agent itself discovers the best way to achi
                 if abs(float(result) - float(gt)) < 1e-5:
                     rewards.append(1.0)
                 else:
-                    print(f"Result {result} doesn't match target {gt}")
                     rewards.append(0.0)
             except Exception as e:
-                print(f"Equation error: {e}")
                 rewards.append(0.0)
         return rewards
 
@@ -218,7 +214,7 @@ Combining all these components, we can now initialise the HuggingFaceGym object.
             },
             {
                 "role": "user",
-                "content": f"Using each number in this tensor only once {tuple(i.item() for i in q)}, create an equation that equals {a.item()}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer> (1 + 2) / 3 </answer>.",
+                "content": f"Using each number in this tensor only once {tuple(i.item() for i in q)}, create an equation that equals {a.item()}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
             },
             {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
         ]
@@ -235,14 +231,10 @@ Combining all these components, we can now initialise the HuggingFaceGym object.
         return tokenized_prompt
 
     def custom_collate_fn(batch):
-        # Extract answers and questions
         answers = torch.tensor([item["answer"] for item in batch])
 
         # For questions of variable length, we need to pad them
-        # First, find the maximum length
         max_len = max(len(item["question"]) for item in batch)
-
-        # Create padded tensor
         questions = torch.zeros(len(batch), max_len, dtype=torch.long)
         for i, item in enumerate(batch):
             q_len = len(item["question"])
@@ -275,13 +267,6 @@ larger, more powerful model, then this becomes even more infeasible. Instead, we
 training, to share the workload across multiple devices and speed up training. To enable distributed
 training in this tutorial, we use deepspeed and accelerate.
 
-To generate an accelerate file, run the command ``accelerate config`` in your terminal, following the instructions
-on screen to outline the details of the compute you intend to use for your finetuning, saying yes to the question
-"Do you want to use DeepSpeed?" and no to the question "Do you want to specify a json file to a DeepSpeed config?"
-if you want an auto-generated deepspeed config file. More information on the deepspeed configuration can be found
-in their `docs <https://www.deepspeed.ai/docs/config-json/>`_. The accelerate config will handle the details of
-the distribution and the GRPO class handles how the accelerator is used during training.
-
 .. code-block:: python
 
     agent = GRPO(
@@ -290,7 +275,7 @@ the distribution and the GRPO class handles how the accelerator is used during t
         actor_network=model,
         pad_token_id=tokenizer.eos_token_id,
         max_output_tokens=1024,
-        batch_size=1,
+        batch_size=4,
         group_size=12,
         reduce_memory_peak=True,
         accelerator=Accelerator()
@@ -318,12 +303,54 @@ checkpoints of the trained agent that can be used later for inference. It also u
         accelerator=Accelerator()
     )
 
-You can then launch a training run using ``accelerate`` with the following command:
+Configuring Accelerate and DeepSpeed
+------------------------------------
+To generate an accelerate file, run the command ``accelerate config`` in your terminal, following the instructions
+on screen to outline the details of the compute you intend to use for your finetuning, saying yes to the question
+"Do you want to use DeepSpeed?" and no to the question "Do you want to specify a json file to a DeepSpeed config?"
+if you want an auto-generated deepspeed config file. More information on the deepspeed configuration can be found
+in their `docs <https://www.deepspeed.ai/docs/config-json/>`_. The accelerate config will handle the details of
+the distribution and the GRPO class handles how the accelerator is used during training. You can then launch a training
+run using ``accelerate`` with the following command:
 
 .. code-block:: bash
 
     accelerate launch path/to/training_script
 
+Alternatively, you can avoid ``accelerate config`` by defining your own accelerate-deepspeed config file and pass
+it as an argument to ``accelerate launch``:
+
+.. code-block:: bash
+
+    accelerate launch --config_file path/to/accelerate-deepspeed-config.yaml path/to/training_script
+
+Example config file:
+
+.. code-block:: yaml
+
+    compute_environment: LOCAL_MACHINE
+    debug: false
+    deepspeed_config:
+        gradient_accumulation_steps: 2
+        gradient_clipping: 1.0
+        offload_optimizer_device: cpu
+        offload_param_device: cpu
+        zero3_init_flag: false
+        zero_stage: 2
+    distributed_type: DEEPSPEED
+    downcast_bf16: no
+    enable_cpu_affinity: false
+    machine_rank: 0
+    main_training_function: main
+    mixed_precision: bf16
+    num_machines: 4
+    num_processes: 1
+    rdzv_backend: static
+    same_network: true
+    tpu_env: []
+    tpu_use_cluster: false
+    tpu_use_sudo: false
+    use_cpu: false
 
 Using a custom training loop
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~

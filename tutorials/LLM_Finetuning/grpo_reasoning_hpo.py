@@ -177,9 +177,6 @@ def main(init_hp, mut_p):
 
     # Convert the HuggingFace dataset into a Gymnasium environment
     accelerator = Accelerator()
-    accelerator.state.deepspeed_plugin.deepspeed_config[
-        "train_micro_batch_size_per_gpu"
-    ] = 2
     accelerator.state.deepspeed_plugin.deepspeed_config["activation_checkpointing"] = {
         "partition_activations": True,
         "cpu_checkpointing": True,
@@ -279,7 +276,7 @@ if __name__ == "__main__":
 
     INIT_HP = {
         "ALGO": "GRPO",
-        "BATCH_SIZE": 1,
+        "BATCH_SIZE_PER_GPU": 1,
         "REDUCE_MEMORY_PEAK": True,
         "BETA": 0.001,
         "LR": 0.000005,

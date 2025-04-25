@@ -1538,14 +1538,15 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             and self.accelerator.is_main_process
         ):
             warnings.warn(
-                "Zero stage 3 is feature is nascent and has not been thoroughly tested. It may be unstable or subject to change. We recommend caution in production environments."
+                "Zero stage 3 support is nascent and has not been thoroughly tested. It may be unstable or subject to change. We recommend caution in production environments."
             )
 
         seed = 42
         if self.accelerator is not None:
             if accelerator.is_main_process:
                 seed = np.random.randint(0, 2**32 - 1)
-            seed = broadcast_object_list([seed], from_process=0)[0]
+            if accelerator.num_processes > 1:
+                seed = broadcast_object_list([seed], from_process=0)[0]
         self.rng = np.random.RandomState(seed)
 
     def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
@@ -1716,7 +1717,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         with tempfile.TemporaryDirectory() as temp_dir:
 
             # We need to use the same temp_dir for all processes, so we broadcast the temp_dir from the main process
-            temp_dir = broadcast_object_list([temp_dir], from_process=0)[0]
+            if self.accelerator is not None and self.accelerator.num_processes > 1:
+                temp_dir = broadcast_object_list([temp_dir], from_process=0)[0]
 
             if self.zero_stage is not None and self.zero_stage >= 2:
                 self.accelerator.wait_for_everyone()

@@ -54,7 +54,7 @@ unlike the rest of the AgileRL framework, we can only tune the RL hyperparameter
 
     INIT_HP = {
         "ALGO": "GRPO",
-        "BATCH_SIZE": 1,
+        "BATCH_SIZE_PER_GPU": 1,
         "REDUCE_MEMORY_PEAK": True,
         "BETA": 0.001,
         "LR": 0.000005,
@@ -113,7 +113,7 @@ model, and the Countdown dataset, and initialise them as follows:
 
     def make_dataset(dataset_name: str) -> Tuple[Dataset, Dataset]:
         raw_dataset = (
-            load_dataset(DATASET, split="train").shuffle(seed=42).select(range(50000))
+            load_dataset(dataset_name, split="train").shuffle(seed=42).select(range(50000))
         )
         raw_dataset = raw_dataset.rename_column("target", "answer")
         raw_dataset = raw_dataset.rename_column("nums", "question")
@@ -300,13 +300,6 @@ to train a larger, more powerful model, then this becomes even more infeasible. 
 distributed training, to share the workload across multiple devices and speed up training. To enable distributed
 training in this tutorial, we use deepspeed and accelerate.
 
-To generate an accelerate file, run the command ``accelerate config`` in your terminal, following the instructions
-on screen to outline the details of the compute you intend to use for your finetuning, saying yes to the question
-"Do you want to use DeepSpeed?" and no to the question "Do you want to specify a json file to a DeepSpeed config?"
-if you want an auto-generated deepspeed config file. More information on the deepspeed configuration can be found
-in their `docs <https://www.deepspeed.ai/docs/config-json/>`_. The accelerate config will handle the details of
-the distribution and the GRPO class handles how the accelerator is used during training.
-
 .. code-block:: python
 
     hp_config = HyperparameterConfig(
@@ -394,6 +387,55 @@ The simplest way to train an AgileRL agent is to use the :meth:`finetune_llm() <
         accelerator=accelerator,
         verbose=True,
     )
+
+Configuring Accelerate and DeepSpeed
+------------------------------------
+To generate an accelerate file, run the command ``accelerate config`` in your terminal, following the instructions
+on screen to outline the details of the compute you intend to use for your finetuning, saying yes to the question
+"Do you want to use DeepSpeed?" and no to the question "Do you want to specify a json file to a DeepSpeed config?"
+if you want an auto-generated deepspeed config file. More information on the deepspeed configuration can be found
+in their `docs <https://www.deepspeed.ai/docs/config-json/>`_. The accelerate config will handle the details of
+the distribution and the GRPO class handles how the accelerator is used during training. You can then launch a training
+run using ``accelerate`` with the following command:
+
+.. code-block:: bash
+
+    accelerate launch path/to/training_script
+
+Alternatively, you can avoid ``accelerate config`` by defining your own accelerate-deepspeed config file and pass
+it as an argument to ``accelerate launch``:
+
+.. code-block:: bash
+
+    accelerate launch --config_file path/to/accelerate-deepspeed-config.yaml path/to/training_script
+
+Example config file:
+
+.. code-block:: yaml
+
+    compute_environment: LOCAL_MACHINE
+    debug: false
+    deepspeed_config:
+        gradient_accumulation_steps: 2
+        gradient_clipping: 1.0
+        offload_optimizer_device: cpu
+        offload_param_device: cpu
+        zero3_init_flag: false
+        zero_stage: 2
+    distributed_type: DEEPSPEED
+    downcast_bf16: no
+    enable_cpu_affinity: false
+    machine_rank: 0
+    main_training_function: main
+    mixed_precision: bf16
+    num_machines: 4
+    num_processes: 1
+    rdzv_backend: static
+    same_network: true
+    tpu_env: []
+    tpu_use_cluster: false
+    tpu_use_sudo: false
+    use_cpu: false
 
 
 Using a custom training loop
