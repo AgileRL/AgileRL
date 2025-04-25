@@ -29,8 +29,23 @@ class NoisyObsWrapper(gym.ObservationWrapper):
         else:
             self.single_obs_space = self.env.observation_space
 
-        self.obs_low = self.single_obs_space.low
-        self.obs_high = self.single_obs_space.high
+        obs_low_unclipped = self.single_obs_space.low
+        obs_high_unclipped = self.single_obs_space.high
+
+        # Clip infinite bounds to prevent OverflowError in np.random.uniform
+        # Use finfo for max/min float values, but also clip to a reasonable large range
+        finfo = np.finfo(self.single_obs_space.dtype)
+        large_finite_val = 100  # Define a large but finite value for clipping
+        self.obs_low = np.clip(obs_low_unclipped, -large_finite_val, large_finite_val)
+        self.obs_high = np.clip(obs_high_unclipped, -large_finite_val, large_finite_val)
+
+        # Replace any remaining infinities just in case (e.g., if large_finite_val was inf)
+        self.obs_low[self.obs_low == -np.inf] = finfo.min
+        self.obs_high[self.obs_high == np.inf] = finfo.max
+
+        # Ensure low < high after clipping
+        self.obs_high = np.maximum(self.obs_low + 1e-6, self.obs_high)
+
         self.obs_shape = self.single_obs_space.shape
 
     def reset(self, **kwargs):

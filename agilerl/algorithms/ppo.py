@@ -472,9 +472,7 @@ class PPO(RLAlgorithm):
         :return: Action, log probability, entropy, state values, and next hidden state
         :rtype: Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[ArrayOrTensor]]
         """
-        print("pre-obs", obs)
         obs = self.preprocess_observation(obs)
-        print("post-obs", obs)
         with torch.no_grad():
             if self.recurrent and hidden_state is not None:
                 action, log_prob, entropy, values, next_hidden = (
@@ -612,11 +610,18 @@ class PPO(RLAlgorithm):
                         self.hidden_state[finished_mask] = reset_states
                 elif isinstance(self.hidden_state, dict):
                     for key in self.hidden_state:
+                        # initial_hidden_states_for_reset[key] has shape (1, num_envs, hidden_size)
+                        # finished_mask has shape (num_envs,)
+                        # Index along the num_envs dimension (dim 1)
                         reset_states = initial_hidden_states_for_reset[key][
-                            finished_mask
+                            :, finished_mask, :
                         ]
-                        if reset_states.shape[0] > 0:
-                            self.hidden_state[key][finished_mask] = reset_states
+
+                        if (
+                            reset_states.shape[1] > 0
+                        ):  # Check num_envs dimension if any env finished
+                            # Assign to the correct slice along the num_envs dimension
+                            self.hidden_state[key][:, finished_mask, :] = reset_states
                 # Add handling for numpy if needed
 
             # Update for next step
