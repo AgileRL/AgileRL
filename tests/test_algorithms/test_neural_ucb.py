@@ -509,7 +509,6 @@ def test_clone_returns_identical_agent(observation_space, net_config):
     action_space = spaces.Discrete(2)
 
     bandit = DummyNeuralUCB(observation_space, action_space, net_config)
-    print(bandit.actor)
     bandit.tensor_attribute = torch.randn(1)
     bandit.numpy_attribute = np.random.rand(1)
     clone_agent = bandit.clone()
