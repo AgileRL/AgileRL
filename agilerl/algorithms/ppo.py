@@ -204,9 +204,14 @@ class PPO(RLAlgorithm):
         assert isinstance(recurrent, bool), (
             "Has hidden states flag must be boolean value True or False."
         )
-        if recurrent and hidden_state_size is None:
+        if recurrent and (
+            hidden_state_size is None
+            or hidden_state_size == 0
+            or max_seq_len is None
+            or max_seq_len == 0
+        ):
             warnings.warn(
-                "Hidden states enabled but hidden_state_size not provided. Using default hidden_state_size."
+                "Hidden states enabled but hidden_state_size, or max_seq_len are not provided or set to 0. Using default hidden_state_size."
             )
 
         if not use_rollout_buffer:
@@ -551,13 +556,15 @@ class PPO(RLAlgorithm):
             self.get_initial_hidden_state(self.num_envs) if self.recurrent else None
         )
 
+        current_hidden_state = self.hidden_state
+
         for _ in range(n_steps):
             # Get action
             if self.recurrent:
                 action, log_prob, _, value, next_hidden = self.get_action(
                     obs,
                     action_mask=info.get("action_mask", None),
-                    hidden_state=self.hidden_state,
+                    hidden_state=current_hidden_state,
                 )
                 self.hidden_state = next_hidden
             else:
@@ -595,7 +602,7 @@ class PPO(RLAlgorithm):
                 value=value.reshape(-1),
                 log_prob=log_prob,
                 next_obs=next_obs,
-                hidden_state=self.hidden_state,
+                hidden_state=current_hidden_state,
             )
 
             # Reset hidden state for finished environments
