@@ -1,5 +1,6 @@
 from copy import deepcopy
 import warnings
+import random  # Added to support random sequence sampling for BPTT
 from typing import Dict, List, Optional, Union, Tuple, Any
 
 import numpy as np
@@ -36,6 +37,8 @@ class RolloutBuffer:
     :type use_gae: bool, optional
     :param wrap_at_capacity: Whether to wrap the buffer at capacity, defaults to False. This is especially useful for OFF-policy algorithms, ON-policy algorithms should leave this as False in most cases.
     :type wrap_at_capacity: bool, optional
+    :param max_seq_len: Maximum sequence length for BPTT, defaults to None.
+    :type max_seq_len: int, optional
     """
 
     hidden_states: Optional[Dict[str, np.ndarray]] = None
@@ -55,6 +58,7 @@ class RolloutBuffer:
         hidden_state_size: Optional[int] = None,
         use_gae: bool = True,
         wrap_at_capacity: bool = False,
+        max_seq_len: Optional[int] = None,  # Maximum sequence length for BPTT
     ):
         self.capacity = capacity
         self.observation_space = observation_space
@@ -68,6 +72,9 @@ class RolloutBuffer:
         self.hidden_state_size = hidden_state_size
         self.use_gae = use_gae
         self.wrap_at_capacity = wrap_at_capacity
+        self.max_seq_len = (
+            max_seq_len  # Store maximum sequence length for BPTT sampling
+        )
 
         self.pos = 0
         self.full = False
@@ -540,6 +547,166 @@ class RolloutBuffer:
         """Reset the buffer pointer and full flag."""
         self.pos = 0
         self.full = False
+
+    # ------------------------------------------------------------------
+    # New helper functions for truncated Backpropagation Through Time (BPTT)
+    # ------------------------------------------------------------------
+
+    def _sample_sequence_start_indices(
+        self, seq_len: int, batch_size: int
+    ) -> List[Tuple[int, int]]:
+        """Helper to randomly sample (time_idx, env_idx) pairs that can serve as
+        the starting positions for sequences of length ``seq_len``.
+
+        :param seq_len: Desired sequence length.
+        :param batch_size: Number of sequences to sample.
+        :return: List of tuples (time_idx, env_idx) identifying the first element
+                 of every sampled sequence.
+        """
+        buffer_size = self.capacity if self.full else self.pos
+
+        if seq_len > buffer_size:
+            raise ValueError(
+                f"Requested sequence length {seq_len} exceeds current buffer size {buffer_size}."
+            )
+
+        # Compute valid starting indices along the time dimension
+        max_start = buffer_size - seq_len
+        valid_pairs: List[Tuple[int, int]] = [
+            (t, env) for env in range(self.num_envs) for t in range(max_start + 1)
+        ]
+
+        if batch_size is None or batch_size >= len(valid_pairs):
+            return valid_pairs  # Return all pairs if batch_size too large / None
+
+        return random.sample(valid_pairs, batch_size)
+
+    def get_sequences(
+        self,
+        seq_len: int,
+        batch_size: Optional[int] = None,
+    ) -> Dict[str, Union[np.ndarray, Dict[str, np.ndarray]]]:
+        """Returns a dictionary with batched sequences suitable for truncated BPTT.
+
+        The returned arrays have an additional leading batch dimension of size
+        ``batch_size`` and a time dimension of size ``seq_len``.
+
+        :param seq_len: Length of each sequence in timesteps.
+        :param batch_size: Number of sequences to sample. If None, returns all
+                           possible sequences.
+        :return: Dictionary mirroring :pyfunc:`get`, but with sequences.
+        """
+        # Sample starting indices
+        start_indices = self._sample_sequence_start_indices(seq_len, batch_size)
+
+        actual_batch_size = len(start_indices)
+
+        if actual_batch_size == 0:
+            return {}
+
+        # Helper to stack sequences along batch dimension
+        def _stack_seq(array: np.ndarray) -> np.ndarray:
+            seqs = [
+                array[t : t + seq_len, env_idx] for t, env_idx in start_indices
+            ]  # Each with shape (seq_len, *dims)
+            return np.stack(seqs, axis=0)  # (batch, seq_len, *dims)
+
+        seq_data: Dict[str, Union[np.ndarray, Dict[str, np.ndarray]]] = {}
+
+        # Handle observations (possibly object dtype)
+        if self.observations.dtype == object:
+            seq_data["observations"] = np.array(
+                [
+                    np.concatenate(self.observations[t : t + seq_len, env_idx])
+                    for t, env_idx in start_indices
+                ],
+                dtype=object,
+            )
+        else:
+            seq_data["observations"] = _stack_seq(self.observations)
+
+        if self.next_observations is not None:
+            if self.next_observations.dtype == object:
+                seq_data["next_observations"] = np.array(
+                    [
+                        np.concatenate(self.next_observations[t : t + seq_len, env_idx])
+                        for t, env_idx in start_indices
+                    ],
+                    dtype=object,
+                )
+            else:
+                seq_data["next_observations"] = _stack_seq(self.next_observations)
+
+        # Scalar / vector data
+        for name, array in [
+            ("actions", self.actions),
+            ("rewards", self.rewards),
+            ("dones", self.dones),
+            ("values", self.values),
+            ("log_probs", self.log_probs),
+            ("advantages", self.advantages),
+            ("returns", self.returns),
+            ("episode_starts", self.episode_starts),
+        ]:
+            seq_data[name] = _stack_seq(array)
+
+        # Handle recurrent states
+        if self.recurrent and self.hidden_states is not None:
+            seq_data["initial_hidden_states"] = {}
+            for key in self.recurrent_state_keys:
+                # Shape in buffer: (time, layer, env, hidden)
+                init_h = np.stack(
+                    [
+                        self.hidden_states[key][t, :, env_idx]
+                        for t, env_idx in start_indices
+                    ],
+                    axis=0,
+                )  # (batch, layer, hidden)
+                seq_data["initial_hidden_states"][key] = init_h
+
+        return seq_data
+
+    def get_sequence_tensor_batch(
+        self,
+        seq_len: int,
+        batch_size: Optional[int] = None,
+        device: Optional[str] = None,
+    ) -> Dict[str, Union[torch.Tensor, Dict[str, torch.Tensor]]]:
+        """Same as :pyfunc:`get_sequences` but returns PyTorch tensors on the
+        specified device.
+
+        :param seq_len: Length of each sequence.
+        :param batch_size: Number of sequences to sample. If None, returns all.
+        :param device: Torch device to move tensors to. Defaults to
+                       :pyattr:`self.device`.
+        :return: Dictionary with tensor sequences.
+        """
+        device = device or self.device
+        np_batch = self.get_sequences(seq_len=seq_len, batch_size=batch_size)
+
+        tensor_batch: Dict[str, Union[torch.Tensor, Dict[str, torch.Tensor]]] = {}
+        for key, data in np_batch.items():
+            if key == "initial_hidden_states" and isinstance(data, dict):
+                tensor_batch[key] = {
+                    k: torch.from_numpy(v).to(device) for k, v in data.items()
+                }
+            elif isinstance(data, dict):
+                tensor_batch[key] = {
+                    k: torch.from_numpy(v).to(device) for k, v in data.items()
+                }
+            elif isinstance(data, np.ndarray):
+                if data.dtype == object:
+                    # See note in get_tensor_batch
+                    warnings.warn(
+                        f"Cannot automatically convert object array '{key}' to tensor. Skipping."
+                    )
+                    tensor_batch[key] = data
+                else:
+                    tensor_batch[key] = torch.from_numpy(data).to(device)
+            else:
+                tensor_batch[key] = data
+
+        return tensor_batch
 
     # Removed add_trajectory, _add_trajectory_segment, get_trajectories,
     # clear_trajectories, to_legacy_format, get_flat_batch
