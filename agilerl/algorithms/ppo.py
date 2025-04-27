@@ -908,6 +908,7 @@ class PPO(RLAlgorithm):
         swap_channels: bool = False,
         max_steps: Optional[int] = None,
         loop: int = 3,
+        vectorized: bool = True,
     ) -> float:
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
@@ -926,7 +927,9 @@ class PPO(RLAlgorithm):
         self.set_training_mode(False)
         with torch.no_grad():
             rewards = []
-            num_envs = env.num_envs if hasattr(env, "num_envs") else 1
+            num_envs = (
+                env.num_envs if hasattr(env, "num_envs") and not vectorized else 1
+            )
             for _ in range(loop):
                 obs, info = env.reset()
                 scores = np.zeros(num_envs)
@@ -949,7 +952,11 @@ class PPO(RLAlgorithm):
                     else:
                         action, _, _, _ = self.get_action(obs, action_mask=action_mask)
 
-                    obs, reward, done, trunc, info = env.step(action)
+                    if vectorized:
+                        obs, reward, done, trunc, info = env.step(action)
+                    else:
+                        obs, reward, done, trunc, info = env.step(action[0])
+
                     step += 1
 
                     scores += np.array(reward)
@@ -962,6 +969,26 @@ class PPO(RLAlgorithm):
                         )
                         & ~finished
                     )
+
+                    # Reset hidden state for newly finished environments
+                    if self.recurrent and np.any(newly_finished):
+                        # Get initial hidden states only for the finished environments
+                        initial_hidden_states_for_reset = self.get_initial_hidden_state(
+                            num_envs
+                        )
+
+                        if isinstance(test_hidden_state, dict):
+                            for key in test_hidden_state:
+                                # Assuming dict values have shape [layers, batch, hidden_size]
+                                reset_states = initial_hidden_states_for_reset[key][
+                                    :, newly_finished, :
+                                ]
+                                if (
+                                    reset_states.shape[1] > 0
+                                ):  # Check batch dim if any env finished
+                                    test_hidden_state[key][:, newly_finished, :] = (
+                                        reset_states
+                                    )
 
                     if np.any(newly_finished):
                         completed_episode_scores[newly_finished] = scores[

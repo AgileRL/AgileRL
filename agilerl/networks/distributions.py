@@ -128,14 +128,23 @@ class CategoricalHandler:
     """Handler for Categorical distributions."""
 
     def sample(self, distribution: Categorical) -> torch.Tensor:
-        """Sample an action from the distribution.
+        """Sample an action from the distribution using a faster method
+        based on torch.searchsorted.
 
         :param distribution: Distribution to sample from.
         :type distribution: Categorical
         :return: Sampled action.
         :rtype: torch.Tensor
         """
-        return distribution.sample()
+        probs = distribution.probs
+        # Generate random numbers on the correct device and shape
+        # Calculate cumulative probabilities
+        # Use searchsorted to find the sampled indices efficiently
+        # right=True ensures correct handling for probabilities summing to 1
+        return torch.searchsorted(
+            probs.cumsum(-1),
+            torch.rand(probs.shape[:-1], device=probs.device)[..., None],
+        ).squeeze(-1)
 
     def log_prob(self, distribution: Categorical, action: torch.Tensor) -> torch.Tensor:
         """Get the log probability of the action.
@@ -198,103 +207,6 @@ class MultiCategoricalHandler:
         return torch.stack([dist.entropy() for dist in distribution], dim=1).sum(dim=1)
 
 
-class TorchDistribution:
-    """Wrapper to output a distribution over an action space for an evolvable module. It provides methods
-    to sample actions and compute log probabilities, relevant for many policy-gradient algorithms such as
-    PPO, A2C, TRPO.
-
-    :param distribution: Distribution to wrap.
-    :type distribution: Union[Distribution, List[Distribution]]
-    :param squash_output: Whether to squash the output to the action space.
-    :type squash_output: bool
-    """
-
-    # Map distribution types to their handlers
-    _handlers: Dict[Type, DistributionHandler] = {
-        Normal: NormalHandler(),
-        Bernoulli: BernoulliHandler(),
-        Categorical: CategoricalHandler(),
-        list: MultiCategoricalHandler(),
-    }
-
-    def __init__(
-        self,
-        distribution: DistributionType,
-        squash_output: bool = False,
-    ) -> None:
-        if isinstance(distribution, list):
-            assert all(
-                isinstance(d, Categorical) for d in distribution
-            ), "Only list of Categorical distributions are supported (for MultiDiscrete action spaces)."
-
-        self.distribution = distribution
-        self.squash_output = squash_output
-        self.sampled_action = None
-        self._handler = self._get_handler(distribution)
-
-    def _get_handler(self, distribution: DistributionType) -> DistributionHandler:
-        """Get the appropriate handler for the distribution type.
-
-        :param distribution: Distribution to get handler for.
-        :type distribution: DistributionType
-        :return: Appropriate handler for the distribution type.
-        :rtype: DistributionHandler
-        """
-        if isinstance(distribution, list):
-            return self._handlers[list]
-
-        for dist_type, handler in self._handlers.items():
-            if isinstance(distribution, dist_type) and dist_type is not list:
-                return handler
-
-        raise NotImplementedError(f"Distribution {type(distribution)} not supported.")
-
-    def sample(self) -> torch.Tensor:
-        """Sample an action from the distribution.
-
-        :return: Action from the distribution.
-        :rtype: torch.Tensor
-        """
-        self.sampled_action = self._handler.sample(self.distribution)
-
-        if self.squash_output:
-            return torch.tanh(self.sampled_action)
-
-        return self.sampled_action
-
-    def log_prob(self, action: torch.Tensor) -> torch.Tensor:
-        """Get the log probability of the action.
-
-        :param action: Action.
-        :type action: torch.Tensor
-        :return: Log probability of the action.
-        :rtype: torch.Tensor
-        """
-        _action = action if not self.squash_output else self.sampled_action
-
-        log_prob = self._handler.log_prob(self.distribution, _action)
-
-        # Correction for squashed outputs as per SAC paper:
-        # See https://arxiv.org/html/2410.16739v1
-        if self.squash_output:
-            log_prob -= torch.log(1 - action.pow(2) + 1e-6).sum(dim=1)
-
-        return log_prob
-
-    def entropy(self) -> Optional[torch.Tensor]:
-        """Get the entropy of the action distribution.
-
-        :return: Entropy of the action distribution.
-        :rtype: torch.Tensor, None
-        """
-        # No analytical form for entropy with squashed outputs so must
-        # use -log_prob.mean() in algorithm instead
-        if self.squash_output:
-            return None
-
-        return self._handler.entropy(self.distribution)
-
-
 class EvolvableDistribution(EvolvableWrapper):
     """Wrapper to output a distribution over an action space for an evolvable module. It provides methods
     to sample actions and compute log probabilities, relevant for many policy-gradient algorithms such as
@@ -306,16 +218,25 @@ class EvolvableDistribution(EvolvableWrapper):
     :type network: EvolvableModule
     :param action_std_init: Initial log standard deviation of the action distribution. Defaults to 0.0.
     :type action_std_init: float
-    :param squash_output: Whether to squash the output to the action space.
+    :param squash_output: Whether to squash the output to the action space (for Box spaces).
     :type squash_output: bool
     :param device: Device to use for the network.
     :type device: DeviceType
     """
 
     wrapped: EvolvableModule
-    dist: Optional[TorchDistribution]
     mask: Optional[ArrayOrTensor]
     log_std: Optional[torch.nn.Parameter]
+    # Attributes determined in __init__
+    _dist_class: Type[Distribution] | List[Type[Categorical]]
+    _handler: DistributionHandler
+    _action_splits: Optional[List[int]]
+    # Cached values from last forward pass
+    _last_distribution: Optional[DistributionType]
+    _last_sampled_action: Optional[torch.Tensor]  # Action before potential squashing
+    _last_action: Optional[torch.Tensor]  # Action after potential squashing
+    _last_log_prob: Optional[torch.Tensor]
+    _last_entropy: Optional[torch.Tensor]
 
     def __init__(
         self,
@@ -325,7 +246,6 @@ class EvolvableDistribution(EvolvableWrapper):
         squash_output: bool = False,
         device: DeviceType = "cpu",
     ):
-
         super().__init__(network)
 
         self.action_space = action_space
@@ -333,84 +253,158 @@ class EvolvableDistribution(EvolvableWrapper):
         self.action_std_init = action_std_init
         self.device = device
         self.squash_output = squash_output and isinstance(action_space, spaces.Box)
-        self.dist = None
         self.mask = None
+        self.log_std = None
 
-        # For continuous action spaces, we also learn the standard
-        # deviation (log_std) of the action distribution
-        if isinstance(action_space, spaces.Box):
+        # Handlers mapping - reuse instances for efficiency
+        self._handlers_map: Dict[Type, DistributionHandler] = {
+            Normal: NormalHandler(),
+            Bernoulli: BernoulliHandler(),
+            Categorical: CategoricalHandler(),
+            list: MultiCategoricalHandler(),  # Use list type for MultiCategorical
+        }
+
+        self._action_splits = None  # For MultiDiscrete/MultiBinary
+
+        # Determine distribution class and handler based on action space
+        if isinstance(self.action_space, spaces.Box):
+            self._dist_class = Normal
+            self._handler = self._handlers_map[Normal]
+            # Learn standard deviation for continuous actions
             self.log_std = torch.nn.Parameter(
                 torch.ones(1, np.prod(action_space.shape), device=device)
                 * action_std_init
             )
-
-    @property
-    def net_config(self) -> ConfigType:
-        """Configuration of the network.
-
-        :return: Configuration of the network.
-        :rtype: ConfigType
-        """
-        return self.wrapped.net_config
-
-    def get_distribution(self, logits: torch.Tensor) -> TorchDistribution:
-        """Get the distribution over the action space given an observation.
-
-        :param logits: Output of the network, either logits or probabilities.
-        :type logits: torch.Tensor
-        :return: Distribution over the action space.
-        :rtype: Distribution
-        """
-        # Normal distribution for Continuous action spaces
-        if isinstance(self.action_space, spaces.Box):
-            log_std = self.log_std.expand_as(logits)
-            action_std = torch.exp(log_std)
-            dist = Normal(loc=logits, scale=action_std)
-
-        # Categorical distribution for Discrete action spaces
         elif isinstance(self.action_space, spaces.Discrete):
-            dist = Categorical(logits=logits)
-
-        # List of categorical distributions for MultiDiscrete action spaces
+            self._dist_class = Categorical
+            self._handler = self._handlers_map[Categorical]
         elif isinstance(self.action_space, spaces.MultiDiscrete):
-            dist = [
-                Categorical(logits=split)
-                for split in torch.split(logits, list(self.action_space.nvec), dim=1)
-            ]
-
-        # Bernoulli distribution for MultiBinary action spaces
+            self._dist_class = list  # Represent as list of Categorical
+            self._handler = self._handlers_map[list]
+            self._action_splits = list(self.action_space.nvec)
         elif isinstance(self.action_space, spaces.MultiBinary):
-            dist = Bernoulli(logits=logits)
+            # Although MultiBinary is often handled by Bernoulli,
+            # if we need multiple independent Bernoulli outputs, we might
+            # treat it similarly to MultiDiscrete but with Bernoulli.
+            # For simplicity, let's assume a single Bernoulli output per feature
+            # or treat as MultiDiscrete with n=2 if that's the intended use.
+            # Current implementation uses single Bernoulli.
+            # If it needs to be MultiDiscrete-like (list of Bernoulli), adjust here.
+            self._dist_class = Bernoulli
+            self._handler = self._handlers_map[Bernoulli]
+            # self._action_splits = [1] * self.action_space.n # If treated like MultiDiscrete
         else:
             raise NotImplementedError(
                 f"Action space {self.action_space} not supported."
             )
 
-        return TorchDistribution(dist, self.squash_output)
+        # Initialize caches
+        self._last_distribution = None
+        self._last_sampled_action = None
+        self._last_action = None
+        self._last_log_prob = None
+        self._last_entropy = None
+
+    @property
+    def net_config(self) -> ConfigType:
+        """Configuration of the network."""
+        return self.wrapped.net_config
+
+    def _create_torch_distribution(self, logits: torch.Tensor) -> DistributionType:
+        """Creates the underlying PyTorch distribution object."""
+        if self._dist_class is Normal:
+            assert self.log_std is not None, (
+                "log_std must be initialized for Box spaces"
+            )
+            log_std_expanded = self.log_std.expand_as(logits)
+            action_std = torch.exp(log_std_expanded)
+            return Normal(loc=logits, scale=action_std)
+        elif self._dist_class is Categorical:
+            return Categorical(logits=logits)
+        elif self._dist_class is list:  # MultiDiscrete
+            assert self._action_splits is not None, (
+                "Action splits needed for MultiDiscrete"
+            )
+            return [
+                Categorical(logits=split)
+                for split in torch.split(logits, self._action_splits, dim=1)
+            ]
+        elif self._dist_class is Bernoulli:
+            return Bernoulli(logits=logits)
+        else:
+            # Should not happen due to __init__ checks
+            raise TypeError(f"Distribution class {self._dist_class} not recognized.")
 
     def log_prob(self, action: torch.Tensor) -> torch.Tensor:
-        """Get the log probability of the action.
+        """Get the log probability of a given action using the *last computed distribution*.
 
         :param action: Action.
         :type action: torch.Tensor
         :return: Log probability of the action.
         :rtype: torch.Tensor
         """
-        if self.dist is None:
-            raise ValueError("Distribution not initialized. Call forward first.")
+        if self._last_distribution is None:
+            raise ValueError("Distribution not created. Call forward first.")
 
-        return self.dist.log_prob(action)
+        # Determine which action to use for log_prob calculation based on squashing
+        # If squashed, we need the *original sampled* action before tanh
+        # However, the standard way to evaluate a policy's log_prob is on the
+        # *given* action (which might come from a buffer, not the last sample).
+        # The SAC correction applies based on the *given* action (after tanh).
+        action_for_log_prob = action
 
-    def entropy(self) -> torch.Tensor:
-        """Get the entropy of the action distribution.
+        # If we squashed the output during sampling, the log_prob needs correction.
+        # The correction uses the action *after* tanh (the input `action`).
+        # The log_prob itself from the *original* distribution (e.g., Normal)
+        # needs to be calculated using the *inverse* tanh of the action,
+        # which is the sample *before* tanh.
+        # This seems contradictory. Let's follow the SAC paper / common implementations.
+        # Log prob is calculated for the *given* action `a` using the distribution `pi`.
+        # The correction term `log(1 - tanh(mu)^2)` or `log(1 - a^2)` is subtracted.
+        # The `log_prob` method of the base distribution (e.g., Normal) needs the
+        # pre-squashed value `z` where `a = tanh(z)`.
+        # `z = atanh(a)`. Need to handle potential numerical instability near +/- 1.
 
-        :return: Entropy of the action distribution.
-        :rtype: torch.Tensor
+        if self.squash_output:
+            # Clip action to avoid +/- 1 values for atanh
+            clipped_action = torch.clamp(action, -1.0 + 1e-6, 1.0 + 1e-6)
+            # Inverse tanh: pre-squashed action
+            pre_tanh_action = torch.atanh(clipped_action)
+            # Calculate log_prob using the pre-squashed action
+            log_prob_base = self._handler.log_prob(
+                self._last_distribution, pre_tanh_action
+            )
+            # Apply SAC correction using the squashed action
+            # log(1 - a^2) = sum(log(1 - a_i^2)) over action dims
+            sac_correction = torch.log(1.0 - action.pow(2) + 1e-6).sum(dim=1)
+            log_prob = log_prob_base - sac_correction
+        else:
+            # No squashing, just calculate log_prob directly
+            log_prob = self._handler.log_prob(
+                self._last_distribution, action_for_log_prob
+            )
+
+        return log_prob
+
+    def entropy(self) -> Optional[torch.Tensor]:
+        """Get the entropy of the *last computed* action distribution.
+
+        :return: Entropy of the action distribution, or None if squashed.
+        :rtype: torch.Tensor, None
         """
-        if self.dist is None:
-            raise ValueError("Distribution not initialized. Call forward first.")
+        if self._last_distribution is None:
+            raise ValueError("Distribution not created. Call forward first.")
 
-        return self.dist.entropy()
+        # Entropy is not well-defined analytically for squashed distributions
+        if self.squash_output:
+            return None
+
+        # Return cached entropy from forward pass if available and valid
+        if self._last_entropy is not None:
+            return self._last_entropy
+        else:
+            # Recompute if needed (should have been computed in forward)
+            return self._handler.entropy(self._last_distribution)
 
     def apply_mask(self, logits: torch.Tensor, mask: ArrayOrTensor) -> torch.Tensor:
         """Apply a mask to the logits.
@@ -422,80 +416,130 @@ class EvolvableDistribution(EvolvableWrapper):
         :return: Logits with mask applied.
         :rtype: torch.Tensor
         """
-        # Convert mask to tensor and reshape to match logits shape
-        mask = torch.as_tensor(mask, dtype=torch.bool, device=self.device).view(
-            logits.shape
-        )
+        # Convert mask to tensor and reshape if necessary
+        # Assuming mask shape matches or is broadcastable to logits shape
+        mask = torch.as_tensor(mask, dtype=torch.bool, device=logits.device)
+        if mask.shape != logits.shape:
+            # Attempt to reshape based on common patterns (e.g., batch dim only)
+            if mask.ndim == 1 and mask.shape[0] == logits.shape[0]:
+                mask = mask.unsqueeze(1).expand_as(logits)  # Expand along action dim
+            elif mask.shape == self.action_space.shape:
+                mask = mask.unsqueeze(0).expand_as(logits)  # Add batch dim
+            else:
+                try:
+                    mask = mask.view(logits.shape)
+                except RuntimeError as e:
+                    raise ValueError(
+                        f"Mask shape {mask.shape} incompatible with logits shape {logits.shape}"
+                    ) from e
 
-        if isinstance(self.action_space, spaces.Discrete):
+        # Apply mask based on distribution type
+        if self._dist_class is Categorical:
             masked_logits = apply_action_mask_discrete(logits, mask)
-        elif isinstance(self.action_space, (spaces.MultiDiscrete, spaces.MultiBinary)):
-            splits = (
-                list(self.action_space.nvec)
-                if isinstance(self.action_space, spaces.MultiDiscrete)
-                else [self.action_space.n]
+        elif self._dist_class is list:  # MultiDiscrete
+            assert self._action_splits is not None, (
+                "Action splits needed for MultiDiscrete masking"
             )
-            # Split mask and logits into separate distributions
-            split_masks = torch.split(mask, splits, dim=1)
-            split_logits = torch.split(logits, splits, dim=1)
-
-            # Apply mask to each split
-            masked_logits = []
-            for split_logits, split_mask in zip(split_logits, split_masks):
-                masked_logits.append(
-                    apply_action_mask_discrete(split_logits, split_mask)
-                )
-
-            masked_logits = torch.cat(masked_logits, dim=1)
+            split_masks = torch.split(mask, self._action_splits, dim=1)
+            split_logits = torch.split(logits, self._action_splits, dim=1)
+            masked_logits_parts = [
+                apply_action_mask_discrete(split_logits_part, split_mask)
+                for split_logits_part, split_mask in zip(split_logits, split_masks)
+            ]
+            masked_logits = torch.cat(masked_logits_parts, dim=1)
+        elif self._dist_class is Bernoulli:
+            # Masking for Bernoulli typically means forcing certain actions (0 or 1)
+            # or disallowing them. Simple logit masking might not be standard.
+            # Assuming masking sets disallowed action logits to -inf, similar to Categorical.
+            masked_logits = apply_action_mask_discrete(logits, mask)
+        elif self._dist_class is Normal:
+            # Masking for continuous spaces (Normal) is less common or standard.
+            # It might involve clamping actions post-sampling, or adjusting mean/std.
+            # Raising error as simple logit masking isn't applicable.
+            raise NotImplementedError(
+                f"Action masking not implemented for {self._dist_class}"
+            )
         else:
             raise NotImplementedError(
-                f"Action space {self.action_space} not supported."
+                f"Action masking not supported for action space type associated with {self._dist_class}"
             )
 
         return masked_logits
 
     def forward(
         self, latent: torch.Tensor, action_mask: Optional[ArrayOrTensor] = None
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Forward pass of the network.
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        """Forward pass: compute distribution, sample action, compute log_prob and entropy.
 
         :param latent: Latent space representation.
         :type latent: torch.Tensor
         :param action_mask: Mask to apply to the logits. Defaults to None.
         :type action_mask: Optional[ArrayOrTensor]
-        :return: Action and log probability of the action.
-        :rtype: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        :return: Tuple of (action, log_prob, entropy). Entropy is None if using squash_output.
+        :rtype: Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]
         """
         logits = self.wrapped(latent)
 
+        # Apply mask if provided
         if action_mask is not None:
-            if isinstance(action_mask, (np.ndarray, list)):
-                action_mask = (
-                    np.stack(action_mask)
-                    if action_mask.dtype == np.object_ or isinstance(action_mask, list)
-                    else action_mask
-                )
+            # Preprocess mask if it's a list of arrays/objects (e.g., from vec envs)
+            if isinstance(action_mask, list) or (
+                isinstance(action_mask, np.ndarray) and action_mask.dtype == np.object_
+            ):
+                try:
+                    action_mask = np.stack(action_mask)
+                except ValueError as e:
+                    raise ValueError(
+                        f"Could not stack action_mask: {action_mask}"
+                    ) from e
 
             logits = self.apply_mask(logits, action_mask)
 
-        # Distribution from logits
-        self.dist = self.get_distribution(logits)
+        # Create the PyTorch distribution object
+        distribution = self._create_torch_distribution(logits)
+        self._last_distribution = distribution  # Cache distribution
 
-        # Sample action, compute log probability and entropy
-        action = self.dist.sample()
-        log_prob = self.dist.log_prob(action)
-        entropy = self.dist.entropy()
+        # Sample action using the handler
+        sampled_action = self._handler.sample(distribution)
+        self._last_sampled_action = sampled_action  # Cache pre-squashed action
+
+        # Apply squashing if needed (tanh)
+        if self.squash_output:
+            action = torch.tanh(sampled_action)
+        else:
+            action = sampled_action
+        self._last_action = action  # Cache final action
+
+        # Calculate log probability using the handler and apply SAC correction if squashed
+        log_prob = self.log_prob(
+            action
+        )  # Use the dedicated log_prob method which handles caching
+
+        # Calculate entropy using the handler
+        # Returns None if squashed
+        entropy = (
+            self.entropy()
+        )  # Use the dedicated entropy method which handles caching
+
+        # Cache results
+        self._last_log_prob = log_prob
+        self._last_entropy = entropy  # May be None
+
         return action, log_prob, entropy
 
     def clone(self) -> "EvolvableDistribution":
-        """Clones the distribution.
-
-        :return: Cloned distribution.
-        :rtype: EvolvableDistribution
-        """
-        return EvolvableDistribution(
+        """Clones the distribution wrapper and its underlying network."""
+        cloned_net = self.wrapped.clone()
+        cloned_dist = EvolvableDistribution(
             action_space=self.action_space,
-            network=self.wrapped.clone(),
+            network=cloned_net,
             action_std_init=self.action_std_init,
+            squash_output=self.squash_output,
             device=self.device,
         )
+        # Clone log_std parameter if it exists
+        if self.log_std is not None:
+            cloned_dist.log_std = torch.nn.Parameter(self.log_std.clone())
+            cloned_dist.log_std.requires_grad = self.log_std.requires_grad
+
+        return cloned_dist

@@ -62,7 +62,6 @@ class DeterministicActor(EvolvableNetwork):
         recurrent: bool = False,
         device: str = "cpu",
     ):
-
         super().__init__(
             observation_space,
             encoder_cls=encoder_cls,
