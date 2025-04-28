@@ -163,7 +163,7 @@ def create_population(
     device: str = "cpu",
     accelerator: Optional[Any] = None,
     torch_compiler: Optional[Any] = None,
-    algo_kwargs: Optional[Dict[str, Any]] = None,
+    algo_kwargs: Optional[Dict[str, Any]] = {},
 ) -> PopulationType:
     """Returns population of identical agents.
 
