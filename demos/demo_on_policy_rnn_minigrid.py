@@ -1,6 +1,6 @@
 # AgileRL On-policy (RNN/MLP) MiniGrid Memory Demo
 #
-# This script demonstrates how to use recurrent neural networks (RNNs) or MLPs with PPO to solve the MiniGrid-MemoryS13-v0 environment.
+# This script demonstrates how to use recurrent neural networks (RNNs) or MLPs with PPO to solve the MiniGrid-DoorKey-8x8-v0 environment.
 # The observation wrapper flattens the image and concatenates a one-hot encoding of the agent's direction.
 # This version follows the training structure of performance_flamegraph_cartpole.py and performance_flamegraph_lunar_lander.py,
 # using a population and a simple evolutionary loop.
@@ -39,7 +39,7 @@ class MiniGridObsWrapper(gym.ObservationWrapper):
         return self.observation(obs), info
 
     def observation(self, obs):
-        img = obs["image"].astype(np.float32) / 255.0  # normalize to [0,1]
+        img = obs["image"].astype(np.float32)
         flat_img = img.flatten()
         direction = obs["direction"]
         direction_onehot = np.zeros(4, dtype=np.float32)
@@ -95,7 +95,7 @@ num_envs = 64  # Fewer envs for MiniGrid due to slowness
 
 def make_env(render_mode=None):
     def thunk():
-        env = gym.make("MiniGrid-MemoryS13-v0", render_mode=render_mode)
+        env = gym.make("MiniGrid-DoorKey-8x8-v0", render_mode=render_mode)
         env = MiniGridObsWrapper(env)
         return env
 

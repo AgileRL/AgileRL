@@ -1,6 +1,7 @@
 # AgileRL Performance Profiling with Flamegraphs
 # This script demonstrates profiling AgileRL training using flamegraphs to identify bottlenecks.
 
+import webbrowser
 import torch
 from tqdm import trange
 import time
@@ -15,7 +16,7 @@ import pstats
 import pyinstrument
 from torch.profiler import profile, record_function, ProfilerActivity
 from IPython.display import display, HTML, Video
-
+import tempfile
 from agilerl.utils.utils import create_population, make_vect_envs
 
 # !Note: If you are running this demo without having installed agilerl,
@@ -40,7 +41,7 @@ NET_CONFIG = {
 # Hyperparameters
 INIT_HP = {
     "POP_SIZE": 1,  # Single agent for profiling
-    "BATCH_SIZE": 64,
+    "BATCH_SIZE": 128,
     "LEARN_STEP": 128,  # Smaller learn step for profiling
     "LR": 3e-4,
     "GAMMA": 0.99,
@@ -52,7 +53,7 @@ INIT_HP = {
     "UPDATE_EPOCHS": 4,
     "SHARE_ENCODERS": True,
     # PPO Specific
-    "DISCRETE_ACTIONS": True,  # LunarLander-v2 has discrete actions
+    "DISCRETE_ACTIONS": True,  # LunarLander-v3 has discrete actions
     "ACTION_STD_INIT": 0.6,  # Only used for continuous actions
     "TARGET_KL": None,
     "CHANNELS_LAST": False,  # LunarLander obs are 1D
@@ -63,7 +64,7 @@ INIT_HP = {
 # =====================================================================
 # Create vectorized environment
 num_envs = 64  # Number of parallel environments for profiling
-env = make_vect_envs("LunarLander-v2", num_envs=num_envs, should_async_vector=False)
+env = make_vect_envs("LunarLander-v3", num_envs=num_envs, should_async_vector=False)
 
 observation_space = env.single_observation_space
 action_space = env.single_action_space
@@ -87,7 +88,7 @@ pop = create_population(
 agent = pop[0]
 
 # =====================================================================
-# PROFILING WITH CPROFILE
+# EXAMPLE PROFILING WITH CPROFILE
 # =====================================================================
 print("\n--- Profiling with cProfile ---")
 # Profile the collect_rollouts method
@@ -106,7 +107,7 @@ ps.print_stats(12)  # Print top 12 functions by cumulative time
 print(s.getvalue())
 
 # =====================================================================
-# PROFILING WITH PYINSTRUMENT
+# EXAMPLE PROFILING WITH PYINSTRUMENT
 # =====================================================================
 print("\n--- Profiling with pyinstrument ---")
 # Profile the learn method with pyinstrument
@@ -117,9 +118,6 @@ profiler.start()
 agent.learn()
 
 profiler.stop()
-
-# Display the results as an HTML flamegraph
-display(HTML(profiler.output_html()))
 
 # =====================================================================
 # PROFILING A COMPLETE TRAINING LOOP
@@ -158,10 +156,11 @@ print(f"\nTraining completed in {end_time - start_time:.2f} seconds")
 if use_profiler:
     full_profiler.stop()
     # Save the flamegraph to a file
-    flamegraph_file = "flamegraph_training.html"
+    flamegraph_file = os.path.abspath("flamegraph_training.html")
     with open(flamegraph_file, "w") as f:
         f.write(full_profiler.output_html())
     print(f"Saving flamegraph to {flamegraph_file}")
+    webbrowser.open(flamegraph_file)
 
 # =====================================================================
 # TEST AGENT AND RECORD VIDEO
@@ -175,7 +174,7 @@ if not os.path.exists(video_folder):
 # Create a single synchronous environment for testing and recording
 # We use gym.make directly as RecordVideo works best with a base environment
 # render_mode='rgb_array' is required for RecordVideo
-testing_env_single = gym.make("LunarLander-v2", render_mode="rgb_array")
+testing_env_single = gym.make("LunarLander-v3", render_mode="rgb_array")
 
 # Wrap the environment for recording
 # Record only the first episode (episode_trigger=lambda x: x == 0)

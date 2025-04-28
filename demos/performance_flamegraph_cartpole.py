@@ -123,10 +123,10 @@ profiler.stop()
 # PROFILING A COMPLETE TRAINING LOOP
 # =====================================================================
 # Choose whether to profile the full training loop
-use_profiler = True  # Set to True to enable flamegraph profiling for the full loop
+use_profiler = False  # Set to True to enable flamegraph profiling for the full loop
 
 # Training parameters
-max_steps = 400000 // num_envs
+max_steps = 200000 // num_envs
 total_steps = 0
 start_time = time.time()
 
