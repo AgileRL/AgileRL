@@ -35,8 +35,8 @@ dist_env = dict(
 )
 
 deepspeed_base_config = {
-    "train_micro_batch_size_per_gpu": 4,
     "fp32": {"enabled": True},
+    "gradient_clipping": 1.5,
 }
 
 deepspeed_config_stage_1 = deepspeed_base_config | {
@@ -188,17 +188,16 @@ def create_module(input_size, max_tokens, vocab_size, device):
 
 @pytest.fixture
 def accelerator(request):
+    gc.collect()
+    torch.cuda.empty_cache()
     AcceleratorState._reset_state(True)
     config = request.param.get("config", None)
-    # Create a new accelerator (even if just default)
     if config is None:
-        yield None  # Return None as requested, but keep state initialized
+        yield None
     else:
         accelerator = Accelerator(deepspeed_plugin=DeepSpeedPlugin(hf_ds_config=config))
         yield accelerator
-        del accelerator
-        gc.collect()
-        torch.cuda.empty_cache()
+        accelerator.free_memory()
 
 
 @pytest.fixture
@@ -246,9 +245,6 @@ def grpo(request, accelerator, monkeypatch):
             accelerator=accelerator,
         )
         yield grpo
-    del grpo
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 @pytest.mark.parametrize(
@@ -628,14 +624,10 @@ def test_grpo_loss(grpo, accelerator, request):
             {"config": deepspeed_config_stage_2},
             {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
         ),
-        # (
-        #     {"config": deepspeed_config_stage_3},
-        #     {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
-        # ), # FIXME
     ],
     indirect=["accelerator", "grpo"],
 )
-@pytest.mark.parametrize("batch_size", [8])
+@pytest.mark.parametrize("batch_size", [2])
 def test_grpo_learn(grpo, accelerator, request, batch_size):
     vocab_size = request.node.callspec.params["grpo"]["vocab_size"]
     input_size = request.node.callspec.params["grpo"]["input_size"]
@@ -669,6 +661,7 @@ def test_grpo_learn(grpo, accelerator, request, batch_size):
     mean_loss, mean_kl = grpo.learn((completions, action_masks, rewards))
     assert isinstance(mean_loss, float)
     assert isinstance(mean_kl, float)
+
     # Check that the actor network is updated and the reference actor is not
     for param, pre_learn_param in zip(
         grpo.actor.state_dict().values(), pre_learn_actor_state_dict.values()
@@ -738,10 +731,6 @@ def test_get_logprobs(grpo, accelerator, request, batch_size):
             {"config": deepspeed_config_stage_2},
             {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
         ),
-        # (
-        #     {"config": deepspeed_config_stage_3},
-        #     {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
-        # ), # FIXME
     ],
     indirect=["accelerator", "grpo"],
 )

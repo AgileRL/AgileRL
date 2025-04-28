@@ -151,9 +151,9 @@ class GRPO(LLMAlgorithm):
         if self.accelerator is not None and not clone:
             self.batch_size = 1
             if (
-                self.accelerator.state.deepspeed_plugin.deepspeed_config[
-                    "train_micro_batch_size_per_gpu"
-                ]
+                self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
+                    "train_micro_batch_size_per_gpu", "auto"
+                )
                 == "auto"
             ):
                 self.accelerator.state.deepspeed_plugin.deepspeed_config[
