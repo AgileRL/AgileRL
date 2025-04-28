@@ -940,4 +940,3 @@ def consolidate_mutations(population: PopulationType) -> None:
         setattr(agent, mut, mut_value)
         if mut == "lr":
             LLMAlgorithm.update_lr(agent.optimizer, getattr(agent, mut))
-        
