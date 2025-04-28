@@ -7,12 +7,12 @@ import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl.algorithms import (
     CQN,
     DDPG,
@@ -932,12 +932,13 @@ def consolidate_mutations(population: PopulationType) -> None:
             [
                 agent.index,
                 agent.mut,
-                getattr(agent, agent.mut) if agent.mut is not None else None,
+                getattr(agent, agent.mut) if agent.mut != "None" else None,
             ],
             from_process=0,
         )
         assert index == agent.index
         agent.mut = mut
-        setattr(agent, mut, mut_attr)
-        if mut == "lr":
-            LLMAlgorithm.update_lr(agent.optimizer, getattr(agent, mut))
+        if mut_attr is not None:
+            setattr(agent, mut, mut_attr)
+            if mut == "lr":
+                LLMAlgorithm.update_lr(agent.optimizer, getattr(agent, mut))
