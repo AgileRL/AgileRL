@@ -926,19 +926,18 @@ def consolidate_mutations(population: PopulationType) -> None:
     if not isinstance(population[0], LLMAlgorithm):
         warnings.warn("Consolidate mutations is only supported for LLMAlgorithm.")
         return
-
     for agent in population:
-        index, mut, mut_attr = broadcast_object_list(
+        index, mut, mut_value = broadcast_object_list(
             [
                 agent.index,
                 agent.mut,
-                getattr(agent, agent.mut) if agent.mut != "None" else None,
+                getattr(agent, agent.mut if agent.mut is not None else "None", "None"),
             ],
             from_process=0,
         )
         assert index == agent.index
         agent.mut = mut
-        if mut_attr is not None:
-            setattr(agent, mut, mut_attr)
-            if mut == "lr":
-                LLMAlgorithm.update_lr(agent.optimizer, getattr(agent, mut))
+        setattr(agent, mut, mut_value)
+        if mut == "lr":
+            LLMAlgorithm.update_lr(agent.optimizer, getattr(agent, mut))
+        
