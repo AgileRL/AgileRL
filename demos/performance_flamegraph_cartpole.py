@@ -41,7 +41,7 @@ NET_CONFIG = {
 # Hyperparameters
 INIT_HP = {
     "POP_SIZE": 1,  # Single agent for profiling
-    "BATCH_SIZE": 64,
+    "BATCH_SIZE": 64,  # minibatch size
     "LEARN_STEP": 128,  # Smaller learn step for profiling
     "LR": 1e-4,
     "GAMMA": 0.99,
@@ -123,7 +123,7 @@ profiler.stop()
 # PROFILING A COMPLETE TRAINING LOOP
 # =====================================================================
 # Choose whether to profile the full training loop
-use_profiler = False  # Set to True to enable flamegraph profiling for the full loop
+use_profiler = True  # Set to True to enable flamegraph profiling for the full loop
 
 # Training parameters
 max_steps = 200000 // num_envs
