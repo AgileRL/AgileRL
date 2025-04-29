@@ -215,7 +215,6 @@ def grpo(request, accelerator, monkeypatch):
         }
         for key, value in env_vars.items():
             monkeypatch.setenv(key, value)
-        gc.collect()
         vocab_size = request.param.get("vocab_size", 1000)
         input_size = request.param.get("input_size", 10)
         max_tokens = request.param.get("max_tokens", 20)

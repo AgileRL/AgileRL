@@ -1,7 +1,13 @@
+import gc
+import os
+from unittest import mock
+
 import numpy as np
 import pytest
 import torch
 from accelerate import Accelerator
+from accelerate.state import AcceleratorState
+from accelerate.utils import DeepSpeedPlugin
 from gymnasium import spaces
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
@@ -1642,62 +1648,95 @@ def test_reinit_opt(algo, init_pop):
     torch.cuda.empty_cache()  # Free up GPU memory
 
 
-# Write mutations tests for GRPO
-def test_mutation_applies_rl_hp_mutation_llm_algorithm(request, grpo_hp_config):
+@pytest.mark.parametrize("use_accelerator", [True, False])
+def test_mutation_applies_rl_hp_mutation_llm_algorithm(
+    request, grpo_hp_config, monkeypatch, use_accelerator
+):
     pre_training_mut = False
 
-    population = [
-        GRPO(
-            observation_space=generate_random_box_space((4,)),
-            action_space=generate_random_box_space((4,)),
-            actor_network=create_module(
-                input_size=10,
-                max_tokens=20,
-                vocab_size=1000,
+    with mock.patch.dict(os.environ, clear=True):
+        if use_accelerator:
+            AcceleratorState._reset_state(True)
+            env_vars = {
+                "ACCELERATE_USE_DEEPSPEED": "true",
+                "MASTER_ADDR": "localhost",
+                "MASTER_PORT": "10999",
+                "RANK": "0",
+                "LOCAL_RANK": "0",
+                "WORLD_SIZE": "1",
+            }
+            for key, value in env_vars.items():
+                monkeypatch.setenv(key, value)
+
+            deepspeed_config = {
+                "gradient_accumulation_steps": 1,
+                "zero_optimization": {
+                    "stage": 2,
+                },
+            }
+            accelerator = Accelerator(
+                deepspeed_plugin=DeepSpeedPlugin(hf_ds_config=deepspeed_config),
+            )
+        else:
+            accelerator = None
+        population = [
+            GRPO(
+                observation_space=generate_random_box_space((4,)),
+                action_space=generate_random_box_space((4,)),
+                actor_network=create_module(
+                    input_size=10,
+                    max_tokens=20,
+                    vocab_size=1000,
+                    device="cuda" if torch.cuda.is_available() else "cpu",
+                ),
+                index=0,
+                hp_config=grpo_hp_config,
+                pad_token_id=1000 - 1,
                 device="cuda" if torch.cuda.is_available() else "cpu",
-            ),
-            index=0,
-            hp_config=grpo_hp_config,
-            pad_token_id=1000 - 1,
+                accelerator=accelerator,
+            )
+        ]  # some sort of population
+
+        mutations = Mutations(
+            0,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0.1,
             device="cuda" if torch.cuda.is_available() else "cpu",
+            accelerator=accelerator,
         )
-    ]  # some sort of population
 
-    mutations = Mutations(
-        0,
-        0,
-        0,
-        0,
-        0,
-        1,
-        0.1,
-        device="cuda" if torch.cuda.is_available() else "cpu",
-        accelerator=None,
-    )
+        new_population = [agent.clone(wrap=False) for agent in population]
+        mutated_population = mutations.mutation(new_population, pre_training_mut)
 
-    new_population = [agent.clone(wrap=False) for agent in population]
-    mutated_population = mutations.mutation(new_population, pre_training_mut)
+        assert len(mutated_population) == len(population)
+        for old, individual in zip(population, mutated_population):
+            available_mutations = grpo_hp_config.names()
+            assert individual.mut in available_mutations
 
-    assert len(mutated_population) == len(population)
-    for old, individual in zip(population, mutated_population):
-        available_mutations = grpo_hp_config.names()
-        assert individual.mut in available_mutations
+            new_value = getattr(individual, individual.mut)
+            min_value = grpo_hp_config[individual.mut].min
+            max_value = grpo_hp_config[individual.mut].max
+            assert min_value <= new_value <= max_value
+            assert old.index == individual.index
 
-        new_value = getattr(individual, individual.mut)
-        min_value = grpo_hp_config[individual.mut].min
-        max_value = grpo_hp_config[individual.mut].max
-        assert min_value <= new_value <= max_value
-        assert old.index == individual.index
+        for agent in mutated_population:
+            for param_group in agent.optimizer.optimizer.param_groups:
+                assert param_group["lr"] == agent.lr
 
-    for agent in mutated_population:
-        for param_group in agent.optimizer.optimizer.param_groups:
-            assert param_group["lr"] == agent.lr
-
-    del mutations
-    del population
-    del mutated_population
-    del new_population
-    torch.cuda.empty_cache()
+        del mutations
+        del population
+        del mutated_population
+        del new_population
+        torch.cuda.empty_cache()
+        if use_accelerator:
+            accelerator.free_memory()
+            AcceleratorState._reset_state(True)
+        gc.collect()
+        torch.cuda.empty_cache()
 
 
 @pytest.mark.parametrize("mutation_type", ["architecture", "parameters", "activation"])
