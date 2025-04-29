@@ -583,6 +583,12 @@ def preprocess_observation(
         return preprocessed_obs
 
     elif isinstance(observation_space, spaces.Tuple):
+        if isinstance(observation, TensorDict):
+            # convert to tuple with values ordered by index at the end of key
+            dict_keys = list(observation.keys())
+            dict_keys.sort(key=lambda x: int(x.split("_")[-1]))
+            observation = tuple(observation[key] for key in dict_keys)
+
         assert isinstance(
             observation, tuple
         ), f"Expected tuple, got {type(observation)}"

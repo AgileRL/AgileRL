@@ -13,15 +13,14 @@ from gymnasium import spaces
 
 from agilerl.algorithms.dqn import DQN
 from agilerl.components.data import Transition
-from agilerl.modules.cnn import EvolvableCNN
-from agilerl.modules.mlp import EvolvableMLP
-from agilerl.networks.q_networks import QNetwork
+from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
     generate_dict_or_tuple_space,
     generate_discrete_space,
     generate_multidiscrete_space,
     generate_random_box_space,
+    get_experiences_batch,
     get_sample_from_space,
 )
 
@@ -98,12 +97,21 @@ def simple_cnn():
 
 
 # initialize DQN with valid parameters
-def test_initialize_dqn_with_minimum_parameters():
-    observation_space = generate_random_box_space(shape=(4,))
+@pytest.mark.parametrize(
+    "observation_space, encoder_cls",
+    [
+        (generate_random_box_space(shape=(4,)), EvolvableMLP),
+        (generate_random_box_space(shape=(3, 32, 32), low=0, high=255), EvolvableCNN),
+        (generate_dict_or_tuple_space(2, 2, dict_space=True), EvolvableMultiInput),
+        (generate_dict_or_tuple_space(2, 2, dict_space=False), EvolvableMultiInput),
+    ],
+)
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+def test_initialize_dqn(observation_space, encoder_cls, accelerator):
     action_space = generate_discrete_space(2)
+    dqn = DQN(observation_space, action_space, accelerator=accelerator)
 
-    dqn = DQN(observation_space, action_space)
-
+    expected_device = accelerator.device if accelerator else "cpu"
     assert dqn.observation_space == observation_space
     assert dqn.action_space == action_space
     assert dqn.batch_size == 64
@@ -112,78 +120,23 @@ def test_initialize_dqn_with_minimum_parameters():
     assert dqn.gamma == 0.99
     assert dqn.tau == 0.001
     assert dqn.mut is None
-    assert dqn.device == "cpu"
-    assert dqn.accelerator is None
+    assert dqn.device == expected_device
+    assert dqn.accelerator == accelerator
     assert dqn.index == 0
     assert dqn.scores == []
     assert dqn.fitness == []
     assert dqn.steps == [0]
     assert dqn.double is False
     # assert dqn.actor_network is None
-    assert isinstance(dqn.actor, QNetwork)
-    assert isinstance(dqn.actor_target, QNetwork)
-    assert isinstance(dqn.optimizer.optimizer, optim.Adam)
-    assert isinstance(dqn.criterion, nn.MSELoss)
-
-
-# Initializes actor network with EvolvableCNN based on net_config and Accelerator.
-def test_initialize_dqn_with_cnn_accelerator():
-    observation_space = generate_random_box_space(shape=(3, 32, 32), low=0, high=255)
-    action_space = generate_discrete_space(2)
-    index = 0
-    net_config_cnn = {
-        "encoder_config": {"channel_size": [3], "kernel_size": [3], "stride_size": [1]}
-    }
-    batch_size = 64
-    lr = 1e-4
-    learn_step = 5
-    gamma = 0.99
-    tau = 1e-3
-    mut = None
-    double = True
-    actor_network = None
-    accelerator = Accelerator()
-    wrap = True
-
-    dqn = DQN(
-        observation_space=observation_space,
-        action_space=action_space,
-        index=index,
-        net_config=net_config_cnn,
-        batch_size=batch_size,
-        lr=lr,
-        learn_step=learn_step,
-        gamma=gamma,
-        tau=tau,
-        mut=mut,
-        double=double,
-        actor_network=actor_network,
-        accelerator=accelerator,
-        wrap=wrap,
-    )
-
-    assert dqn.observation_space == observation_space
-    assert dqn.action_space == action_space
-    assert dqn.batch_size == batch_size
-    assert dqn.lr == lr
-    assert dqn.learn_step == learn_step
-    assert dqn.gamma == gamma
-    assert dqn.tau == tau
-    assert dqn.mut == mut
-    assert dqn.accelerator == accelerator
-    assert dqn.index == index
-    assert dqn.scores == []
-    assert dqn.fitness == []
-    assert dqn.steps == [0]
-    assert dqn.double is True
-    # assert dqn.actor_network is None
-    assert isinstance(dqn.actor.encoder, EvolvableCNN)
-    assert isinstance(dqn.actor_target.encoder, EvolvableCNN)
-    assert isinstance(dqn.optimizer.optimizer, AcceleratedOptimizer)
+    assert isinstance(dqn.actor.encoder, encoder_cls)
+    assert isinstance(dqn.actor_target.encoder, encoder_cls)
+    expected_opt_cls = AcceleratedOptimizer if accelerator else optim.Adam
+    assert isinstance(dqn.optimizer.optimizer, expected_opt_cls)
     assert isinstance(dqn.criterion, nn.MSELoss)
 
 
 # Can initialize DQN with an actor network
+# TODO: This will be deprecated in the future
 @pytest.mark.parametrize(
     "observation_space, actor_network, input_tensor",
     [
@@ -219,7 +172,6 @@ def test_initialize_dqn_with_actor_network_make_evo(
     assert dqn.fitness == []
     assert dqn.steps == [0]
     assert dqn.double is False
-    # assert dqn.actor == actor_network
     assert isinstance(dqn.optimizer.optimizer, optim.Adam)
     assert isinstance(dqn.criterion, nn.MSELoss)
 
@@ -267,8 +219,6 @@ def test_initialize_dqn_with_actor_network_evo_net(observation_space, net_type):
     assert dqn.fitness == []
     assert dqn.steps == [0]
     assert dqn.double is False
-    # assert dqn.actor_network is None
-    # assert dqn.actor == actor_network
     assert isinstance(dqn.optimizer.optimizer, optim.Adam)
     assert isinstance(dqn.criterion, nn.MSELoss)
 
@@ -294,6 +244,7 @@ def test_initialize_dqn_with_incorrect_actor_net_type():
     [
         generate_discrete_space(4),
         generate_random_box_space(shape=(4,)),
+        generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
         generate_multidiscrete_space(2, 2),
         generate_dict_or_tuple_space(2, 2, dict_space=True),
         generate_dict_or_tuple_space(2, 2, dict_space=False),
@@ -402,126 +353,30 @@ def test_dqn_optimizer_parameters():
         generate_discrete_space(4),
         generate_random_box_space(shape=(4,)),
         generate_multidiscrete_space(2, 2),
+        generate_dict_or_tuple_space(2, 2, dict_space=True),
+        generate_dict_or_tuple_space(2, 2, dict_space=False),
     ],
 )
-def test_learns_from_experiences(observation_space):
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("double", [False, True])
+def test_learns_from_experiences(observation_space, accelerator, double):
     action_space = generate_discrete_space(2)
-    batch_size = 64
-
-    # Create an instance of the DQN class
-    dqn = DQN(observation_space, action_space, batch_size=batch_size)
-
-    # Create a batch of experiences
-    states = torch.from_numpy(get_sample_from_space(observation_space, batch_size))
-    actions = torch.randint(0, action_space.n, (batch_size, 1))
-    rewards = torch.randn((batch_size, 1))
-    next_states = torch.from_numpy(get_sample_from_space(observation_space, batch_size))
-    dones = torch.randint(0, 2, (batch_size, 1))
-
-    experiences = Transition(
-        obs=states,
-        action=actions,
-        reward=rewards,
-        next_obs=next_states,
-        done=dones,
-    ).to_tensordict()
-
-    # Copy state dict before learning - should be different to after updating weights
-    actor = dqn.actor
-    actor_target = dqn.actor_target
-    actor_pre_learn_sd = str(copy.deepcopy(dqn.actor.state_dict()))
-
-    # Call the learn method
-    loss = dqn.learn(experiences)
-
-    assert isinstance(loss, float)
-    assert loss >= 0.0
-    assert actor == dqn.actor
-    assert actor_target == dqn.actor_target
-    assert actor_pre_learn_sd != str(dqn.actor.state_dict())
-
-
-# handles double Q-learning
-def test_handles_double_q_learning():
-    accelerator = Accelerator()
-    observation_space = generate_discrete_space(4)
-    action_space = generate_discrete_space(2)
-    double = True
     batch_size = 64
 
     # Create an instance of the DQN class
     dqn = DQN(
         observation_space,
         action_space,
-        double=double,
         batch_size=batch_size,
         accelerator=accelerator,
-    )
-
-    # Create a batch of experiences
-    states = torch.randint(0, observation_space.n, (batch_size, 1))
-    actions = torch.randint(0, action_space.n, (batch_size, 1))
-    rewards = torch.randn((batch_size, 1))
-    next_states = torch.randint(0, observation_space.n, (batch_size, 1))
-    dones = torch.randint(0, 2, (batch_size, 1))
-
-    experiences = Transition(
-        obs=states,
-        action=actions,
-        reward=rewards,
-        next_obs=next_states,
-        done=dones,
-        device=accelerator.device,
-    ).to_tensordict()
-
-    # Copy state dict before learning - should be different to after updating weights
-    actor = dqn.actor
-    actor_target = dqn.actor_target
-    actor_pre_learn_sd = str(copy.deepcopy(dqn.actor.state_dict()))
-
-    # Call the learn method
-    loss = dqn.learn(experiences)
-
-    assert isinstance(loss, float)
-    assert loss >= 0.0
-    assert actor == dqn.actor
-    assert actor_target == dqn.actor_target
-    assert actor_pre_learn_sd != str(dqn.actor.state_dict())
-
-
-# handles double Q-learning with CNN
-def test_handles_double_q_learning_cnn():
-    observation_space = generate_random_box_space(shape=(3, 32, 32), low=0, high=255)
-    action_space = generate_discrete_space(2)
-    double = True
-    batch_size = 64
-    net_config = {
-        "encoder_config": {"channel_size": [3], "kernel_size": [3], "stride_size": [1]}
-    }
-
-    # Create an instance of the DQN class
-    dqn = DQN(
-        observation_space,
-        action_space,
-        net_config=net_config,
         double=double,
-        batch_size=batch_size,
     )
 
     # Create a batch of experiences
-    states = torch.randn(batch_size, *observation_space.shape)
-    actions = torch.randint(0, action_space.n, (batch_size, 1))
-    rewards = torch.randn((batch_size, 1))
-    next_states = torch.randn(batch_size, *observation_space.shape)
-    dones = torch.randint(0, 2, (batch_size, 1))
-
-    experiences = Transition(
-        obs=states,
-        action=actions,
-        reward=rewards,
-        next_obs=next_states,
-        done=dones,
-    ).to_tensordict()
+    device = accelerator.device if accelerator else "cpu"
+    experiences = get_experiences_batch(
+        observation_space, action_space, batch_size, device
+    )
 
     # Copy state dict before learning - should be different to after updating weights
     actor = dqn.actor
