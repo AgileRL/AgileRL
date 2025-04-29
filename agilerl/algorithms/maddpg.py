@@ -21,14 +21,14 @@ from agilerl.typing import (
     GymEnvType,
     InfosDict,
     ObservationType,
-    TensorDict,
+    StandardTensorDict,
 )
 from agilerl.utils.algo_utils import (
     concatenate_spaces,
     contains_image_space,
+    format_shared_critic_config,
     key_in_nested_dict,
     make_safe_deepcopies,
-    multi_agent_sample_tensor_from_space,
     obs_channels_to_first,
 )
 from agilerl.utils.evolvable_networks import get_default_encoder_config
@@ -262,50 +262,12 @@ class MADDPG(MultiAgentRLAlgorithm):
                     self.single_space, simba
                 )
 
-            # For image spaces we need to give a sample input tensor to
-            # build networks with Conv3d blocks appropriately
-            # NOTE: Currently AgileRL only supports Dict observation spaces
-            # with a unique image space (i.e. all agents and all subspaces
-            # contain the same image space).
-            if self.is_image_space:
-                actor_sample_input = multi_agent_sample_tensor_from_space(
-                    self.single_space, self.n_agents, device=self.device
-                )
-                critic_sample_input = multi_agent_sample_tensor_from_space(
-                    self.single_space,
-                    self.n_agents,
-                    device=self.device,
-                    critic=True,
-                )
-
-                def get_first_sample_input(
-                    sample_input: Union[
-                        Tuple[torch.Tensor, ...], Dict[str, torch.Tensor]
-                    ],
-                ) -> torch.Tensor:
-                    if isinstance(self.single_space, spaces.Dict):
-                        return list(sample_input.values())[0]
-                    elif isinstance(self.single_space, spaces.Tuple):
-                        return sample_input[0]
-
-                    return sample_input
-
-                actor_sample_input = get_first_sample_input(actor_sample_input)
-                critic_sample_input = get_first_sample_input(critic_sample_input)
-
-                if isinstance(self.single_space, (spaces.Dict, spaces.Tuple)):
-                    encoder_config["cnn_config"]["sample_input"] = actor_sample_input
-                    critic_encoder_config["cnn_config"][
-                        "sample_input"
-                    ] = critic_sample_input
-                else:
-                    encoder_config["sample_input"] = actor_sample_input
-                    critic_encoder_config["sample_input"] = critic_sample_input
-
             net_config["encoder_config"] = encoder_config
             net_config["head_config"] = head_config
 
-            critic_net_config["encoder_config"] = critic_encoder_config
+            critic_net_config = format_shared_critic_config(
+                critic_net_config, critic_encoder_config
+            )
             critic_net_config["head_config"] = critic_head_config
 
             clip_actions = self.torch_compiler is None
@@ -314,18 +276,16 @@ class MADDPG(MultiAgentRLAlgorithm):
                 return DeterministicActor(
                     self.observation_spaces[idx],
                     self.action_spaces[idx],
-                    n_agents=self.n_agents,
                     device=self.device,
                     clip_actions=clip_actions,
                     **copy.deepcopy(net_config),
                 )
 
-            # NOTE: Critic uses observations + actions of all agents to predict Q-value
+            # Critic uses observations + actions of all agents to predict Q-value
             def create_critic():
                 return ContinuousQNetwork(
-                    observation_space=concatenate_spaces(observation_spaces),
+                    observation_space=self.observation_space,
                     action_space=concatenate_spaces(action_spaces),
-                    n_agents=self.n_agents,
                     device=self.device,
                     **copy.deepcopy(critic_net_config),
                 )
@@ -540,7 +500,7 @@ class MADDPG(MultiAgentRLAlgorithm):
             for idx in indices:
                 self.current_noise[i][idx, :] = 0
 
-    def learn(self, experiences: ExperiencesType) -> TensorDict:
+    def learn(self, experiences: ExperiencesType) -> Dict[str, torch.Tensor]:
         """Updates agent network parameters to learn from experiences.
 
         :param experience: Tuple of dictionaries containing batched states, actions,
@@ -576,8 +536,6 @@ class MADDPG(MultiAgentRLAlgorithm):
                 next_actions.append(self.actor_targets[i](next_states[agent_id_label]))
 
         # Stack states and actions
-        stacked_states = self.stack_critic_observations(states)
-        stacked_next_states = self.stack_critic_observations(next_states)
         stacked_actions = torch.cat(list(actions.values()), dim=1)
         stacked_next_actions = torch.cat(next_actions, dim=1)
 
@@ -607,11 +565,10 @@ class MADDPG(MultiAgentRLAlgorithm):
                 critic_target,
                 actor_optimizer,
                 critic_optimizer,
-                stacked_states,
                 stacked_actions,
-                stacked_next_states,
                 stacked_next_actions,
                 states,
+                next_states,
                 actions,
                 rewards,
                 dones,
@@ -634,14 +591,13 @@ class MADDPG(MultiAgentRLAlgorithm):
         critic_target: nn.Module,
         actor_optimizer: optim.Optimizer,
         critic_optimizer: optim.Optimizer,
-        stacked_states: torch.Tensor,
         stacked_actions: torch.Tensor,
-        stacked_next_states: torch.Tensor,
         stacked_next_actions: torch.Tensor,
-        states: TensorDict,
-        actions: TensorDict,
-        rewards: TensorDict,
-        dones: TensorDict,
+        states: StandardTensorDict,
+        next_states: StandardTensorDict,
+        actions: StandardTensorDict,
+        rewards: StandardTensorDict,
+        dones: StandardTensorDict,
     ) -> Tuple[float, float]:
         """
         Inner call to each agent for the learning/algo training steps, up until the soft updates.
@@ -661,41 +617,37 @@ class MADDPG(MultiAgentRLAlgorithm):
         :type actor_optimizer: optim.Optimizer
         :param critic_optimizer: Optimizer for the critic network
         :type critic_optimizer: optim.Optimizer
-        :param stacked_states: Stacked states tensor
-        :type stacked_states: torch.Tensor
         :param stacked_actions: Stacked actions tensor
         :type stacked_actions: torch.Tensor
-        :param stacked_next_states: Stacked next states tensor
-        :type stacked_next_states: torch.Tensor
         :param stacked_next_actions: Stacked next actions tensor
         :type stacked_next_actions: torch.Tensor
         :param states: Dictionary of current states for each agent
-        :type states: TensorDict
+        :type states: dict[str, torch.Tensor]
+        :param next_states: Dictionary of next states for each agent
+        :type next_states: dict[str, torch.Tensor]
         :param actions: Dictionary of actions for each agent
-        :type actions: TensorDict
+        :type actions: dict[str, torch.Tensor]
         :param rewards: Dictionary of rewards for each agent
-        :type rewards: TensorDict
+        :type rewards: dict[str, torch.Tensor]
         :param dones: Dictionary of done flags for each agent
-        :type dones: TensorDict
+        :type dones: dict[str, torch.Tensor]
         :return: Tuple containing actor loss and critic loss
         :rtype: Tuple[float, float]
         """
         if self.accelerator is not None:
             with critic.no_sync():
-                q_value = critic(stacked_states, stacked_actions)
+                q_value = critic(states, stacked_actions)
         else:
-            q_value = critic(stacked_states, stacked_actions)
+            q_value = critic(states, stacked_actions)
 
         with torch.no_grad():
             if self.accelerator is not None:
                 with critic_target.no_sync():
                     q_value_next_state = critic_target(
-                        stacked_next_states, stacked_next_actions
+                        next_states, stacked_next_actions
                     )
             else:
-                q_value_next_state = critic_target(
-                    stacked_next_states, stacked_next_actions
-                )
+                q_value_next_state = critic_target(next_states, stacked_next_actions)
 
         y_j = (
             rewards[agent_id] + (1 - dones[agent_id]) * self.gamma * q_value_next_state
@@ -725,9 +677,9 @@ class MADDPG(MultiAgentRLAlgorithm):
         stacked_detached_actions = torch.cat(list(detached_actions.values()), dim=1)
         if self.accelerator is not None:
             with critic.no_sync():
-                actor_loss = -critic(stacked_states, stacked_detached_actions).mean()
+                actor_loss = -critic(states, stacked_detached_actions).mean()
         else:
-            actor_loss = -critic(stacked_states, stacked_detached_actions).mean()
+            actor_loss = -critic(states, stacked_detached_actions).mean()
 
         # actor loss backprop
         actor_optimizer.zero_grad()

@@ -373,6 +373,33 @@ SupportedSpace = Union[
 ]
 
 
+def format_shared_critic_config(
+    net_config: Dict[str, Any], encoder_config: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Formats the shared critic encoder config.
+
+    :param net_config: Network configuration
+    :type net_config: Dict[str, Any]
+    :param encoder_config: Encoder configuration
+    :type encoder_config: Dict[str, Any]
+    :return: Formatted network configuration
+    :rtype: Dict[str, Any]
+    """
+    # For vector spaces we use a vector space MLP in `EvolvableMultiInput`
+    if encoder_config.get("hidden_size") is not None:
+        net_config["encoder_config"] = {"mlp_config": encoder_config}
+        net_config["encoder_config"]["vector_space_mlp"] = True
+        net_config["encoder_config"]["latent_dim"] = encoder_config["hidden_size"][-1]
+
+    elif encoder_config.get("channel_size") is not None:
+        net_config["encoder_config"] = {"cnn_config": encoder_config}
+        net_config["encoder_config"]["latent_dim"] = net_config.get("latent_dim", 64)
+    else:
+        net_config["encoder_config"] = encoder_config
+
+    return net_config
+
+
 def concatenate_spaces(space_list: List[SupportedSpace]) -> spaces.Space:
     """Concatenates a list of spaces into a single space. If spaces correspond to images,
     we check that their shapes are the same and use the first space's shape as the shape of the

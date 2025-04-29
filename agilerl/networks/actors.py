@@ -31,9 +31,6 @@ class DeterministicActor(EvolvableNetwork):
     :type min_latent_dim: int
     :param max_latent_dim: Maximum dimension of the latent space representation.
     :type max_latent_dim: int
-    :param n_agents: Number of agents in the environment. Defaults to None, which corresponds to
-        single-agent environments.
-    :type n_agents: Optional[int]
     :param latent_dim: Dimension of the latent space representation.
     :type latent_dim: int
     :param simba: Whether to use the SimBa architecture for training the network.
@@ -56,7 +53,6 @@ class DeterministicActor(EvolvableNetwork):
         clip_actions: bool = True,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
-        n_agents: Optional[int] = None,
         latent_dim: int = 32,
         simba: bool = False,
         recurrent: bool = False,
@@ -70,7 +66,6 @@ class DeterministicActor(EvolvableNetwork):
             action_space=action_space,
             min_latent_dim=min_latent_dim,
             max_latent_dim=max_latent_dim,
-            n_agents=n_agents,
             latent_dim=latent_dim,
             simba=simba,
             recurrent=recurrent,
@@ -215,9 +210,6 @@ class StochasticActor(EvolvableNetwork):
     :type action_std_init: float
     :param squash_output: Whether to squash the output to the action space.
     :type squash_output: bool
-    :param n_agents: Number of agents in the environment. Defaults to None, which corresponds to
-        single-agent environments.
-    :type n_agents: Optional[int]
     :param latent_dim: Dimension of the latent space representation.
     :type latent_dim: int
     :param simba: Whether to use the SimBa architecture for training the network.
@@ -247,7 +239,6 @@ class StochasticActor(EvolvableNetwork):
         squash_output: bool = False,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
-        n_agents: Optional[int] = None,
         latent_dim: int = 32,
         simba: bool = False,
         recurrent: bool = False,
@@ -260,7 +251,6 @@ class StochasticActor(EvolvableNetwork):
             action_space=action_space,
             min_latent_dim=min_latent_dim,
             max_latent_dim=max_latent_dim,
-            n_agents=n_agents,
             latent_dim=latent_dim,
             simba=simba,
             recurrent=recurrent,

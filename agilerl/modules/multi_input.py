@@ -1,7 +1,8 @@
 import copy
 from collections import OrderedDict
 from dataclasses import asdict
-from typing import Any, Dict, Literal, Optional, Tuple, Union
+from enum import Enum
+from typing import Any, Dict, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -42,6 +43,13 @@ DefaultLstmConfig = LstmNetConfig(
     num_layers=2,
     output_activation="ReLU",
 )
+
+
+class FeatureExtractorType(Enum):
+    CNN = "cnn"
+    LSTM = "lstm"
+    MLP = "mlp"
+    MULTI_INPUT = "multi_input"
 
 
 def get_total_flatdim(observation_spaces: spaces.Dict) -> int:
@@ -297,14 +305,14 @@ class EvolvableMultiInput(EvolvableModule):
         )
 
     def get_inner_init_dict(
-        self, key: str, default: Literal["cnn", "mlp", "lstm"]
+        self, key: str, default: FeatureExtractorType
     ) -> ConfigType:
         """Returns the initialization dictionary for the specified key.
 
         :param key: Key of the observation space.
         :type key: str
         :param default: Default value to return if the key is not found.
-        :type default: Literal["cnn", "mlp", "lstm"]
+        :type default: FeatureExtractorType
         :return: Initialization dictionary.
         :rtype: ConfigType
         """
@@ -316,16 +324,18 @@ class EvolvableMultiInput(EvolvableModule):
             return init_dict
 
         init_dict = {
-            "cnn": self.cnn_init_dict,
-            "mlp": self.mlp_init_dict,
-            "lstm": self.lstm_init_dict,
+            FeatureExtractorType.CNN: self.cnn_init_dict,
+            FeatureExtractorType.MLP: self.mlp_init_dict,
+            FeatureExtractorType.LSTM: self.lstm_init_dict,
+            FeatureExtractorType.MULTI_INPUT: self.net_config,
         }.get(default)
 
         if init_dict is None:
             raise ValueError(
-                "Invalid default value provided, must be 'cnn' or 'mlp' or 'lstm'."
+                "Invalid default value provided, must be 'cnn' or 'mlp' or 'lstm' or 'multi_input'."
             )
         else:
+            # Check if we are extracting a nested dict
             nested_dict = init_dict.get(key)
             init_dict = (
                 copy.deepcopy(nested_dict)
@@ -351,26 +361,43 @@ class EvolvableMultiInput(EvolvableModule):
         for key, space in self.observation_space.spaces.items():
             if isinstance(space, spaces.Box) and len(space.shape) in [0, 1]:
                 continue
+
+            # EvolvableMultiInput for nested multi-input spaces
+            elif isinstance(space, (spaces.Dict, spaces.Tuple)):
+                init_dict = self.get_inner_init_dict(
+                    key, default=FeatureExtractorType.MULTI_INPUT
+                )
+                feature_extractor = EvolvableMultiInput(
+                    observation_space=space,
+                    name=init_dict.pop("name", key),
+                    **init_dict,
+                )
             # EvolvableCNN for image spaces
-            if is_image_space(space):
-                init_dict = copy.deepcopy(self.get_inner_init_dict(key, default="cnn"))
+            elif is_image_space(space):
+                init_dict = self.get_inner_init_dict(
+                    key, default=FeatureExtractorType.CNN
+                )
                 feature_extractor = EvolvableCNN(
                     input_shape=space.shape,
                     name=init_dict.pop("name", key),
                     **init_dict,
                 )
+
+            # EvolvableLSTM for 2D Box spaces if recurrent=True
             elif (
                 isinstance(space, spaces.Box)
                 and len(space.shape) == 2
                 and key not in self.vector_spaces.keys()
             ):
-                # EvolvableLSTM for 2D Box spaces if recurrent=True
-                init_dict = copy.deepcopy(self.get_inner_init_dict(key, default="lstm"))
+                init_dict = self.get_inner_init_dict(
+                    key, default=FeatureExtractorType.LSTM
+                )
                 feature_extractor = EvolvableLSTM(
                     input_size=space.shape[1],
                     name=init_dict.pop("name", key),
                     **init_dict,
                 )
+
             # Flatten other observation types
             else:
                 feature_extractor = nn.Flatten()
@@ -379,8 +406,8 @@ class EvolvableMultiInput(EvolvableModule):
 
         # Optionally, use an EvolvableMLP for all concatenated vector inputs
         if self.vector_space_mlp:
-            init_dict = copy.deepcopy(
-                self.get_inner_init_dict("vector_mlp", default="mlp")
+            init_dict = self.get_inner_init_dict(
+                "vector_mlp", default=FeatureExtractorType.MLP
             )
             self.mlp_name = init_dict.pop("name", "vector_mlp")
             vector_mlp = EvolvableMLP(
@@ -429,17 +456,23 @@ class EvolvableMultiInput(EvolvableModule):
             vector_inputs.append(_obs)
 
         # Concatenate vector inputs and, optionally, pass through additional EvolvableMLP
-        vector_inputs = torch.cat(vector_inputs, dim=1)
+        vector_inputs = (
+            torch.cat(vector_inputs, dim=1)
+            if vector_inputs
+            else torch.tensor([], device=self.device)
+        )
         vector_features = (
             self.feature_net[self.mlp_name](vector_inputs)
             if self.vector_space_mlp
             else vector_inputs
         )
 
-        if extracted_features:
-            extracted_features = torch.cat(list(extracted_features.values()), dim=1)
-        else:
-            extracted_features = torch.tensor([], device=self.device)
+        # Concatenate extracted latent features
+        extracted_features = (
+            torch.cat(list(extracted_features.values()), dim=1)
+            if extracted_features
+            else torch.tensor([], device=self.device)
+        )
 
         # Concatenate all features and pass through final MLP
         features = torch.cat([extracted_features, vector_features], dim=1)

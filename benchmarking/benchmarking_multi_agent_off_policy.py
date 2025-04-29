@@ -41,6 +41,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Tru
         accelerator.wait_for_everyone()
     else:
         accelerator = None
+
     print(f"DEVICE: {device}")
 
     env = importlib.import_module(f"{INIT_HP['ENV_NAME']}").parallel_env
@@ -164,6 +165,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Tru
         torch_compiler=INIT_HP["TORCH_COMPILE"],
     )
 
+    print(agent_pop[0].critics[0])
     train_multi_agent_off_policy(
         env,
         INIT_HP["ENV_NAME"],

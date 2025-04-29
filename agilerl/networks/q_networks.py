@@ -35,9 +35,6 @@ class QNetwork(EvolvableNetwork):
     :type min_latent_dim: int
     :param max_latent_dim: Maximum dimension of the latent space representation. Defaults to 128.
     :type max_latent_dim: int
-    :param n_agents: Number of agents in the environment. Defaults to None, which corresponds to
-        single-agent environments.
-    :type n_agents: Optional[int]
     :param latent_dim: Dimension of the latent space representation.
     :type latent_dim: int
     :param simba: If True, use a SimBa network for the encoder for vector spaces. Defaults to False.
@@ -61,7 +58,6 @@ class QNetwork(EvolvableNetwork):
         head_config: Optional[ConfigType] = None,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
-        n_agents: Optional[int] = None,
         latent_dim: int = 32,
         simba: bool = False,
         recurrent: bool = False,
@@ -74,7 +70,6 @@ class QNetwork(EvolvableNetwork):
             encoder_config=encoder_config,
             min_latent_dim=min_latent_dim,
             max_latent_dim=max_latent_dim,
-            n_agents=n_agents,
             latent_dim=latent_dim,
             simba=simba,
             recurrent=recurrent,
@@ -156,9 +151,6 @@ class RainbowQNetwork(EvolvableNetwork):
     :type min_latent_dim: int
     :param max_latent_dim: Maximum dimension of the latent space representation. Defaults to 128.
     :type max_latent_dim: int
-    :param n_agents: Number of agents in the environment. Defaults to None, which corresponds to
-        single-agent environments.
-    :type n_agents: Optional[int]
     :param latent_dim: Dimension of the latent space representation.
     :type latent_dim: int
     :param device: Device to use for the network.
@@ -176,7 +168,6 @@ class RainbowQNetwork(EvolvableNetwork):
         head_config: Optional[ConfigType] = None,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
-        n_agents: Optional[int] = None,
         latent_dim: int = 32,
         device: str = "cpu",
     ):
@@ -201,7 +192,6 @@ class RainbowQNetwork(EvolvableNetwork):
             action_space=action_space,
             min_latent_dim=min_latent_dim,
             max_latent_dim=max_latent_dim,
-            n_agents=n_agents,
             latent_dim=latent_dim,
             device=device,
         )
@@ -305,9 +295,6 @@ class ContinuousQNetwork(EvolvableNetwork):
     :type min_latent_dim: int
     :param max_latent_dim: Maximum dimension of the latent space representation. Defaults to 128.
     :type max_latent_dim: int
-    :param n_agents: Number of agents in the environment. Defaults to None, which corresponds to
-        single-agent environments.
-    :type n_agents: Optional[int]
     :param latent_dim: Dimension of the latent space representation.
     :type latent_dim: int
     :param simba: Whether to use SimBA for the network. Defaults to False.
@@ -332,7 +319,6 @@ class ContinuousQNetwork(EvolvableNetwork):
         head_config: Optional[ConfigType] = None,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
-        n_agents: Optional[int] = None,
         latent_dim: int = 32,
         simba: bool = False,
         normalize_actions: bool = False,
@@ -346,7 +332,6 @@ class ContinuousQNetwork(EvolvableNetwork):
             action_space=action_space,
             min_latent_dim=min_latent_dim,
             max_latent_dim=max_latent_dim,
-            n_agents=n_agents,
             latent_dim=latent_dim,
             simba=simba,
             device=device,

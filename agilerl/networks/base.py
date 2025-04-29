@@ -182,7 +182,6 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         action_space: Optional[spaces.Space] = None,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
-        n_agents: Optional[int] = None,
         latent_dim: int = 32,
         simba: bool = False,
         recurrent: bool = False,
@@ -200,19 +199,8 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         if encoder_config is None:
             encoder_config = get_default_encoder_config(observation_space, simba=simba)
 
-        # For multi-agent settings with image observation spaces, we use
-        # `nn.Conv3D` layers and stack the agents observations across the depth dimension.
-        cnn_keys = ["cnn_config", "kernel_size"]
-        if n_agents is not None and any(
-            key in encoder_config.keys() for key in cnn_keys
-        ):
-            encoder_config = EvolvableNetwork.modify_multi_agent_config(
-                net_config=encoder_config, observation_space=observation_space
-            )
-
         self.observation_space = observation_space
         self.action_space = action_space
-        self.n_agents = n_agents
         self.latent_dim = latent_dim
         self.min_latent_dim = min_latent_dim
         self.max_latent_dim = max_latent_dim
@@ -332,24 +320,6 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         raise NotImplementedError(
             "Method build_network_head must be implemented in EvolvableNetwork objects."
         )
-
-    @staticmethod
-    def modify_multi_agent_config(
-        net_config: Dict[str, Any],
-        observation_space: spaces.Space,
-    ) -> Dict[str, Any]:
-        """In multi-agent settings, it is not clear what the shape of the input to the
-        encoder is based on the passed observation space. If kernel sizes are passed as
-        integers, we add a depth dimension of 1 for all layers. Note that for e.g. value
-        functions the first layer should have a depth corresponding to the number of agents
-        to receive a single output rather than `self.n_agents`
-        """
-        if isinstance(observation_space, (spaces.Dict, spaces.Tuple)):
-            net_config["cnn_config"]["block_type"] = "Conv3d"
-        else:
-            net_config["block_type"] = "Conv3d"
-
-        return net_config
 
     def create_mlp(
         self, num_inputs: int, num_outputs: int, name: str, net_config: Dict[str, Any]
