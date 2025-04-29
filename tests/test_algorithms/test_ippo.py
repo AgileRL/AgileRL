@@ -191,7 +191,16 @@ class DummyMultiEnvAsync(ParallelEnv):
         }
 
         rewards = {agent: np.random.randint(0, 5) for agent in action.keys()}
-        dones = {agent: False for agent in self.active_agents}
+        # Make different agents done at different times
+        dones = {}
+        for agent in self.active_agents:
+            if agent in ["agent_0", "agent_1"]:
+                # agent_0 and agent_1 terminate after 25 steps
+                dones[agent] = self.current_step >= 25
+            else:
+                # other agents terminate after 50 steps
+                dones[agent] = self.current_step >= 50
+
         truncated = {agent: False for agent in self.active_agents}
 
         infos = {agent: {} for agent in self.active_agents}
@@ -1744,33 +1753,16 @@ def test_ippo_init_torch_compiler_error(mode):
 
 
 @pytest.mark.parametrize(
-    "observation_spaces, net_config",
+    "observation_spaces",
     [
-        (
-            generate_multi_agent_box_spaces(3, (4,)),
-            {
-                "encoder_config": {"hidden_size": [64, 64], "init_layers": False},
-                "head_config": {"hidden_size": [32], "init_layers": False},
-            },
-        ),
-        (
-            generate_multi_agent_box_spaces(3, (3, 32, 32), low=0, high=255),
-            {
-                "encoder_config": {
-                    "channel_size": [3],
-                    "kernel_size": [3],
-                    "stride_size": [1],
-                    "init_layers": False,
-                },
-                "head_config": {"hidden_size": [32], "init_layers": False},
-            },
-        ),
+        generate_multi_agent_box_spaces(3, (4,)),
+        generate_multi_agent_box_spaces(3, (3, 32, 32), low=0, high=255),
     ],
 )
 @pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_initialize_ippo_with_net_config(
-    net_config, accelerator_flag, observation_spaces, device, compile_mode
+    accelerator_flag, observation_spaces, device, compile_mode
 ):
     action_spaces = generate_multi_agent_discrete_spaces(3, 2)
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
@@ -1780,11 +1772,15 @@ def test_initialize_ippo_with_net_config(
     else:
         accelerator = None
 
+    net_config = {
+        "encoder_config": get_default_encoder_config(observation_spaces[0]),
+        "head_config": {"hidden_size": [32]},
+    }
     ippo = IPPO(
         observation_spaces=observation_spaces,
-        net_config=net_config,
         action_spaces=action_spaces,
         agent_ids=agent_ids,
+        net_config=net_config,
         accelerator=accelerator,
         device=device,
         torch_compiler=compile_mode,
@@ -1801,34 +1797,26 @@ def test_initialize_ippo_with_net_config(
     assert ippo.steps == [0]
     assert ippo.target_kl == 0.5
 
-    if compile_mode is not None and accelerator is None:
-        assert all(isinstance(actor, OptimizedModule) for actor in ippo.actors)
-        assert all(isinstance(critic, OptimizedModule) for critic in ippo.critics)
-    else:
-        assert all(isinstance(actor, StochasticActor) for actor in ippo.actors)
-        assert all(isinstance(critic, ValueNetwork) for critic in ippo.critics)
+    expected_actor_cls = (
+        OptimizedModule if compile_mode is not None else StochasticActor
+    )
+    expected_critic_cls = OptimizedModule if compile_mode is not None else ValueNetwork
+    assert all(isinstance(actor, expected_actor_cls) for actor in ippo.actors)
+    assert all(isinstance(critic, expected_critic_cls) for critic in ippo.critics)
 
-    if accelerator is None:
-        assert all(
-            isinstance(actor_optimizer, optim.Adam)
-            for actor_optimizer in ippo.actor_optimizers
-        )
-        assert all(
-            isinstance(critic_optimizer, optim.Adam)
-            for critic_optimizer in ippo.critic_optimizers
-        )
-    else:
-        assert all(
-            isinstance(actor_optimizer, AcceleratedOptimizer)
-            for actor_optimizer in ippo.actor_optimizers
-        )
-        assert all(
-            isinstance(critic_optimizer, AcceleratedOptimizer)
-            for critic_optimizer in ippo.critic_optimizers
-        )
+    expected_opt_cls = optim.Adam if accelerator is None else AcceleratedOptimizer
+    assert all(
+        isinstance(actor_optimizer, expected_opt_cls)
+        for actor_optimizer in ippo.actor_optimizers
+    )
+    assert all(
+        isinstance(critic_optimizer, expected_opt_cls)
+        for critic_optimizer in ippo.critic_optimizers
+    )
     assert isinstance(ippo.criterion, nn.MSELoss)
 
 
+# TODO: This will be deprecated in the future
 @pytest.mark.parametrize(
     "observation_spaces", [generate_multi_agent_box_spaces(3, (6,))]
 )
@@ -1939,6 +1927,7 @@ def test_initialize_ippo_with_mlp_networks_gumbel_softmax(
     assert ippo.torch_compiler == "reduce-overhead"
 
 
+# TODO: This will be deprecated in the future
 @pytest.mark.parametrize(
     "observation_spaces",
     [generate_multi_agent_box_spaces(3, (4, 210, 160), low=0, high=255)],
@@ -2083,18 +2072,22 @@ def test_initialize_ippo_with_evo_networks(
         accelerator=accelerator,
     )
 
-    if compile_mode is not None and accelerator is None:
-        assert all(isinstance(actor, OptimizedModule) for actor in ippo.actors)
-        assert all(isinstance(critic, OptimizedModule) for critic in ippo.critics)
-    else:
-        assert all(
-            isinstance(actor.encoder, (EvolvableMLP, EvolvableCNN))
-            for actor in ippo.actors
-        )
-        assert all(
-            isinstance(critic.encoder, (EvolvableMLP, EvolvableCNN))
-            for critic in ippo.critics
-        )
+    expected_actor_cls = (
+        OptimizedModule if compile_mode is not None else StochasticActor
+    )
+    expected_critic_cls = OptimizedModule if compile_mode is not None else ValueNetwork
+    assert all(isinstance(actor, expected_actor_cls) for actor in ippo.actors)
+    assert all(isinstance(critic, expected_critic_cls) for critic in ippo.critics)
+
+    expected_opt_cls = optim.Adam if accelerator is None else AcceleratedOptimizer
+    assert all(
+        isinstance(actor_optimizer, expected_opt_cls)
+        for actor_optimizer in ippo.actor_optimizers
+    )
+    assert all(
+        isinstance(critic_optimizer, expected_opt_cls)
+        for critic_optimizer in ippo.critic_optimizers
+    )
 
     assert ippo.observation_spaces == observation_spaces
     assert ippo.action_spaces == action_spaces
@@ -2105,26 +2098,6 @@ def test_initialize_ippo_with_evo_networks(
     assert ippo.scores == []
     assert ippo.fitness == []
     assert ippo.steps == [0]
-
-    if accelerator is None:
-        assert all(
-            isinstance(actor_optimizer, optim.Adam)
-            for actor_optimizer in ippo.actor_optimizers
-        )
-        assert all(
-            isinstance(critic_optimizer, optim.Adam)
-            for critic_optimizer in ippo.critic_optimizers
-        )
-    else:
-        assert all(
-            isinstance(actor_optimizer, AcceleratedOptimizer)
-            for actor_optimizer in ippo.actor_optimizers
-        )
-        assert all(
-            isinstance(critic_optimizer, AcceleratedOptimizer)
-            for critic_optimizer in ippo.critic_optimizers
-        )
-
     assert isinstance(ippo.criterion, nn.MSELoss)
 
 
@@ -2317,35 +2290,21 @@ def test_get_action_distributed(compile_mode):
 
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
-@pytest.mark.parametrize(
-    "observation_spaces, action_spaces",
-    [
-        (
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-        ),
-        (
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-        ),
-        (
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-        ),
-        (
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-        ),
-    ],
-)
 @pytest.mark.parametrize("observation_mode", ["frequency"])
+@pytest.mark.parametrize("vectorized", [False, True])
 def test_ippo_custom_training_with_async_env(
-    observation_spaces, action_spaces, device, compile_mode, observation_mode
+    device, compile_mode, observation_mode, vectorized
 ):
-    """Test IPPO with a custom training loop on asynchronous environment for multiple iterations."""
-
     # Create async environment with agents that return observations asynchronously
-    env = DummyMultiEnvAsync(observation_spaces, action_spaces)
+    observation_spaces = generate_multi_agent_box_spaces(3, (6,))
+    action_spaces = generate_multi_agent_discrete_spaces(3, 2)
+
+    if vectorized:
+        env = make_multi_agent_vect_envs(
+            observation_spaces, action_spaces, num_envs=3, vectorized=vectorized
+        )
+    else:
+        env = DummyMultiEnv(observation_spaces, action_spaces)
 
     # Set observation mode (frequency-based or probability-based)
     env.observation_mode = observation_mode

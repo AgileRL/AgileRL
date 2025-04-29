@@ -638,27 +638,19 @@ def test_policy_q_learning_with_probe_env_cnn():
         "agent_ids": env.possible_agents,
         "net_config": {
             "encoder_config": {
-                "channel_size": [16],  # Increased channel size
-                "kernel_size": [3],
-                "stride_size": [1],
-                "init_layers": True,  # Control weight initialization
-            },
-            "head_config": {
-                "hidden_size": [32],  # Add head config
-                "init_layers": True,
-            },
+                "channel_size": [3],  # CNN channel size
+                "kernel_size": [3],  # CNN kernel size
+                "stride_size": [1],  # CNN stride size
+            }
         },
-        "lr_actor": 1e-5,  # Reduced actor learning rate
-        "lr_critic": 1e-4,  # Reduced critic learning rate
-        "batch_size": 64,  # Smaller batch size
-        "normalize_images": True,  # Ensure image normalization
-        "gamma": 0.99,  # Stable discount factor
-        "tau": 0.005,  # Smaller soft update parameter
+        "lr_actor": 1e-4,
+        "lr_critic": 1e-3,
+        "batch_size": 128,
     }
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = MultiAgentReplayBuffer(
-        memory_size=10000,
-        field_names=field_names,
+        memory_size=10000,  # Max replay buffer size
+        field_names=field_names,  # Field names to store in memory
         agent_ids=algo_args["agent_ids"],
         device=device,
     )
@@ -666,8 +658,6 @@ def test_policy_q_learning_with_probe_env_cnn():
     check_policy_q_learning_with_probe_env(
         env, MADDPG, algo_args, memory, learn_steps, device
     )
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 @pytest.mark.parametrize(
