@@ -791,13 +791,14 @@ def test_save_load_checkpoint_correct_data_and_format(
 
 
 # The saved checkpoint file contains the correct data and format.
+# TODO: This will be deprecated in the future.
 @pytest.mark.parametrize(
     "actor_network, input_tensor",
     [
         ("simple_cnn", torch.randn(1, 3, 64, 64)),
     ],
 )
-def test_save_load_checkpoint_correct_data_and_format_cnn_network(
+def test_save_load_checkpoint_correct_data_and_format_make_evo_cnn(
     actor_network, input_tensor, request, tmpdir
 ):
     observation_space = spaces.Box(0, 1, shape=(3, 64, 64))
@@ -911,7 +912,7 @@ def test_multi_dim_clamp(min, max, action, expected_result, device):
         max = np.array(max)
     ddpg = DDPG(
         observation_space=generate_random_box_space(shape=(4,)),
-        action_space=spaces.Box(0, 1, shape=(1,)),
+        action_space=generate_random_box_space(shape=(1,)),
         device=device,
     )
     input = torch.tensor(action, dtype=torch.float32).to(device)
@@ -920,18 +921,21 @@ def test_multi_dim_clamp(min, max, action, expected_result, device):
     assert clamped_actions.dtype == expected_result.dtype
 
 
+# The saved checkpoint file contains the correct data and format.
 @pytest.mark.parametrize(
-    "device, accelerator",
+    "observation_space, encoder_cls",
     [
-        ("cpu", None),
-        ("cpu", Accelerator()),
+        (generate_random_box_space(shape=(4,)), EvolvableMLP),
+        (generate_random_box_space(shape=(3, 32, 32), low=0, high=255), EvolvableCNN),
+        (generate_dict_or_tuple_space(2, 2, dict_space=True), EvolvableMultiInput),
+        (generate_dict_or_tuple_space(2, 2, dict_space=False), EvolvableMultiInput),
     ],
 )
-# The saved checkpoint file contains the correct data and format.
-def test_load_from_pretrained(device, accelerator, tmpdir):
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+def test_load_from_pretrained(observation_space, encoder_cls, accelerator, tmpdir):
     # Initialize the ddpg agent
     ddpg = DDPG(
-        observation_space=generate_random_box_space(shape=(4,)),
+        observation_space=observation_space,
         action_space=generate_random_box_space(shape=(2,)),
     )
 
@@ -939,21 +943,21 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
     ddpg.save_checkpoint(checkpoint_path)
 
-    checkpoint = torch.load(checkpoint_path, map_location=device, pickle_module=dill)
+    checkpoint = torch.load(checkpoint_path, pickle_module=dill)
     assert "agilerl_version" in checkpoint
 
     # Create new agent object
-    new_ddpg = DDPG.load(checkpoint_path, device=device, accelerator=accelerator)
+    new_ddpg = DDPG.load(checkpoint_path, accelerator=accelerator)
 
     # Check if properties and weights are loaded correctly
     assert new_ddpg.observation_space == ddpg.observation_space
     assert new_ddpg.action_space == ddpg.action_space
     assert np.all(new_ddpg.min_action == ddpg.min_action)
     assert np.all(new_ddpg.max_action == ddpg.max_action)
-    assert isinstance(new_ddpg.actor.encoder, EvolvableMLP)
-    assert isinstance(new_ddpg.actor_target.encoder, EvolvableMLP)
-    assert isinstance(new_ddpg.critic.encoder, EvolvableMLP)
-    assert isinstance(new_ddpg.critic_target.encoder, EvolvableMLP)
+    assert isinstance(new_ddpg.actor.encoder, encoder_cls)
+    assert isinstance(new_ddpg.actor_target.encoder, encoder_cls)
+    assert isinstance(new_ddpg.critic.encoder, encoder_cls)
+    assert isinstance(new_ddpg.critic_target.encoder, encoder_cls)
     assert new_ddpg.lr_actor == ddpg.lr_actor
     assert new_ddpg.lr_critic == ddpg.lr_critic
     assert str(new_ddpg.actor.to("cpu").state_dict()) == str(ddpg.actor.state_dict())
@@ -976,66 +980,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     assert new_ddpg.steps == ddpg.steps
 
 
-@pytest.mark.parametrize(
-    "device, accelerator",
-    [
-        ("cpu", None),
-        ("cpu", Accelerator()),
-    ],
-)
 # The saved checkpoint file contains the correct data and format.
-def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
-    # Initialize the ddpg agent
-    ddpg = DDPG(
-        observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
-        action_space=generate_random_box_space(shape=(2,)),
-        net_config={
-            "encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }
-        },
-    )
-
-    # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    ddpg.save_checkpoint(checkpoint_path)
-
-    # Create new agent object
-    new_ddpg = DDPG.load(checkpoint_path, device=device, accelerator=accelerator)
-
-    # Check if properties and weights are loaded correctly
-    assert new_ddpg.observation_space == ddpg.observation_space
-    assert new_ddpg.action_space == ddpg.action_space
-    assert np.all(new_ddpg.min_action == ddpg.min_action)
-    assert np.all(new_ddpg.max_action == ddpg.max_action)
-    assert isinstance(new_ddpg.actor.encoder, EvolvableCNN)
-    assert isinstance(new_ddpg.actor_target.encoder, EvolvableCNN)
-    assert isinstance(new_ddpg.critic.encoder, EvolvableCNN)
-    assert isinstance(new_ddpg.critic_target.encoder, EvolvableCNN)
-    assert new_ddpg.lr_actor == ddpg.lr_actor
-    assert new_ddpg.lr_critic == ddpg.lr_critic
-    assert str(new_ddpg.actor.to("cpu").state_dict()) == str(ddpg.actor.state_dict())
-    assert str(new_ddpg.actor_target.to("cpu").state_dict()) == str(
-        ddpg.actor_target.state_dict()
-    )
-    assert str(new_ddpg.critic.to("cpu").state_dict()) == str(ddpg.critic.state_dict())
-    assert str(new_ddpg.critic_target.to("cpu").state_dict()) == str(
-        ddpg.critic_target.state_dict()
-    )
-    assert new_ddpg.batch_size == ddpg.batch_size
-    assert new_ddpg.learn_step == ddpg.learn_step
-    assert new_ddpg.gamma == ddpg.gamma
-    assert new_ddpg.tau == ddpg.tau
-    assert new_ddpg.policy_freq == ddpg.policy_freq
-    assert new_ddpg.mut == ddpg.mut
-    assert new_ddpg.index == ddpg.index
-    assert new_ddpg.scores == ddpg.scores
-    assert new_ddpg.fitness == ddpg.fitness
-    assert new_ddpg.steps == ddpg.steps
-
-
+# TODO: This will be deprecated in the future.
 @pytest.mark.parametrize(
     "observation_space, actor_network, input_tensor",
     [
@@ -1043,7 +989,6 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
         (spaces.Box(0, 1, shape=(3, 64, 64)), "simple_cnn", torch.randn(1, 3, 64, 64)),
     ],
 )
-# The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained_networks(
     observation_space, actor_network, input_tensor, request, tmpdir
 ):

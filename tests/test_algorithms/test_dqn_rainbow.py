@@ -823,6 +823,7 @@ def test_save_load_checkpoint_correct_data_and_format(
 
 
 # The saved checkpoint file contains the correct data and format.
+# TODO: This will be deprecated in the future.
 @pytest.mark.parametrize(
     "actor_network, input_tensor",
     [
@@ -936,6 +937,8 @@ def test_load_from_pretrained(observation_space, encoder_cls, accelerator, tmpdi
     assert new_dqn.steps == dqn.steps
 
 
+# The saved checkpoint file contains the correct data and format.
+# TODO: This will be deprecated in the future.
 @pytest.mark.parametrize(
     "observation_space, actor_network, input_tensor",
     [
@@ -947,7 +950,6 @@ def test_load_from_pretrained(observation_space, encoder_cls, accelerator, tmpdi
         ),
     ],
 )
-# The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained_networks(
     observation_space, actor_network, input_tensor, request, tmpdir
 ):

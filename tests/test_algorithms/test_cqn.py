@@ -714,7 +714,7 @@ def test_load_from_pretrained(observation_space, encoder_cls, accelerator, tmpdi
     ],
 )
 # The saved checkpoint file contains the correct data and format.
-def test_load_from_pretrained_networks(
+def test_load_from_pretrained_make_evo(
     observation_space, actor_network, input_tensor, request, tmpdir
 ):
     action_space = spaces.Discrete(2)

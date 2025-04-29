@@ -666,6 +666,7 @@ def test_load_from_pretrained(observation_space, encoder_cls, accelerator, tmpdi
     )
 
 
+# The saved checkpoint file contains the correct data and format.
 # TODO: Will be deprecated in the future
 @pytest.mark.parametrize(
     "observation_space, actor_network, input_tensor",
@@ -674,7 +675,6 @@ def test_load_from_pretrained(observation_space, encoder_cls, accelerator, tmpdi
         (spaces.Box(0, 1, shape=(3, 64, 64)), "simple_cnn", torch.randn(1, 3, 64, 64)),
     ],
 )
-# The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained_networks(
     observation_space, actor_network, input_tensor, request, tmpdir
 ):

@@ -643,10 +643,21 @@ def test_unwrap_models():
 
 
 # The saved checkpoint file contains the correct data and format.
-def test_save_load_checkpoint_correct_data_and_format(tmpdir):
+@pytest.mark.parametrize(
+    "observation_space, encoder_cls",
+    [
+        (generate_random_box_space(shape=(4,)), EvolvableMLP),
+        (generate_random_box_space(shape=(3, 32, 32), low=0, high=255), EvolvableCNN),
+        (generate_dict_or_tuple_space(2, 2, dict_space=True), EvolvableMultiInput),
+        (generate_dict_or_tuple_space(2, 2, dict_space=False), EvolvableMultiInput),
+    ],
+)
+def test_save_load_checkpoint_correct_data_and_format(
+    observation_space, encoder_cls, tmpdir
+):
     # Initialize the DQN agent
     dqn = DQN(
-        observation_space=generate_random_box_space(shape=(4,)),
+        observation_space=observation_space,
         action_space=generate_discrete_space(2),
     )
 
@@ -685,72 +696,8 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     dqn.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert isinstance(dqn.actor.encoder, EvolvableMLP)
-    assert isinstance(dqn.actor_target.encoder, EvolvableMLP)
-    assert dqn.lr == 1e-4
-    # assert str(dqn.actor.state_dict()) == str(dqn.actor_target.state_dict())
-    assert str(initial_actor_state_dict) == str(dqn.actor.state_dict())
-    assert str(init_optim_state_dict) == str(dqn.optimizer.state_dict())
-    assert dqn.batch_size == 64
-    assert dqn.learn_step == 5
-    assert dqn.gamma == 0.99
-    assert dqn.tau == 1e-3
-    assert dqn.mut is None
-    assert dqn.index == 0
-    assert dqn.scores == []
-    assert dqn.fitness == []
-    assert dqn.steps == [0]
-
-
-def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
-    net_config_cnn = {
-        "encoder_config": {"channel_size": [3], "kernel_size": [3], "stride_size": [1]}
-    }
-
-    # Initialize the DQN agent
-    dqn = DQN(
-        observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
-        action_space=generate_discrete_space(2),
-        net_config=net_config_cnn,
-    )
-
-    initial_actor_state_dict = dqn.actor.state_dict()
-    init_optim_state_dict = dqn.optimizer.state_dict()
-
-    # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    dqn.save_checkpoint(checkpoint_path)
-
-    # Load the saved checkpoint file
-    checkpoint = torch.load(checkpoint_path, pickle_module=dill)
-
-    # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint["network_info"]["modules"]
-    assert "actor_state_dict" in checkpoint["network_info"]["modules"]
-    assert "actor_target_init_dict" in checkpoint["network_info"]["modules"]
-    assert "actor_target_state_dict" in checkpoint["network_info"]["modules"]
-    assert "optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
-    assert "batch_size" in checkpoint
-    assert "lr" in checkpoint
-    assert "learn_step" in checkpoint
-    assert "gamma" in checkpoint
-    assert "tau" in checkpoint
-    assert "mut" in checkpoint
-    assert "index" in checkpoint
-    assert "scores" in checkpoint
-    assert "fitness" in checkpoint
-    assert "steps" in checkpoint
-
-    dqn = DQN(
-        observation_space=generate_random_box_space(shape=(4,)),
-        action_space=generate_discrete_space(2),
-    )
-    # Load checkpoint
-    dqn.load_checkpoint(checkpoint_path)
-
-    # Check if properties and weights are loaded correctly
-    assert isinstance(dqn.actor.encoder, EvolvableCNN)
-    assert isinstance(dqn.actor_target.encoder, EvolvableCNN)
+    assert isinstance(dqn.actor.encoder, encoder_cls)
+    assert isinstance(dqn.actor_target.encoder, encoder_cls)
     assert dqn.lr == 1e-4
     # assert str(dqn.actor.state_dict()) == str(dqn.actor_target.state_dict())
     assert str(initial_actor_state_dict) == str(dqn.actor.state_dict())
@@ -767,6 +714,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
 
 # The saved checkpoint file contains the correct data and format.
+# TODO: This will be deprecated in the future.
 @pytest.mark.parametrize(
     "actor_network, input_tensor",
     [
@@ -838,18 +786,23 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert dqn.steps == [0]
 
 
+# The saved checkpoint file contains the correct data and format.
+@pytest.mark.parametrize(
+    "observation_space, encoder_cls",
+    [
+        (generate_random_box_space(shape=(4,)), EvolvableMLP),
+        (generate_random_box_space(shape=(3, 32, 32), low=0, high=255), EvolvableCNN),
+        (generate_dict_or_tuple_space(2, 2, dict_space=True), EvolvableMultiInput),
+        (generate_dict_or_tuple_space(2, 2, dict_space=False), EvolvableMultiInput),
+    ],
+)
 @pytest.mark.parametrize(
     "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
 )
-@pytest.mark.parametrize(
-    "accelerator",
-    [
-        None,
-        Accelerator(),
-    ],
-)
-# The saved checkpoint file contains the correct data and format.
-def test_load_from_pretrained(device, accelerator, tmpdir):
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+def test_load_from_pretrained(
+    observation_space, encoder_cls, device, accelerator, tmpdir
+):
     # Initialize the DQN agent
     dqn = DQN(
         observation_space=generate_random_box_space(shape=(4,)),
@@ -866,8 +819,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     # Check if properties and weights are loaded correctly
     assert new_dqn.observation_space == dqn.observation_space
     assert new_dqn.action_space == dqn.action_space
-    assert isinstance(new_dqn.actor.encoder, EvolvableMLP)
-    assert isinstance(new_dqn.actor_target.encoder, EvolvableMLP)
+    assert isinstance(new_dqn.actor.encoder, encoder_cls)
+    assert isinstance(new_dqn.actor_target.encoder, encoder_cls)
     assert new_dqn.lr == dqn.lr
     assert str(new_dqn.actor.to("cpu").state_dict()) == str(dqn.actor.state_dict())
     assert new_dqn.batch_size == dqn.batch_size
@@ -881,53 +834,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     assert new_dqn.steps == dqn.steps
 
 
-@pytest.mark.parametrize(
-    "device, accelerator",
-    [
-        ("cpu", None),
-        ("cpu", Accelerator()),
-    ],
-)
 # The saved checkpoint file contains the correct data and format.
-def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
-    # Initialize the DQN agent
-    dqn = DQN(
-        observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
-        action_space=generate_discrete_space(2),
-        net_config={
-            "encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }
-        },
-    )
-
-    # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    dqn.save_checkpoint(checkpoint_path)
-
-    # Create new agent object
-    new_dqn = DQN.load(checkpoint_path, device=device, accelerator=accelerator)
-
-    # Check if properties and weights are loaded correctly
-    assert new_dqn.observation_space == dqn.observation_space
-    assert new_dqn.action_space == dqn.action_space
-    assert isinstance(new_dqn.actor.encoder, EvolvableCNN)
-    assert isinstance(new_dqn.actor_target.encoder, EvolvableCNN)
-    assert new_dqn.lr == dqn.lr
-    assert str(new_dqn.actor.to("cpu").state_dict()) == str(dqn.actor.state_dict())
-    assert new_dqn.batch_size == dqn.batch_size
-    assert new_dqn.learn_step == dqn.learn_step
-    assert new_dqn.gamma == dqn.gamma
-    assert new_dqn.tau == dqn.tau
-    assert new_dqn.mut == dqn.mut
-    assert new_dqn.index == dqn.index
-    assert new_dqn.scores == dqn.scores
-    assert new_dqn.fitness == dqn.fitness
-    assert new_dqn.steps == dqn.steps
-
-
+# TODO: This will be deprecated in the future.
 @pytest.mark.parametrize(
     "observation_space, actor_network, input_tensor",
     [
@@ -939,7 +847,6 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
         ),
     ],
 )
-# The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained_networks(
     observation_space, actor_network, input_tensor, request, tmpdir
 ):
