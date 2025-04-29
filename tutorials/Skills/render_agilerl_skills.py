@@ -25,7 +25,7 @@ def resize_frames(frames, fraction):
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    env = gym.make("LunarLander-v2", render_mode="rgb_array")
+    env = gym.make("LunarLander-v3", render_mode="rgb_array")
 
     skills = ["stabilize", "center", "landing"]
 
@@ -84,7 +84,7 @@ if __name__ == "__main__":
         gif_path = "./videos/"
         os.makedirs(gif_path, exist_ok=True)
         imageio.mimwrite(
-            os.path.join("./videos/", f"LunarLander-v2_{skill}.gif"),
+            os.path.join("./videos/", f"LunarLander-v3_{skill}.gif"),
             frames,
             duration=40,
             loop=0,

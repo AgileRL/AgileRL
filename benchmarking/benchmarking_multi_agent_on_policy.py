@@ -42,7 +42,10 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
 
     env = importlib.import_module(f"{INIT_HP['ENV_NAME']}").parallel_env
     env_kwargs = dict(max_cycles=25, continuous_actions=True)
-    env = make_multi_agent_vect_envs(env, num_envs=INIT_HP["NUM_ENVS"], **env_kwargs)
+    # env_kwargs = {}
+    env = make_multi_agent_vect_envs(
+        env, num_envs=INIT_HP["NUM_ENVS"], shared_critic=False, **env_kwargs
+    )
 
     if INIT_HP["CHANNELS_LAST"]:
         # Environment processing for image based observations
@@ -144,7 +147,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
 
 
 if __name__ == "__main__":
-    with open("configs/training/multi_agent/ippo.yaml") as file:
+    config = "configs/training/multi_agent/ippo.yaml"
+    with open(config) as file:
         config = yaml.safe_load(file)
     INIT_HP = config["INIT_HP"]
     MUTATION_PARAMS = config["MUTATION_PARAMS"]

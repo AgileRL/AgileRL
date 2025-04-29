@@ -74,7 +74,7 @@ are more likely to remain present in the population. The sequence of evolution (
 
     # Initialize vectorized environments
     num_envs = 16
-    env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
+    env = make_vect_envs("LunarLander-v3", num_envs=num_envs)  # Create environment
 
     observation_space = env.single_observation_space
     action_space = env.single_action_space
@@ -140,7 +140,7 @@ easiest to use our training function, which returns a population of trained agen
 
     trained_pop, pop_fitnesses = train_off_policy(
         env=env,  # Gym-style environment
-        env_name="LunarLander-v2",  # Environment name
+        env_name="LunarLander-v3",  # Environment name
         algo="DQN",  # Algorithm
         pop=pop,  # Population of agents
         memory=memory,  # Replay buffer
@@ -194,7 +194,7 @@ Alternatively, use a custom training loop. Combining all of the above:
 
     # Initialize vectorized environments
     num_envs = 16
-    env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
+    env = make_vect_envs("LunarLander-v3", num_envs=num_envs)  # Create environment
 
     observation_space = env.single_observation_space
     action_space = env.single_action_space

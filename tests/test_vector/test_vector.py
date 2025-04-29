@@ -602,6 +602,7 @@ def test_async_vector_subenv_error():
     ]
     envs = AsyncPettingZooVecEnv(env_list * 3)
 
+    envs.reset()
     with pytest.raises(ValueError, match="Error in step"):
         envs.step({"agent_0": [0, 1, 2]})
 
@@ -895,6 +896,7 @@ def test_worker_reset():
             child_pipe,
             parent_pipe,
             vec_env._obs_buffer,
+            True,
             queue,
             vec_env.agents,
         ),
@@ -934,6 +936,7 @@ def test_worker_step_simple():
             child_pipe,
             parent_pipe,
             vec_env._obs_buffer,
+            True,
             queue,
             vec_env.agents,
         ),
@@ -997,6 +1000,7 @@ def test_worker_step_autoreset():
             child_pipe,
             parent_pipe,
             vec_env._obs_buffer,
+            True,
             queue,
             vec_env.agents,
         ),
@@ -1041,6 +1045,7 @@ def test_worker_runtime_error():
                 child_pipe,
                 parent_pipe,
                 vec_env._obs_buffer,
+                True,
                 queue,
                 vec_env.agents,
             ),

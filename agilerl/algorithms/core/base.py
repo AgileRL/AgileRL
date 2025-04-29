@@ -1410,7 +1410,10 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         return processed_obs
 
     def disassemble_homogeneous_outputs(
-        self, homo_outputs: ArrayDict, vect_dim: int
+        self,
+        homo_outputs: ArrayDict,
+        vect_dim: int,
+        homogeneous_agents: Dict[str, List[str]],
     ) -> ArrayDict:
         """Disassembles batched output by shared policies into their homogeneous agents' outputs.
 
@@ -1418,17 +1421,19 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         :type homo_outputs: Dict[str, np.ndarray]
         :param vect_dim: Vectorization dimension size, i.e. number of vect envs
         :type vect_dim: int
+        :param homogeneous_agents: Dictionary of homogeneous agent IDs
+        :type homogeneous_agents: Dict[str, List[str]]
         :return: Assembled dictionary, e.g. {'agent_0': 4, 'agent_1': 7, 'agent_2': 8}
         :rtype: Dict[str, np.ndarray]
         """
         output_dict = {}
-        for unique_id in self.shared_agent_ids:
-            homo_outputs[unique_id] = np.reshape(
-                homo_outputs[unique_id],
-                (len(self.homogeneous_agents[unique_id]), vect_dim, -1),
+        for homo_id in homogeneous_agents:
+            homo_outputs[homo_id] = np.reshape(
+                homo_outputs[homo_id],
+                (len(homogeneous_agents[homo_id]), vect_dim, -1),
             )
-            for i, homo_id in enumerate(self.homogeneous_agents[unique_id]):
-                output_dict[homo_id] = homo_outputs[unique_id][i]
+            for i, agent_id in enumerate(homogeneous_agents[homo_id]):
+                output_dict[agent_id] = homo_outputs[homo_id][i]
 
         return output_dict
 
@@ -1440,10 +1445,17 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         :return: Summed rewards dictionary
         :rtype: Dict[str, np.ndarray]
         """
-        summed_rewards = {homo_id: 0 for homo_id in self.shared_agent_ids}
+        reward_shape = list(rewards.values())[0]
+        reward_shape = (
+            reward_shape.shape if isinstance(reward_shape, np.ndarray) else (1,)
+        )
+        summed_rewards = {
+            agent_id: np.zeros(reward_shape) for agent_id in self.shared_agent_ids
+        }
         for agent_id, reward in rewards.items():
             homo_id = self.get_homo_id(agent_id)
             summed_rewards[homo_id] += reward
+
         return summed_rewards
 
     def assemble_homogeneous_outputs(
