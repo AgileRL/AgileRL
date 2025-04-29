@@ -6,6 +6,7 @@ from gymnasium import spaces
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
+from agilerl.algorithms.grpo import GRPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.modules.bert import EvolvableBERT
 from agilerl.utils.utils import create_population
@@ -18,6 +19,8 @@ from tests.helper_functions import (
     generate_multi_agent_discrete_spaces,
     generate_random_box_space,
 )
+
+from ..test_algorithms.test_grpo import create_module
 
 # Shared HP dict that can be used by any algorithm
 SHARED_INIT_HP = {
@@ -114,6 +117,13 @@ def default_hp_config():
         learn_step=RLParameter(
             min=1, max=10, dtype=int, grow_factor=1.5, shrink_factor=0.75
         ),
+    )
+
+
+@pytest.fixture
+def grpo_hp_config():
+    return HyperparameterConfig(
+        lr=RLParameter(min=6.25e-5, max=1e-2),
     )
 
 
@@ -1630,3 +1640,110 @@ def test_reinit_opt(algo, init_pop):
     del new_population
 
     torch.cuda.empty_cache()  # Free up GPU memory
+
+
+# Write mutations tests for GRPO
+def test_mutation_applies_rl_hp_mutation_llm_algorithm(request, grpo_hp_config):
+    pre_training_mut = False
+
+    population = [
+        GRPO(
+            observation_space=generate_random_box_space((4,)),
+            action_space=generate_random_box_space((4,)),
+            actor_network=create_module(
+                input_size=10,
+                max_tokens=20,
+                vocab_size=1000,
+                device="cuda" if torch.cuda.is_available() else "cpu",
+            ),
+            index=0,
+            hp_config=grpo_hp_config,
+            pad_token_id=1000 - 1,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+        )
+    ]  # some sort of population
+
+    mutations = Mutations(
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0.1,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        accelerator=None,
+    )
+
+    new_population = [agent.clone(wrap=False) for agent in population]
+    mutated_population = mutations.mutation(new_population, pre_training_mut)
+
+    assert len(mutated_population) == len(population)
+    for old, individual in zip(population, mutated_population):
+        available_mutations = grpo_hp_config.names()
+        assert individual.mut in available_mutations
+
+        new_value = getattr(individual, individual.mut)
+        min_value = grpo_hp_config[individual.mut].min
+        max_value = grpo_hp_config[individual.mut].max
+        assert min_value <= new_value <= max_value
+        assert old.index == individual.index
+
+    for agent in mutated_population:
+        for param_group in agent.optimizer.optimizer.param_groups:
+            assert param_group["lr"] == agent.lr
+
+    del mutations
+    del population
+    del mutated_population
+    del new_population
+    torch.cuda.empty_cache()
+
+
+@pytest.mark.parametrize("mutation_type", ["architecture", "parameters", "activation"])
+def test_mutations_warns_on_llm_algorithm(request, grpo_hp_config, mutation_type):
+    pre_training_mut = False
+
+    population = [
+        GRPO(
+            observation_space=generate_random_box_space((4,)),
+            action_space=generate_random_box_space((4,)),
+            actor_network=create_module(
+                input_size=10,
+                max_tokens=20,
+                vocab_size=1000,
+                device="cuda" if torch.cuda.is_available() else "cpu",
+            ),
+            index=0,
+            hp_config=grpo_hp_config,
+            pad_token_id=1000 - 1,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+        )
+    ]  # some sort of population
+
+    mutations = Mutations(
+        0,
+        1 if mutation_type == "architecture" else 0,
+        0.5 if mutation_type == "architecture" else 0,
+        1 if mutation_type == "parameters" else 0,
+        1 if mutation_type == "activation" else 0,
+        0,
+        0.1,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        accelerator=None,
+    )
+
+    new_population = [agent.clone(wrap=False) for agent in population]
+    with pytest.warns(UserWarning):
+        mutated_population = mutations.mutation(new_population, pre_training_mut)
+
+    assert len(mutated_population) == len(population)
+    for old, individual in zip(population, mutated_population):
+        assert old.mut is None
+        assert individual.mut == "None"
+
+    del mutations
+    del population
+    del mutated_population
+    del new_population
+    torch.cuda.empty_cache()

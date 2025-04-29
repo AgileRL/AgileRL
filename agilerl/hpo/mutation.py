@@ -591,6 +591,9 @@ class Mutations:
         # OR perform activation mutations within evolvable modules directly and disable
         # on an algorithm basis
         if individual.algo in ["PPO", "DDPG", "TD3", "IPPO", "MADDPG", "MATD3", "GRPO"]:
+            warnings.warn(
+                f"Activation mutations are not supported for {individual.algo}."
+            )
             individual.mut = "None"
             return individual
 
@@ -665,6 +668,11 @@ class Mutations:
         :param individual: Individual agent from population
         :type individual: EvolvableAlgorithm
         """
+        if isinstance(individual, LLMAlgorithm):
+            warnings.warn("Parameter mutations are not supported for LLM algorithms.")
+            individual.mut = "None"
+            return individual
+
         registry = individual.registry
 
         # We only apply parameter mutations to the evaluation policy network
@@ -788,6 +796,14 @@ class Mutations:
         :param individual: Individual agent from population
         :type individual: object
         """
+
+        if isinstance(individual, LLMAlgorithm):
+            warnings.warn(
+                "Architecture mutations are not supported for LLM algorithms."
+            )
+            individual.mut = "None"
+            return individual
+
         # Get the offspring evaluation modules
         # We first extract and apply a mutation for the algo policy and then apply
         # the same mutation to the rest of the evaluation modules e.g. critics
