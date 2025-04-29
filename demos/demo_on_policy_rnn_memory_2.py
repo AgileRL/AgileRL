@@ -1,79 +1,93 @@
-# AgileRL On-policy (RNN/MLP) Easy Memory Game Demo
+# Sequence Parity RNN-Only Memory Game Demo
 #
-# This script demonstrates a much easier memory game for RL agents.
-# The agent is shown a random symbol (one-hot) at the start, and is immediately asked to repeat it in the next step.
-# There is no delay, so the agent does not need to remember over time, making it trivial for MLPs.
+# This environment requires the agent to remember a sequence of random binary digits (0 or 1)
+# shown one at a time. At the end of the sequence, the agent must output whether the total
+# number of 1s in the sequence was even or odd (i.e., the parity). The agent receives a reward
+# only if it correctly outputs the parity. Only an RNN can solve this; an MLP cannot, as the
+# relevant information is distributed across time.
 
 import gymnasium as gym
 import numpy as np
 import torch
 from tqdm import trange
-import os
 
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.utils import create_population
 
 
-# --- Define an Easy Memory Game Environment ---
-class EasyMemoryGameEnv(gym.Env):
+# --- Define the Sequence Parity RNN-Only Memory Game Environment ---
+class SequenceParityMemoryEnv(gym.Env):
     """
-    Observation: one-hot vector of length n_symbols at step 0, all zeros at step 1.
-    Action: discrete, n_symbols.
-    Reward: +1 if action matches the original symbol at the query step, else 0.
-    Episode: Each episode is 2 steps (show, query).
+    Observation: At each step t < seq_len, agent sees a single bit (0 or 1) as a one-hot vector [1,0] or [0,1].
+    At the final step, agent receives a special query observation [0.5, 0.5] and must output the parity (even=0, odd=1).
+    Action: discrete, 2 (0=even, 1=odd).
+    Reward: +1 if action matches the parity at the query step, else 0.
+    Episode: seq_len + 1 steps (seq_len bits, then query).
     """
 
     metadata = {"render_modes": ["human"], "render_fps": 4}
 
-    def __init__(self, n_symbols=3, render_mode=None):
+    def __init__(self, seq_len=5, render_mode=None):
         super().__init__()
-        self.n_symbols = n_symbols
+        self.seq_len = seq_len
         self.observation_space = gym.spaces.Box(
-            low=0.0, high=1.0, shape=(n_symbols,), dtype=np.float32
+            low=0.0, high=1.0, shape=(2,), dtype=np.float32
         )
-        self.action_space = gym.spaces.Discrete(n_symbols)
+        self.action_space = gym.spaces.Discrete(2)  # 0=even, 1=odd
         self.render_mode = render_mode
         self._reset_state()
 
     def _reset_state(self):
         self.current_step = 0
-        self.symbol = np.random.randint(self.n_symbols)
+        self.sequence = np.random.randint(0, 2, size=self.seq_len)
         self.done = False
         self.last_action = None
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         self._reset_state()
-        obs = np.zeros(self.n_symbols, dtype=np.float32)
-        obs[self.symbol] = 1.0  # Show symbol at first step
+        obs = np.zeros(2, dtype=np.float32)
+        obs[self.sequence[0]] = 1.0  # Show first bit as one-hot
         info = {}
         return obs, info
 
     def step(self, action):
         self.current_step += 1
-        if self.current_step == 1:
-            # Query step: obs is all zeros
-            obs = np.zeros(self.n_symbols, dtype=np.float32)
-            reward = 1.0 if action == self.symbol else 0.0
-            terminated = True
-            truncated = False
+        if self.current_step < self.seq_len:
+            # Show next bit in sequence
+            obs = np.zeros(2, dtype=np.float32)
+            obs[self.sequence[self.current_step]] = 1.0
+            reward = 0.0
+            terminated = False
+        elif self.current_step == self.seq_len:
+            # Query step: ask for parity
+            obs = np.array([0.5, 0.5], dtype=np.float32)  # Query signal
             self.last_action = action
+            parity = np.sum(self.sequence) % 2
+            reward = 1.0 if action == parity else 0.0
+            terminated = True
+            self.done = True
         else:
-            # Should not happen
-            obs = np.zeros(self.n_symbols, dtype=np.float32)
+            # Episode is over
+            obs = np.zeros(2, dtype=np.float32)
             reward = 0.0
             terminated = True
-            truncated = False
+            self.done = True
+
+        truncated = False
         info = {}
         return obs, reward, terminated, truncated, info
 
     def render(self):
-        if self.current_step == 0:
-            print(f"Show symbol: {self.symbol}")
-        elif self.current_step == 1:
+        if self.current_step < self.seq_len:
             print(
-                f"Query: Agent answered {self.last_action}, correct was {self.symbol}"
+                f"Step {self.current_step}: Show bit {self.sequence[self.current_step]}"
+            )
+        elif self.current_step == self.seq_len:
+            parity = np.sum(self.sequence) % 2
+            print(
+                f"Query: Agent answered {self.last_action} (0=even, 1=odd), correct was {parity} (sequence: {self.sequence})"
             )
 
     def close(self):
@@ -85,12 +99,12 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 # Toggle this to True for RNN (LSTM), False for MLP
-recurrent = False  # For this easy game, MLP is sufficient
+recurrent = True  # <--- CHANGE THIS TO ENABLE/DISABLE RECURRENT
 
 if recurrent:
     NET_CONFIG = {
         "encoder_config": {
-            "hidden_state_size": 32,  # LSTM hidden state size
+            "hidden_state_size": 32,  # LSTM hidden state size (small, task is simple)
         },
     }
 else:
@@ -101,23 +115,23 @@ else:
     }
 
 # --- Create Environment and Population ---
-n_symbols = 3
-num_envs = 32  # Fewer envs needed for easy game
+seq_len = 2
+num_envs = 32  # Fewer envs, since task is simple
 
 # Hyperparameters
 INIT_HP = {
-    "POP_SIZE": 2,  # Small population
-    "BATCH_SIZE": 32,
-    "LEARN_STEP": 2,  # Match episode length (2 steps)
+    "POP_SIZE": 1,  # Population size
+    "BATCH_SIZE": 256,
+    "LEARN_STEP": seq_len + 1,  # Steps per episode
     "HIDDEN_STATE_SIZE": 32,
     "LR": 1e-3,
     "GAMMA": 0.99,
-    "GAE_LAMBDA": 1.0,
+    "GAE_LAMBDA": 0.95,
     "CLIP_COEF": 0.2,
     "ENT_COEF": 0.001,
     "VF_COEF": 1.0,
     "MAX_GRAD_NORM": 0.5,
-    "UPDATE_EPOCHS": 2,
+    "UPDATE_EPOCHS": 4,
     "SHARE_ENCODERS": True,
     "DISCRETE_ACTIONS": True,
     "ACTION_STD_INIT": 0.6,
@@ -128,7 +142,7 @@ INIT_HP = {
 
 def make_env():
     def thunk():
-        return EasyMemoryGameEnv(n_symbols=n_symbols)
+        return SequenceParityMemoryEnv(seq_len=seq_len)
 
     return thunk
 
@@ -155,7 +169,7 @@ pop = create_population(
             if recurrent
             else {}
         ),
-        "max_seq_len": 2,  # Match episode length
+        "max_seq_len": seq_len + 1,
     },
 )
 
@@ -168,7 +182,7 @@ tournament = TournamentSelection(
 )
 
 mutations = Mutations(
-    no_mutation=0.4,
+    no_mutation=0.5,
     architecture=0,
     new_layer_prob=0.0,
     parameters=0.2,
@@ -182,11 +196,11 @@ mutations = Mutations(
 )
 
 # --- Training Loop ---
-max_steps = 10_000 // num_envs
-required_score = 0.95
-evo_steps = num_envs * INIT_HP["LEARN_STEP"] * 10
+max_steps = 500_000 // num_envs
+required_score = 1
+evo_steps = num_envs * INIT_HP["LEARN_STEP"] * 100
 eval_steps = None
-eval_loop = 5
+eval_loop = 10
 
 total_steps = 0
 training_complete = False
@@ -215,14 +229,9 @@ while (
             )
             for agent in pop
         ]
-        mean_scores = [round(np.mean(agent.fitness[-eval_loop:]), 1) for agent in pop]
+        mean_scores = [round(np.mean(agent.fitness[-eval_loop:]), 2) for agent in pop]
         print(f"--- Global steps {total_steps} ---")
-        print(f"Steps {[agent.steps[-1] for agent in pop]}")
         print(f"Scores: {mean_scores}")
-        print(f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}")
-        print(
-            f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}"
-        )
 
         if any(score >= required_score for score in mean_scores):
             print(
@@ -286,4 +295,4 @@ avg_reward = sum(episode_rewards) / len(episode_rewards)
 avg_steps = total_steps / len(episode_rewards)
 print(f"Average Reward: {avg_reward:.2f}, Average Steps: {avg_steps:.2f}")
 
-print("Easy memory game demo complete.")
+print("Demo complete.")

@@ -636,6 +636,10 @@ class PPO(RLAlgorithm):
                             self.hidden_state[key][:, finished_mask, :] = reset_states
                 # Add handling for numpy if needed
 
+            # Update the current hidden state for the next timestep
+            if self.recurrent:
+                current_hidden_state = self.hidden_state
+
             # Update for next step
             obs = next_obs
             info = next_info
@@ -744,43 +748,42 @@ class PPO(RLAlgorithm):
                 batch_values = batch_values.squeeze()
 
                 if len(minibatch_idxs) > 1:
-                    log_prob, entropy, value = self.evaluate_actions(
-                        obs=batch_states, actions=batch_actions
+                    # For flat learning, hidden state from buffer is (batch, layer, hidden)
+                    # Needs to be (layer, batch, hidden) for _get_action_and_values
+                    if batch_hidden_states is not None:
+                        eval_hidden_state = {
+                            k: v.permute(1, 0, 2).contiguous()
+                            for k, v in batch_hidden_states.items()
+                        }
+                    else:
+                        eval_hidden_state = None
+
+                    # Get values and next hidden state (which we ignore in flat learning)
+                    _, _, entropy_t, new_value_t, _ = self._get_action_and_values(
+                        batch_states, hidden_state=eval_hidden_state
                     )
 
-                    logratio = log_prob - batch_log_probs
-                    ratio = logratio.exp()
+                    # Compute log prob of taken actions
+                    new_log_prob_t = self.actor.action_log_prob(batch_actions)
 
-                    with torch.no_grad():
-                        approx_kl = ((ratio - 1) - logratio).mean()
+                    # Use -log_prob as entropy when head returns None (continuous actions w/ squashing)
+                    if entropy_t is None:
+                        entropy_t = -new_log_prob_t
 
-                    minibatch_advs = batch_advantages
-                    minibatch_advs = (minibatch_advs - minibatch_advs.mean()) / (
-                        minibatch_advs.std() + 1e-8
-                    )
-
-                    # Policy loss
-                    pg_loss1 = -minibatch_advs * ratio
-                    pg_loss2 = -minibatch_advs * torch.clamp(
+                    ratio = torch.exp(new_log_prob_t - batch_log_probs)
+                    policy_loss1 = -batch_advantages * ratio
+                    policy_loss2 = -batch_advantages * torch.clamp(
                         ratio, 1 - self.clip_coef, 1 + self.clip_coef
                     )
+                    policy_loss = torch.max(policy_loss1, policy_loss2).mean()
 
-                    pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+                    value_loss = 0.5 * ((new_value_t - batch_returns) ** 2).mean()
+                    entropy_loss = -entropy_t.mean()
 
-                    # Value loss
-                    value = value.view(-1)
-                    v_loss_unclipped = (value - batch_returns) ** 2
-                    v_clipped = batch_values + torch.clamp(
-                        value - batch_values, -self.clip_coef, self.clip_coef
-                    )
-
-                    v_loss_clipped = (v_clipped - batch_returns) ** 2
-                    v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
-                    v_loss = 0.5 * v_loss_max.mean()
-
-                    entropy_loss = entropy.mean()
                     loss = (
-                        pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
+                        policy_loss
+                        + self.vf_coef * value_loss
+                        + self.ent_coef * entropy_loss
                     )
 
                     # actor + critic loss backprop
@@ -870,19 +873,37 @@ class PPO(RLAlgorithm):
                         for key, hidden_tensor in buffer_data["hidden_states"].items()
                     }
 
-                new_log_probs, entropy, new_values = self.evaluate_actions(
-                    mb_obs, mb_actions, hidden_state=mb_hidden_states
+                # For flat learning, hidden state from buffer is (batch, layer, hidden)
+                # Needs to be (layer, batch, hidden) for _get_action_and_values
+                if mb_hidden_states is not None:
+                    eval_hidden_state = {
+                        k: v.permute(1, 0, 2).contiguous()
+                        for k, v in mb_hidden_states.items()
+                    }
+                else:
+                    eval_hidden_state = None
+
+                # Get values and next hidden state (which we ignore in flat learning)
+                _, _, entropy_t, new_value_t, _ = self._get_action_and_values(
+                    mb_obs, hidden_state=eval_hidden_state
                 )
 
-                ratio = torch.exp(new_log_probs - mb_old_log_probs)
+                # Compute log prob of taken actions
+                new_log_prob_t = self.actor.action_log_prob(mb_actions)
+
+                # Use -log_prob as entropy when head returns None (continuous actions w/ squashing)
+                if entropy_t is None:
+                    entropy_t = -new_log_prob_t
+
+                ratio = torch.exp(new_log_prob_t - mb_old_log_probs)
                 policy_loss1 = -mb_advantages * ratio
                 policy_loss2 = -mb_advantages * torch.clamp(
                     ratio, 1 - self.clip_coef, 1 + self.clip_coef
                 )
                 policy_loss = torch.max(policy_loss1, policy_loss2).mean()
 
-                value_loss = 0.5 * ((new_values - mb_returns) ** 2).mean()
-                entropy_loss = -entropy.mean()
+                value_loss = 0.5 * ((new_value_t - mb_returns) ** 2).mean()
+                entropy_loss = -entropy_t.mean()
 
                 loss = (
                     policy_loss
@@ -891,7 +912,7 @@ class PPO(RLAlgorithm):
                 )
 
                 with torch.no_grad():
-                    log_ratio = new_log_probs - mb_old_log_probs
+                    log_ratio = new_log_prob_t - mb_old_log_probs
                     approx_kl = ((torch.exp(log_ratio) - 1) - log_ratio).mean().item()
                     approx_kl_divs.append(approx_kl)
 
@@ -973,6 +994,15 @@ class PPO(RLAlgorithm):
                 value_loss_total = 0.0
                 entropy_loss_total = 0.0
 
+                # Prepare hidden state for first timestep (layer, batch, hidden)
+                if self.recurrent and mb_hidden_state is not None:
+                    step_hidden_state = {
+                        k: v.permute(1, 0, 2).contiguous()
+                        for k, v in mb_hidden_state.items()
+                    }
+                else:
+                    step_hidden_state = None
+
                 for t in range(seq_len):
                     obs_t = mb_obs_seq[:, t]
                     actions_t = mb_actions_seq[:, t]
@@ -981,36 +1011,20 @@ class PPO(RLAlgorithm):
                     return_t = mb_returns_seq[:, t]
                     old_value_t = mb_old_values_seq[:, t]
 
-                    # Evaluate current step and obtain next hidden state
-                    # Reshape hidden_state dict to match expectations if present
-                    eval_hidden_state = None
-                    if mb_hidden_state is not None:
-                        eval_hidden_state = {k: v for k, v in mb_hidden_state.items()}
-
-                    new_log_prob_t, entropy_t, new_value_t = self.evaluate_actions(
-                        obs_t, actions_t, hidden_state=eval_hidden_state
+                    # Get values, entropy, and next hidden state directly
+                    # step_hidden_state is already (layer, batch, hidden)
+                    _, _, entropy_t, new_value_t, next_hidden = (
+                        self._get_action_and_values(
+                            obs_t, hidden_state=step_hidden_state
+                        )
                     )
 
-                    # Update hidden state using actor to ensure proper propagation
-                    if self.recurrent:
-                        with torch.no_grad():
-                            if eval_hidden_state is not None:
-                                actor_hidden_in = {
-                                    k: v.permute(1, 0, 2).contiguous()
-                                    for k, v in eval_hidden_state.items()
-                                }
-                            else:
-                                actor_hidden_in = None
+                    # Compute log prob of taken actions
+                    new_log_prob_t = self.actor.action_log_prob(actions_t)
 
-                            _, _, _, _, next_hidden = self._get_action_and_values(
-                                obs_t, hidden_state=actor_hidden_in
-                            )
-
-                        if next_hidden is not None:
-                            mb_hidden_state = {
-                                k: next_hidden[k].permute(1, 0, 2).detach()
-                                for k in next_hidden
-                            }
+                    # Use -log_prob as entropy when head returns None (continuous actions w/ squashing)
+                    if entropy_t is None:
+                        entropy_t = -new_log_prob_t
 
                     # PPO losses per timestep
                     ratio = torch.exp(new_log_prob_t - old_log_prob_t)
@@ -1027,12 +1041,18 @@ class PPO(RLAlgorithm):
                     value_loss_total += value_loss
                     entropy_loss_total += entropy_step
 
+                    # Track KL for early stopping
                     with torch.no_grad():
                         log_ratio = new_log_prob_t - old_log_prob_t
                         approx_kl = (
                             ((torch.exp(log_ratio) - 1) - log_ratio).mean().item()
                         )
                         approx_kl_divs.append(approx_kl)
+
+                    # Update hidden state for next timestep *without* detaching so that
+                    # gradients flow through time. We only detach outside the sequence.
+                    if self.recurrent and next_hidden is not None:
+                        step_hidden_state = next_hidden
 
                 # Average losses over sequence length
                 policy_loss_total = policy_loss_total / seq_len

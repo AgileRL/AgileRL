@@ -124,8 +124,8 @@ num_envs = 64  # Can be higher for faster training
 
 # Hyperparameters
 INIT_HP = {
-    "POP_SIZE": 4,  # Population size
-    "BATCH_SIZE": 64,
+    "POP_SIZE": 2,  # Population size
+    "BATCH_SIZE": 256,
     "LEARN_STEP": (delay_steps + 2),  # Match episode length (delay_steps + 2)
     "HIDDEN_STATE_SIZE": 64,
     "LR": 1e-4,
