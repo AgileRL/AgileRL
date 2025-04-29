@@ -47,7 +47,6 @@ def multiagent_cnn_config(
     else:
         sample_input = None
 
-    print(sample_input)
     return asdict(
         CnnNetConfig(
             channel_size=[32],

@@ -14,10 +14,10 @@ MUTATION_PARAMS:
 
 INIT_HP:
     ALGO: GRPO
-    BATCH_SIZE: 1
+    BATCH_SIZE_PER_GPU: 4 # This is batch size per GPU
     REDUCE_MEMORY_PEAK: true
     BETA: 0.001
-    LR: 0.0000005
+    LR: 0.000005
     CLIP_COEF: 0.2
     MAX_GRAD_NORM: 0.1
     UPDATE_EPOCHS: 1
@@ -29,5 +29,5 @@ INIT_HP:
     COSINE_lR_SCHEDULER:
     TOURN_SIZE: 2
     ELITISM: true
-    POP_SIZE: 1
+    POP_SIZE: 2
     EVAL_LOOP: 1

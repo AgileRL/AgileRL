@@ -11,8 +11,7 @@ from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
 
 from agilerl.algorithms.td3 import TD3
-from agilerl.modules.cnn import EvolvableCNN
-from agilerl.modules.mlp import EvolvableMLP
+from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
 from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.wrappers.make_evolvable import MakeEvolvable
@@ -21,6 +20,7 @@ from tests.helper_functions import (
     generate_discrete_space,
     generate_multidiscrete_space,
     generate_random_box_space,
+    get_experiences_batch,
     get_sample_from_space,
 )
 
@@ -142,12 +142,25 @@ class SimpleCNN(nn.Module):
 
 
 # initialize td3 with valid parameters
-def test_initialize_td3_with_minimum_parameters():
-    observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
+# Initializes all necessary attributes with default values
+@pytest.mark.parametrize(
+    "observation_space, encoder_cls",
+    [
+        (generate_random_box_space(shape=(4,)), EvolvableMLP),
+        (generate_random_box_space(shape=(3, 32, 32), low=0, high=255), EvolvableCNN),
+        (generate_dict_or_tuple_space(2, 2, dict_space=True), EvolvableMultiInput),
+        (generate_dict_or_tuple_space(2, 2, dict_space=False), EvolvableMultiInput),
+    ],
+)
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+def test_initialize_td3(observation_space, encoder_cls, accelerator):
     action_space = generate_random_box_space(shape=(2,), low=-1, high=1)
 
-    td3 = TD3(observation_space, action_space)
+    # Initialize TD3 with default parameters
+    td3 = TD3(observation_space, action_space, accelerator=accelerator)
 
+    expected_opt_cls = AcceleratedOptimizer if accelerator else optim.Adam
+    expected_device = accelerator.device if accelerator else "cpu"
     assert td3.observation_space == observation_space
     assert td3.action_space == action_space
     assert np.all(td3.max_action == 1)
@@ -158,93 +171,26 @@ def test_initialize_td3_with_minimum_parameters():
     assert td3.gamma == 0.99
     assert td3.tau == 0.005
     assert td3.mut is None
-    assert td3.device == "cpu"
-    assert td3.accelerator is None
+    assert td3.device == expected_device
+    assert td3.accelerator == accelerator
     assert td3.index == 0
     assert td3.scores == []
     assert td3.fitness == []
     assert td3.steps == [0]
-    assert isinstance(td3.actor.encoder, EvolvableMLP)
-    assert isinstance(td3.actor_target.encoder, EvolvableMLP)
-    assert isinstance(td3.actor_optimizer.optimizer, optim.Adam)
-    assert isinstance(td3.critic_1.encoder, EvolvableMLP)
-    assert isinstance(td3.critic_target_1.encoder, EvolvableMLP)
-    assert isinstance(td3.critic_1_optimizer.optimizer, optim.Adam)
-    assert isinstance(td3.critic_2.encoder, EvolvableMLP)
-    assert isinstance(td3.critic_target_2.encoder, EvolvableMLP)
-    assert isinstance(td3.critic_2_optimizer.optimizer, optim.Adam)
-    assert isinstance(td3.criterion, nn.MSELoss)
-
-
-# Initializes actor network with EvolvableCNN based on net_config and Accelerator.
-def test_initialize_td3_with_cnn_accelerator():
-    observation_space = generate_random_box_space(shape=(3, 32, 32), low=0, high=255)
-    action_space = generate_random_box_space(shape=(2,), low=0, high=1)
-    max_action = 1
-    index = 0
-    net_config_cnn = {
-        "encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-    batch_size = 64
-    lr_actor = 1e-4
-    lr_critic = 1e-3
-    learn_step = 5
-    gamma = 0.99
-    tau = 1e-3
-    mut = None
-    actor_network = None
-    accelerator = Accelerator()
-    wrap = True
-
-    td3 = TD3(
-        observation_space=observation_space,
-        action_space=action_space,
-        index=index,
-        net_config=net_config_cnn,
-        batch_size=batch_size,
-        lr_actor=lr_actor,
-        lr_critic=lr_critic,
-        learn_step=learn_step,
-        gamma=gamma,
-        tau=tau,
-        mut=mut,
-        actor_network=actor_network,
-        accelerator=accelerator,
-        wrap=wrap,
-    )
-
-    assert td3.observation_space == observation_space
-    assert td3.action_space == action_space
-    assert np.all(td3.max_action == max_action)
-    assert td3.batch_size == batch_size
-    assert td3.lr_actor == lr_actor
-    assert td3.lr_critic == lr_critic
-    assert td3.learn_step == learn_step
-    assert td3.gamma == gamma
-    assert td3.tau == tau
-    assert td3.mut == mut
-    assert td3.accelerator == accelerator
-    assert td3.index == index
-    assert td3.scores == []
-    assert td3.fitness == []
-    assert td3.steps == [0]
-    assert isinstance(td3.actor.encoder, EvolvableCNN)
-    assert isinstance(td3.actor_target.encoder, EvolvableCNN)
-    assert isinstance(td3.critic_1.encoder, EvolvableCNN)
-    assert isinstance(td3.critic_target_1.encoder, EvolvableCNN)
-    assert isinstance(td3.critic_2.encoder, EvolvableCNN)
-    assert isinstance(td3.critic_target_2.encoder, EvolvableCNN)
-    assert isinstance(td3.actor_optimizer.optimizer, AcceleratedOptimizer)
-    assert isinstance(td3.critic_1_optimizer.optimizer, AcceleratedOptimizer)
-    assert isinstance(td3.critic_2_optimizer.optimizer, AcceleratedOptimizer)
+    assert isinstance(td3.actor.encoder, encoder_cls)
+    assert isinstance(td3.actor_target.encoder, encoder_cls)
+    assert isinstance(td3.actor_optimizer.optimizer, expected_opt_cls)
+    assert isinstance(td3.critic_1.encoder, encoder_cls)
+    assert isinstance(td3.critic_target_1.encoder, encoder_cls)
+    assert isinstance(td3.critic_1_optimizer.optimizer, expected_opt_cls)
+    assert isinstance(td3.critic_2.encoder, encoder_cls)
+    assert isinstance(td3.critic_target_2.encoder, encoder_cls)
+    assert isinstance(td3.critic_2_optimizer.optimizer, expected_opt_cls)
     assert isinstance(td3.criterion, nn.MSELoss)
 
 
 # Can initialize td3 with an actor network
+# TODO: This will be deprecated in the future
 @pytest.mark.parametrize(
     "observation_space, actor_network, critic_1_network, critic_2_network, input_tensor, input_tensor_critic",
     [
@@ -308,6 +254,7 @@ def test_initialize_td3_with_actor_network(
 
 
 # Can initialize td3 with an actor network
+# TODO: This will be deprecated in the future
 @pytest.mark.parametrize(
     "observation_space, actor_network, critic_1_network, critic_2_network, input_tensor, input_tensor_critic",
     [
@@ -323,6 +270,7 @@ def test_initialize_td3_with_actor_network(
 )
 
 # Can initialize td3 with an actor network but no critics - should trigger warning
+# TODO: This will be deprecated in the future
 def test_initialize_td3_with_actor_network_no_critics(
     observation_space,
     actor_network,
@@ -368,6 +316,7 @@ def test_initialize_td3_with_actor_network_no_critics(
 
 
 # Can initialize td3 with an actor network
+# TODO: This will be deprecated in the future
 @pytest.mark.parametrize(
     "observation_space, actor_network, input_tensor",
     [
@@ -527,42 +476,45 @@ def test_returns_expected_action_float64():
 
 # learns from experiences and updates network parameters
 @pytest.mark.parametrize(
+    "observation_space",
+    [
+        generate_discrete_space(4),
+        generate_random_box_space(shape=(4,)),
+        generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
+        generate_multidiscrete_space(2, 2),
+        generate_dict_or_tuple_space(2, 2, dict_space=True),
+        generate_dict_or_tuple_space(2, 2, dict_space=False),
+    ],
+)
+@pytest.mark.parametrize(
     "min_action, max_action",
     [(-1, 1), ([-1, 0], [1, 1]), ([-1, -1], [0, 1]), ([-1, -2], [1, 0])],
 )
-def test_learns_from_experiences(min_action, max_action):
-    min_action = np.array(min_action) if isinstance(min_action, list) else min_action
-    max_action = np.array(max_action) if isinstance(max_action, list) else max_action
-    observation_space = generate_random_box_space(shape=(3, 32, 32), low=0, high=255)
-    action_space = generate_random_box_space(
-        shape=(2,), low=min_action, high=max_action
-    )
-    batch_size = 64
-    net_config_cnn = {
-        "encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+def test_learns_from_experiences(
+    observation_space, min_action, max_action, accelerator
+):
+    # Continuous action space
+    low = np.array(min_action) if isinstance(min_action, list) else min_action
+    high = np.array(max_action) if isinstance(max_action, list) else max_action
+    action_space = generate_random_box_space(shape=(2,), low=low, high=high)
 
     # Create an instance of the td3 class
+    batch_size = 64
+    policy_freq = 2
     td3 = TD3(
         observation_space,
         action_space,
-        net_config=net_config_cnn,
         batch_size=batch_size,
-        policy_freq=2,
+        policy_freq=policy_freq,
+        accelerator=accelerator,
     )
 
     # Create a batch of experiences
-    states = torch.randn(batch_size, *observation_space.shape)
-    actions = torch.randint(0, 2, (batch_size, action_space.shape[0])).float()
-    rewards = torch.randn((batch_size, 1))
-    next_states = torch.randn(batch_size, *observation_space.shape)
-    dones = torch.randint(0, 2, (batch_size, 1))
-
-    experiences = [states, actions, rewards, next_states, dones]
+    device = accelerator.device if accelerator else "cpu"
+    experiences = get_experiences_batch(
+        observation_space, action_space, batch_size, device
+    )
 
     # Copy state dict before learning - should be different to after updating weights
     actor = td3.actor
@@ -589,59 +541,6 @@ def test_learns_from_experiences(min_action, max_action):
     assert isinstance(actor_loss, float)
     assert isinstance(critic_loss, float)
     assert critic_loss >= 0.0
-    assert actor == td3.actor
-    assert actor_target == td3.actor_target
-    assert actor_pre_learn_sd != str(td3.actor.state_dict())
-    assert critic_1 == td3.critic_1
-    assert critic_target_1 == td3.critic_target_1
-    assert critic_1_pre_learn_sd != str(td3.critic_1.state_dict())
-    assert critic_2 == td3.critic_2
-    assert critic_target_2 == td3.critic_target_2
-    assert critic_2_pre_learn_sd != str(td3.critic_2.state_dict())
-
-
-# learns from experiences and updates network parameters
-def test_learns_from_experiences_with_accelerator():
-    accelerator = Accelerator()
-    observation_space = generate_discrete_space(4)
-    action_space = generate_random_box_space(shape=(2,), low=0, high=1)
-    max_action = 1
-    batch_size = 64
-
-    # Create an instance of the td3 class
-    td3 = TD3(
-        observation_space,
-        action_space,
-        max_action,
-        batch_size=batch_size,
-        policy_freq=1,
-        accelerator=accelerator,
-    )
-
-    # Create a batch of experiences
-    states = torch.randint(0, observation_space.n, (batch_size, 1)).float()
-    actions = torch.randint(0, 2, (batch_size, action_space.shape[0])).float()
-    rewards = torch.randn((batch_size, 1))
-    next_states = torch.randint(0, observation_space.n, (batch_size, 1)).float()
-    dones = torch.randint(0, 2, (batch_size, 1))
-
-    experiences = [states, actions, rewards, next_states, dones]
-
-    # Copy state dict before learning - should be different to after updating weights
-    actor = td3.actor
-    actor_target = td3.actor_target
-    actor_pre_learn_sd = str(copy.deepcopy(td3.actor.state_dict()))
-    critic_1 = td3.critic_1
-    critic_target_1 = td3.critic_target_1
-    critic_1_pre_learn_sd = str(copy.deepcopy(td3.critic_1.state_dict()))
-    critic_2 = td3.critic_2
-    critic_target_2 = td3.critic_target_2
-    critic_2_pre_learn_sd = str(copy.deepcopy(td3.critic_2.state_dict()))
-
-    td3.scores = [0]
-    # Call the learn method
-    td3.learn(experiences)
-
     assert actor == td3.actor
     assert actor_target == td3.actor_target
     assert actor_pre_learn_sd != str(td3.actor.state_dict())
@@ -733,82 +632,34 @@ def test_soft_update():
 
 
 # Runs algorithm test loop
-def test_algorithm_test_loop():
-    observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
+@pytest.mark.parametrize(
+    "observation_space",
+    [
+        generate_random_box_space(shape=(4,)),
+        generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
+    ],
+)
+@pytest.mark.parametrize("num_envs", [1, 3])
+def test_algorithm_test_loop(observation_space, num_envs):
     action_space = generate_random_box_space(shape=(2,), low=0, high=1)
-    num_envs = 3
-
-    env = DummyEnv(state_size=observation_space.shape, vect=True, num_envs=num_envs)
-
-    # env = make_vect_envs("CartPole-v1", num_envs=num_envs)
+    vect = num_envs > 1
+    env = DummyEnv(state_size=observation_space.shape, vect=vect, num_envs=num_envs)
     agent = TD3(observation_space=observation_space, action_space=action_space)
     mean_score = agent.test(env, max_steps=10)
-    assert isinstance(mean_score, float)
-
-
-# Runs algorithm test loop with unvectorised env
-def test_algorithm_test_loop_unvectorized():
-    observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
-    action_space = generate_random_box_space(shape=(2,), low=0, high=1)
-
-    env = DummyEnv(state_size=observation_space.shape, vect=False)
-
-    agent = TD3(observation_space=observation_space, action_space=action_space)
-    mean_score = agent.test(env, max_steps=10)
-    assert isinstance(mean_score, float)
-
-
-# Runs algorithm test loop with images
-def test_algorithm_test_loop_images():
-    observation_space = generate_random_box_space(shape=(3, 32, 32), low=0, high=255)
-    action_space = generate_random_box_space(shape=(2,), low=0, high=1)
-
-    env = DummyEnv(state_size=observation_space.shape, vect=True)
-
-    net_config_cnn = {
-        "encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-
-    agent = TD3(
-        observation_space=observation_space,
-        action_space=action_space,
-        net_config=net_config_cnn,
-    )
-    mean_score = agent.test(env, max_steps=10)
-    assert isinstance(mean_score, float)
-
-
-# Runs algorithm test loop with unvectorized images
-def test_algorithm_test_loop_images_unvectorized():
-    observation_space = generate_random_box_space(shape=(32, 32, 3), low=0, high=255)
-    action_space = generate_random_box_space(shape=(2,), low=0, high=1)
-
-    env = DummyEnv(state_size=observation_space.shape, vect=False)
-
-    net_config_cnn = {
-        "encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-
-    agent = TD3(
-        observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
-        action_space=action_space,
-        net_config=net_config_cnn,
-    )
-    mean_score = agent.test(env, max_steps=10, swap_channels=True)
     assert isinstance(mean_score, float)
 
 
 # Clones the agent and returns an identical agent.
-def test_clone_returns_identical_agent():
-    observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
+@pytest.mark.parametrize(
+    "observation_space",
+    [
+        generate_random_box_space(shape=(4,), low=0, high=1),
+        generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
+        generate_dict_or_tuple_space(2, 2, dict_space=True),
+        generate_dict_or_tuple_space(2, 2, dict_space=False),
+    ],
+)
+def test_clone_returns_identical_agent(observation_space):
     action_space = generate_random_box_space(shape=(2,), low=0, high=1)
 
     td3 = DummyTD3(observation_space, action_space)
@@ -956,14 +807,13 @@ def test_clone_after_learning():
     batch_size = 8
     td3 = TD3(observation_space, action_space)
 
-    states = torch.randn(batch_size, observation_space.shape[0])
-    actions = torch.randn(batch_size, action_space.shape[0])
-    rewards = torch.rand(batch_size, 1)
-    next_states = torch.randn(batch_size, observation_space.shape[0])
-    dones = torch.zeros(batch_size, 1)
-
-    experiences = states, actions, rewards, next_states, dones
+    # Get experiences and learn
+    experiences = get_experiences_batch(
+        observation_space, action_space, batch_size, device=td3.device
+    )
     td3.learn(experiences)
+
+    # Clone the agent
     clone_agent = td3.clone()
 
     assert clone_agent.observation_space == td3.observation_space
@@ -1020,10 +870,21 @@ def test_unwrap_models():
 
 
 # The saved checkpoint file contains the correct data and format.
-def test_save_load_checkpoint_correct_data_and_format(tmpdir):
+@pytest.mark.parametrize(
+    "observation_space, encoder_cls",
+    [
+        (generate_random_box_space(shape=(4,), low=0, high=1), EvolvableMLP),
+        (generate_random_box_space(shape=(3, 32, 32), low=0, high=255), EvolvableCNN),
+        (generate_dict_or_tuple_space(2, 2, dict_space=True), EvolvableMultiInput),
+        (generate_dict_or_tuple_space(2, 2, dict_space=False), EvolvableMultiInput),
+    ],
+)
+def test_save_load_checkpoint_correct_data_and_format(
+    tmpdir, observation_space, encoder_cls
+):
     # Initialize the td3 agent
     td3 = TD3(
-        observation_space=generate_random_box_space(shape=(4,), low=0, high=1),
+        observation_space=observation_space,
         action_space=generate_random_box_space(shape=(2,), low=0, high=1),
     )
 
@@ -1064,102 +925,19 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "steps" in checkpoint
 
     td3 = TD3(
-        observation_space=generate_random_box_space(shape=(4,), low=0, high=1),
+        observation_space=observation_space,
         action_space=generate_random_box_space(shape=(2,), low=-1, high=1),
     )
     # Load checkpoint
     td3.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert isinstance(td3.actor.encoder, EvolvableMLP)
-    assert isinstance(td3.actor_target.encoder, EvolvableMLP)
-    assert isinstance(td3.critic_1.encoder, EvolvableMLP)
-    assert isinstance(td3.critic_target_1.encoder, EvolvableMLP)
-    assert isinstance(td3.critic_2.encoder, EvolvableMLP)
-    assert isinstance(td3.critic_target_2.encoder, EvolvableMLP)
-    assert td3.lr_actor == 1e-4
-    assert td3.lr_critic == 1e-3
-    assert str(td3.actor.state_dict()) == str(td3.actor_target.state_dict())
-    assert str(td3.critic_1.state_dict()) == str(td3.critic_target_1.state_dict())
-    assert str(td3.critic_2.state_dict()) == str(td3.critic_target_2.state_dict())
-    assert np.all(td3.max_action == 1)
-    assert td3.batch_size == 64
-    assert td3.learn_step == 5
-    assert td3.gamma == 0.99
-    assert td3.tau == 0.005
-    assert td3.mut is None
-    assert td3.index == 0
-    assert td3.scores == []
-    assert td3.fitness == []
-    assert td3.steps == [0]
-
-
-def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
-    net_config_cnn = {
-        "encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-
-    # Initialize the td3 agent
-    td3 = TD3(
-        observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
-        action_space=generate_random_box_space(shape=(2,), low=-1, high=1),
-        net_config=net_config_cnn,
-    )
-
-    # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    td3.save_checkpoint(checkpoint_path)
-
-    # Load the saved checkpoint file
-    checkpoint = torch.load(checkpoint_path, pickle_module=dill)
-
-    # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint["network_info"]["modules"]
-    assert "actor_state_dict" in checkpoint["network_info"]["modules"]
-    assert "actor_target_init_dict" in checkpoint["network_info"]["modules"]
-    assert "actor_target_state_dict" in checkpoint["network_info"]["modules"]
-    assert "actor_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
-    assert "critic_1_init_dict" in checkpoint["network_info"]["modules"]
-    assert "critic_1_state_dict" in checkpoint["network_info"]["modules"]
-    assert "critic_target_1_init_dict" in checkpoint["network_info"]["modules"]
-    assert "critic_target_1_state_dict" in checkpoint["network_info"]["modules"]
-    assert "critic_1_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
-    assert "critic_2_init_dict" in checkpoint["network_info"]["modules"]
-    assert "critic_2_state_dict" in checkpoint["network_info"]["modules"]
-    assert "critic_target_2_init_dict" in checkpoint["network_info"]["modules"]
-    assert "critic_target_2_state_dict" in checkpoint["network_info"]["modules"]
-    assert "critic_2_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
-    assert "max_action" in checkpoint
-    assert "batch_size" in checkpoint
-    assert "lr_actor" in checkpoint
-    assert "lr_critic" in checkpoint
-    assert "learn_step" in checkpoint
-    assert "gamma" in checkpoint
-    assert "tau" in checkpoint
-    assert "mut" in checkpoint
-    assert "index" in checkpoint
-    assert "scores" in checkpoint
-    assert "fitness" in checkpoint
-    assert "steps" in checkpoint
-
-    td3 = TD3(
-        observation_space=generate_random_box_space(shape=(4,), low=0, high=1),
-        action_space=generate_random_box_space(shape=(2,), low=-1, high=1),
-    )
-    # Load checkpoint
-    td3.load_checkpoint(checkpoint_path)
-
-    # Check if properties and weights are loaded correctly
-    assert isinstance(td3.actor.encoder, EvolvableCNN)
-    assert isinstance(td3.actor_target.encoder, EvolvableCNN)
-    assert isinstance(td3.critic_1.encoder, EvolvableCNN)
-    assert isinstance(td3.critic_target_1.encoder, EvolvableCNN)
-    assert isinstance(td3.critic_2.encoder, EvolvableCNN)
-    assert isinstance(td3.critic_target_2.encoder, EvolvableCNN)
+    assert isinstance(td3.actor.encoder, encoder_cls)
+    assert isinstance(td3.actor_target.encoder, encoder_cls)
+    assert isinstance(td3.critic_1.encoder, encoder_cls)
+    assert isinstance(td3.critic_target_1.encoder, encoder_cls)
+    assert isinstance(td3.critic_2.encoder, encoder_cls)
+    assert isinstance(td3.critic_target_2.encoder, encoder_cls)
     assert td3.lr_actor == 1e-4
     assert td3.lr_critic == 1e-3
     assert str(td3.actor.state_dict()) == str(td3.actor_target.state_dict())
@@ -1178,6 +956,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
 
 # The saved checkpoint file contains the correct data and format.
+# TODO: This will be deprecated in the future
 @pytest.mark.parametrize(
     "actor_network, input_tensor",
     [
@@ -1384,18 +1163,21 @@ def test_multi_dim_clamp(min, max, action, expected_result, device):
     assert clamped_actions.dtype == expected_result.dtype
 
 
+# The saved checkpoint file contains the correct data and format.
 @pytest.mark.parametrize(
-    "device, accelerator",
+    "observation_space, encoder_cls",
     [
-        ("cpu", None),
-        ("cpu", Accelerator()),
+        (generate_random_box_space(shape=(4,), low=0, high=1), EvolvableMLP),
+        (generate_random_box_space(shape=(3, 32, 32), low=0, high=255), EvolvableCNN),
+        (generate_dict_or_tuple_space(2, 2, dict_space=True), EvolvableMultiInput),
+        (generate_dict_or_tuple_space(2, 2, dict_space=False), EvolvableMultiInput),
     ],
 )
-# The saved checkpoint file contains the correct data and format.
-def test_load_from_pretrained(device, accelerator, tmpdir):
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+def test_load_from_pretrained(observation_space, encoder_cls, accelerator, tmpdir):
     # Initialize the td3 agent
     td3 = TD3(
-        observation_space=generate_random_box_space(shape=(4,), low=0, high=1),
+        observation_space=observation_space,
         action_space=generate_random_box_space(shape=(2,), low=0, high=1),
     )
 
@@ -1404,19 +1186,19 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     td3.save_checkpoint(checkpoint_path)
 
     # Create new agent object
-    new_td3 = TD3.load(checkpoint_path, device=device, accelerator=accelerator)
+    new_td3 = TD3.load(checkpoint_path, accelerator=accelerator)
 
     # Check if properties and weights are loaded correctly
     assert new_td3.observation_space == td3.observation_space
     assert new_td3.action_space == td3.action_space
     assert np.all(new_td3.min_action == td3.min_action)
     assert np.all(new_td3.max_action == td3.max_action)
-    assert isinstance(new_td3.actor.encoder, EvolvableMLP)
-    assert isinstance(new_td3.actor_target.encoder, EvolvableMLP)
-    assert isinstance(new_td3.critic_1.encoder, EvolvableMLP)
-    assert isinstance(new_td3.critic_target_1.encoder, EvolvableMLP)
-    assert isinstance(new_td3.critic_2.encoder, EvolvableMLP)
-    assert isinstance(new_td3.critic_target_2.encoder, EvolvableMLP)
+    assert isinstance(new_td3.actor.encoder, encoder_cls)
+    assert isinstance(new_td3.actor_target.encoder, encoder_cls)
+    assert isinstance(new_td3.critic_1.encoder, encoder_cls)
+    assert isinstance(new_td3.critic_target_1.encoder, encoder_cls)
+    assert isinstance(new_td3.critic_2.encoder, encoder_cls)
+    assert isinstance(new_td3.critic_target_2.encoder, encoder_cls)
     assert new_td3.lr_actor == td3.lr_actor
     assert new_td3.lr_critic == td3.lr_critic
     assert str(new_td3.actor.to("cpu").state_dict()) == str(td3.actor.state_dict())
@@ -1447,76 +1229,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     assert new_td3.steps == td3.steps
 
 
-@pytest.mark.parametrize(
-    "device, accelerator",
-    [
-        ("cpu", None),
-        ("cpu", Accelerator()),
-    ],
-)
 # The saved checkpoint file contains the correct data and format.
-def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
-    # Initialize the td3 agent
-    td3 = TD3(
-        observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
-        action_space=generate_random_box_space(shape=(2,), low=0, high=1),
-        net_config={
-            "encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }
-        },
-    )
-
-    # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    td3.save_checkpoint(checkpoint_path)
-
-    # Create new agent object
-    new_td3 = TD3.load(checkpoint_path, device=device, accelerator=accelerator)
-
-    # Check if properties and weights are loaded correctly
-    assert new_td3.observation_space == td3.observation_space
-    assert new_td3.action_space == td3.action_space
-    assert np.all(new_td3.min_action == td3.min_action)
-    assert np.all(new_td3.max_action == td3.max_action)
-    assert isinstance(new_td3.actor.encoder, EvolvableCNN)
-    assert isinstance(new_td3.actor_target.encoder, EvolvableCNN)
-    assert isinstance(new_td3.critic_1.encoder, EvolvableCNN)
-    assert isinstance(new_td3.critic_target_1.encoder, EvolvableCNN)
-    assert isinstance(new_td3.critic_2.encoder, EvolvableCNN)
-    assert isinstance(new_td3.critic_target_2.encoder, EvolvableCNN)
-    assert new_td3.lr_actor == td3.lr_actor
-    assert new_td3.lr_critic == td3.lr_critic
-    assert str(new_td3.actor.to("cpu").state_dict()) == str(td3.actor.state_dict())
-    assert str(new_td3.actor_target.to("cpu").state_dict()) == str(
-        td3.actor_target.state_dict()
-    )
-    assert str(new_td3.critic_1.to("cpu").state_dict()) == str(
-        td3.critic_1.state_dict()
-    )
-    assert str(new_td3.critic_target_1.to("cpu").state_dict()) == str(
-        td3.critic_target_1.state_dict()
-    )
-    assert str(new_td3.critic_2.to("cpu").state_dict()) == str(
-        td3.critic_2.state_dict()
-    )
-    assert str(new_td3.critic_target_2.to("cpu").state_dict()) == str(
-        td3.critic_target_2.state_dict()
-    )
-    assert new_td3.batch_size == td3.batch_size
-    assert new_td3.learn_step == td3.learn_step
-    assert new_td3.gamma == td3.gamma
-    assert new_td3.tau == td3.tau
-    assert new_td3.policy_freq == td3.policy_freq
-    assert new_td3.mut == td3.mut
-    assert new_td3.index == td3.index
-    assert new_td3.scores == td3.scores
-    assert new_td3.fitness == td3.fitness
-    assert new_td3.steps == td3.steps
-
-
+# TODO: This will be deprecated in the future
 @pytest.mark.parametrize(
     "observation_space, actor_network, input_tensor",
     [
@@ -1532,7 +1246,6 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
         ),
     ],
 )
-# The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained_networks(
     observation_space, actor_network, input_tensor, request, tmpdir
 ):

@@ -54,7 +54,7 @@ unlike the rest of the AgileRL framework, we can only tune the RL hyperparameter
 
     INIT_HP = {
         "ALGO": "GRPO",
-        "BATCH_SIZE": 1,
+        "BATCH_SIZE_PER_GPU": 1,
         "REDUCE_MEMORY_PEAK": True,
         "BETA": 0.001,
         "LR": 0.000005,
@@ -94,8 +94,8 @@ model, and the Countdown dataset, and initialise them as follows:
             attn_implementation="flash_attention_2",
         )
         peft_config = LoraConfig(
-            r=32,
-            lora_alpha=32,
+            r=16,
+            lora_alpha=64,
             target_modules=[
                 "q_proj",
                 "k_proj",
@@ -113,7 +113,7 @@ model, and the Countdown dataset, and initialise them as follows:
 
     def make_dataset(dataset_name: str) -> Tuple[Dataset, Dataset]:
         raw_dataset = (
-            load_dataset(DATASET, split="train").shuffle(seed=42).select(range(50000))
+            load_dataset(dataset_name, split="train").shuffle(seed=42).select(range(50000))
         )
         raw_dataset = raw_dataset.rename_column("target", "answer")
         raw_dataset = raw_dataset.rename_column("nums", "question")
@@ -125,9 +125,9 @@ model, and the Countdown dataset, and initialise them as follows:
     # Instantiate the model and the associated tokenizer
     model = create_model(pretrained_model_name_or_path=MODEL_PATH)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.pad_token_id = tokenizer.eos_token_id
     train_dataset, test_dataset = make_dataset(DATASET)
-
+    INIT_HP["PAD_TOKEN_ID"] = tokenizer.pad_token_id
 
 Create the Reasoning Environment
 --------------------------------
@@ -188,14 +188,12 @@ for displaying these behaviours, the agent itself discovers the best way to achi
                 equation = answer_tags[0].strip()
                 used_numbers = [int(n) for n in re.findall(r"\d+", equation)]
 
-                if sorted(used_numbers) != sorted(numbers):
-                    print(f"Numbers mismatch: {used_numbers} vs {numbers}")
+                if sorted(used_numbers) != sorted(numbers.flatten().tolist()):
                     rewards.append(0.0)
                     continue
 
                 allowed_pattern = r"^[\d+\-*/().\s]+$"
                 if not re.match(allowed_pattern, equation):
-                    print(f"Equation format invalid: {equation}")
                     rewards.append(0.0)
                     continue
 
@@ -204,10 +202,8 @@ for displaying these behaviours, the agent itself discovers the best way to achi
                 if abs(float(result) - float(gt)) < 1e-5:
                     rewards.append(1.0)
                 else:
-                    print(f"Result {result} doesn't match target {gt}")
                     rewards.append(0.0)
-            except Exception as e:
-                print(f"Equation error: {e}")
+            except Exception:
                 rewards.append(0.0)
         return rewards
 
@@ -218,20 +214,11 @@ for displaying these behaviours, the agent itself discovers the best way to achi
             + format_reward_func([completion], [solution])[0]
         )
 
-        print(
-            f"""
-        ============================================, \n
-        Completion: {completion}, \n
-        Numbers: {prompt}, \n
-        Gospel Answer: {solution.item()} \n
-        Reward: {reward}
-        """
-        )
-        # Save successful countdown  comletions
         if reward == 2.0:
             with open("countdown_completions.txt", "a") as text_file:
-                text_file.write(completion + "\n" + "="*50 + "\n")
-
+                text_file.write(
+                    f"Prompt {prompt}" + "\n" + completion + "\n" + "=" * 50 + "\n"
+                )
 
         return reward
 
@@ -251,7 +238,7 @@ Combining all these components, we can now initialise the HuggingFaceGym object.
             },
             {
                 "role": "user",
-                "content": f"Using each number in this tensor only once {tuple(i.item() for i in q)}, create an equation that equals {a.item()}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer> (1 + 2) / 3 </answer>.",
+                "content": f"Using each number in this tensor only once {tuple(i.item() for i in q)}, create an equation that equals {a.item()}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
             },
             {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
         ]
@@ -285,7 +272,7 @@ Combining all these components, we can now initialise the HuggingFaceGym object.
 
 
     # Define accelerators for distributed training
-    accelerators = [Accelerator() for _ in range(init_hp["POP_SIZE"])]
+    accelerator = Accelerator()
 
     # Convert the HuggingFace dataset into a Gymnasium environment
     env = HuggingFaceGym(
@@ -296,6 +283,7 @@ Combining all these components, we can now initialise the HuggingFaceGym object.
         apply_chat_template_fn=countdown_chat_template,
         data_batch_size=8,
         custom_collate_fn=custom_collate_fn,
+        accelerator=accelerator,
     )
 
 
@@ -312,13 +300,6 @@ to train a larger, more powerful model, then this becomes even more infeasible. 
 distributed training, to share the workload across multiple devices and speed up training. To enable distributed
 training in this tutorial, we use deepspeed and accelerate.
 
-To generate an accelerate file, run the command ``accelerate config`` in your terminal, following the instructions
-on screen to outline the details of the compute you intend to use for your finetuning, saying yes to the question
-"Do you want to use DeepSpeed?" and no to the question "Do you want to specify a json file to a DeepSpeed config?"
-if you want an auto-generated deepspeed config file. More information on the deepspeed configuration can be found
-in their `docs <https://www.deepspeed.ai/docs/config-json/>`_. The accelerate config will handle the details of
-the distribution and the GRPO class handles how the accelerator is used during training.
-
 .. code-block:: python
 
     hp_config = HyperparameterConfig(
@@ -333,11 +314,12 @@ the distribution and the GRPO class handles how the accelerator is used during t
         algo=init_hp["ALGO"],
         observation_space=env.observation_space,
         action_space=env.action_space,
+        actor_network=model,
         net_config=None,
-        INIT_HP=init_hp,
+        INIT_HP=INIT_HP,
         hp_config=hp_config,
         population_size=init_hp["POP_SIZE"],
-        accelerator=accelerators,
+        accelerator=accelerator,
     )
 
 Creating Mutations and Tournament objects
@@ -402,9 +384,58 @@ The simplest way to train an AgileRL agent is to use the :meth:`finetune_llm() <
         evo_steps=10,
         mutation=mutations,
         tournament=tournament,
-        accelerator=accelerators[0],
+        accelerator=accelerator,
         verbose=True,
     )
+
+Configuring Accelerate and DeepSpeed
+------------------------------------
+To generate an accelerate file, run the command ``accelerate config`` in your terminal, following the instructions
+on screen to outline the details of the compute you intend to use for your finetuning, saying yes to the question
+"Do you want to use DeepSpeed?" and no to the question "Do you want to specify a json file to a DeepSpeed config?"
+if you want an auto-generated deepspeed config file. More information on the deepspeed configuration can be found
+in their `docs <https://www.deepspeed.ai/docs/config-json/>`_. The accelerate config will handle the details of
+the distribution and the GRPO class handles how the accelerator is used during training. You can then launch a training
+run using ``accelerate`` with the following command:
+
+.. code-block:: bash
+
+    accelerate launch path/to/training_script
+
+Alternatively, you can avoid ``accelerate config`` by defining your own accelerate-deepspeed config file and pass
+it as an argument to ``accelerate launch``:
+
+.. code-block:: bash
+
+    accelerate launch --config_file path/to/accelerate-deepspeed-config.yaml path/to/training_script
+
+Example config file:
+
+.. code-block:: yaml
+
+    compute_environment: LOCAL_MACHINE
+    debug: false
+    deepspeed_config:
+        gradient_accumulation_steps: 2
+        gradient_clipping: 1.0
+        offload_optimizer_device: cpu
+        offload_param_device: cpu
+        zero3_init_flag: false
+        zero_stage: 2
+    distributed_type: DEEPSPEED
+    downcast_bf16: no
+    enable_cpu_affinity: false
+    machine_rank: 0
+    main_training_function: main
+    mixed_precision: bf16
+    num_machines: 4
+    num_processes: 1
+    rdzv_backend: static
+    same_network: true
+    tpu_env: []
+    tpu_use_cluster: false
+    tpu_use_sudo: false
+    use_cpu: false
 
 
 Using a custom training loop
@@ -415,47 +446,41 @@ function and is an example of how we might choose to make use of a population of
 
 .. code-block:: python
 
-    def gather_tensor(tensor: torch.Tensor, agent: GRPO) -> torch.Tensor:
+    def gather_tensor(tensor: Union[torch.Tensor, float], accelerator: Accelerator) -> torch.Tensor:
         """Gather tensors from gpus
 
         :param tensor: Tensor to gather
         :type tensor: torch.Tensor
-        :param agent: GRPO agent object
-        :type agent: GRPO
+        :param accelerator: Accelerator object
+        :type accelerator: accelerate.Accelerator
         :return: Stacked tensors
         :rtype: torch.Tensor
         """
-        # Convert to tensor if it's a scalar
         if not isinstance(tensor, torch.Tensor):
-            tensor = torch.tensor(tensor, device=f"cuda:{agent.local_rank}")
-
-        if tensor.device != agent.device:
-            tensor = tensor.to(agent.device)
-        # Ensure tensor is on correct device
-        tensor = tensor.detach().clone()
-        # Create a list to store tensors from all processes
-        world_size = dist.get_world_size()
-        gathered_tensors = [torch.zeros_like(tensor) for _ in range(world_size)]
-
-        # Gather the tensor from all processes
-        dist.all_gather(gathered_tensors, tensor)
-        return torch.stack(gathered_tensors)
+            tensor = torch.tensor(tensor, device=accelerator.device)
+        tensor = tensor.to(accelerator.device)
+        gathered_tensors = accelerator.gather(tensor)
+        return gathered_tensors
 
 
-    def aggregate_metrics_across_gpus(agent: GRPO, metric_tensor: torch.Tensor) -> float:
+    def aggregate_metrics_across_gpus(
+        accelerator: Accelerator, metric_tensor: Union[torch.Tensor, float]
+    ) -> float:
         """Aggregate gathered tensors
 
-        :param agent: GRPO agent
-        :type agent: GRPO
+        :param accelerator: Accelerator object
+        :type accelerator: accelerate.Accelerator
         :param metric_tensor: Metrics
         :type metric_tensor: torch.Tensor
         :return: Mean metric
         :rtype: float
         """
-        all_metrics = gather_tensor(metric_tensor, agent)
+        all_metrics = gather_tensor(metric_tensor, accelerator)
         avg_metrics = all_metrics.mean().item()
         return avg_metrics
 
+
+    accelerator = Accelerator()
     if accelerator is None or accelerator.is_main_process:
         print("\nTraining...")
 
@@ -491,7 +516,7 @@ function and is an example of how we might choose to make use of a population of
                 accuracy = (rewards == max_reward).sum() / len(rewards.flatten())
                 metrics.append(accuracy)
             agg_metrics = [
-                aggregate_metrics_across_gpus(agent, metric) for metric in metrics
+                aggregate_metrics_across_gpus(accelerator, metric) for metric in metrics
             ]
             prompts = next_prompts
             agg_test_metrics = None
@@ -504,7 +529,7 @@ function and is an example of how we might choose to make use of a population of
                     )
                     test_metrics.append(test_accuracy)
                 agg_test_metrics = [
-                    aggregate_metrics_across_gpus(agent, metric)
+                    aggregate_metrics_across_gpus(accelerator, metric)
                     for metric in test_metrics
                 ]
                 if verbose and (accelerator is None or accelerator.is_main_process):

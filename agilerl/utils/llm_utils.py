@@ -136,14 +136,6 @@ class HuggingFaceGym(gym.Env):
                 for completion in decoded_group_completion
             ]
             total_rewards.append(rewards)
-        # Shape of the returned tensor is (batch_size X group_size)
-        if self.eval_mode:
-            for idx, answer in enumerate(decoded_completions):
-                print(f"Question: {self.questions[idx]}")
-                print(f"Answer: {answer}")
-                print(f"Correct answer: {self.answers[idx]}")
-                print(f"Rewards: {total_rewards[idx]}")
-                print("\n")
         return torch.tensor(total_rewards)
 
     def _get_next_batch(self) -> List[BatchEncoding]:
