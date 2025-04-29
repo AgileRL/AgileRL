@@ -105,7 +105,7 @@ SHARED_INIT_HP_MA = {
 
 @pytest.fixture
 def ac_hp_config():
-    return HyperparameterConfig(
+    yield HyperparameterConfig(
         lr_actor=RLParameter(min=1e-4, max=1e-2),
         lr_critic=RLParameter(min=1e-4, max=1e-2),
         batch_size=RLParameter(min=8, max=512, dtype=int),
@@ -117,7 +117,7 @@ def ac_hp_config():
 
 @pytest.fixture
 def default_hp_config():
-    return HyperparameterConfig(
+    yield HyperparameterConfig(
         lr=RLParameter(min=6.25e-5, max=1e-2),
         batch_size=RLParameter(min=8, max=512, dtype=int),
         learn_step=RLParameter(
@@ -135,12 +135,12 @@ def grpo_hp_config():
 
 @pytest.fixture
 def encoder_mlp_config():
-    return {"encoder_config": {"hidden_size": [8]}}
+    yield {"encoder_config": {"hidden_size": [8]}}
 
 
 @pytest.fixture
 def encoder_simba_config():
-    return {
+    yield {
         "simba": True,
         "encoder_config": {
             "hidden_size": 64,
@@ -151,7 +151,7 @@ def encoder_simba_config():
 
 @pytest.fixture
 def encoder_cnn_config():
-    return {
+    yield {
         "encoder_config": {
             "channel_size": [3],
             "kernel_size": [3],
@@ -162,7 +162,7 @@ def encoder_cnn_config():
 
 @pytest.fixture
 def encoder_multi_input_config():
-    return {
+    yield {
         "encoder_config": {
             "cnn_config": {
                 "channel_size": [3],
@@ -195,7 +195,7 @@ def init_pop(
     if hp_config is not None:
         hp_config = request.getfixturevalue(hp_config)
 
-    return create_population(
+    pop = create_population(
         algo=algo,
         observation_space=observation_space,
         action_space=action_space,
@@ -206,6 +206,10 @@ def init_pop(
         device=device,
         accelerator=accelerator,
     )
+    yield pop
+    del pop
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 # The constructor initializes all the attributes of the Mutations class correctly.
