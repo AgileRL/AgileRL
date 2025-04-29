@@ -805,7 +805,7 @@ def test_load_from_pretrained(
 ):
     # Initialize the DQN agent
     dqn = DQN(
-        observation_space=generate_random_box_space(shape=(4,)),
+        observation_space=observation_space,
         action_space=generate_discrete_space(2),
     )
 
