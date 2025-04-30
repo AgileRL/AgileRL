@@ -1,21 +1,32 @@
-# AgileRL On-policy (RNN/MLP) Memory Game Demo
-#
-# This script demonstrates how to use recurrent neural networks (RNNs) or MLPs with PPO to solve a simple "remember the input" memory game.
-# The agent is shown a random symbol (one-hot) at the start, then receives blank observations for N steps, and is then asked to output the same symbol.
-# This is a minimal memory challenge for RL agents.
+# AgileRL Performance Profiling with Flamegraphs
+# This script demonstrates profiling AgileRL training using flamegraphs to identify bottlenecks
+# for the Memory Game RNN/MLP demo (see demo_on_policy_rnn_memory.py).
 
-import gymnasium as gym
-import numpy as np
+import webbrowser
 import torch
 from tqdm import trange
+import time
 import os
+import glob
+import io
+import gymnasium as gym
+
+# Profiling tools
+import cProfile
+import pstats
+import pyinstrument
+from torch.profiler import profile, record_function, ProfilerActivity
+from IPython.display import display, HTML, Video
+import tempfile
 
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.utils import create_population
 
+# --- Memory Game Environment (from demo_on_policy_rnn_memory.py) ---
+import numpy as np
 
-# --- Define the Memory Game Environment ---
+
 class MemoryGameEnv(gym.Env):
     """
     Observation: one-hot vector of length n_symbols, or all zeros during delay.
@@ -96,7 +107,7 @@ class MemoryGameEnv(gym.Env):
         pass
 
 
-# --- Setup Configuration ---
+# --- Setup Configuration (from demo_on_policy_rnn_memory.py) ---
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
@@ -116,15 +127,14 @@ else:
         },
     }
 
-
 # --- Create Environment and Population ---
 n_symbols = 5
-delay_steps = 5
-num_envs = 64  # Can be higher for faster training
+delay_steps = 4
+num_envs = 128  # Can be higher for faster training/profiling
 
 # Hyperparameters
 INIT_HP = {
-    "POP_SIZE": 2,  # Population size
+    "POP_SIZE": 1,  # Single agent for profiling
     "BATCH_SIZE": 256,
     "LEARN_STEP": (delay_steps + 2),  # Match episode length (delay_steps + 2)
     "HIDDEN_STATE_SIZE": 64,
@@ -177,132 +187,93 @@ pop = create_population(
     },
 )
 
-# --- Setup Evolution Components ---
-tournament = TournamentSelection(
-    tournament_size=2,
-    elitism=True,
-    population_size=INIT_HP["POP_SIZE"],
-    eval_loop=1,
-)
+agent = pop[0]
 
-mutations = Mutations(
-    no_mutation=0.4,
-    architecture=0,
-    new_layer_prob=0.0,
-    parameters=0.2,
-    activation=0,
-    rl_hp=0.2,
-    mutation_sd=0.1,
-    activation_selection=["ReLU", "ELU", "GELU"],
-    mutate_elite=True,
-    rand_seed=1,
-    device=device,
-)
+# =====================================================================
+# EXAMPLE PROFILING WITH CPROFILE
+# =====================================================================
+print("\n--- Profiling with cProfile ---")
+pr = cProfile.Profile()
+pr.enable()
+agent.collect_rollouts(env)
+pr.disable()
+s = io.StringIO()
+ps = pstats.Stats(pr, stream=s).sort_stats("cumulative")
+ps.print_stats(12)
+print(s.getvalue())
 
-# --- Training Loop (Performance-Flamegraph Style) ---
-max_steps = 5_000_000 // num_envs
-required_score = 0.95
-evo_steps = num_envs * INIT_HP["LEARN_STEP"] * 100
-eval_steps = None
-eval_loop = 5
+# =====================================================================
+# EXAMPLE PROFILING WITH PYINSTRUMENT
+# =====================================================================
+print("\n--- Profiling with pyinstrument ---")
+profiler = pyinstrument.Profiler()
+profiler.start()
+agent.learn()
+profiler.stop()
+# You can print or save the profiler output if desired:
+# print(profiler.output_text(unicode=True, color=True))
 
+# =====================================================================
+# PROFILING A COMPLETE TRAINING LOOP
+# =====================================================================
+use_profiler = False  # Set to True to enable flamegraph profiling for the full loop
+
+max_steps = 500_000 // num_envs  # Reduced for profiling
 total_steps = 0
-training_complete = False
+start_time = time.time()
 
-print("Training...")
+if use_profiler:
+    full_profiler = pyinstrument.Profiler()
+    full_profiler.start()
+
+print("\n--- Running Training Loop ---")
 pbar = trange(max_steps * num_envs, unit="step")
-while (
-    np.less([agent.steps[-1] for agent in pop], max_steps).all()
-    and not training_complete
-):
-    for agent in pop:
-        agent.collect_rollouts(env)
-        agent.learn()
-        total_steps += agent.learn_step * num_envs
-        agent.steps[-1] += agent.learn_step
-        pbar.update(agent.learn_step * num_envs // len(pop))
-
-    # Evaluate and evolve
-    if total_steps % evo_steps == 0:
-        fitnesses = [
-            agent.test(
-                single_test_env,
-                swap_channels=False,
-                max_steps=eval_steps,
-                loop=eval_loop,
-            )
-            for agent in pop
-        ]
-        mean_scores = [round(np.mean(agent.fitness[-eval_loop:]), 1) for agent in pop]
-        print(f"--- Global steps {total_steps} ---")
-        print(f"Steps {[agent.steps[-1] for agent in pop]}")
-        print(f"Scores: {mean_scores}")
-        print(f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}")
-        print(
-            f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}"
-        )
-
-        if any(score >= required_score for score in mean_scores):
-            print(
-                f"\nAgent achieved required score {required_score}. Stopping training."
-            )
-            elite, _ = tournament.select(pop)
-            training_complete = True
-            break
-
-        elite, pop = tournament.select(pop)
-        # pop = mutations.mutation(pop)
-        for agent in pop:
-            agent.steps.append(agent.steps[-1])
-
+while total_steps < max_steps:
+    agent.collect_rollouts(env)
+    agent.learn()
+    total_steps += INIT_HP["LEARN_STEP"]
+    pbar.update(INIT_HP["LEARN_STEP"] * num_envs)
 pbar.close()
 env.close()
 
-# --- Evaluate Best Agent ---
-print("Evaluating best agent...")
+end_time = time.time()
+print(f"\nTraining completed in {end_time - start_time:.2f} seconds")
 
-if not training_complete:
-    fitnesses = [
-        agent.test(
-            single_test_env,
-            swap_channels=False,
-            max_steps=eval_steps,
-            loop=eval_loop,
-            vectorized=True,
-        )
-        for agent in pop
-    ]
-    elite, _ = tournament.select(pop)
+if use_profiler:
+    full_profiler.stop()
+    flamegraph_file = os.path.abspath("flamegraph_training.html")
+    with open(flamegraph_file, "w") as f:
+        f.write(full_profiler.output_html())
+    print(f"Saving flamegraph to {flamegraph_file}")
+    webbrowser.open(flamegraph_file)
 
-# --- Run a few episodes and print results ---
-print("Running a few episodes with the best agent:")
-total_steps = 0
-episode_rewards = []
+# =====================================================================
+# TEST AGENT AND RECORD VIDEO (OPTIONAL)
+# =====================================================================
+print("\n--- Testing Agent and Recording Video ---")
+video_folder = "videos_rnn_memory_test"
+if not os.path.exists(video_folder):
+    os.makedirs(video_folder)
 
-for episode in range(20):
-    obs, _ = single_test_env.reset()
-    done = np.array([False])
-    episode_reward = 0
-    episode_steps = 0
-    if recurrent:
-        hidden_state = elite.get_initial_hidden_state(1)
-    while not done[0]:
-        if recurrent:
-            action, _, _, _, hidden_state = elite.get_action(
-                obs, hidden_state=hidden_state
-            )
-        else:
-            action, _, _, _, _ = elite.get_action(obs)
-        obs, reward, terminated, truncated, _ = single_test_env.step(action)
-        done = np.logical_or(terminated, truncated)
-        episode_reward += reward[0]
-        episode_steps += 1
-    print(f"Episode {episode + 1}: Reward: {episode_reward}, Steps: {episode_steps}")
-    total_steps += episode_steps
-    episode_rewards.append(episode_reward)
+# For MemoryGameEnv, we use a single SyncVectorEnv for testing
+testing_env_single = gym.vector.SyncVectorEnv([make_env()])
 
-avg_reward = sum(episode_rewards) / len(episode_rewards)
-avg_steps = total_steps / len(episode_rewards)
-print(f"Average Reward: {avg_reward:.2f}, Average Steps: {avg_steps:.2f}")
+# Optionally, you could wrap with RecordVideo if you implement a render_mode='rgb_array' for MemoryGameEnv
+# For now, we just run a test and print results
+print("Testing agent...")
+mean_reward = agent.test(testing_env_single, loop=5, max_steps=None, vectorized=True)
+print(f"Achieved mean reward of: {mean_reward}")
 
-print("Demo complete.")
+# =====================================================================
+# ADDITIONAL PROFILING WITH PYTORCH PROFILER
+# =====================================================================
+print("\n--- Profiling with PyTorch Profiler ---")
+with profile(
+    activities=[ProfilerActivity.CPU], record_shapes=True, with_stack=True
+) as prof:
+    with record_function("training_step"):
+        agent.collect_rollouts(env)
+        agent.learn()
+
+prof.export_chrome_trace("pytorch_trace.json")
+print("PyTorch profiler trace saved to pytorch_trace.json")
