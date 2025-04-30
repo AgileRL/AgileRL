@@ -355,9 +355,6 @@ def test_clone_returns_identical_agent():
     assert clone_agent.mut == ddpg.mut
     assert clone_agent.device == ddpg.device
     assert clone_agent.accelerator == ddpg.accelerator
-    print(clone_agent.wrap, ddpg.wrap)
-    print("1 = ", clone_agent.actor.state_dict())
-    print("\n\n2 = ", ddpg.actor.state_dict())
     assert str(clone_agent.actor.state_dict()) == str(ddpg.actor.state_dict())
     assert str(clone_agent.actor_target.state_dict()) == str(
         ddpg.actor_target.state_dict()
@@ -416,7 +413,6 @@ def test_save_load_checkpoint(tmp_path):
 
     # load_checkpoint
     loaded_agent = RSNorm(DDPG(observation_space, action_space))
-    print(checkpoint_path)
     loaded_agent.load_checkpoint(checkpoint_path)
     ddpg = ddpg_norm.agent
 

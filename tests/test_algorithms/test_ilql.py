@@ -204,8 +204,6 @@ def test_get_loss():
     assert isinstance(loss[0].item(), float)
     assert isinstance(loss[1], dict)
 
-    print(loss[1])
-
     loss_dict = {}
     loss_dict["token_loss"] = loss[1]["token_loss"][0]
     loss_dict["q_loss"] = loss[1]["q_loss"][0]

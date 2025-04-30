@@ -1,4 +1,5 @@
 import copy
+import gc
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -16,16 +17,12 @@ from pettingzoo import ParallelEnv
 from torch._dynamo import OptimizedModule
 
 from agilerl.algorithms.ippo import IPPO
-from agilerl.modules.cnn import EvolvableCNN
+from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
 from agilerl.modules.custom_components import GumbelSoftmax
-from agilerl.modules.mlp import EvolvableMLP
 from agilerl.networks.actors import StochasticActor
 from agilerl.networks.value_networks import ValueNetwork
 from agilerl.utils.evolvable_networks import get_default_encoder_config
-from agilerl.utils.utils import (
-    make_multi_agent_vect_envs,
-    observation_space_channels_to_first,
-)
+from agilerl.utils.utils import make_multi_agent_vect_envs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
     gen_multi_agent_dict_or_tuple_spaces,
@@ -298,7 +295,10 @@ def mlp_actor(observation_spaces, action_spaces):
         nn.Linear(64, action_spaces[0].n),
         nn.Softmax(dim=-1),
     )
-    return net
+    yield net
+    del net
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @pytest.fixture
@@ -308,19 +308,28 @@ def mlp_critic(observation_spaces):
         nn.ReLU(),
         nn.Linear(64, 1),
     )
-    return net
+    yield net
+    del net
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @pytest.fixture
 def cnn_actor():
     net = MultiAgentCNNActor()
-    return net
+    yield net
+    del net
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @pytest.fixture
 def cnn_critic():
     net = MultiAgentCNNCritic()
-    return net
+    yield net
+    del net
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @pytest.fixture
@@ -482,18 +491,30 @@ def vectorized_experiences(
 
 @pytest.mark.parametrize("sum_score", [True, False])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
-def test_loop(device, sum_score, compile_mode):
-    observation_spaces = generate_multi_agent_box_spaces(3, (6,))
+@pytest.mark.parametrize(
+    "observation_spaces",
+    [
+        generate_multi_agent_box_spaces(3, (6,)),
+        generate_multi_agent_box_spaces(3, (3, 32, 32)),
+    ],
+)
+@pytest.mark.parametrize("vectorized", [False, True])
+def test_loop(device, sum_score, compile_mode, observation_spaces, vectorized):
     action_spaces = generate_multi_agent_discrete_spaces(3, 2)
-    accelerator = None
 
-    env = DummyMultiEnv(observation_spaces, action_spaces)
+    if vectorized:
+        env = make_multi_agent_vect_envs(
+            DummyMultiEnv,
+            2,
+            **dict(observation_spaces=observation_spaces, action_spaces=action_spaces)
+        )
+    else:
+        env = DummyMultiEnv(observation_spaces, action_spaces)
 
     ippo = IPPO(
         observation_spaces,
         action_spaces,
         agent_ids=["agent_0", "agent_1", "other_agent_0"],
-        accelerator=accelerator,
         device=device,
         torch_compiler=compile_mode,
     )
@@ -505,100 +526,25 @@ def test_loop(device, sum_score, compile_mode):
         assert len(mean_score) == 2
 
 
-@pytest.mark.parametrize("sum_score", [True, False])
-@pytest.mark.parametrize("compile_mode", [None, "default"])
-def test_loop_cnn_non_vectorized(device, sum_score, compile_mode):
-    observation_spaces = generate_multi_agent_box_spaces(
-        3, (32, 32, 3), low=0, high=255
-    )
-    net_config = {
-        "encoder_config": {
-            "channel_size": [16],
-            "kernel_size": [3],
-            "stride_size": [1],
-            "init_layers": False,
-        },
-        "head_config": {"hidden_size": [32], "init_layers": False},
-    }
-    action_spaces = generate_multi_agent_discrete_spaces(3, 2)
-    accelerator = None
-    env = DummyMultiEnv(observation_spaces, action_spaces)
-    observation_spaces = [
-        observation_space_channels_to_first(space) for space in observation_spaces
-    ]
-    ippo = IPPO(
-        observation_spaces,
-        action_spaces,
-        agent_ids=["agent_0", "agent_1", "other_agent_0"],
-        net_config=net_config,
-        accelerator=accelerator,
-        device=device,
-        torch_compiler=compile_mode,
-    )
-    mean_score = ippo.test(env, max_steps=10, swap_channels=True, sum_scores=sum_score)
-    if sum_score:
-        assert isinstance(mean_score, float)
-    else:
-        assert isinstance(mean_score, np.ndarray)
-        assert len(mean_score) == 2
-
-
-@pytest.mark.parametrize("sum_score", [True, False])
-@pytest.mark.parametrize("compile_mode", [None, "default"])
-def test_loop_cnn_vectorized(device, sum_score, compile_mode):
-    env_observation_spaces = generate_multi_agent_box_spaces(
-        3, (32, 32, 3), low=0, high=255
-    )
-    agent_observation_spaces = generate_multi_agent_box_spaces(
-        3, (3, 32, 32), low=0, high=255
-    )
-    net_config = {
-        "encoder_config": {
-            "channel_size": [16],
-            "kernel_size": [3],
-            "stride_size": [1],
-            "init_layers": False,
-        },
-        "head_config": {"hidden_size": [32], "init_layers": False},
-    }
-    action_spaces = generate_multi_agent_discrete_spaces(3, 2)
-    accelerator = None
-    env = make_multi_agent_vect_envs(
-        DummyMultiEnv,
-        2,
-        **dict(observation_spaces=env_observation_spaces, action_spaces=action_spaces),
-    )
-    ippo = IPPO(
-        agent_observation_spaces,
-        action_spaces,
-        agent_ids=["agent_0", "agent_1", "other_agent_0"],
-        net_config=net_config,
-        accelerator=accelerator,
-        device=device,
-        torch_compiler=compile_mode,
-    )
-    mean_score = ippo.test(env, max_steps=10, swap_channels=True, sum_scores=sum_score)
-    if sum_score:
-        assert isinstance(mean_score, float)
-    else:
-        assert isinstance(mean_score, np.ndarray)
-        assert len(mean_score) == 2
-    env.close()
-
-
+@pytest.mark.parametrize(
+    "observation_spaces",
+    [
+        generate_multi_agent_box_spaces(3, (6,)),
+        generate_multi_agent_box_spaces(3, (3, 32, 32)),
+        gen_multi_agent_dict_or_tuple_spaces(3, 2, 2, dict_space=True),
+        gen_multi_agent_dict_or_tuple_spaces(3, 2, 2, dict_space=False),
+    ],
+)
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("wrap", [True, False])
-def test_ippo_clone_returns_identical_agent(accelerator_flag, wrap, compile_mode):
+def test_ippo_clone_returns_identical_agent(
+    accelerator_flag, wrap, compile_mode, observation_spaces
+):
     # Clones the agent and returns an identical copy.
-    observation_spaces = generate_multi_agent_box_spaces(3, (4,))
     action_spaces = generate_multi_agent_discrete_spaces(3, 2)
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     index = 0
-    net_config = {
-        "encoder_config": {"hidden_size": [64, 64], "init_layers": False},
-        "head_config": {"hidden_size": [32], "init_layers": False},
-    }
     batch_size = 64
     lr = 1e-4
     learn_step = 2048
@@ -625,7 +571,6 @@ def test_ippo_clone_returns_identical_agent(accelerator_flag, wrap, compile_mode
         action_spaces,
         agent_ids,
         index=index,
-        net_config=net_config,
         batch_size=batch_size,
         lr=lr,
         learn_step=learn_step,
@@ -771,23 +716,33 @@ def test_clone_after_learning(compile_mode):
 
 
 @pytest.mark.parametrize(
+    "observation_spaces, encoder_cls",
+    [
+        (generate_multi_agent_box_spaces(1, (6,)), EvolvableMLP),
+        (generate_multi_agent_box_spaces(1, (3, 32, 32)), EvolvableCNN),
+        (
+            gen_multi_agent_dict_or_tuple_spaces(1, 2, 2, dict_space=True),
+            EvolvableMultiInput,
+        ),
+        (
+            gen_multi_agent_dict_or_tuple_spaces(1, 2, 2, dict_space=False),
+            EvolvableMultiInput,
+        ),
+    ],
+)
+@pytest.mark.parametrize(
     "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator()])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_save_load_checkpoint_correct_data_and_format(
-    tmpdir, device, accelerator, compile_mode
+    tmpdir, device, accelerator, compile_mode, observation_spaces, encoder_cls
 ):
-    net_config = {
-        "encoder_config": {"hidden_size": [32, 32], "init_layers": False},
-        "head_config": {"hidden_size": [32], "init_layers": False},
-    }
     # Initialize the ippo agent
     ippo = IPPO(
-        observation_spaces=generate_multi_agent_box_spaces(1, (6,)),
+        observation_spaces=observation_spaces,
         action_spaces=generate_multi_agent_discrete_spaces(1, 2),
         agent_ids=["agent_0"],
-        net_config=net_config,
         torch_compiler=compile_mode,
         device=device,
         accelerator=accelerator,
@@ -820,10 +775,9 @@ def test_save_load_checkpoint_correct_data_and_format(
 
     # Load checkpoint
     loaded_ippo = IPPO(
-        observation_spaces=generate_multi_agent_box_spaces(1, (6,)),
+        observation_spaces=observation_spaces,
         action_spaces=generate_multi_agent_discrete_spaces(1, 2),
         agent_ids=["agent_0"],
-        net_config=net_config,
         torch_compiler=compile_mode,
         device=device,
         accelerator=accelerator,
@@ -838,10 +792,10 @@ def test_save_load_checkpoint_correct_data_and_format(
         )
     else:
         assert all(
-            isinstance(actor.encoder, EvolvableMLP) for actor in loaded_ippo.actors
+            isinstance(actor.encoder, encoder_cls) for actor in loaded_ippo.actors
         )
         assert all(
-            isinstance(critic.encoder, EvolvableMLP) for critic in loaded_ippo.critics
+            isinstance(critic.encoder, encoder_cls) for critic in loaded_ippo.critics
         )
     assert ippo.lr == 1e-4
 
@@ -862,6 +816,7 @@ def test_save_load_checkpoint_correct_data_and_format(
     assert ippo.steps == [0]
 
 
+# TODO: This will be deprecated in the future
 @pytest.mark.parametrize(
     "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
 )
@@ -1001,25 +956,38 @@ def test_ippo_unwrap_models(compile_mode):
         assert isinstance(critic, nn.Module)
 
 
+# The saved checkpoint file contains the correct data and format.
+@pytest.mark.parametrize(
+    "observation_spaces, encoder_cls",
+    [
+        (generate_multi_agent_box_spaces(3, (4,)), EvolvableMLP),
+        (generate_multi_agent_box_spaces(3, (3, 32, 32)), EvolvableCNN),
+        (
+            gen_multi_agent_dict_or_tuple_spaces(3, 2, 2, dict_space=True),
+            EvolvableMultiInput,
+        ),
+        (
+            gen_multi_agent_dict_or_tuple_spaces(3, 2, 2, dict_space=False),
+            EvolvableMultiInput,
+        ),
+    ],
+)
 @pytest.mark.parametrize(
     "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator()])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
-# The saved checkpoint file contains the correct data and format.
-def test_load_from_pretrained(device, accelerator, tmpdir, compile_mode):
+def test_load_from_pretrained(
+    device, accelerator, tmpdir, compile_mode, observation_spaces, encoder_cls
+):
     # Initialize the ippo agent
     ippo = IPPO(
-        observation_spaces=generate_multi_agent_box_spaces(3, (4,)),
+        observation_spaces=observation_spaces,
         action_spaces=generate_multi_agent_discrete_spaces(3, 2),
         agent_ids=["agent_0", "agent_1", "other_agent_0"],
         torch_compiler=compile_mode,
         accelerator=accelerator,
         device=device,
-        net_config={
-            "encoder_config": {"hidden_size": [16, 16], "init_layers": False},
-            "head_config": {"hidden_size": [16], "init_layers": False},
-        },
     )
 
     # Save the checkpoint to a file
@@ -1052,8 +1020,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir, compile_mode):
             assert isinstance(new_actor, OptimizedModule)
             assert isinstance(new_critic, OptimizedModule)
         else:
-            assert isinstance(new_actor.encoder, EvolvableMLP)
-            assert isinstance(new_critic.encoder, EvolvableMLP)
+            assert isinstance(new_actor.encoder, encoder_cls)
+            assert isinstance(new_critic.encoder, encoder_cls)
 
         new_actor_sd = str(new_actor.state_dict())
         new_critic_sd = str(new_critic.state_dict())
@@ -1072,83 +1040,7 @@ def test_load_from_pretrained(device, accelerator, tmpdir, compile_mode):
     assert new_ippo.steps == ippo.steps
 
 
-@pytest.mark.parametrize(
-    "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
-)
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
-@pytest.mark.parametrize("compile_mode", [None, "default"])
-# The saved checkpoint file contains the correct data and format.
-def test_load_from_pretrained_cnn(device, accelerator, tmpdir, compile_mode):
-    # Initialize the ippo agent
-    ippo = IPPO(
-        observation_spaces=generate_multi_agent_box_spaces(
-            2, (3, 32, 32), low=0, high=255
-        ),
-        action_spaces=generate_multi_agent_discrete_spaces(3, 2),
-        agent_ids=["agent_a", "agent_b"],
-        net_config={
-            "encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-                "init_layers": False,
-            },
-            "head_config": {"hidden_size": [32], "init_layers": False},
-        },
-        torch_compiler=compile_mode,
-        accelerator=accelerator,
-        device=device,
-    )
-
-    # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    ippo.save_checkpoint(checkpoint_path)
-
-    # Create new agent object
-    new_ippo = IPPO.load(checkpoint_path, device=device, accelerator=accelerator)
-
-    # Check if properties and weights are loaded correctly
-    assert new_ippo.observation_spaces == ippo.observation_spaces
-    assert new_ippo.action_spaces == ippo.action_spaces
-    assert new_ippo.one_hot == ippo.one_hot
-    assert new_ippo.n_agents == ippo.n_agents
-    assert new_ippo.agent_ids == ippo.agent_ids
-    assert new_ippo.lr == ippo.lr
-    for (
-        new_actor,
-        new_critic,
-        actor,
-        critic,
-    ) in zip(
-        new_ippo.actors,
-        new_ippo.critics,
-        ippo.actors,
-        ippo.critics,
-    ):
-        if compile_mode is not None and accelerator is None:
-            assert isinstance(new_actor, OptimizedModule)
-            assert isinstance(new_critic, OptimizedModule)
-        else:
-            assert isinstance(new_actor.encoder, EvolvableCNN)
-            assert isinstance(new_critic.encoder, EvolvableCNN)
-
-        new_actor_sd = str(new_actor.state_dict())
-        new_critic_sd = str(new_critic.state_dict())
-
-        assert new_actor_sd == str(actor.state_dict())
-        assert new_critic_sd == str(critic.state_dict())
-
-    assert new_ippo.batch_size == ippo.batch_size
-    assert new_ippo.learn_step == ippo.learn_step
-    assert new_ippo.gamma == ippo.gamma
-    assert new_ippo.gae_lambda == ippo.gae_lambda
-    assert new_ippo.mut == ippo.mut
-    assert new_ippo.index == ippo.index
-    assert new_ippo.scores == ippo.scores
-    assert new_ippo.fitness == ippo.fitness
-    assert new_ippo.steps == ippo.steps
-
-
+# TODO: This will be deprecated in the future
 @pytest.mark.parametrize(
     "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
 )
@@ -1268,142 +1160,17 @@ def test_load_from_pretrained_networks(
     assert new_ippo.steps == ippo.steps
 
 
-@pytest.mark.parametrize(
-    "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
-)
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("batch_size", [64])
+@pytest.mark.parametrize("agent_ids", [["agent_0", "agent_1", "other_agent_0"]])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
-def test_ippo_save_load_checkpoint_correct_data_and_format_cnn(
-    tmpdir, device, accelerator, compile_mode
-):
-    net_config_cnn = {
-        "encoder_config": {
-            "channel_size": [16],
-            "kernel_size": [3],
-            "stride_size": [1],
-            "init_layers": False,
-        },
-        "head_config": {"hidden_size": [32], "init_layers": False},
-    }
-
-    # Initialize the ippo agent
-    ippo = IPPO(
-        observation_spaces=generate_multi_agent_box_spaces(
-            1, (3, 32, 32), low=0, high=255
-        ),
-        action_spaces=generate_multi_agent_discrete_spaces(1, 2),
-        agent_ids=["agent_0"],
-        net_config=net_config_cnn,
-        torch_compiler=compile_mode,
-        device=device,
-        accelerator=accelerator,
-    )
-
-    # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    ippo.save_checkpoint(checkpoint_path)
-
-    # Load the saved checkpoint file
-    checkpoint = torch.load(checkpoint_path, pickle_module=dill)
-
-    # Check if the loaded checkpoint has the correct keys
-    assert "actors_init_dict" in checkpoint["network_info"]["modules"]
-    assert "actors_state_dict" in checkpoint["network_info"]["modules"]
-    assert "critics_init_dict" in checkpoint["network_info"]["modules"]
-    assert "critics_state_dict" in checkpoint["network_info"]["modules"]
-    assert "actor_optimizers_state_dict" in checkpoint["network_info"]["optimizers"]
-    assert "critic_optimizers_state_dict" in checkpoint["network_info"]["optimizers"]
-    assert "batch_size" in checkpoint
-    assert "lr" in checkpoint
-    assert "learn_step" in checkpoint
-    assert "gamma" in checkpoint
-    assert "gae_lambda" in checkpoint
-    assert "mut" in checkpoint
-    assert "index" in checkpoint
-    assert "scores" in checkpoint
-    assert "fitness" in checkpoint
-    assert "steps" in checkpoint
-
-    # Load checkpoint
-    loaded_ippo = IPPO(
-        observation_spaces=generate_multi_agent_box_spaces(
-            1, (3, 32, 32), low=0, high=255
-        ),
-        action_spaces=generate_multi_agent_discrete_spaces(1, 2),
-        agent_ids=["agent_0"],
-        net_config=net_config_cnn,
-        torch_compiler=compile_mode,
-        device=device,
-        accelerator=accelerator,
-    )
-    loaded_ippo.load_checkpoint(checkpoint_path)
-
-    # Check if properties and weights are loaded correctly
-    if compile_mode is not None and accelerator is None:
-        assert all(isinstance(actor, OptimizedModule) for actor in loaded_ippo.actors)
-        assert all(
-            isinstance(critic, OptimizedModule) for critic in loaded_ippo.critics
-        )
-    else:
-        assert all(
-            isinstance(actor.encoder, EvolvableCNN) for actor in loaded_ippo.actors
-        )
-        assert all(
-            isinstance(critic.encoder, EvolvableCNN) for critic in loaded_ippo.critics
-        )
-    assert ippo.lr == 1e-4
-
-    for actor, loaded_actor in zip(ippo.actors, loaded_ippo.actors):
-        assert str(actor.state_dict()) == str(loaded_actor.state_dict())
-
-    for critic, loaded_critic in zip(ippo.critics, loaded_ippo.critics):
-        assert str(critic.state_dict()) == str(loaded_critic.state_dict())
-
-    assert ippo.batch_size == 64
-    assert ippo.learn_step == 2048
-    assert ippo.gamma == 0.99
-    assert ippo.gae_lambda == 0.95
-    assert ippo.mut is None
-    assert ippo.index == 0
-    assert ippo.scores == []
-    assert ippo.fitness == []
-    assert ippo.steps == [0]
-
-
+@pytest.mark.parametrize("action_spaces", [generate_multi_agent_discrete_spaces(3, 2)])
 @pytest.mark.parametrize(
-    "observation_spaces, batch_size, action_spaces, agent_ids, compile_mode",
+    "observation_spaces",
     [
-        (
-            generate_multi_agent_box_spaces(3, (6,)),
-            64,
-            generate_multi_agent_discrete_spaces(3, 2),
-            ["agent_0", "agent_1", "other_agent_0"],
-            None,
-        ),
-        (
-            generate_multi_agent_discrete_spaces(3, 6),
-            64,
-            generate_multi_agent_discrete_spaces(3, 2),
-            ["agent_0", "agent_1", "other_agent_0"],
-            None,
-        ),
-        (
-            generate_multi_agent_box_spaces(3, (6,)),
-            64,
-            generate_multi_agent_discrete_spaces(3, 2),
-            ["agent_0", "agent_1", "other_agent_0"],
-            "default",
-        ),
-        (
-            generate_multi_agent_discrete_spaces(3, 6),
-            64,
-            generate_multi_agent_discrete_spaces(3, 2),
-            ["agent_0", "agent_1", "other_agent_0"],
-            "default",
-        ),
+        generate_multi_agent_box_spaces(3, (6,)),
     ],
 )
-def test_ippo_learns_from_experiences_mlp_distributed(
+def test_ippo_learns_from_experiences_distributed(
     observation_spaces,
     accelerated_experiences,
     batch_size,
@@ -1418,10 +1185,6 @@ def test_ippo_learns_from_experiences_mlp_distributed(
         agent_ids=agent_ids,
         accelerator=accelerator,
         torch_compiler=compile_mode,
-        net_config={
-            "encoder_config": {"hidden_size": [16, 16], "init_layers": False},
-            "head_config": {"hidden_size": [16], "init_layers": False},
-        },
     )
 
     for actor, critic in zip(ippo.actors, ippo.critics):
@@ -1463,16 +1226,15 @@ def test_ippo_learns_from_experiences_mlp_distributed(
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize("agent_ids", [["agent_0", "agent_1", "other_agent_0"]])
 @pytest.mark.parametrize("batch_size", [64])
+@pytest.mark.parametrize("action_spaces", [generate_multi_agent_discrete_spaces(3, 2)])
 @pytest.mark.parametrize(
-    "action_spaces",
+    "observation_spaces",
     [
-        generate_multi_agent_discrete_spaces(3, 2),
+        generate_multi_agent_box_spaces(3, (3, 32, 32)),
+        generate_multi_agent_box_spaces(3, (6,)),
     ],
 )
-@pytest.mark.parametrize(
-    "observation_spaces", [generate_multi_agent_box_spaces(3, (3, 32, 32))]
-)
-def test_ippo_learns_from_experiences_cnn(
+def test_ippo_learns_from_experiences(
     observation_spaces,
     experiences,
     batch_size,
@@ -1481,112 +1243,6 @@ def test_ippo_learns_from_experiences_cnn(
     device,
     compile_mode,
 ):
-    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
-    net_config = {
-        "encoder_config": {
-            "channel_size": [16],
-            "kernel_size": [3],
-            "stride_size": [1],
-            "init_layers": False,
-        },
-        "head_config": {"hidden_size": [32], "init_layers": False},
-    }
-    ippo = IPPO(
-        observation_spaces,
-        action_spaces,
-        net_config=net_config,
-        agent_ids=agent_ids,
-        device=device,
-        torch_compiler=compile_mode,
-    )
-
-    actors = ippo.actors
-    actors_pre_learn_sd = [copy.deepcopy(actor.state_dict()) for actor in ippo.actors]
-    critics = ippo.critics
-    critics_pre_learn_sd = [
-        str(copy.deepcopy(critic.state_dict())) for critic in ippo.critics
-    ]
-
-    for _ in range(4):
-        ippo.scores.append(0)
-        loss = ippo.learn(experiences)
-
-    assert isinstance(loss, dict)
-    for agent_id in ippo.shared_agent_ids:
-        assert agent_id in loss
-
-    for old_actor, updated_actor in zip(actors, ippo.actors):
-        assert old_actor == updated_actor
-
-    for old_actor_state_dict, updated_actor in zip(actors_pre_learn_sd, ippo.actors):
-        assert old_actor_state_dict != str(updated_actor.state_dict())
-
-    for old_critic, updated_critic in zip(critics, ippo.critics):
-        assert old_critic == updated_critic
-
-    for old_critic_state_dict, updated_critic in zip(
-        critics_pre_learn_sd, ippo.critics
-    ):
-        assert old_critic_state_dict != str(updated_critic.state_dict())
-
-
-@pytest.mark.parametrize(
-    "observation_spaces, batch_size, action_spaces, agent_ids, compile_mode",
-    [
-        (
-            generate_multi_agent_box_spaces(3, (6,)),
-            64,
-            generate_multi_agent_discrete_spaces(3, 2),
-            ["agent_0", "agent_1", "other_agent_0"],
-            None,
-        ),
-        (
-            generate_multi_agent_box_spaces(3, (6,)),
-            64,
-            generate_multi_agent_box_spaces(3, (2,)),
-            ["agent_0", "agent_1", "other_agent_0"],
-            None,
-        ),
-        (
-            generate_multi_agent_discrete_spaces(3, 6),
-            64,
-            generate_multi_agent_discrete_spaces(3, 2),
-            ["agent_0", "agent_1", "other_agent_0"],
-            None,
-        ),
-        (
-            generate_multi_agent_discrete_spaces(3, 6),
-            64,
-            generate_multi_agent_box_spaces(3, (6,)),
-            ["agent_0", "agent_1", "other_agent_0"],
-            None,
-        ),
-        (
-            generate_multi_agent_box_spaces(3, (6,)),
-            64,
-            generate_multi_agent_discrete_spaces(3, 2),
-            ["agent_0", "agent_1", "other_agent_0"],
-            None,  # "default",
-        ),
-        (
-            generate_multi_agent_discrete_spaces(3, 6),
-            64,
-            generate_multi_agent_discrete_spaces(3, 2),
-            ["agent_0", "agent_1", "other_agent_0"],
-            "default",
-        ),
-    ],
-)
-def test_ippo_learns_from_experiences_mlp(
-    observation_spaces,
-    experiences,
-    batch_size,
-    action_spaces,
-    agent_ids,
-    device,
-    compile_mode,
-):
-    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     ippo = IPPO(
         observation_spaces,
         action_spaces,
@@ -1630,35 +1286,20 @@ def test_ippo_learns_from_experiences_mlp(
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize("vect_dim", [1, 8])
 @pytest.mark.parametrize(
-    "observation_spaces, action_spaces",
+    "action_spaces",
     [
-        (
-            generate_multi_agent_discrete_spaces(3, 6),
-            generate_multi_agent_discrete_spaces(3, 2),
-        ),
-        (
-            generate_multi_agent_discrete_spaces(3, 6),
-            generate_multi_agent_box_spaces(3, (6,)),
-        ),
-        (
-            generate_multi_agent_discrete_spaces(3, 6),
-            generate_multi_agent_discrete_spaces(3, 2),
-        ),
-        (
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 3),
-        ),
-        (
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-        ),
-        (
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_box_spaces(3, (1,)),
-        ),
+        generate_multi_agent_discrete_spaces(3, 2),
+        generate_multi_agent_box_spaces(3, (6,)),
     ],
 )
-def test_ippo_learns_from_vectorized_experiences_mlp(
+@pytest.mark.parametrize(
+    "observation_spaces",
+    [
+        generate_multi_agent_box_spaces(3, (3, 32, 32)),  # cnn
+        generate_multi_agent_box_spaces(3, (6,)),  # mlp
+    ],
+)
+def test_ippo_learns_from_vectorized_experiences(
     observation_spaces,
     vectorized_experiences,
     batch_size,
@@ -1827,75 +1468,6 @@ def test_ippo_learns_from_hardcoded_vectorized_experiences_mlp(
         assert old_critic_state_dict != str(updated_critic.state_dict())
 
 
-@pytest.mark.parametrize(
-    "observation_spaces, batch_size, vect_dim, action_spaces, agent_ids, compile_mode",
-    [
-        (
-            generate_multi_agent_box_spaces(3, (3, 32, 32)),
-            32,
-            4,
-            generate_multi_agent_discrete_spaces(3, 3),
-            ["agent_0", "agent_1", "other_agent_0"],
-            "default",
-        ),
-        (
-            generate_multi_agent_box_spaces(3, (3, 32, 32)),
-            64,
-            8,
-            generate_multi_agent_box_spaces(3, (2,)),
-            ["agent_0", "agent_1", "other_agent_0"],
-            None,
-        ),
-    ],
-)
-def test_ippo_learns_from_vectorized_experiences_cnn(
-    observation_spaces,
-    vectorized_experiences,
-    batch_size,
-    action_spaces,
-    agent_ids,
-    device,
-    compile_mode,
-):
-    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
-    ippo = IPPO(
-        observation_spaces,
-        action_spaces,
-        agent_ids=agent_ids,
-        device=device,
-        torch_compiler=compile_mode,
-        batch_size=batch_size,
-    )
-
-    actors = ippo.actors
-    actors_pre_learn_sd = [copy.deepcopy(actor.state_dict()) for actor in ippo.actors]
-    critics = ippo.critics
-    critics_pre_learn_sd = [
-        str(copy.deepcopy(critic.state_dict())) for critic in ippo.critics
-    ]
-    for _ in range(4):
-        ippo.scores.append(0)
-        loss = ippo.learn(vectorized_experiences)
-
-    assert isinstance(loss, dict)
-    for agent_id in ippo.shared_agent_ids:
-        assert agent_id in loss
-
-    for old_actor, updated_actor in zip(actors, ippo.actors):
-        assert old_actor == updated_actor
-
-    for old_actor_state_dict, updated_actor in zip(actors_pre_learn_sd, ippo.actors):
-        assert old_actor_state_dict != str(updated_actor.state_dict())
-
-    for old_critic, updated_critic in zip(critics, ippo.critics):
-        assert old_critic == updated_critic
-
-    for old_critic_state_dict, updated_critic in zip(
-        critics_pre_learn_sd, ippo.critics
-    ):
-        assert old_critic_state_dict != str(updated_critic.state_dict())
-
-
 def no_sync(self):
     class DummyNoSync:
         def __enter__(self):
@@ -1908,48 +1480,18 @@ def no_sync(self):
 
 
 @pytest.mark.parametrize(
-    "training, observation_spaces, action_spaces, compile_mode",
+    "action_spaces",
     [
-        (
-            1,
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            None,
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            None,
-        ),
-        (
-            1,
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_box_spaces(3, (2,)),
-            None,
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_box_spaces(3, (2,)),
-            None,
-        ),
-        (
-            1,
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            "default",
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            "default",
-        ),
+        generate_multi_agent_discrete_spaces(3, 2),
+        generate_multi_agent_box_spaces(3, (2,)),
     ],
 )
+@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize(
+    "observation_spaces", [generate_multi_agent_box_spaces(3, (6,))]
+)
 def test_ippo_get_action_agent_masking(
-    training, observation_spaces, action_spaces, device, compile_mode
+    observation_spaces, action_spaces, device, compile_mode
 ):
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     state = {
@@ -1970,6 +1512,8 @@ def test_ippo_get_action_agent_masking(
             "agent_1": {"env_defined_actions": None},
             "other_agent_0": {"env_defined_actions": None},
         }
+
+    # Define the ippo agent
     ippo = IPPO(
         observation_spaces,
         action_spaces,
@@ -1977,9 +1521,9 @@ def test_ippo_get_action_agent_masking(
         device=device,
         torch_compiler=compile_mode,
     )
-    actions, log_probs, dist_entropy, state_values = ippo.get_action(
-        obs=state, infos=info
-    )
+
+    # Get the action
+    actions, _, _, _ = ippo.get_action(obs=state, infos=info)
 
     if discrete_actions:
         assert np.array_equal(actions["agent_0"], np.array([[1]])), actions["agent_0"]
@@ -2009,13 +1553,7 @@ def test_ippo_get_action_agent_masking(
         generate_multi_agent_multidiscrete_spaces(3, 2),
     ],
 )
-@pytest.mark.parametrize(
-    "compile_mode",
-    [
-        None,
-        "default",
-    ],
-)
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize("accelerator", [None, Accelerator()])
 def test_ippo_get_action(
     observation_spaces, action_spaces, device, compile_mode, accelerator
@@ -2055,35 +1593,22 @@ def test_ippo_get_action(
 
 
 @pytest.mark.parametrize(
-    "training, observation_spaces, action_spaces, compile_mode",
+    "observation_spaces",
     [
-        (
-            1,
-            generate_multi_agent_box_spaces(3, (3,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            None,
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(3, (3,)),
-            generate_multi_agent_box_spaces(3, (2,), low=-1, high=1),
-            None,
-        ),
-        (
-            1,
-            generate_multi_agent_discrete_spaces(3, 3),
-            generate_multi_agent_discrete_spaces(3, 2),
-            None,
-        ),
-        (
-            0,
-            generate_multi_agent_discrete_spaces(3, 3),
-            generate_multi_agent_box_spaces(3, (2,)),
-            None,
-        ),
+        generate_multi_agent_box_spaces(3, (6,)),
+        generate_multi_agent_box_spaces(3, (3, 32, 32), low=0, high=255),
     ],
 )
-def test_ippo_get_action_mlp_vectorized(
+@pytest.mark.parametrize(
+    "action_spaces",
+    [
+        generate_multi_agent_box_spaces(3, (2,), low=-1, high=1),
+        generate_multi_agent_discrete_spaces(3, 2),
+    ],
+)
+@pytest.mark.parametrize("training", [1, 0])
+@pytest.mark.parametrize("compile_mode", [None])
+def test_ippo_get_action_vectorized(
     training, observation_spaces, action_spaces, device, compile_mode
 ):
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
@@ -2107,10 +1632,6 @@ def test_ippo_get_action_mlp_vectorized(
         observation_spaces,
         action_spaces,
         agent_ids=agent_ids,
-        net_config={
-            "encoder_config": {"hidden_size": [64, 64], "init_layers": False},
-            "head_config": {"hidden_size": [32], "init_layers": False},
-        },
         device=device,
         torch_compiler=compile_mode,
     )
@@ -2129,93 +1650,10 @@ def test_ippo_get_action_mlp_vectorized(
         assert agent_id in state_values
 
 
-@pytest.mark.parametrize(
-    "training, observation_spaces, action_spaces, compile_mode",
-    [
-        (
-            1,
-            generate_multi_agent_box_spaces(3, (3, 32, 32)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            None,
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(3, (3, 32, 32)),
-            generate_multi_agent_box_spaces(3, (2,), low=-1, high=1),
-            None,
-        ),
-    ],
-)
-def test_ippo_get_action_cnn_vectorized(
-    training, observation_spaces, action_spaces, device, compile_mode
-):
+def test_ippo_get_action_action_masking_exception(device):
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
-    vect_dim = 2
-    if all(isinstance(space, spaces.Discrete) for space in observation_spaces):
-        state = {
-            agent: np.random.randint(0, observation_spaces[idx].n, (vect_dim, 1))
-            for idx, agent in enumerate(agent_ids)
-        }
-        info = None
-    else:
-        state = {
-            agent: np.random.randn(vect_dim, *observation_spaces[idx].shape).astype(
-                np.float32
-            )
-            for idx, agent in enumerate(agent_ids)
-        }
-        info = {agent: {} for agent in agent_ids}
-
-    ippo = IPPO(
-        observation_spaces,
-        action_spaces,
-        agent_ids=agent_ids,
-        net_config={
-            "encoder_config": {
-                "channel_size": [16],
-                "kernel_size": [3],
-                "stride_size": [1],
-                "init_layers": False,
-            },
-            "head_config": {"hidden_size": [32], "init_layers": False},
-        },
-        device=device,
-        torch_compiler=compile_mode,
-    )
-    actions, log_probs, dist_entropy, state_values = ippo.get_action(
-        obs=state, infos=info
-    )
-
-    # Check action shapes
-    assert isinstance(actions, dict)
-    assert isinstance(log_probs, dict)
-
-    for agent_id in agent_ids:
-        assert agent_id in actions
-        assert agent_id in log_probs
-        assert agent_id in dist_entropy
-        assert agent_id in state_values
-
-
-@pytest.mark.parametrize(
-    "training, observation_spaces, action_spaces",
-    [
-        (
-            1,
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 4),
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 4),
-        ),
-    ],
-)
-def test_ippo_get_action_action_masking_exception(
-    training, observation_spaces, action_spaces, device
-):
-    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    observation_spaces = generate_multi_agent_box_spaces(3, (6,))
+    action_spaces = generate_multi_agent_discrete_spaces(3, 4)
     state = {
         agent: {
             "observation": np.random.randn(*observation_spaces[idx].shape),
@@ -2237,25 +1675,10 @@ def test_ippo_get_action_action_masking_exception(
         actions, log_probs, dist_entropy, state_values = ippo.get_action(obs=state)
 
 
-@pytest.mark.parametrize(
-    "training, observation_spaces, action_spaces",
-    [
-        (
-            1,
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 4),
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 4),
-        ),
-    ],
-)
-def test_ippo_get_action_action_masking(
-    training, observation_spaces, action_spaces, device
-):
+def test_ippo_get_action_action_masking(device):
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    observation_spaces = generate_multi_agent_box_spaces(3, (6,))
+    action_spaces = generate_multi_agent_discrete_spaces(3, 4)
     state = {
         agent: np.random.randn(*observation_spaces[idx].shape).astype(np.float32)
         for idx, agent in enumerate(agent_ids)
@@ -2269,19 +1692,10 @@ def test_ippo_get_action_action_masking(
     ippo = IPPO(
         observation_spaces,
         action_spaces,
-        net_config={
-            "encoder_config": {
-                "hidden_size": [64, 64],
-                "init_layers": False,
-            },
-            "head_config": {"hidden_size": [32], "init_layers": False},
-        },
         agent_ids=agent_ids,
         device=device,
     )
-    actions, log_probs, dist_entropy, state_values = ippo.get_action(
-        obs=state, infos=info
-    )
+    actions, _, _, _ = ippo.get_action(obs=state, infos=info)
 
     # With action mask [0, 1, 0, 1], actions should be index 1 or 3
     for agent_id, action_array in actions.items():
@@ -2330,21 +1744,17 @@ def test_ippo_init_torch_compiler_error(mode):
 
 
 @pytest.mark.parametrize(
-    "net_config, accelerator_flag, observation_spaces, compile_mode",
+    "observation_spaces, net_config",
     [
         (
-            {
-                "encoder_config": {
-                    "hidden_size": [64, 64],
-                    "init_layers": False,
-                },
-                "head_config": {"hidden_size": [32], "init_layers": False},
-            },
-            False,
             generate_multi_agent_box_spaces(3, (4,)),
-            None,
+            {
+                "encoder_config": {"hidden_size": [64, 64], "init_layers": False},
+                "head_config": {"hidden_size": [32], "init_layers": False},
+            },
         ),
         (
+            generate_multi_agent_box_spaces(3, (3, 32, 32), low=0, high=255),
             {
                 "encoder_config": {
                     "channel_size": [3],
@@ -2354,66 +1764,11 @@ def test_ippo_init_torch_compiler_error(mode):
                 },
                 "head_config": {"hidden_size": [32], "init_layers": False},
             },
-            False,
-            generate_multi_agent_box_spaces(3, (3, 32, 32), low=0, high=255),
-            None,
-        ),
-        (
-            {
-                "encoder_config": {
-                    "channel_size": [3],
-                    "kernel_size": [3],
-                    "stride_size": [1],
-                    "init_layers": False,
-                },
-                "head_config": {"hidden_size": [32], "init_layers": False},
-            },
-            True,
-            generate_multi_agent_box_spaces(3, (3, 32, 32), low=0, high=255),
-            None,
-        ),
-        (
-            {
-                "encoder_config": {
-                    "hidden_size": [64, 64],
-                    "init_layers": False,
-                },
-                "head_config": {"hidden_size": [32], "init_layers": False},
-            },
-            False,
-            generate_multi_agent_box_spaces(3, (4,)),
-            "default",
-        ),
-        (
-            {
-                "encoder_config": {
-                    "channel_size": [3],
-                    "kernel_size": [3],
-                    "stride_size": [1],
-                    "init_layers": False,
-                },
-                "head_config": {"hidden_size": [32], "init_layers": False},
-            },
-            False,
-            generate_multi_agent_box_spaces(3, (3, 32, 32), low=0, high=255),
-            "default",
-        ),
-        (
-            {
-                "encoder_config": {
-                    "channel_size": [3],
-                    "kernel_size": [3],
-                    "stride_size": [1],
-                    "init_layers": False,
-                },
-                "head_config": {"hidden_size": [32], "init_layers": False},
-            },
-            True,
-            generate_multi_agent_box_spaces(3, (3, 32, 32), low=0, high=255),
-            "default",
         ),
     ],
 )
+@pytest.mark.parametrize("accelerator_flag", [False, True])
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_initialize_ippo_with_net_config(
     net_config, accelerator_flag, observation_spaces, device, compile_mode
 ):
@@ -2475,34 +1830,11 @@ def test_initialize_ippo_with_net_config(
 
 
 @pytest.mark.parametrize(
-    "observation_spaces, action_spaces, accelerator_flag, compile_mode",
-    [
-        (
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            False,
-            None,
-        ),
-        (
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            True,
-            None,
-        ),
-        (
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            False,
-            "default",
-        ),
-        (
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            True,
-            "default",
-        ),
-    ],
+    "observation_spaces", [generate_multi_agent_box_spaces(3, (6,))]
 )
+@pytest.mark.parametrize("action_spaces", [generate_multi_agent_discrete_spaces(3, 2)])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_initialize_ippo_with_mlp_networks(
     mlp_actor,
     mlp_critic,
@@ -2512,10 +1844,7 @@ def test_initialize_ippo_with_mlp_networks(
     device,
     compile_mode,
 ):
-    if accelerator_flag:
-        accelerator = Accelerator()
-    else:
-        accelerator = None
+    accelerator = Accelerator() if accelerator_flag else None
     evo_actors = [
         MakeEvolvable(network=mlp_actor, input_tensor=torch.randn(1, 6), device=device)
         for _ in range(2)
@@ -2572,24 +1901,15 @@ def test_initialize_ippo_with_mlp_networks(
 
 
 @pytest.mark.parametrize(
-    "observation_spaces, action_spaces, accelerator_flag, compile_mode",
-    [
-        (
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            False,
-            "reduce-overhead",
-        ),
-    ],
+    "observation_spaces", [generate_multi_agent_box_spaces(3, (6,))]
 )
+@pytest.mark.parametrize("action_spaces", [generate_multi_agent_discrete_spaces(3, 2)])
 def test_initialize_ippo_with_mlp_networks_gumbel_softmax(
     mlp_actor,
     mlp_critic,
     observation_spaces,
     action_spaces,
-    accelerator_flag,
     device,
-    compile_mode,
 ):
     net_config = {
         "encoder_config": {
@@ -2614,40 +1934,18 @@ def test_initialize_ippo_with_mlp_networks_gumbel_softmax(
         agent_ids=["agent_0", "agent_1", "other_agent_0"],
         net_config=net_config,
         device=device,
-        torch_compiler=compile_mode,
+        torch_compiler="reduce-overhead",
     )
     assert ippo.torch_compiler == "reduce-overhead"
 
 
 @pytest.mark.parametrize(
-    "observation_spaces, action_spaces, accelerator_flag, compile_mode",
-    [
-        (
-            generate_multi_agent_box_spaces(3, (4, 210, 160), low=0, high=255),
-            generate_multi_agent_discrete_spaces(3, 2),
-            False,
-            None,
-        ),
-        (
-            generate_multi_agent_box_spaces(3, (4, 210, 160), low=0, high=255),
-            generate_multi_agent_discrete_spaces(3, 2),
-            True,
-            None,
-        ),
-        (
-            generate_multi_agent_box_spaces(3, (4, 210, 160), low=0, high=255),
-            generate_multi_agent_discrete_spaces(3, 2),
-            False,
-            "default",
-        ),
-        (
-            generate_multi_agent_box_spaces(3, (4, 210, 160), low=0, high=255),
-            generate_multi_agent_discrete_spaces(3, 2),
-            True,
-            "default",
-        ),
-    ],
+    "observation_spaces",
+    [generate_multi_agent_box_spaces(3, (4, 210, 160), low=0, high=255)],
 )
+@pytest.mark.parametrize("action_spaces", [generate_multi_agent_discrete_spaces(3, 2)])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_initialize_ippo_with_cnn_networks(
     cnn_actor,
     cnn_critic,
@@ -2724,40 +2022,19 @@ def test_initialize_ippo_with_cnn_networks(
     assert isinstance(ippo.criterion, nn.MSELoss)
 
 
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
 @pytest.mark.parametrize(
-    "observation_spaces, action_spaces, net, compile_mode",
+    "observation_spaces, net",
     [
-        (
-            generate_multi_agent_box_spaces(3, (4,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            "mlp",
-            None,
-        ),
-        (
-            generate_multi_agent_box_spaces(3, (4, 210, 160), low=0, high=255),
-            generate_multi_agent_discrete_spaces(3, 2),
-            "cnn",
-            None,
-        ),
-        (
-            generate_multi_agent_box_spaces(3, (4,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            "mlp",
-            "default",
-        ),
-        (
-            generate_multi_agent_box_spaces(3, (4, 210, 160), low=0, high=255),
-            generate_multi_agent_discrete_spaces(3, 2),
-            "cnn",
-            "default",
-        ),
+        (generate_multi_agent_box_spaces(3, (4, 210, 160), low=0, high=255), "cnn"),
+        (generate_multi_agent_box_spaces(3, (4,)), "mlp"),
     ],
 )
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_initialize_ippo_with_evo_networks(
-    observation_spaces, action_spaces, net, device, compile_mode, accelerator
+    observation_spaces, net, device, compile_mode, accelerator
 ):
-
+    action_spaces = generate_multi_agent_discrete_spaces(3, 2)
     net_config = get_default_encoder_config(observation_spaces[0])
 
     # For image spaces we need to give a sample input tensor to build networks
@@ -2851,24 +2128,10 @@ def test_initialize_ippo_with_evo_networks(
     assert isinstance(ippo.criterion, nn.MSELoss)
 
 
-@pytest.mark.parametrize(
-    "observation_spaces, action_spaces, compile_mode",
-    [
-        (
-            generate_multi_agent_box_spaces(3, (4,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            None,
-        ),
-        (
-            generate_multi_agent_box_spaces(3, (4,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            "default",
-        ),
-    ],
-)
-def test_initialize_ippo_with_incorrect_evo_networks(
-    observation_spaces, action_spaces, compile_mode
-):
+@pytest.mark.parametrize("compile_mode", [None, "default"])
+def test_initialize_ippo_with_incorrect_evo_networks(compile_mode):
+    observation_spaces = generate_multi_agent_box_spaces(3, (4,))
+    action_spaces = generate_multi_agent_discrete_spaces(3, 2)
     evo_actors = []
     evo_critics = []
 
@@ -2917,20 +2180,10 @@ def test_initialize_ippo_with_incorrect_networks(
 
 
 @pytest.mark.parametrize(
-    "observation_spaces, action_spaces, compile_mode",
-    [
-        (
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            None,
-        ),
-        (
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            "default",
-        ),
-    ],
+    "observation_spaces", [generate_multi_agent_box_spaces(3, (6,))]
 )
+@pytest.mark.parametrize("action_spaces", [generate_multi_agent_discrete_spaces(3, 2)])
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_ippo_init_warning(
     mlp_actor, observation_spaces, action_spaces, device, compile_mode
 ):
@@ -2950,21 +2203,14 @@ def test_ippo_init_warning(
         )
 
 
-@pytest.mark.parametrize(
-    "observation_spaces, action_spaces, compile_mode",
-    [
-        (
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            None,
-        ),
-    ],
-)
-def test_homogeneous_outputs_functions(observation_spaces, action_spaces, compile_mode):
+def test_homogeneous_outputs_functions():
     """Test that the assemble_homogeneous_outputs and disassemble_homogeneous_outputs
     functions work as expected and are inverses of each other."""
 
     # Initialize agent with homogeneous agents
+    observation_spaces = generate_multi_agent_box_spaces(3, (6,))
+    action_spaces = generate_multi_agent_discrete_spaces(3, 2)
+    compile_mode = None
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     agent = IPPO(
         observation_spaces,
@@ -3022,38 +2268,10 @@ def test_homogeneous_outputs_functions(observation_spaces, action_spaces, compil
         )
 
 
-@pytest.mark.parametrize(
-    "training, observation_spaces, action_spaces, compile_mode",
-    [
-        (
-            1,
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            None,
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            None,
-        ),
-        (
-            1,
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            "default",
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-            "default",
-        ),
-    ],
-)
-def test_get_action_distributed(
-    training, observation_spaces, action_spaces, compile_mode
-):
+@pytest.mark.parametrize("compile_mode", [None, "default"])
+def test_get_action_distributed(compile_mode):
+    observation_spaces = generate_multi_agent_box_spaces(3, (6,))
+    action_spaces = generate_multi_agent_discrete_spaces(3, 2)
     accelerator = Accelerator()
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     state = {

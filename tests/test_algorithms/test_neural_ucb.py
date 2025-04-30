@@ -13,9 +13,12 @@ from gymnasium import spaces
 from tensordict import TensorDict
 
 from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
-from agilerl.modules.cnn import EvolvableCNN
-from agilerl.modules.mlp import EvolvableMLP
+from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
 from agilerl.wrappers.make_evolvable import MakeEvolvable
+from tests.helper_functions import (
+    generate_dict_or_tuple_space,
+    generate_random_box_space,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -90,12 +93,20 @@ def simple_cnn():
     return network
 
 
-# initialize NeuralUCB with valid parameters
-def test_initialize_bandit_with_minimum_parameters():
-    observation_space = spaces.Box(0, 1, shape=(4,))
+@pytest.mark.parametrize(
+    "observation_space, encoder_cls",
+    [
+        (generate_random_box_space(shape=(4,)), EvolvableMLP),
+        (generate_random_box_space(shape=(3, 64, 64)), EvolvableCNN),
+        (generate_dict_or_tuple_space(2, 2, dict_space=True), EvolvableMultiInput),
+        (generate_dict_or_tuple_space(2, 2, dict_space=False), EvolvableMultiInput),
+    ],
+)
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+def test_initialize_bandit(observation_space, encoder_cls, accelerator):
     action_space = spaces.Discrete(2)
-
-    bandit = NeuralUCB(observation_space, action_space)
+    device = accelerator.device if accelerator else "cpu"
+    bandit = NeuralUCB(observation_space, action_space, accelerator=accelerator)
 
     assert bandit.observation_space == observation_space
     assert bandit.action_space == action_space
@@ -106,77 +117,20 @@ def test_initialize_bandit_with_minimum_parameters():
     assert bandit.lamb == 1.0
     assert bandit.reg == 0.000625
     assert bandit.mut is None
-    assert bandit.device == "cpu"
-    assert bandit.accelerator is None
+    assert bandit.device == device
+    assert bandit.accelerator == accelerator
     assert bandit.index == 0
     assert bandit.scores == []
     assert bandit.fitness == []
     assert bandit.steps == [0]
-    assert isinstance(bandit.actor.encoder, EvolvableMLP)
-    assert isinstance(bandit.optimizer.optimizer, optim.Adam)
-    assert isinstance(bandit.criterion, nn.MSELoss)
-
-
-# Initializes actor network with EvolvableCNN based on net_config and Accelerator.
-def test_initialize_bandit_with_cnn_accelerator():
-    observation_space = spaces.Box(0, 1, shape=(3, 32, 32))
-    action_space = spaces.Discrete(2)
-    index = 0
-    net_config_cnn = {
-        "encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-    batch_size = 64
-    lr = 1e-3
-    learn_step = 5
-    gamma = 1.0
-    lamb = 1.0
-    reg = 0.000625
-    mut = None
-    actor_network = None
-    accelerator = Accelerator()
-    wrap = True
-
-    bandit = NeuralUCB(
-        observation_space=observation_space,
-        action_space=action_space,
-        index=index,
-        net_config=net_config_cnn,
-        batch_size=batch_size,
-        lr=lr,
-        learn_step=learn_step,
-        gamma=gamma,
-        lamb=lamb,
-        reg=reg,
-        mut=mut,
-        actor_network=actor_network,
-        accelerator=accelerator,
-        wrap=wrap,
-    )
-
-    assert bandit.observation_space == observation_space
-    assert bandit.action_space == action_space
-    assert bandit.batch_size == batch_size
-    assert bandit.lr == lr
-    assert bandit.learn_step == learn_step
-    assert bandit.gamma == gamma
-    assert bandit.lamb == lamb
-    assert bandit.reg == reg
-    assert bandit.mut == mut
-    assert bandit.accelerator == accelerator
-    assert bandit.index == index
-    assert bandit.scores == []
-    assert bandit.fitness == []
-    assert bandit.steps == [0]
-    assert isinstance(bandit.actor.encoder, EvolvableCNN)
-    assert isinstance(bandit.optimizer.optimizer, AcceleratedOptimizer)
+    assert isinstance(bandit.actor.encoder, encoder_cls)
+    expected_optimizer = AcceleratedOptimizer if accelerator else optim.Adam
+    assert isinstance(bandit.optimizer.optimizer, expected_optimizer)
     assert isinstance(bandit.criterion, nn.MSELoss)
 
 
 # Can initialize NeuralUCB with an actor network
+# TODO: Will be deprecated in the future
 @pytest.mark.parametrize(
     "observation_space, actor_network, input_tensor",
     [
@@ -227,7 +181,7 @@ def test_initialize_bandit_with_incorrect_actor_network():
         )
 
 
-def test_initialize_bandit_with_evo_nets():  #
+def test_initialize_bandit_with_evo_nets():
     observation_space = spaces.Box(0, 1, shape=(4,))
     action_space = spaces.Discrete(2)
     actor_network = EvolvableMLP(
@@ -305,128 +259,24 @@ def test_returns_expected_action_mask():
 
 
 # learns from experiences and updates network parameters
-def test_learns_from_experiences():
-    observation_space = spaces.Box(0, 1, shape=(4,))
+@pytest.mark.parametrize(
+    "observation_space",
+    [
+        generate_random_box_space(shape=(4,)),
+        generate_random_box_space(shape=(3, 32, 32)),
+    ],
+)
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+def test_learns_from_experiences(observation_space, accelerator):
     action_space = spaces.Discrete(2)
     batch_size = 64
 
-    # Create an instance of the NeuralUCB class
-    bandit = NeuralUCB(observation_space, action_space, batch_size=batch_size)
-
-    # Create a batch of experiences
-    states = torch.randn(batch_size, *observation_space.shape)
-    rewards = torch.randn((batch_size, 1))
-
-    experiences = TensorDict(
-        {"obs": states, "reward": rewards},
-        batch_size=[batch_size],
-        device=bandit.device,
-    )
-
-    # Copy state dict before learning - should be different to after updating weights
-    actor = bandit.actor
-    actor_pre_learn_sd = str(copy.deepcopy(bandit.actor.state_dict()))
-
-    # Call the learn method
-    loss = bandit.learn(experiences)
-
-    assert isinstance(loss, float)
-    assert loss >= 0.0
-    assert actor == bandit.actor
-    assert actor_pre_learn_sd != str(bandit.actor.state_dict())
-
-
-# learns from experiences and updates network parameters
-def test_learns_from_experiences_if_cuda():
-    observation_space = spaces.Box(0, 1, shape=(4,))
-    action_space = spaces.Discrete(2)
-    batch_size = 64
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Create an instance of the NeuralUCB class
-    bandit = NeuralUCB(
-        observation_space, action_space, batch_size=batch_size, device=device
-    )
-
-    # Create a batch of experiences
-    states = torch.randn(batch_size, *observation_space.shape).to(device)
-    rewards = torch.randn((batch_size, 1)).to(device)
-
-    experiences = TensorDict(
-        {"obs": states, "reward": rewards},
-        batch_size=[batch_size],
-        device=device,
-    )
-
-    # Copy state dict before learning - should be different to after updating weights
-    actor = bandit.actor
-    actor_pre_learn_sd = str(copy.deepcopy(bandit.actor.state_dict()))
-
-    # Call the learn method
-    loss = bandit.learn(experiences)
-
-    assert isinstance(loss, float)
-    assert loss >= 0.0
-    assert actor == bandit.actor
-    assert actor_pre_learn_sd != str(bandit.actor.state_dict())
-
-
-def test_learning_accelerator():
-    accelerator = Accelerator()
-    observation_space = spaces.Box(0, 1, shape=(4,))
-    action_space = spaces.Discrete(2)
-    batch_size = 64
-
-    # Create an instance of the NeuralUCB class
+    # Create an instance of the NeuralTS class
     bandit = NeuralUCB(
         observation_space,
         action_space,
         batch_size=batch_size,
         accelerator=accelerator,
-    )
-
-    # Create a batch of experiences
-    states = torch.randn(batch_size, *observation_space.shape)
-    rewards = torch.randn((batch_size, 1))
-
-    experiences = TensorDict(
-        {"obs": states, "reward": rewards},
-        batch_size=[batch_size],
-        device=accelerator.device,
-    )
-
-    # Copy state dict before learning - should be different to after updating weights
-    actor = bandit.actor
-    actor_pre_learn_sd = str(copy.deepcopy(bandit.actor.state_dict()))
-
-    # Call the learn method
-    loss = bandit.learn(experiences)
-
-    assert isinstance(loss, float)
-    assert loss >= 0.0
-    assert actor == bandit.actor
-    assert actor_pre_learn_sd != str(bandit.actor.state_dict())
-
-
-def test_learning_cnn():
-    observation_space = spaces.Box(0, 1, shape=(3, 32, 32))
-    action_space = spaces.Discrete(2)
-    batch_size = 64
-    net_config = {
-        "encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-
-    # Create an instance of the NeuralUCB class
-    bandit = NeuralUCB(
-        observation_space,
-        action_space,
-        net_config=net_config,
-        batch_size=batch_size,
     )
 
     # Create a batch of experiences
@@ -453,8 +303,14 @@ def test_learning_cnn():
 
 
 # Runs algorithm test loop
-def test_algorithm_test_loop():
-    observation_space = spaces.Box(0, 1, shape=(4,))
+@pytest.mark.parametrize(
+    "observation_space",
+    [
+        generate_random_box_space(shape=(4,)),
+        generate_random_box_space(shape=(3, 32, 32)),
+    ],
+)
+def test_algorithm_test_loop(observation_space):
     action_space = spaces.Discrete(2)
 
     env = DummyBanditEnv(state_size=observation_space.shape, arms=action_space.n)
@@ -464,52 +320,19 @@ def test_algorithm_test_loop():
     assert isinstance(mean_score, float)
 
 
-# Runs algorithm test loop with images
-def test_algorithm_test_loop_images():
-    observation_space = spaces.Box(0, 1, shape=(32, 32, 3))
-    action_space = spaces.Discrete(2)
-
-    env = DummyBanditEnv(state_size=observation_space.shape, arms=action_space.n)
-
-    net_config_cnn = {
-        "encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-
-    agent = NeuralUCB(
-        observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
-        action_space=action_space,
-        net_config=net_config_cnn,
-    )
-    mean_score = agent.test(env, max_steps=10, swap_channels=True)
-    assert isinstance(mean_score, float)
-
-
 # Clones the agent and returns an identical agent.
 @pytest.mark.parametrize(
-    "observation_space, net_config",
+    "observation_space",
     [
-        (
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            {
-                "encoder_config": {
-                    "channel_size": [3],
-                    "kernel_size": [3],
-                    "stride_size": [1],
-                }
-            },
-        ),
-        (spaces.Box(0, 1, shape=(4,)), {"encoder_config": {"hidden_size": [128]}}),
+        generate_random_box_space(shape=(4,)),
+        generate_random_box_space(shape=(3, 32, 32)),
+        generate_dict_or_tuple_space(2, 2, dict_space=True),
+        generate_dict_or_tuple_space(2, 2, dict_space=False),
     ],
 )
-def test_clone_returns_identical_agent(observation_space, net_config):
+def test_clone_returns_identical_agent(observation_space):
     action_space = spaces.Discrete(2)
-
-    bandit = DummyNeuralUCB(observation_space, action_space, net_config)
-    print(bandit.actor)
+    bandit = DummyNeuralUCB(observation_space, action_space)
     bandit.tensor_attribute = torch.randn(1)
     bandit.numpy_attribute = np.random.rand(1)
     clone_agent = bandit.clone()
@@ -614,6 +437,7 @@ def test_clone_after_learning():
     assert clone_agent.scores == bandit.scores
 
 
+# TODO: Will be deprecated in the future
 @pytest.mark.parametrize(
     "observation_space, actor_network, input_tensor",
     [
@@ -657,10 +481,21 @@ def test_unwrap_models():
 
 
 # The saved checkpoint file contains the correct data and format.
-def test_save_load_checkpoint_correct_data_and_format(tmpdir):
+@pytest.mark.parametrize(
+    "observation_space, encoder_cls",
+    [
+        (generate_random_box_space(shape=(4,)), EvolvableMLP),
+        (generate_random_box_space(shape=(3, 32, 32)), EvolvableCNN),
+        (generate_dict_or_tuple_space(2, 2, dict_space=True), EvolvableMultiInput),
+        (generate_dict_or_tuple_space(2, 2, dict_space=False), EvolvableMultiInput),
+    ],
+)
+def test_save_load_checkpoint_correct_data_and_format(
+    observation_space, encoder_cls, tmpdir
+):
     # Initialize the NeuralUCB agent
     bandit = NeuralUCB(
-        observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2)
+        observation_space=observation_space, action_space=spaces.Discrete(2)
     )
 
     # Save the checkpoint to a file
@@ -691,75 +526,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     bandit.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert isinstance(bandit.actor.encoder, EvolvableMLP)
-    assert bandit.lr == 1e-3
-    assert bandit.batch_size == 64
-    assert bandit.learn_step == 2
-    assert bandit.gamma == 1.0
-    assert bandit.lamb == 1.0
-    assert bandit.reg == 0.000625
-    assert bandit.mut is None
-    assert bandit.index == 0
-    assert bandit.scores == []
-    assert bandit.fitness == []
-    assert bandit.steps == [0]
-
-    assert bandit.numel == sum(
-        w.numel() for w in bandit.exp_layer.parameters() if w.requires_grad
-    )
-    assert torch.equal(
-        bandit.theta_0,
-        torch.cat(
-            [w.flatten() for w in bandit.exp_layer.parameters() if w.requires_grad]
-        ),
-    )
-
-
-def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
-    net_config_cnn = {
-        "encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-
-    # Initialize the NeuralUCB agent
-    bandit = NeuralUCB(
-        observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
-        action_space=spaces.Discrete(2),
-        net_config=net_config_cnn,
-    )
-
-    # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    bandit.save_checkpoint(checkpoint_path)
-
-    # Load the saved checkpoint file
-    checkpoint = torch.load(checkpoint_path, pickle_module=dill)
-
-    # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint["network_info"]["modules"]
-    assert "actor_state_dict" in checkpoint["network_info"]["modules"]
-    assert "optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
-    assert "batch_size" in checkpoint
-    assert "lr" in checkpoint
-    assert "learn_step" in checkpoint
-    assert "gamma" in checkpoint
-    assert "mut" in checkpoint
-    assert "index" in checkpoint
-    assert "scores" in checkpoint
-    assert "fitness" in checkpoint
-    assert "steps" in checkpoint
-
-    bandit = NeuralUCB(
-        observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2)
-    )
-    # Load checkpoint
-    bandit.load_checkpoint(checkpoint_path)
-
-    # Check if properties and weights are loaded correctly
-    assert isinstance(bandit.actor.encoder, EvolvableCNN)
+    assert isinstance(bandit.actor.encoder, encoder_cls)
     assert bandit.lr == 1e-3
     assert bandit.batch_size == 64
     assert bandit.learn_step == 2
@@ -784,14 +551,14 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
 
 # The saved checkpoint file contains the correct data and format.
+# TODO: Will be deprecated in the future
 @pytest.mark.parametrize(
     "observation_space, actor_network, input_tensor",
     [
         (spaces.Box(0, 1, shape=(4,)), "simple_mlp", torch.randn(1, 4)),
-        (spaces.Box(0, 1, shape=(3, 64, 64)), "simple_cnn", torch.randn(1, 3, 64, 64)),
     ],
 )
-def test_save_load_checkpoint_correct_data_and_format_cnn_network(
+def test_save_load_checkpoint_correct_data_and_format_network(
     observation_space, actor_network, input_tensor, request, tmpdir
 ):
     actor_network = request.getfixturevalue(actor_network)
@@ -856,18 +623,21 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     )
 
 
+# The saved checkpoint file contains the correct data and format.
 @pytest.mark.parametrize(
-    "device, accelerator",
+    "observation_space, encoder_cls",
     [
-        ("cpu", None),
-        ("cpu", Accelerator()),
+        (generate_random_box_space(shape=(4,)), EvolvableMLP),
+        (generate_random_box_space(shape=(3, 32, 32)), EvolvableCNN),
+        (generate_dict_or_tuple_space(2, 2, dict_space=True), EvolvableMultiInput),
+        (generate_dict_or_tuple_space(2, 2, dict_space=False), EvolvableMultiInput),
     ],
 )
-# The saved checkpoint file contains the correct data and format.
-def test_load_from_pretrained(device, accelerator, tmpdir):
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+def test_load_from_pretrained(observation_space, encoder_cls, accelerator, tmpdir):
     # Initialize the NeuralUCB agent
     bandit = NeuralUCB(
-        observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2)
+        observation_space=observation_space, action_space=spaces.Discrete(2)
     )
 
     # Save the checkpoint to a file
@@ -875,12 +645,12 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     bandit.save_checkpoint(checkpoint_path)
 
     # Create new agent object
-    new_bandit = NeuralUCB.load(checkpoint_path, device=device, accelerator=accelerator)
+    new_bandit = NeuralUCB.load(checkpoint_path, accelerator=accelerator)
 
     # Check if properties and weights are loaded correctly
     assert new_bandit.observation_space == bandit.observation_space
     assert new_bandit.action_space == bandit.action_space
-    assert isinstance(new_bandit.actor.encoder, EvolvableMLP)
+    assert isinstance(new_bandit.actor.encoder, encoder_cls)
     assert new_bandit.lr == bandit.lr
     assert str(copy.deepcopy(new_bandit.actor).to("cpu").state_dict()) == str(
         bandit.actor.state_dict()
@@ -907,70 +677,11 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     )
 
 
-@pytest.mark.parametrize(
-    "device, accelerator",
-    [
-        ("cpu", None),
-        ("cpu", Accelerator()),
-    ],
-)
-# The saved checkpoint file contains the correct data and format.
-def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
-    # Initialize the NeuralUCB agent
-    bandit = NeuralUCB(
-        observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
-        action_space=spaces.Discrete(2),
-        net_config={
-            "encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }
-        },
-    )
-
-    # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    bandit.save_checkpoint(checkpoint_path)
-
-    # Create new agent object
-    new_bandit = NeuralUCB.load(checkpoint_path, device=device, accelerator=accelerator)
-
-    # Check if properties and weights are loaded correctly
-    assert new_bandit.observation_space == bandit.observation_space
-    assert new_bandit.action_space == bandit.action_space
-    assert isinstance(new_bandit.actor.encoder, EvolvableCNN)
-    assert new_bandit.lr == bandit.lr
-    assert str(copy.deepcopy(new_bandit.actor).to("cpu").state_dict()) == str(
-        bandit.actor.state_dict()
-    )
-    assert new_bandit.batch_size == bandit.batch_size
-    assert new_bandit.learn_step == bandit.learn_step
-    assert new_bandit.gamma == bandit.gamma
-    assert new_bandit.lamb == bandit.lamb
-    assert new_bandit.reg == bandit.reg
-    assert new_bandit.mut == bandit.mut
-    assert new_bandit.index == bandit.index
-    assert new_bandit.scores == bandit.scores
-    assert new_bandit.fitness == bandit.fitness
-    assert new_bandit.steps == bandit.steps
-
-    assert new_bandit.numel == sum(
-        w.numel() for w in bandit.exp_layer.parameters() if w.requires_grad
-    )
-    assert torch.equal(
-        new_bandit.theta_0,
-        torch.cat(
-            [w.flatten() for w in new_bandit.exp_layer.parameters() if w.requires_grad]
-        ),
-    )
-
-
+# TODO: Will be deprecated in the future
 @pytest.mark.parametrize(
     "observation_space, actor_network, input_tensor",
     [
         (spaces.Box(0, 1, shape=(4,)), "simple_mlp", torch.randn(1, 4)),
-        (spaces.Box(0, 1, shape=(3, 64, 64)), "simple_cnn", torch.randn(1, 3, 64, 64)),
     ],
 )
 # The saved checkpoint file contains the correct data and format.

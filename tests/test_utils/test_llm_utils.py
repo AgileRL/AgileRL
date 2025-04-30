@@ -35,7 +35,6 @@ class DummyDataset(Dataset):
         self.info = Info("dummy_dataset")
 
     def __len__(self):
-        print("QUESTION LENGTH", len(self.questions))
         return len(self.questions)
 
     def __getitem__(self, index):

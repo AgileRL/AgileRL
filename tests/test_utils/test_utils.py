@@ -1,9 +1,10 @@
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import gymnasium as gym
 import numpy as np
 import pytest
 import torch
+from accelerate import Accelerator
 from gymnasium import spaces
 from pettingzoo.mpe import simple_speaker_listener_v4
 
@@ -303,105 +304,6 @@ def test_plot_fitness_scores_all_agents(mock_plt):
     assert mock_plt.figure.called
 
 
-@pytest.fixture
-def mock_agent():
-    agent = MagicMock()
-    agent.local_rank = 0
-    return agent
-
-
-@patch("torch.distributed.get_world_size")
-@patch("torch.distributed.all_gather")
-def test_gather_tensor_with_tensor_input(
-    mock_all_gather, mock_get_world_size, mock_agent
-):
-    mock_get_world_size.return_value = 3
-    input_tensor = torch.tensor([1.0, 2.0, 3.0], device=f"cuda:{mock_agent.local_rank}")
-
-    def mock_gather(output_list, input_tensor):
-        output_list[0].copy_(
-            torch.tensor([1.0, 2.0, 3.0], device=f"cuda:{mock_agent.local_rank}")
-        )
-        output_list[1].copy_(
-            torch.tensor([4.0, 5.0, 6.0], device=f"cuda:{mock_agent.local_rank}")
-        )
-        output_list[2].copy_(
-            torch.tensor([7.0, 8.0, 9.0], device=f"cuda:{mock_agent.local_rank}")
-        )
-
-    mock_all_gather.side_effect = mock_gather
-    mock_agent.device = f"cuda:{mock_agent.local_rank}"
-    result = gather_tensor(input_tensor, mock_agent)
-    expected = torch.tensor(
-        [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
-        device=f"cuda:{mock_agent.local_rank}",
-    )
-    assert torch.allclose(result, expected)
-    mock_get_world_size.assert_called_once()
-    mock_all_gather.assert_called_once()
-
-
-@patch("torch.distributed.get_world_size")
-@patch("torch.distributed.all_gather")
-def test_gather_tensor_with_scalar_input(
-    mock_all_gather, mock_get_world_size, mock_agent
-):
-    mock_get_world_size.return_value = 2
-    input_scalar = 42.0
-
-    def mock_gather(output_list, input_tensor):
-        output_list[0].copy_(torch.tensor(42.0, device=f"cuda:{mock_agent.local_rank}"))
-        output_list[1].copy_(torch.tensor(84.0, device=f"cuda:{mock_agent.local_rank}"))
-
-    mock_all_gather.side_effect = mock_gather
-    mock_agent.device = f"cuda:{mock_agent.local_rank}"
-    result = gather_tensor(input_scalar, mock_agent)
-    expected = torch.tensor([42.0, 84.0], device=f"cuda:{mock_agent.local_rank}")
-    assert torch.allclose(result, expected)
-    mock_get_world_size.assert_called_once()
-    mock_all_gather.assert_called_once()
-
-
-@pytest.fixture
-def setup_test_data():
-    agent = Mock()
-    agent.device = torch.device("cpu")
-    agent.world_size = 4
-    loss = torch.tensor([[2.5]])
-    kl = torch.tensor([[1.2]])
-    rewards = torch.tensor([3.0, 4.0, 5.0])
-
-    return agent, loss, kl, rewards
-
-
-def mock_gather_tensor(tensor, agent):
-    if not isinstance(tensor, torch.Tensor):
-        tensor = torch.tensor(tensor, device=f"cuda:{agent.local_rank}")
-    tensor = tensor.detach().clone()
-    world_size = agent.world_size
-    gathered_tensors = []
-    for i in range(world_size):
-        gathered_tensors.append(tensor)
-    return torch.stack(gathered_tensors)
-
-
-@patch("agilerl.utils.utils.gather_tensor", side_effect=mock_gather_tensor)
-def test_basic_aggregation(mock_gather, setup_test_data):
-    """Test basic aggregation functionality."""
-    agent, *data = setup_test_data
-    avg_loss, avg_kl, avg_reward = (
-        aggregate_metrics_across_gpus(agent, metric) for metric in data
-    )
-    mock_gather.assert_called()
-    assert avg_loss == 2.5
-    assert pytest.approx(avg_kl) == 1.2
-    assert avg_reward == 4.0
-    assert mock_gather.call_count == 3
-    mock_gather.assert_any_call(data[0], agent)
-    mock_gather.assert_any_call(data[1], agent)
-    assert mock_gather.call_args_list[2][0][0].mean() == 4.0
-
-
 def test_save_with_accelerator():
     """Test saving checkpoint when agent has an accelerator."""
     agent = Mock()
@@ -423,3 +325,144 @@ def test_save_without_accelerator():
     agent.accelerator = None
     save_llm_checkpoint(agent, None)
     agent.actor.save_pretrained.assert_called_once_with("./saved_checkpoints/grpo")
+
+
+def test_gather_tensor_with_tensor_input():
+    """Test gather_tensor with tensor input"""
+
+    accelerator = Accelerator()
+
+    input_tensor = torch.tensor([1, 2, 3], device=accelerator.device)
+
+    gathered = gather_tensor(input_tensor, accelerator)
+
+    assert isinstance(gathered, torch.Tensor)
+
+    assert torch.equal(gathered, input_tensor)
+
+
+def test_gather_tensor_with_non_tensor_input():
+    """Test gather_tensor with non-tensor input"""
+    input_list = [1, 2, 3]
+
+    accelerator = Accelerator()
+
+    gathered = gather_tensor(input_list, accelerator)
+
+    assert isinstance(gathered, torch.Tensor)
+
+    assert torch.equal(gathered, torch.tensor(input_list).to(accelerator.device))
+
+
+def test_gather_tensor_device():
+    """Test that tensor is moved to accelerator device"""
+    input_tensor = torch.tensor([1, 2, 3])
+
+    accelerator = Accelerator()
+
+    gathered = gather_tensor(input_tensor, accelerator)
+
+    assert gathered.device.type == accelerator.device.type
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_gather_tensor_distributed():
+    """Test gather_tensor in distributed setting"""
+
+    accelerator = Accelerator()
+
+    rank = accelerator.process_index
+    input_tensor = torch.tensor([rank], device=accelerator.device)
+
+    gathered = gather_tensor(input_tensor, accelerator)
+
+    assert len(gathered) == accelerator.num_processes
+    assert torch.equal(
+        gathered, torch.arange(accelerator.num_processes, device=accelerator.device)
+    )
+
+
+# def test_save_with_accelerator():
+#     """Test saving checkpoint when agent has an accelerator."""
+#     agent = Mock()
+#     agent.actor = Mock()
+#     agent.accelerator = Mock()
+#     agent.algo = "grpo"
+#     save_llm_checkpoint(agent, "test_checkpoint")
+#     agent.actor.save_pretrained.assert_called_once_with("test_checkpoint/grpo")
+
+
+# def test_save_without_accelerator():
+#     """Test saving checkpoint when agent has no accelerator."""
+#     agent = Mock()
+#     agent.actor = Mock()
+#     agent.algo = "grpo"
+#     agent.accelerator = None
+#     save_llm_checkpoint(agent, None)
+#     agent.actor.save_pretrained.assert_called_once_with("./saved_checkpoints/grpo")
+
+
+def test_aggregate_metrics_across_gpus_single_process():
+    """Test aggregate_metrics_across_gpus with single process"""
+    accelerator = Accelerator()
+
+    metric_tensor = torch.tensor([1.0, 2.0, 3.0], device=accelerator.device)
+
+    result = aggregate_metrics_across_gpus(accelerator, metric_tensor)
+
+    assert result == 2.0  # (1 + 2 + 3) / 3 = 2.0
+    assert isinstance(result, float)
+
+
+def test_aggregate_metrics_across_gpus_with_scalar():
+    """Test aggregate_metrics_across_gpus with scalar input"""
+    accelerator = Accelerator()
+
+    metric_tensor = torch.tensor(5.0, device=accelerator.device)
+
+    result = aggregate_metrics_across_gpus(accelerator, metric_tensor)
+
+    assert result == 5.0
+    assert isinstance(result, float)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_aggregate_metrics_across_gpus_distributed():
+    """Test aggregate_metrics_across_gpus in distributed setting"""
+    accelerator = Accelerator()
+
+    rank = accelerator.process_index
+    metric_tensor = torch.tensor([rank + 1.0], device=accelerator.device)
+
+    result = aggregate_metrics_across_gpus(accelerator, metric_tensor)
+
+    expected_mean = (
+        sum(range(1, accelerator.num_processes + 1)) / accelerator.num_processes
+    )
+    assert (
+        abs(result - expected_mean) < 1e-6
+    )  # Allow for small floating point differences
+
+
+def test_aggregate_metrics_across_gpus_with_negative_values():
+    """Test aggregate_metrics_across_gpus with negative values"""
+    accelerator = Accelerator()
+
+    metric_tensor = torch.tensor([-1.0, -2.0, -3.0], device=accelerator.device)
+
+    result = aggregate_metrics_across_gpus(accelerator, metric_tensor)
+
+    assert result == -2.0  # (-1 + -2 + -3) / 3 = -2.0
+    assert isinstance(result, float)
+
+
+def test_aggregate_metrics_across_gpus_with_zero_values():
+    """Test aggregate_metrics_across_gpus with zero values"""
+    accelerator = Accelerator()
+
+    metric_tensor = torch.tensor([0.0, 0.0, 0.0], device=accelerator.device)
+
+    result = aggregate_metrics_across_gpus(accelerator, metric_tensor)
+
+    assert result == 0.0
+    assert isinstance(result, float)

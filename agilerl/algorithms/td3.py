@@ -410,22 +410,24 @@ class TD3(RLAlgorithm):
         :type noise_clip: float, optional
         :param policy_noise: Standard deviation of noise applied to policy, defaults to 0.2
         :type policy_noise: float, optional
+        :return: Actor loss and critic loss
+        :rtype: tuple[float, float]
         """
-        states, actions, rewards, next_states, dones = experiences
+        obs = experiences["obs"]
+        actions = experiences["action"]
+        rewards = experiences["reward"]
+        next_obs = experiences["next_obs"]
+        dones = experiences["done"]
 
-        actions = actions.to(self.device)
-        rewards = rewards.to(self.device)
-        dones = dones.to(self.device)
-
-        states = self.preprocess_observation(states)
-        next_states = self.preprocess_observation(next_states)
+        obs = self.preprocess_observation(obs)
+        next_obs = self.preprocess_observation(next_obs)
 
         # Compute the Q values
-        q_value_1 = self.critic_1(states, actions)
-        q_value_2 = self.critic_2(states, actions)
+        q_value_1 = self.critic_1(obs, actions)
+        q_value_2 = self.critic_2(obs, actions)
 
         with torch.no_grad():
-            next_actions = self.actor_target(next_states)
+            next_actions = self.actor_target(next_obs)
             noise = actions.data.normal_(0, policy_noise)
             noise = self.multi_dim_clamp(-noise_clip, noise_clip, noise.to(self.device))
             next_actions = next_actions + noise
@@ -434,8 +436,8 @@ class TD3(RLAlgorithm):
             )
 
             # Compute the target, y_j, making use of twin critic networks
-            q_value_next_state_1 = self.critic_target_1(next_states, next_actions)
-            q_value_next_state_2 = self.critic_target_2(next_states, next_actions)
+            q_value_next_state_1 = self.critic_target_1(next_obs, next_actions)
+            q_value_next_state_2 = self.critic_target_2(next_obs, next_actions)
 
             q_value_next_state = torch.min(q_value_next_state_1, q_value_next_state_2)
 
@@ -460,10 +462,10 @@ class TD3(RLAlgorithm):
         # update actor and targets every policy_freq learn steps
         self.learn_counter += 1
         if self.learn_counter % self.policy_freq == 0:
-            policy_actions = self.actor(states)
+            policy_actions = self.actor(obs)
 
             # Compute actor loss
-            actor_loss = -self.critic_1(states, policy_actions).mean()
+            actor_loss = -self.critic_1(obs, policy_actions).mean()
 
             # actor loss backprop
             self.actor_optimizer.zero_grad()
