@@ -150,60 +150,60 @@ class PPO(RLAlgorithm):
         assert isinstance(gamma, (float, int, torch.Tensor)), "Gamma must be a float."
         assert isinstance(gae_lambda, (float, int)), "Lambda must be a float."
         assert gae_lambda >= 0, "Lambda must be greater than or equal to zero."
-        assert isinstance(action_std_init, (float, int)), (
-            "Action standard deviation must be a float."
-        )
-        assert action_std_init >= 0, (
-            "Action standard deviation must be greater than or equal to zero."
-        )
-        assert isinstance(clip_coef, (float, int)), (
-            "Clipping coefficient must be a float."
-        )
-        assert clip_coef >= 0, (
-            "Clipping coefficient must be greater than or equal to zero."
-        )
-        assert isinstance(ent_coef, (float, int)), (
-            "Entropy coefficient must be a float."
-        )
-        assert ent_coef >= 0, (
-            "Entropy coefficient must be greater than or equal to zero."
-        )
-        assert isinstance(vf_coef, (float, int)), (
-            "Value function coefficient must be a float."
-        )
-        assert vf_coef >= 0, (
-            "Value function coefficient must be greater than or equal to zero."
-        )
-        assert isinstance(max_grad_norm, (float, int)), (
-            "Maximum norm for gradient clipping must be a float."
-        )
-        assert max_grad_norm >= 0, (
-            "Maximum norm for gradient clipping must be greater than or equal to zero."
-        )
-        assert isinstance(target_kl, (float, int)) or target_kl is None, (
-            "Target KL divergence threshold must be a float."
-        )
+        assert isinstance(
+            action_std_init, (float, int)
+        ), "Action standard deviation must be a float."
+        assert (
+            action_std_init >= 0
+        ), "Action standard deviation must be greater than or equal to zero."
+        assert isinstance(
+            clip_coef, (float, int)
+        ), "Clipping coefficient must be a float."
+        assert (
+            clip_coef >= 0
+        ), "Clipping coefficient must be greater than or equal to zero."
+        assert isinstance(
+            ent_coef, (float, int)
+        ), "Entropy coefficient must be a float."
+        assert (
+            ent_coef >= 0
+        ), "Entropy coefficient must be greater than or equal to zero."
+        assert isinstance(
+            vf_coef, (float, int)
+        ), "Value function coefficient must be a float."
+        assert (
+            vf_coef >= 0
+        ), "Value function coefficient must be greater than or equal to zero."
+        assert isinstance(
+            max_grad_norm, (float, int)
+        ), "Maximum norm for gradient clipping must be a float."
+        assert (
+            max_grad_norm >= 0
+        ), "Maximum norm for gradient clipping must be greater than or equal to zero."
+        assert (
+            isinstance(target_kl, (float, int)) or target_kl is None
+        ), "Target KL divergence threshold must be a float."
         if target_kl is not None:
-            assert target_kl >= 0, (
-                "Target KL divergence threshold must be greater than or equal to zero."
-            )
-        assert isinstance(update_epochs, int), (
-            "Policy update epochs must be an integer."
-        )
-        assert update_epochs >= 1, (
-            "Policy update epochs must be greater than or equal to one."
-        )
-        assert isinstance(wrap, bool), (
-            "Wrap models flag must be boolean value True or False."
-        )
+            assert (
+                target_kl >= 0
+            ), "Target KL divergence threshold must be greater than or equal to zero."
+        assert isinstance(
+            update_epochs, int
+        ), "Policy update epochs must be an integer."
+        assert (
+            update_epochs >= 1
+        ), "Policy update epochs must be greater than or equal to one."
+        assert isinstance(
+            wrap, bool
+        ), "Wrap models flag must be boolean value True or False."
 
         # New parameters for using RolloutBuffer
-        assert isinstance(use_rollout_buffer, bool), (
-            "Use rollout buffer flag must be boolean value True or False."
-        )
-        assert isinstance(recurrent, bool), (
-            "Has hidden states flag must be boolean value True or False."
-        )
+        assert isinstance(
+            use_rollout_buffer, bool
+        ), "Use rollout buffer flag must be boolean value True or False."
+        assert isinstance(
+            recurrent, bool
+        ), "Has hidden states flag must be boolean value True or False."
         if recurrent and (
             hidden_state_size is None
             or hidden_state_size == 0
@@ -748,42 +748,43 @@ class PPO(RLAlgorithm):
                 batch_values = batch_values.squeeze()
 
                 if len(minibatch_idxs) > 1:
-                    # For flat learning, hidden state from buffer is (batch, layer, hidden)
-                    # Needs to be (layer, batch, hidden) for _get_action_and_values
-                    if batch_hidden_states is not None:
-                        eval_hidden_state = {
-                            k: v.permute(1, 0, 2).contiguous()
-                            for k, v in batch_hidden_states.items()
-                        }
-                    else:
-                        eval_hidden_state = None
-
-                    # Get values and next hidden state (which we ignore in flat learning)
-                    _, _, entropy_t, new_value_t, _ = self._get_action_and_values(
-                        batch_states, hidden_state=eval_hidden_state
+                    log_prob, entropy, value = self.evaluate_actions(
+                        obs=batch_states, actions=batch_actions
                     )
 
-                    # Compute log prob of taken actions
-                    new_log_prob_t = self.actor.action_log_prob(batch_actions)
+                    logratio = log_prob - batch_log_probs
+                    ratio = logratio.exp()
 
-                    # Use -log_prob as entropy when head returns None (continuous actions w/ squashing)
-                    if entropy_t is None:
-                        entropy_t = -new_log_prob_t
+                    with torch.no_grad():
+                        approx_kl = ((ratio - 1) - logratio).mean()
 
-                    ratio = torch.exp(new_log_prob_t - batch_log_probs)
-                    policy_loss1 = -batch_advantages * ratio
-                    policy_loss2 = -batch_advantages * torch.clamp(
+                    minibatch_advs = batch_advantages
+                    minibatch_advs = (minibatch_advs - minibatch_advs.mean()) / (
+                        minibatch_advs.std() + 1e-8
+                    )
+
+                    # Policy loss
+                    pg_loss1 = -minibatch_advs * ratio
+                    pg_loss2 = -minibatch_advs * torch.clamp(
                         ratio, 1 - self.clip_coef, 1 + self.clip_coef
                     )
-                    policy_loss = torch.max(policy_loss1, policy_loss2).mean()
 
-                    value_loss = 0.5 * ((new_value_t - batch_returns) ** 2).mean()
-                    entropy_loss = -entropy_t.mean()
+                    pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
+                    # Value loss
+                    value = value.view(-1)
+                    v_loss_unclipped = (value - batch_returns) ** 2
+                    v_clipped = batch_values + torch.clamp(
+                        value - batch_values, -self.clip_coef, self.clip_coef
+                    )
+
+                    v_loss_clipped = (v_clipped - batch_returns) ** 2
+                    v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
+                    v_loss = 0.5 * v_loss_max.mean()
+
+                    entropy_loss = entropy.mean()
                     loss = (
-                        policy_loss
-                        + self.vf_coef * value_loss
-                        + self.ent_coef * entropy_loss
+                        pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
                     )
 
                     # actor + critic loss backprop
@@ -844,9 +845,9 @@ class PPO(RLAlgorithm):
 
         batch_size = self.batch_size
         num_samples = observations.size(0)
-        assert num_samples == self.rollout_buffer.size(), (
-            f"Expected {self.rollout_buffer.size()} samples, but got {num_samples}"
-        )
+        assert (
+            num_samples == self.rollout_buffer.size()
+        ), f"Expected {self.rollout_buffer.size()} samples, but got {num_samples}"
 
         indices = np.arange(num_samples)
         mean_loss = 0.0
@@ -1110,9 +1111,8 @@ class PPO(RLAlgorithm):
         self.set_training_mode(False)
         with torch.no_grad():
             rewards = []
-            num_envs = (
-                env.num_envs if hasattr(env, "num_envs") and not vectorized else 1
-            )
+            num_envs = env.num_envs if hasattr(env, "num_envs") and vectorized else 1
+
             for _ in range(loop):
                 obs, info = env.reset()
                 scores = np.zeros(num_envs)
@@ -1169,9 +1169,9 @@ class PPO(RLAlgorithm):
                                 if (
                                     reset_states.shape[1] > 0
                                 ):  # Check batch dim if any env finished
-                                    test_hidden_state[key][:, newly_finished, :] = (
-                                        reset_states
-                                    )
+                                    test_hidden_state[key][
+                                        :, newly_finished, :
+                                    ] = reset_states
 
                     if np.any(newly_finished):
                         completed_episode_scores[newly_finished] = scores[

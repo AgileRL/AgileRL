@@ -774,6 +774,7 @@ def test_algorithm_test_loop():
         action_space=action_space,
         num_envs=num_envs,
     )
+
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
 

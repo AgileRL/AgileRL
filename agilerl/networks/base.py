@@ -33,15 +33,15 @@ def assert_correct_mlp_net_config(net_config: Dict[str, Any]) -> None:
     :param net_config: Configuration of the MLP network.
     :type net_config: Dict[str, Any]
     """
-    assert "hidden_size" in net_config.keys(), (
-        "Net config must contain hidden_size: int."
-    )
-    assert isinstance(net_config["hidden_size"], list), (
-        "Net config hidden_size must be a list."
-    )
-    assert len(net_config["hidden_size"]) > 0, (
-        "Net config hidden_size must contain at least one element."
-    )
+    assert (
+        "hidden_size" in net_config.keys()
+    ), "Net config must contain hidden_size: int."
+    assert isinstance(
+        net_config["hidden_size"], list
+    ), "Net config hidden_size must be a list."
+    assert (
+        len(net_config["hidden_size"]) > 0
+    ), "Net config hidden_size must contain at least one element."
 
 
 def assert_correct_simba_net_config(net_config: Dict[str, Any]) -> None:
@@ -50,16 +50,16 @@ def assert_correct_simba_net_config(net_config: Dict[str, Any]) -> None:
     :param net_config: Configuration of the MLP network.
     :type net_config: Dict[str, Any]
     """
-    assert "hidden_size" in net_config.keys(), (
-        "Net config must contain hidden_size: int."
-    )
-    assert isinstance(net_config["hidden_size"], (int, np.int64)), (
-        "Net config hidden_size must be an integer."
-    )
+    assert (
+        "hidden_size" in net_config.keys()
+    ), "Net config must contain hidden_size: int."
+    assert isinstance(
+        net_config["hidden_size"], (int, np.int64)
+    ), "Net config hidden_size must be an integer."
     assert "num_blocks" in net_config.keys(), "Net config must contain num_blocks: int."
-    assert isinstance(net_config["num_blocks"], int), (
-        "Net config num_blocks must be an integer."
-    )
+    assert isinstance(
+        net_config["num_blocks"], int
+    ), "Net config num_blocks must be an integer."
 
 
 def assert_correct_cnn_net_config(net_config: Dict[str, Any]) -> None:
@@ -75,14 +75,14 @@ def assert_correct_cnn_net_config(net_config: Dict[str, Any]) -> None:
     ]:
         assert key in net_config.keys(), f"Net config must contain {key}: int."
         assert isinstance(net_config[key], list), f"Net config {key} must be a list."
-        assert len(net_config[key]) > 0, (
-            f"Net config {key} must contain at least one element."
-        )
+        assert (
+            len(net_config[key]) > 0
+        ), f"Net config {key} must contain at least one element."
 
         if key == "kernel_size":
-            assert isinstance(net_config[key], (int, tuple, list)), (
-                "Kernel size must be of type int, list, or tuple."
-            )
+            assert isinstance(
+                net_config[key], (int, tuple, list)
+            ), "Kernel size must be of type int, list, or tuple."
 
 
 def assert_correct_lstm_net_config(net_config: Dict[str, Any]) -> None:
@@ -91,9 +91,9 @@ def assert_correct_lstm_net_config(net_config: Dict[str, Any]) -> None:
     :param net_config: Configuration of the LSTM network.
     :type net_config: Dict[str, Any]
     """
-    assert "hidden_state_size" in net_config.keys(), (
-        "LSTM net config must contain hidden_state_size: int."
-    )
+    assert (
+        "hidden_state_size" in net_config.keys()
+    ), "LSTM net config must contain hidden_state_size: int."
     assert isinstance(net_config["hidden_state_size"], (int, np.int64)), (
         "LSTM net config hidden_state_size must be an integer but is "
         + str(type(net_config["hidden_state_size"]))
@@ -191,12 +191,12 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     ) -> None:
         super().__init__(device)
 
-        assert latent_dim <= max_latent_dim, (
-            "Latent dimension must be less than or equal to max latent dimension."
-        )
-        assert latent_dim >= min_latent_dim, (
-            "Latent dimension must be greater than or equal to min latent dimension."
-        )
+        assert (
+            latent_dim <= max_latent_dim
+        ), "Latent dimension must be less than or equal to max latent dimension."
+        assert (
+            latent_dim >= min_latent_dim
+        ), "Latent dimension must be greater than or equal to min latent dimension."
 
         if encoder_config is None:
             encoder_config = get_default_encoder_config(observation_space, simba=simba)
@@ -225,9 +225,9 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         self.hidden_state_size = hidden_state_size
 
         if self.recurrent:
-            assert encoder_config.get("hidden_state_size", None) is not None, (
-                "Hidden state size must be specified for recurrent networks."
-            )
+            assert (
+                encoder_config.get("hidden_state_size", None) is not None
+            ), "Hidden state size must be specified for recurrent networks."
 
         encoder_config = (
             encoder_config
