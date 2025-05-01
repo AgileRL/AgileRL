@@ -144,8 +144,9 @@ class IPPO(MultiAgentRLAlgorithm):
             hp_config=hp_config,
             device=device,
             accelerator=accelerator,
-            normalize_images=normalize_images,
             torch_compiler=torch_compiler,
+            normalize_images=normalize_images,
+            placeholder_value=None,
             name="IPPO",
         )
 
@@ -372,23 +373,24 @@ class IPPO(MultiAgentRLAlgorithm):
     ) -> Dict[str, TorchObsType]:
         """Preprocesses observations for forward pass through neural network.
 
-        :param observations: Observations of environment
-        :type observations: numpy.ndarray[float] or dict[str, numpy.ndarray[float]]
+        :param observation: Observations of environment
+        :type observation: numpy.ndarray[float] or dict[str, numpy.ndarray[float]]
 
         :return: Preprocessed observations
         :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
         """
         preprocessed = {homo_id: [] for homo_id in homo_ids}
-        for agent_id, obs in observation.items():
+        for agent_id, agent_obs in observation.items():
             homo_id = self.get_homo_id(agent_id)
             preprocessed[homo_id].append(
                 preprocess_observation(
-                    observation=obs,
-                    observation_space=self.observation_space.get(agent_id),
+                    self.observation_space.get(agent_id),
+                    observation=agent_obs,
                     device=self.device,
                     normalize_images=self.normalize_images,
                 )
             )
+
         for homo_id in homo_ids:
             # Case where we have asynchronous agents
             if not preprocessed[homo_id]:
@@ -419,51 +421,6 @@ class IPPO(MultiAgentRLAlgorithm):
 
         return action_masks, env_defined_actions, agent_masks
 
-    def extract_inactive_agents(
-        self, obs: Dict[str, ObservationType]
-    ) -> Tuple[Dict[str, np.ndarray], Dict[str, ObservationType]]:
-        """Extract inactive agents from observation.
-
-        :param obs: Observation dictionary
-        :type obs: Dict[str, ObservationType]
-
-        :return: Tuple of inactive agents and filtered observations
-        :rtype: Tuple[Dict[str, np.ndarray], Dict[str, ObservationType]]
-        """
-        inactive_agents = {}
-        agents_to_remove = []
-        for agent_id, agent_obs in obs.items():
-            if isinstance(agent_obs, dict):
-                sample = next(iter(agent_obs.values()))
-            elif isinstance(agent_obs, tuple):
-                sample = agent_obs[0]
-            else:
-                sample = agent_obs
-
-            # Extract rows where all values are NaN
-            inactive_agent_indices = np.where(np.isnan(sample).all(axis=1))[0]
-
-            # If agent is active in all environments, don't need to save info
-            if inactive_agent_indices.shape[0] == 0:
-                continue
-
-            filtered_obs: np.ndarray = np.delete(
-                obs[agent_id], inactive_agent_indices, axis=0
-            )
-
-            # Don't need to save info if same agent is inactive in all environments
-            if filtered_obs.shape[0] == 0:
-                agents_to_remove.append(agent_id)
-                continue
-
-            obs[agent_id] = filtered_obs
-            inactive_agents[agent_id] = inactive_agent_indices
-
-        for agent_id in agents_to_remove:
-            obs.pop(agent_id)
-
-        return inactive_agents, obs
-
     def get_action(
         self,
         obs: Dict[str, ObservationType],
@@ -485,10 +442,7 @@ class IPPO(MultiAgentRLAlgorithm):
         action_masks, env_defined_actions, agent_masks = self.process_infos(infos)
         vect_dim = get_vect_dim(obs, self.observation_space)
 
-        # Need to extract inactive agents from obs
-        # inactive_agents, obs = self.extract_inactive_agents(obs)
-
-        # Preprocess observations
+        # Extract currently active agents
         unique_agents_ids = list(obs.keys())
         homogenous_agents = defaultdict(list)
         for agent_id in unique_agents_ids:
@@ -572,20 +526,6 @@ class IPPO(MultiAgentRLAlgorithm):
         action_dict = self.disassemble_homogeneous_outputs(
             action_dict, vect_dim, homogenous_agents
         )
-
-        # Place NaNs in actions for inactive agents
-        # NOTE: With the current implementation of `AsyncPettingZooVecEnv`
-        # this is never used -> will need to take a second look in the future
-        # for agent_id, inactive_array in inactive_agents.items():
-        #     # Handle different action types (integers, floats, etc.)
-        #     placeholder = (
-        #         np.array([-999], dtype=action_dict[agent_id].dtype)
-        #         if np.issubdtype(action_dict[agent_id].dtype, np.integer)
-        #         else np.nan
-        #     )
-        #     action_dict[agent_id] = np.insert(
-        #         action_dict[agent_id], inactive_array, placeholder, axis=0
-        #     )
 
         # If using env_defined_actions replace actions
         if env_defined_actions is not None:
@@ -707,18 +647,27 @@ class IPPO(MultiAgentRLAlgorithm):
 
         # Handle case where we haven't collected a next state for this set
         # of homogeneous agents yet.
-        # TODO: Handle resets not being synchronised between homogeneous agents
         if not next_state:
-            next_state = {agent_id: state[-1] for agent_id, state in states.items()}
-            next_done = {agent_id: done[-1] for agent_id, done in dones.items()}
-            states = {agent_id: state[:-1] for agent_id, state in states.items()}
-            actions = {agent_id: action[:-1] for agent_id, action in actions.items()}
-            log_probs = {
-                agent_id: log_prob[:-1] for agent_id, log_prob in log_probs.items()
-            }
-            dones = {agent_id: done[:-1] for agent_id, done in dones.items()}
-            values = {agent_id: value[:-1] for agent_id, value in values.items()}
-            rewards = {agent_id: reward[:-1] for agent_id, reward in rewards.items()}
+            next_state = {agent_id: None for agent_id in states.keys()}
+
+        for agent_id in next_state.keys():
+            agent_next_state = next_state[agent_id]
+            if agent_next_state is None or np.isnan(agent_next_state).all():
+                agent_states = states[agent_id]
+                agent_dones = dones[agent_id]
+                agent_rewards = rewards[agent_id]
+                last_active_index = np.where(~np.isnan(agent_states))[0][-1]
+
+                # Filter out NaNs
+                next_state[agent_id] = agent_states[last_active_index]
+                next_done[agent_id] = agent_dones[last_active_index]
+                states[agent_id] = agent_states[:last_active_index]
+                dones[agent_id] = agent_dones[:last_active_index]
+                rewards[agent_id] = agent_rewards[:last_active_index]
+
+                actions[agent_id] = actions[agent_id][:-1]
+                log_probs[agent_id] = log_probs[agent_id][:-1]
+                values[agent_id] = values[agent_id][:-1]
 
         log_probs, rewards, dones, values = map(
             vectorize_experiences_by_agent, (log_probs, rewards, dones, values)
@@ -730,8 +679,6 @@ class IPPO(MultiAgentRLAlgorithm):
         next_state = vectorize_experiences_by_agent(next_state, dim=0)
         next_done = vectorize_experiences_by_agent(next_done, dim=0)
 
-        # Bootstrapping returns using GAE advantage estimation
-        dones = dones.long()
         with torch.no_grad():
             num_steps = rewards.size(0)
             rewards = rewards.reshape(num_steps, -1)
@@ -740,7 +687,7 @@ class IPPO(MultiAgentRLAlgorithm):
             next_done = next_done.reshape(1, -1)
 
             next_state = preprocess_observation(
-                next_state, obs_space, self.device, self.normalize_images
+                obs_space, next_state, self.device, self.normalize_images
             )
             next_value = critic(next_state).reshape(1, -1).cpu()
             advantages = torch.zeros_like(rewards).float()
@@ -779,7 +726,7 @@ class IPPO(MultiAgentRLAlgorithm):
         num_samples = experiences[4].size(0)
         batch_idxs = np.arange(num_samples)
         mean_loss = 0
-        for epoch in range(self.update_epochs):
+        for _ in range(self.update_epochs):
             np.random.shuffle(batch_idxs)
             for start in range(0, num_samples, self.batch_size):
                 minibatch_idxs = batch_idxs[start : start + self.batch_size]
@@ -802,7 +749,7 @@ class IPPO(MultiAgentRLAlgorithm):
                     actor.train()
                     critic.train()
                     batch_states = preprocess_observation(
-                        batch_states, obs_space, self.device, self.normalize_images
+                        obs_space, batch_states, self.device, self.normalize_images
                     )
                     _, _, entropy = actor(batch_states)
                     value = critic(batch_states).squeeze(-1)
@@ -894,14 +841,11 @@ class IPPO(MultiAgentRLAlgorithm):
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
         :type loop: int, optional
         :param sum_scores: Boolean flag to indicate whether to sum sub-agent scores, defaults to True
-        :type sum_scores: book, optional
-        :param batch_size: Batch size for processing observations, helps reduce memory overhead with many agents
-        :type batch_size: int, optional
+        :type sum_scores: bool, optional
         :return: Mean test score
         :rtype: float
         """
         self.set_training_mode(False)
-
         with torch.no_grad():
             rewards = []
             if hasattr(env, "num_envs"):
@@ -911,7 +855,7 @@ class IPPO(MultiAgentRLAlgorithm):
                 num_envs = 1
                 is_vectorised = False
 
-            for i in range(loop):
+            for _ in range(loop):
                 obs, info = env.reset()
                 scores = (
                     np.zeros((num_envs, 1))
@@ -933,33 +877,51 @@ class IPPO(MultiAgentRLAlgorithm):
                             for agent_id, s in obs.items()
                         }
 
+                    # Need to extract inactive agents from observation
+                    _, obs = self.extract_inactive_agents(obs)
+
+                    # Get next action from agent
                     action, _, _, _ = self.get_action(obs=obs, infos=info)
+
                     if not is_vectorised:
                         action = {agent: act[0] for agent, act in action.items()}
+
                     obs, reward, term, trunc, info = env.step(action)
                     reward = self.sum_shared_rewards(reward)
+
+                    # Compute score increment (replace NaNs representing inactive agents with 0)
+                    agent_rewards = np.array(list(reward.values())).transpose()
+                    agent_rewards = np.where(np.isnan(agent_rewards), 0, agent_rewards)
                     score_increment = (
                         (
-                            np.sum(
-                                np.array(list(reward.values())).transpose(), axis=-1
-                            )[:, np.newaxis]
+                            np.sum(agent_rewards, axis=-1)[:, np.newaxis]
                             if is_vectorised
-                            else np.sum(
-                                np.array(list(reward.values())).transpose(), axis=-1
-                            )
+                            else np.sum(agent_rewards, axis=-1)
                         )
                         if sum_scores
-                        else np.array(list(reward.values())).transpose()
+                        else agent_rewards
                     )
                     scores += score_increment
 
                     dones = {}
-                    for agent in term:
-                        dones[agent] = term[agent] | trunc[agent]
+                    for agent_id in self.agent_ids:
+                        terminated = term.get(agent_id, True)
+                        truncated = trunc.get(agent_id, False)
+
+                        # Replace NaNs with True (indicate killed agent)
+                        terminated = np.where(
+                            np.isnan(terminated), True, terminated
+                        ).astype(bool)
+                        truncated = np.where(
+                            np.isnan(truncated), False, truncated
+                        ).astype(bool)
+
+                        dones[agent_id] = terminated | truncated
 
                     if not is_vectorised:
                         dones = {
-                            agent: np.array([done]) for agent, done in dones.items()
+                            agent: np.array([dones[agent_id]])
+                            for agent in self.agent_ids
                         }
 
                     for idx, agent_dones in enumerate(zip(*dones.values())):

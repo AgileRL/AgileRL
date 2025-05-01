@@ -48,26 +48,17 @@ def reshape_observation(
     if isinstance(space, spaces.Dict):
         result = OrderedDict()
         for key, subspace in space.spaces.items():
-            subspace_data = raw_data[key]
-            shape = subspace.shape if subspace.shape != () else (1,)
-
-            # Reshape to [num_envs, *shape]
-            reshaped = subspace_data.reshape((num_envs, *shape))
-            result[key] = reshaped.astype(subspace.dtype)
+            result[key] = reshape_observation(raw_data[key], subspace, num_envs)
 
     elif isinstance(space, spaces.Tuple):
         result = []
         for i, subspace in enumerate(space.spaces):
-            subspace_data = raw_data[i]
-            shape = subspace.shape if subspace.shape != () else (1,)
-
-            reshaped = subspace_data.reshape((num_envs, *subspace.shape))
-            result.append(reshaped.astype(subspace.dtype))
+            result.append(reshape_observation(raw_data[i], subspace, num_envs))
 
         result = tuple(result)
     else:
+        # Reshape to [num_envs, *shape]
         shape = space.shape if space.shape != () else (1,)
-
         reshaped = raw_data.reshape((num_envs, *shape))
         result = reshaped.astype(space.dtype)
 
@@ -90,8 +81,6 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
     :type env_fns: list[Callable]
     :param copy: Boolean flag to copy the observation data when it is returned with either .step() or .reset(), recommended, defaults to True
     :type copy: bool, optional
-    :param shared_critic: Boolean flag to share the critic between agents, defaults to False
-    :type shared_critic: bool, optional
     :param context: Context for multiprocessing
 
     """
@@ -105,7 +94,6 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         self,
         env_fns: List[Callable[[], PzEnvType]],
         copy: bool = True,
-        shared_critic: bool = False,
         context: Optional[str] = None,
     ):
         # Core class attributes
@@ -127,7 +115,6 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         self.active_agents = None
         self.previous_active = None
         self.copy = copy
-        self.shared_critic = shared_critic
         self.agents = dummy_env.possible_agents[:]
         action_spaces = {
             agent: dummy_env.action_space(agent) for agent in dummy_env.possible_agents
@@ -172,7 +159,6 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
                         child_pipe,
                         parent_pipe,
                         self._obs_buffer,
-                        self.shared_critic,
                         self.error_queue,
                         self.agents,
                     ),
@@ -236,24 +222,20 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
 
         self._state = AsyncState.WAITING_RESET
 
-    def filter_nans(
-        self, observation: Dict[str, NumpyObsType], copy: bool = False
-    ) -> Dict[str, NumpyObsType]:
-        """Filter out NaN values from the observations"""
-        filtered_obs = {}
-        for agent_id in observation.keys():
-            obs = observation[agent_id] if not copy else deepcopy(observation[agent_id])
-            if isinstance(obs, dict):
-                sample = next(iter(obs.values()))
-            elif isinstance(obs, tuple):
-                sample = obs[0]
-            else:
-                sample = obs
+    def get_observations(self) -> Dict[str, NumpyObsType]:
+        """Get the observations from the environments.
 
-            if not np.isnan(sample).all():
-                filtered_obs[agent_id] = obs
-
-        return filtered_obs
+        :return: Observations from the environments
+        :rtype: Dict[str, NumpyObsType]
+        """
+        return (
+            {
+                agent: deepcopy(self.observations[agent])
+                for agent in self.observations.keys()
+            }
+            if self.copy
+            else self.observations
+        )
 
     def reset_wait(
         self, timeout: Optional[float] = None
@@ -290,17 +272,8 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
 
         self._state = AsyncState.DEFAULT
 
-        observations = self.filter_nans(self.observations, self.copy)
         return (
-            # (
-            #     {
-            #         agent: deepcopy(self.observations[agent])
-            #         for agent in self.observations.keys()
-            #     }
-            #     if self.copy
-            #     else self.observations
-            # ),
-            observations,
+            self.get_observations(),
             infos,
         )
 
@@ -358,13 +331,10 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             successes.append(success)
             if success:
                 reward, term, trunc, info = env_step_return
-
-                # Here we handle the case where we have asynchronous agents
-                # (i.e. the environment doesn't return an observation for all agents each timestep)
                 for agent in self.agents:
-                    rewards[agent].append(reward.get(agent, np.nan))
-                    terminations[agent].append(term.get(agent, np.nan))
-                    truncations[agent].append(trunc.get(agent, np.nan))
+                    rewards[agent].append(reward[agent])
+                    terminations[agent].append(term[agent])
+                    truncations[agent].append(trunc[agent])
 
                 infos = self._add_info(infos, info, env_idx)
 
@@ -376,18 +346,10 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         truncations = {agent: np.array(trunc) for agent, trunc in truncations.items()}
 
         return (
-            # (
-            #     {
-            #         agent: deepcopy(self.observations[agent])
-            #         for agent in self.observations.keys()
-            #     }
-            #     if self.copy
-            #     else self.observations
-            # ),
-            self.filter_nans(self.observations, self.copy),
-            self.filter_nans(rewards),
-            self.filter_nans(terminations),
-            self.filter_nans(truncations),
+            self.get_observations(),
+            rewards,
+            terminations,
+            truncations,
             infos,
         )
 
@@ -788,9 +750,9 @@ def get_placeholder_value(
     agent: str,
     transition_name: str,
     obs_spaces: Optional[Dict[str, spaces.Space]] = None,
-    use_nan: bool = False,
 ) -> Any:
-    """When an agent is killed, used to obtain a placeholder value to return for associated experience.
+    """Used to obtain a placeholder value to return for associated experience when an
+    agent is killed or is inactive for the current step.
 
     :param agent: Agent ID
     :type agent: str
@@ -798,26 +760,17 @@ def get_placeholder_value(
     :type transition_name: str
     :param obs_spaces: Observation spaces
     :type obs_spaces: Dict[str, gymnasium.spaces.Space]
-    :param use_nan: Whether to use NaN as a placeholder value
-    :type use_nan: bool
 
     :return: Placeholder value
     :rtype: Any
     """
-
-    def get_placeholder(value: np.ndarray) -> np.ndarray:
-        if use_nan:
-            return np.full(value.shape, np.nan)
-        else:
-            return -np.ones(value.shape)
-
     match transition_name:
         case "reward":
-            return 0
+            return np.nan
         case "truncated":
-            return False
+            return np.nan
         case "terminated":
-            return True
+            return np.nan
         case "info":
             return {}
         case "observation":
@@ -827,13 +780,13 @@ def get_placeholder_value(
             agent_space = obs_spaces[agent]
             if isinstance(agent_space, spaces.Dict):
                 # For Dict spaces, create a dictionary of -1 arrays
-                return {k: get_placeholder(v) for k, v in agent_space.items()}
+                return {k: np.full(v.shape, np.nan) for k, v in agent_space.items()}
             elif isinstance(agent_space, spaces.Tuple):
                 # For Tuple spaces, create a tuple of -1 arrays
-                return tuple(get_placeholder(s) for s in agent_space)
+                return tuple(np.full(s.shape, np.nan) for s in agent_space)
             else:
                 # For normal spaces
-                return get_placeholder(agent_space)
+                return np.full(agent_space.shape, np.nan)
 
 
 def process_transition(
@@ -841,7 +794,6 @@ def process_transition(
     obs_spaces: Dict[str, spaces.Space],
     transition_names: List[str],
     agents: List[str],
-    shared_critic: bool,
 ) -> List[Dict[str, NumpyObsType]]:
     """Process transition, adds in placeholder values for killed sub-agents.
 
@@ -853,8 +805,6 @@ def process_transition(
     :type transition_names: List[str]
     :param agents: List of sub-agent names
     :type agents: List[str]
-    :param shared_critic: Boolean flag to share the critic between agents, defaults to False
-    :type shared_critic: bool, optional
     """
     transition_list = []
     for transition, name in zip(list(transitions), transition_names):
@@ -862,7 +812,7 @@ def process_transition(
             agent: (
                 transition[agent]
                 if agent in transition.keys()
-                else get_placeholder_value(agent, name, obs_spaces, not shared_critic)
+                else get_placeholder_value(agent, name, obs_spaces)
             )
             for agent in agents
         }
@@ -937,7 +887,6 @@ def _async_worker(
     pipe: Connection,
     parent_pipe: Connection,
     shared_memory: Dict[str, RawArray],
-    shared_critic: bool,
     error_queue: mp.Queue,
     agents: List[str],
 ) -> None:
@@ -954,8 +903,6 @@ def _async_worker(
     :type parent_pipe: Connection
     :param shared_memory: List of shared memories.
     :type shared_memory: List[multiprocessing.Array]
-    :param shared_critic: Boolean flag to share the critic between agents, defaults to False
-    :type shared_critic: bool, optional
     :param error_queue: Queue object for collecting subprocess errors to communicate back to the main process
     :type error_queue: mp.Queue
     :param observation_shapes: Shapes of observations
@@ -973,7 +920,6 @@ def _async_worker(
     parent_pipe.close()
 
     # Need to keep track of the active agents in the environment
-    # For the edge case of asynchronous agents
     current_active = None
     try:
         while True:
@@ -987,7 +933,6 @@ def _async_worker(
                     observation_space,
                     ["observation", "info"],
                     agents,
-                    shared_critic,
                 )
                 write_to_shared_memory(
                     index, observation, shared_memory, observation_space
@@ -1024,7 +969,6 @@ def _async_worker(
                         "info",
                     ],
                     agents,
-                    shared_critic,
                 )
                 write_to_shared_memory(
                     index, observation, shared_memory, observation_space

@@ -144,7 +144,7 @@ class MultiAgentReplayBuffer:
                 # Stack transitions if necessary
                 ts = MultiAgentReplayBuffer.stack_transitions(ts)
 
-                if is_binary_field:
+                if is_binary_field and not np.isnan(ts).any():
                     ts = ts.astype(np.uint8)
 
                 if not np_array:

@@ -78,7 +78,6 @@ def make_vect_envs(
 def make_multi_agent_vect_envs(
     env: Callable[[], ParallelEnv],
     num_envs: int = 1,
-    shared_critic: bool = True,
     **env_kwargs: Any,
 ) -> AsyncPettingZooVecEnv:
     """Returns async-vectorized PettingZoo parallel environments.
@@ -87,12 +86,12 @@ def make_multi_agent_vect_envs(
     :type env: pettingzoo.utils.env.ParallelEnv
     :param num_envs: Number of vectorized environments, defaults to 1
     :type num_envs: int, optional
-    :param shared_critic: Boolean flag to share the critic between agents, whereby a value of -1
-        is placed for observations of inactive agents, defaults to False.
-    :type shared_critic: bool, optional
+
+    :return: Async-vectorized PettingZoo parallel environments
+    :rtype: agilerl.vector.pz_async_vec_env.AsyncPettingZooVecEnv
     """
     env_fns = [lambda: env(**env_kwargs) for _ in range(num_envs)]
-    return AsyncPettingZooVecEnv(env_fns=env_fns, shared_critic=shared_critic)
+    return AsyncPettingZooVecEnv(env_fns=env_fns)
 
 
 def make_skill_vect_envs(

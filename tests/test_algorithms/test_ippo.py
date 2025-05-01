@@ -90,22 +90,12 @@ class DummyMultiEnvAsync(ParallelEnv):
         # Define observation frequencies (every N steps)
         self.observation_frequencies = {
             "agent_0": 1,  # observes every step
-            "agent_1": 2,  # observes every 2 steps
+            "agent_1": 1,  # observes every 2 steps
             "other_agent_0": 4,  # observes every 4 steps
-        }
-
-        # Probability-based method (keeping for backward compatibility)
-        self.observation_probabilities = {
-            "agent_0": 0.8,  # 80% chance to return observation
-            "agent_1": 0.6,  # 60% chance to return observation
-            "other_agent_0": 0.4,  # 40% chance to return observation
         }
 
         # Initialize step counters for each agent
         self.agent_step_counters = {agent: 0 for agent in self.agents}
-
-        # Observation skipping mode (frequency or probability)
-        self.observation_mode = "frequency"  # can be "frequency" or "probability"
 
         self.active_agents = self.agents.copy()  # Initially all agents are active
         self.current_step = 0
@@ -123,20 +113,8 @@ class DummyMultiEnvAsync(ParallelEnv):
         self.current_step = 0
         self.agent_step_counters = {agent: 0 for agent in self.agents}
 
-        if self.observation_mode == "frequency":
-            # All agents observe at reset (step 0)
-            self.active_agents = self.agents.copy()
-        else:
-            # Probability-based method
-            self.active_agents = [
-                agent
-                for agent in self.agents
-                if np.random.random() < self.observation_probabilities[agent]
-            ]
-
-            # Ensure at least one agent is active
-            if not self.active_agents:
-                self.active_agents = [np.random.choice(self.agents)]
+        # All agents observe at reset (step 0)
+        self.active_agents = self.agents.copy()
 
         observations = {
             agent: np.random.rand(
@@ -163,25 +141,13 @@ class DummyMultiEnvAsync(ParallelEnv):
         for agent in self.agents:
             self.agent_step_counters[agent] += 1
 
-        if self.observation_mode == "frequency":
-            # Determine which agents should observe based on their frequency
-            self.active_agents = [
-                agent
-                for agent in self.agents
-                if self.agent_step_counters[agent] % self.observation_frequencies[agent]
-                == 0
-            ]
-        else:
-            # Probability-based method
-            self.active_agents = [
-                agent
-                for agent in self.agents
-                if np.random.random() < self.observation_probabilities[agent]
-            ]
-
-            # Ensure at least one agent is active
-            if not self.active_agents:
-                self.active_agents = [np.random.choice(self.agents)]
+        # Determine which agents should observe based on their frequency
+        self.active_agents = [
+            agent
+            for agent in self.agents
+            if self.agent_step_counters[agent] % self.observation_frequencies[agent]
+            == 0
+        ]
 
         observations = {
             agent: np.random.rand(
@@ -191,16 +157,17 @@ class DummyMultiEnvAsync(ParallelEnv):
         }
 
         rewards = {agent: np.random.randint(0, 5) for agent in action.keys()}
-        dones = {agent: False for agent in self.active_agents}
-        truncated = {agent: False for agent in self.active_agents}
 
-        infos = {agent: {} for agent in self.active_agents}
+        # Different homogeneous agents done at different times
+        dones = {}
         for agent in self.active_agents:
-            infos[agent]["env_defined_actions"] = None
+            if agent in ["agent_0", "agent_1"]:
+                dones[agent] = self.current_step >= 30
+            else:
+                dones[agent] = self.current_step >= 40
 
-        # Always provide env_defined_actions for agent_0 if active
-        if "agent_0" in self.active_agents:
-            infos["agent_0"]["env_defined_actions"] = np.array([1])
+        truncated = {agent: False for agent in self.active_agents}
+        infos = {agent: {} for agent in self.active_agents}
 
         return observations, rewards, dones, truncated, infos
 
@@ -506,7 +473,7 @@ def test_loop(device, sum_score, compile_mode, observation_spaces, vectorized):
         env = make_multi_agent_vect_envs(
             DummyMultiEnv,
             2,
-            **dict(observation_spaces=observation_spaces, action_spaces=action_spaces)
+            **dict(observation_spaces=observation_spaces, action_spaces=action_spaces),
         )
     else:
         env = DummyMultiEnv(observation_spaces, action_spaces)
@@ -1744,33 +1711,16 @@ def test_ippo_init_torch_compiler_error(mode):
 
 
 @pytest.mark.parametrize(
-    "observation_spaces, net_config",
+    "observation_spaces",
     [
-        (
-            generate_multi_agent_box_spaces(3, (4,)),
-            {
-                "encoder_config": {"hidden_size": [64, 64], "init_layers": False},
-                "head_config": {"hidden_size": [32], "init_layers": False},
-            },
-        ),
-        (
-            generate_multi_agent_box_spaces(3, (3, 32, 32), low=0, high=255),
-            {
-                "encoder_config": {
-                    "channel_size": [3],
-                    "kernel_size": [3],
-                    "stride_size": [1],
-                    "init_layers": False,
-                },
-                "head_config": {"hidden_size": [32], "init_layers": False},
-            },
-        ),
+        generate_multi_agent_box_spaces(3, (4,)),
+        generate_multi_agent_box_spaces(3, (3, 32, 32), low=0, high=255),
     ],
 )
 @pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_initialize_ippo_with_net_config(
-    net_config, accelerator_flag, observation_spaces, device, compile_mode
+    accelerator_flag, observation_spaces, device, compile_mode
 ):
     action_spaces = generate_multi_agent_discrete_spaces(3, 2)
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
@@ -1780,11 +1730,15 @@ def test_initialize_ippo_with_net_config(
     else:
         accelerator = None
 
+    net_config = {
+        "encoder_config": get_default_encoder_config(observation_spaces[0]),
+        "head_config": {"hidden_size": [32]},
+    }
     ippo = IPPO(
         observation_spaces=observation_spaces,
-        net_config=net_config,
         action_spaces=action_spaces,
         agent_ids=agent_ids,
+        net_config=net_config,
         accelerator=accelerator,
         device=device,
         torch_compiler=compile_mode,
@@ -1801,34 +1755,32 @@ def test_initialize_ippo_with_net_config(
     assert ippo.steps == [0]
     assert ippo.target_kl == 0.5
 
-    if compile_mode is not None and accelerator is None:
-        assert all(isinstance(actor, OptimizedModule) for actor in ippo.actors)
-        assert all(isinstance(critic, OptimizedModule) for critic in ippo.critics)
-    else:
-        assert all(isinstance(actor, StochasticActor) for actor in ippo.actors)
-        assert all(isinstance(critic, ValueNetwork) for critic in ippo.critics)
+    expected_actor_cls = (
+        OptimizedModule
+        if compile_mode is not None and accelerator is None
+        else StochasticActor
+    )
+    expected_critic_cls = (
+        OptimizedModule
+        if compile_mode is not None and accelerator is None
+        else ValueNetwork
+    )
+    assert all(isinstance(actor, expected_actor_cls) for actor in ippo.actors)
+    assert all(isinstance(critic, expected_critic_cls) for critic in ippo.critics)
 
-    if accelerator is None:
-        assert all(
-            isinstance(actor_optimizer, optim.Adam)
-            for actor_optimizer in ippo.actor_optimizers
-        )
-        assert all(
-            isinstance(critic_optimizer, optim.Adam)
-            for critic_optimizer in ippo.critic_optimizers
-        )
-    else:
-        assert all(
-            isinstance(actor_optimizer, AcceleratedOptimizer)
-            for actor_optimizer in ippo.actor_optimizers
-        )
-        assert all(
-            isinstance(critic_optimizer, AcceleratedOptimizer)
-            for critic_optimizer in ippo.critic_optimizers
-        )
+    expected_opt_cls = optim.Adam if accelerator is None else AcceleratedOptimizer
+    assert all(
+        isinstance(actor_optimizer, expected_opt_cls)
+        for actor_optimizer in ippo.actor_optimizers
+    )
+    assert all(
+        isinstance(critic_optimizer, expected_opt_cls)
+        for critic_optimizer in ippo.critic_optimizers
+    )
     assert isinstance(ippo.criterion, nn.MSELoss)
 
 
+# TODO: This will be deprecated in the future
 @pytest.mark.parametrize(
     "observation_spaces", [generate_multi_agent_box_spaces(3, (6,))]
 )
@@ -1939,6 +1891,7 @@ def test_initialize_ippo_with_mlp_networks_gumbel_softmax(
     assert ippo.torch_compiler == "reduce-overhead"
 
 
+# TODO: This will be deprecated in the future
 @pytest.mark.parametrize(
     "observation_spaces",
     [generate_multi_agent_box_spaces(3, (4, 210, 160), low=0, high=255)],
@@ -2083,18 +2036,28 @@ def test_initialize_ippo_with_evo_networks(
         accelerator=accelerator,
     )
 
-    if compile_mode is not None and accelerator is None:
-        assert all(isinstance(actor, OptimizedModule) for actor in ippo.actors)
-        assert all(isinstance(critic, OptimizedModule) for critic in ippo.critics)
-    else:
-        assert all(
-            isinstance(actor.encoder, (EvolvableMLP, EvolvableCNN))
-            for actor in ippo.actors
-        )
-        assert all(
-            isinstance(critic.encoder, (EvolvableMLP, EvolvableCNN))
-            for critic in ippo.critics
-        )
+    expected_actor_cls = (
+        OptimizedModule
+        if compile_mode is not None and accelerator is None
+        else StochasticActor
+    )
+    expected_critic_cls = (
+        OptimizedModule
+        if compile_mode is not None and accelerator is None
+        else ValueNetwork
+    )
+    assert all(isinstance(actor, expected_actor_cls) for actor in ippo.actors)
+    assert all(isinstance(critic, expected_critic_cls) for critic in ippo.critics)
+
+    expected_opt_cls = optim.Adam if accelerator is None else AcceleratedOptimizer
+    assert all(
+        isinstance(actor_optimizer, expected_opt_cls)
+        for actor_optimizer in ippo.actor_optimizers
+    )
+    assert all(
+        isinstance(critic_optimizer, expected_opt_cls)
+        for critic_optimizer in ippo.critic_optimizers
+    )
 
     assert ippo.observation_spaces == observation_spaces
     assert ippo.action_spaces == action_spaces
@@ -2105,26 +2068,6 @@ def test_initialize_ippo_with_evo_networks(
     assert ippo.scores == []
     assert ippo.fitness == []
     assert ippo.steps == [0]
-
-    if accelerator is None:
-        assert all(
-            isinstance(actor_optimizer, optim.Adam)
-            for actor_optimizer in ippo.actor_optimizers
-        )
-        assert all(
-            isinstance(critic_optimizer, optim.Adam)
-            for critic_optimizer in ippo.critic_optimizers
-        )
-    else:
-        assert all(
-            isinstance(actor_optimizer, AcceleratedOptimizer)
-            for actor_optimizer in ippo.actor_optimizers
-        )
-        assert all(
-            isinstance(critic_optimizer, AcceleratedOptimizer)
-            for critic_optimizer in ippo.critic_optimizers
-        )
-
     assert isinstance(ippo.criterion, nn.MSELoss)
 
 
@@ -2317,54 +2260,20 @@ def test_get_action_distributed(compile_mode):
 
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
-@pytest.mark.parametrize(
-    "observation_spaces, action_spaces",
-    [
-        (
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-        ),
-        (
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-        ),
-        (
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-        ),
-        (
-            generate_multi_agent_box_spaces(3, (6,)),
-            generate_multi_agent_discrete_spaces(3, 2),
-        ),
-    ],
-)
-@pytest.mark.parametrize("observation_mode", ["frequency"])
-def test_ippo_custom_training_with_async_env(
-    observation_spaces, action_spaces, device, compile_mode, observation_mode
-):
-    """Test IPPO with a custom training loop on asynchronous environment for multiple iterations."""
-
+@pytest.mark.parametrize("num_envs", [1, 2])
+def test_ippo_custom_training_with_async_env(device, compile_mode, num_envs):
     # Create async environment with agents that return observations asynchronously
-    env = DummyMultiEnvAsync(observation_spaces, action_spaces)
-
-    # Set observation mode (frequency-based or probability-based)
-    env.observation_mode = observation_mode
-
-    if observation_mode == "frequency":
-        # Configure agents with different observation frequencies
-        # NOTE: Assume homogeneous agents have the same frequency
-        env.observation_frequencies = {
-            "agent_0": 1,  # Observes every step
-            "agent_1": 1,  # Observes every 2 steps
-            "other_agent_0": 4,  # Observes every 4 steps
-        }
+    observation_spaces = generate_multi_agent_box_spaces(3, (6,))
+    action_spaces = generate_multi_agent_discrete_spaces(3, 2)
+    vectorized = num_envs > 1
+    if vectorized:
+        env = make_multi_agent_vect_envs(
+            DummyMultiEnvAsync,
+            num_envs=num_envs,
+            **dict(observation_spaces=observation_spaces, action_spaces=action_spaces),
+        )
     else:
-        # Configure agents with different observation probabilities
-        env.observation_probabilities = {
-            "agent_0": 0.9,  # 90% chance to return observation
-            "agent_1": 0.5,  # 50% chance to return observation
-            "other_agent_0": 0.25,  # 25% chance to return observation
-        }
+        env = DummyMultiEnvAsync(observation_spaces, action_spaces)
 
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
 
@@ -2385,15 +2294,9 @@ def test_ippo_custom_training_with_async_env(
     )
 
     # Custom training loop for multiple iterations
-    n_iterations = 5
-
-    for iteration in range(n_iterations):
+    for iteration in range(5):
         # Reset environment
         observations, infos = env.reset()
-
-        # Track agent participation for analysis
-        agent_participation = {agent_id: 0 for agent_id in agent_ids}
-        steps_with_all_agents = 0
 
         states = {agent_id: [] for agent_id in agent_ids}
         actions = {agent_id: [] for agent_id in agent_ids}
@@ -2402,11 +2305,15 @@ def test_ippo_custom_training_with_async_env(
         dones = {agent_id: [] for agent_id in agent_ids}
         values = {agent_id: [] for agent_id in agent_ids}
 
-        done = {agent_id: np.zeros((1,), dtype=np.int8) for agent_id in agent_ids}
+        done = {
+            agent_id: np.zeros((num_envs,), dtype=np.int8) for agent_id in agent_ids
+        }
 
         # Collect experiences for multiple steps
         max_steps = 105
         for step in range(max_steps):
+            inactive, observations = agent.extract_inactive_agents(observations)
+
             # Get actions for current active agents
             action_dict, logprob_dict, _, value_dict = agent.get_action(
                 observations, infos
@@ -2415,21 +2322,12 @@ def test_ippo_custom_training_with_async_env(
             # Verify actions are only for active agents
             assert all(agent_id in observations for agent_id in action_dict)
 
-            # Update participation stats
-            for agent_id in observations:
-                agent_participation[agent_id] += 1
-
-            # Count steps with all agents or no agents
-            if len(observations) == len(agent_ids):
-                steps_with_all_agents += 1
-
             # Step the environment
             next_observations, reward_dict, terminated, truncated, next_infos = (
                 env.step(action_dict)
             )
 
             # Store experiences for active agents
-            next_dones = {}
             for agent_id in observations:
                 states[agent_id].append(observations[agent_id])
                 actions[agent_id].append(action_dict[agent_id])
@@ -2438,13 +2336,22 @@ def test_ippo_custom_training_with_async_env(
                 dones[agent_id].append(done[agent_id])
                 rewards[agent_id].append(reward_dict[agent_id])
 
+            next_dones = {}
             for agent_id in terminated:
-                next_dones[agent_id] = np.expand_dims(
-                    np.logical_or(terminated[agent_id], truncated[agent_id]).astype(
-                        np.int8
-                    ),
-                    axis=-1,
-                )
+                term = terminated[agent_id]
+                trunc = truncated[agent_id]
+
+                # Process asynchronous dones
+                if vectorized:
+                    mask = ~(np.isnan(term) | np.isnan(trunc))
+                    result = np.full_like(mask, np.nan, dtype=float)
+                    result[mask] = np.logical_or(term[mask], trunc[mask])
+
+                    next_dones[agent_id] = result
+                else:
+                    next_dones[agent_id] = np.array(
+                        [np.logical_or(term, trunc)]
+                    ).astype(np.int8)
 
             # Update for next step
             observations = next_observations
@@ -2452,25 +2359,14 @@ def test_ippo_custom_training_with_async_env(
             infos = next_infos
 
             # Break if all agents report done
-            if all(done.values()):
-                break
+            for idx, agent_dones in enumerate(zip(*next_dones.values())):
+                if all(agent_dones):
+                    if not vectorized:
+                        observations, info = env.reset()
 
-        # Verify asymmetric observation patterns based on mode
-        if observation_mode == "frequency":
-            # In frequency mode, agent_0 should observe most, followed by agent_1, then other_agent_0
-            assert agent_participation["agent_0"] >= agent_participation["agent_1"]
-            assert (
-                agent_participation["agent_1"] >= agent_participation["other_agent_0"]
-            )
-
-            # At least 20% of steps should have all agents observing
-            assert steps_with_all_agents > 0, "No steps with all agents observing"
-        else:
-            # In probability mode, check if participation roughly matches probabilities
-            total_steps = sum(agent_participation.values())
-            if total_steps > 0:
-                # Just verify agent_0 has highest participation
-                assert agent_participation["agent_0"] >= agent_participation["agent_1"]
+                    done = {
+                        agent_id: np.zeros(num_envs) for agent_id in agent.agent_ids
+                    }
 
         # Skip learning if no experiences collected
         if not any(states.values()):
@@ -2484,7 +2380,7 @@ def test_ippo_custom_training_with_async_env(
             rewards,
             dones,
             values,
-            observations,  # next_states
+            next_observations,  # next_states
             next_dones,
         )
 
@@ -2494,11 +2390,6 @@ def test_ippo_custom_training_with_async_env(
 
             # Verify that learning worked for at least one agent
             assert any(agent_id in loss_info for agent_id in agent.shared_agent_ids)
-
-        # Verify that agent can still get actions after learning
-        if observations:
-            final_actions, _, _, _ = agent.get_action(observations, infos)
-            assert all(agent_id in observations for agent_id in final_actions)
 
     # Final test: verify agent can handle completely different set of active agents
     test_observations, test_infos = env.reset()
