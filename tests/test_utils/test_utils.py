@@ -1,4 +1,4 @@
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import gymnasium as gym
 import numpy as np
@@ -19,10 +19,13 @@ from agilerl.algorithms import (
     TD3,
     RainbowDQN,
 )
-from agilerl.algorithms.core import EvolvableAlgorithm
+from agilerl.algorithms.core import EvolvableAlgorithm, LLMAlgorithm
+from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.utils import (
     aggregate_metrics_across_gpus,
     calculate_vectorized_scores,
+    consolidate_mutations,
     create_population,
     gather_tensor,
     make_multi_agent_vect_envs,
@@ -31,6 +34,7 @@ from agilerl.utils.utils import (
     plot_population_score,
     print_hyperparams,
     save_llm_checkpoint,
+    tournament_selection_and_mutation,
 )
 from agilerl.wrappers.learning import Skill
 
@@ -309,12 +313,11 @@ def test_save_with_accelerator():
     agent = Mock()
     agent.actor = Mock()
     agent.accelerator = Mock()
+    agent.accelerator.wait_for_everyone = Mock()
     agent.algo = "grpo"
-    unwrapped_model = Mock()
-    agent.accelerator.unwrap_model = Mock(return_value=unwrapped_model)
-    save_llm_checkpoint(agent, "test_checkpoint")
-    agent.accelerator.unwrap_model.assert_called_once_with(agent.actor)
-    unwrapped_model.save_pretrained.assert_called_once_with("test_checkpoint/grpo")
+    save_llm_checkpoint(agent, None)
+    agent.actor.save_pretrained.assert_called_once_with("./saved_checkpoints/grpo")
+    agent.accelerator.wait_for_everyone.assert_called()
 
 
 def test_save_without_accelerator():
@@ -382,26 +385,6 @@ def test_gather_tensor_distributed():
     )
 
 
-# def test_save_with_accelerator():
-#     """Test saving checkpoint when agent has an accelerator."""
-#     agent = Mock()
-#     agent.actor = Mock()
-#     agent.accelerator = Mock()
-#     agent.algo = "grpo"
-#     save_llm_checkpoint(agent, "test_checkpoint")
-#     agent.actor.save_pretrained.assert_called_once_with("test_checkpoint/grpo")
-
-
-# def test_save_without_accelerator():
-#     """Test saving checkpoint when agent has no accelerator."""
-#     agent = Mock()
-#     agent.actor = Mock()
-#     agent.algo = "grpo"
-#     agent.accelerator = None
-#     save_llm_checkpoint(agent, None)
-#     agent.actor.save_pretrained.assert_called_once_with("./saved_checkpoints/grpo")
-
-
 def test_aggregate_metrics_across_gpus_single_process():
     """Test aggregate_metrics_across_gpus with single process"""
     accelerator = Accelerator()
@@ -466,3 +449,72 @@ def test_aggregate_metrics_across_gpus_with_zero_values():
 
     assert result == 0.0
     assert isinstance(result, float)
+
+
+def test_consolidate_mutations_warning_if_not_llm_algorithm():
+    """Test consolidate_mutations"""
+    population = [Mock() for _ in range(3)]
+    with pytest.warns(UserWarning):
+        consolidate_mutations(population)
+
+
+def test_consolidate_mutations():
+    population = [MagicMock(spec=LLMAlgorithm) for _ in range(3)]
+    for agent in population:
+        agent.mut = "lr"
+        agent.lr = 0.01
+        agent.optimizer = Mock()
+        agent.optimizer.param_groups = [{"lr": 0.01}]
+    consolidate_mutations(population)
+    for agent in population:
+        assert agent.mut == "lr"
+        assert agent.lr == 0.01
+        assert agent.optimizer.param_groups[0]["lr"] == 0.01
+
+
+def test_tournament_selection_and_mutation_language_model():
+    """Test tournament_selection_and_mutation with language model"""
+    population = [MagicMock(spec=LLMAlgorithm) for _ in range(3)]
+    for agent in population:
+        agent.mut = "lr"
+        agent.lr = 0.01
+        agent.optimizer = Mock()
+        agent.optimizer.param_groups = [{"lr": 0.01}]
+        agent.accelerator = MagicMock(spec=Accelerator)
+        agent.actor = MagicMock()
+        agent.actor.save_pretrained = Mock()
+    tournament = MagicMock(spec=TournamentSelection)
+    mutation = MagicMock(spec=Mutations)
+    mutation.mutation = Mock(return_value=population)
+    tournament.select = Mock(return_value=(population[0], population))
+    env_name = "CartPole-v1"
+    algo = None
+    elite_path = None
+    save_elite = True
+    language_model = True
+    accelerator = MagicMock(spec=Accelerator)
+    accelerator.is_main_process = True
+    accelerator.wait_for_everyone = Mock()
+
+    with patch(
+        "agilerl.utils.utils.save_llm_checkpoint"
+    ) as mock_save_llm_checkpoint, patch(
+        "agilerl.utils.utils.consolidate_mutations"
+    ) as mock_consolidate_mutations:
+        output_pop = tournament_selection_and_mutation(
+            population,
+            tournament,
+            mutation,
+            env_name,
+            algo,
+            elite_path,
+            save_elite,
+            accelerator,
+            language_model,
+        )
+        mock_save_llm_checkpoint.assert_called_once_with(population[0], elite_path)
+        mock_consolidate_mutations.assert_called_once_with(output_pop)
+
+    tournament.select.assert_called_once_with(population)
+    mutation.mutation.assert_called_once_with(population)
+    accelerator.wait_for_everyone.assert_called()
