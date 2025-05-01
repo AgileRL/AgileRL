@@ -335,6 +335,9 @@ class DummyMultiAgent(DummyAgentOffPolicy):
             "other_agent": np.random.randn(vect_dim, self.action_size),
         }
 
+    def extract_inactive_agents(self, obs):
+        return {}, obs
+
 
 class DummyTournament:
     def __init__(self):
@@ -760,6 +763,9 @@ def mocked_multi_agent(multi_env, algo):
             return out, out, out, out
         return out, None
 
+    def extract_inactive_agents(obs):
+        return {}, obs
+
     mock_agent.get_action.side_effect = get_action
     mock_agent.test.side_effect = lambda *args, **kwargs: np.random.uniform(0, 400)
     if algo == IPPO:
@@ -776,6 +782,7 @@ def mocked_multi_agent(multi_env, algo):
     mock_agent.load_checkpoint.side_effect = lambda *args, **kwargs: None
     mock_agent.wrap_models.side_effect = lambda *args, **kwargs: None
     mock_agent.unwrap_models.side_effect = lambda *args, **kwargs: None
+    mock_agent.extract_inactive_agents.side_effect = extract_inactive_agents
     if algo != IPPO:
         mock_agent.reset_action_noise.side_effect = lambda *args, **kwargs: None
     mock_agent.algo = {MADDPG: "MADDPG", MATD3: "MATD3", IPPO: "IPPO"}[algo]

@@ -1127,8 +1127,8 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
         """
         return preprocess_observation(
+            self.observation_space,
             observation=observation,
-            observation_space=self.observation_space,
             device=self.device,
             normalize_images=self.normalize_images,
         )
@@ -1151,10 +1151,12 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
     :type device: str, optional
     :param accelerator: Accelerator object for distributed computing, defaults to None
     :type accelerator: Optional[Accelerator], optional
-    :param normalize_images: If True, normalize images, defaults to True
-    :type normalize_images: bool, optional
     :param torch_compiler: The torch compiler mode to use, defaults to None
     :type torch_compiler: Optional[Any], optional
+    :param normalize_images: If True, normalize images, defaults to True
+    :type normalize_images: bool, optional
+    :param placeholder_value: The value to use as placeholder for missing observations, defaults to -1.
+    :type placeholder_value: Optional[Any], optional
     :param name: Name of the algorithm, defaults to the class name
     :type name: Optional[str], optional
     """
@@ -1170,6 +1172,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         accelerator: Optional[Accelerator] = None,
         torch_compiler: Optional[Any] = None,
         normalize_images: bool = True,
+        placeholder_value: Optional[Any] = -1,
         name: Optional[str] = None,
     ) -> None:
 
@@ -1228,6 +1231,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         self.agent_ids = agent_ids
         self.n_agents = len(agent_ids)
+        self.placeholder_value = placeholder_value
 
         self.shared_agent_ids = []
         self.homogeneous_agents = {}
@@ -1298,12 +1302,13 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
         """
         preprocessed = {}
-        for agent_id, obs in observation.items():
+        for agent_id, agent_obs in observation.items():
             preprocessed[agent_id] = preprocess_observation(
-                observation=obs,
-                observation_space=self.observation_space.get(agent_id),
+                self.observation_space.get(agent_id),
+                observation=agent_obs,
                 device=self.device,
                 normalize_images=self.normalize_images,
+                placeholder_value=self.placeholder_value,
             )
 
         return preprocessed
@@ -1424,6 +1429,56 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         return processed_obs
 
+    def extract_inactive_agents(
+        self, obs: Dict[str, ObservationType]
+    ) -> Tuple[Dict[str, np.ndarray], Dict[str, ObservationType]]:
+        """Extract inactive agents from observation.
+
+        :param obs: Observation dictionary
+        :type obs: Dict[str, ObservationType]
+
+        :return: Tuple of inactive agents and filtered observations
+        :rtype: Tuple[Dict[str, np.ndarray], Dict[str, ObservationType]]
+        """
+        inactive_agents = {}
+        agents_to_remove = []
+        for agent_id, agent_obs in obs.items():
+            if isinstance(agent_obs, dict):
+                sample = next(iter(agent_obs.values()))
+            elif isinstance(agent_obs, tuple):
+                sample = agent_obs[0]
+            else:
+                sample = agent_obs
+
+            # For non-vectorised environments we assume observations for
+            # inactive agents are not returned
+            if len(sample.shape) == 1:
+                continue
+
+            # Extract rows where all values are -1
+            inactive_agent_indices = np.where(np.isnan(sample).all(axis=1))[0]
+
+            # If agent is active in all environments, don't need to save info
+            if inactive_agent_indices.shape[0] == 0:
+                continue
+
+            filtered_obs: np.ndarray = np.delete(
+                obs[agent_id], inactive_agent_indices, axis=0
+            )
+
+            # Don't need to save info if same agent is inactive in all environments
+            if filtered_obs.shape[0] == 0:
+                agents_to_remove.append(agent_id)
+                continue
+
+            obs[agent_id] = filtered_obs
+            inactive_agents[agent_id] = inactive_agent_indices
+
+        for agent_id in agents_to_remove:
+            obs.pop(agent_id)
+
+        return inactive_agents, obs
+
     def disassemble_homogeneous_outputs(
         self,
         homo_outputs: ArrayDict,
@@ -1431,6 +1486,9 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         homogeneous_agents: Dict[str, List[str]],
     ) -> ArrayDict:
         """Disassembles batched output by shared policies into their homogeneous agents' outputs.
+
+        .. note:: This assumes that for any given sub-agent the termination condition is deterministic,
+            i.e. any given agent will always terminate at the same timestep in different vectorized environments.
 
         :param homo_outputs: Dictionary to be disassembled, has the form {'agent': [4, 7, 8]}
         :type homo_outputs: Dict[str, np.ndarray]
@@ -1442,12 +1500,12 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         :rtype: Dict[str, np.ndarray]
         """
         output_dict = {}
-        for homo_id in homogeneous_agents:
+        for homo_id, agent_ids in homogeneous_agents.items():
             homo_outputs[homo_id] = np.reshape(
                 homo_outputs[homo_id],
-                (len(homogeneous_agents[homo_id]), vect_dim, -1),
+                (len(agent_ids), vect_dim, -1),
             )
-            for i, agent_id in enumerate(homogeneous_agents[homo_id]):
+            for i, agent_id in enumerate(agent_ids):
                 output_dict[agent_id] = homo_outputs[homo_id][i]
 
         return output_dict

@@ -41,19 +41,26 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Tru
         accelerator.wait_for_everyone()
     else:
         accelerator = None
+
     print(f"DEVICE: {device}")
 
-    env = importlib.import_module(f"{INIT_HP['ENV_NAME']}").parallel_env
-    env_kwargs = dict(max_cycles=25, continuous_actions=False)
-    env = make_multi_agent_vect_envs(env, num_envs=INIT_HP["NUM_ENVS"], **env_kwargs)
+    def create_env(**kwargs):
+        env = importlib.import_module(f"{INIT_HP['ENV_NAME']}").parallel_env(**kwargs)
 
-    if INIT_HP["CHANNELS_LAST"]:
-        # Environment processing for image based observations
-        env = ss.frame_skip_v0(env, 4)
-        env = ss.clip_reward_v0(env, lower_bound=-1, upper_bound=1)
-        env = ss.color_reduction_v0(env, mode="B")
-        env = ss.resize_v1(env, x_size=84, y_size=84)
-        env = ss.frame_stack_v1(env, 4)
+        if INIT_HP["CHANNELS_LAST"]:
+            # Environment processing for image based observations
+            # env = ss.frame_skip_v0(env, 4)
+            # env = ss.clip_reward_v0(env, lower_bound=-1, upper_bound=1)
+            # env = ss.color_reduction_v0(env, mode="B")
+            env = ss.resize_v1(env, x_size=84, y_size=84)
+            env = ss.frame_stack_v1(env, 4)
+
+        return env
+
+    env_kwargs = dict(max_cycles=25, continuous_actions=False)
+    env = make_multi_agent_vect_envs(
+        create_env, num_envs=INIT_HP["NUM_ENVS"], **env_kwargs
+    )
 
     env.reset(seed=42)
     # Configure the multi-agent algo input arguments

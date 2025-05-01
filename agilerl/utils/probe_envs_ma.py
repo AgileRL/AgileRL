@@ -779,8 +779,8 @@ class FixedObsPolicyImageEnv:
             "other_agent_0": np.zeros((1, 3, 3)),
         }
         self.observation_space = {
-            "agent_0": spaces.Box(0.0, 0.0, (1, 3, 3)),
-            "other_agent_0": spaces.Box(0.0, 0.0, (1, 3, 3)),
+            "agent_0": spaces.Box(0.0, 1.0, (1, 3, 3)),
+            "other_agent_0": spaces.Box(0.0, 1.0, (1, 3, 3)),
         }
         self.action_space = {
             "agent_0": spaces.Discrete(2),

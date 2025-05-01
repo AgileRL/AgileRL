@@ -331,14 +331,10 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             successes.append(success)
             if success:
                 reward, term, trunc, info = env_step_return
-
-                # For asynchronous agents (i.e. those for which the environment doesn't
-                # return an observation for the current timestep) we need to fill with
-                # placeholder value (nan)
                 for agent in self.agents:
-                    rewards[agent].append(reward.get(agent, np.nan))
-                    terminations[agent].append(term.get(agent, np.nan))
-                    truncations[agent].append(trunc.get(agent, np.nan))
+                    rewards[agent].append(reward[agent])
+                    terminations[agent].append(term[agent])
+                    truncations[agent].append(trunc[agent])
 
                 infos = self._add_info(infos, info, env_idx)
 
@@ -770,11 +766,11 @@ def get_placeholder_value(
     """
     match transition_name:
         case "reward":
-            return 0
+            return np.nan
         case "truncated":
-            return False
+            return np.nan
         case "terminated":
-            return True
+            return np.nan
         case "info":
             return {}
         case "observation":
@@ -784,13 +780,13 @@ def get_placeholder_value(
             agent_space = obs_spaces[agent]
             if isinstance(agent_space, spaces.Dict):
                 # For Dict spaces, create a dictionary of -1 arrays
-                return {k: -np.ones(v.shape) for k, v in agent_space.items()}
+                return {k: np.full(v.shape, np.nan) for k, v in agent_space.items()}
             elif isinstance(agent_space, spaces.Tuple):
                 # For Tuple spaces, create a tuple of -1 arrays
-                return tuple(-np.ones(s.shape) for s in agent_space)
+                return tuple(np.full(s.shape, np.nan) for s in agent_space)
             else:
                 # For normal spaces
-                return -np.ones(agent_space.shape)
+                return np.full(agent_space.shape, np.nan)
 
 
 def process_transition(
@@ -924,7 +920,6 @@ def _async_worker(
     parent_pipe.close()
 
     # Need to keep track of the active agents in the environment
-    # For the edge case of asynchronous agents
     current_active = None
     try:
         while True:
