@@ -647,6 +647,9 @@ class IPPO(MultiAgentRLAlgorithm):
 
         # Handle case where we haven't collected a next state for this set
         # of homogeneous agents yet.
+        if not next_state:
+            next_state = {agent_id: None for agent_id in states.keys()}
+
         for agent_id in next_state.keys():
             agent_next_state = next_state[agent_id]
             if agent_next_state is None or np.isnan(agent_next_state).all():

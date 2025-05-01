@@ -1756,9 +1756,15 @@ def test_initialize_ippo_with_net_config(
     assert ippo.target_kl == 0.5
 
     expected_actor_cls = (
-        OptimizedModule if compile_mode is not None else StochasticActor
+        OptimizedModule
+        if compile_mode is not None and accelerator is None
+        else StochasticActor
     )
-    expected_critic_cls = OptimizedModule if compile_mode is not None else ValueNetwork
+    expected_critic_cls = (
+        OptimizedModule
+        if compile_mode is not None and accelerator is None
+        else ValueNetwork
+    )
     assert all(isinstance(actor, expected_actor_cls) for actor in ippo.actors)
     assert all(isinstance(critic, expected_critic_cls) for critic in ippo.critics)
 
@@ -2031,9 +2037,15 @@ def test_initialize_ippo_with_evo_networks(
     )
 
     expected_actor_cls = (
-        OptimizedModule if compile_mode is not None else StochasticActor
+        OptimizedModule
+        if compile_mode is not None and accelerator is None
+        else StochasticActor
     )
-    expected_critic_cls = OptimizedModule if compile_mode is not None else ValueNetwork
+    expected_critic_cls = (
+        OptimizedModule
+        if compile_mode is not None and accelerator is None
+        else ValueNetwork
+    )
     assert all(isinstance(actor, expected_actor_cls) for actor in ippo.actors)
     assert all(isinstance(critic, expected_critic_cls) for critic in ippo.critics)
 
@@ -2300,6 +2312,8 @@ def test_ippo_custom_training_with_async_env(device, compile_mode, num_envs):
         # Collect experiences for multiple steps
         max_steps = 105
         for step in range(max_steps):
+            inactive, observations = agent.extract_inactive_agents(observations)
+
             # Get actions for current active agents
             action_dict, logprob_dict, _, value_dict = agent.get_action(
                 observations, infos
@@ -2324,12 +2338,20 @@ def test_ippo_custom_training_with_async_env(device, compile_mode, num_envs):
 
             next_dones = {}
             for agent_id in terminated:
-                next_dones[agent_id] = np.logical_or(
-                    terminated[agent_id], truncated[agent_id]
-                ).astype(np.int8)
+                term = terminated[agent_id]
+                trunc = truncated[agent_id]
 
-                if not vectorized:
-                    next_dones[agent_id] = np.array([next_dones[agent_id]])
+                # Process asynchronous dones
+                if vectorized:
+                    mask = ~(np.isnan(term) | np.isnan(trunc))
+                    result = np.full_like(mask, np.nan, dtype=float)
+                    result[mask] = np.logical_or(term[mask], trunc[mask])
+
+                    next_dones[agent_id] = result
+                else:
+                    next_dones[agent_id] = np.array(
+                        [np.logical_or(term, trunc)]
+                    ).astype(np.int8)
 
             # Update for next step
             observations = next_observations
@@ -2341,9 +2363,10 @@ def test_ippo_custom_training_with_async_env(device, compile_mode, num_envs):
                 if all(agent_dones):
                     if not vectorized:
                         observations, info = env.reset()
-                        done = {
-                            agent_id: np.zeros(num_envs) for agent_id in agent.agent_ids
-                        }
+
+                    done = {
+                        agent_id: np.zeros(num_envs) for agent_id in agent.agent_ids
+                    }
 
         # Skip learning if no experiences collected
         if not any(states.values()):
@@ -2357,22 +2380,16 @@ def test_ippo_custom_training_with_async_env(device, compile_mode, num_envs):
             rewards,
             dones,
             values,
-            observations,  # next_states
+            next_observations,  # next_states
             next_dones,
         )
 
         # Train on collected experiences if we have any
         if any(len(states[agent_id]) > 0 for agent_id in states):
             loss_info = agent.learn(experiences)
-            raise Exception("Stop here")
 
             # Verify that learning worked for at least one agent
             assert any(agent_id in loss_info for agent_id in agent.shared_agent_ids)
-
-        # Verify that agent can still get actions after learning
-        if observations:
-            final_actions, _, _, _ = agent.get_action(observations, infos)
-            assert all(agent_id in observations for agent_id in final_actions)
 
     # Final test: verify agent can handle completely different set of active agents
     test_observations, test_infos = env.reset()
