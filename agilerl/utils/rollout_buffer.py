@@ -10,6 +10,39 @@ from gymnasium import spaces
 from agilerl.typing import ArrayOrTensor, TorchObsType, ObservationType
 
 
+def _get_space_shape(space: spaces.Space) -> Tuple[int, ...]:
+    """Helper to get shape from different gym spaces."""
+    if isinstance(space, spaces.Discrete):
+        return (1,)
+    elif isinstance(space, spaces.Box):
+        return space.shape
+    elif isinstance(space, spaces.MultiDiscrete):
+        return (len(space.nvec),)
+    elif isinstance(space, spaces.MultiBinary):
+        return (space.n,)
+    else:
+        # Fallback for spaces with shape attribute
+        try:
+            return space.shape
+        except AttributeError:
+            raise TypeError(f"Unsupported space type without shape: {type(space)}")
+
+
+def _get_space_dtype(space: spaces.Space) -> np.dtype:
+    """Helper to get dtype from different gym spaces."""
+    if isinstance(space, spaces.Discrete):
+        return np.int64
+    elif isinstance(space, spaces.Box):
+        return space.dtype
+    elif isinstance(space, spaces.MultiDiscrete):
+        return np.int64  # Match gym common practice
+    elif isinstance(space, spaces.MultiBinary):
+        return np.int8  # Match gym common practice
+    else:
+        # Fallback for spaces with dtype attribute, default to float32
+        return getattr(space, "dtype", np.float32)
+
+
 class RolloutBuffer:
     """
     Rollout buffer for collecting experiences and computing advantages for RL algorithms.
@@ -31,6 +64,8 @@ class RolloutBuffer:
     :type gamma: float, optional
     :param recurrent: Whether to store hidden states, defaults to False.
     :type recurrent: bool, optional
+    :param recurrent_state_keys: Keys for hidden states if using dict, defaults to ["h", "c"].
+    :type recurrent_state_keys: List[str], optional
     :param hidden_state_size: Size of hidden states if used, defaults to None.
     :type hidden_state_size: int, optional
     :param use_gae: Whether to compute GAE advantages, defaults to True.
@@ -41,6 +76,9 @@ class RolloutBuffer:
     :type max_seq_len: int, optional
     """
 
+    # Type hints for observation buffers which can be single array or dict of arrays
+    observations: Union[np.ndarray, Dict[str, np.ndarray]]
+    next_observations: Union[np.ndarray, Dict[str, np.ndarray]]
     hidden_states: Optional[Dict[str, np.ndarray]] = None
     next_hidden_states: Optional[Dict[str, np.ndarray]] = None
 
@@ -63,6 +101,7 @@ class RolloutBuffer:
         self.capacity = capacity
         self.observation_space = observation_space
         self.action_space = action_space
+        self.is_dict_obs = isinstance(observation_space, spaces.Dict)
         self.num_envs = num_envs
         self.device = device
         self.gamma = gamma
@@ -82,31 +121,30 @@ class RolloutBuffer:
 
     def _initialize_buffers(self) -> None:
         """Initialize buffer arrays with correct shapes for vectorized environments."""
-        if isinstance(self.observation_space, spaces.Discrete):
-            obs_shape = (1,)
-        elif isinstance(self.observation_space, spaces.Box):
-            obs_shape = self.observation_space.shape
-        elif isinstance(self.observation_space, (spaces.Dict, spaces.Tuple)):
-            # Assuming Dict/Tuple spaces are handled element-wise later
-            obs_shape = ()  # Placeholder, will be determined by actual data
+        # Initialize observation buffers based on space type
+        if self.is_dict_obs:
+            self.observations = {}
+            self.next_observations = {}
+            for key, space in self.observation_space.spaces.items():
+                obs_shape = _get_space_shape(space)
+                obs_dtype = _get_space_dtype(space)
+                self.observations[key] = np.zeros(
+                    (self.capacity, self.num_envs, *obs_shape), dtype=obs_dtype
+                )
+                self.next_observations[key] = np.zeros(
+                    (self.capacity, self.num_envs, *obs_shape), dtype=obs_dtype
+                )
         else:
-            obs_shape = self.observation_space.shape
-
-        # Initialize buffers with zeros, adding the num_envs dimension
-        # Note: Handling Dict/Tuple spaces requires dynamic shape inference or preprocessing
-        if obs_shape:
+            obs_shape = _get_space_shape(self.observation_space)
+            obs_dtype = _get_space_dtype(self.observation_space)
             self.observations = np.zeros(
-                (self.capacity, self.num_envs, *obs_shape), dtype=np.float32
+                (self.capacity, self.num_envs, *obs_shape), dtype=obs_dtype
             )
             self.next_observations = np.zeros(
-                (self.capacity, self.num_envs, *obs_shape), dtype=np.float32
-            )
-        else:  # Placeholder for Dict/Tuple - consider initializing with None or object dtype
-            self.observations = np.empty((self.capacity, self.num_envs), dtype=object)
-            self.next_observations = np.empty(
-                (self.capacity, self.num_envs), dtype=object
+                (self.capacity, self.num_envs, *obs_shape), dtype=obs_dtype
             )
 
+        # Initialize other standard buffers
         self.episode_starts = np.zeros((self.capacity, self.num_envs), dtype=np.bool_)
         self.rewards = np.zeros((self.capacity, self.num_envs), dtype=np.float32)
         self.dones = np.zeros((self.capacity, self.num_envs), dtype=np.bool_)
@@ -116,38 +154,14 @@ class RolloutBuffer:
         self.returns = np.zeros((self.capacity, self.num_envs), dtype=np.float32)
 
         # Initialize action buffer based on action space type
-        if isinstance(self.action_space, spaces.Discrete):
-            action_shape = ()
-            action_dtype = np.int64
-        elif isinstance(self.action_space, spaces.Box):
-            action_shape = self.action_space.shape
-            action_dtype = np.float32
-        elif isinstance(self.action_space, spaces.MultiDiscrete):
-            action_shape = (len(self.action_space.nvec),)
-            action_dtype = np.int64
-        elif isinstance(self.action_space, spaces.MultiBinary):
-            action_shape = (self.action_space.n,)
-            action_dtype = np.int64
-        else:
-            # Attempt to handle other spaces, assuming they have a shape attribute
-            try:
-                action_shape = self.action_space.shape
-                action_dtype = getattr(
-                    self.action_space, "dtype", np.float32
-                )  # Use float32 as default
-            except AttributeError:
-                raise TypeError(
-                    f"Unsupported action space type without shape: {type(self.action_space)}"
-                )
-
-        # Initialize actions buffer based on determined shape and dtype
-        # For Discrete spaces, action_shape is now empty, resulting in shape (capacity, num_envs)
+        action_shape = _get_space_shape(self.action_space)
+        action_dtype = _get_space_dtype(self.action_space)
         self.actions = np.zeros(
             (self.capacity, self.num_envs, *action_shape), dtype=action_dtype
         )
 
+        # Initialize hidden state buffers if recurrent
         if self.recurrent:
-            # Initialize hidden states buffer as dict of numpy arrays
             if self.hidden_state_size is None:
                 raise ValueError("hidden_state_size must be provided if recurrent=True")
             if not self.recurrent_state_keys:
@@ -187,18 +201,20 @@ class RolloutBuffer:
         episode_start: Optional[Union[bool, np.ndarray]] = None,
     ) -> None:
         """
-        Add a new batch of observations and associated data from vectorized environments to the buffer.
+        Add a new batch of transitions to the buffer. Handles Dict observations.
 
-        :param obs: Current observation batch (shape: (num_envs, *obs_shape))
-        :param action: Action batch taken (shape: (num_envs, *action_shape))
-        :param reward: Reward batch received (shape: (num_envs,))
-        :param done: Done flag batch (shape: (num_envs,))
-        :param value: Value estimate batch (shape: (num_envs,))
-        :param log_prob: Log probability batch of the actions (shape: (num_envs,))
-        :param next_obs: Next observation batch (shape: (num_envs, *obs_shape)), defaults to None
-        :param hidden_state: Current hidden state batch (shape: (num_envs, hidden_size)), defaults to None
-        :param next_hidden_state: Next hidden state batch (shape: (num_envs, hidden_size)), defaults to None
-        :param episode_start: Episode start flag batch (shape: (num_envs,)), defaults to None
+        :param obs: Current observation batch. Expected type depends on `self.is_dict_obs`:
+                    - If False: `np.ndarray` of shape `(num_envs, *obs_shape)`.
+                    - If True: `Dict[str, np.ndarray]` where each value has shape `(num_envs, *value_shape)`.
+        :param action: Action batch taken (shape: `(num_envs, *action_shape)`).
+        :param reward: Reward batch received (shape: `(num_envs,)`).
+        :param done: Done flag batch (shape: `(num_envs,)`).
+        :param value: Value estimate batch (shape: `(num_envs,)`).
+        :param log_prob: Log probability batch of the actions (shape: `(num_envs,)`).
+        :param next_obs: Next observation batch. Type matches `obs`. Defaults to None.
+        :param hidden_state: Current hidden state dictionary. Each value shape `(1, num_envs, hidden_size)`. Defaults to None.
+        :param next_hidden_state: Next hidden state dictionary. Type matches `hidden_state`. Defaults to None.
+        :param episode_start: Episode start flag batch (shape: `(num_envs,)`). Defaults to None.
         """
         if self.pos == self.capacity:
             if self.wrap_at_capacity:
@@ -208,100 +224,96 @@ class RolloutBuffer:
                     f"Buffer has reached capacity ({self.capacity} transitions) but received more transitions. Either increase buffer capacity or set wrap_at_capacity=True."
                 )
 
-        if self.num_envs == 1:
-            obs = np.expand_dims(obs, axis=0)
-            action = np.expand_dims(action, axis=0)
-            reward = np.expand_dims(reward, axis=0)
-            done = np.expand_dims(done, axis=0)
-            value = np.expand_dims(value, axis=0)
-            log_prob = np.expand_dims(log_prob, axis=0)
+        # Ensure inputs are numpy arrays
+        action = self._to_numpy(action)
+        reward = np.atleast_1d(self._to_numpy(reward))
+        done = np.atleast_1d(self._to_numpy(done))
+        value = np.atleast_1d(self._to_numpy(value))
+        log_prob = np.atleast_1d(self._to_numpy(log_prob)).squeeze(-1)
 
-        # Convert tensors to numpy arrays if needed
-        if isinstance(obs, torch.Tensor):
-            obs = obs.cpu().numpy()
-        if next_obs is not None and isinstance(next_obs, torch.Tensor):
-            next_obs = next_obs.cpu().numpy()
-        if isinstance(action, torch.Tensor):
-            action = action.cpu().numpy()
-        if isinstance(reward, torch.Tensor):
-            reward = reward.cpu().numpy()
-        if isinstance(done, torch.Tensor):
-            done = done.cpu().numpy()
-        if isinstance(value, torch.Tensor):
-            value = value.cpu().numpy()
-        if isinstance(log_prob, torch.Tensor):
-            log_prob = log_prob.cpu().numpy()
-        if hidden_state is not None and isinstance(hidden_state, torch.Tensor):
-            hidden_state = hidden_state.cpu().numpy()
-        if next_hidden_state is not None and isinstance(
-            next_hidden_state, torch.Tensor
-        ):
-            next_hidden_state = next_hidden_state.cpu().numpy()
-        if episode_start is not None and isinstance(episode_start, torch.Tensor):
-            episode_start = episode_start.cpu().numpy()
-
-        # Ensure inputs are at least 1D arrays for consistent batch handling
-        reward = np.atleast_1d(reward)
-        done = np.atleast_1d(done)
-        value = np.atleast_1d(value)
-        log_prob = np.atleast_1d(log_prob)
         if episode_start is not None:
-            episode_start = np.atleast_1d(episode_start)
+            episode_start = np.atleast_1d(self._to_numpy(episode_start))
 
-        # Check if input dimensions match num_envs
-        if obs is not None and obs.shape[0] != self.num_envs:
-            raise ValueError(
-                f"Observation batch size {obs.shape[0]} does not match num_envs {self.num_envs}"
-            )
-        # Add similar checks for action, reward, done, value, log_prob, next_obs if needed
+        # Handle observations (Dict or standard)
+        if self.is_dict_obs:
+            if not isinstance(obs, dict):
+                raise TypeError(f"Expected obs to be a dict, got {type(obs)}")
+            if next_obs is not None and not isinstance(next_obs, dict):
+                raise TypeError(f"Expected next_obs to be a dict, got {type(next_obs)}")
 
-        # Store the data batch at the current position
-        self.observations[self.pos] = obs
+            for key in self.observations:
+                obs_value = self._to_numpy(obs[key])
+                if obs_value.shape[0] != self.num_envs:
+                    raise ValueError(
+                        f"Observation['{key}'] batch size {obs_value.shape[0]} != num_envs {self.num_envs}"
+                    )
+                self.observations[key][self.pos] = obs_value
+                if next_obs is not None:
+                    next_obs_value = self._to_numpy(next_obs[key])
+                    if next_obs_value.shape[0] != self.num_envs:
+                        raise ValueError(
+                            f"Next Observation['{key}'] batch size {next_obs_value.shape[0]} != num_envs {self.num_envs}"
+                        )
+                    self.next_observations[key][self.pos] = next_obs_value
+        else:
+            obs = self._to_numpy(obs)
+            if obs.shape[0] != self.num_envs:
+                raise ValueError(
+                    f"Observation batch size {obs.shape[0]} != num_envs {self.num_envs}"
+                )
+            self.observations[self.pos] = obs
+            if next_obs is not None:
+                next_obs = self._to_numpy(next_obs)
+                if next_obs.shape[0] != self.num_envs:
+                    raise ValueError(
+                        f"Next observation batch size {next_obs.shape[0]} != num_envs {self.num_envs}"
+                    )
+                self.next_observations[self.pos] = next_obs
+
+        # Store standard data
         self.actions[self.pos] = action
         self.rewards[self.pos] = reward
         self.dones[self.pos] = done
         self.values[self.pos] = value
         self.log_probs[self.pos] = log_prob
-
-        if next_obs is not None:
-            self.next_observations[self.pos] = next_obs
-
-        if episode_start is not None:
-            self.episode_starts[self.pos] = episode_start
-        else:
-            # Default episode_start to False if not provided
-            self.episode_starts[self.pos] = np.zeros(self.num_envs, dtype=bool)
+        self.episode_starts[self.pos] = (
+            episode_start
+            if episode_start is not None
+            else np.zeros(self.num_envs, dtype=bool)
+        )
 
         # Store hidden states if enabled
         if self.recurrent:
             expected_shape = (1, self.num_envs, self.hidden_state_size)
             if hidden_state is not None:
+                if not isinstance(hidden_state, dict):
+                    raise TypeError(
+                        f"Expected hidden_state to be a dict, got {type(hidden_state)}"
+                    )
                 for key in self.recurrent_state_keys:
                     state = hidden_state.get(key)
                     if state is None:
                         raise ValueError(f"Hidden state missing key: {key}")
-                    # Convert state to numpy if it's a tensor
-                    if isinstance(state, torch.Tensor):
-                        state = state.cpu().numpy()
-                    # Validate shape before storing
+                    state = self._to_numpy(state)
                     if state.shape != expected_shape:
                         raise ValueError(
-                            f"Hidden state['{key}'] shape {state.shape} does not match expected {expected_shape}"
+                            f"Hidden state['{key}'] shape {state.shape} != expected {expected_shape}"
                         )
                     self.hidden_states[key][self.pos] = state
 
             if next_hidden_state is not None:
+                if not isinstance(next_hidden_state, dict):
+                    raise TypeError(
+                        f"Expected next_hidden_state to be a dict, got {type(next_hidden_state)}"
+                    )
                 for key in self.recurrent_state_keys:
                     next_state = next_hidden_state.get(key)
                     if next_state is None:
                         raise ValueError(f"Next hidden state missing key: {key}")
-                    # Convert state to numpy if it's a tensor
-                    if isinstance(next_state, torch.Tensor):
-                        next_state = next_state.cpu().numpy()
-                    # Validate shape before storing
+                    next_state = self._to_numpy(next_state)
                     if next_state.shape != expected_shape:
                         raise ValueError(
-                            f"Next hidden state['{key}'] shape {next_state.shape} does not match expected {expected_shape}"
+                            f"Next hidden state['{key}'] shape {next_state.shape} != expected {expected_shape}"
                         )
                     self.next_hidden_states[key][self.pos] = next_state
 
@@ -309,6 +321,25 @@ class RolloutBuffer:
         self.pos += 1
         if self.pos == self.capacity:
             self.full = True
+
+    def _to_numpy(
+        self, data: Union[ArrayOrTensor, Dict[str, ArrayOrTensor]]
+    ) -> Union[np.ndarray, Dict[str, np.ndarray]]:
+        """Convert single tensor or dict of tensors to numpy arrays."""
+        if isinstance(data, torch.Tensor):
+            return data.cpu().numpy()
+        elif isinstance(data, dict):
+            return {k: self._to_numpy(v) for k, v in data.items()}
+        elif isinstance(data, (np.ndarray, float, int, bool)):
+            return data  # Already numpy or scalar
+        else:
+            # Attempt conversion for lists/tuples, assuming homogeneous elements
+            try:
+                return np.array(data)
+            except Exception as e:
+                raise TypeError(
+                    f"Unsupported type for conversion to numpy: {type(data)}. Error: {e}"
+                )
 
     def compute_returns_and_advantages(
         self, last_value: ArrayOrTensor, last_done: ArrayOrTensor
@@ -320,10 +351,8 @@ class RolloutBuffer:
         :param last_done: Done flag for the last state in each environment (shape: (num_envs,))
         """
         # Convert tensors to numpy
-        if isinstance(last_value, torch.Tensor):
-            last_value = last_value.cpu().numpy()
-        if isinstance(last_done, torch.Tensor):
-            last_done = last_done.cpu().numpy()
+        last_value = self._to_numpy(last_value)
+        last_done = self._to_numpy(last_done)
 
         # Ensure last_value and last_done have the correct shape
         last_value = np.atleast_1d(last_value).reshape(self.num_envs)
@@ -350,188 +379,164 @@ class RolloutBuffer:
                     delta
                     + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lambda
                 )
-            self.returns = (
-                self.advantages[:buffer_size] + self.values[:buffer_size]
-            )  # Only assign up to current size
+            # Ensure returns are only calculated for the filled part of the buffer
+            valid_returns = self.advantages[:buffer_size] + self.values[:buffer_size]
+            self.returns[:buffer_size] = valid_returns
         else:
             # Monte Carlo returns
             last_returns = last_value * (1.0 - last_done.astype(float))
             for t in reversed(range(buffer_size)):
-                self.returns[t] = last_returns = self.rewards[
-                    t
-                ] + self.gamma * last_returns * (1.0 - self.dones[t].astype(float))
+                current_rewards = self.rewards[t]
+                current_dones = self.dones[t]
+                self.returns[t] = last_returns = (
+                    current_rewards
+                    + self.gamma * last_returns * (1.0 - current_dones.astype(float))
+                )
 
-            self.advantages = (
-                self.returns - self.values[:buffer_size]
-            )  # Only assign up to current size
+            # Calculate advantages based on computed returns for the filled part
+            valid_advantages = self.returns[:buffer_size] - self.values[:buffer_size]
+            self.advantages[:buffer_size] = valid_advantages
 
     def get(
         self, batch_size: Optional[int] = None
     ) -> Dict[str, Union[np.ndarray, Dict[str, np.ndarray]]]:
         """
         Get data from the buffer, flattened and optionally sampled into minibatches.
+        Handles Dict observations correctly.
 
         :param batch_size: Size of the minibatch to sample. If None, returns all data. Defaults to None.
-        :return: Dictionary containing flattened buffer data arrays.
+        :return: Dictionary containing flattened buffer data arrays. For Dict observations,
+                 'observations' and 'next_observations' are dictionaries mapping keys to flattened arrays.
         """
         buffer_size = self.capacity if self.full else self.pos
         total_samples = buffer_size * self.num_envs
 
         if total_samples == 0:
-            # Return empty dictionary or raise error if buffer is empty
+            warnings.warn("Buffer is empty, returning empty dictionary.")
             return {}
 
-        # Flatten the data across time and environment dimensions
-        flattened_data = {}
-        # Handle potential object dtype for obs/next_obs if Dict/Tuple spaces were used
-        if self.observations.dtype == object:
-            # Need careful stacking if obs are dicts/tuples
-            # This is a simplified placeholder - real implementation might need more logic
-            flattened_data["observations"] = np.concatenate(
-                self.observations[:buffer_size].ravel()
+        # Generate indices for sampling or for taking all data
+        if batch_size is None:
+            indices = np.arange(total_samples)
+        elif batch_size > total_samples:
+            warnings.warn(
+                f"Batch size {batch_size} is larger than buffer size {total_samples}. Returning all data."
             )
-            if self.next_observations is not None:
-                flattened_data["next_observations"] = np.concatenate(
-                    self.next_observations[:buffer_size].ravel()
+            indices = np.arange(total_samples)
+        else:
+            indices = np.random.choice(total_samples, size=batch_size, replace=False)
+
+        # Function to flatten and sample a standard array
+        def flatten_and_sample(
+            arr: np.ndarray, shape_suffix: Tuple[int, ...]
+        ) -> np.ndarray:
+            # Reshape (buffer_size, num_envs, *shape_suffix) -> (total_samples, *shape_suffix)
+            flattened_arr = arr[:buffer_size].reshape(total_samples, *shape_suffix)
+            return flattened_arr[indices]
+
+        sampled_data: Dict[str, Union[np.ndarray, Dict[str, np.ndarray]]] = {}
+
+        # Handle observations
+        if self.is_dict_obs:
+            sampled_data["observations"] = {}
+            sampled_data["next_observations"] = {}
+            for key, space in self.observation_space.spaces.items():
+                obs_shape_suffix = _get_space_shape(space)
+                sampled_data["observations"][key] = flatten_and_sample(
+                    self.observations[key], obs_shape_suffix
+                )
+                sampled_data["next_observations"][key] = flatten_and_sample(
+                    self.next_observations[key], obs_shape_suffix
                 )
         else:
-            obs_shape = self.observations.shape[2:]
-            flattened_data["observations"] = self.observations[:buffer_size].reshape(
-                total_samples, *obs_shape
+            obs_shape_suffix = _get_space_shape(self.observation_space)
+            sampled_data["observations"] = flatten_and_sample(
+                self.observations, obs_shape_suffix
             )
-            if self.next_observations is not None:
-                flattened_data["next_observations"] = self.next_observations[
-                    :buffer_size
-                ].reshape(total_samples, *obs_shape)
+            sampled_data["next_observations"] = flatten_and_sample(
+                self.next_observations, obs_shape_suffix
+            )
 
-        action_shape = self.actions.shape[2:]
-        flattened_data["actions"] = self.actions[:buffer_size].reshape(
-            total_samples, *action_shape
-        )
-        flattened_data["rewards"] = self.rewards[:buffer_size].reshape(total_samples)
-        flattened_data["dones"] = self.dones[:buffer_size].reshape(total_samples)
-        flattened_data["values"] = self.values[:buffer_size].reshape(total_samples)
-        flattened_data["log_probs"] = self.log_probs[:buffer_size].reshape(
-            total_samples
-        )
-        flattened_data["advantages"] = self.advantages[:buffer_size].reshape(
-            total_samples
-        )
-        flattened_data["returns"] = self.returns[:buffer_size].reshape(total_samples)
-        flattened_data["episode_starts"] = self.episode_starts[:buffer_size].reshape(
-            total_samples
-        )
+        # Handle actions
+        action_shape_suffix = _get_space_shape(self.action_space)
+        sampled_data["actions"] = flatten_and_sample(self.actions, action_shape_suffix)
 
-        if self.recurrent:
-            flattened_data["hidden_states"] = {}
-            flattened_data["next_hidden_states"] = {}
-            total_samples = (
-                buffer_size * self.num_envs
-            )  # Recalculate or ensure it's available
+        # Handle scalar/1D data
+        for name, arr in [
+            ("rewards", self.rewards),
+            ("dones", self.dones),
+            ("values", self.values),
+            ("log_probs", self.log_probs),
+            ("advantages", self.advantages),
+            ("returns", self.returns),
+            ("episode_starts", self.episode_starts),
+        ]:
+            sampled_data[name] = flatten_and_sample(arr, ())
+
+        # Handle recurrent states
+        if self.recurrent and self.hidden_states is not None:
+            sampled_data["hidden_states"] = {}
+            # Shape in buffer: (buffer_size, layer=1, num_envs, hidden_size)
+            # Desired output shape: (batch_size, layer=1, hidden_size)
+            hidden_shape_suffix = (1, self.hidden_state_size)  # Assuming layer dim is 1
 
             for key in self.recurrent_state_keys:
-                if self.hidden_states is not None and key in self.hidden_states:
-                    data = self.hidden_states[key][
-                        :buffer_size
-                    ]  # Shape: (buffer_size, 1, num_envs, hidden_size)
-                    # Swap num_envs and layer_dim axes, then reshape
-                    flattened_data["hidden_states"][key] = data.swapaxes(1, 2).reshape(
-                        total_samples, 1, self.hidden_state_size
+                # Reshape to (total_samples, layer=1, hidden_size)
+                flattened_hidden = (
+                    self.hidden_states[key][:buffer_size]
+                    .swapaxes(1, 2)
+                    .reshape(total_samples, *hidden_shape_suffix)
+                )
+                sampled_data["hidden_states"][key] = flattened_hidden[indices]
+
+            # Optionally handle next_hidden_states if they are stored and needed
+            if self.next_hidden_states is not None:
+                sampled_data["next_hidden_states"] = {}
+                for key in self.recurrent_state_keys:
+                    flattened_next_hidden = (
+                        self.next_hidden_states[key][:buffer_size]
+                        .swapaxes(1, 2)
+                        .reshape(total_samples, *hidden_shape_suffix)
                     )
+                    sampled_data["next_hidden_states"][key] = flattened_next_hidden[
+                        indices
+                    ]
 
-                if (
-                    self.next_hidden_states is not None
-                    and key in self.next_hidden_states
-                ):
-                    next_data = self.next_hidden_states[key][
-                        :buffer_size
-                    ]  # Shape: (buffer_size, 1, num_envs, hidden_size)
-                    # Swap num_envs and layer_dim axes, then reshape
-                    flattened_data["next_hidden_states"][key] = next_data.swapaxes(
-                        1, 2
-                    ).reshape(total_samples, 1, self.hidden_state_size)
-
-        # Sample a minibatch if batch_size is specified
-        if batch_size is not None:
-            if batch_size > total_samples:
-                warnings.warn(
-                    f"Batch size {batch_size} is larger than buffer size {total_samples}. Returning all data."
-                )
-                indices = np.arange(total_samples)
-            else:
-                indices = np.random.choice(
-                    total_samples, size=batch_size, replace=False
-                )
-
-            # Sample from flattened data, handling the dict structure for hidden states
-            sampled_batch = {}
-            for key, data in flattened_data.items():
-                if key in ["hidden_states", "next_hidden_states"] and isinstance(
-                    data, dict
-                ):
-                    sampled_batch[key] = {
-                        sub_key: sub_data[indices] for sub_key, sub_data in data.items()
-                    }
-                elif isinstance(data, np.ndarray):
-                    sampled_batch[key] = data[indices]
-                else:
-                    sampled_batch[key] = data  # Should not happen ideally
-
-            return sampled_batch
-        else:
-            # Return all flattened data
-            return flattened_data
+        return sampled_data
 
     def get_tensor_batch(
         self, batch_size: Optional[int] = None, device: Optional[str] = None
     ) -> Dict[str, Union[torch.Tensor, Dict[str, torch.Tensor]]]:
         """
         Get data from the buffer as PyTorch tensors, flattened and optionally sampled.
+        Handles Dict observations correctly.
 
         :param batch_size: Size of batch to sample, if None returns all data, defaults to None.
         :param device: Device to put tensors on, defaults to None (uses self.device).
-        :return: Dictionary with tensor data.
+        :return: Dictionary with tensor data. For Dict observations, 'observations' and
+                 'next_observations' are dictionaries mapping keys to tensors.
         """
         np_batch = self.get(batch_size)
-        device = device or self.device
+        target_device = torch.device(device or self.device)
 
         tensor_batch: Dict[str, Union[torch.Tensor, Dict[str, torch.Tensor]]] = {}
+
         for key, data in np_batch.items():
-            if key in ["hidden_states", "next_hidden_states"] and isinstance(
-                data, dict
-            ):
+            if isinstance(data, dict):
+                # Handles dicts for observations, hidden_states, next_hidden_states
                 tensor_batch[key] = {
-                    sub_key: torch.from_numpy(sub_data).to(device)
+                    sub_key: torch.from_numpy(sub_data).to(target_device)
                     for sub_key, sub_data in data.items()
                 }
             elif isinstance(data, np.ndarray):
-                # Handle potential object dtype for observations (Dict/Tuple)
-                # This requires knowing how to convert the specific dict/tuple structure to tensors
-                if data.dtype == object:
-                    # Placeholder: Assumes data is a list/array of dicts/tuples that can be processed
-                    # This part needs custom logic based on the actual structure
-                    # Example: Convert list of dicts to a dict of tensors
-                    if isinstance(data[0], dict):
-                        tensor_batch[key] = {
-                            k: torch.stack([torch.from_numpy(d[k]) for d in data]).to(
-                                device
-                            )
-                            for k in data[0]
-                        }
-                    # Add handling for tuples if needed
-                    else:
-                        # Fallback or raise error if structure not handled
-                        warnings.warn(
-                            f"Cannot automatically convert object array '{key}' to tensor. Skipping."
-                        )
-                        tensor_batch[key] = (
-                            data  # Keep as numpy object array? Or handle specific types
-                        )
-                else:
-                    tensor_batch[key] = torch.from_numpy(data).to(device)
+                # Handles standard numpy arrays
+                tensor_batch[key] = torch.from_numpy(data).to(target_device)
             else:
-                # Should not happen if get() returns numpy arrays/dicts, but handle just in case
-                tensor_batch[key] = data  # Or raise error?
+                # Should ideally not happen if get() returns numpy arrays/dicts
+                warnings.warn(
+                    f"Unexpected data type '{type(data)}' for key '{key}' in batch. Skipping tensor conversion."
+                )
+                tensor_batch[key] = data  # Keep as is or raise error?
 
         return tensor_batch
 
@@ -571,10 +576,18 @@ class RolloutBuffer:
             )
 
         # Compute valid starting indices along the time dimension
-        max_start = buffer_size - seq_len
+        # Ensure sequences do not wrap around the buffer unless wrap_at_capacity=True (not handled here yet)
+        # For now, assume sequences must be contiguous within the current fill level.
+        max_start_time = buffer_size - seq_len
+        if max_start_time < 0:
+            return []  # Cannot form sequences of length seq_len
+
         valid_pairs: List[Tuple[int, int]] = [
-            (t, env) for env in range(self.num_envs) for t in range(max_start + 1)
+            (t, env) for env in range(self.num_envs) for t in range(max_start_time + 1)
         ]
+
+        if not valid_pairs:
+            return []
 
         if batch_size is None or batch_size >= len(valid_pairs):
             return valid_pairs  # Return all pairs if batch_size too large / None
@@ -587,6 +600,7 @@ class RolloutBuffer:
         batch_size: Optional[int] = None,
     ) -> Dict[str, Union[np.ndarray, Dict[str, np.ndarray]]]:
         """Returns a dictionary with batched sequences suitable for truncated BPTT.
+        Handles Dict observations correctly.
 
         The returned arrays have an additional leading batch dimension of size
         ``batch_size`` and a time dimension of size ``seq_len``.
@@ -594,50 +608,48 @@ class RolloutBuffer:
         :param seq_len: Length of each sequence in timesteps.
         :param batch_size: Number of sequences to sample. If None, returns all
                            possible sequences.
-        :return: Dictionary mirroring :pyfunc:`get`, but with sequences.
+        :return: Dictionary mirroring :pyfunc:`get`, but with sequences. For Dict
+                 observations, 'observations' and 'next_observations' are dictionaries
+                 mapping keys to sequence arrays. 'initial_hidden_states' is also
+                 a dictionary if recurrent.
         """
-        # Sample starting indices
+        # Sample starting indices (time_idx, env_idx)
         start_indices = self._sample_sequence_start_indices(seq_len, batch_size)
 
         actual_batch_size = len(start_indices)
 
         if actual_batch_size == 0:
+            warnings.warn(
+                "Could not sample any valid sequences, returning empty dictionary."
+            )
             return {}
 
-        # Helper to stack sequences along batch dimension
+        # Helper to stack sequences along a new batch dimension
+        # Input array shape: (buffer_capacity, num_envs, *dims)
+        # Output array shape: (actual_batch_size, seq_len, *dims)
         def _stack_seq(array: np.ndarray) -> np.ndarray:
-            seqs = [
-                array[t : t + seq_len, env_idx] for t, env_idx in start_indices
-            ]  # Each with shape (seq_len, *dims)
-            return np.stack(seqs, axis=0)  # (batch, seq_len, *dims)
+            # Extract sequence slices for each start index
+            # slice shape: (seq_len, *dims)
+            seqs = [array[t : t + seq_len, env_idx] for t, env_idx in start_indices]
+            # Stack along a new batch dimension (axis 0)
+            return np.stack(seqs, axis=0)
 
         seq_data: Dict[str, Union[np.ndarray, Dict[str, np.ndarray]]] = {}
 
-        # Handle observations (possibly object dtype)
-        if self.observations.dtype == object:
-            seq_data["observations"] = np.array(
-                [
-                    np.concatenate(self.observations[t : t + seq_len, env_idx])
-                    for t, env_idx in start_indices
-                ],
-                dtype=object,
-            )
+        # Handle observations
+        if self.is_dict_obs:
+            seq_data["observations"] = {}
+            seq_data["next_observations"] = {}
+            for key in self.observations:
+                seq_data["observations"][key] = _stack_seq(self.observations[key])
+                seq_data["next_observations"][key] = _stack_seq(
+                    self.next_observations[key]
+                )
         else:
             seq_data["observations"] = _stack_seq(self.observations)
+            seq_data["next_observations"] = _stack_seq(self.next_observations)
 
-        if self.next_observations is not None:
-            if self.next_observations.dtype == object:
-                seq_data["next_observations"] = np.array(
-                    [
-                        np.concatenate(self.next_observations[t : t + seq_len, env_idx])
-                        for t, env_idx in start_indices
-                    ],
-                    dtype=object,
-                )
-            else:
-                seq_data["next_observations"] = _stack_seq(self.next_observations)
-
-        # Scalar / vector data
+        # Handle standard data (actions, rewards, etc.)
         for name, array in [
             ("actions", self.actions),
             ("rewards", self.rewards),
@@ -650,18 +662,22 @@ class RolloutBuffer:
         ]:
             seq_data[name] = _stack_seq(array)
 
-        # Handle recurrent states
+        # Handle recurrent states: We need the hidden state *at the beginning* of each sequence
         if self.recurrent and self.hidden_states is not None:
             seq_data["initial_hidden_states"] = {}
             for key in self.recurrent_state_keys:
-                # Shape in buffer: (time, layer, env, hidden)
+                # Buffer shape: (time, layer, env, hidden)
+                # We need the state at time 't' for environment 'env_idx'
+                # Output shape: (batch, layer, hidden)
                 init_h = np.stack(
                     [
-                        self.hidden_states[key][t, :, env_idx]
+                        # Get state from specific time 't' and env 'env_idx'
+                        # Squeeze env dim as we are stacking batch dim
+                        self.hidden_states[key][t, :, env_idx, :]
                         for t, env_idx in start_indices
                     ],
-                    axis=0,
-                )  # (batch, layer, hidden)
+                    axis=0,  # Stack along the new batch dimension
+                )
                 seq_data["initial_hidden_states"][key] = init_h
 
         return seq_data
@@ -673,37 +689,36 @@ class RolloutBuffer:
         device: Optional[str] = None,
     ) -> Dict[str, Union[torch.Tensor, Dict[str, torch.Tensor]]]:
         """Same as :pyfunc:`get_sequences` but returns PyTorch tensors on the
-        specified device.
+        specified device. Handles Dict observations correctly.
 
         :param seq_len: Length of each sequence.
         :param batch_size: Number of sequences to sample. If None, returns all.
         :param device: Torch device to move tensors to. Defaults to
                        :pyattr:`self.device`.
-        :return: Dictionary with tensor sequences.
+        :return: Dictionary with tensor sequences. For Dict observations, 'observations'
+                 and 'next_observations' are dictionaries mapping keys to tensors.
+                 'initial_hidden_states' is also a dictionary if recurrent.
         """
-        device = device or self.device
+        target_device = torch.device(device or self.device)
         np_batch = self.get_sequences(seq_len=seq_len, batch_size=batch_size)
+
+        if not np_batch:  # Handle empty batch case from get_sequences
+            return {}
 
         tensor_batch: Dict[str, Union[torch.Tensor, Dict[str, torch.Tensor]]] = {}
         for key, data in np_batch.items():
-            if key == "initial_hidden_states" and isinstance(data, dict):
+            if isinstance(data, dict):
+                # Handles dicts for observations, next_observations, initial_hidden_states
                 tensor_batch[key] = {
-                    k: torch.from_numpy(v).to(device) for k, v in data.items()
-                }
-            elif isinstance(data, dict):
-                tensor_batch[key] = {
-                    k: torch.from_numpy(v).to(device) for k, v in data.items()
+                    k: torch.from_numpy(v).to(target_device) for k, v in data.items()
                 }
             elif isinstance(data, np.ndarray):
-                if data.dtype == object:
-                    # See note in get_tensor_batch
-                    warnings.warn(
-                        f"Cannot automatically convert object array '{key}' to tensor. Skipping."
-                    )
-                    tensor_batch[key] = data
-                else:
-                    tensor_batch[key] = torch.from_numpy(data).to(device)
+                # Handles standard numpy arrays
+                tensor_batch[key] = torch.from_numpy(data).to(target_device)
             else:
+                warnings.warn(
+                    f"Unexpected data type '{type(data)}' for key '{key}' in sequence batch. Skipping tensor conversion."
+                )
                 tensor_batch[key] = data
 
         return tensor_batch

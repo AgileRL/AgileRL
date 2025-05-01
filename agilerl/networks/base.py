@@ -304,7 +304,9 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         """Forward pass of the network."""
         return self.forward(*args, **kwargs)
 
-    def extract_features(self, x: torch.Tensor, hidden_state=None) -> torch.Tensor:
+    def extract_features(
+        self, x: torch.Tensor, hidden_state=None
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Extract features from the encoder part of the network.
 
         :param x: Input tensor to extract features from

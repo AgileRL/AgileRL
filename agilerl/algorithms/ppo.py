@@ -959,7 +959,11 @@ class PPO(RLAlgorithm):
 
         initial_hidden_states = buffer_data.get("initial_hidden_states", None)
 
-        num_sequences = observations.size(0)
+        if isinstance(observations, dict):
+            num_sequences = observations[list(observations.keys())[0]].size(0)
+        else:
+            num_sequences = observations.size(0)
+
         indices = np.arange(num_sequences)
         mean_loss = 0.0
         approx_kl_divs = []
@@ -975,7 +979,11 @@ class PPO(RLAlgorithm):
                 batch_indices = indices[start_idx:end_idx]
 
                 # Slice batch sequences
-                mb_obs_seq = observations[batch_indices]  # (batch, seq_len, obs...)
+                if isinstance(observations, dict):
+                    mb_obs_seq = {k: v[batch_indices] for k, v in observations.items()}
+                else:
+                    mb_obs_seq = observations[batch_indices]  # (batch, seq_len, obs...)
+
                 mb_actions_seq = actions[batch_indices]
                 mb_old_log_probs_seq = old_log_probs[batch_indices]
                 mb_advantages_seq = advantages[batch_indices]
@@ -1005,7 +1013,11 @@ class PPO(RLAlgorithm):
                     step_hidden_state = None
 
                 for t in range(seq_len):
-                    obs_t = mb_obs_seq[:, t]
+                    if isinstance(mb_obs_seq, dict):
+                        obs_t = {k: v[:, t] for k, v in mb_obs_seq.items()}
+                    else:
+                        obs_t = mb_obs_seq[:, t]
+
                     actions_t = mb_actions_seq[:, t]
                     old_log_prob_t = mb_old_log_probs_seq[:, t]
                     adv_t = mb_advantages_seq[:, t]
