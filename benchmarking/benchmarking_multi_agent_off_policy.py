@@ -170,8 +170,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Tru
         accelerator=accelerator,
         torch_compiler=INIT_HP["TORCH_COMPILE"],
     )
-
-    print(agent_pop[0].critics[0])
+    print("Actor: ", agent_pop[0].actors[0])
+    print("Critic: ", agent_pop[0].critics[0])
     train_multi_agent_off_policy(
         env,
         INIT_HP["ENV_NAME"],

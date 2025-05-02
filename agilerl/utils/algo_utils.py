@@ -396,6 +396,9 @@ def format_shared_critic_config(
     if encoder_config.get("hidden_size") is not None:
         net_config["encoder_config"] = {"mlp_config": encoder_config}
         net_config["encoder_config"]["vector_space_mlp"] = True
+        net_config["encoder_config"]["output_layernorm"] = encoder_config.get(
+            "layernorm", True
+        )
         net_config["encoder_config"]["latent_dim"] = encoder_config["hidden_size"][-1]
 
     elif encoder_config.get("channel_size") is not None:

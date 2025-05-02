@@ -200,6 +200,22 @@ class HyperparameterConfig:
         return list(self.config.keys())[key], list(self.config.values())[key]
 
 
+def check_evolvable_module_list(eval: Any, msg: str) -> bool:
+    """Check if the evaluation network is a list of EvolvableModule objects.
+
+    :param eval: The evaluation network.
+    :type eval: Union[EvolvableModule, List[EvolvableModule]]
+    :param msg: The message to raise if the evaluation network is not a list of EvolvableModule objects.
+    :type msg: str
+    :return: Whether the evaluation network is a list of EvolvableModule objects.
+    :rtype: bool
+    """
+    if not isinstance(eval, list) and not all(
+        isinstance(net, EvolvableModule) for net in eval
+    ):
+        raise TypeError(msg + f" Found: {eval}.")
+
+
 @dataclass
 class NetworkGroup:
     """Dataclass for storing a group of networks. This consists of an evaluation network (i.e.
@@ -227,18 +243,18 @@ class NetworkGroup:
 
     def __post_init__(self):
         if self.multiagent:
-            assert isinstance(self.eval, list) and isinstance(
-                self.eval[0], EvolvableModule
-            ), (
+            msg = (
                 "Multiagent algorithms should specify a list of EvolvableModule objects "
-                "for the evaluation argument in the network group.",
+                "for the evaluation argument in the network group."
             )
+            check_evolvable_module_list(self.eval, msg)
 
             if self.shared is not None:
-                assert isinstance(self.shared, list), (
+                msg = (
                     "Multiagent algorithms should specify a list of EvolvableModule objects "
-                    "for the shared argument in the network group.",
+                    "for the shared argument in the network group. Found"
                 )
+                check_evolvable_module_list(self.shared, msg)
 
         # Identify the names of the attributes where the networks are stored
         container = self._infer_parent_container()

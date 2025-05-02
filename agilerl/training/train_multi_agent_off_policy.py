@@ -224,7 +224,10 @@ def train_multi_agent_off_policy(
         pop_episode_scores = []
         pop_fps = []
         for agent_idx, agent in enumerate(pop):  # Loop through population
-            obs, info = env.reset()  # Reset environment at start of episode
+            agent.set_training_mode(True)
+
+            # Reset environment at start of episode
+            obs, info = env.reset()
             scores = (
                 np.zeros((num_envs, 1))
                 if sum_scores
@@ -244,13 +247,8 @@ def train_multi_agent_off_policy(
             start_time = time.time()
             for idx_step in range(evo_steps // num_envs):
                 # Get next action from agent
-                cont_actions, discrete_action = agent.get_action(
-                    obs=obs, training=True, infos=info
-                )
-                if agent.discrete_actions:
-                    action = discrete_action
-                else:
-                    action = cont_actions
+                cont_actions, discrete_action = agent.get_action(obs=obs, infos=info)
+                action = discrete_action if agent.discrete_actions else cont_actions
 
                 if not is_vectorised:
                     action = {agent: act[0] for agent, act in action.items()}
@@ -400,6 +398,7 @@ def train_multi_agent_off_policy(
                         pop_critic_loss[agent_idx][agent_id].append(
                             np.mean(critic_losses)
                         )
+
         # Evaluate population
         fitnesses = [
             agent.test(

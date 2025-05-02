@@ -37,6 +37,7 @@ DefaultCnnConfig = CnnNetConfig(
 DefaultMlpConfig = MlpNetConfig(
     hidden_size=[64, 64],
     output_activation="ReLU",
+    output_layernorm=True,
 )
 DefaultLstmConfig = LstmNetConfig(
     hidden_size=64,
@@ -134,6 +135,7 @@ class EvolvableMultiInput(EvolvableModule):
         lstm_config: Optional[MultiInputConfigType] = None,
         init_dicts: Optional[MultiInputConfigType] = None,
         output_activation: Optional[str] = None,
+        output_layernorm: bool = False,
         recurrent: bool = False,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
@@ -180,11 +182,17 @@ class EvolvableMultiInput(EvolvableModule):
         self.vector_space_mlp = vector_space_mlp
         self.latent_dim = latent_dim
         self.output_activation = output_activation
+        self.output_layernorm = output_layernorm
         self.min_latent_dim = min_latent_dim
         self.max_latent_dim = max_latent_dim
         self.recurrent = recurrent
         self.name = name
         self.device = device
+
+        # Need to set output_vanish for MLP encoders
+        self.mlp_config["output_vanish"] = False
+        self.mlp_config["output_layernorm"] = self.mlp_config.get("layer_norm", True)
+        self.mlp_config["output_activation"] = self.mlp_config.get("activation", "ReLU")
 
         self.vector_spaces = spaces.Dict(
             {
@@ -209,6 +217,9 @@ class EvolvableMultiInput(EvolvableModule):
         )
         # Final dense layer to convert feature encodings to desired num_outputs
         self.final_dense = nn.Linear(features_dim, num_outputs, device=device)
+        self.final_layernorm = (
+            nn.LayerNorm(num_outputs, device=device) if self.output_layernorm else None
+        )
         self.output = get_activation(output_activation)
 
     @property
@@ -409,6 +420,7 @@ class EvolvableMultiInput(EvolvableModule):
             init_dict = self.get_inner_init_dict(
                 "vector_mlp", default=FeatureExtractorType.MLP
             )
+
             self.mlp_name = init_dict.pop("name", "vector_mlp")
             vector_mlp = EvolvableMLP(
                 num_inputs=self.total_vector_dims, name=self.mlp_name, **init_dict
@@ -477,6 +489,10 @@ class EvolvableMultiInput(EvolvableModule):
         # Concatenate all features and pass through final MLP
         features = torch.cat([extracted_features, vector_features], dim=1)
         latent = self.final_dense(features)
+
+        if self.output_layernorm:
+            latent = self.final_layernorm(latent)
+
         return self.output(latent)
 
     @mutation(MutationType.ACTIVATION)

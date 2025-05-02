@@ -531,6 +531,7 @@ class MADDPG(MultiAgentRLAlgorithm):
                 next_actions.append(self.actor_targets[i](next_states[agent_id_label]))
 
         # Stack states and actions
+
         stacked_actions = torch.cat(list(actions.values()), dim=1)
         stacked_next_actions = torch.cat(next_actions, dim=1)
 

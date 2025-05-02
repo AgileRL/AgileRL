@@ -60,6 +60,7 @@ class MlpNetConfig(NetConfig):
     max_mlp_nodes: int = field(default=500)
     layer_norm: bool = field(default=True)
     output_vanish: bool = field(default=True)
+    output_layernorm: bool = field(default=False)
     init_layers: bool = field(default=True)
     noisy: bool = field(default=False)
     noise_std: float = field(default=0.5)
