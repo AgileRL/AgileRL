@@ -363,10 +363,7 @@ class MADDPG(MultiAgentRLAlgorithm):
         return action_masks, env_defined_actions, agent_masks
 
     def get_action(
-        self,
-        obs: Dict[str, ObservationType],
-        training: bool = True,
-        infos: Optional[InfosDict] = None,
+        self, obs: Dict[str, ObservationType], infos: Optional[InfosDict] = None
     ) -> Tuple[ArrayDict, ArrayDict]:
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
@@ -374,8 +371,6 @@ class MADDPG(MultiAgentRLAlgorithm):
 
         :param obs: Environment observations: {'agent_0': state_dim_0, ..., 'agent_n': state_dim_n}
         :type obs: Dict[str, numpy.Array]
-        :param training: Agent is training, use exploration noise, defaults to True
-        :type training: bool, optional
         :param infos: Information dictionary returned by env.step(actions)
         :type infos: Dict[str, Dict[str, ...]]
         :return: Tuple of actions for each agent
@@ -388,12 +383,12 @@ class MADDPG(MultiAgentRLAlgorithm):
         action_masks, env_defined_actions, agent_masks = self.process_infos(infos)
 
         # Preprocess observations
-        preprocessed_states = list(self.preprocess_observation(obs).values())
+        preprocessed_states = self.preprocess_observation(obs)
 
         action_dict = {}
-        for idx, (agent_id, obs, actor) in enumerate(
-            zip(self.agent_ids, preprocessed_states, self.actors)
-        ):
+        for idx, (agent_id, obs) in enumerate(preprocessed_states.items()):
+            agent_idx = self.agent_ids.index(agent_id)
+            actor = self.actors[agent_idx]
             actor.eval()
             if self.accelerator is not None:
                 with actor.no_sync(), torch.no_grad():
@@ -413,7 +408,7 @@ class MADDPG(MultiAgentRLAlgorithm):
                 )
 
             actor.train()
-            if training:
+            if self.training:
                 if self.discrete_actions:
                     min_action, max_action = 0, 1
                 else:
@@ -762,13 +757,13 @@ class MADDPG(MultiAgentRLAlgorithm):
 
                     cont_actions, discrete_action = self.get_action(
                         obs,
-                        training=False,
                         infos=info,
                     )
                     if self.discrete_actions:
                         action = discrete_action
                     else:
                         action = cont_actions
+
                     if not is_vectorised:
                         action = {agent: act[0] for agent, act in action.items()}
 
