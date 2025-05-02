@@ -24,7 +24,10 @@ extensions = [
     "sphinx.ext.intersphinx",
     "sphinx_toolbox.collapse",
     "notfound.extension",
+    "sphinxcontrib.googleanalytics",
 ]
+
+googleanalytics_id = "G-ZKYJ8HJN69"
 
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3/", None),
