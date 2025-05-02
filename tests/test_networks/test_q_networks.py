@@ -40,6 +40,10 @@ def test_q_network_initialization(observation_space, encoder_type):
     elif encoder_type == "cnn":
         assert isinstance(network.encoder, EvolvableCNN)
 
+    evolvable_modules = network.modules()
+    assert "encoder" in evolvable_modules
+    assert "head_net" in evolvable_modules
+
 
 @pytest.mark.parametrize(
     "observation_space",
@@ -161,6 +165,10 @@ def test_rainbow_q_network_initialization(observation_space, encoder_type):
         assert isinstance(network.encoder, EvolvableMLP)
     elif encoder_type == "cnn":
         assert isinstance(network.encoder, EvolvableCNN)
+
+    evolvable_modules = network.modules()
+    assert "encoder" in evolvable_modules
+    assert "head_net" in evolvable_modules
 
 
 @pytest.mark.parametrize(
@@ -285,6 +293,10 @@ def test_continuous_q_network_initialization(observation_space, encoder_type):
         assert isinstance(network.encoder, EvolvableMLP)
     elif encoder_type == "cnn":
         assert isinstance(network.encoder, EvolvableCNN)
+
+    evolvable_modules = network.modules()
+    assert "encoder" in evolvable_modules
+    assert "head_net" in evolvable_modules
 
 
 @pytest.mark.parametrize(
