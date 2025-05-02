@@ -27,7 +27,7 @@ INIT_HP:
     EVAL_STEPS:                # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
     SHARE_ENCODERS: true       # Share encoders between actor and critic
-    WANDB: true                # Log with Weights and Biases
+    WANDB: false                # Log with Weights and Biases
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation

@@ -36,6 +36,9 @@ def is_evolvable(attr: str, obj: Any) -> bool:
     :return: True if the attribute is evolvable, False otherwise.
     :rtype: bool
     """
+    if isinstance(obj, EvolvableModule):
+        return True
+
     return (
         recursive_check_module_attrs(obj, networks_only=True)
         and not attr.startswith("_")
