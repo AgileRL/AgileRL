@@ -178,7 +178,6 @@ def test_remove_layer(num_inputs, num_outputs, hidden_size, device):
     if initial_hidden_size > 1:
         assert len(evolvable_mlp.hidden_size) == initial_hidden_size - 1
         for key, param in new_net.named_parameters():
-            print(key, param.shape)
             if (
                 key in initial_net_dict.keys()
                 and param.shape == initial_net_dict[key].shape

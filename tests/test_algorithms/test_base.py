@@ -21,6 +21,7 @@ from tests.helper_functions import (
     generate_multi_agent_discrete_spaces,
     generate_multidiscrete_space,
     generate_random_box_space,
+    is_processed_observation,
 )
 
 
@@ -226,6 +227,21 @@ def test_population_multi_agent():
             assert agent.action_space[agent_id] == action_spaces[j]
 
         assert agent.index == i
+
+
+@pytest.mark.parametrize(
+    "observation_space",
+    [
+        generate_random_box_space((4,)),
+        generate_random_box_space((3, 32, 32)),
+        generate_dict_or_tuple_space(1, 1, dict_space=True),
+        generate_dict_or_tuple_space(1, 1, dict_space=False),
+    ],
+)
+def test_preprocess_observation(observation_space):
+    agent = DummyRLAlgorithm(observation_space, generate_discrete_space(4), index=0)
+    observation = agent.preprocess_observation(observation_space.sample())
+    assert is_processed_observation(observation, observation_space)
 
 
 def test_incorrect_hp_config():

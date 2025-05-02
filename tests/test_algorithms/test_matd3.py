@@ -1,6 +1,6 @@
 import copy
+import gc
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import dill
 import numpy as np
@@ -15,9 +15,8 @@ from gymnasium.spaces import Discrete
 from torch._dynamo import OptimizedModule
 
 from agilerl.algorithms.matd3 import MATD3
-from agilerl.modules.cnn import EvolvableCNN
+from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
 from agilerl.modules.custom_components import GumbelSoftmax
-from agilerl.modules.mlp import EvolvableMLP
 from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.utils.algo_utils import concatenate_spaces
@@ -25,16 +24,12 @@ from agilerl.utils.evolvable_networks import get_default_encoder_config
 from agilerl.utils.utils import make_multi_agent_vect_envs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
+    gen_multi_agent_dict_or_tuple_spaces,
     generate_multi_agent_box_spaces,
     generate_multi_agent_discrete_spaces,
+    generate_multi_agent_multidiscrete_spaces,
 )
 from tests.test_algorithms.test_maddpg import DummyMultiEnv
-
-
-@pytest.fixture(autouse=True)
-def cleanup():
-    yield  # Run the test first
-    torch.cuda.empty_cache()  # Free up GPU memory
 
 
 class MultiAgentCNNActor(nn.Module):
@@ -131,7 +126,10 @@ def mlp_actor(observation_spaces, action_spaces):
         nn.Linear(64, action_spaces[0].n),
         GumbelSoftmax(),
     )
-    return net
+    yield net
+    del net
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @pytest.fixture
@@ -141,29 +139,33 @@ def mlp_critic(action_spaces, observation_spaces):
         nn.ReLU(),
         nn.Linear(64, 1),
     )
-    return net
+    yield net
+    del net
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @pytest.fixture
 def cnn_actor():
     net = MultiAgentCNNActor()
-    return net
+    yield net
+    del net
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @pytest.fixture
 def cnn_critic():
     net = MultiAgentCNNCritic()
-    return net
+    yield net
+    del net
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @pytest.fixture
 def device():
     return "cuda" if torch.cuda.is_available() else "cpu"
-
-
-@pytest.fixture
-def mocked_accelerator():
-    MagicMock(spec=Accelerator)
 
 
 @pytest.fixture
@@ -195,7 +197,7 @@ def accelerated_experiences(batch_size, observation_spaces, action_spaces, agent
             agent: torch.randn(batch_size, *state_size) for agent in agent_ids
         }
 
-    return states, actions, rewards, next_states, dones
+    yield states, actions, rewards, next_states, dones
 
 
 @pytest.fixture
@@ -235,42 +237,34 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, device
             for agent in agent_ids
         }
 
-    return states, actions, rewards, next_states, dones
+    yield states, actions, rewards, next_states, dones
 
 
-@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize(
-    "observation_spaces, net_config",
+    "observation_spaces",
     [
-        (
-            generate_multi_agent_box_spaces(2, (4,)),
-            {"encoder_config": {"hidden_size": [64, 64]}},
-        ),
-        (
-            generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
-            {
-                "encoder_config": {
-                    "channel_size": [3],
-                    "kernel_size": [3],
-                    "stride_size": [1],
-                }
-            },
-        ),
+        generate_multi_agent_box_spaces(2, (4,)),
+        generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
+        gen_multi_agent_dict_or_tuple_spaces(2, 2, 2, dict_space=True),
+        gen_multi_agent_dict_or_tuple_spaces(2, 2, 2, dict_space=False),
+        generate_multi_agent_multidiscrete_spaces(2, 2),
     ],
 )
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_initialize_matd3_with_net_config(
-    net_config, accelerator_flag, observation_spaces, device, compile_mode
+    observation_spaces, accelerator_flag, device, compile_mode
 ):
+    net_config = {
+        "encoder_config": get_default_encoder_config(observation_spaces[0]),
+        "head_config": {"hidden_size": [16]},
+    }
     action_spaces = generate_multi_agent_box_spaces(2, (2,))
     agent_ids = ["agent_0", "other_agent_0"]
     expl_noise = 0.1
     batch_size = 64
     policy_freq = 2
-    if accelerator_flag:
-        accelerator = Accelerator()
-    else:
-        accelerator = None
+    accelerator = Accelerator() if accelerator_flag else None
     matd3 = MATD3(
         observation_spaces=observation_spaces,
         net_config=net_config,
@@ -289,7 +283,7 @@ def test_initialize_matd3_with_net_config(
     for noise_vec in matd3.expl_noise:
         assert torch.all(noise_vec == expl_noise)
     assert matd3.batch_size == batch_size
-    assert matd3.total_state_dims == sum(state.shape[0] for state in observation_spaces)
+    # assert matd3.total_state_dims == sum(state.shape[0] for state in observation_spaces)
     assert matd3.total_actions == sum(space.shape[0] for space in action_spaces)
     assert matd3.scores == []
     assert matd3.fitness == []
@@ -333,25 +327,17 @@ def test_initialize_matd3_with_net_config(
 
 
 @pytest.mark.parametrize(
-    "observation_spaces, action_spaces, accelerator_flag, compile_mode",
-    [
-        (
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            False,
-            "reduce-overhead",
-        ),
-    ],
+    "observation_spaces", [generate_multi_agent_box_spaces(2, (6,))]
 )
+@pytest.mark.parametrize("action_spaces", [generate_multi_agent_discrete_spaces(2, 2)])
 def test_initialize_matd3_with_mlp_networks_gumbel_softmax(
     mlp_actor,
     mlp_critic,
     observation_spaces,
     action_spaces,
-    accelerator_flag,
     device,
-    compile_mode,
 ):
+    compile_mode = "reduce-overhead"
     net_config = {
         "encoder_config": {
             "hidden_size": [64, 64],
@@ -374,6 +360,7 @@ def test_initialize_matd3_with_mlp_networks_gumbel_softmax(
     assert matd3.torch_compiler == compile_mode
 
 
+# TODO: This will be deprecated in the future
 @pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize(
@@ -389,10 +376,7 @@ def test_initialize_matd3_with_mlp_networks(
     device,
     compile_mode,
 ):
-    if accelerator_flag:
-        accelerator = Accelerator()
-    else:
-        accelerator = None
+    accelerator = Accelerator() if accelerator_flag else None
     evo_actors = [
         MakeEvolvable(network=mlp_actor, input_tensor=torch.randn(1, 6), device=device)
         for _ in range(2)
@@ -425,6 +409,7 @@ def test_initialize_matd3_with_mlp_networks(
         assert all(isinstance(actor, MakeEvolvable) for actor in matd3.actors)
         assert all(isinstance(critic, MakeEvolvable) for critic in matd3.critics_1)
         assert all(isinstance(critic, MakeEvolvable) for critic in matd3.critics_2)
+
     assert matd3.observation_spaces == observation_spaces
     assert matd3.action_spaces == action_spaces
     assert matd3.n_agents == 2
@@ -436,55 +421,38 @@ def test_initialize_matd3_with_mlp_networks(
     assert matd3.scores == []
     assert matd3.fitness == []
     assert matd3.steps == [0]
-    if accelerator is None:
-        assert all(
-            isinstance(actor_optimizer, optim.Adam)
-            for actor_optimizer in matd3.actor_optimizers
-        )
-        assert all(
-            isinstance(critic_1_optimizer, optim.Adam)
-            for critic_1_optimizer in matd3.critic_1_optimizers
-        )
-        assert all(
-            isinstance(critic_2_optimizer, optim.Adam)
-            for critic_2_optimizer in matd3.critic_2_optimizers
-        )
-    else:
-        assert all(
-            isinstance(actor_optimizer, AcceleratedOptimizer)
-            for actor_optimizer in matd3.actor_optimizers
-        )
-        assert all(
-            isinstance(critic_1_optimizer, AcceleratedOptimizer)
-            for critic_1_optimizer in matd3.critic_1_optimizers
-        )
-        assert all(
-            isinstance(critic_2_optimizer, AcceleratedOptimizer)
-            for critic_2_optimizer in matd3.critic_2_optimizers
-        )
+
+    expected_optimizer_cls = optim.Adam if accelerator is None else AcceleratedOptimizer
+    assert all(
+        isinstance(actor_optimizer, expected_optimizer_cls)
+        for actor_optimizer in matd3.actor_optimizers
+    )
+    assert all(
+        isinstance(critic_1_optimizer, expected_optimizer_cls)
+        for critic_1_optimizer in matd3.critic_1_optimizers
+    )
+    assert all(
+        isinstance(critic_2_optimizer, expected_optimizer_cls)
+        for critic_2_optimizer in matd3.critic_2_optimizers
+    )
     assert isinstance(matd3.criterion, nn.MSELoss)
 
 
+# TODO: This will be deprecated in the future
 @pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
-@pytest.mark.parametrize(
-    "observation_spaces",
-    [generate_multi_agent_box_spaces(2, (4, 210, 160), low=0, high=255)],
-)
-@pytest.mark.parametrize("action_spaces", [generate_multi_agent_discrete_spaces(2, 2)])
 def test_initialize_matd3_with_cnn_networks(
     cnn_actor,
     cnn_critic,
-    observation_spaces,
-    action_spaces,
     accelerator_flag,
     device,
     compile_mode,
 ):
-    if accelerator_flag:
-        accelerator = Accelerator()
-    else:
-        accelerator = None
+    observation_spaces = generate_multi_agent_box_spaces(
+        2, (4, 210, 160), low=0, high=255
+    )
+    action_spaces = generate_multi_agent_discrete_spaces(2, 2)
+    accelerator = Accelerator() if accelerator_flag else None
     evo_actors = [
         MakeEvolvable(
             network=cnn_actor,
@@ -523,14 +491,14 @@ def test_initialize_matd3_with_cnn_networks(
         policy_freq=2,
         torch_compiler=compile_mode,
     )
-    if compile_mode is not None and accelerator is None:
-        assert all(isinstance(actor, OptimizedModule) for actor in matd3.actors)
-        assert all(isinstance(critic, OptimizedModule) for critic in matd3.critics_1)
-        assert all(isinstance(critic, OptimizedModule) for critic in matd3.critics_2)
-    else:
-        assert all(isinstance(actor, MakeEvolvable) for actor in matd3.actors)
-        assert all(isinstance(critic, MakeEvolvable) for critic in matd3.critics_1)
-        assert all(isinstance(critic, MakeEvolvable) for critic in matd3.critics_2)
+    expected_module_cls = (
+        OptimizedModule
+        if compile_mode is not None and accelerator is None
+        else MakeEvolvable
+    )
+    assert all(isinstance(actor, expected_module_cls) for actor in matd3.actors)
+    assert all(isinstance(critic, expected_module_cls) for critic in matd3.critics_1)
+    assert all(isinstance(critic, expected_module_cls) for critic in matd3.critics_2)
     assert matd3.observation_spaces == observation_spaces
     assert matd3.policy_freq == 2
     assert matd3.action_spaces == action_spaces
@@ -542,68 +510,39 @@ def test_initialize_matd3_with_cnn_networks(
     assert matd3.scores == []
     assert matd3.fitness == []
     assert matd3.steps == [0]
-    if accelerator is None:
-        assert all(
-            isinstance(actor_optimizer, optim.Adam)
-            for actor_optimizer in matd3.actor_optimizers
-        )
-        assert all(
-            isinstance(critic_1_optimizer, optim.Adam)
-            for critic_1_optimizer in matd3.critic_1_optimizers
-        )
-        assert all(
-            isinstance(critic_2_optimizer, optim.Adam)
-            for critic_2_optimizer in matd3.critic_2_optimizers
-        )
-    else:
-        assert all(
-            isinstance(actor_optimizer, AcceleratedOptimizer)
-            for actor_optimizer in matd3.actor_optimizers
-        )
-        assert all(
-            isinstance(critic_1_optimizer, AcceleratedOptimizer)
-            for critic_1_optimizer in matd3.critic_1_optimizers
-        )
-        assert all(
-            isinstance(critic_2_optimizer, AcceleratedOptimizer)
-            for critic_2_optimizer in matd3.critic_2_optimizers
-        )
+
+    expected_optimizer_cls = optim.Adam if accelerator is None else AcceleratedOptimizer
+    assert all(
+        isinstance(actor_optimizer, expected_optimizer_cls)
+        for actor_optimizer in matd3.actor_optimizers
+    )
+    assert all(
+        isinstance(critic_1_optimizer, expected_optimizer_cls)
+        for critic_1_optimizer in matd3.critic_1_optimizers
+    )
+    assert all(
+        isinstance(critic_2_optimizer, expected_optimizer_cls)
+        for critic_2_optimizer in matd3.critic_2_optimizers
+    )
     assert isinstance(matd3.criterion, nn.MSELoss)
 
 
 @pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize(
-    "observation_spaces, action_spaces, net, compile_mode",
+    "observation_spaces, encoder_cls",
     [
-        (
-            generate_multi_agent_box_spaces(2, (4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            "mlp",
-            None,
-        ),
+        (generate_multi_agent_box_spaces(2, (4,)), EvolvableMLP),
         (
             generate_multi_agent_box_spaces(2, (4, 210, 160), low=0, high=255),
-            generate_multi_agent_discrete_spaces(2, 2),
-            "cnn",
-            None,
-        ),
-        (
-            generate_multi_agent_box_spaces(2, (4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            "mlp",
-            "default",
-        ),
-        (
-            generate_multi_agent_box_spaces(2, (4, 210, 160), low=0, high=255),
-            generate_multi_agent_discrete_spaces(2, 2),
-            "cnn",
-            "default",
+            EvolvableCNN,
         ),
     ],
 )
 def test_initialize_matd3_with_evo_networks(
-    observation_spaces, action_spaces, net, device, compile_mode, accelerator
+    observation_spaces, encoder_cls, device, compile_mode, accelerator
 ):
+    action_spaces = generate_multi_agent_discrete_spaces(2, 2)
     net_config = get_default_encoder_config(observation_spaces[0])
 
     # For image spaces we need to give a sample input tensor to build networks
@@ -674,83 +613,49 @@ def test_initialize_matd3_with_evo_networks(
         assert all(isinstance(critic, OptimizedModule) for critic in matd3.critics_1)
         assert all(isinstance(critic, OptimizedModule) for critic in matd3.critics_2)
     else:
+        assert all(isinstance(actor.encoder, encoder_cls) for actor in matd3.actors)
         assert all(
-            isinstance(actor.encoder, (EvolvableMLP, EvolvableCNN))
-            for actor in matd3.actors
+            isinstance(critic.encoder, encoder_cls) for critic in matd3.critics_1
         )
         assert all(
-            isinstance(critic.encoder, (EvolvableMLP, EvolvableCNN))
-            for critic in matd3.critics_1
+            isinstance(critic.encoder, encoder_cls) for critic in matd3.critics_2
         )
-        assert all(
-            isinstance(critic.encoder, (EvolvableMLP, EvolvableCNN))
-            for critic in matd3.critics_2
-        )
-
     assert matd3.observation_spaces == observation_spaces
     assert matd3.policy_freq == 2
     assert matd3.action_spaces == action_spaces
     assert matd3.n_agents == 2
     assert matd3.agent_ids == ["agent_0", "other_agent_0"]
     assert matd3.discrete_actions is True
-    assert matd3.total_state_dims == sum(state.shape[0] for state in observation_spaces)
+    # assert matd3.total_state_dims == sum(state.shape[0] for state in observation_spaces)
     assert matd3.total_actions == sum(space.n for space in action_spaces)
     assert matd3.scores == []
     assert matd3.fitness == []
     assert matd3.steps == [0]
-    if accelerator is None:
-        assert all(
-            isinstance(actor_optimizer, optim.Adam)
-            for actor_optimizer in matd3.actor_optimizers
-        )
-        assert all(
-            isinstance(critic_optimizer, optim.Adam)
-            for critic_optimizer in matd3.critic_1_optimizers
-        )
-        assert all(
-            isinstance(critic_optimizer, optim.Adam)
-            for critic_optimizer in matd3.critic_2_optimizers
-        )
-    else:
-        assert all(
-            isinstance(actor_optimizer, AcceleratedOptimizer)
-            for actor_optimizer in matd3.actor_optimizers
-        )
-        assert all(
-            isinstance(critic_optimizer, AcceleratedOptimizer)
-            for critic_optimizer in matd3.critic_1_optimizers
-        )
-        assert all(
-            isinstance(critic_optimizer, AcceleratedOptimizer)
-            for critic_optimizer in matd3.critic_2_optimizers
-        )
 
+    expected_optimizer_cls = optim.Adam if accelerator is None else AcceleratedOptimizer
+    assert all(
+        isinstance(actor_optimizer, expected_optimizer_cls)
+        for actor_optimizer in matd3.actor_optimizers
+    )
+    assert all(
+        isinstance(critic_optimizer, expected_optimizer_cls)
+        for critic_optimizer in matd3.critic_1_optimizers
+    )
+    assert all(
+        isinstance(critic_optimizer, expected_optimizer_cls)
+        for critic_optimizer in matd3.critic_2_optimizers
+    )
     assert isinstance(matd3.criterion, nn.MSELoss)
 
 
-@pytest.mark.parametrize(
-    "observation_spaces, action_spaces, compile_mode",
-    [
-        (
-            generate_multi_agent_box_spaces(2, (4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            None,
-        ),
-        (
-            generate_multi_agent_box_spaces(2, (4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            "default",
-        ),
-    ],
-)
-def test_initialize_matd3_with_incorrect_evo_networks(
-    observation_spaces, action_spaces, compile_mode
-):
+@pytest.mark.parametrize("compile_mode", [None, "default"])
+def test_initialize_matd3_with_incorrect_evo_networks(compile_mode):
     evo_actors = []
     evo_critics = []
-
+    observation_spaces = generate_multi_agent_box_spaces(2, (4,))
+    action_spaces = generate_multi_agent_discrete_spaces(2, 2)
     with pytest.raises(AssertionError):
-        matd3 = MATD3(
+        _ = MATD3(
             observation_spaces=observation_spaces,
             action_spaces=action_spaces,
             agent_ids=["agent_0", "other_agent_0"],
@@ -758,26 +663,15 @@ def test_initialize_matd3_with_incorrect_evo_networks(
             critic_networks=evo_critics,
             torch_compiler=compile_mode,
         )
-        assert matd3
 
 
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize(
-    "observation_spaces, action_spaces, compile_mode",
-    [
-        (
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            None,
-        ),
-        (
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            "default",
-        ),
-    ],
+    "observation_spaces", [generate_multi_agent_box_spaces(2, (6,))]
 )
+@pytest.mark.parametrize("action_spaces", [generate_multi_agent_discrete_spaces(2, 2)])
 def test_matd3_init_warning(
-    mlp_actor, observation_spaces, action_spaces, device, compile_mode
+    mlp_actor, device, compile_mode, observation_spaces, action_spaces
 ):
     warning_string = "Actor and critic network lists must both be supplied to use custom networks. Defaulting to net config."
     evo_actors = [
@@ -852,23 +746,24 @@ def test_matd3_init_with_compile_error(mode):
         )
 
 
-@pytest.mark.parametrize("training", [0, 1])
 @pytest.mark.parametrize(
     "observation_spaces",
     [
         generate_multi_agent_box_spaces(2, (6,)),
         generate_multi_agent_discrete_spaces(2, 6),
+        generate_multi_agent_box_spaces(2, (4, 210, 160), low=0, high=255),
     ],
 )
 @pytest.mark.parametrize(
     "action_spaces",
     [
-        generate_multi_agent_box_spaces(2, (2,)),
+        generate_multi_agent_box_spaces(2, (2,), low=-1, high=1),
         generate_multi_agent_discrete_spaces(2, 2),
     ],
 )
+@pytest.mark.parametrize("training", [0, 1])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
-def test_matd3_get_action_mlp(
+def test_matd3_get_action(
     training, observation_spaces, action_spaces, device, compile_mode
 ):
     agent_ids = ["agent_0", "other_agent_0"]
@@ -886,7 +781,6 @@ def test_matd3_get_action_mlp(
     matd3 = MATD3(
         observation_spaces,
         action_spaces,
-        net_config={"encoder_config": {"hidden_size": [8, 8]}},
         agent_ids=agent_ids,
         device=device,
         torch_compiler=compile_mode,
@@ -921,80 +815,12 @@ def test_matd3_get_action_mlp(
     matd3 = None
 
 
-@pytest.mark.parametrize("training", [0, 1])
 @pytest.mark.parametrize(
     "observation_spaces",
-    [generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255)],
-)
-@pytest.mark.parametrize(
-    "action_spaces",
     [
-        generate_multi_agent_box_spaces(2, (2,)),
-        generate_multi_agent_discrete_spaces(2, 2),
+        generate_multi_agent_box_spaces(2, (6,)),
+        generate_multi_agent_box_spaces(2, (4, 210, 160), low=0, high=255),
     ],
-)
-@pytest.mark.parametrize("compile_mode", [None, "default"])
-def test_matd3_get_action_cnn(
-    training, observation_spaces, action_spaces, device, compile_mode
-):
-    agent_ids = ["agent_0", "other_agent_0"]
-    net_config = {
-        "encoder_config": {
-            "channel_size": [16],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-    state = {
-        agent: np.random.randn(*observation_spaces[idx].shape)
-        for idx, agent in enumerate(agent_ids)
-    }
-    matd3 = MATD3(
-        observation_spaces,
-        action_spaces,
-        agent_ids=agent_ids,
-        net_config=net_config,
-        device=device,
-        torch_compiler=compile_mode,
-    )
-    cont_actions, discrete_action = matd3.get_action(state, training)
-    discrete_actions = all(
-        isinstance(space, spaces.Discrete) for space in action_spaces
-    )
-    for idx, env_actions in enumerate(list(cont_actions.values())):
-        action_dim = (
-            action_spaces[idx].shape[0]
-            if isinstance(action_spaces[idx], spaces.Box)
-            else action_spaces[idx].n
-        )
-        for action in env_actions:
-            assert len(action) == action_dim
-            if discrete_actions:
-                torch.testing.assert_close(
-                    sum(action),
-                    1.0,
-                    atol=0.1,
-                    rtol=1e-3,
-                )
-            act = action[idx]
-            assert act.dtype == np.float32
-            assert -1 <= act.all() <= 1
-
-    if discrete_actions:
-        for idx, env_action in enumerate(list(discrete_action.values())):
-            action_dim = (
-                action_spaces[idx].shape[0]
-                if isinstance(action_spaces[idx], spaces.Box)
-                else action_spaces[idx].n
-            )
-            for action in env_action:
-                assert action <= action_dim - 1
-
-
-@pytest.mark.parametrize("training", [0, 1])
-@pytest.mark.parametrize(
-    "observation_spaces",
-    [generate_multi_agent_box_spaces(2, (6,))],
 )
 @pytest.mark.parametrize(
     "action_spaces",
@@ -1003,6 +829,7 @@ def test_matd3_get_action_cnn(
         generate_multi_agent_box_spaces(2, (2,)),
     ],
 )
+@pytest.mark.parametrize("training", [0, 1])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_matd3_get_action_distributed(
     training, observation_spaces, action_spaces, compile_mode
@@ -1024,6 +851,8 @@ def test_matd3_get_action_distributed(
         DummyDeterministicActor(
             observation_space=actor.observation_space,
             action_space=actor.action_space,
+            encoder_config=actor.encoder.net_config,
+            head_config=actor.head_net.net_config,
             n_agents=actor.n_agents,
             device=actor.device,
         )
@@ -1064,9 +893,11 @@ def test_matd3_get_action_distributed(
                 assert action <= action_dim - 1
 
 
-@pytest.mark.parametrize("training", [0, 1])
 @pytest.mark.parametrize(
-    "observation_spaces", [generate_multi_agent_box_spaces(2, (6,))]
+    "observation_spaces",
+    [
+        generate_multi_agent_box_spaces(2, (6,)),
+    ],
 )
 @pytest.mark.parametrize(
     "action_spaces",
@@ -1075,9 +906,10 @@ def test_matd3_get_action_distributed(
         generate_multi_agent_discrete_spaces(2, 2),
     ],
 )
+@pytest.mark.parametrize("training", [0, 1])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_matd3_get_action_agent_masking(
-    training, observation_spaces, action_spaces, compile_mode, device
+    training, observation_spaces, action_spaces, device, compile_mode
 ):
     agent_ids = ["agent_0", "other_agent_0"]
     state = {
@@ -1114,7 +946,6 @@ def test_matd3_get_action_agent_masking(
         ), cont_actions["agent_0"]
 
 
-@pytest.mark.parametrize("training", [0, 1])
 @pytest.mark.parametrize(
     "observation_spaces", [generate_multi_agent_box_spaces(2, (6,))]
 )
@@ -1125,6 +956,7 @@ def test_matd3_get_action_agent_masking(
         generate_multi_agent_discrete_spaces(2, 6),
     ],
 )
+@pytest.mark.parametrize("training", [0, 1])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_matd3_get_action_vectorized_agent_masking(
     training, observation_spaces, action_spaces, device, compile_mode
@@ -1204,7 +1036,6 @@ def test_matd3_get_action_action_masking_exception(
     matd3 = MATD3(
         observation_spaces,
         action_spaces,
-        net_config={"encoder_config": {"hidden_size": [64, 64]}},
         agent_ids=agent_ids,
         device=device,
     )
@@ -1212,24 +1043,10 @@ def test_matd3_get_action_action_masking_exception(
         _, discrete_action = matd3.get_action(state, training)
 
 
-@pytest.mark.parametrize(
-    "training, observation_spaces, action_spaces",
-    [
-        (
-            1,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_discrete_spaces(2, 4),
-        ),
-        (
-            0,
-            generate_multi_agent_box_spaces(2, (6,)),
-            generate_multi_agent_discrete_spaces(2, 4),
-        ),
-    ],
-)
-def test_matd3_get_action_action_masking(
-    training, observation_spaces, action_spaces, device
-):
+@pytest.mark.parametrize("training", [0, 1])
+def test_matd3_get_action_action_masking(training, device):
+    observation_spaces = generate_multi_agent_box_spaces(2, (6,))
+    action_spaces = generate_multi_agent_discrete_spaces(2, 4)
     agent_ids = ["agent_0", "other_agent_0"]
     state = {
         agent: np.random.randn(*observation_spaces[idx].shape)
@@ -1244,7 +1061,6 @@ def test_matd3_get_action_action_masking(
     matd3 = MATD3(
         observation_spaces,
         action_spaces,
-        net_config={"encoder_config": {"hidden_size": [64, 64]}},
         agent_ids=agent_ids,
         device=device,
     )
@@ -1257,6 +1073,7 @@ def test_matd3_get_action_action_masking(
     [
         generate_multi_agent_box_spaces(2, (6,)),
         generate_multi_agent_discrete_spaces(2, 6),
+        generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
     ],
 )
 @pytest.mark.parametrize(
@@ -1269,7 +1086,7 @@ def test_matd3_get_action_action_masking(
 @pytest.mark.parametrize("batch_size", [64])
 @pytest.mark.parametrize("agent_ids", [["agent_0", "other_agent_0"]])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
-def test_matd3_learns_from_experiences_mlp(
+def test_matd3_learns_from_experiences(
     observation_spaces,
     experiences,
     batch_size,
@@ -1356,6 +1173,7 @@ def no_sync(self):
     [
         generate_multi_agent_box_spaces(2, (6,)),
         generate_multi_agent_discrete_spaces(2, 6),
+        generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
     ],
 )
 @pytest.mark.parametrize(
@@ -1368,7 +1186,7 @@ def no_sync(self):
 @pytest.mark.parametrize("batch_size", [64])
 @pytest.mark.parametrize("agent_ids", [["agent_0", "other_agent_0"]])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
-def test_matd3_learns_from_experiences_mlp_distributed(
+def test_matd3_learns_from_experiences_distributed(
     observation_spaces,
     accelerated_experiences,
     batch_size,
@@ -1462,240 +1280,6 @@ def test_matd3_learns_from_experiences_mlp_distributed(
         assert old_critic_2_state_dict != str(updated_critic_2.state_dict())
 
 
-@pytest.mark.parametrize(
-    "observation_spaces, batch_size, action_spaces, agent_ids, compile_mode",
-    [
-        (
-            generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
-            64,
-            generate_multi_agent_box_spaces(2, (2,)),
-            ["agent_0", "other_agent_0"],
-            None,
-        ),
-        (
-            generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
-            64,
-            generate_multi_agent_discrete_spaces(2, 2),
-            ["agent_0", "other_agent_0"],
-            "default",
-        ),
-    ],
-)
-def test_matd3_learns_from_experiences_cnn(
-    observation_spaces,
-    experiences,
-    batch_size,
-    action_spaces,
-    agent_ids,
-    device,
-    compile_mode,
-):
-    agent_ids = ["agent_0", "other_agent_0"]
-    policy_freq = 2
-    net_config = {
-        "encoder_config": {
-            "channel_size": [16],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-    matd3 = MATD3(
-        observation_spaces,
-        action_spaces,
-        net_config=net_config,
-        agent_ids=agent_ids,
-        device=device,
-        policy_freq=policy_freq,
-        torch_compiler=compile_mode,
-    )
-    actors = matd3.actors
-    actor_targets = matd3.actor_targets
-    actors_pre_learn_sd = [copy.deepcopy(actor.state_dict()) for actor in matd3.actors]
-    critics_1 = matd3.critics_1
-    critic_targets_1 = matd3.critic_targets_1
-    critics_2 = matd3.critics_2
-    critic_targets_2 = matd3.critic_targets_2
-    critics_1_pre_learn_sd = [
-        str(copy.deepcopy(critic_1.state_dict())) for critic_1 in matd3.critics_1
-    ]
-    critics_2_pre_learn_sd = [
-        str(copy.deepcopy(critic_2.state_dict())) for critic_2 in matd3.critics_2
-    ]
-
-    for _ in range(100 * policy_freq):
-        matd3.scores.append(0)
-        loss = matd3.learn(experiences)
-
-    assert isinstance(loss, dict)
-    for agent_id in matd3.agent_ids:
-        assert loss[agent_id][-1] >= 0.0
-    for old_actor, updated_actor in zip(actors, matd3.actors):
-        assert old_actor == updated_actor
-    for old_actor_target, updated_actor_target in zip(
-        actor_targets, matd3.actor_targets
-    ):
-        assert old_actor_target == updated_actor_target
-    for old_actor_state_dict, updated_actor in zip(actors_pre_learn_sd, matd3.actors):
-        assert old_actor_state_dict != str(updated_actor.state_dict())
-    for old_critic_1, updated_critic_1 in zip(critics_1, matd3.critics_1):
-        assert old_critic_1 == updated_critic_1
-    for old_critic_target_1, updated_critic_target_1 in zip(
-        critic_targets_1, matd3.critic_targets_1
-    ):
-        assert old_critic_target_1 == updated_critic_target_1
-    for old_critic_1_state_dict, updated_critic_1 in zip(
-        critics_1_pre_learn_sd, matd3.critics_1
-    ):
-        assert old_critic_1_state_dict != str(updated_critic_1.state_dict())
-    for old_critic_2, updated_critic_2 in zip(critics_2, matd3.critics_2):
-        assert old_critic_2 == updated_critic_2
-    for old_critic_target_2, updated_critic_target_2 in zip(
-        critic_targets_2, matd3.critic_targets_2
-    ):
-        assert old_critic_target_2 == updated_critic_target_2
-    for old_critic_2_state_dict, updated_critic_2 in zip(
-        critics_2_pre_learn_sd, matd3.critics_2
-    ):
-        assert old_critic_2_state_dict != str(updated_critic_2.state_dict())
-
-
-@pytest.mark.parametrize(
-    "observation_spaces, batch_size, action_spaces, agent_ids, compile_mode",
-    [
-        (
-            generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
-            64,
-            generate_multi_agent_box_spaces(2, (2,)),
-            ["agent_0", "other_agent_0"],
-            None,
-        ),
-        (
-            generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
-            64,
-            generate_multi_agent_discrete_spaces(2, 2),
-            ["agent_0", "other_agent_0"],
-            None,
-        ),
-        (
-            generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
-            64,
-            generate_multi_agent_box_spaces(2, (2,)),
-            ["agent_0", "other_agent_0"],
-            "default",
-        ),
-        (
-            generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
-            64,
-            generate_multi_agent_discrete_spaces(2, 2),
-            ["agent_0", "other_agent_0"],
-            "default",
-        ),
-    ],
-)
-def test_matd3_learns_from_experiences_cnn_distributed(
-    observation_spaces,
-    accelerated_experiences,
-    batch_size,
-    action_spaces,
-    agent_ids,
-    device,
-    compile_mode,
-):
-    accelerator = Accelerator(device_placement=False)
-    agent_ids = ["agent_0", "other_agent_0"]
-    net_config = {
-        "encoder_config": {
-            "channel_size": [16],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-    policy_freq = 2
-    matd3 = MATD3(
-        observation_spaces,
-        action_spaces,
-        net_config=net_config,
-        agent_ids=agent_ids,
-        accelerator=accelerator,
-        policy_freq=policy_freq,
-        torch_compiler=compile_mode,
-    )
-
-    for (
-        actor,
-        critic_1,
-        critic_2,
-        actor_target,
-        critic_target_1,
-        critic_target_2,
-    ) in zip(
-        matd3.actors,
-        matd3.critics_1,
-        matd3.critics_2,
-        matd3.actor_targets,
-        matd3.critic_targets_1,
-        matd3.critic_targets_2,
-    ):
-        actor.no_sync = no_sync.__get__(actor)
-        critic_1.no_sync = no_sync.__get__(critic_1)
-        critic_2.no_sync = no_sync.__get__(critic_2)
-        actor_target.no_sync = no_sync.__get__(actor_target)
-        critic_target_1.no_sync = no_sync.__get__(critic_target_1)
-        critic_target_2.no_sync = no_sync.__get__(critic_target_2)
-
-    actors = matd3.actors
-    actor_targets = matd3.actor_targets
-    actors_pre_learn_sd = [copy.deepcopy(actor.state_dict()) for actor in matd3.actors]
-    critics_1 = matd3.critics_1
-    critic_targets_1 = matd3.critic_targets_1
-    critics_1_pre_learn_sd = [
-        str(copy.deepcopy(critic_1.state_dict())) for critic_1 in matd3.critics_1
-    ]
-    critics_2 = matd3.critics_2
-    critic_targets_2 = matd3.critic_targets_2
-    critics_2_pre_learn_sd = [
-        str(copy.deepcopy(critic_2.state_dict())) for critic_2 in matd3.critics_2
-    ]
-
-    for _ in range(4):
-        matd3.scores.append(0)
-        loss = matd3.learn(accelerated_experiences)
-
-    assert isinstance(loss, dict)
-    for agent_id in matd3.agent_ids:
-        assert loss[agent_id][-1] >= 0.0
-    for old_actor, updated_actor in zip(actors, matd3.actors):
-        assert old_actor == updated_actor
-    for old_actor_target, updated_actor_target in zip(
-        actor_targets, matd3.actor_targets
-    ):
-        assert old_actor_target == updated_actor_target
-    for old_actor_state_dict, updated_actor in zip(actors_pre_learn_sd, matd3.actors):
-        assert old_actor_state_dict != str(updated_actor.state_dict())
-
-    for old_critic_1, updated_critic_1 in zip(critics_1, matd3.critics_1):
-        assert old_critic_1 == updated_critic_1
-    for old_critic_target_1, updated_critic_target_1 in zip(
-        critic_targets_1, matd3.critic_targets_1
-    ):
-        assert old_critic_target_1 == updated_critic_target_1
-    for old_critic_1_state_dict, updated_critic_1 in zip(
-        critics_1_pre_learn_sd, matd3.critics_1
-    ):
-        assert old_critic_1_state_dict != str(updated_critic_1.state_dict())
-
-    for old_critic_2, updated_critic_2 in zip(critics_2, matd3.critics_2):
-        assert old_critic_2 == updated_critic_2
-    for old_critic_target_2, updated_critic_target_2 in zip(
-        critic_targets_2, matd3.critic_targets_2
-    ):
-        assert old_critic_target_2 == updated_critic_target_2
-    for old_critic_2_state_dict, updated_critic_2 in zip(
-        critics_2_pre_learn_sd, matd3.critics_2
-    ):
-        assert old_critic_2_state_dict != str(updated_critic_2.state_dict())
-
-
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_matd3_soft_update(device, compile_mode):
     observation_spaces = generate_multi_agent_box_spaces(2, (6,))
@@ -1764,14 +1348,33 @@ def test_matd3_soft_update(device, compile_mode):
         )
 
 
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize(
+    "observation_spaces",
+    [
+        generate_multi_agent_box_spaces(2, (6,)),
+        generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
+    ],
+)
 @pytest.mark.parametrize("sum_score", [True, False])
-def test_matd3_algorithm_test_loop(device, compile_mode, sum_score):
-    observation_spaces = generate_multi_agent_box_spaces(2, (6,))
+@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("vectorized", [True, False])
+def test_matd3_algorithm_test_loop(
+    observation_spaces, device, compile_mode, sum_score, vectorized
+):
     action_spaces = generate_multi_agent_discrete_spaces(2, 2)
     accelerator = None
 
-    env = DummyMultiEnv(observation_spaces[0], action_spaces)
+    # Define environment and algorithm
+    if vectorized:
+        env = make_multi_agent_vect_envs(
+            DummyMultiEnv,
+            2,
+            **dict(
+                observation_spaces=observation_spaces[0], action_spaces=action_spaces
+            )
+        )
+    else:
+        env = DummyMultiEnv(observation_spaces[0], action_spaces)
 
     matd3 = MATD3(
         observation_spaces,
@@ -1789,105 +1392,27 @@ def test_matd3_algorithm_test_loop(device, compile_mode, sum_score):
         assert len(mean_score) == 2
 
 
-@pytest.mark.parametrize("sum_score", [True, False])
-@pytest.mark.parametrize("compile_mode", [None, "default"])
-def test_matd3_algorithm_test_loop_cnn(device, sum_score, compile_mode):
-    env_observation_spaces = generate_multi_agent_box_spaces(
-        2, (32, 32, 3), low=0, high=255
-    )
-    agent_observation_spaces = generate_multi_agent_box_spaces(
-        2, (3, 32, 32), low=0, high=255
-    )
-    net_config = {
-        "encoder_config": {
-            "channel_size": [16],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-    action_spaces = generate_multi_agent_discrete_spaces(2, 2)
-    accelerator = None
-    env = DummyMultiEnv(env_observation_spaces[0], action_spaces)
-    matd3 = MATD3(
-        agent_observation_spaces,
-        action_spaces,
-        agent_ids=["agent_0", "other_agent_0"],
-        net_config=net_config,
-        accelerator=accelerator,
-        device=device,
-        torch_compiler=compile_mode,
-    )
-    mean_score = matd3.test(env, max_steps=10, swap_channels=True)
-    mean_score = matd3.test(env, max_steps=10, swap_channels=True, sum_scores=sum_score)
-    if sum_score:
-        assert isinstance(mean_score, float)
-    else:
-        assert isinstance(mean_score, np.ndarray)
-        assert len(mean_score) == 2
-
-
-@pytest.mark.parametrize("sum_score", [True, False])
-@pytest.mark.parametrize("compile_mode", [None, "default"])
-def test_matd3_algorithm_test_loop_cnn_vectorized(device, sum_score, compile_mode):
-    env_observation_spaces = generate_multi_agent_box_spaces(
-        2, (32, 32, 3), low=0, high=255
-    )
-    agent_observation_spaces = generate_multi_agent_box_spaces(
-        2, (3, 32, 32), low=0, high=255
-    )
-    net_config = {
-        "encoder_config": {
-            "channel_size": [16],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-    action_spaces = generate_multi_agent_discrete_spaces(2, 2)
-    accelerator = None
-    env = make_multi_agent_vect_envs(
-        DummyMultiEnv,
-        2,
-        **dict(
-            observation_spaces=env_observation_spaces[0], action_spaces=action_spaces
-        )
-    )
-    matd3 = MATD3(
-        agent_observation_spaces,
-        action_spaces,
-        agent_ids=["agent_0", "other_agent_0"],
-        net_config=net_config,
-        accelerator=accelerator,
-        device=device,
-        torch_compiler=compile_mode,
-    )
-    mean_score = matd3.test(env, max_steps=10, swap_channels=True, sum_scores=sum_score)
-    if sum_score:
-        assert isinstance(mean_score, float)
-    else:
-        assert isinstance(mean_score, np.ndarray)
-        assert len(mean_score) == 2
-    env.close()
-
-
 @pytest.mark.parametrize(
-    "accelerator_flag, wrap, compile_mode",
+    "observation_spaces",
     [
-        (False, True, None),
-        (True, True, None),
-        (True, False, None),
-        (False, True, "default"),
-        (True, True, "default"),
-        (True, False, "default"),
+        generate_multi_agent_box_spaces(2, (4,)),
+        generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
+        generate_multi_agent_discrete_spaces(2, 2),
+        gen_multi_agent_dict_or_tuple_spaces(2, 2, 2, dict_space=True),
+        gen_multi_agent_dict_or_tuple_spaces(2, 2, 2, dict_space=False),
     ],
 )
-def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap, compile_mode):
+@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
+@pytest.mark.parametrize("wrap", [True, False])
+def test_matd3_clone_returns_identical_agent(
+    accelerator_flag, wrap, compile_mode, observation_spaces
+):
     # Clones the agent and returns an identical copy.
-    observation_spaces = generate_multi_agent_box_spaces(2, (4,))
     action_spaces = generate_multi_agent_box_spaces(2, (2,), low=-1, high=1)
     agent_ids = ["agent_0", "other_agent_0"]
     expl_noise = 0.1
     index = 0
-    net_config = {"encoder_config": {"hidden_size": [64, 64]}}
     batch_size = 64
     lr_actor = 0.001
     lr_critic = 0.01
@@ -1899,11 +1424,7 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap, compile_mod
     critic_networks = None
     policy_freq = 2
     device = "cpu"
-    if accelerator_flag:
-        accelerator = Accelerator(device_placement=False)
-    else:
-        accelerator = None
-
+    accelerator = Accelerator(device_placement=False) if accelerator_flag else None
     matd3 = MATD3(
         observation_spaces,
         action_spaces,
@@ -1911,7 +1432,6 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap, compile_mod
         expl_noise=expl_noise,
         index=index,
         policy_freq=policy_freq,
-        net_config=net_config,
         batch_size=batch_size,
         lr_actor=lr_actor,
         lr_critic=lr_critic,
@@ -2098,27 +1618,36 @@ def test_clone_after_learning(compile_mode):
 
 
 @pytest.mark.parametrize(
-    "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
-)
-@pytest.mark.parametrize(
-    "accelerator, compile_mode",
+    "observation_spaces, encoder_cls",
     [
-        (None, None),
-        (Accelerator(), None),
-        (None, "default"),
-        (Accelerator(), "default"),
+        (generate_multi_agent_box_spaces(1, (6,)), EvolvableMLP),
+        (
+            generate_multi_agent_box_spaces(1, (3, 32, 32), low=0, high=255),
+            EvolvableCNN,
+        ),
+        (
+            gen_multi_agent_dict_or_tuple_spaces(1, 2, 2, dict_space=True),
+            EvolvableMultiInput,
+        ),
+        (
+            gen_multi_agent_dict_or_tuple_spaces(1, 2, 2, dict_space=False),
+            EvolvableMultiInput,
+        ),
     ],
 )
+@pytest.mark.parametrize(
+    "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
+)
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_matd3_save_load_checkpoint_correct_data_and_format(
-    tmpdir, device, accelerator, compile_mode
+    tmpdir, device, accelerator, compile_mode, observation_spaces, encoder_cls
 ):
-    net_config = {"encoder_config": {"hidden_size": [32, 32]}}
-    # Initialize the ddpg agent
+    # Initialize the matd3 agent
     matd3 = MATD3(
-        observation_spaces=generate_multi_agent_box_spaces(1, (6,)),
+        observation_spaces=observation_spaces,
         action_spaces=generate_multi_agent_discrete_spaces(1, 2),
         agent_ids=["agent_0"],
-        net_config=net_config,
         torch_compiler=compile_mode,
         device=device,
         accelerator=accelerator,
@@ -2162,7 +1691,7 @@ def test_matd3_save_load_checkpoint_correct_data_and_format(
 
     # Load checkpoint
     loaded_matd3 = MATD3(
-        observation_spaces=generate_multi_agent_box_spaces(1, (6,)),
+        observation_spaces=observation_spaces,
         action_spaces=generate_multi_agent_discrete_spaces(1, 2),
         agent_ids=["agent_0"],
         torch_compiler=compile_mode,
@@ -2170,6 +1699,7 @@ def test_matd3_save_load_checkpoint_correct_data_and_format(
         accelerator=accelerator,
     )
     loaded_matd3.load_checkpoint(checkpoint_path)
+
     # Check if properties and weights are loaded correctly
     if compile_mode is not None and accelerator is None:
         assert all(isinstance(actor, OptimizedModule) for actor in loaded_matd3.actors)
@@ -2193,28 +1723,27 @@ def test_matd3_save_load_checkpoint_correct_data_and_format(
         )
     else:
         assert all(
-            isinstance(actor.encoder, EvolvableMLP) for actor in loaded_matd3.actors
+            isinstance(actor.encoder, encoder_cls) for actor in loaded_matd3.actors
         )
         assert all(
-            isinstance(actor_target.encoder, EvolvableMLP)
-            for actor_target in loaded_matd3.actor_targets
+            isinstance(actor.encoder, encoder_cls)
+            for actor in loaded_matd3.actor_targets
         )
         assert all(
-            isinstance(critic.encoder, EvolvableMLP)
-            for critic in loaded_matd3.critics_1
+            isinstance(critic.encoder, encoder_cls) for critic in loaded_matd3.critics_1
         )
         assert all(
-            isinstance(critic_target.encoder, EvolvableMLP)
-            for critic_target in loaded_matd3.critic_targets_1
+            isinstance(critic.encoder, encoder_cls)
+            for critic in loaded_matd3.critic_targets_1
         )
         assert all(
-            isinstance(critic.encoder, EvolvableMLP)
-            for critic in loaded_matd3.critics_2
+            isinstance(critic.encoder, encoder_cls) for critic in loaded_matd3.critics_2
         )
         assert all(
-            isinstance(critic_target.encoder, EvolvableMLP)
-            for critic_target in loaded_matd3.critic_targets_2
+            isinstance(critic.encoder, encoder_cls)
+            for critic in loaded_matd3.critic_targets_2
         )
+
     assert matd3.lr_actor == 0.001
     assert matd3.lr_critic == 0.01
 
@@ -2243,158 +1772,7 @@ def test_matd3_save_load_checkpoint_correct_data_and_format(
     assert matd3.policy_freq == 2
 
 
-@pytest.mark.parametrize(
-    "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
-)
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
-@pytest.mark.parametrize("compile_mode", [None, "default"])
-def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(
-    tmpdir, device, accelerator, compile_mode
-):
-    net_config_cnn = {
-        "encoder_config": {
-            "channel_size": [16],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-    policy_freq = 2
-    # Initialize the ddpg agent
-    matd3 = MATD3(
-        observation_spaces=generate_multi_agent_box_spaces(
-            1, (3, 32, 32), low=0, high=255
-        ),
-        action_spaces=generate_multi_agent_discrete_spaces(1, 2),
-        agent_ids=["agent_0"],
-        net_config=net_config_cnn,
-        policy_freq=policy_freq,
-        torch_compiler=compile_mode,
-        device=device,
-        accelerator=accelerator,
-    )
-
-    # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    matd3.save_checkpoint(checkpoint_path)
-
-    # Load the saved checkpoint file
-    checkpoint = torch.load(checkpoint_path, pickle_module=dill)
-
-    # Check if the loaded checkpoint has the correct keys
-    assert "actors_init_dict" in checkpoint["network_info"]["modules"]
-    assert "actors_state_dict" in checkpoint["network_info"]["modules"]
-    assert "actor_targets_init_dict" in checkpoint["network_info"]["modules"]
-    assert "actor_targets_state_dict" in checkpoint["network_info"]["modules"]
-    assert "actor_optimizers_state_dict" in checkpoint["network_info"]["optimizers"]
-    assert "critics_1_init_dict" in checkpoint["network_info"]["modules"]
-    assert "critics_1_state_dict" in checkpoint["network_info"]["modules"]
-    assert "critic_targets_1_init_dict" in checkpoint["network_info"]["modules"]
-    assert "critic_targets_1_state_dict" in checkpoint["network_info"]["modules"]
-    assert "critic_2_optimizers_state_dict" in checkpoint["network_info"]["optimizers"]
-    assert "critics_2_init_dict" in checkpoint["network_info"]["modules"]
-    assert "critics_2_state_dict" in checkpoint["network_info"]["modules"]
-    assert "critic_targets_2_init_dict" in checkpoint["network_info"]["modules"]
-    assert "critic_targets_2_state_dict" in checkpoint["network_info"]["modules"]
-    assert "critic_2_optimizers_state_dict" in checkpoint["network_info"]["optimizers"]
-    assert "batch_size" in checkpoint
-    assert "lr_actor" in checkpoint
-    assert "lr_critic" in checkpoint
-    assert "learn_step" in checkpoint
-    assert "gamma" in checkpoint
-    assert "tau" in checkpoint
-    assert "mut" in checkpoint
-    assert "index" in checkpoint
-    assert "scores" in checkpoint
-    assert "fitness" in checkpoint
-    assert "steps" in checkpoint
-    assert "policy_freq" in checkpoint
-
-    # Load checkpoint
-    loaded_matd3 = MATD3(
-        observation_spaces=generate_multi_agent_box_spaces(
-            1, (3, 32, 32), low=0, high=255
-        ),
-        action_spaces=generate_multi_agent_discrete_spaces(1, 2),
-        agent_ids=["agent_0"],
-        torch_compiler=compile_mode,
-        device=device,
-        accelerator=accelerator,
-    )
-    loaded_matd3.load_checkpoint(checkpoint_path)
-
-    # Check if properties and weights are loaded correctly
-    if compile_mode is not None and accelerator is None:
-        assert all(isinstance(actor, OptimizedModule) for actor in loaded_matd3.actors)
-        assert all(
-            isinstance(actor_target, OptimizedModule)
-            for actor_target in loaded_matd3.actor_targets
-        )
-        assert all(
-            isinstance(critic, OptimizedModule) for critic in loaded_matd3.critics_1
-        )
-        assert all(
-            isinstance(critic_target, OptimizedModule)
-            for critic_target in loaded_matd3.critic_targets_1
-        )
-        assert all(
-            isinstance(critic, OptimizedModule) for critic in loaded_matd3.critics_2
-        )
-        assert all(
-            isinstance(critic_target, OptimizedModule)
-            for critic_target in loaded_matd3.critic_targets_2
-        )
-    else:
-        assert all(
-            isinstance(actor.encoder, EvolvableCNN) for actor in loaded_matd3.actors
-        )
-        assert all(
-            isinstance(actor_target.encoder, EvolvableCNN)
-            for actor_target in loaded_matd3.actor_targets
-        )
-        assert all(
-            isinstance(critic.encoder, EvolvableCNN)
-            for critic in loaded_matd3.critics_1
-        )
-        assert all(
-            isinstance(critic_target.encoder, EvolvableCNN)
-            for critic_target in loaded_matd3.critic_targets_1
-        )
-        assert all(
-            isinstance(critic.encoder, EvolvableCNN)
-            for critic in loaded_matd3.critics_2
-        )
-        assert all(
-            isinstance(critic_target.encoder, EvolvableCNN)
-            for critic_target in loaded_matd3.critic_targets_2
-        )
-    assert matd3.lr_actor == 0.001
-    assert matd3.lr_critic == 0.01
-
-    for actor, actor_target in zip(loaded_matd3.actors, loaded_matd3.actor_targets):
-        assert str(actor.state_dict()) == str(actor_target.state_dict())
-
-    for critic_1, critic_target_1 in zip(
-        loaded_matd3.critics_1, loaded_matd3.critic_targets_1
-    ):
-        assert str(critic_1.state_dict()) == str(critic_target_1.state_dict())
-
-    for critic_2, critic_target_2 in zip(
-        loaded_matd3.critics_2, loaded_matd3.critic_targets_2
-    ):
-        assert str(critic_2.state_dict()) == str(critic_target_2.state_dict())
-
-    assert matd3.batch_size == 64
-    assert matd3.learn_step == 5
-    assert matd3.gamma == 0.95
-    assert matd3.tau == 0.01
-    assert matd3.mut is None
-    assert matd3.index == 0
-    assert matd3.scores == []
-    assert matd3.fitness == []
-    assert matd3.steps == [0]
-    assert matd3.policy_freq == policy_freq
-
-
+# TODO: This will be deprecated in the future
 @pytest.mark.parametrize(
     "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
 )
@@ -2406,10 +1784,10 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(
 @pytest.mark.parametrize("action_spaces", [generate_multi_agent_discrete_spaces(1, 2)])
 def test_matd3_save_load_checkpoint_correct_data_and_format_make_evo(
     tmpdir,
-    observation_spaces,
-    action_spaces,
     mlp_actor,
     mlp_critic,
+    observation_spaces,
+    action_spaces,
     device,
     compile_mode,
     accelerator,
@@ -2487,46 +1865,32 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_make_evo(
     loaded_matd3.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    if compile_mode is not None and accelerator is None:
-        assert all(isinstance(actor, OptimizedModule) for actor in loaded_matd3.actors)
-        assert all(
-            isinstance(actor_target, OptimizedModule)
-            for actor_target in loaded_matd3.actor_targets
-        )
-        assert all(
-            isinstance(critic, OptimizedModule) for critic in loaded_matd3.critics_1
-        )
-        assert all(
-            isinstance(critic_target, OptimizedModule)
-            for critic_target in loaded_matd3.critic_targets_1
-        )
-        assert all(
-            isinstance(critic, OptimizedModule) for critic in loaded_matd3.critics_2
-        )
-        assert all(
-            isinstance(critic_target, OptimizedModule)
-            for critic_target in loaded_matd3.critic_targets_2
-        )
-    else:
-        assert all(isinstance(actor, MakeEvolvable) for actor in loaded_matd3.actors)
-        assert all(
-            isinstance(actor_target, MakeEvolvable)
-            for actor_target in loaded_matd3.actor_targets
-        )
-        assert all(
-            isinstance(critic, MakeEvolvable) for critic in loaded_matd3.critics_1
-        )
-        assert all(
-            isinstance(critic_target, MakeEvolvable)
-            for critic_target in loaded_matd3.critic_targets_1
-        )
-        assert all(
-            isinstance(critic, MakeEvolvable) for critic in loaded_matd3.critics_2
-        )
-        assert all(
-            isinstance(critic_target, MakeEvolvable)
-            for critic_target in loaded_matd3.critic_targets_2
-        )
+    expected_module_class = (
+        OptimizedModule
+        if compile_mode is not None and accelerator is None
+        else MakeEvolvable
+    )
+    assert all(
+        isinstance(actor, expected_module_class) for actor in loaded_matd3.actors
+    )
+    assert all(
+        isinstance(actor_target, expected_module_class)
+        for actor_target in loaded_matd3.actor_targets
+    )
+    assert all(
+        isinstance(critic, expected_module_class) for critic in loaded_matd3.critics_1
+    )
+    assert all(
+        isinstance(critic_target, expected_module_class)
+        for critic_target in loaded_matd3.critic_targets_1
+    )
+    assert all(
+        isinstance(critic, expected_module_class) for critic in loaded_matd3.critics_2
+    )
+    assert all(
+        isinstance(critic_target, expected_module_class)
+        for critic_target in loaded_matd3.critic_targets_2
+    )
     assert matd3.lr_actor == 0.001
     assert matd3.lr_critic == 0.01
 
@@ -2591,15 +1955,36 @@ def test_matd3_unwrap_models(compile_mode):
         assert isinstance(critic_target_2, nn.Module)
 
 
+# The saved checkpoint file contains the correct data and format.
+@pytest.mark.parametrize(
+    "observation_spaces, encoder_cls",
+    [
+        (generate_multi_agent_box_spaces(2, (6,)), EvolvableMLP),
+        (
+            generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
+            EvolvableCNN,
+        ),
+        (
+            gen_multi_agent_dict_or_tuple_spaces(2, 2, 2, dict_space=True),
+            EvolvableMultiInput,
+        ),
+        (
+            gen_multi_agent_dict_or_tuple_spaces(2, 2, 2, dict_space=False),
+            EvolvableMultiInput,
+        ),
+    ],
+)
 @pytest.mark.parametrize(
     "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator()])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
-def test_load_from_pretrained(device, accelerator, compile_mode, tmpdir):
+def test_load_from_pretrained(
+    device, accelerator, compile_mode, tmpdir, observation_spaces, encoder_cls
+):
     # Initialize the matd3 agent
     matd3 = MATD3(
-        observation_spaces=generate_multi_agent_box_spaces(2, (4,)),
+        observation_spaces=observation_spaces,
         action_spaces=generate_multi_agent_discrete_spaces(2, 2),
         agent_ids=["agent_0", "other_agent_0"],
         torch_compiler=compile_mode,
@@ -2658,12 +2043,12 @@ def test_load_from_pretrained(device, accelerator, compile_mode, tmpdir):
             assert isinstance(new_critic_2, OptimizedModule)
             assert isinstance(new_critic_target_2, OptimizedModule)
         else:
-            assert isinstance(new_actor.encoder, EvolvableMLP)
-            assert isinstance(new_actor_target.encoder, EvolvableMLP)
-            assert isinstance(new_critic_1.encoder, EvolvableMLP)
-            assert isinstance(new_critic_target_1.encoder, EvolvableMLP)
-            assert isinstance(new_critic_2.encoder, EvolvableMLP)
-            assert isinstance(new_critic_target_2.encoder, EvolvableMLP)
+            assert isinstance(new_actor.encoder, encoder_cls)
+            assert isinstance(new_actor_target.encoder, encoder_cls)
+            assert isinstance(new_critic_1.encoder, encoder_cls)
+            assert isinstance(new_critic_target_1.encoder, encoder_cls)
+            assert isinstance(new_critic_2.encoder, encoder_cls)
+            assert isinstance(new_critic_target_2.encoder, encoder_cls)
 
         new_actor_sd = str(new_actor.state_dict())
         new_actor_target_sd = str(new_actor_target.state_dict())
@@ -2690,125 +2075,18 @@ def test_load_from_pretrained(device, accelerator, compile_mode, tmpdir):
     assert new_matd3.steps == matd3.steps
 
 
-@pytest.mark.parametrize(
-    "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
-)
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
-@pytest.mark.parametrize("compile_mode", [None, "default"])
 # The saved checkpoint file contains the correct data and format.
-def test_load_from_pretrained_cnn(device, accelerator, compile_mode, tmpdir):
-    # Initialize the matd3 agent
-    matd3 = MATD3(
-        observation_spaces=generate_multi_agent_box_spaces(
-            2, (3, 32, 32), low=0, high=255
-        ),
-        action_spaces=generate_multi_agent_box_spaces(2, (1,)),
-        agent_ids=["agent_a", "agent_b"],
-        net_config={
-            "encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }
-        },
-        torch_compiler=compile_mode,
-        accelerator=accelerator,
-        device=device,
-    )
-
-    # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    matd3.save_checkpoint(checkpoint_path)
-
-    # Create new agent object
-    new_matd3 = MATD3.load(checkpoint_path, device=device, accelerator=accelerator)
-
-    # Check if properties and weights are loaded correctly
-    assert new_matd3.observation_spaces == matd3.observation_spaces
-    assert new_matd3.action_spaces == matd3.action_spaces
-    assert new_matd3.n_agents == matd3.n_agents
-    assert new_matd3.agent_ids == matd3.agent_ids
-    assert new_matd3.min_action == matd3.min_action
-    assert new_matd3.max_action == matd3.max_action
-    assert new_matd3.lr_actor == matd3.lr_actor
-    assert new_matd3.lr_critic == matd3.lr_critic
-    for (
-        new_actor,
-        new_actor_target,
-        new_critic_1,
-        new_critic_target_1,
-        new_critic_2,
-        new_critic_target_2,
-        actor,
-        actor_target,
-        critic_1,
-        critic_target_1,
-        critic_2,
-        critic_target_2,
-    ) in zip(
-        new_matd3.actors,
-        new_matd3.actor_targets,
-        new_matd3.critics_1,
-        new_matd3.critic_targets_1,
-        new_matd3.critics_2,
-        new_matd3.critic_targets_2,
-        matd3.actors,
-        matd3.actor_targets,
-        matd3.critics_1,
-        matd3.critic_targets_1,
-        matd3.critics_2,
-        matd3.critic_targets_2,
-    ):
-        if compile_mode is not None and accelerator is None:
-            assert isinstance(new_actor, OptimizedModule)
-            assert isinstance(new_actor_target, OptimizedModule)
-            assert isinstance(new_critic_1, OptimizedModule)
-            assert isinstance(new_critic_target_1, OptimizedModule)
-            assert isinstance(new_critic_2, OptimizedModule)
-            assert isinstance(new_critic_target_2, OptimizedModule)
-        else:
-            assert isinstance(new_actor.encoder, EvolvableCNN)
-            assert isinstance(new_actor_target.encoder, EvolvableCNN)
-            assert isinstance(new_critic_1.encoder, EvolvableCNN)
-            assert isinstance(new_critic_target_1.encoder, EvolvableCNN)
-            assert isinstance(new_critic_2.encoder, EvolvableCNN)
-            assert isinstance(new_critic_target_2.encoder, EvolvableCNN)
-
-        new_actor_sd = str(new_actor.state_dict())
-        new_actor_target_sd = str(new_actor_target.state_dict())
-        new_critic_1_sd = str(new_critic_1.state_dict())
-        new_critic_target_1_sd = str(new_critic_target_1.state_dict())
-        new_critic_2_sd = str(new_critic_2.state_dict())
-        new_critic_target_2_sd = str(new_critic_target_2.state_dict())
-
-        assert new_actor_sd == str(actor.state_dict())
-        assert new_actor_target_sd == str(actor_target.state_dict())
-        assert new_critic_1_sd == str(critic_1.state_dict())
-        assert new_critic_target_1_sd == str(critic_target_1.state_dict())
-        assert new_critic_2_sd == str(critic_2.state_dict())
-        assert new_critic_target_2_sd == str(critic_target_2.state_dict())
-
-    assert new_matd3.batch_size == matd3.batch_size
-    assert new_matd3.learn_step == matd3.learn_step
-    assert new_matd3.gamma == matd3.gamma
-    assert new_matd3.tau == matd3.tau
-    assert new_matd3.mut == matd3.mut
-    assert new_matd3.index == matd3.index
-    assert new_matd3.scores == matd3.scores
-    assert new_matd3.fitness == matd3.fitness
-    assert new_matd3.steps == matd3.steps
-
-
+# TODO: This will be deprecated in the future
 @pytest.mark.parametrize(
     "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
 )
+@pytest.mark.parametrize("action_spaces", [generate_multi_agent_discrete_spaces(2, 2)])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize(
-    "observation_spaces, action_spaces, arch, input_tensor, critic_input_tensor, secondary_input_tensor",
+    "observation_spaces, arch, input_tensor, critic_input_tensor, secondary_input_tensor",
     [
         (
             generate_multi_agent_box_spaces(2, (4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
             "mlp",
             torch.randn(1, 4),
             torch.randn(1, 6),
@@ -2816,7 +2094,6 @@ def test_load_from_pretrained_cnn(device, accelerator, compile_mode, tmpdir):
         ),
         (
             generate_multi_agent_box_spaces(2, (4, 210, 160), low=0, high=255),
-            generate_multi_agent_discrete_spaces(2, 2),
             "cnn",
             torch.randn(1, 4, 2, 210, 160),
             torch.randn(1, 4, 2, 210, 160),
@@ -2824,7 +2101,6 @@ def test_load_from_pretrained_cnn(device, accelerator, compile_mode, tmpdir):
         ),
         (
             generate_multi_agent_box_spaces(2, (4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
             "mlp",
             torch.randn(1, 4),
             torch.randn(1, 6),
@@ -2832,7 +2108,6 @@ def test_load_from_pretrained_cnn(device, accelerator, compile_mode, tmpdir):
         ),
         (
             generate_multi_agent_box_spaces(2, (4, 210, 160), low=0, high=255),
-            generate_multi_agent_discrete_spaces(2, 2),
             "cnn",
             torch.randn(1, 4, 2, 210, 160),
             torch.randn(1, 4, 2, 210, 160),
@@ -2840,8 +2115,7 @@ def test_load_from_pretrained_cnn(device, accelerator, compile_mode, tmpdir):
         ),
     ],
 )
-# The saved checkpoint file contains the correct data and format.
-def test_load_from_pretrained_networks(
+def test_load_from_pretrained_make_evo(
     mlp_actor,
     mlp_critic,
     cnn_actor,

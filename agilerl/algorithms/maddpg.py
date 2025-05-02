@@ -18,9 +18,9 @@ from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.typing import (
     ArrayDict,
     ExperiencesType,
-    GymEnvType,
     InfosDict,
     ObservationType,
+    PzEnvType,
     StandardTensorDict,
 )
 from agilerl.utils.algo_utils import (
@@ -644,6 +644,19 @@ class MADDPG(MultiAgentRLAlgorithm):
             else:
                 q_value_next_state = critic_target(next_states, stacked_next_actions)
 
+        # Replace NaN rewards with 0 and dones with True
+        rewards[agent_id] = torch.where(
+            torch.isnan(rewards[agent_id]),
+            torch.full_like(rewards[agent_id], 0),
+            rewards[agent_id],
+        ).to(torch.float32)
+
+        dones[agent_id] = torch.where(
+            torch.isnan(dones[agent_id]),
+            torch.full_like(dones[agent_id], 1),
+            dones[agent_id],
+        ).to(torch.uint8)
+
         y_j = (
             rewards[agent_id] + (1 - dones[agent_id]) * self.gamma * q_value_next_state
         )
@@ -701,7 +714,7 @@ class MADDPG(MultiAgentRLAlgorithm):
 
     def test(
         self,
-        env: GymEnvType,
+        env: PzEnvType,
         swap_channels: bool = False,
         max_steps: Optional[int] = None,
         loop: int = 3,
@@ -768,26 +781,40 @@ class MADDPG(MultiAgentRLAlgorithm):
                         action = {agent: act[0] for agent, act in action.items()}
 
                     obs, reward, term, trunc, info = env.step(action)
+
+                    # Compute score increment (replace NaNs representing inactive agents with 0)
+                    agent_rewards = np.array(list(reward.values())).transpose()
+                    agent_rewards = np.where(np.isnan(agent_rewards), 0, agent_rewards)
                     score_increment = (
                         (
-                            np.sum(
-                                np.array(list(reward.values())).transpose(), axis=-1
-                            )[:, np.newaxis]
+                            np.sum(agent_rewards, axis=-1)[:, np.newaxis]
                             if is_vectorised
-                            else np.sum(
-                                np.array(list(reward.values())).transpose(), axis=-1
-                            )
+                            else np.sum(agent_rewards, axis=-1)
                         )
                         if sum_scores
-                        else np.array(list(reward.values())).transpose()
+                        else agent_rewards
                     )
                     scores += score_increment
-                    dones = {
-                        agent: term[agent] | trunc[agent] for agent in self.agent_ids
-                    }
+
+                    dones = {}
+                    for agent_id in self.agent_ids:
+                        terminated = term.get(agent_id, True)
+                        truncated = trunc.get(agent_id, False)
+
+                        # Replace NaNs with True (indicate killed agent)
+                        terminated = np.where(
+                            np.isnan(terminated), True, terminated
+                        ).astype(bool)
+                        truncated = np.where(
+                            np.isnan(truncated), False, truncated
+                        ).astype(bool)
+
+                        dones[agent_id] = terminated | truncated
+
                     if not is_vectorised:
                         dones = {
-                            agent: np.array([done]) for agent, done in dones.items()
+                            agent: np.array([dones[agent_id]])
+                            for agent in self.agent_ids
                         }
 
                     for idx, agent_dones in enumerate(zip(*dones.values())):

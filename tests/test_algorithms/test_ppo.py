@@ -12,12 +12,12 @@ from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 
 from agilerl.algorithms.ppo import PPO
-from agilerl.modules.cnn import EvolvableCNN
-from agilerl.modules.mlp import EvolvableMLP
+from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
     generate_dict_or_tuple_space,
     generate_discrete_space,
+    generate_multidiscrete_space,
     generate_random_box_space,
 )
 
@@ -154,17 +154,30 @@ class SimpleCNN(nn.Module):
 
 
 # Initializes all necessary attributes with default values
-def test_initializes_with_default_values():
-    observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
-    action_space = generate_random_box_space(shape=(2,), low=-1, high=1)
-    net_config = {"encoder_config": {"hidden_size": [64, 64]}}
-
-    ppo = PPO(observation_space, action_space, net_config=net_config)
-
+@pytest.mark.parametrize(
+    "observation_space, encoder_cls",
+    [
+        (generate_random_box_space(shape=(4,)), EvolvableMLP),
+        (generate_random_box_space(shape=(3, 32, 32), low=0, high=255), EvolvableCNN),
+        (generate_dict_or_tuple_space(2, 2, dict_space=True), EvolvableMultiInput),
+        (generate_dict_or_tuple_space(2, 2, dict_space=False), EvolvableMultiInput),
+    ],
+)
+@pytest.mark.parametrize(
+    "action_space",
+    [
+        generate_random_box_space(shape=(2,), low=-1, high=1),
+        generate_discrete_space(2),
+        generate_multidiscrete_space(2, 3),
+        spaces.MultiBinary(2),
+    ],
+)
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+def test_initialize_ppo(observation_space, action_space, encoder_cls, accelerator):
+    ppo = PPO(observation_space, action_space, accelerator=accelerator)
     assert ppo.algo == "PPO"
-    assert ppo.observation_space == generate_random_box_space(shape=(4,), low=0, high=1)
-    assert ppo.action_space == generate_random_box_space(shape=(2,), low=-1, high=1)
-    assert not ppo.discrete_actions
+    assert ppo.observation_space == observation_space
+    assert ppo.action_space == action_space
     assert ppo.batch_size == 64
     assert ppo.lr == 1e-4
     assert ppo.gamma == 0.99
@@ -177,90 +190,20 @@ def test_initializes_with_default_values():
     assert ppo.max_grad_norm == 0.5
     assert ppo.target_kl is None
     assert ppo.update_epochs == 4
-    assert ppo.device == "cpu"
-    assert ppo.accelerator is None
+    assert ppo.device == accelerator.device if accelerator else "cpu"
+    assert ppo.accelerator == accelerator
     assert ppo.index == 0
     assert ppo.scores == []
     assert ppo.fitness == []
     assert ppo.steps == [0]
-    assert isinstance(ppo.actor.encoder, EvolvableMLP)
-    assert isinstance(ppo.critic.encoder, EvolvableMLP)
-    assert isinstance(ppo.optimizer.optimizer, optim.Adam)
-
-
-# Initializes actor network with EvolvableCNN based on net_config and Accelerator.
-def test_initialize_ppo_with_cnn_accelerator():
-    observation_space = generate_random_box_space(shape=(3, 32, 32), low=0, high=255)
-    action_space = generate_discrete_space(2)
-    net_config_cnn = {
-        "encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-    batch_size = 64
-    lr = 1e-4
-    gamma = 0.99
-    gae_lambda = 0.95
-    mut = None
-    action_std_init = 0.6
-    clip_coef = 0.2
-    ent_coef = 0.01
-    vf_coef = 0.5
-    max_grad_norm = 0.5
-    target_kl = None
-    update_epochs = 4
-    actor_network = None
-    critic_network = None
-    accelerator = Accelerator()
-    wrap = True
-
-    ppo = PPO(
-        observation_space=observation_space,
-        action_space=action_space,
-        net_config=net_config_cnn,
-        batch_size=batch_size,
-        lr=lr,
-        gamma=gamma,
-        gae_lambda=gae_lambda,
-        mut=mut,
-        action_std_init=action_std_init,
-        clip_coef=clip_coef,
-        ent_coef=ent_coef,
-        vf_coef=vf_coef,
-        max_grad_norm=max_grad_norm,
-        target_kl=target_kl,
-        update_epochs=update_epochs,
-        actor_network=actor_network,
-        critic_network=critic_network,
-        accelerator=accelerator,
-        wrap=wrap,
-    )
-
-    net_config_cnn.update({"output_activation": "Softmax"})
-
-    assert ppo.observation_space == observation_space
-    assert ppo.action_space == action_space
-    assert ppo.discrete_actions
-    assert ppo.batch_size == batch_size
-    assert ppo.lr == lr
-    assert ppo.gamma == gamma
-    assert ppo.gae_lambda == gae_lambda
-    assert ppo.mut == mut
-    assert ppo.action_std_init == action_std_init
-    assert ppo.clip_coef == clip_coef
-    assert ppo.ent_coef == ent_coef
-    assert ppo.vf_coef == vf_coef
-    assert ppo.max_grad_norm == max_grad_norm
-    assert ppo.target_kl == target_kl
-    assert ppo.update_epochs == update_epochs
-    assert isinstance(ppo.actor.encoder, EvolvableCNN)
-    assert isinstance(ppo.critic.encoder, EvolvableCNN)
-    assert isinstance(ppo.optimizer.optimizer, AcceleratedOptimizer)
+    assert isinstance(ppo.actor.encoder, encoder_cls)
+    assert isinstance(ppo.critic.encoder, encoder_cls)
+    expected_optimizer = AcceleratedOptimizer if accelerator else optim.Adam
+    assert isinstance(ppo.optimizer.optimizer, expected_optimizer)
 
 
 # Can initialize ppo with an actor network
+# TODO: Will be deprecated in the future
 @pytest.mark.parametrize(
     "obs_space, action_space, actor_network, critic_network, input_tensor, input_tensor_critic",
     [
@@ -274,7 +217,7 @@ def test_initialize_ppo_with_cnn_accelerator():
         ),
     ],
 )
-def test_initialize_ppo_with_actor_network(
+def test_initialize_ppo_with_make_evo(
     obs_space,
     action_space,
     actor_network,
@@ -298,79 +241,6 @@ def test_initialize_ppo_with_actor_network(
     )
 
     assert ppo.observation_space == obs_space
-    assert ppo.action_space == action_space
-    assert ppo.batch_size == 64
-    assert ppo.lr == 1e-4
-    assert ppo.gamma == 0.99
-    assert ppo.gae_lambda == 0.95
-    assert ppo.mut is None
-    assert ppo.action_std_init == 0.0
-    assert ppo.clip_coef == 0.2
-    assert ppo.ent_coef == 0.01
-    assert ppo.vf_coef == 0.5
-    assert ppo.max_grad_norm == 0.5
-    assert ppo.target_kl is None
-    assert ppo.update_epochs == 4
-    assert ppo.device == "cpu"
-    assert ppo.accelerator is None
-    assert ppo.index == 0
-    assert ppo.scores == []
-    assert ppo.fitness == []
-    assert ppo.steps == [0]
-    assert isinstance(ppo.optimizer.optimizer, optim.Adam)
-
-
-@pytest.mark.parametrize(
-    "observation_space, net_type",
-    [
-        (generate_random_box_space(shape=(4,), low=0, high=1), "mlp"),
-        (generate_random_box_space(shape=(3, 64, 64), low=0, high=1), "cnn"),
-    ],
-)
-def test_initialize_ppo_with_actor_network_evo_net(observation_space, net_type):
-    action_space = generate_discrete_space(2)
-    if net_type == "mlp":
-        actor_network = EvolvableMLP(
-            num_inputs=observation_space.shape[0],
-            num_outputs=action_space.n,
-            hidden_size=[64, 64],
-            activation="Tanh",
-            output_activation="Tanh",
-        )
-        critic_network = EvolvableMLP(
-            num_inputs=observation_space.shape[0] + action_space.n,
-            num_outputs=1,
-            hidden_size=[64, 64],
-            activation="Tanh",
-        )
-    else:
-        actor_network = EvolvableCNN(
-            input_shape=observation_space.shape,
-            num_outputs=action_space.n,
-            channel_size=[8, 8],
-            kernel_size=[2, 2],
-            stride_size=[1, 1],
-            activation="Tanh",
-            output_activation="Tanh",
-        )
-
-        critic_network = EvolvableCNN(
-            input_shape=observation_space.shape,
-            num_outputs=action_space.n,
-            channel_size=[8, 8],
-            kernel_size=[2, 2],
-            stride_size=[1, 1],
-            activation="Tanh",
-        )
-
-    ppo = PPO(
-        observation_space,
-        action_space,
-        actor_network=actor_network,
-        critic_network=critic_network,
-    )
-
-    assert ppo.observation_space == observation_space
     assert ppo.action_space == action_space
     assert ppo.batch_size == 64
     assert ppo.lr == 1e-4
@@ -442,52 +312,11 @@ def test_initialize_ppo_with_actor_network_no_critic(
         assert ppo
 
 
-# Converts numpy array to torch tensor of type float
-def test_convert_numpy_array_to_tensor():
-    state = np.array([1, 2, 3, 4])
-    ppo = PPO(
-        observation_space=generate_random_box_space(shape=(5,), low=0, high=1),
-        action_space=generate_discrete_space(2),
-    )
-    prepared_state = ppo.preprocess_observation(state)
-    assert isinstance(prepared_state, torch.Tensor)
-
-
-def test_unsqueeze_prepare():
-    state = np.array([1, 2, 3, 4])
-    ppo = PPO(
-        observation_space=generate_random_box_space(shape=(4,), low=0, high=1),
-        action_space=generate_discrete_space(2),
-    )
-    prepared_state = ppo.preprocess_observation(state)
-    assert isinstance(prepared_state, torch.Tensor)
-
-
-def test_prepare_state_cnn_accelerator():
-    accelerator = Accelerator()
-    observation_space = generate_random_box_space(shape=(3, 32, 32), low=0, high=1)
-    state = torch.rand(*observation_space.shape)
-    net_config_cnn = {
-        "encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-    ppo = PPO(
-        observation_space=observation_space,
-        action_space=generate_discrete_space(2),
-        net_config=net_config_cnn,
-        accelerator=accelerator,
-    )
-    prepared_state = ppo.preprocess_observation(state)
-    assert isinstance(prepared_state, torch.Tensor)
-    assert prepared_state.dtype == torch.float32
-
-
 @pytest.fixture
 def build_ppo(observation_space, action_space, accelerator):
-    return PPO(observation_space, action_space, accelerator=accelerator)
+    ppo = PPO(observation_space, action_space, accelerator=accelerator)
+    yield ppo
+    del ppo
 
 
 @pytest.mark.parametrize(
@@ -582,15 +411,10 @@ def test_ppo_optimizer_parameters():
 
 
 @pytest.mark.parametrize(
-    "observation_space, action_space, accelerator",
-    [
-        (
-            generate_random_box_space(shape=(4,), low=0, high=1),
-            generate_discrete_space(2),
-            None,
-        ),
-    ],
+    "observation_space", [generate_random_box_space(shape=(4,), low=0, high=1)]
 )
+@pytest.mark.parametrize("action_space", [generate_discrete_space(2)])
+@pytest.mark.parametrize("accelerator", [None])
 def test_returns_expected_action_mask_vectorized(build_ppo):
     state = np.array([[1, 2, 4, 5], [2, 3, 5, 1]])
     action_mask = np.array([[0, 1], [1, 0]])
@@ -608,13 +432,15 @@ def test_returns_expected_action_mask_vectorized(build_ppo):
         generate_dict_or_tuple_space(2, 3, dict_space=True),
     ],
 )
-def test_learns_from_experiences(observation_space):
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+def test_learns_from_experiences(observation_space, accelerator):
     batch_size = 45
     action_space = spaces.Discrete(2)
     ppo = PPO(
         observation_space=observation_space,
         action_space=action_space,
         batch_size=batch_size,
+        accelerator=accelerator,
     )
 
     # Copy state dict before learning - should be different to after updating weights
@@ -656,17 +482,11 @@ def test_learns_from_experiences(observation_space):
 
     # Create a batch of experiences
     actions = torch.randint(0, action_space.n, (num_steps,)).float()
-    log_probs = torch.randn(
-        num_steps,
-    )
-    rewards = torch.randn(
-        num_steps,
-    )
+    log_probs = torch.randn(num_steps)
+    rewards = torch.randn(num_steps)
     dones = torch.randint(0, 2, (num_steps,))
-    values = torch.randn(
-        num_steps,
-    )
-    next_done = np.zeros(1)
+    values = torch.randn(num_steps)
+    next_done = torch.zeros(1)
     experiences = [
         [states],
         [actions],
@@ -687,145 +507,37 @@ def test_learns_from_experiences(observation_space):
     assert actor_pre_learn_sd != str(ppo.actor.state_dict())
 
 
-# learns from experiences and updates network parameters
-def test_learns_from_experiences_continuous_accel():
-    accelerator = Accelerator()
-    observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
-    action_space = generate_random_box_space(shape=(2,), low=0, high=1)
-    batch_size = 10
-    target_kl = 0
-
-    ppo = PPO(
-        observation_space=observation_space,
-        action_space=action_space,
-        net_config={
-            "encoder_config": {
-                "hidden_size": [64, 64],
-                "output_activation": "Tanh",
-            }
-        },
-        target_kl=target_kl,
-        batch_size=batch_size,
-        accelerator=accelerator,
-    )
-
-    # Copy state dict before learning - should be different to after updating weights
-    actor = ppo.actor
-    actor_pre_learn_sd = str(copy.deepcopy(ppo.actor.state_dict()))
-
-    num_steps = 11
-
-    # Create a batch of experiences
-    states = torch.rand(num_steps, *observation_space.shape)
-    actions = torch.rand(num_steps, action_space.shape[0])
-    log_probs = torch.randn(
-        num_steps,
-    )
-    rewards = torch.randn(
-        num_steps,
-    )
-    dones = torch.randint(0, 2, (num_steps,))
-    values = torch.randn(
-        num_steps,
-    )
-    next_state = torch.rand(1, *observation_space.shape)
-    next_done = np.zeros(1)
-    experiences = [
-        states,
-        actions,
-        log_probs,
-        rewards,
-        dones,
-        values,
-        next_state,
-        next_done,
-    ]
-    # Call the learn method
-    loss = ppo.learn(experiences)
-
-    assert isinstance(loss, float)
-    assert loss >= 0.0
-    assert actor == ppo.actor
-    assert actor_pre_learn_sd != str(ppo.actor.state_dict())
-
-
 # Runs algorithm test loop
-def test_algorithm_test_loop():
-    observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
+@pytest.mark.parametrize(
+    "observation_space",
+    [
+        generate_random_box_space(shape=(4,), low=0, high=1),
+        generate_random_box_space(shape=(3, 32, 32), low=0, high=1),
+    ],
+)
+@pytest.mark.parametrize("num_envs", [1, 3])
+def test_algorithm_test_loop(observation_space, num_envs):
     action_space = generate_discrete_space(2)
-    num_envs = 3
 
-    env = DummyEnv(state_size=observation_space.shape, vect=True, num_envs=num_envs)
-
-    # env = make_vect_envs("CartPole-v1", num_envs=num_envs)
+    # Create a vectorised environment & test loop
+    vect = num_envs > 1
+    env = DummyEnv(state_size=observation_space.shape, vect=vect, num_envs=num_envs)
     agent = PPO(observation_space=observation_space, action_space=action_space)
     mean_score = agent.test(env, max_steps=10)
-    assert isinstance(mean_score, float)
-
-
-# Runs algorithm test loop with unvectorised env
-def test_algorithm_test_loop_unvectorized():
-    observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
-    action_space = generate_discrete_space(2)
-
-    env = DummyEnv(state_size=observation_space.shape, vect=False)
-
-    agent = PPO(observation_space=observation_space, action_space=action_space)
-    mean_score = agent.test(env, max_steps=10)
-    assert isinstance(mean_score, float)
-
-
-# Runs algorithm test loop with images
-def test_algorithm_test_loop_images():
-    observation_space = generate_random_box_space(shape=(3, 32, 32), low=0, high=1)
-    action_space = generate_discrete_space(2)
-
-    env = DummyEnv(state_size=observation_space.shape, vect=True)
-
-    net_config_cnn = {
-        "encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-
-    agent = PPO(
-        observation_space=observation_space,
-        action_space=action_space,
-        net_config=net_config_cnn,
-    )
-    mean_score = agent.test(env, max_steps=10)
-    assert isinstance(mean_score, float)
-
-
-# Runs algorithm test loop with unvectorized images
-def test_algorithm_test_loop_images_unvectorized():
-    observation_space = spaces.Box(0, 1, shape=(32, 32, 3))
-    action_space = generate_discrete_space(2)
-
-    env = DummyEnv(state_size=observation_space.shape, vect=False)
-
-    net_config_cnn = {
-        "encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-
-    agent = PPO(
-        observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=1),
-        action_space=action_space,
-        net_config=net_config_cnn,
-    )
-    mean_score = agent.test(env, max_steps=10, swap_channels=True)
     assert isinstance(mean_score, float)
 
 
 # Clones the agent and returns an identical agent.
-def test_clone_returns_identical_agent():
-    observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
+@pytest.mark.parametrize(
+    "observation_space",
+    [
+        generate_random_box_space(shape=(4,), low=0, high=1),
+        generate_random_box_space(shape=(3, 32, 32), low=0, high=1),
+        generate_dict_or_tuple_space(2, 3, dict_space=False),
+        generate_dict_or_tuple_space(2, 3, dict_space=True),
+    ],
+)
+def test_clone_returns_identical_agent(observation_space):
     action_space = generate_discrete_space(2)
 
     ppo = DummyPPO(observation_space, action_space)
@@ -982,10 +694,21 @@ def test_clone_after_learning():
 
 
 # The saved checkpoint file contains the correct data and format.
-def test_save_load_checkpoint_correct_data_and_format(tmpdir):
+@pytest.mark.parametrize(
+    "observation_space, encoder_cls",
+    [
+        (generate_random_box_space(shape=(4,), low=0, high=1), EvolvableMLP),
+        (generate_random_box_space(shape=(3, 32, 32), low=0, high=1), EvolvableCNN),
+        (generate_dict_or_tuple_space(2, 3, dict_space=False), EvolvableMultiInput),
+        (generate_dict_or_tuple_space(2, 3, dict_space=True), EvolvableMultiInput),
+    ],
+)
+def test_save_load_checkpoint_correct_data_and_format(
+    observation_space, encoder_cls, tmpdir
+):
     # Initialize the ppo agent
     ppo = PPO(
-        observation_space=generate_random_box_space(shape=(4,), low=0, high=1),
+        observation_space=observation_space,
         action_space=generate_random_box_space(shape=(2,)),
     )
 
@@ -1021,98 +744,15 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "steps" in checkpoint
 
     ppo = PPO(
-        observation_space=generate_random_box_space(shape=(4,), low=0, high=1),
-        action_space=generate_random_box_space(shape=(2,), low=0, high=1),
-    )
-    # Load checkpoint
-    print(
-        "Actor state dict: ",
-        checkpoint["network_info"]["modules"]["actor_state_dict"].keys(),
-    )
-    print(
-        "Critic state dict: ",
-        checkpoint["network_info"]["modules"]["critic_state_dict"].keys(),
-    )
-    print("Critic new state dict: ", ppo.critic.state_dict().keys())
-    ppo.load_checkpoint(checkpoint_path)
-
-    # Check if properties and weights are loaded correctly
-    assert isinstance(ppo.actor.encoder, EvolvableMLP)
-    assert isinstance(ppo.critic.encoder, EvolvableMLP)
-    assert ppo.lr == 1e-4
-    assert ppo.batch_size == 64
-    assert ppo.gamma == 0.99
-    assert ppo.mut is None
-    assert ppo.action_std_init == 0.0
-    assert ppo.clip_coef == 0.2
-    assert ppo.ent_coef == 0.01
-    assert ppo.vf_coef == 0.5
-    assert ppo.max_grad_norm == 0.5
-    assert ppo.target_kl is None
-    assert ppo.update_epochs == 4
-    assert ppo.index == 0
-    assert ppo.scores == []
-    assert ppo.fitness == []
-    assert ppo.steps == [0]
-
-
-def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
-    net_config_cnn = {
-        "encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-
-    # Initialize the ppo agent
-    ppo = PPO(
-        observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=1),
-        action_space=generate_random_box_space(shape=(2,), low=0, high=1),
-        net_config=net_config_cnn,
-    )
-
-    # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    ppo.save_checkpoint(checkpoint_path)
-
-    # Load the saved checkpoint file
-    checkpoint = torch.load(checkpoint_path, pickle_module=dill)
-
-    # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint["network_info"]["modules"]
-    assert "actor_state_dict" in checkpoint["network_info"]["modules"]
-    assert "critic_init_dict" in checkpoint["network_info"]["modules"]
-    assert "critic_state_dict" in checkpoint["network_info"]["modules"]
-    assert "optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
-    assert "batch_size" in checkpoint
-    assert "lr" in checkpoint
-    assert "gamma" in checkpoint
-    assert "gae_lambda" in checkpoint
-    assert "mut" in checkpoint
-    assert "action_std_init" in checkpoint
-    assert "clip_coef" in checkpoint
-    assert "ent_coef" in checkpoint
-    assert "vf_coef" in checkpoint
-    assert "max_grad_norm" in checkpoint
-    assert "target_kl" in checkpoint
-    assert "update_epochs" in checkpoint
-    assert "mut" in checkpoint
-    assert "index" in checkpoint
-    assert "scores" in checkpoint
-    assert "fitness" in checkpoint
-    assert "steps" in checkpoint
-
-    ppo = PPO(
-        observation_space=generate_random_box_space(shape=(4,), low=0, high=1),
+        observation_space=observation_space,
         action_space=generate_random_box_space(shape=(2,), low=0, high=1),
     )
     # Load checkpoint
     ppo.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert isinstance(ppo.actor.encoder, EvolvableCNN)
-    assert isinstance(ppo.critic.encoder, EvolvableCNN)
+    assert isinstance(ppo.actor.encoder, encoder_cls)
+    assert isinstance(ppo.critic.encoder, encoder_cls)
     assert ppo.lr == 1e-4
     assert ppo.batch_size == 64
     assert ppo.gamma == 0.99
@@ -1131,6 +771,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
 
 # The saved checkpoint file contains the correct data and format.
+# TODO: This will be deprecated in the future
 @pytest.mark.parametrize(
     "actor_network, input_tensor",
     [
@@ -1222,17 +863,22 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert ppo.steps == [0]
 
 
+# The saved checkpoint file contains the correct data and format.]
 @pytest.mark.parametrize(
-    "device", ["cpu", torch.device("cuda" if torch.cuda.is_available() else "cpu")]
+    "observation_space, encoder_cls",
+    [
+        (generate_random_box_space(shape=(4,), low=0, high=1), EvolvableMLP),
+        (generate_random_box_space(shape=(3, 32, 32), low=0, high=1), EvolvableCNN),
+        (generate_dict_or_tuple_space(2, 3, dict_space=False), EvolvableMultiInput),
+        (generate_dict_or_tuple_space(2, 3, dict_space=True), EvolvableMultiInput),
+    ],
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator()])
-# The saved checkpoint file contains the correct data and format.
-def test_load_from_pretrained(device, accelerator, tmpdir):
+def test_load_from_pretrained(observation_space, encoder_cls, accelerator, tmpdir):
     # Initialize the ppo agent
     ppo = PPO(
-        observation_space=generate_random_box_space(shape=(4,), low=0, high=1),
+        observation_space=observation_space,
         action_space=generate_random_box_space(shape=(2,), low=0, high=1),
-        device=device,
         accelerator=accelerator,
     )
 
@@ -1241,14 +887,14 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     ppo.save_checkpoint(checkpoint_path)
 
     # Create new agent object
-    new_ppo = PPO.load(checkpoint_path, device=device, accelerator=accelerator)
+    new_ppo = PPO.load(checkpoint_path, accelerator=accelerator)
 
     # Check if properties and weights are loaded correctly
     assert new_ppo.observation_space == ppo.observation_space
     assert new_ppo.action_space == ppo.action_space
     assert new_ppo.discrete_actions == ppo.discrete_actions
-    assert isinstance(new_ppo.actor.encoder, EvolvableMLP)
-    assert isinstance(new_ppo.critic.encoder, EvolvableMLP)
+    assert isinstance(new_ppo.actor.encoder, encoder_cls)
+    assert isinstance(new_ppo.critic.encoder, encoder_cls)
     assert new_ppo.lr == ppo.lr
     assert str(new_ppo.actor.state_dict()) == str(ppo.actor.state_dict())
     assert str(new_ppo.critic.state_dict()) == str(ppo.critic.state_dict())
@@ -1261,52 +907,7 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     assert new_ppo.steps == ppo.steps
 
 
-@pytest.mark.parametrize(
-    "device", ["cpu", torch.device("cuda" if torch.cuda.is_available() else "cpu")]
-)
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
-# The saved checkpoint file contains the correct data and format.
-def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
-    # Initialize the ppo agent
-    ppo = PPO(
-        observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=1),
-        action_space=generate_random_box_space(shape=(2,), low=0, high=1),
-        net_config={
-            "encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }
-        },
-        device=device,
-        accelerator=accelerator,
-    )
-
-    # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    ppo.save_checkpoint(checkpoint_path)
-
-    # Create new agent object
-    new_ppo = PPO.load(checkpoint_path, device=device, accelerator=accelerator)
-
-    # Check if properties and weights are loaded correctly
-    assert new_ppo.observation_space == ppo.observation_space
-    assert new_ppo.action_space == ppo.action_space
-    assert new_ppo.discrete_actions == ppo.discrete_actions
-    assert isinstance(new_ppo.actor.encoder, EvolvableCNN)
-    assert isinstance(new_ppo.critic.encoder, EvolvableCNN)
-    assert new_ppo.lr == ppo.lr
-    assert str(new_ppo.actor.state_dict()) == str(ppo.actor.state_dict())
-    assert str(new_ppo.critic.state_dict()) == str(ppo.critic.state_dict())
-    assert new_ppo.batch_size == ppo.batch_size
-    assert new_ppo.gamma == ppo.gamma
-    assert new_ppo.mut == ppo.mut
-    assert new_ppo.index == ppo.index
-    assert new_ppo.scores == ppo.scores
-    assert new_ppo.fitness == ppo.fitness
-    assert new_ppo.steps == ppo.steps
-
-
+# TODO: This will be deprecated in the future
 @pytest.mark.parametrize(
     "observation_space, actor_network, input_tensor",
     [

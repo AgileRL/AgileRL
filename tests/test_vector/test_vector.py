@@ -545,7 +545,6 @@ def test_env_order_preserved():
     env = AsyncPettingZooVecEnv(env_fns)
     env.reset()
     for obs_view in env.observations.obs_view.values():
-        print("obs view", obs_view)
         obs_view[:] = 0
     actions = [0, 1]
     rand_env = np.random.randint(0, 16)
@@ -792,11 +791,11 @@ def test_get_placeholder_value(transition_name):
     if transition_name != "observation":
         val = get_placeholder_value("agent", transition_name)
         if transition_name == "reward":
-            assert val == 0
+            assert np.isnan(val)
         if transition_name == "truncated":
-            assert not val
+            assert np.isnan(val)
         if transition_name == "terminated":
-            assert val
+            assert np.isnan(val)
         if transition_name == "info":
             assert val == {}
     else:
@@ -896,7 +895,6 @@ def test_worker_reset():
             child_pipe,
             parent_pipe,
             vec_env._obs_buffer,
-            True,
             queue,
             vec_env.agents,
         ),
@@ -936,7 +934,6 @@ def test_worker_step_simple():
             child_pipe,
             parent_pipe,
             vec_env._obs_buffer,
-            True,
             queue,
             vec_env.agents,
         ),
@@ -1000,7 +997,6 @@ def test_worker_step_autoreset():
             child_pipe,
             parent_pipe,
             vec_env._obs_buffer,
-            True,
             queue,
             vec_env.agents,
         ),
@@ -1045,7 +1041,6 @@ def test_worker_runtime_error():
                 child_pipe,
                 parent_pipe,
                 vec_env._obs_buffer,
-                True,
                 queue,
                 vec_env.agents,
             ),

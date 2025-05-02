@@ -23,8 +23,8 @@ def create_model(pretrained_model_name_or_path):
         attn_implementation="flash_attention_2",
     )
     peft_config = LoraConfig(
-        r=32,
-        lora_alpha=32,
+        r=16,
+        lora_alpha=64,
         target_modules=[
             "q_proj",
             "k_proj",
@@ -68,11 +68,11 @@ def countdown_chat_template(q, a, tokenizer):
 
 def make_dataset(dataset_name: str) -> Tuple[Dataset, Dataset]:
     raw_dataset = (
-        load_dataset(DATASET, split="train").shuffle(seed=42).select(range(50000))
+        load_dataset(dataset_name, split="train").shuffle(seed=42).select(range(50000))
     )
     raw_dataset = raw_dataset.rename_column("target", "answer")
     raw_dataset = raw_dataset.rename_column("nums", "question")
-    train_test_split = raw_dataset.train_test_split(test_size=0.1)
+    train_test_split = raw_dataset.train_test_split(test_size=0.2)
     train_dataset = train_test_split["train"]
     test_dataset = train_test_split["test"]
     return train_dataset, test_dataset
@@ -113,14 +113,12 @@ def equation_reward_func(completions, target, nums, **kwargs):
             equation = answer_tags[0].strip()
             used_numbers = [int(n) for n in re.findall(r"\d+", equation)]
 
-            if sorted(used_numbers) != sorted(numbers):
-                print(f"Numbers mismatch: {used_numbers} vs {numbers}")
+            if sorted(used_numbers) != sorted(numbers.flatten().tolist()):
                 rewards.append(0.0)
                 continue
 
             allowed_pattern = r"^[\d+\-*/().\s]+$"
             if not re.match(allowed_pattern, equation):
-                print(f"Equation format invalid: {equation}")
                 rewards.append(0.0)
                 continue
 
@@ -129,10 +127,8 @@ def equation_reward_func(completions, target, nums, **kwargs):
             if abs(float(result) - float(gt)) < 1e-5:
                 rewards.append(1.0)
             else:
-                print(f"Result {result} doesn't match target {gt}")
                 rewards.append(0.0)
-        except Exception as e:
-            print(f"Equation error: {e}")
+        except Exception:
             rewards.append(0.0)
     return rewards
 
@@ -141,16 +137,6 @@ def combined_rewards(completion, solution, prompt):
     reward = (
         equation_reward_func([completion], [solution], [prompt])[0]
         + format_reward_func([completion], [solution])[0]
-    )
-
-    print(
-        f"""
-    ============================================, \n
-    Completion: {completion}, \n
-    Numbers: {prompt}, \n
-    Correct Answer: {solution.item()} \n
-    Reward: {reward}
-    """
     )
 
     if reward == 2.0:
@@ -186,6 +172,7 @@ def main():
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
 
+    # Convert the HuggingFace dataset into a Gymnasium environment
     accelerator = Accelerator()
 
     # Convert the HuggingFace dataset into a Gymnasium environment
@@ -195,16 +182,18 @@ def main():
         tokenizer=tokenizer,
         reward_fn=combined_rewards,
         apply_chat_template_fn=countdown_chat_template,
-        data_batch_size_per_gpu=1,
+        data_batch_size_per_gpu=2,
         custom_collate_fn=custom_collate_fn,
+        accelerator=accelerator,
     )
+
     # Instantiate the grpo agent
     agent = GRPO(
         env.observation_space,
         env.action_space,
         actor_network=model,
         pad_token_id=tokenizer.eos_token_id,
-        batch_size=1,
+        batch_size=4,
         max_output_tokens=1024,
         group_size=12,
         reduce_memory_peak=True,

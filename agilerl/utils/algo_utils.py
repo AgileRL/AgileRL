@@ -1,24 +1,29 @@
-import glob
 import inspect
 import os
+import shutil
 import warnings
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
+from functools import singledispatch
 from numbers import Number
 from typing import Any, Dict, Iterable, List, Optional, Tuple, TypeGuard, Union
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from accelerate.optimizer import AcceleratedOptimizer
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
+from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 from gymnasium import spaces
+from peft import PeftModel, get_peft_model
 from tensordict import TensorDict, from_module
 from tensordict.nn import CudaGraphModule
 from torch._dynamo import OptimizedModule
 from torch.nn import Module
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+from transformers import PreTrainedModel
 
 from agilerl.protocols import (
     EvolvableAttributeType,
@@ -36,6 +41,8 @@ from agilerl.typing import (
     OptimizerType,
     TorchObsType,
 )
+
+PreTrainedModelType = Union[PeftModel, PreTrainedModel]
 
 
 def share_encoder_parameters(
@@ -581,98 +588,267 @@ def get_vect_dim(observation: NumpyObsType, observation_space: spaces.Space) -> 
         return array_shape[0] if len(array_shape) > len(observation_space.shape) else 1
 
 
+@singledispatch
 def preprocess_observation(
-    observation: NumpyObsType,
     observation_space: spaces.Space,
+    observation: ObservationType,
     device: Union[str, torch.device] = "cpu",
     normalize_images: bool = True,
+    placeholder_value: Optional[Any] = None,
 ) -> TorchObsType:
     """Preprocesses observations for forward pass through neural network.
 
-    :param observations: Observations of environment
-    :type observations: ObservationType
     :param observation_space: The observation space of the environment, defaults to the agent's observation space
     :type observation_space: spaces.Space
+    :param observation: Observations of environment
+    :type observation: ObservationType
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to "cpu"
     :type device: Union[str, torch.device], optional
     :param normalize_images: Normalize images from [0. 255] to [0, 1], defaults to True
     :type normalize_images: bool, optional
+    :param placeholder_value: The value to use as placeholder for missing observations, defaults to None.
+    :type placeholder_value: Optional[Any], optional
 
     :return: Preprocessed observations
     :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
     """
+    raise TypeError(
+        f"AgileRL currently doesn't support {type(observation_space)} spaces."
+    )
+
+
+@preprocess_observation.register(spaces.Dict)
+def preprocess_dict_observation(
+    observation_space: spaces.Dict,
+    observation: Dict[str, np.ndarray | torch.Tensor],
+    device: Union[str, torch.device] = "cpu",
+    normalize_images: bool = True,
+    placeholder_value: Optional[Any] = None,
+) -> Dict[str, TorchObsType]:
+    """Preprocess dictionary observations.
+
+    :param observation: Dictionary observation
+    :param observation_space: Dictionary observation space
+    :param device: Computing device
+    :param normalize_images: Whether to normalize images
+    :param placeholder_value: Value to replace NaNs with
+    :return: Preprocessed dictionary observation
+    """
+    assert isinstance(
+        observation, (dict, TensorDict)
+    ), f"Expected dict, got {type(observation)}"
+
+    preprocessed_obs = {}
+    for key, _obs in observation.items():
+        preprocessed_obs[key] = preprocess_observation(
+            observation_space[key],
+            observation=_obs,
+            device=device,
+            normalize_images=normalize_images,
+            placeholder_value=placeholder_value,
+        )
+
+    return preprocessed_obs
+
+
+@preprocess_observation.register(spaces.Tuple)
+def preprocess_tuple_observation(
+    observation_space: spaces.Tuple,
+    observation: Tuple[np.ndarray | torch.Tensor, ...],
+    device: Union[str, torch.device] = "cpu",
+    normalize_images: bool = True,
+    placeholder_value: Optional[Any] = None,
+) -> Tuple[TorchObsType, ...]:
+    """Preprocess tuple observations.
+
+    :param observation: Tuple observation
+    :param observation_space: Tuple observation space
+    :param device: Computing device
+    :param normalize_images: Whether to normalize images
+    :param placeholder_value: Value to replace NaNs with
+    :return: Preprocessed tuple observation
+    """
+    if isinstance(observation, TensorDict):
+        # Convert to tuple with values ordered by index at the end of key
+        dict_keys = list(observation.keys())
+        dict_keys.sort(key=lambda x: int(x.split("_")[-1]))
+        observation = tuple(observation[key] for key in dict_keys)
+
+    assert isinstance(observation, tuple), f"Expected tuple, got {type(observation)}"
+
+    return tuple(
+        preprocess_observation(
+            _space,
+            observation=_obs,
+            device=device,
+            normalize_images=normalize_images,
+            placeholder_value=placeholder_value,
+        )
+        for _obs, _space in zip(observation, observation_space.spaces)
+    )
+
+
+@preprocess_observation.register(spaces.Box)
+def preprocess_box_observation(
+    observation_space: spaces.Box,
+    observation: NumpyObsType,
+    device: Union[str, torch.device] = "cpu",
+    normalize_images: bool = True,
+    placeholder_value: Optional[Any] = None,
+) -> torch.Tensor:
+    """Preprocess box observations (continuous spaces).
+
+    :param observation: Box observation
+    :param observation_space: Box observation space
+    :param device: Computing device
+    :param normalize_images: Whether to normalize images
+    :param placeholder_value: Value to replace NaNs with
+    :return: Preprocessed box observation
+    """
+    # Convert to tensor
     observation = obs_to_tensor(observation, device)
 
-    # Preprocess different spaces accordingly
-    if isinstance(observation_space, spaces.Dict):
-        assert isinstance(
-            observation, (dict, TensorDict)
-        ), f"Expected dict, got {type(observation)}"
-        preprocessed_obs = {}
-        for key, _obs in observation.items():
-            preprocessed_obs[key] = preprocess_observation(
-                observation=_obs,
-                observation_space=observation_space[key],
-                device=device,
-                normalize_images=normalize_images,
-            )
+    # Replace NaNs with placeholder value if specified
+    if placeholder_value is not None:
+        observation = torch.where(
+            torch.isnan(observation),
+            torch.full_like(observation, placeholder_value),
+            observation,
+        ).to(torch.float32)
 
-        return preprocessed_obs
+    # Normalize images if applicable and specified
+    if len(observation_space.shape) == 3 and normalize_images:
+        observation = apply_image_normalization(observation, observation_space)
 
-    elif isinstance(observation_space, spaces.Tuple):
-        assert isinstance(
-            observation, tuple
-        ), f"Expected tuple, got {type(observation)}"
-        return tuple(
-            preprocess_observation(_obs, _space, device, normalize_images)
-            for _obs, _space in zip(observation, observation_space.spaces)
-        )
+    space_shape = observation_space.shape
 
-    assert isinstance(
-        observation, torch.Tensor
-    ), f"Expected torch.Tensor, got {type(observation)}"
+    # Check add batch dimension if necessary
+    observation = maybe_add_batch_dim(observation, space_shape)
 
-    if isinstance(observation_space, spaces.Box):
-        # Normalize images if applicable and specified
-        if len(observation_space.shape) == 3 and normalize_images:
-            observation = apply_image_normalization(observation, observation_space)
+    return observation
 
-        space_shape = observation_space.shape
 
-    elif isinstance(observation_space, spaces.Discrete):
-        # One hot encoding of discrete observation
-        observation = F.one_hot(
-            observation.long(), num_classes=int(observation_space.n)
-        ).float()
-        if observation_space.n > 1:
-            observation = (
-                observation.squeeze()
-            )  # If n == 1 then squeeze removes obs dim
+@preprocess_observation.register(spaces.Discrete)
+def preprocess_discrete_observation(
+    observation_space: spaces.Discrete,
+    observation: NumpyObsType,
+    device: Union[str, torch.device] = "cpu",
+    normalize_images: bool = True,
+    placeholder_value: Optional[Any] = None,
+) -> torch.Tensor:
+    """Preprocess discrete observations.
 
-        space_shape = (observation_space.n,)
+    :param observation: Discrete observation
+    :param observation_space: Discrete observation space
+    :param device: Computing device
+    :param normalize_images: Whether to normalize images
+    :param placeholder_value: Value to replace NaNs with
+    :return: Preprocessed discrete observation (one-hot encoded)
+    """
+    # Convert to tensor
+    observation = obs_to_tensor(observation, device)
 
-    elif isinstance(observation_space, spaces.MultiDiscrete):
-        # Need to add batch dimension prior to splitting
-        space_shape = (sum(observation_space.nvec),)
-        observation: torch.Tensor = maybe_add_batch_dim(observation, space_shape)
+    # Replace NaNs with placeholder value if specified
+    if placeholder_value is not None:
+        observation = torch.where(
+            torch.isnan(observation),
+            torch.full_like(observation, placeholder_value),
+            observation,
+        ).to(torch.float32)
 
-        # Tensor concatenation of one hot encodings of each Categorical sub-space
-        observation = torch.cat(
-            [
-                F.one_hot(
-                    obs_.long(), num_classes=int(observation_space.nvec[idx])
-                ).float()
-                for idx, obs_ in enumerate(torch.split(observation.long(), 1, dim=1))
-            ],
-            dim=-1,
-        )
-    elif isinstance(observation_space, spaces.MultiBinary):
-        observation = observation.float()
-        space_shape = (observation_space.n,)
-    else:
-        raise TypeError(
-            f"AgileRL currently doesn't support {type(observation_space)} spaces."
-        )
+    # One hot encoding of discrete observation
+    observation = F.one_hot(
+        observation.long(), num_classes=int(observation_space.n)
+    ).float()
+
+    if observation_space.n > 1:
+        observation = observation.squeeze()  # If n == 1 then squeeze removes obs dim
+
+    space_shape = (observation_space.n,)
+
+    # Check add batch dimension if necessary
+    observation = maybe_add_batch_dim(observation, space_shape)
+
+    return observation
+
+
+@preprocess_observation.register(spaces.MultiDiscrete)
+def preprocess_multidiscrete_observation(
+    observation_space: spaces.MultiDiscrete,
+    observation: NumpyObsType,
+    device: Union[str, torch.device] = "cpu",
+    normalize_images: bool = True,
+    placeholder_value: Optional[Any] = None,
+) -> torch.Tensor:
+    """Preprocess multi-discrete observations.
+
+    :param observation: Multi-discrete observation
+    :param observation_space: Multi-discrete observation space
+    :param device: Computing device
+    :param normalize_images: Whether to normalize images
+    :param placeholder_value: Value to replace NaNs with
+    :return: Preprocessed multi-discrete observation (one-hot encoded)
+    """
+    # Convert to tensor
+    observation = obs_to_tensor(observation, device)
+
+    # Replace NaNs with placeholder value if specified
+    if placeholder_value is not None:
+        observation = torch.where(
+            torch.isnan(observation),
+            torch.full_like(observation, placeholder_value),
+            observation,
+        ).to(torch.float32)
+
+    # Need to add batch dimension prior to splitting
+    space_shape = (sum(observation_space.nvec),)
+    observation: torch.Tensor = maybe_add_batch_dim(observation, space_shape)
+
+    # Tensor concatenation of one hot encodings of each Categorical sub-space
+    observation = torch.cat(
+        [
+            F.one_hot(obs_.long(), num_classes=int(observation_space.nvec[idx])).float()
+            for idx, obs_ in enumerate(torch.split(observation.long(), 1, dim=1))
+        ],
+        dim=-1,
+    )
+
+    # Check add batch dimension if necessary
+    observation = maybe_add_batch_dim(observation, space_shape)
+
+    return observation
+
+
+@preprocess_observation.register(spaces.MultiBinary)
+def preprocess_multibinary_observation(
+    observation_space: spaces.MultiBinary,
+    observation: NumpyObsType,
+    device: Union[str, torch.device] = "cpu",
+    normalize_images: bool = True,
+    placeholder_value: Optional[Any] = None,
+) -> torch.Tensor:
+    """Preprocess multi-binary observations.
+
+    :param observation: Multi-binary observation
+    :param observation_space: Multi-binary observation space
+    :param device: Computing device
+    :param normalize_images: Whether to normalize images
+    :param placeholder_value: Value to replace NaNs with
+    :return: Preprocessed multi-binary observation
+    """
+    # Convert to tensor
+    observation = obs_to_tensor(observation, device)
+
+    # Replace NaNs with placeholder value if specified
+    if placeholder_value is not None:
+        observation = torch.where(
+            torch.isnan(observation),
+            torch.full_like(observation, placeholder_value),
+            observation,
+        ).to(torch.float32)
+
+    observation = observation.float()
+    space_shape = (observation_space.n,)
 
     # Check add batch dimension if necessary
     observation = maybe_add_batch_dim(observation, space_shape)
@@ -855,7 +1031,6 @@ def stack_and_pad_experiences(
                     )
                     for e, padding_size in zip(exp, padding_sizes)
                 ]
-
             stacked_exp = torch.cat(exp, dim=0)
         else:
             raise TypeError(f"Unsupported experience type: {type(exp[0])}")
@@ -975,7 +1150,7 @@ def create_warmup_cosine_scheduler(
     return scheduler
 
 
-def remove_nested_files(files: str) -> None:
+def remove_nested_files(files: List[str]) -> None:
     """Remove nested files from a list of files.
 
     :param files: List of files to remove nested files from
@@ -983,12 +1158,11 @@ def remove_nested_files(files: str) -> None:
     :param depth: Depth of the nested files, defaults to 0
     :type depth: int, optional
     """
-    for _file in files:
-        if os.path.isdir(_file):
-            remove_nested_files(glob.glob(_file + "/*"))
-            os.rmdir(_file)
+    for f in files:
+        if os.path.isdir(f):
+            shutil.rmtree(f)
         else:
-            os.remove(_file)
+            os.remove(f)
 
 
 def vectorize_experiences_by_agent(
@@ -1176,3 +1350,34 @@ def concatenate_experiences_into_batches(
 
     stacked_tensor = concatenate_tensors(tensors)
     return reshape_from_space(stacked_tensor, space)
+
+
+def is_peft_model(model: nn.Module) -> bool:
+    """Check if a model is a PEFT model.
+
+    :param model: Model to check
+    :type model: nn.Module
+    :return: True if the model is a PEFT model, False otherwise
+    :rtype: bool
+    """
+    return isinstance(model, PeftModel)
+
+
+def clone_llm(
+    original_model: PreTrainedModelType, load_state_dict: bool = True
+) -> PreTrainedModelType:
+    """Clone the actor.
+
+    :param model: Model to clone
+    :type model: PreTrainedModelType
+    :return: Cloned model
+    """
+    model_config = original_model.config
+    base_model = original_model.model
+    model = type(base_model)(model_config)
+    if is_peft_model(original_model):
+        peft_config = original_model.peft_config[original_model.active_adapter]
+        model = get_peft_model(model, peft_config)
+    if load_state_dict:
+        model.load_state_dict(clone_tensors_for_torch_save(original_model.state_dict()))
+    return model

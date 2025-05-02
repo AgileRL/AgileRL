@@ -6,9 +6,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 from gymnasium import spaces
+from tensordict import TensorDict
 
+from agilerl.components.data import Transition
 from agilerl.protocols import EvolvableAlgorithm, EvolvableModule
-from agilerl.typing import NumpyObsType
+from agilerl.typing import NumpyObsType, TorchObsType
 
 
 def unpack_network(model: nn.Sequential) -> List[nn.Module]:
@@ -135,8 +137,20 @@ def gen_multi_agent_dict_or_tuple_spaces(
 
 
 def get_sample_from_space(
-    space: spaces.Space, batch_size: Optional[int] = None
+    space: spaces.Space,
+    batch_size: Optional[int] = None,
+    device: Optional[torch.device] = None,
 ) -> NumpyObsType:
+    """
+    Generate a sample from the given space.
+
+    :param space: The space to generate a sample from.
+    :type space: spaces.Space
+    :param batch_size: The batch size.
+    :type batch_size: int
+    :return: A sample from the space.
+    :rtype: NumpyObsType
+    """
     if isinstance(space, spaces.Box):
         if batch_size is None:
             return np.random.uniform(low=space.low, high=space.high, size=space.shape)
@@ -155,11 +169,78 @@ def get_sample_from_space(
         else:
             return np.random.randint(space.nvec, size=(batch_size, len(space.nvec)))
     elif isinstance(space, spaces.Dict):
-        return {key: get_sample_from_space(value) for key, value in space.items()}
+        return {
+            key: get_sample_from_space(value, batch_size)
+            for key, value in space.items()
+        }
     elif isinstance(space, spaces.Tuple):
-        return tuple(get_sample_from_space(value) for value in space)
+        return tuple(get_sample_from_space(value, batch_size) for value in space)
     else:
         raise ValueError(f"Unsupported space type: {type(space)}")
+
+
+def is_processed_observation(observation: TorchObsType, space: spaces.Space) -> bool:
+    if isinstance(space, spaces.Box):
+        print(observation.shape, space.shape)
+        return (
+            isinstance(observation, torch.Tensor)
+            and observation.shape[1:] == space.shape
+        )
+    elif isinstance(space, spaces.Discrete):
+        return isinstance(observation, torch.Tensor) and observation.shape[1:] == (1,)
+    elif isinstance(space, spaces.MultiDiscrete):
+        return isinstance(observation, torch.Tensor) and observation.shape[1:] == (
+            len(space.nvec),
+        )
+    elif isinstance(space, spaces.Dict):
+        return isinstance(observation, dict) and all(
+            is_processed_observation(observation[key], space[key])
+            for key in space.keys()
+        )
+    elif isinstance(space, spaces.Tuple):
+        return isinstance(observation, tuple) and all(
+            is_processed_observation(value, space[i])
+            for i, value in enumerate(observation)
+        )
+    else:
+        raise ValueError(f"Unsupported space type: {type(space)}")
+
+
+def get_experiences_batch(
+    observation_space: spaces.Space,
+    action_space: spaces.Space,
+    batch_size: int,
+    device: Optional[torch.device] = None,
+) -> TensorDict:
+    """
+    Generate a batch of experiences from the observation and action spaces.
+
+    :param observation_space: The observation space.
+    :type observation_space: spaces.Space
+    :param action_space: The action space.
+    :type action_space: spaces.Space
+    :param batch_size: The batch size.
+    :type batch_size: int
+    :param device: The device to run the experiences on.
+    :type device: torch.device
+    :return: A batch of experiences.
+    :rtype: TensorDict
+    """
+    device = device if device is not None else "cpu"
+    states = get_sample_from_space(observation_space, batch_size)
+    actions = get_sample_from_space(action_space, batch_size)
+    rewards = torch.randn((batch_size, 1))
+    next_states = get_sample_from_space(observation_space, batch_size)
+    dones = torch.randint(0, 2, (batch_size, 1))
+    return Transition(
+        obs=states,
+        action=actions,
+        reward=rewards,
+        next_obs=next_states,
+        done=dones,
+        batch_size=[batch_size],
+        device=device,
+    ).to_tensordict()
 
 
 def check_equal_params_ind(

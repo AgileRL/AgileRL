@@ -40,22 +40,26 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
 
     print(f"DEVICE: {device}")
 
-    env = importlib.import_module(f"{INIT_HP['ENV_NAME']}").parallel_env
+    def create_env(**kwargs):
+        env = importlib.import_module(f"{INIT_HP['ENV_NAME']}").parallel_env(**kwargs)
+
+        if INIT_HP["CHANNELS_LAST"]:
+            # Environment processing for image based observations
+            # env = ss.frame_skip_v0(env, 4)
+            # env = ss.clip_reward_v0(env, lower_bound=-1, upper_bound=1)
+            # env = ss.color_reduction_v0(env, mode="B")
+            env = ss.resize_v1(env, x_size=84, y_size=84)
+            env = ss.frame_stack_v1(env, 4)
+
+        return env
+
     env_kwargs = dict(max_cycles=25, continuous_actions=True)
-    # env_kwargs = {}
     env = make_multi_agent_vect_envs(
-        env, num_envs=INIT_HP["NUM_ENVS"], shared_critic=False, **env_kwargs
+        create_env, num_envs=INIT_HP["NUM_ENVS"], **env_kwargs
     )
 
-    if INIT_HP["CHANNELS_LAST"]:
-        # Environment processing for image based observations
-        env = ss.frame_skip_v0(env, 4)
-        env = ss.clip_reward_v0(env, lower_bound=-1, upper_bound=1)
-        env = ss.color_reduction_v0(env, mode="B")
-        env = ss.resize_v1(env, x_size=84, y_size=84)
-        env = ss.frame_stack_v1(env, 4)
-
     env.reset(seed=42)
+
     # Configure the multi-agent algo input arguments
     observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
     action_spaces = [env.single_action_space(agent) for agent in env.agents]
@@ -122,25 +126,29 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
         torch_compiler=INIT_HP["TORCH_COMPILE"],
     )
 
-    train_multi_agent_on_policy(
-        env,
-        INIT_HP["ENV_NAME"],
-        INIT_HP["ALGO"],
-        agent_pop,
-        sum_scores=True,
-        INIT_HP=INIT_HP,
-        MUT_P=MUTATION_PARAMS,
-        swap_channels=INIT_HP["CHANNELS_LAST"],
-        max_steps=INIT_HP["MAX_STEPS"],
-        evo_steps=INIT_HP["EVO_STEPS"],
-        eval_steps=INIT_HP["EVAL_STEPS"],
-        eval_loop=INIT_HP["EVAL_LOOP"],
-        target=INIT_HP["TARGET_SCORE"],
-        tournament=tournament,
-        mutation=mutations,
-        wb=INIT_HP["WANDB"],
-        accelerator=accelerator,
-    )
+    try:
+        train_multi_agent_on_policy(
+            env,
+            INIT_HP["ENV_NAME"],
+            INIT_HP["ALGO"],
+            agent_pop,
+            sum_scores=True,
+            INIT_HP=INIT_HP,
+            MUT_P=MUTATION_PARAMS,
+            swap_channels=INIT_HP["CHANNELS_LAST"],
+            max_steps=INIT_HP["MAX_STEPS"],
+            evo_steps=INIT_HP["EVO_STEPS"],
+            eval_steps=INIT_HP["EVAL_STEPS"],
+            eval_loop=INIT_HP["EVAL_LOOP"],
+            target=INIT_HP["TARGET_SCORE"],
+            tournament=tournament,
+            mutation=mutations,
+            wb=INIT_HP["WANDB"],
+            accelerator=accelerator,
+        )
+    except Exception as e:
+        env.close()
+        raise e
 
     if str(device) == "cuda":
         torch.cuda.empty_cache()

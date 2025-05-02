@@ -831,7 +831,7 @@ def test_preprocess_observation():
 
     # Test with normalize_images=True
     processed_box = preprocess_observation(
-        box_obs, box_space, device, normalize_images=True
+        box_space, box_obs, device, normalize_images=True
     )
     assert isinstance(processed_box, torch.Tensor)
     assert processed_box.shape == (1, 3, 84, 84)  # Added batch dimension
@@ -839,7 +839,7 @@ def test_preprocess_observation():
 
     # Test with normalize_images=False
     processed_box_no_norm = preprocess_observation(
-        box_obs, box_space, device, normalize_images=False
+        box_space, box_obs, device, normalize_images=False
     )
     assert isinstance(processed_box_no_norm, torch.Tensor)
     assert processed_box_no_norm.shape == (1, 3, 84, 84)
@@ -853,7 +853,7 @@ def test_preprocess_observation():
     )
     dict_obs = {"image": np.ones((3, 84, 84)) * 127.5, "vector": np.ones(5) * 0.5}
 
-    processed_dict = preprocess_observation(dict_obs, dict_space, device)
+    processed_dict = preprocess_observation(dict_space, dict_obs, device)
     assert isinstance(processed_dict, dict)
     assert "image" in processed_dict
     assert "vector" in processed_dict
@@ -869,7 +869,7 @@ def test_preprocess_observation():
     )
     tuple_obs = (np.ones((3, 84, 84)) * 127.5, np.ones(5) * 0.5)
 
-    processed_tuple = preprocess_observation(tuple_obs, tuple_space, device)
+    processed_tuple = preprocess_observation(tuple_space, tuple_obs, device)
     assert isinstance(processed_tuple, tuple)
     assert len(processed_tuple) == 2
     assert processed_tuple[0].shape == (1, 3, 84, 84)
@@ -879,7 +879,7 @@ def test_preprocess_observation():
     discrete_space = spaces.Discrete(10)
     discrete_obs = np.array(5)
 
-    processed_discrete = preprocess_observation(discrete_obs, discrete_space, device)
+    processed_discrete = preprocess_observation(discrete_space, discrete_obs, device)
     assert isinstance(processed_discrete, torch.Tensor)
     assert processed_discrete.shape == (1, 10)  # One-hot encoded
     assert processed_discrete[0, 5] == 1.0  # The 5th element should be 1.0
@@ -890,7 +890,7 @@ def test_preprocess_observation():
     multidiscrete_obs = np.array([[1, 2]])  # Make 2D to work with split operation
 
     processed_multidiscrete = preprocess_observation(
-        multidiscrete_obs, multidiscrete_space, device
+        multidiscrete_space, multidiscrete_obs, device
     )
     assert isinstance(processed_multidiscrete, torch.Tensor)
     assert processed_multidiscrete.shape[1] == 7  # 3 + 4 = 7 (sum of categories)
@@ -900,7 +900,7 @@ def test_preprocess_observation():
     multibinary_obs = np.array([[1, 0, 1]])
 
     processed_multibinary = preprocess_observation(
-        multibinary_obs, multibinary_space, device
+        multibinary_space, multibinary_obs, device
     )
     assert isinstance(processed_multibinary, torch.Tensor)
     assert processed_multibinary.shape == (1, 3)
