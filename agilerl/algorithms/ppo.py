@@ -362,6 +362,8 @@ class PPO(RLAlgorithm):
         obs: ArrayOrTensor,
         action_mask: Optional[ArrayOrTensor] = None,
         hidden_state: Optional[ArrayOrTensor] = None,
+        *,                       # keyword-only
+        sample: bool = True,     # NEW flag
     ) -> Tuple[
         ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[ArrayOrTensor]
     ]:
@@ -373,6 +375,8 @@ class PPO(RLAlgorithm):
         :type action_mask: numpy.ndarray, optional
         :param hidden_state: Hidden state for recurrent policies, defaults to None
         :type hidden_state: numpy.ndarray, optional
+        :param sample: Whether to sample an action or return the mode/mean. Defaults to True.
+        :type sample: bool
         :return: Action, log probability, entropy, state values, and next hidden state
         :rtype: Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[ArrayOrTensor]]
         """
@@ -381,7 +385,7 @@ class PPO(RLAlgorithm):
                 obs, hidden_state=hidden_state
             )
             action, log_prob, entropy = self.actor.forward_head(
-                latent_pi, action_mask=action_mask
+                latent_pi, action_mask=action_mask, sample=sample
             )
             values = (
                 self.critic.forward_head(latent_pi).squeeze(-1)
@@ -392,7 +396,7 @@ class PPO(RLAlgorithm):
         else:
             latent_pi = self.actor.extract_features(obs)
             action, log_prob, entropy = self.actor.forward_head(
-                latent_pi, action_mask=action_mask
+                latent_pi, action_mask=action_mask, sample=sample
             )
             values = (
                 self.critic.forward_head(latent_pi).squeeze(-1)
@@ -442,7 +446,7 @@ class PPO(RLAlgorithm):
 
         # Get values from actor-critic
         _, _, entropy, values, _ = self._get_action_and_values(
-            obs, hidden_state=eval_hidden_state
+            obs, hidden_state=eval_hidden_state, sample=False # No need to sample here
         )
 
         # Get log probability of the actions using the *original* hidden state if needed by actor?
@@ -886,7 +890,7 @@ class PPO(RLAlgorithm):
 
                 # Get values and next hidden state (which we ignore in flat learning)
                 _, _, entropy_t, new_value_t, _ = self._get_action_and_values(
-                    mb_obs, hidden_state=eval_hidden_state
+                    mb_obs, hidden_state=eval_hidden_state, sample=False # No need to sample here
                 )
 
                 # Compute log prob of taken actions
@@ -1028,7 +1032,7 @@ class PPO(RLAlgorithm):
                     # step_hidden_state is already (layer, batch, hidden)
                     _, _, entropy_t, new_value_t, next_hidden = (
                         self._get_action_and_values(
-                            obs_t, hidden_state=step_hidden_state
+                            obs_t, hidden_state=step_hidden_state, sample=False # No need to sample here
                         )
                     )
 

@@ -6,7 +6,7 @@ from gymnasium import spaces
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.base import EvolvableNetwork
-from agilerl.networks.distributions import EvolvableDistribution
+from agilerl.networks.distributions_experimental import EvolvableDistribution
 from agilerl.typing import ArrayOrTensor, ConfigType, TorchObsType
 
 
