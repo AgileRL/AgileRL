@@ -1139,7 +1139,9 @@ class PPO(RLAlgorithm):
                 test_hidden_state = (
                     self.get_initial_hidden_state(num_envs) if self.recurrent else None
                 )
-                last_infos = [{}] * num_envs if vectorized else {} # Initialize last_info holder
+                last_infos = (
+                    [{}] * num_envs if vectorized else {}
+                )  # Initialize last_info holder
 
                 while not np.all(finished):
                     if swap_channels:
@@ -1149,7 +1151,11 @@ class PPO(RLAlgorithm):
                     action_mask = None
                     if vectorized:
                         # Check if info is a list/array of dicts
-                        if isinstance(info, (list, np.ndarray)) and len(info) == num_envs and all(isinstance(i, dict) for i in info):
+                        if (
+                            isinstance(info, (list, np.ndarray))
+                            and len(info) == num_envs
+                            and all(isinstance(i, dict) for i in info)
+                        ):
                             masks = [env_info.get("action_mask") for env_info in info]
                             # If all environments returned a mask and they are not None
                             if all(m is not None for m in masks):
@@ -1160,19 +1166,20 @@ class PPO(RLAlgorithm):
                                     action_mask = None
                             # If only some environments returned masks, we probably can't use them reliably
                             elif any(m is not None for m in masks):
-                                 warnings.warn("Action masks not provided for all vectorized environments. Skipping mask.")
-                                 action_mask = None
+                                warnings.warn(
+                                    "Action masks not provided for all vectorized environments. Skipping mask."
+                                )
+                                action_mask = None
                             # else: # No masks found, action_mask remains None
                         # Handle case where info might be a single dict even if vectorized (e.g. VecNormalize)
                         elif isinstance(info, dict):
-                             action_mask = info.get("action_mask", None)
+                            action_mask = info.get("action_mask", None)
                         # else: # info is None or not in expected format, action_mask remains None
 
-                    else: # Not vectorized
+                    else:  # Not vectorized
                         if isinstance(info, dict):
                             action_mask = info.get("action_mask", None)
                         # else: action_mask remains None
-
 
                     # Get action
                     if self.recurrent:
@@ -1185,12 +1192,12 @@ class PPO(RLAlgorithm):
                     # Environment step
                     if vectorized:
                         obs, reward, done, trunc, info = env.step(action)
-                        last_infos = info # Store the array of infos
+                        last_infos = info  # Store the array of infos
                     else:
                         obs, reward, done, trunc, info_single = env.step(action[0])
                         # Store info in a dictionary for consistency if not vectorized
                         info = {"final_info": info_single} if done or trunc else {}
-                        last_infos = info # Store the single info dict
+                        last_infos = info  # Store the single info dict
 
                     step += 1
                     scores += np.array(reward)
@@ -1239,10 +1246,17 @@ class PPO(RLAlgorithm):
                 # Prepare info for callback (use info from the first env if vectorized)
                 final_info_for_callback = {}
                 if vectorized:
-                     if isinstance(last_infos, (list, np.ndarray)) and len(last_infos) > 0:
-                         final_info_for_callback = last_infos[0] if isinstance(last_infos[0], dict) else {}
-                     elif isinstance(last_infos, dict): # Should not happen if vectorized=True and step returned array? But handle just in case.
-                         final_info_for_callback = last_infos
+                    if (
+                        isinstance(last_infos, (list, np.ndarray))
+                        and len(last_infos) > 0
+                    ):
+                        final_info_for_callback = (
+                            last_infos[0] if isinstance(last_infos[0], dict) else {}
+                        )
+                    elif isinstance(
+                        last_infos, dict
+                    ):  # Should not happen if vectorized=True and step returned array? But handle just in case.
+                        final_info_for_callback = last_infos
                 else:
                     if isinstance(last_infos, dict):
                         final_info_for_callback = last_infos
