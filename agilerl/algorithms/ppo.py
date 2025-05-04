@@ -1,6 +1,6 @@
 import copy
 import warnings
-from typing import Any, Dict, Optional, Tuple, Union, List
+from typing import Any, Callable, Dict, Optional, Tuple, Union, List
 
 import numpy as np
 import torch
@@ -1105,6 +1105,7 @@ class PPO(RLAlgorithm):
         max_steps: Optional[int] = None,
         loop: int = 3,
         vectorized: bool = True,
+        callback: Optional[Callable[[float, Dict[str, float]], None]] = None,
     ) -> float:
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
@@ -1116,6 +1117,10 @@ class PPO(RLAlgorithm):
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
         :type loop: int, optional
+        :param vectorized: Whether the environment is vectorized, defaults to True
+        :type vectorized: bool, optional
+        :param callback: Optional callback function that takes the sum of rewards and the last info dictionary as input, defaults to None
+        :type callback: Optional[Callable[[reward_sum: float, last_info: Dict[str, float]]], optional
 
         :return: Mean test score of agent in environment
         :rtype: float
@@ -1134,12 +1139,42 @@ class PPO(RLAlgorithm):
                 test_hidden_state = (
                     self.get_initial_hidden_state(num_envs) if self.recurrent else None
                 )
+                last_infos = [{}] * num_envs if vectorized else {} # Initialize last_info holder
 
                 while not np.all(finished):
                     if swap_channels:
                         obs = obs_channels_to_first(obs)
 
-                    action_mask = info.get("action_mask", None)
+                    # Process action mask
+                    action_mask = None
+                    if vectorized:
+                        # Check if info is a list/array of dicts
+                        if isinstance(info, (list, np.ndarray)) and len(info) == num_envs and all(isinstance(i, dict) for i in info):
+                            masks = [env_info.get("action_mask") for env_info in info]
+                            # If all environments returned a mask and they are not None
+                            if all(m is not None for m in masks):
+                                try:
+                                    action_mask = np.stack(masks)
+                                except Exception as e:
+                                    warnings.warn(f"Could not stack action masks: {e}")
+                                    action_mask = None
+                            # If only some environments returned masks, we probably can't use them reliably
+                            elif any(m is not None for m in masks):
+                                 warnings.warn("Action masks not provided for all vectorized environments. Skipping mask.")
+                                 action_mask = None
+                            # else: # No masks found, action_mask remains None
+                        # Handle case where info might be a single dict even if vectorized (e.g. VecNormalize)
+                        elif isinstance(info, dict):
+                             action_mask = info.get("action_mask", None)
+                        # else: # info is None or not in expected format, action_mask remains None
+
+                    else: # Not vectorized
+                        if isinstance(info, dict):
+                            action_mask = info.get("action_mask", None)
+                        # else: action_mask remains None
+
+
+                    # Get action
                     if self.recurrent:
                         action, _, _, _, test_hidden_state = self.get_action(
                             obs, action_mask=action_mask, hidden_state=test_hidden_state
@@ -1147,13 +1182,17 @@ class PPO(RLAlgorithm):
                     else:
                         action, _, _, _ = self.get_action(obs, action_mask=action_mask)
 
+                    # Environment step
                     if vectorized:
                         obs, reward, done, trunc, info = env.step(action)
+                        last_infos = info # Store the array of infos
                     else:
-                        obs, reward, done, trunc, info = env.step(action[0])
+                        obs, reward, done, trunc, info_single = env.step(action[0])
+                        # Store info in a dictionary for consistency if not vectorized
+                        info = {"final_info": info_single} if done or trunc else {}
+                        last_infos = info # Store the single info dict
 
                     step += 1
-
                     scores += np.array(reward)
 
                     # Check for episode termination
@@ -1172,6 +1211,7 @@ class PPO(RLAlgorithm):
                             num_envs
                         )
 
+                        # hidden state is always a dict for recurrent networks
                         if isinstance(test_hidden_state, dict):
                             for key in test_hidden_state:
                                 # Assuming dict values have shape [layers, batch, hidden_size]
@@ -1190,6 +1230,25 @@ class PPO(RLAlgorithm):
                             newly_finished
                         ]
                         finished[newly_finished] = True
+                        # Optionally reset scores for finished envs if loop continues within while
+                        # scores[newly_finished] = 0 # Uncomment if scores should reset immediately
+
+                # End of episode loop for one test run
+                loop_reward_sum = np.sum(completed_episode_scores)
+
+                # Prepare info for callback (use info from the first env if vectorized)
+                final_info_for_callback = {}
+                if vectorized:
+                     if isinstance(last_infos, (list, np.ndarray)) and len(last_infos) > 0:
+                         final_info_for_callback = last_infos[0] if isinstance(last_infos[0], dict) else {}
+                     elif isinstance(last_infos, dict): # Should not happen if vectorized=True and step returned array? But handle just in case.
+                         final_info_for_callback = last_infos
+                else:
+                    if isinstance(last_infos, dict):
+                        final_info_for_callback = last_infos
+
+                if callback is not None:
+                    callback(loop_reward_sum, final_info_for_callback)
 
                 rewards.append(np.mean(completed_episode_scores))
 

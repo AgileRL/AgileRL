@@ -1101,6 +1101,7 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
             if hasattr(action_space, "high")
             else None
         )
+        
 
     def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
         """Preprocesses observations for forward pass through neural network.

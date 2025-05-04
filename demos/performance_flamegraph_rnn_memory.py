@@ -117,7 +117,7 @@ recurrent = True  # <--- CHANGE THIS TO ENABLE/DISABLE RECURRENT
 if recurrent:
     NET_CONFIG = {
         "encoder_config": {
-            "hidden_state_size": 64,  # LSTM hidden state size
+            "hidden_state_size": 512,  # LSTM hidden state size
         },
     }
 else:
@@ -130,14 +130,14 @@ else:
 # --- Create Environment and Population ---
 n_symbols = 5
 delay_steps = 4
-num_envs = 128  # Can be higher for faster training/profiling
+num_envs = 1024  # Can be higher for faster training/profiling
 
 # Hyperparameters
 INIT_HP = {
     "POP_SIZE": 1,  # Single agent for profiling
     "BATCH_SIZE": 256,
     "LEARN_STEP": (delay_steps + 2),  # Match episode length (delay_steps + 2)
-    "HIDDEN_STATE_SIZE": 64,
+    "HIDDEN_STATE_SIZE": 512,
     "LR": 1e-4,
     "GAMMA": 0.99,
     "GAE_LAMBDA": 1.0,
@@ -216,9 +216,9 @@ profiler.stop()
 # =====================================================================
 # PROFILING A COMPLETE TRAINING LOOP
 # =====================================================================
-use_profiler = False  # Set to True to enable flamegraph profiling for the full loop
+use_profiler = True  # Set to True to enable flamegraph profiling for the full loop
 
-max_steps = 500_000 // num_envs  # Reduced for profiling
+max_steps = 100_000 // num_envs  # Reduced for profiling
 total_steps = 0
 start_time = time.time()
 
