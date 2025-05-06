@@ -113,7 +113,6 @@ class EvolvableMultiInput(EvolvableModule):
     """
 
     feature_net: ModuleDict
-    _SupportedSpaces = (spaces.Box, spaces.Discrete, spaces.MultiDiscrete)
 
     def __init__(
         self,
@@ -146,15 +145,6 @@ class EvolvableMultiInput(EvolvableModule):
             latent_dim >= min_latent_dim
         ), "Latent dimension must be greater than or equal to min latent dimension."
 
-        subspaces = (
-            observation_space.spaces.values()
-            if isinstance(observation_space, spaces.Dict)
-            else observation_space.spaces
-        )
-        assert all(
-            [isinstance(space, self._SupportedSpaces) for space in subspaces]
-        ), "Observation space must contain only Box, Discrete, or MultiDiscrete spaces."
-
         # Convert Tuple space to Dict space for consistency
         self.is_tuple_space = False
         if isinstance(observation_space, spaces.Tuple):
@@ -177,6 +167,9 @@ class EvolvableMultiInput(EvolvableModule):
         self.recurrent = recurrent
         self.name = name
         self.device = device
+
+        # Require certain parameters for encoder MLPs
+        self.mlp_config = self._reformat_mlp_config(self.mlp_config)
 
         self.vector_spaces = spaces.Dict(
             {
@@ -270,6 +263,17 @@ class EvolvableMultiInput(EvolvableModule):
     def lstm_init_dict(self) -> Dict[str, Any]:
         """Returns the initialization dictionary for the LSTM."""
         return copy.deepcopy(self.lstm_config)
+
+    def _reformat_mlp_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Reformats the MLP configuration."""
+        config["output_vanish"] = False  # Don't want output vanish for encoder
+        config["output_layernorm"] = config.get(
+            "layer_norm", True
+        )  # Add layer norm for output if present generally
+        config["output_activation"] = config.get(
+            "activation", "ReLU"
+        )  # Use same output activation
+        return config
 
     def init_weights_gaussian(
         self, std_coeff: float = 4, output_coeff: float = 4
