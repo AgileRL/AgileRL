@@ -608,7 +608,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         """Filter out mutation methods that contain the specified string in their name.
 
         param remove: The string to remove.
-        type remove: str
+        :type remove: str
         """
 
         def filter_methods(methods: List[str]) -> List[str]:
@@ -621,7 +621,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         """Get the mutation probabilities for each mutation method.
 
         param new_layer_prob: The probability of selecting a layer mutation method.
-        type new_layer_prob: float
+        :type new_layer_prob: float
         return: A list of probabilities for each mutation method.
         rtype: List[float]
         """
@@ -679,9 +679,9 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         # Load state dict if the network has been trained
         try:
             clone.load_state_dict(self.state_dict())
-        except RuntimeError:
+        except RuntimeError as e:
+            print(f"Warning: Failed to load state_dict during unpickling of {self.__class__.__name__} to device {self.device}. Error: {e}")
             pass
-
         return clone
 
 

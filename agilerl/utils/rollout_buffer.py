@@ -708,6 +708,98 @@ class RolloutBuffer:
 
         return tensor_batch
 
-    # Removed add_trajectory, _add_trajectory_segment, get_trajectories,
-    # clear_trajectories, to_legacy_format, get_flat_batch
-    # as they are less applicable/more complex with the vectorized approach.
+    def __getstate__(self) -> Dict[str, Any]:
+        """Gets the state dictionary for pickling, ensuring arrays are copied."""
+        state = self.__dict__.copy()
+        # Explicitly copy numpy arrays to avoid issues with read-only views after unpickling
+        buffer_size = self.capacity if self.full else self.pos
+        array_keys = [
+            'observations', 'actions', 'rewards', 'dones', 'values',
+            'log_probs', 'next_observations', 'advantages', 'returns', 'episode_starts'
+        ]
+        for key in array_keys:
+            if hasattr(self, key) and getattr(self, key) is not None:
+                # Slice up to current size and copy
+                state[key] = np.array(getattr(self, key)[:buffer_size], copy=True)
+
+        # Handle hidden_states dictionary (contains tensors or numpy arrays)
+        if self.recurrent and self.hidden_states is not None:
+            state['hidden_states'] = {}
+            for key, val in self.hidden_states.items():
+                # Slice up to current size and copy
+                sliced_val = val[:buffer_size]
+                state['hidden_states'][key] = sliced_val.clone() if isinstance(sliced_val, torch.Tensor) else np.array(sliced_val, copy=True)
+
+        if self.recurrent and self.next_hidden_states is not None:
+            state['next_hidden_states'] = {}
+            for key, val in self.next_hidden_states.items():
+                 # Slice up to current size and copy
+                 sliced_val = val[:buffer_size]
+                 state['next_hidden_states'][key] = sliced_val.clone() if isinstance(sliced_val, torch.Tensor) else np.array(sliced_val, copy=True)
+
+        # Remove attributes that might not be easily serializable or needed
+        # state.pop('observation_space', None)
+        # state.pop('action_space', None)
+        # We need observation_space and action_space for _initialize_buffers in __setstate__
+
+        return state
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        """Sets the state dictionary when unpickling, re-initializing buffers."""
+        self.__dict__.update(state)
+
+        # Re-initialize buffers to ensure they are correctly sized and writable
+        # We need observation_space and action_space for this, ensured they are in state
+        if not hasattr(self, 'observation_space') or not hasattr(self, 'action_space'):
+             warnings.warn("Observation or action space missing during RolloutBuffer unpickling. Buffer might be invalid.")
+             return # Cannot properly reinitialize
+
+        self._initialize_buffers() # Creates fresh, writable arrays
+
+        # Restore data into the newly created buffers
+        buffer_size = self.capacity if self.full else self.pos
+        array_keys = [
+            'observations', 'actions', 'rewards', 'dones', 'values',
+            'log_probs', 'next_observations', 'advantages', 'returns', 'episode_starts'
+        ]
+        for key in array_keys:
+            if key in state and hasattr(self, key) and getattr(self, key) is not None:
+                saved_array = state[key]
+                # Ensure the loaded array length matches the expected buffer size based on pos/full
+                current_buffer_len = min(len(saved_array), buffer_size)
+                if current_buffer_len > 0:
+                    getattr(self, key)[:current_buffer_len] = saved_array[:current_buffer_len]
+
+        # Restore hidden states
+        if self.recurrent and 'hidden_states' in state and state['hidden_states'] is not None:
+            if not hasattr(self, 'hidden_states') or self.hidden_states is None:
+                 self.hidden_states = {}
+            saved_hidden_states = state['hidden_states']
+            for key, saved_val in saved_hidden_states.items():
+                current_buffer_len = min(len(saved_val), buffer_size)
+                if current_buffer_len > 0:
+                    if key not in self.hidden_states or self.hidden_states[key] is None:
+                        # Need to initialize the specific key buffer if it wasn't created by _initialize_buffers
+                        # This can happen if recurrent_state_keys was empty during initial init
+                         hidden_layer_shape = (1, self.num_envs, self.hidden_state_size)
+                         self.hidden_states[key] = torch.zeros((self.capacity, *hidden_layer_shape), dtype=saved_val.dtype, device=self.device) if isinstance(saved_val, torch.Tensor) else np.zeros((self.capacity, *hidden_layer_shape), dtype=saved_val.dtype)
+
+                    self.hidden_states[key][:current_buffer_len] = saved_val[:current_buffer_len]
+
+        if self.recurrent and 'next_hidden_states' in state and state['next_hidden_states'] is not None:
+            if not hasattr(self, 'next_hidden_states') or self.next_hidden_states is None:
+                self.next_hidden_states = {}
+            saved_next_hidden_states = state['next_hidden_states']
+            for key, saved_val in saved_next_hidden_states.items():
+                current_buffer_len = min(len(saved_val), buffer_size)
+                if current_buffer_len > 0:
+                    if key not in self.next_hidden_states or self.next_hidden_states[key] is None:
+                         hidden_layer_shape = (1, self.num_envs, self.hidden_state_size)
+                         self.next_hidden_states[key] = torch.zeros((self.capacity, *hidden_layer_shape), dtype=saved_val.dtype, device=self.device) if isinstance(saved_val, torch.Tensor) else np.zeros((self.capacity, *hidden_layer_shape), dtype=saved_val.dtype)
+
+                    self.next_hidden_states[key][:current_buffer_len] = saved_val[:current_buffer_len]
+
+
+    # ------------------------------------------------------------------
+    # New helper functions for truncated Backpropagation Through Time (BPTT)
+    # ------------------------------------------------------------------
