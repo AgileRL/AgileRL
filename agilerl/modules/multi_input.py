@@ -113,6 +113,7 @@ class EvolvableMultiInput(EvolvableModule):
     """
 
     feature_net: ModuleDict
+    _SupportedSpaces = (spaces.Box, spaces.Discrete, spaces.MultiDiscrete)
 
     def __init__(
         self,
@@ -144,6 +145,15 @@ class EvolvableMultiInput(EvolvableModule):
         assert (
             latent_dim >= min_latent_dim
         ), "Latent dimension must be greater than or equal to min latent dimension."
+
+        subspaces = (
+            observation_space.spaces.values()
+            if isinstance(observation_space, spaces.Dict)
+            else observation_space.spaces
+        )
+        assert all(
+            [isinstance(space, self._SupportedSpaces) for space in subspaces]
+        ), "Observation space must contain only Box, Discrete, or MultiDiscrete spaces."
 
         # Convert Tuple space to Dict space for consistency
         self.is_tuple_space = False
