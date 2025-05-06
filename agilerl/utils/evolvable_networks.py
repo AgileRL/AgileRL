@@ -11,6 +11,7 @@ from torch.optim import Optimizer
 
 from agilerl.modules.configs import (
     CnnNetConfig,
+    LSTMNetConfig,
     MlpNetConfig,
     MultiInputNetConfig,
     SimBaNetConfig,
@@ -50,18 +51,22 @@ def tuple_to_dict_obs(tuple_obs: tuple) -> dict:
 
 
 def get_default_encoder_config(
-    observation_space: spaces.Space, simba: bool = False
+    observation_space: spaces.Space, simba: bool = False, recurrent: bool = False
 ) -> ConfigType:
     """Get the default configuration for the encoder network based on the observation space.
 
     :param observation_space: Observation space of the environment.
     :type observation_space: spaces.Space
+    :param simba: Whether to use SimBA encoder.
+    :type simba: bool
+    :param recurrent: Whether to use recurrent encoder.
+    :type recurrent: bool
 
     :return: Default configuration for the encoder network.
     :rtype: Dict[str, Any]
     """
     if isinstance(observation_space, (spaces.Dict, spaces.Tuple)):
-        return MultiInputNetConfig()
+        return MultiInputNetConfig(output_activation=None)
     elif is_image_space(observation_space):
         return CnnNetConfig(
             channel_size=[16, 16],
@@ -70,8 +75,10 @@ def get_default_encoder_config(
             output_activation=None,
         )
     else:
-        if simba:
-            return SimBaNetConfig(hidden_size=128, num_blocks=2)
+        if simba and len(observation_space.shape) == 1:
+            return SimBaNetConfig(hidden_size=128, num_blocks=2, output_activation=None)
+        elif recurrent and len(observation_space.shape) == 2:
+            return LSTMNetConfig(hidden_size=128, num_layers=2, output_activation=None)
 
         return MlpNetConfig(
             hidden_size=[16, 16], output_activation=None, output_vanish=False

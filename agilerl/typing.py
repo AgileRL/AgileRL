@@ -45,8 +45,8 @@ ActionType = Union[int, float, np.ndarray, torch.Tensor]
 InfosDict = Dict[str, Dict[str, Any]]
 MaybeObsList = Union[List[ObservationType], ObservationType]
 ExperiencesType = Union[Dict[str, ObservationType], Tuple[ObservationType, ...]]
-StepType = Tuple[NumpyObsType, ActionType, float, MaybeObsList, InfosDict]
-MultiAgentStepType = Tuple[
+GymStepReturn = Tuple[NumpyObsType, ActionType, float, MaybeObsList, InfosDict]
+PzStepReturn = Tuple[
     Dict[str, NumpyObsType], ArrayDict, ArrayDict, ArrayDict, Dict[str, Any]
 ]
 

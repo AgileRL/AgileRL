@@ -124,8 +124,7 @@ class EvolvableMultiInput(EvolvableModule):
     :type name: str, optional
     """
 
-    feature_net: ModuleDict[SupportedEvolvableTypes]
-    _SupportedSpaces = (spaces.Box, spaces.Discrete, spaces.MultiDiscrete)
+    feature_net: ModuleDict
 
     def __init__(
         self,
@@ -158,15 +157,6 @@ class EvolvableMultiInput(EvolvableModule):
         assert (
             latent_dim >= min_latent_dim
         ), "Latent dimension must be greater than or equal to min latent dimension."
-
-        subspaces = (
-            observation_space.spaces.values()
-            if isinstance(observation_space, spaces.Dict)
-            else observation_space.spaces
-        )
-        assert all(
-            [isinstance(space, self._SupportedSpaces) for space in subspaces]
-        ), "Observation space must contain only Box, Discrete, or MultiDiscrete spaces."
 
         # Convert Tuple space to Dict space for consistency
         self.is_tuple_space = False
@@ -298,7 +288,6 @@ class EvolvableMultiInput(EvolvableModule):
         output vanishing, and apply layer normalization at the final layer consistently with the
         rest of the network). See https://github.com/AgileRL/AgileRL/issues/337 for more details.
         """
-
         self.mlp_config["output_vanish"] = False
         self.mlp_config["output_layernorm"] = self.mlp_config.get("layer_norm", True)
         self.mlp_config["output_activation"] = self.mlp_config.get("activation", "ReLU")

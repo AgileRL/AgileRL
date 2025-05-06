@@ -197,7 +197,9 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         ), "Latent dimension must be greater than or equal to min latent dimension."
 
         if encoder_config is None:
-            encoder_config = get_default_encoder_config(observation_space, simba=simba)
+            encoder_config = get_default_encoder_config(
+                observation_space, simba=simba, recurrent=recurrent
+            )
 
         self.observation_space = observation_space
         self.action_space = action_space
@@ -211,7 +213,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         self.flatten_obs = False
 
         # By default we use same activation for encoder output as for the rest of the network
-        output_activation = encoder_config.get("output_activation")
+        output_activation = encoder_config.get("output_activation", None)
         if output_activation is None:
             activation = encoder_config.get("activation", "ReLU")
             encoder_config["output_activation"] = activation
