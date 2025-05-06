@@ -329,9 +329,11 @@ class Mutations:
 
         :param module: The module to reinitialize
         :type module: EvolvableModule
-
         :param init_dict: The initialization dictionary
         :type init_dict: Dict[str, Any]
+
+        :return: The reinitialized module
+        :rtype: EvolvableModule
         """
         if isinstance(module, torch._dynamo.eval_frame.OptimizedModule):
             module_cls = type(module._orig_mod)
@@ -347,9 +349,11 @@ class Mutations:
 
         :param offspring: The offspring to reinitialize
         :type offspring: OffspringType
+        :param remove_compile_prefix: Boolean flag indicating if the compile prefix should be removed, defaults to False
+        :type remove_compile_prefix: bool, optional
 
         :return: The reinitialized offspring
-        :rtype: OffspringType
+        :rtype: list[EvolvableModule], EvolvableModule
         """
         if isinstance(offspring, list):
             ind_shared = [
@@ -392,9 +396,11 @@ class Mutations:
 
         :param modules: The modules to compile
         :type modules: List[ModuleType]
-
         :param compiler: The compiler to use
         :type compiler: Optional[str]
+
+        :return: Compiled modules
+        :rtype: list[EvolvableModule], EvolvableModule
         """
         single_offspring = not isinstance(modules, list)
         if single_offspring:
@@ -419,6 +425,9 @@ class Mutations:
         :type population: list[EvolvableAlgorithm]
         :param pre_training_mut: Boolean flag indicating if the mutation is before the training loop
         :type pre_training_mut: bool, optional
+
+        :return: Mutated population
+        :rtype: list[EvolvableAlgorithm]
         """
         # Create lists of possible mutation functions and their respective relative probabilities
         mutation_options = (
@@ -543,7 +552,10 @@ class Mutations:
         """Returns individual from population with RL hyperparameter mutation.
 
         :param individual: Individual agent from population
-        :type individual: object
+        :type individual: EvolvableAlgorithm
+
+        :return: Individual from population with RL hyperparameter mutation
+        :rtype: EvolvableAlgorithm
         """
         # Randomly sample hyperparameter to mutate from the passed configuration
         hp_config = individual.registry.hp_config
@@ -585,6 +597,9 @@ class Mutations:
 
         :param individual: Individual agent from population
         :type individual: EvolvableAlgorithm
+
+        :return: Individual from population with activation layer mutation
+        :rtype: EvolvableAlgorithm
         """
         # Needs to stay constant for policy gradient methods
         # NOTE: Could set up an algorithm registry to make algo checks more robust
@@ -794,7 +809,10 @@ class Mutations:
         adds either layers or nodes to different types of network architectures.
 
         :param individual: Individual agent from population
-        :type individual: object
+        :type individual: EvolvableAlgorithm
+
+        :return: Individual from population with network architecture mutation
+        :rtype: EvolvableAlgorithm
         """
 
         if isinstance(individual, LLMAlgorithm):

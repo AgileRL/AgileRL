@@ -210,16 +210,10 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         self.recurrent = recurrent
         self.flatten_obs = False
 
-        encoder_config = (
-            encoder_config
-            if isinstance(encoder_config, dict)
-            else asdict(encoder_config)
-        )
-
         # By default we use same activation for encoder output as for the rest of the network
         output_activation = encoder_config.get("output_activation")
         if output_activation is None:
-            activation = encoder_config.get("activation")
+            activation = encoder_config.get("activation", "ReLU")
             encoder_config["output_activation"] = activation
 
         if encoder_cls is not None:
@@ -233,9 +227,9 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             input_args = inspect.getfullargspec(self.encoder_cls.__init__).args
             if "num_outputs" not in input_args:
                 warnings.warn(
-                    f"{self.encoder_cls.__name__} does not contain `num_outputs` as an input argument. "
-                    "Disabling latent space mutations. Make sure to set the number of outputs to the "
-                    "latent dimension in the encoder configuration."
+                    f"Custom encoder {self.encoder_cls.__name__} does not contain `num_outputs` as an "
+                    "input argument. Disabling latent space mutations. Make sure to set the number of "
+                    "outputs to the latent dimension in the encoder configuration."
                 )
                 self.filter_mutation_methods("latent")
             else:
@@ -443,6 +437,8 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         :return: Encoder module.
         :rtype: EvolvableModule
         """
+        net_config = net_config if isinstance(net_config, dict) else asdict(net_config)
+
         if isinstance(self.observation_space, (spaces.Dict, spaces.Tuple)):
             encoder = EvolvableMultiInput(
                 observation_space=self.observation_space,

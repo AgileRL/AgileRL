@@ -5,6 +5,7 @@ from typing import (
     Any,
     Callable,
     Dict,
+    Generic,
     Iterable,
     List,
     Optional,
@@ -756,7 +757,7 @@ class EvolvableWrapper(EvolvableModule):
 ModuleType = TypeVar("ModuleType", bound=Union[EvolvableModule, nn.Module])
 
 
-class ModuleDict(EvolvableModule, nn.ModuleDict):
+class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleType]):
     """Analogous to ``nn.ModuleDict``, but allows for the inheritance of the
     mutation methods of nested evolvable modules."""
 

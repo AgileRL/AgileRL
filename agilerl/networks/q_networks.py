@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from gymnasium import spaces
 
-from agilerl.modules import EvolvableMLP, EvolvableModule
+from agilerl.modules import EvolvableMLP, EvolvableModule, EvolvableMultiInput
 from agilerl.modules.configs import MlpNetConfig, NetConfig
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.custom_modules import DuelingDistributionalMLP
@@ -347,12 +347,29 @@ class ContinuousQNetwork(EvolvableNetwork):
         # If the encoder has nn.LayerNorm layers, we normalize the actions for
         # better training stability
         # see https://github.com/AgileRL/AgileRL/issues/337
-        self.normalize_actions = (
-            isinstance(self.encoder, EvolvableMLP) and self.encoder.layer_norm
-        ) or normalize_actions
+        self.normalize_actions = normalize_actions or self._check_normalize_actions()
 
         # Build value network
         self.build_network_head(head_config)
+
+    def _check_normalize_actions(self) -> bool:
+        """Checks if the actions should be normalized.
+
+        :return: Whether to normalize the actions.
+        :rtype: bool
+        """
+        if isinstance(self.encoder, EvolvableMLP):
+            return self.encoder.layer_norm
+
+        # NOTE: In multi-input encoders, normalizing actions is only relevant if
+        # we specify `vector_space_mlp=True` in the encoder config.
+        elif (
+            isinstance(self.encoder, EvolvableMultiInput)
+            and "vector_mlp" in self.encoder.feature_net
+        ):
+            return self.encoder.feature_net["vector_mlp"].layer_norm
+
+        return False
 
     def build_network_head(self, net_config: Optional[ConfigType] = None) -> None:
         """Builds the head of the network.

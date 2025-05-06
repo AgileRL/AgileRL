@@ -2,7 +2,7 @@ import copy
 from collections import OrderedDict
 from dataclasses import asdict
 from enum import Enum
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, TypeVar, Union
 
 import numpy as np
 import torch
@@ -21,8 +21,11 @@ from agilerl.utils.evolvable_networks import (
     tuple_to_dict_space,
 )
 
+MultiInputType = TypeVar("MultiInputType", bound="EvolvableMultiInput")
 ModuleType = Union[EvolvableModule, nn.Module]
-SupportedEvolvableTypes = Union[EvolvableCNN, EvolvableMLP, EvolvableLSTM]
+SupportedEvolvableTypes = Union[
+    EvolvableCNN, EvolvableMLP, EvolvableLSTM, MultiInputType
+]
 MultiInputConfigType = Union[ConfigType, Dict[str, ConfigType]]
 TupleOrDictSpace = Union[spaces.Tuple, spaces.Dict]
 TupleOrDictObservation = Union[Dict[str, ArrayOrTensor], Tuple[ArrayOrTensor]]
@@ -121,7 +124,7 @@ class EvolvableMultiInput(EvolvableModule):
     :type name: str, optional
     """
 
-    feature_net: ModuleDict
+    feature_net: ModuleDict[SupportedEvolvableTypes]
     _SupportedSpaces = (spaces.Box, spaces.Discrete, spaces.MultiDiscrete)
 
     def __init__(
@@ -189,11 +192,11 @@ class EvolvableMultiInput(EvolvableModule):
         self.name = name
         self.device = device
 
-        # Need to set output_vanish for MLP encoders
-        self.mlp_config["output_vanish"] = False
-        self.mlp_config["output_layernorm"] = self.mlp_config.get("layer_norm", True)
-        self.mlp_config["output_activation"] = self.mlp_config.get("activation", "ReLU")
+        # Modifications for MLP encoders
+        if self.vector_space_mlp:
+            self._modify_mlp_config()
 
+        # Vector spaces
         self.vector_spaces = spaces.Dict(
             {
                 key: space
@@ -289,6 +292,16 @@ class EvolvableMultiInput(EvolvableModule):
     def lstm_init_dict(self) -> Dict[str, Any]:
         """Returns the initialization dictionary for the LSTM."""
         return copy.deepcopy(self.lstm_config)
+
+    def _modify_mlp_config(self) -> None:
+        """Modifies the MLP architecture to be appropriate for use as an encoder (i.e. disable
+        output vanishing, and apply layer normalization at the final layer consistently with the
+        rest of the network). See https://github.com/AgileRL/AgileRL/issues/337 for more details.
+        """
+
+        self.mlp_config["output_vanish"] = False
+        self.mlp_config["output_layernorm"] = self.mlp_config.get("layer_norm", True)
+        self.mlp_config["output_activation"] = self.mlp_config.get("activation", "ReLU")
 
     def init_weights_gaussian(
         self, std_coeff: float = 4, output_coeff: float = 4
