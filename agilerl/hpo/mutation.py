@@ -1,5 +1,6 @@
 import copy
 import warnings
+from functools import singledispatch
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, TypeVar, Union
 
 import fastrand
@@ -619,7 +620,7 @@ class Mutations:
             eval_module: OffspringType = getattr(individual, network_group.eval)
             if isinstance(eval_module, list):
                 # TODO: Will need to modify when making multi-agent support more robust
-                # to different type sof settings (i.e. different observation spaces and thus
+                # to different types of settings (i.e. different observation spaces and thus
                 # network architectures for different agents)
                 if eval_module[0].activation is None:
                     no_activation = True
@@ -823,7 +824,7 @@ class Mutations:
             return individual
 
         # Get the offspring evaluation modules
-        # We first extract and apply a mutation for the algo policy and then apply
+        # We first extract and apply a mutation to the policy and then apply
         # the same mutation to the rest of the evaluation modules e.g. critics
         policy, offspring_evals = get_offspring_eval_modules(individual)
         policy_name, policy_offspring = list(policy.items())[0]
@@ -846,7 +847,7 @@ class Mutations:
             policy_offspring, self.new_layer_prob, self.rng
         )
 
-        applied_mutations, mut_dict = self._apply_arch_mutation(
+        applied_mutations, mut_dict = Mutations.apply_arch_mutation(
             policy_offspring, mut_method
         )
         self.to_device_and_set_individual(individual, policy_name, policy_offspring)
@@ -857,7 +858,7 @@ class Mutations:
 
         # Apply the same mutation to the rest of the evaluation modules
         for name, offsprings in offspring_evals.items():
-            self._apply_arch_mutation(offsprings, applied_mutations, mut_dict)
+            Mutations.apply_arch_mutation(offsprings, applied_mutations, mut_dict)
             self.to_device_and_set_individual(individual, name, offsprings)
 
             # Reinitialize bandit gradients after architecture mutation
@@ -875,8 +876,9 @@ class Mutations:
         )
         return individual
 
-    def _apply_arch_mutation(
-        self,
+    @singledispatch
+    @staticmethod
+    def apply_arch_mutation(
         networks: OffspringType,
         mut_method: Union[Optional[str], List[Optional[str]]],
         applied_mut_dict: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None,
@@ -886,49 +888,91 @@ class Mutations:
         :param networks: The networks to apply the mutation to
         :type networks: OffspringType
         :param mut_method: The mutation method to apply
-        :type mut_method: str
-        :param ret_type: The return type of the mutation method
-        :type ret_type: Type
-        :param mut_dict: The mutation dictionary, defaults to None
-        :type mut_dict: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]], optional
+        :type mut_method: Union[Optional[str], List[Optional[str]]]
+        :param applied_mut_dict: The mutation dictionary, defaults to None
+        :type applied_mut_dict: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]], optional
 
         :return: The mutation method name and the mutation dictionary
         :rtype: Tuple[Union[str, List[str]], MutationReturnType]
         """
-        if applied_mut_dict is None:
-            applied_mut_dict = (
-                [{}] * len(networks) if isinstance(networks, list) else {}
-            )
+        raise MutationError(
+            f"Can't apply architecture mutation to {type(networks)} networks."
+        )
 
+    @apply_arch_mutation.register(EvolvableModule)
+    @staticmethod
+    def _apply_arch_single(
+        network: EvolvableModule,
+        mut_method: Optional[str],
+        applied_mut_dict: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[str, MutationReturnType]:
+        """Applies the mutation method to networks and returns mutation data if needed.
+
+        :param network: The network to apply the mutation to
+        :type network: EvolvableModule
+        :param mut_method: The mutation method to apply
+        :type mut_method: str
+        :param applied_mut_dict: The mutation dictionary, defaults to None
+        :type applied_mut_dict: Optional[Dict[str, Any]], optional
+
+        :return: The mutation method name and the mutation dictionary
+        :rtype: Tuple[str, Dict[str, Any]]
+        """
+        applied_mut_dict = applied_mut_dict if applied_mut_dict is not None else {}
         mut_dict = None
-        if isinstance(networks, list):
-            if isinstance(mut_method, str) or mut_method is None:
-                mut_method = [mut_method] * len(networks)
-
-            mut_dict = []
-            applied_muts = []
-            for i, net in enumerate(networks):
-                _to_apply = mut_method[i]
-                if _to_apply is None:
-                    mut_dict.append({})
-                    applied_muts.append(None)
-                    net.last_mutation_attr = None
-                    net.last_mutation = None
-                    continue
-
-                mut_return = getattr(net, mut_method[i])(**applied_mut_dict[i])
-                mut_dict.append(mut_return if mut_return is not None else {})
-                applied_muts.append(net.last_mutation_attr)
+        if mut_method is None:
+            mut_dict = {}
+            network.last_mutation_attr = None
+            network.last_mutation = None
         else:
-            if mut_method is None:
-                mut_dict = {}
-                networks.last_mutation_attr = None
-                networks.last_mutation = None
-            else:
-                mut_dict = getattr(networks, mut_method)(**applied_mut_dict)
+            if mut_method not in network.mutation_methods:
+                raise MutationError(
+                    f"Mutation method '{mut_method}' not found in '{network.__class__.__name__}'; "
+                    f"available methods: \n {network.mutation_methods}."
+                )
 
-            mut_dict = mut_dict if mut_dict is not None else {}
-            applied_muts = networks.last_mutation_attr
+            mut_dict = getattr(network, mut_method)(**applied_mut_dict)
+
+        mut_dict = mut_dict if mut_dict is not None else {}
+        applied_mut = network.last_mutation_attr
+
+        return applied_mut, mut_dict
+
+    @apply_arch_mutation.register(list)
+    @staticmethod
+    def _apply_arch_multi(
+        networks: List[EvolvableModule],
+        mut_method: List[Optional[str]],
+        applied_mut_dict: Optional[List[Dict[str, Any]]] = None,
+    ) -> Tuple[List[str], List[Dict[str, Any]]]:
+        """Applies the mutation method to networks and returns mutation data if needed.
+
+        :param networks: The networks to apply the mutation to
+        :type networks: List[EvolvableModule]
+        :param mut_method: The mutation method to apply
+        :type mut_method: List[Optional[str]]
+        :param applied_mut_dict: The mutation dictionary, defaults to None
+        :type applied_mut_dict: Optional[List[Dict[str, Any]]], optional
+
+        :return: The mutation method name and the mutation dictionary
+        :rtype: Tuple[List[str], List[Dict[str, Any]]]
+        """
+        applied_mut_dict = (
+            applied_mut_dict if applied_mut_dict is not None else [{}] * len(networks)
+        )
+
+        # Consider the case where the same mutation method is applied to all sub-agents
+        if isinstance(mut_method, str) or mut_method is None:
+            mut_method = [mut_method] * len(networks)
+
+        mut_dict = []
+        applied_muts = []
+        for i, net in enumerate(networks):
+            applied_mut, mut_return = Mutations._apply_arch_single(
+                net, mut_method[i], applied_mut_dict[i]
+            )
+            mut_dict.append(mut_return if mut_return is not None else {})
+            applied_muts.append(applied_mut)
 
         return applied_muts, mut_dict
 
@@ -1021,3 +1065,9 @@ class Mutations:
             if individual.accelerator is None
             else individual.accelerator.device
         )
+
+
+class MutationError(Exception):
+    """Custom exception for mutation errors."""
+
+    pass

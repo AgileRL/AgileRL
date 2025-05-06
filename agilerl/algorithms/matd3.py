@@ -25,9 +25,9 @@ from agilerl.typing import (
 from agilerl.utils.algo_utils import (
     concatenate_spaces,
     contains_image_space,
+    format_shared_critic_config,
     key_in_nested_dict,
     make_safe_deepcopies,
-    multi_agent_sample_tensor_from_space,
     obs_channels_to_first,
 )
 from agilerl.utils.evolvable_networks import get_default_encoder_config
@@ -253,7 +253,6 @@ class MATD3(MultiAgentRLAlgorithm):
                     head_config["output_activation"] = "GumbelSoftmax"
 
                 critic_head_config = copy.deepcopy(head_config)
-                critic_head_config["output_activation"] = None
             else:
                 output_activation = "GumbelSoftmax" if self.discrete_actions else None
                 head_config = MlpNetConfig(
@@ -270,50 +269,12 @@ class MATD3(MultiAgentRLAlgorithm):
                     self.single_space, simba
                 )
 
-            # For image spaces we need to give a sample input tensor to
-            # build networks with Conv3d blocks appropriately
-            # NOTE: Currently AgileRL only supports Dict observation spaces
-            # with a unique image space (i.e. all agents and all subspaces
-            # contain the same image space).
-            if self.is_image_space:
-                actor_sample_input = multi_agent_sample_tensor_from_space(
-                    self.single_space, self.n_agents, device=self.device
-                )
-                critic_sample_input = multi_agent_sample_tensor_from_space(
-                    self.single_space,
-                    self.n_agents,
-                    device=self.device,
-                    critic=True,
-                )
-
-                def get_first_sample_input(
-                    sample_input: Union[
-                        Tuple[torch.Tensor, ...], Dict[str, torch.Tensor]
-                    ],
-                ) -> torch.Tensor:
-                    if isinstance(self.single_space, spaces.Dict):
-                        return list(sample_input.values())[0]
-                    elif isinstance(self.single_space, spaces.Tuple):
-                        return sample_input[0]
-
-                    return sample_input
-
-                actor_sample_input = get_first_sample_input(actor_sample_input)
-                critic_sample_input = get_first_sample_input(critic_sample_input)
-
-                if isinstance(self.single_space, (spaces.Dict, spaces.Tuple)):
-                    encoder_config["cnn_config"]["sample_input"] = actor_sample_input
-                    critic_encoder_config["cnn_config"][
-                        "sample_input"
-                    ] = critic_sample_input
-                else:
-                    encoder_config["sample_input"] = actor_sample_input
-                    critic_encoder_config["sample_input"] = critic_sample_input
-
             net_config["encoder_config"] = encoder_config
             net_config["head_config"] = head_config
 
-            critic_net_config["encoder_config"] = critic_encoder_config
+            critic_net_config = format_shared_critic_config(
+                critic_net_config, critic_encoder_config
+            )
             critic_net_config["head_config"] = critic_head_config
 
             clip_actions = self.torch_compiler is None
@@ -322,21 +283,16 @@ class MATD3(MultiAgentRLAlgorithm):
                 return DeterministicActor(
                     self.observation_spaces[idx],
                     self.action_spaces[idx],
-                    n_agents=self.n_agents,
                     device=self.device,
                     clip_actions=clip_actions,
                     **copy.deepcopy(net_config),
                 )
 
-            # NOTE: Critic uses observations + actions of all agents to predict Q-value
-            concatenated_obs_space = concatenate_spaces(observation_spaces)
-            concatenated_action_space = concatenate_spaces(action_spaces)
-
+            # Critic uses observations + actions of all agents to predict Q-value
             def create_critic():
                 return ContinuousQNetwork(
-                    observation_space=concatenated_obs_space,
-                    action_space=concatenated_action_space,
-                    n_agents=self.n_agents,
+                    observation_space=self.observation_space,
+                    action_space=concatenate_spaces(action_spaces),
                     device=self.device,
                     **copy.deepcopy(critic_net_config),
                 )

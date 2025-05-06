@@ -59,7 +59,6 @@ class CustomNetwork(EvolvableNetwork):
         action_space=None,
         min_latent_dim=8,
         max_latent_dim=128,
-        n_agents=None,
         latent_dim=32,
         device="cpu",
     ):
@@ -70,7 +69,6 @@ class CustomNetwork(EvolvableNetwork):
             action_space=action_space,
             min_latent_dim=min_latent_dim,
             max_latent_dim=max_latent_dim,
-            n_agents=n_agents,
             latent_dim=latent_dim,
             simba=False,
             device=device,

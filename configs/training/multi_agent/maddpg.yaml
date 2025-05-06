@@ -27,7 +27,7 @@ INIT_HP:
     EVAL_STEPS:                # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
     LEARNING_DELAY: 0          # Steps before learning
-    WANDB: true                # Log with Weights and Biases
+    WANDB: false                # Log with Weights and Biases
     TORCH_COMPILE: default
 
 MUTATION_PARAMS:
