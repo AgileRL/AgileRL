@@ -1337,12 +1337,14 @@ def is_peft_model(model: nn.Module) -> bool:
 
 
 def clone_llm(
-    original_model: PreTrainedModelType, load_state_dict: bool = True
+    original_model: PreTrainedModelType, state_dict: Optional[Dict[str, torch.Tensor]] = None
 ) -> PreTrainedModelType:
     """Clone the actor.
 
     :param model: Model to clone
     :type model: PreTrainedModelType
+    :param state_dict: State dict to load, defaults to None
+    :type state_dict: Optional[Dict[str, torch.Tensor]], optional
     :return: Cloned model
     """
     model_config = original_model.config
@@ -1351,6 +1353,6 @@ def clone_llm(
     if is_peft_model(original_model):
         peft_config = original_model.peft_config[original_model.active_adapter]
         model = get_peft_model(model, peft_config)
-    if load_state_dict:
-        model.load_state_dict(clone_tensors_for_torch_save(original_model.state_dict()))
+    if state_dict is not None:
+        model.load_state_dict(state_dict)
     return model

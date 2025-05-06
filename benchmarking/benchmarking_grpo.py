@@ -16,15 +16,18 @@ from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
-MODEL_PATH = "Qwen/Qwen2.5-1.5B"
+from agilerl.utils.algo_utils import clone_llm
+
+MODEL_PATH = "Qwen/Qwen2.5-3B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
 
 def create_model(pretrained_model_name_or_path):
     model = AutoModelForCausalLM.from_pretrained(
         pretrained_model_name_or_path=pretrained_model_name_or_path,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=torch.bfloat16, 
         attn_implementation="flash_attention_2",
+        device_map="cpu"
     )
     peft_config = LoraConfig(
         r=16,
@@ -84,9 +87,7 @@ def make_dataset(dataset_name: str) -> Tuple[Dataset, Dataset]:
 
 def format_reward_func(completions, target, **kwargs):
     rewards = []
-
     for completion, gt in zip(completions, target):
-
         try:
             # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
             completion = "<think>" + completion
@@ -248,8 +249,8 @@ def main(init_hp, mut_p):
         elite_path="saved_llms",
         max_reward=2.0,
         evo_steps=10,
-        mutation=mutations,
-        tournament=tournament,
+        mutation=None,#mutations,
+        tournament=None, #tournament,
         accelerator=accelerator,
         verbose=True,
     )
@@ -258,7 +259,6 @@ def main(init_hp, mut_p):
 
 if __name__ == "__main__":
     import os
-
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     with open("configs/training/grpo.yaml") as file:
         config = yaml.safe_load(file)

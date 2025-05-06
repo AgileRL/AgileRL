@@ -1752,20 +1752,21 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """Clean up the algorithm."""
 
         if self.accelerator is not None:
-            self.actor, self.reference_actor, self.optimizer, self.lr_scheduler = (
+            self.actor, self.reference_actor, self.optimizer, self.lr_scheduler, self.reference_actor_state_dict = (
                 self.accelerator.free_memory(
-                    self.actor, self.reference_actor, self.optimizer, self.lr_scheduler
+                    self.actor, self.reference_actor, self.optimizer, self.lr_scheduler, self.reference_actor_state_dict
                 )
             )
             self.accelerator.wait_for_everyone()
         else:
-            self.actor, self.reference_actor, self.optimizer, self.lr_scheduler = (
+            self.actor, self.reference_actor, self.optimizer, self.lr_scheduler, self.reference_actor_state_dict = (
+                None,
                 None,
                 None,
                 None,
                 None,
             )
-        gc.collect()
+        gc.collect()    
         torch.cuda.empty_cache()
 
     def clone(self, index: Optional[int] = None, wrap: bool = True):
@@ -1803,8 +1804,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 else self.actor
             )
 
+            actor_state_dict = None
+            if self.zero_stage is None or self.zero_stage < 2:
+                actor_state_dict = clone_tensors_for_torch_save(actor.state_dict())
+
             cloned_actor = clone_llm(
-                actor, load_state_dict=(self.zero_stage is None or self.zero_stage < 2)
+                actor, state_dict=actor_state_dict
             )
 
             actor = None  # De-reference the actor
@@ -1845,10 +1850,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 clone.index = index
 
             clone.wrap_models()
-            for param, cloned_param in zip(
-                self.reference_actor.parameters(), clone.reference_actor.parameters()
-            ):
-                cloned_param.data = param.data
 
             if self.zero_stage is not None and self.zero_stage >= 2:
                 clone.accelerator.wait_for_everyone()
@@ -1857,6 +1858,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             else:
                 if self.accelerator is not None:
                     self.accelerator.wait_for_everyone()
+
         return clone
 
     @staticmethod

@@ -196,6 +196,7 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE_PER_GPU"]
                     accelerator.wait_for_everyone()
             if accelerator is None or accelerator.is_main_process:
                 metrics_dict = {
+                    "global_step": total_steps,
                     "Train/Loss": agg_metrics[0],
                     "Train/KL-divergence": agg_metrics[1],
                     "Train/Mean reward": agg_metrics[2],
@@ -290,6 +291,16 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE_PER_GPU"]
                         ]
                     )
                 }
+                wandb_dict |= {
+                    "Train/Best accuracy": np.max(
+                        [
+                            agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                                "Train/Accuracy"
+                            ]
+                            for agent_idx, _ in enumerate(pop)
+                        ]
+                    )
+                }
             if len(pop[0].registry.hp_config.config.keys()) > 0:
                 wandb_dict |= {
                     f"HPO_agent_{agent_idx}/{key}": getattr(agent, key)
@@ -319,6 +330,16 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE_PER_GPU"]
                 if max_reward is not None:
                     test_dict |= {
                         "Eval/Mean population accuracy": np.mean(
+                            [
+                                agent_metrics_dict[f"agent_{agent_idx}/test_metrics"][
+                                    "Eval/Accuracy"
+                                ]
+                                for agent_idx, _ in enumerate(pop)
+                            ]
+                        )
+                    }
+                    wandb_dict |= {
+                        "Eval/Best accuracy": np.max(
                             [
                                 agent_metrics_dict[f"agent_{agent_idx}/test_metrics"][
                                     "Eval/Accuracy"
