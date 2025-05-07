@@ -3,10 +3,10 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch.distributed as dist
-import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import GRPO
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.hpo.mutation import Mutations
@@ -179,6 +179,7 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE_PER_GPU"]
             agent.steps[-1] += effective_data_batch_size
             total_steps += effective_data_batch_size
             agg_test_metrics = None
+
             if (i + 1) % evaluation_interval == 0:
                 test_reward = agent.test(env)
                 test_metrics = [test_reward]
@@ -194,6 +195,7 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE_PER_GPU"]
 
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
+
             if accelerator is None or accelerator.is_main_process:
                 metrics_dict = {
                     "global_step": total_steps,

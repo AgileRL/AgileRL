@@ -16,18 +16,16 @@ from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
-from agilerl.utils.algo_utils import clone_llm
-
-MODEL_PATH = "Qwen/Qwen2.5-3B"
+MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
 
 def create_model(pretrained_model_name_or_path):
     model = AutoModelForCausalLM.from_pretrained(
         pretrained_model_name_or_path=pretrained_model_name_or_path,
-        torch_dtype=torch.bfloat16, 
+        torch_dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
-        device_map="cpu"
+        device_map="cpu",
     )
     peft_config = LoraConfig(
         r=16,
@@ -243,14 +241,14 @@ def main(init_hp, mut_p):
         pop=pop,
         env=env,
         init_hp=init_hp,
-        evaluation_interval=10,
+        evaluation_interval=5,
         wb=True,
         save_elite=True,
         elite_path="saved_llms",
         max_reward=2.0,
-        evo_steps=10,
-        mutation=None,#mutations,
-        tournament=None, #tournament,
+        # evo_steps=10,
+        mutation=mutations,
+        tournament=tournament,
         accelerator=accelerator,
         verbose=True,
     )
@@ -259,6 +257,7 @@ def main(init_hp, mut_p):
 
 if __name__ == "__main__":
     import os
+
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     with open("configs/training/grpo.yaml") as file:
         config = yaml.safe_load(file)
