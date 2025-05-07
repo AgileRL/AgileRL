@@ -15,6 +15,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.utils import create_population
 
+
 # --- Define the Sequence Parity RNN-Only Memory Game Environment ---
 class SequenceParityMemoryEnv(gym.Env):
     """
@@ -115,11 +116,11 @@ else:
 
 # --- Create Environment and Population ---
 seq_len = 2
-num_envs = 32  # Fewer envs, since task is simple
+num_envs = 64  # Fewer envs, since task is simple
 
 # Hyperparameters
 INIT_HP = {
-    "POP_SIZE": 8,  # Population size
+    "POP_SIZE": 4,  # Population size
     "BATCH_SIZE": 256,
     "LEARN_STEP": seq_len + 1,  # Steps per episode
     "HIDDEN_STATE_SIZE": 32,
@@ -204,7 +205,7 @@ eval_loop = 10
 total_steps = 0
 training_complete = False
 
-print("Training...")
+print(f"Training... with population of {len(pop)} agents")
 pbar = trange(max_steps * num_envs, unit="step")
 while (
     np.less([agent.steps[-1] for agent in pop], max_steps).all()
@@ -216,7 +217,7 @@ while (
         total_steps += agent.learn_step * num_envs
         agent.steps[-1] += agent.learn_step
         pbar.update(agent.learn_step * num_envs // len(pop))
-    
+
     # check if Evaluate and evolve
     if total_steps % evo_steps == 0:
         fitnesses = [

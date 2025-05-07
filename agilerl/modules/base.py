@@ -680,7 +680,9 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         try:
             clone.load_state_dict(self.state_dict())
         except RuntimeError as e:
-            print(f"Warning: Failed to load state_dict during unpickling of {self.__class__.__name__} to device {self.device}. Error: {e}")
+            print(
+                f"Warning: Failed to load state_dict during unpickling of {self.__class__.__name__} to device {self.device}. Error: {e}"
+            )
             pass
         return clone
 

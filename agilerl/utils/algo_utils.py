@@ -49,16 +49,23 @@ def share_encoder_parameters(
     :type others: EvolvableNetwork
     """
     assert isinstance(policy, EvolvableNetwork), "Policy must be an EvolvableNetwork"
-    assert all(isinstance(other, EvolvableNetwork) for other in others), (
-        "All others must be EvolvableNetwork"
-    )
+    assert all(
+        isinstance(other, EvolvableNetwork) for other in others
+    ), "All others must be EvolvableNetwork"
 
-    # detaching encoder parameters from computation graph reduces
-    # memory overhead and speeds up training
-    param_vals: TensorDict = from_module(policy.encoder).detach()
+    # Directly copy the encoder `state_dict` to every other network **before**
+    # freezing the weights.  This keeps the destination parameters registered
+    # as proper `torch.nn.Parameter`s so that pickling / cloning continues to
+    # work, but prevents them from being updated during optimisation.
+
+    src_state = policy.encoder.state_dict()
+
     for other in others:
-        target_params: TensorDict = param_vals.clone().lock_()
-        target_params.to_module(other.encoder)
+        other.encoder.load_state_dict(src_state)
+
+        # Freeze – we only want the policy encoder to keep training.
+        for param in other.encoder.parameters():
+            param.requires_grad = False
 
         # Disable architecture mutations since we will be
         # reinitializing directly through a mutation hook
@@ -568,9 +575,9 @@ def preprocess_observation(
 
     # Preprocess different spaces accordingly
     if isinstance(observation_space, spaces.Dict):
-        assert isinstance(observation, (dict, TensorDict)), (
-            f"Expected dict, got {type(observation)}"
-        )
+        assert isinstance(
+            observation, (dict, TensorDict)
+        ), f"Expected dict, got {type(observation)}"
         preprocessed_obs = {}
         for key, _obs in observation.items():
             preprocessed_obs[key] = preprocess_observation(
@@ -583,17 +590,17 @@ def preprocess_observation(
         return preprocessed_obs
 
     elif isinstance(observation_space, spaces.Tuple):
-        assert isinstance(observation, tuple), (
-            f"Expected tuple, got {type(observation)}"
-        )
+        assert isinstance(
+            observation, tuple
+        ), f"Expected tuple, got {type(observation)}"
         return tuple(
             preprocess_observation(_obs, _space, device, normalize_images)
             for _obs, _space in zip(observation, observation_space.spaces)
         )
 
-    assert isinstance(observation, torch.Tensor), (
-        f"Expected torch.Tensor, got {type(observation)}"
-    )
+    assert isinstance(
+        observation, torch.Tensor
+    ), f"Expected torch.Tensor, got {type(observation)}"
 
     if isinstance(observation_space, spaces.Box):
         # Normalize images if applicable and specified
