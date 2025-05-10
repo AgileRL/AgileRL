@@ -533,7 +533,6 @@ class PPO(RLAlgorithm):
         self,
         env: GymEnvType,
         n_steps: int = None,
-        listify_actions: bool = False,
     ) -> None:
         """
         Collect rollouts from the environment and store them in the rollout buffer.
@@ -542,8 +541,6 @@ class PPO(RLAlgorithm):
         :type env: GymEnvType
         :param n_steps: Number of steps to collect, defaults to self.learn_step
         :type n_steps: int, optional
-        :param listify_actions: Whether to listify the actions, defaults to False. This is useful for environments that expect a list of actions rather than a numpy array.
-        :type listify_actions: bool, defaults to False
         """
         if not self.use_rollout_buffer:
             raise RuntimeError(
@@ -578,9 +575,7 @@ class PPO(RLAlgorithm):
                 )
 
             # Execute action
-            next_obs, reward, done, truncated, next_info = env.step(
-                (action.tolist() if listify_actions else action)
-            )
+            next_obs, reward, done, truncated, next_info = env.step(action)
 
             # Handle both single environment and vectorized environments terminal states
             if isinstance(done, list) or isinstance(done, np.ndarray):
