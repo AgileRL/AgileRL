@@ -26,7 +26,7 @@ from agilerl.utils.algo_utils import (
     share_encoder_parameters,
     stack_experiences,
 )
-from agilerl.utils.rollout_buffer import RolloutBuffer
+from agilerl.components.rollout_buffer import RolloutBuffer
 
 
 class PPO(RLAlgorithm):
@@ -124,9 +124,7 @@ class PPO(RLAlgorithm):
         use_rollout_buffer: bool = False,
         rollout_buffer_config: Optional[Dict[str, Any]] = {},
         recurrent: bool = False,
-        hidden_state_size: Optional[int] = None,
         device: str = "cpu",
-        max_seq_len: Optional[int] = None,
         accelerator: Optional[Any] = None,
         wrap: bool = True,
     ) -> None:
@@ -204,15 +202,20 @@ class PPO(RLAlgorithm):
         assert isinstance(
             recurrent, bool
         ), "Has hidden states flag must be boolean value True or False."
-        if recurrent and (
-            hidden_state_size is None
-            or hidden_state_size == 0
-            or max_seq_len is None
-            or max_seq_len == 0
-        ):
-            warnings.warn(
-                "Hidden states enabled but hidden_state_size, or max_seq_len are not provided or set to 0. Using default hidden_state_size."
+        if recurrent:
+            hidden_state_size = net_config.get("encoder_config", {}).get(
+                "hidden_state_size", None
             )
+            max_seq_len = net_config.get("max_seq_len", None)
+            if (
+                hidden_state_size is None
+                or hidden_state_size == 0
+                or max_seq_len is None
+                or max_seq_len == 0
+            ):
+                warnings.warn(
+                    "Hidden states enabled but hidden_state_size, or max_seq_len are not provided or set to 0. Using default hidden_state_size."
+                )
 
         if not use_rollout_buffer:
             warnings.warn(
@@ -249,6 +252,7 @@ class PPO(RLAlgorithm):
         self.recurrent = recurrent
         self.hidden_state_size = hidden_state_size
         self.max_seq_len = max_seq_len
+        self.rollout_buffer_config = rollout_buffer_config
 
         if actor_network is not None and critic_network is not None:
             if not isinstance(actor_network, EvolvableModule):
@@ -325,19 +329,10 @@ class PPO(RLAlgorithm):
 
         # Initialize rollout buffer if enabled
         if self.use_rollout_buffer:
-            self.rollout_buffer = RolloutBuffer(
-                capacity=self.learn_step,
-                observation_space=self.observation_space,
-                action_space=self.action_space,
-                device=self.device,
-                num_envs=self.num_envs,
-                gae_lambda=self.gae_lambda,
-                gamma=self.gamma,
-                recurrent=self.recurrent,
-                hidden_state_size=self.hidden_state_size,
-                max_seq_len=self.max_seq_len,
-                **rollout_buffer_config,
-            )
+            self.create_rollout_buffer()
+
+            # Need to register a mutation hook that does this after every mutation (e.g. the batch size, sequence length, etc. have changed)
+            self.register_mutation_hook(self.create_rollout_buffer)
 
         if self.accelerator is not None and wrap:
             self.wrap_models()
@@ -357,13 +352,29 @@ class PPO(RLAlgorithm):
                 "Encoder sharing is disabled as actor or critic is not an EvolvableNetwork."
             )
 
+    def create_rollout_buffer(self) -> None:
+        """Creates a rollout buffer with the current configuration."""
+        self.rollout_buffer = RolloutBuffer(
+            capacity=self.learn_step,
+            observation_space=self.observation_space,
+            action_space=self.action_space,
+            device=self.device,
+            num_envs=self.num_envs,
+            gae_lambda=self.gae_lambda,
+            gamma=self.gamma,
+            recurrent=self.recurrent,
+            hidden_state_size=self.hidden_state_size,
+            max_seq_len=self.max_seq_len,
+            **self.rollout_buffer_config,
+        )
+
     def _get_action_and_values(
         self,
         obs: ArrayOrTensor,
         action_mask: Optional[ArrayOrTensor] = None,
         hidden_state: Optional[ArrayOrTensor] = None,
-        *,                       # keyword-only
-        sample: bool = True,     # NEW flag
+        *,  # keyword-only
+        sample: bool = True,  # NEW flag
     ) -> Tuple[
         ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[ArrayOrTensor]
     ]:
@@ -446,7 +457,7 @@ class PPO(RLAlgorithm):
 
         # Get values from actor-critic
         _, _, entropy, values, _ = self._get_action_and_values(
-            obs, hidden_state=eval_hidden_state, sample=False # No need to sample here
+            obs, hidden_state=eval_hidden_state, sample=False  # No need to sample here
         )
 
         # Get log probability of the actions using the *original* hidden state if needed by actor?
@@ -885,7 +896,9 @@ class PPO(RLAlgorithm):
 
                 # Get values and next hidden state (which we ignore in flat learning)
                 _, _, entropy_t, new_value_t, _ = self._get_action_and_values(
-                    mb_obs, hidden_state=eval_hidden_state, sample=False # No need to sample here
+                    mb_obs,
+                    hidden_state=eval_hidden_state,
+                    sample=False,  # No need to sample here
                 )
 
                 # Compute log prob of taken actions
@@ -1027,7 +1040,9 @@ class PPO(RLAlgorithm):
                     # step_hidden_state is already (layer, batch, hidden)
                     _, _, entropy_t, new_value_t, next_hidden = (
                         self._get_action_and_values(
-                            obs_t, hidden_state=step_hidden_state, sample=False # No need to sample here
+                            obs_t,
+                            hidden_state=step_hidden_state,
+                            sample=False,  # No need to sample here
                         )
                     )
 

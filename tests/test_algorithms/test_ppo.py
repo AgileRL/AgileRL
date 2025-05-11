@@ -15,7 +15,7 @@ from gymnasium import spaces
 from agilerl.algorithms.ppo import PPO
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
-from agilerl.utils.rollout_buffer import RolloutBuffer
+from from agilerl.components.rollout_buffer import RolloutBuffer import RolloutBuffer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
     generate_dict_or_tuple_space,
