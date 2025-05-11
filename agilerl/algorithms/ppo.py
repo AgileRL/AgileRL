@@ -484,7 +484,7 @@ class PPO(RLAlgorithm):
             torch.Tensor,
             torch.Tensor,
             torch.Tensor,
-            Optional[ArrayOrTensor],
+            Optional[Dict[str, ArrayOrTensor]],
         ],
         Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor],
     ]:

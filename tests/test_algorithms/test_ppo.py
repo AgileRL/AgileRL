@@ -1867,8 +1867,8 @@ def test_ppo_with_hidden_states():
     assert isinstance(entropy, np.ndarray)
     assert isinstance(value, np.ndarray)
     assert next_hidden is not None
-    assert next_hidden.get("h", None).shape == (1, 1, 64)
-    assert next_hidden.get("c", None).shape == (1, 1, 64)
+    assert next_hidden.get("shared_encoder_h", None).shape == (1, 1, 64)
+    assert next_hidden.get("shared_encoder_c", None).shape == (1, 1, 64)
 
 
 # Test PPO with hidden states
@@ -1898,16 +1898,13 @@ def test_ppo_with_hidden_states_multiple_obs():
         obs, hidden_state=hidden_state
     )
 
-    print(action.shape)
-    print(next_hidden.get("h", None).shape)
-
     assert action.shape[0] == 2
     assert isinstance(log_prob, np.ndarray)
     assert isinstance(entropy, np.ndarray)
     assert isinstance(value, np.ndarray)
     assert next_hidden is not None
-    assert next_hidden.get("h", None).shape == (1, 2, 64)
-    assert next_hidden.get("c", None).shape == (1, 2, 64)
+    assert next_hidden.get("shared_encoder_h", None).shape == (1, 2, 64)
+    assert next_hidden.get("shared_encoder_c", None).shape == (1, 2, 64)
 
 
 # Test PPO with hidden states
@@ -1942,16 +1939,13 @@ def test_ppo_with_hidden_states_multiple_envs():
         obs, hidden_state=hidden_state
     )
 
-    print(action.shape)
-    print(next_hidden.get("h", None).shape)
-
     assert action.shape[0] == 2
     assert isinstance(log_prob, np.ndarray)
     assert isinstance(entropy, np.ndarray)
     assert isinstance(value, np.ndarray)
     assert next_hidden is not None
-    assert next_hidden.get("h", None).shape == (1, 2, 64)
-    assert next_hidden.get("c", None).shape == (1, 2, 64)
+    assert next_hidden.get("shared_encoder_h", None).shape == (1, 2, 64)
+    assert next_hidden.get("shared_encoder_c", None).shape == (1, 2, 64)
 
 
 # Test PPO with hidden states and collect_rollouts
@@ -1974,7 +1968,7 @@ def test_ppo_with_hidden_states_multiple_envs_collect_rollouts():
         net_config={
             "encoder_config": {
                 "hidden_state_size": 64,
-                "max_seq_len": 10,
+                "max_seq_len": 5,
             }
         },
     )
@@ -1993,8 +1987,16 @@ def test_ppo_with_hidden_states_multiple_envs_collect_rollouts():
     assert ppo.rollout_buffer.next_hidden_states is not None
 
     # Verify hidden states were properly stored
-    assert ppo.rollout_buffer.hidden_states["h"][0].shape == (1, num_envs, 64)
-    assert ppo.rollout_buffer.hidden_states["c"][0].shape == (1, num_envs, 64)
+    assert ppo.rollout_buffer.hidden_states["shared_encoder_h"][0].shape == (
+        1,
+        num_envs,
+        64,
+    )
+    assert ppo.rollout_buffer.hidden_states["shared_encoder_c"][0].shape == (
+        1,
+        num_envs,
+        64,
+    )
 
     # Learn from collected rollouts
     loss = ppo.learn()
