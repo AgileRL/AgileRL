@@ -13,6 +13,7 @@ from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 
+from agilerl.components.rollout_buffer import RolloutBuffer
 from agilerl.algorithms.ppo import PPO
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
 from agilerl.wrappers.make_evolvable import MakeEvolvable
@@ -1645,11 +1646,9 @@ def test_ppo_with_hidden_states_multiple_envs_collect_rollouts_and_test():
 
     assert isinstance(loss, float)
     assert loss >= 0.0
-    
+
     # Test test loop
     ppo.test(test_env)
-    
-    
 
 
 # Test PPO collect_rollouts method
@@ -1691,7 +1690,6 @@ def test_ppo_collect_rollouts():
 
     assert isinstance(loss, float)
     assert loss >= 0.0
-    
 
 
 def test_ppo_wrap_at_capacity():
