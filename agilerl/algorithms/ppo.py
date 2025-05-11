@@ -84,10 +84,6 @@ class PPO(RLAlgorithm):
     :type use_rollout_buffer: bool, optional
     :param recurrent: Flag to use hidden states for recurrent policies, defaults to False
     :type recurrent: bool, optional
-    :param hidden_state_size: Size of hidden states if used, defaults to None
-    :type hidden_state_size: int, optional
-    :param max_seq_len: Maximum sequence length for BPTT, defaults to None
-    :type max_seq_len: int, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -202,20 +198,6 @@ class PPO(RLAlgorithm):
         assert isinstance(
             recurrent, bool
         ), "Has hidden states flag must be boolean value True or False."
-        if recurrent:
-            hidden_state_size = net_config.get("encoder_config", {}).get(
-                "hidden_state_size", None
-            )
-            max_seq_len = net_config.get("max_seq_len", None)
-            if (
-                hidden_state_size is None
-                or hidden_state_size == 0
-                or max_seq_len is None
-                or max_seq_len == 0
-            ):
-                warnings.warn(
-                    "Hidden states enabled but hidden_state_size, or max_seq_len are not provided or set to 0. Using default hidden_state_size."
-                )
 
         if not use_rollout_buffer:
             warnings.warn(
@@ -230,8 +212,14 @@ class PPO(RLAlgorithm):
                 stacklevel=2,
             )
 
-        if recurrent and not use_rollout_buffer:
-            raise ValueError("use_rollout_buffer must be True if recurrent=True.")
+        if recurrent:
+            if not use_rollout_buffer:
+                raise ValueError("use_rollout_buffer must be True if recurrent=True.")
+            self.max_seq_len = net_config.get("encoder_config", {}).get(
+                "max_seq_len", None
+            )
+            if self.max_seq_len is None:
+                raise ValueError("max_seq_len must be provided if recurrent=True.")
 
         self.batch_size = batch_size
         self.lr = lr
@@ -250,8 +238,6 @@ class PPO(RLAlgorithm):
         self.use_rollout_buffer = use_rollout_buffer
         self.num_envs = num_envs
         self.recurrent = recurrent
-        self.hidden_state_size = hidden_state_size
-        self.max_seq_len = max_seq_len
         self.rollout_buffer_config = rollout_buffer_config
 
         if actor_network is not None and critic_network is not None:
@@ -269,21 +255,6 @@ class PPO(RLAlgorithm):
             )
         else:
             net_config = {} if net_config is None else net_config
-            if (
-                (
-                    net_config.get("encoder_config", None) is None
-                    or net_config.get("encoder_config", None).get(
-                        "hidden_state_size", None
-                    )
-                    is None
-                )
-                and self.recurrent
-                and self.hidden_state_size is not None
-            ):
-                # Set hidden state size for recurrent networks
-                net_config["encoder_config"] = {
-                    "hidden_state_size": self.hidden_state_size
-                }
 
             critic_net_config = copy.deepcopy(net_config)
 
@@ -303,6 +274,7 @@ class PPO(RLAlgorithm):
                 action_std_init=self.action_std_init,
                 device=self.device,
                 recurrent=self.recurrent,
+                encoder_name=("shared_encoder" if share_encoders else "actor_encoder"),
                 **net_config,
             )
 
@@ -310,6 +282,7 @@ class PPO(RLAlgorithm):
                 observation_space,
                 device=self.device,
                 recurrent=self.recurrent,
+                encoder_name=("shared_encoder" if share_encoders else "critic_encoder"),
                 **critic_net_config,
             )
 
@@ -363,8 +336,11 @@ class PPO(RLAlgorithm):
             gae_lambda=self.gae_lambda,
             gamma=self.gamma,
             recurrent=self.recurrent,
-            hidden_state_size=self.hidden_state_size,
-            max_seq_len=self.max_seq_len,
+            # recurrent specific parameters
+            hidden_state_architecture=(
+                self.get_hidden_state_architecture() if self.recurrent else None
+            ),
+            max_seq_len=self.max_seq_len if self.recurrent else None,
             **self.rollout_buffer_config,
         )
 
@@ -398,11 +374,16 @@ class PPO(RLAlgorithm):
             action, log_prob, entropy = self.actor.forward_head(
                 latent_pi, action_mask=action_mask, sample=sample
             )
-            values = (
-                self.critic.forward_head(latent_pi).squeeze(-1)
-                if self.share_encoders
-                else self.critic(obs, hidden_state=next_hidden).squeeze(-1)
-            )
+
+            if self.share_encoders:
+                values = self.critic.forward_head(latent_pi).squeeze(-1)
+            else:
+                # we can pass the state because the keys are different for the actor and critic,
+                # so they don't conflict and we can just overwrite the next_hidden.
+                # e.g. {"actor_encoder_h": ..., "critic_encoder_h": ...}
+                values, next_hidden = self.critic(obs, hidden_state=next_hidden)
+                values = values.squeeze(-1)
+
             return action, log_prob, entropy, values, next_hidden
         else:
             latent_pi = self.actor.extract_features(obs)
@@ -416,9 +397,18 @@ class PPO(RLAlgorithm):
             )
             return action, log_prob, entropy, values, None
 
-    def get_initial_hidden_state(self, num_envs: int) -> ArrayOrTensor:
+    def get_hidden_state_architecture(self) -> Dict[str, Tuple[int, ...]]:
         """
-        Get the initial hidden state for the environment.
+        Get the hidden state architecture for the environment.
+        """
+        return {
+            k: v.shape for k, v in self.get_initial_hidden_state(self.num_envs).items()
+        }
+
+    def get_initial_hidden_state(self, num_envs: int = 1) -> Dict[str, ArrayOrTensor]:
+        """
+        Get the initial hidden state for the environment. The hidden states are generally cached on a per Module basis.
+        The reason the Cache is per Module is because the user might want to have a custom initialization for the hidden states.
         """
         if not self.recurrent:
             raise ValueError(
@@ -426,8 +416,20 @@ class PPO(RLAlgorithm):
             )
 
         # Return a batch of initial hidden states
-        # Assuming self.actor.initialize_hidden_state() returns a single state (e.g., zeros)
-        return self.actor.initialize_hidden_state(batch_size=num_envs)
+        # Flat map them into "actor_*" and "critic_*" (if not sharing encoders)
+        flat_hidden = {}
+
+        actor_hidden = self.actor.initialize_hidden_state(batch_size=num_envs)
+        for k, v in actor_hidden.items():
+            flat_hidden[f"{self.actor.encoder_name}_{k}"] = v
+
+        # also add the critic hidden state if not sharing encoders
+        if not self.share_encoders:
+            critic_hidden = self.critic.initialize_hidden_state(batch_size=num_envs)
+            for k, v in critic_hidden.items():
+                flat_hidden[f"{self.critic.encoder_name}_{k}"] = v
+
+        return flat_hidden
 
     def evaluate_actions(
         self,
@@ -450,7 +452,7 @@ class PPO(RLAlgorithm):
 
         eval_hidden_state = None
         if self.recurrent and hidden_state is not None:
-            # Reshape hidden state for LSTM: (batch_size, 1, hidden_size) -> (1, batch_size, hidden_size)
+            # Reshape hidden state for RNN: (batch_size, 1, hidden_size) -> (1, batch_size, hidden_size)
             eval_hidden_state = {
                 key: val.permute(1, 0, 2) for key, val in hidden_state.items()
             }

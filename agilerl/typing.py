@@ -54,3 +54,8 @@ NetworkType = Union[Module, List[Module], Tuple[Module, ...]]
 PopulationType = List[EvolvableAlgorithm]
 ConfigType = Union[IsDataclass, Dict[str, Any]]
 StateDict = Union[Dict[str, Any], List[Dict[str, Any]]]
+
+
+class BatchDimension:
+    def __repr__(self):
+        return "BatchDimension"

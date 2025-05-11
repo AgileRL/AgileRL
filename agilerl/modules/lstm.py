@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
-from agilerl.typing import ArrayOrTensor
+from agilerl.typing import ArrayOrTensor, BatchDimension
 from agilerl.utils.evolvable_networks import get_activation
 
 
@@ -47,6 +47,7 @@ class EvolvableLSTM(EvolvableModule):
         output_activation: str = None,
         min_hidden_state_size: int = 32,
         max_hidden_state_size: int = 512,
+        max_seq_len: int = None,
         min_layers: int = 1,
         max_layers: int = 3,
         dropout: float = 0.0,
@@ -84,6 +85,14 @@ class EvolvableLSTM(EvolvableModule):
         self.min_layers = min_layers
         self.max_layers = max_layers
         self.dropout = dropout
+        self.max_seq_len = max_seq_len
+
+        # For LSTM, hidden state and cell state have shape (num_layers * num_directions, batch_size, hidden_size)
+        # Assuming unidirectional LSTM (num_directions=1) !TODO: SHOULD WE HAVE A DIRECTIONAL LSTM IN THE FUTURE?
+        self.hidden_state_architecture = {
+            "h": (self.num_layers, BatchDimension, self.hidden_state_size),
+            "c": (self.num_layers, BatchDimension, self.hidden_state_size),
+        }
 
         # Create the network
         self.model = self.create_lstm()
@@ -175,8 +184,9 @@ class EvolvableLSTM(EvolvableModule):
 
         # Use provided hidden state if available
         if hidden_state is not None:
-            h0 = hidden_state.get("h", None)
-            c0 = hidden_state.get("c", None)
+            h0 = hidden_state.get(f"{self.name}_h", None)
+            c0 = hidden_state.get(f"{self.name}_c", None)
+
             lstm_output, (h_n, c_n) = self.model[f"{self.name}_lstm"](x, (h0, c0))
         else:
             lstm_output, (h_n, c_n) = self.model[f"{self.name}_lstm"](x)
@@ -186,7 +196,11 @@ class EvolvableLSTM(EvolvableModule):
         lstm_output = self.model[f"{self.name}_output_activation"](lstm_output)
 
         # Return output and new hidden state
-        next_hidden = {"h": h_n, "c": c_n}
+        next_hidden = {
+            **hidden_state,
+            f"{self.name}_h": h_n,
+            f"{self.name}_c": c_n,
+        }
         return lstm_output, next_hidden
 
     def get_output_dense(self) -> torch.nn.Module:

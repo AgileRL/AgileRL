@@ -39,7 +39,7 @@ from agilerl.typing import (
 
 
 def share_encoder_parameters(
-    policy: EvolvableNetwork, *others: EvolvableNetwork
+    policy: EvolvableNetwork, *others: EvolvableNetwork, destructive: bool = False
 ) -> None:
     """Shares the encoder parameters between the policy and any number of other networks.
 
@@ -53,23 +53,72 @@ def share_encoder_parameters(
         isinstance(other, EvolvableNetwork) for other in others
     ), "All others must be EvolvableNetwork"
 
-    # Directly copy the encoder `state_dict` to every other network **before**
-    # freezing the weights.  This keeps the destination parameters registered
-    # as proper `torch.nn.Parameter`s so that pickling / cloning continues to
-    # work, but prevents them from being updated during optimisation.
-
-    src_state = policy.encoder.state_dict()
-
+    # detaching encoder parameters from computation graph reduces
+    # memory overhead and speeds up training
+    param_vals: TensorDict = from_module(policy.encoder).detach()
     for other in others:
-        other.encoder.load_state_dict(src_state)
-
-        # Freeze – we only want the policy encoder to keep training.
-        for param in other.encoder.parameters():
-            param.requires_grad = False
+        target_params: TensorDict = param_vals.clone().lock_()
+        target_params.to_module(other.encoder, use_state_dict=True)
 
         # Disable architecture mutations since we will be
         # reinitializing directly through a mutation hook
         other.encoder.disable_mutations()
+
+
+# def share_encoder_parameters(
+#     policy: EvolvableNetwork, *others: EvolvableNetwork
+# ) -> None:
+#     """Shares the encoder parameters between the policy and any number of other networks.
+
+#     :param policy: The policy network whose encoder parameters will be used.
+#     :type policy: EvolvableNetwork
+#     :param others: The other networks whose encoder parameters will be pinned to the policy.
+#     :type others: EvolvableNetwork
+#     """
+#     assert isinstance(policy, EvolvableNetwork), "Policy must be an EvolvableNetwork"
+#     assert all(
+#         isinstance(other, EvolvableNetwork) for other in others
+#     ), "All others must be EvolvableNetwork"
+
+#     # Directly copy the encoder `state_dict` to every other network **before**
+#     # freezing the weights.  This keeps the destination parameters registered
+#     # as proper `torch.nn.Parameter`s so that pickling / cloning continues to
+#     # work, but prevents them from being updated during optimisation.
+
+#     src_state = policy.encoder.state_dict()
+
+#     for other in others:
+#         other.encoder.load_state_dict(src_state)
+
+#         # Freeze – we only want the policy encoder to keep training.
+#         for param in other.encoder.parameters():
+#             param.requires_grad = False
+
+#         # Disable architecture mutations since we will be
+#         # reinitializing directly through a mutation hook
+#         other.encoder.disable_mutations()
+
+
+def get_hidden_states_shape_from_model(model: Module) -> Dict[str, int]:
+    """Loops through all of the modules in the model and checks if they have a
+    `hidden_state_architecture` attribute. If they do, it adds the items to a
+    dictionary and returns it. This should make it easier to initialize the
+    hidden states of the model.
+
+    :param model: The model to get the hidden states from.
+    :type model: Module
+    :param x: The input to the model.
+    :type x: TorchObsType
+    :return: The hidden states shape from the model.
+    :rtype: torch.Tensor
+    """
+    hidden_state_architecture = {}
+
+    for name, module in model.named_modules():
+        if hasattr(module, "hidden_state_architecture"):
+            hidden_state_architecture.update(module.hidden_state_architecture)
+
+    return hidden_state_architecture
 
 
 def is_image_space(space: spaces.Space) -> bool:

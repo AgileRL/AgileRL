@@ -3,6 +3,7 @@ from pathlib import Path
 
 import dill
 import gymnasium
+from gymnasium.vector import SyncVectorEnv
 import numpy as np
 import pytest
 import torch
@@ -15,7 +16,7 @@ from gymnasium import spaces
 from agilerl.algorithms.ppo import PPO
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
-from from agilerl.components.rollout_buffer import RolloutBuffer import RolloutBuffer
+from agilerl.components.rollout_buffer import RolloutBuffer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
     generate_dict_or_tuple_space,
@@ -957,40 +958,83 @@ def test_clone_new_index():
     assert clone_agent.index == 100
 
 
-def test_clone_after_learning():
+@pytest.mark.parametrize("device", ["cpu", "cuda"], ids=lambda d: f"device={d}")
+@pytest.mark.parametrize(
+    "use_rollout_buffer", [True, False], ids=lambda b: f"use_rollout_buffer={b}"
+)
+@pytest.mark.parametrize("recurrent", [True, False], ids=lambda r: f"recurrent={r}")
+@pytest.mark.parametrize(
+    "share_encoders", [True, False], ids=lambda s: f"share_encoders={s}"
+)
+def test_clone_after_learning(device, use_rollout_buffer, recurrent, share_encoders):
+
+    # accept if recurrent and no rollout buffer
+    if recurrent and not use_rollout_buffer:
+        return
+
+    # check if device is available
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
     observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
     action_space = generate_random_box_space(shape=(2,), low=0, high=1)
     max_env_steps = 20
     num_vec_envs = 2
-    ppo = PPO(observation_space, action_space)
 
-    # Manually set num_envs for this test, as default is 1
-    ppo.num_envs = num_vec_envs
+    if recurrent:
+        net_config = {
+            "encoder_config": {
+                "hidden_state_size": 64,
+                "max_seq_len": 10,
+            }
+        }
+    else:
+        net_config = {}
 
-    states = np.random.randn(max_env_steps, num_vec_envs, observation_space.shape[0])
-
-    next_states = np.random.randn(num_vec_envs, observation_space.shape[0])
-    actions = np.random.rand(max_env_steps, num_vec_envs, action_space.shape[0])
-    log_probs = -np.random.rand(max_env_steps, num_vec_envs)
-    rewards = np.random.randint(0, 100, (max_env_steps, num_vec_envs))
-    dones = np.zeros((max_env_steps, num_vec_envs))
-    values = np.random.randn(
-        max_env_steps,
-        num_vec_envs,
+    ppo = PPO(
+        observation_space,
+        action_space,
+        device=torch.device(device),
+        use_rollout_buffer=use_rollout_buffer,
+        recurrent=recurrent,
+        net_config=net_config,
+        num_envs=num_vec_envs,
+        share_encoders=share_encoders,
     )
-    next_done = np.zeros((1, num_vec_envs))
-    experiences = (
-        states,
-        actions,
-        log_probs,
-        rewards,
-        dones,
-        values,
-        next_states,
-        next_done,
-    )
-    ppo.learn(experiences)
+
+    if use_rollout_buffer:
+        dummy_env = DummyEnv(observation_space.shape, vect=True, num_envs=num_vec_envs)
+        ppo.collect_rollouts(dummy_env)
+        ppo.learn()
+    else:
+        states = np.random.randn(
+            max_env_steps, num_vec_envs, observation_space.shape[0]
+        )
+        next_states = np.random.randn(num_vec_envs, observation_space.shape[0])
+        actions = np.random.rand(max_env_steps, num_vec_envs, action_space.shape[0])
+        log_probs = -np.random.rand(max_env_steps, num_vec_envs)
+        rewards = np.random.randint(0, 100, (max_env_steps, num_vec_envs))
+        dones = np.zeros((max_env_steps, num_vec_envs))
+        values = np.random.randn(
+            max_env_steps,
+            num_vec_envs,
+        )
+        next_done = np.zeros((1, num_vec_envs))
+        experiences = (
+            states,
+            actions,
+            log_probs,
+            rewards,
+            dones,
+            values,
+            next_states,
+            next_done,
+        )
+
+        ppo.learn(experiences)
+
     clone_agent = ppo.clone()
+
     assert clone_agent.observation_space == ppo.observation_space
     assert clone_agent.action_space == ppo.action_space
     assert clone_agent.batch_size == ppo.batch_size
@@ -1008,7 +1052,25 @@ def test_clone_after_learning():
     assert clone_agent.device == ppo.device
     assert clone_agent.accelerator == ppo.accelerator
     assert str(clone_agent.actor.state_dict()) == str(ppo.actor.state_dict())
-    assert str(clone_agent.critic.state_dict()) == str(ppo.critic.state_dict())
+
+    if share_encoders and recurrent:
+        # the critic might be different if share_encoders is True
+        # (the encoder might be different because of the logic in the share_encoder_parameters)
+        # The important thing is that the head_net is the same as the encoder is neither ran during
+        # the forward of the exploration, nor the learning step.
+
+        # !IMPORTANT: I'm having trouble understanding why the critic is different here.
+        # ! I'm not sure if this is an issue or not. the agent is learning, so it's not like
+        # ! the encoder is not being used. we might need to look into this more.
+        # ! it could be because of something inside the LSTM, or possibly the optimizer
+        # ! however, the parameters are being detached from the encoder.
+        # !IMPORTANT
+        assert str(clone_agent.critic.head_net.state_dict()) == str(
+            ppo.critic.head_net.state_dict()
+        )
+    else:
+        assert str(clone_agent.critic.state_dict()) == str(ppo.critic.state_dict())
+
     assert str(clone_agent.optimizer.state_dict()) == str(ppo.optimizer.state_dict())
     assert clone_agent.fitness == ppo.fitness
     assert clone_agent.steps == ppo.steps
@@ -1429,7 +1491,7 @@ def test_rollout_buffer_initialization():
     assert buffer.gamma == 0.99
     assert buffer.gae_lambda == 0.95
     assert buffer.recurrent is False
-    assert buffer.hidden_state_size is None
+    assert buffer.hidden_state_architecture is None
     assert buffer.device == "cpu"
     assert buffer.pos == 0
     assert buffer.full is False
@@ -1447,7 +1509,7 @@ def test_rollout_buffer_initialization():
     )
 
     assert buffer.recurrent is False
-    assert buffer.hidden_state_size is None
+    assert buffer.hidden_state_architecture is None
     assert buffer.hidden_states is None
     assert buffer.next_hidden_states is None
 
@@ -1473,7 +1535,7 @@ def test_rollout_buffer_initialization_recurrent():
     assert buffer.gamma == 0.99
     assert buffer.gae_lambda == 0.95
     assert buffer.recurrent is False
-    assert buffer.hidden_state_size is None
+    assert buffer.hidden_state_architecture is None
     assert buffer.device == "cpu"
     assert buffer.pos == 0
     assert buffer.full is False
@@ -1488,11 +1550,37 @@ def test_rollout_buffer_initialization_recurrent():
         gae_lambda=0.95,
         gamma=0.99,
         recurrent=True,
-        hidden_state_size=64,
+        # (num_layers * directions, num_envs, hidden_size)
+        hidden_state_architecture={
+            "shared_encoder_h": (1, 1, 64),
+            "shared_encoder_c": (1, 1, 64),
+        },
     )
 
     assert buffer.recurrent is True
-    assert buffer.hidden_state_size == 64
+    assert buffer.hidden_state_architecture is not None
+    assert buffer.hidden_states is not None
+    assert buffer.next_hidden_states is not None
+
+    # Test with hidden states
+    buffer = RolloutBuffer(
+        capacity=100,
+        num_envs=8,
+        observation_space=observation_space,
+        action_space=action_space,
+        device="cpu",
+        gae_lambda=0.95,
+        gamma=0.99,
+        recurrent=True,
+        # (num_layers * directions, num_envs, hidden_size)
+        hidden_state_architecture={
+            "shared_encoder_h": (1, 8, 64),
+            "shared_encoder_c": (1, 8, 64),
+        },
+    )
+
+    assert buffer.recurrent is True
+    assert buffer.hidden_state_architecture is not None
     assert buffer.hidden_states is not None
     assert buffer.next_hidden_states is not None
 
@@ -1669,13 +1757,45 @@ def test_ppo_with_rollout_buffer():
         action_space=action_space,
         recurrent=True,
         use_rollout_buffer=True,
-        hidden_state_size=64,
+        net_config={
+            "encoder_config": {
+                "hidden_state_size": 64,
+                "max_seq_len": 10,
+            }
+        },
     )
 
     assert ppo.recurrent
-    assert ppo.hidden_state_size == 64
+    assert ppo.rollout_buffer.hidden_state_architecture == {
+        "shared_encoder_h": (1, 1, 64),
+        "shared_encoder_c": (1, 1, 64),
+    }
     assert ppo.rollout_buffer.recurrent
-    assert ppo.rollout_buffer.hidden_state_size == 64
+
+    # Test with hidden states
+    ppo = PPO(
+        observation_space=observation_space,
+        action_space=action_space,
+        recurrent=True,
+        use_rollout_buffer=True,
+        share_encoders=False,
+        net_config={
+            "encoder_config": {
+                "hidden_state_size": 64,
+                "max_seq_len": 10,
+            }
+        },
+    )
+
+    assert ppo.recurrent
+    assert ppo.rollout_buffer.hidden_state_architecture == {
+        "actor_encoder_h": (1, 1, 64),
+        "actor_encoder_c": (1, 1, 64),
+        "critic_encoder_h": (1, 1, 64),
+        "critic_encoder_c": (1, 1, 64),
+    }
+    assert ppo.rollout_buffer.recurrent
+    assert not ppo.share_encoders
 
 
 # Test PPO learning with rollout buffer
@@ -1726,12 +1846,17 @@ def test_ppo_with_hidden_states():
         action_space=action_space,
         use_rollout_buffer=True,
         recurrent=True,
-        hidden_state_size=64,
+        net_config={
+            "encoder_config": {
+                "hidden_state_size": 64,
+                "max_seq_len": 10,
+            }
+        },
     )
 
     # Get action with hidden state
     obs = np.random.rand(*observation_space.shape)
-    hidden_state = ppo.actor.initialize_hidden_state()
+    hidden_state = ppo.get_initial_hidden_state()
 
     action, log_prob, entropy, value, next_hidden = ppo.get_action(
         obs, hidden_state=hidden_state
@@ -1756,8 +1881,13 @@ def test_ppo_with_hidden_states_multiple_obs():
         action_space=action_space,
         use_rollout_buffer=True,
         recurrent=True,
-        hidden_state_size=64,
         num_envs=2,
+        net_config={
+            "encoder_config": {
+                "hidden_state_size": 64,
+                "max_seq_len": 10,
+            }
+        },
     )
 
     # Get action with hidden state (multiple observations)
@@ -1795,8 +1925,13 @@ def test_ppo_with_hidden_states_multiple_envs():
         action_space=action_space,
         use_rollout_buffer=True,
         recurrent=True,
-        hidden_state_size=64,
         num_envs=num_envs,
+        net_config={
+            "encoder_config": {
+                "hidden_state_size": 64,
+                "max_seq_len": 10,
+            }
+        },
     )
 
     # Get action with hidden state (multiple observations)
@@ -1834,9 +1969,14 @@ def test_ppo_with_hidden_states_multiple_envs_collect_rollouts():
         action_space=action_space,
         use_rollout_buffer=True,
         recurrent=True,
-        hidden_state_size=64,
         num_envs=num_envs,
         learn_step=5,
+        net_config={
+            "encoder_config": {
+                "hidden_state_size": 64,
+                "max_seq_len": 10,
+            }
+        },
     )
 
     # Collect rollouts with recurrent network

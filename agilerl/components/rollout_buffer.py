@@ -54,8 +54,7 @@ class RolloutBuffer:
         gae_lambda: float = 0.95,
         gamma: float = 0.99,
         recurrent: bool = False,
-        recurrent_state_keys: Optional[List[str]] = ["h", "c"],
-        hidden_state_size: Optional[int] = None,
+        hidden_state_architecture: Optional[Dict[str, Tuple[int, int, int]]] = None,
         use_gae: bool = True,
         wrap_at_capacity: bool = False,
         max_seq_len: Optional[int] = None,  # Maximum sequence length for BPTT
@@ -68,8 +67,7 @@ class RolloutBuffer:
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.recurrent = recurrent
-        self.recurrent_state_keys = recurrent_state_keys if recurrent else []
-        self.hidden_state_size = hidden_state_size
+        self.hidden_state_architecture = hidden_state_architecture
         self.use_gae = use_gae
         self.wrap_at_capacity = wrap_at_capacity
         self.max_seq_len = (
@@ -148,29 +146,25 @@ class RolloutBuffer:
 
         if self.recurrent:
             # Initialize hidden states buffer as dict of numpy arrays
-            if self.hidden_state_size is None:
-                raise ValueError("hidden_state_size must be provided if recurrent=True")
-            if not self.recurrent_state_keys:
+            if self.hidden_state_architecture is None:
                 raise ValueError(
-                    "recurrent_state_keys must be provided if recurrent=True"
+                    "hidden_state_architecture must be provided if recurrent=True"
                 )
 
-            # Assuming num_layers * directions = 1 based on EvolvableLSTM implementation
-            hidden_layer_shape = (1, self.num_envs, self.hidden_state_size)
-
+            # preallocate hidden states
             self.hidden_states = {
                 key: np.zeros(
-                    (self.capacity, *hidden_layer_shape),
+                    (self.capacity, *self.hidden_state_architecture[key]),
                     dtype=np.float32,
                 )
-                for key in self.recurrent_state_keys
+                for key in self.hidden_state_architecture.keys()
             }
             self.next_hidden_states = {
                 key: np.zeros(
-                    (self.capacity, *hidden_layer_shape),
+                    (self.capacity, *self.hidden_state_architecture[key]),
                     dtype=np.float32,
                 )
-                for key in self.recurrent_state_keys
+                for key in self.hidden_state_architecture.keys()
             }
 
     def add(
@@ -274,16 +268,17 @@ class RolloutBuffer:
 
         # Store hidden states if enabled
         if self.recurrent:
-            expected_shape = (1, self.num_envs, self.hidden_state_size)
+            # Use hidden_state_architecture to validate hidden state shapes
             if hidden_state is not None:
-                for key in self.recurrent_state_keys:
+                for key in self.hidden_state_architecture.keys():
                     state = hidden_state.get(key)
                     if state is None:
                         raise ValueError(f"Hidden state missing key: {key}")
                     # Convert state to numpy if it's a tensor
                     if isinstance(state, torch.Tensor):
                         state = state.cpu().numpy()
-                    # Validate shape before storing
+                    # Get expected shape from hidden_state_architecture
+                    expected_shape = self.hidden_state_architecture[key]
                     if state.shape != expected_shape:
                         raise ValueError(
                             f"Hidden state['{key}'] shape {state.shape} does not match expected {expected_shape}"
@@ -291,14 +286,15 @@ class RolloutBuffer:
                     self.hidden_states[key][self.pos] = state
 
             if next_hidden_state is not None:
-                for key in self.recurrent_state_keys:
+                for key in self.hidden_state_architecture.keys():
                     next_state = next_hidden_state.get(key)
                     if next_state is None:
                         raise ValueError(f"Next hidden state missing key: {key}")
                     # Convert state to numpy if it's a tensor
                     if isinstance(next_state, torch.Tensor):
                         next_state = next_state.cpu().numpy()
-                    # Validate shape before storing
+                    # Get expected shape from hidden_state_architecture
+                    expected_shape = self.hidden_state_architecture[key]
                     if next_state.shape != expected_shape:
                         raise ValueError(
                             f"Next hidden state['{key}'] shape {next_state.shape} does not match expected {expected_shape}"
@@ -429,27 +425,31 @@ class RolloutBuffer:
                 buffer_size * self.num_envs
             )  # Recalculate or ensure it's available
 
-            for key in self.recurrent_state_keys:
+            for key in self.hidden_state_architecture.keys():
                 if self.hidden_states is not None and key in self.hidden_states:
-                    data = self.hidden_states[key][
-                        :buffer_size
-                    ]  # Shape: (buffer_size, 1, num_envs, hidden_size)
+                    # Shape: (buffer_size, 1, num_envs, hidden_size)
+                    data = self.hidden_states[key][:buffer_size]
                     # Swap num_envs and layer_dim axes, then reshape
                     flattened_data["hidden_states"][key] = data.swapaxes(1, 2).reshape(
-                        total_samples, 1, self.hidden_state_size
+                        total_samples,
+                        self.hidden_state_architecture[key][0],
+                        self.hidden_state_architecture[key][2],
                     )
 
                 if (
                     self.next_hidden_states is not None
                     and key in self.next_hidden_states
                 ):
-                    next_data = self.next_hidden_states[key][
-                        :buffer_size
-                    ]  # Shape: (buffer_size, 1, num_envs, hidden_size)
+                    # Shape: (buffer_size, 1, num_envs, hidden_size)
+                    next_data = self.next_hidden_states[key][:buffer_size]
                     # Swap num_envs and layer_dim axes, then reshape
                     flattened_data["next_hidden_states"][key] = next_data.swapaxes(
                         1, 2
-                    ).reshape(total_samples, 1, self.hidden_state_size)
+                    ).reshape(
+                        total_samples,
+                        self.hidden_state_architecture[key][0],
+                        self.hidden_state_architecture[key][2],
+                    )
 
         # Sample a minibatch if batch_size is specified
         if batch_size is not None:
@@ -653,7 +653,7 @@ class RolloutBuffer:
         # Handle recurrent states
         if self.recurrent and self.hidden_states is not None:
             seq_data["initial_hidden_states"] = {}
-            for key in self.recurrent_state_keys:
+            for key in self.hidden_state_architecture.keys():
                 # Shape in buffer: (time, layer, env, hidden)
                 init_h = np.stack(
                     [
@@ -714,8 +714,16 @@ class RolloutBuffer:
         # Explicitly copy numpy arrays to avoid issues with read-only views after unpickling
         buffer_size = self.capacity if self.full else self.pos
         array_keys = [
-            'observations', 'actions', 'rewards', 'dones', 'values',
-            'log_probs', 'next_observations', 'advantages', 'returns', 'episode_starts'
+            "observations",
+            "actions",
+            "rewards",
+            "dones",
+            "values",
+            "log_probs",
+            "next_observations",
+            "advantages",
+            "returns",
+            "episode_starts",
         ]
         for key in array_keys:
             if hasattr(self, key) and getattr(self, key) is not None:
@@ -724,18 +732,26 @@ class RolloutBuffer:
 
         # Handle hidden_states dictionary (contains tensors or numpy arrays)
         if self.recurrent and self.hidden_states is not None:
-            state['hidden_states'] = {}
+            state["hidden_states"] = {}
             for key, val in self.hidden_states.items():
                 # Slice up to current size and copy
                 sliced_val = val[:buffer_size]
-                state['hidden_states'][key] = sliced_val.clone() if isinstance(sliced_val, torch.Tensor) else np.array(sliced_val, copy=True)
+                state["hidden_states"][key] = (
+                    sliced_val.clone()
+                    if isinstance(sliced_val, torch.Tensor)
+                    else np.array(sliced_val, copy=True)
+                )
 
         if self.recurrent and self.next_hidden_states is not None:
-            state['next_hidden_states'] = {}
+            state["next_hidden_states"] = {}
             for key, val in self.next_hidden_states.items():
-                 # Slice up to current size and copy
-                 sliced_val = val[:buffer_size]
-                 state['next_hidden_states'][key] = sliced_val.clone() if isinstance(sliced_val, torch.Tensor) else np.array(sliced_val, copy=True)
+                # Slice up to current size and copy
+                sliced_val = val[:buffer_size]
+                state["next_hidden_states"][key] = (
+                    sliced_val.clone()
+                    if isinstance(sliced_val, torch.Tensor)
+                    else np.array(sliced_val, copy=True)
+                )
 
         # Remove attributes that might not be easily serializable or needed
         # state.pop('observation_space', None)
@@ -750,17 +766,27 @@ class RolloutBuffer:
 
         # Re-initialize buffers to ensure they are correctly sized and writable
         # We need observation_space and action_space for this, ensured they are in state
-        if not hasattr(self, 'observation_space') or not hasattr(self, 'action_space'):
-             warnings.warn("Observation or action space missing during RolloutBuffer unpickling. Buffer might be invalid.")
-             return # Cannot properly reinitialize
+        if not hasattr(self, "observation_space") or not hasattr(self, "action_space"):
+            warnings.warn(
+                "Observation or action space missing during RolloutBuffer unpickling. Buffer might be invalid."
+            )
+            return  # Cannot properly reinitialize
 
-        self._initialize_buffers() # Creates fresh, writable arrays
+        self._initialize_buffers()  # Creates fresh, writable arrays
 
         # Restore data into the newly created buffers
         buffer_size = self.capacity if self.full else self.pos
         array_keys = [
-            'observations', 'actions', 'rewards', 'dones', 'values',
-            'log_probs', 'next_observations', 'advantages', 'returns', 'episode_starts'
+            "observations",
+            "actions",
+            "rewards",
+            "dones",
+            "values",
+            "log_probs",
+            "next_observations",
+            "advantages",
+            "returns",
+            "episode_starts",
         ]
         for key in array_keys:
             if key in state and hasattr(self, key) and getattr(self, key) is not None:
@@ -768,38 +794,30 @@ class RolloutBuffer:
                 # Ensure the loaded array length matches the expected buffer size based on pos/full
                 current_buffer_len = min(len(saved_array), buffer_size)
                 if current_buffer_len > 0:
-                    getattr(self, key)[:current_buffer_len] = saved_array[:current_buffer_len]
+                    getattr(self, key)[:current_buffer_len] = saved_array[
+                        :current_buffer_len
+                    ]
 
         # Restore hidden states
-        if self.recurrent and 'hidden_states' in state and state['hidden_states'] is not None:
-            if not hasattr(self, 'hidden_states') or self.hidden_states is None:
-                 self.hidden_states = {}
-            saved_hidden_states = state['hidden_states']
-            for key, saved_val in saved_hidden_states.items():
-                current_buffer_len = min(len(saved_val), buffer_size)
-                if current_buffer_len > 0:
-                    if key not in self.hidden_states or self.hidden_states[key] is None:
-                        # Need to initialize the specific key buffer if it wasn't created by _initialize_buffers
-                        # This can happen if recurrent_state_keys was empty during initial init
-                         hidden_layer_shape = (1, self.num_envs, self.hidden_state_size)
-                         self.hidden_states[key] = torch.zeros((self.capacity, *hidden_layer_shape), dtype=saved_val.dtype, device=self.device) if isinstance(saved_val, torch.Tensor) else np.zeros((self.capacity, *hidden_layer_shape), dtype=saved_val.dtype)
+        if self.recurrent:
+            if "hidden_states" in state and self.hidden_states is not None:
+                saved_hidden_states = state["hidden_states"]
+                for key, saved_array_val in saved_hidden_states.items():
+                    if key in self.hidden_states:
+                        # Ensure the loaded array length matches the expected buffer size
+                        current_buffer_len = min(len(saved_array_val), buffer_size)
+                        if current_buffer_len > 0:
+                            self.hidden_states[key][:current_buffer_len] = (
+                                saved_array_val[:current_buffer_len]
+                            )
 
-                    self.hidden_states[key][:current_buffer_len] = saved_val[:current_buffer_len]
-
-        if self.recurrent and 'next_hidden_states' in state and state['next_hidden_states'] is not None:
-            if not hasattr(self, 'next_hidden_states') or self.next_hidden_states is None:
-                self.next_hidden_states = {}
-            saved_next_hidden_states = state['next_hidden_states']
-            for key, saved_val in saved_next_hidden_states.items():
-                current_buffer_len = min(len(saved_val), buffer_size)
-                if current_buffer_len > 0:
-                    if key not in self.next_hidden_states or self.next_hidden_states[key] is None:
-                         hidden_layer_shape = (1, self.num_envs, self.hidden_state_size)
-                         self.next_hidden_states[key] = torch.zeros((self.capacity, *hidden_layer_shape), dtype=saved_val.dtype, device=self.device) if isinstance(saved_val, torch.Tensor) else np.zeros((self.capacity, *hidden_layer_shape), dtype=saved_val.dtype)
-
-                    self.next_hidden_states[key][:current_buffer_len] = saved_val[:current_buffer_len]
-
-
-    # ------------------------------------------------------------------
-    # New helper functions for truncated Backpropagation Through Time (BPTT)
-    # ------------------------------------------------------------------
+            if "next_hidden_states" in state and self.next_hidden_states is not None:
+                saved_next_hidden_states = state["next_hidden_states"]
+                for key, saved_array_val in saved_next_hidden_states.items():
+                    if key in self.next_hidden_states:
+                        # Ensure the loaded array length matches the expected buffer size
+                        current_buffer_len = min(len(saved_array_val), buffer_size)
+                        if current_buffer_len > 0:
+                            self.next_hidden_states[key][:current_buffer_len] = (
+                                saved_array_val[:current_buffer_len]
+                            )

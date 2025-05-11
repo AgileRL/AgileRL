@@ -678,7 +678,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
 
         # Load state dict if the network has been trained
         try:
-            clone.load_state_dict(self.state_dict())
+            clone.load_state_dict(self.state_dict(), strict=False)
         except RuntimeError as e:
             print(
                 f"Warning: Failed to load state_dict during unpickling of {self.__class__.__name__} to device {self.device}. Error: {e}"

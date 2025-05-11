@@ -1,3 +1,4 @@
+from copy import deepcopy
 import inspect
 import warnings
 from dataclasses import asdict
@@ -18,7 +19,12 @@ from agilerl.modules import (
 )
 from agilerl.modules.base import EvolvableModule, ModuleMeta, mutation
 from agilerl.protocols import MutationType
-from agilerl.typing import ArrayOrTensor, ConfigType, DeviceType, TorchObsType
+from agilerl.typing import (
+    BatchDimension,
+    ConfigType,
+    DeviceType,
+)
+from agilerl.utils.algo_utils import get_hidden_states_shape_from_model
 from agilerl.utils.evolvable_networks import get_default_encoder_config, is_image_space
 
 SelfEvolvableNetwork = TypeVar("SelfEvolvableNetwork", bound="EvolvableNetwork")
@@ -179,6 +185,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         observation_space: spaces.Space,
         encoder_cls: Optional[Union[str, Type[EvolvableModule]]] = None,
         encoder_config: Optional[ConfigType] = None,
+        encoder_name: str = "encoder",
         action_space: Optional[spaces.Space] = None,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
@@ -186,7 +193,6 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         latent_dim: int = 32,
         simba: bool = False,
         recurrent: bool = False,
-        hidden_state_size: Optional[int] = None,
         device: DeviceType = "cpu",
     ) -> None:
         super().__init__(device)
@@ -222,12 +228,8 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         self.simba = simba
         self.recurrent = recurrent
         self.flatten_obs = False
-        self.hidden_state_size = hidden_state_size
-
-        if self.recurrent:
-            assert (
-                encoder_config.get("hidden_state_size", None) is not None
-            ), "Hidden state size must be specified for recurrent networks."
+        self.encoder_name = encoder_name
+        self.cached_hidden_state = None
 
         encoder_config = (
             encoder_config
@@ -421,34 +423,19 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         :type env: GymEnvType
         """
         if self.recurrent:
-            hidden_size = self.encoder_config.get("hidden_state_size", None)
-            if hidden_size is None:
-                raise ValueError(
-                    "Hidden state size must be specified for recurrent networks."
-                )
 
-            # Assuming num_layers=1 and bidirectional=False for EvolvableLSTM
-            num_layers = 1
-            directions = 1
-            shape = (num_layers * directions, batch_size, hidden_size)
-
-            if (
-                hasattr(self, "cached_hidden_state")
-                and self.cached_hidden_state is not None
-            ):
-                # Ensure cached state has the correct shape or reinitialize
-                if self.cached_hidden_state["h"].shape != shape:
-                    self.cached_hidden_state = {
-                        "h": torch.zeros(shape).to(self.device),
-                        "c": torch.zeros(shape).to(self.device),
-                    }
-                return self.cached_hidden_state.copy()
-            else:
-                self.cached_hidden_state = {
-                    "h": torch.zeros(shape).to(self.device),
-                    "c": torch.zeros(shape).to(self.device),
-                }
-            return self.cached_hidden_state.copy()
+            # if the hidden state is not initialized, initialize it
+            if self.cached_hidden_state is None or len(self.cached_hidden_state) == 0:
+                self.cached_hidden_state = {}
+                for name, shape in get_hidden_states_shape_from_model(
+                    self.encoder
+                ).items():
+                    # shape might have a batch dimension 'BatchPlaceholder', so we need to replace it
+                    shape = tuple(
+                        batch_size if x == BatchDimension else x for x in shape
+                    )
+                    self.cached_hidden_state[name] = torch.zeros(shape).to(self.device)
+            return deepcopy(self.cached_hidden_state)
         else:
             raise ValueError(
                 "Cannot initialize hidden state for non-recurrent networks."
@@ -527,7 +514,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                 observation_space=self.observation_space,
                 num_outputs=self.latent_dim,
                 device=self.device,
-                name="encoder",
+                name=self.encoder_name,
                 **net_config,
             )
         elif is_image_space(self.observation_space):
@@ -537,7 +524,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                 input_shape=self.observation_space.shape,
                 num_outputs=self.latent_dim,
                 device=self.device,
-                name="encoder",
+                name=self.encoder_name,
                 **net_config,
             )
         elif self.recurrent:
@@ -547,7 +534,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                 input_size=self.observation_space.shape[0],
                 num_outputs=self.latent_dim,
                 device=self.device,
-                name="encoder",
+                name=self.encoder_name,
                 **net_config,
             )
         else:
@@ -569,7 +556,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                 num_inputs=spaces.flatdim(self.observation_space),
                 num_outputs=self.latent_dim,
                 device=self.device,
-                name="encoder",
+                name=self.encoder_name,
                 **net_config,
             )
 
