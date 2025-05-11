@@ -4,11 +4,11 @@ from copy import deepcopy
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-import gymnasium as gym
 import numpy as np
 import wandb
 from accelerate import Accelerator
 from gymnasium import spaces
+from pettingzoo import ParallelEnv
 from tqdm import trange
 
 from agilerl.algorithms import IPPO
@@ -20,6 +20,7 @@ from agilerl.utils.utils import (
     save_population_checkpoint,
     tournament_selection_and_mutation,
 )
+from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 InitDictType = Optional[Dict[str, Any]]
 MultiAgentOnPolicyAlgorithms = IPPO
@@ -27,7 +28,7 @@ PopulationType = List[MultiAgentOnPolicyAlgorithms]
 
 
 def train_multi_agent_on_policy(
-    env: gym.Env,
+    env: ParallelEnv | AsyncPettingZooVecEnv,
     env_name: str,
     algo: str,
     pop: PopulationType,
@@ -223,7 +224,6 @@ def train_multi_agent_on_policy(
 
             start_time = time.time()
             for _ in range(-(evo_steps // -agent.learn_step)):
-
                 states = {agent_id: [] for agent_id in agent.agent_ids}
                 actions = {agent_id: [] for agent_id in agent.agent_ids}
                 log_probs = {agent_id: [] for agent_id in agent.agent_ids}
@@ -234,12 +234,34 @@ def train_multi_agent_on_policy(
 
                 done = {agent_id: np.zeros(num_envs) for agent_id in agent.agent_ids}
 
-                for idx_step in range(-(agent.learn_step // -num_envs)):
+                for _ in range(-(agent.learn_step // -num_envs)):
+                    # Need to extract inactive agents from observation
+                    # NOTE: We currently assume the termination condition is deterministic
+                    # (i.e. any given agent will always terminate at the same timestep in
+                    # different vectorized environments). `inactive_agents` is therefore not used.
+                    # TODO: This would be so much cleaner if it was implemented as an `AgentWrapper``
+                    _, obs = agent.extract_inactive_agents(obs)
 
                     # Get next action from agent
                     action, log_prob, entropy, value = agent.get_action(
                         obs=obs, infos=info
                     )
+
+                    # Need to fill in placeholder values for inactive agents
+                    # NOTE: This will only happen in environments where the termination
+                    # condition is based on the agents actions where the same agent in
+                    # different environments may terminate at different times.
+                    # for agent_id, inactive_array in inactive_agents.items():
+                    #     placeholder = (
+                    #         int(np.nan)
+                    #         if np.issubdtype(action[agent_id].dtype, np.integer)
+                    #         else np.nan
+                    #     )
+
+                    #     # Insert placeholder values for inactive agents
+                    #     action[agent_id] = np.insert(
+                    #         action[agent_id], inactive_array, placeholder, axis=0
+                    #     )
 
                     if not is_vectorised:
                         action = {agent: act[0] for agent, act in action.items()}
@@ -271,47 +293,58 @@ def train_multi_agent_on_policy(
                     next_obs, reward, termination, truncation, info = env.step(
                         clipped_action
                     )
+
+                    # Compute score increment (replace NaNs representing inactive agents with 0)
+                    agent_rewards = np.array(list(reward.values())).transpose()
+                    agent_rewards = np.where(np.isnan(agent_rewards), 0, agent_rewards)
                     score_increment = (
                         (
-                            np.sum(
-                                np.array(list(reward.values())).transpose(), axis=-1
-                            )[:, np.newaxis]
+                            np.sum(agent_rewards, axis=-1)[:, np.newaxis]
                             if is_vectorised
-                            else np.sum(
-                                np.array(list(reward.values())).transpose(), axis=-1
-                            )
+                            else np.sum(agent_rewards, axis=-1)
                         )
                         if sum_scores
-                        else np.array(list(reward.values())).transpose()
+                        else agent_rewards
                     )
-
                     scores += score_increment
                     total_steps += num_envs
                     steps += num_envs
 
-                    next_done = {}
-                    for agent_id in agent.agent_ids:
+                    # Save transition
+                    for agent_id in obs:
                         states[agent_id].append(obs[agent_id])
+                        rewards[agent_id].append(reward[agent_id])
                         actions[agent_id].append(action[agent_id])
                         log_probs[agent_id].append(log_prob[agent_id])
                         entropies[agent_id].append(entropy[agent_id])
-                        rewards[agent_id].append(reward[agent_id])
-                        dones[agent_id].append(done[agent_id])
                         values[agent_id].append(value[agent_id])
-                        next_done[agent_id] = np.logical_or(
-                            termination[agent_id], truncation[agent_id]
-                        ).astype(np.int8)
+                        dones[agent_id].append(done[agent_id])
+
+                    # Find which agents are "done" - i.e. terminated or truncated
+                    next_done = {}
+                    for agent_id in termination:
+                        terminated = termination[agent_id]
+                        truncated = truncation[agent_id]
+
+                        # Process asynchronous dones
+                        if is_vectorised:
+                            mask = ~(np.isnan(terminated) | np.isnan(truncated))
+                            result = np.full_like(mask, np.nan, dtype=float)
+                            result[mask] = np.logical_or(
+                                terminated[mask], truncated[mask]
+                            )
+
+                            next_done[agent_id] = result
+                        else:
+                            next_done[agent_id] = np.array(
+                                [np.logical_or(terminated, truncated)]
+                            ).astype(np.int8)
 
                     if swap_channels:
                         expand_dims = not is_vectorised
                         next_obs = {
                             agent_id: obs_channels_to_first(s, expand_dims)
                             for agent_id, s in next_obs.items()
-                        }
-
-                    if not is_vectorised:
-                        next_done = {
-                            agent: np.array([n_d]) for agent, n_d in next_done.items()
                         }
 
                     obs = next_obs
@@ -326,6 +359,11 @@ def train_multi_agent_on_policy(
                             scores[idx].fill(0)
                             if not is_vectorised:
                                 obs, info = env.reset()
+
+                            done = {
+                                agent_id: np.zeros(num_envs)
+                                for agent_id in agent.agent_ids
+                            }
 
                 experiences = (
                     states,

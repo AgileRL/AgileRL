@@ -46,11 +46,12 @@ For more details on how to set up GRPO and use it for training, check out the :r
 Saving and loading agents
 -------------------------
 
-To save an agent, use the ``save_checkpoint`` method:
+To save an agent, use the :ref:`save_llm_checkpoint<save_llm_checkpoint>` function:
 
 .. code-block:: python
 
   from agilerl.algorithms.grpo import GRPO
+  from agilerl.utils.utils import save_llm_checkpoint
 
   agent = GRPO(
     env.observation_space,
@@ -60,16 +61,25 @@ To save an agent, use the ``save_checkpoint`` method:
   )
 
   checkpoint_path = "path/to/checkpoint"
-  agent.save_checkpoint(checkpoint_path)
+  save_llm_checkpoint(agent, checkpoint_path)
 
-To load a saved agent, use the ``load`` method:
+
+To load a saved agent, you must use the HuggingFace `.from_pretrained` method, AgileRL is
+compatible with HuggingFace and Peft models:
 
 .. code-block:: python
 
-  from agilerl.algorithms.grpo import GRPO
+ from transformers import AutoModelForCausalLM, AutoTokenizer
+  from peft import PeftModel
+  import torch
 
-  checkpoint_path = "path/to/checkpoint"
-  agent = GRPO.load(checkpoint_path)
+  base_model = AutoModelForCausalLM.from_pretrained(
+      "Qwen/Qwen2.5-3B",
+      torch_dtype=torch.bfloat16,
+      device_map="auto"
+  )
+  tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B")
+  model = PeftModel.from_pretrained(base_model, "path/to/model/directory")
 
 Parameters
 ------------

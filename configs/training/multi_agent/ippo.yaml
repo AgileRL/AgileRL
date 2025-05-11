@@ -1,7 +1,7 @@
 ---
 # Define initial hyperparameters
 INIT_HP:
-    ENV_NAME: pettingzoo.mpe.simple_speaker_listener_v4 #  # Gym environment name
+    ENV_NAME: pettingzoo.mpe.simple_speaker_listener_v4 # pettingzoo.butterfly.knights_archers_zombies_v10 #  # Gym environment name
     ALGO: IPPO                                          # Algorithm
     # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     CHANNELS_LAST: false
@@ -57,12 +57,16 @@ NET_CONFIG:
         hidden_size: [64]
         activation: Tanh
         min_mlp_nodes: 16
-        max_mlp_nodes: 256
+        max_mlp_nodes: 500
         layer_norm: true
+        # channel_size: [32, 16]
+        # kernel_size: [3, 3]
+        # stride_size: [2, 2]
+        # activation: ReLU
 
     head_config:
         hidden_size: [64]
-        activation: Tanh
+        activation: ReLU
         output_activation:
         min_hidden_layers: 1
         max_hidden_layers: 2

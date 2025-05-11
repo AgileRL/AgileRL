@@ -1,5 +1,9 @@
 import copy
+import gc
+import glob
 import inspect
+import os
+import tempfile
 import warnings
 from abc import ABC, ABCMeta, abstractmethod
 from importlib.metadata import version
@@ -16,10 +20,14 @@ from typing import (
     Union,
 )
 
+import deepspeed
 import dill
 import numpy as np
 import torch
 from accelerate import Accelerator
+from accelerate.utils import broadcast_object_list
+from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
+from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
 from gymnasium import spaces
 from numpy.typing import ArrayLike
 from tensordict import TensorDict
@@ -51,6 +59,7 @@ from agilerl.typing import (
 from agilerl.utils.algo_utils import (
     assert_supported_space,
     chkpt_attribute_to_device,
+    clone_llm,
     compile_model,
     is_module_list,
     isroutine,
@@ -422,6 +431,12 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                         )
                 elif isinstance(attr, list) or isinstance(clone_attr, list):
                     setattr(clone, attribute, [copy.deepcopy(el) for el in attr])
+                elif isinstance(attr, dict) or isinstance(clone_attr, dict):
+                    setattr(
+                        clone,
+                        attribute,
+                        {key: copy.deepcopy(value) for key, value in attr.items()},
+                    )
                 elif attr != clone_attr or isinstance(attr, MutationRegistry):
                     setattr(clone, attribute, copy.deepcopy(getattr(agent, attribute)))
             else:
@@ -1112,8 +1127,8 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
         """
         return preprocess_observation(
+            self.observation_space,
             observation=observation,
-            observation_space=self.observation_space,
             device=self.device,
             normalize_images=self.normalize_images,
         )
@@ -1136,10 +1151,12 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
     :type device: str, optional
     :param accelerator: Accelerator object for distributed computing, defaults to None
     :type accelerator: Optional[Accelerator], optional
-    :param normalize_images: If True, normalize images, defaults to True
-    :type normalize_images: bool, optional
     :param torch_compiler: The torch compiler mode to use, defaults to None
     :type torch_compiler: Optional[Any], optional
+    :param normalize_images: If True, normalize images, defaults to True
+    :type normalize_images: bool, optional
+    :param placeholder_value: The value to use as placeholder for missing observations, defaults to -1.
+    :type placeholder_value: Optional[Any], optional
     :param name: Name of the algorithm, defaults to the class name
     :type name: Optional[str], optional
     """
@@ -1155,6 +1172,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         accelerator: Optional[Accelerator] = None,
         torch_compiler: Optional[Any] = None,
         normalize_images: bool = True,
+        placeholder_value: Optional[Any] = -1,
         name: Optional[str] = None,
     ) -> None:
 
@@ -1213,6 +1231,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         self.agent_ids = agent_ids
         self.n_agents = len(agent_ids)
+        self.placeholder_value = placeholder_value
 
         self.shared_agent_ids = []
         self.homogeneous_agents = {}
@@ -1283,12 +1302,13 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
         """
         preprocessed = {}
-        for agent_id, obs in observation.items():
+        for agent_id, agent_obs in observation.items():
             preprocessed[agent_id] = preprocess_observation(
-                observation=obs,
-                observation_space=self.observation_space.get(agent_id),
+                self.observation_space.get(agent_id),
+                observation=agent_obs,
                 device=self.device,
                 normalize_images=self.normalize_images,
+                placeholder_value=self.placeholder_value,
             )
 
         return preprocessed
@@ -1409,26 +1429,84 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         return processed_obs
 
+    def extract_inactive_agents(
+        self, obs: Dict[str, ObservationType]
+    ) -> Tuple[Dict[str, np.ndarray], Dict[str, ObservationType]]:
+        """Extract inactive agents from observation.
+
+        :param obs: Observation dictionary
+        :type obs: Dict[str, ObservationType]
+
+        :return: Tuple of inactive agents and filtered observations
+        :rtype: Tuple[Dict[str, np.ndarray], Dict[str, ObservationType]]
+        """
+        inactive_agents = {}
+        agents_to_remove = []
+        for agent_id, agent_obs in obs.items():
+            if isinstance(agent_obs, dict):
+                sample = next(iter(agent_obs.values()))
+            elif isinstance(agent_obs, tuple):
+                sample = agent_obs[0]
+            else:
+                sample = agent_obs
+
+            # For non-vectorised environments we assume observations for
+            # inactive agents are not returned
+            if len(sample.shape) == 1:
+                continue
+
+            # Extract rows where all values are -1
+            inactive_agent_indices = np.where(np.isnan(sample).all(axis=1))[0]
+
+            # If agent is active in all environments, don't need to save info
+            if inactive_agent_indices.shape[0] == 0:
+                continue
+
+            filtered_obs: np.ndarray = np.delete(
+                obs[agent_id], inactive_agent_indices, axis=0
+            )
+
+            # Don't need to save info if same agent is inactive in all environments
+            if filtered_obs.shape[0] == 0:
+                agents_to_remove.append(agent_id)
+                continue
+
+            obs[agent_id] = filtered_obs
+            inactive_agents[agent_id] = inactive_agent_indices
+
+        for agent_id in agents_to_remove:
+            obs.pop(agent_id)
+
+        return inactive_agents, obs
+
     def disassemble_homogeneous_outputs(
-        self, homo_outputs: ArrayDict, vect_dim: int
+        self,
+        homo_outputs: ArrayDict,
+        vect_dim: int,
+        homogeneous_agents: Dict[str, List[str]],
     ) -> ArrayDict:
         """Disassembles batched output by shared policies into their homogeneous agents' outputs.
+
+        .. note:: This assumes that for any given sub-agent the termination condition is deterministic,
+            i.e. any given agent will always terminate at the same timestep in different vectorized environments.
 
         :param homo_outputs: Dictionary to be disassembled, has the form {'agent': [4, 7, 8]}
         :type homo_outputs: Dict[str, np.ndarray]
         :param vect_dim: Vectorization dimension size, i.e. number of vect envs
         :type vect_dim: int
+        :param homogeneous_agents: Dictionary of homogeneous agent IDs
+        :type homogeneous_agents: Dict[str, List[str]]
         :return: Assembled dictionary, e.g. {'agent_0': 4, 'agent_1': 7, 'agent_2': 8}
         :rtype: Dict[str, np.ndarray]
         """
         output_dict = {}
-        for unique_id in self.shared_agent_ids:
-            homo_outputs[unique_id] = np.reshape(
-                homo_outputs[unique_id],
-                (len(self.homogeneous_agents[unique_id]), vect_dim, -1),
+        for homo_id, agent_ids in homogeneous_agents.items():
+            homo_outputs[homo_id] = np.reshape(
+                homo_outputs[homo_id],
+                (len(agent_ids), vect_dim, -1),
             )
-            for i, homo_id in enumerate(self.homogeneous_agents[unique_id]):
-                output_dict[homo_id] = homo_outputs[unique_id][i]
+            for i, agent_id in enumerate(agent_ids):
+                output_dict[agent_id] = homo_outputs[homo_id][i]
 
         return output_dict
 
@@ -1440,10 +1518,17 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         :return: Summed rewards dictionary
         :rtype: Dict[str, np.ndarray]
         """
-        summed_rewards = {homo_id: 0 for homo_id in self.shared_agent_ids}
+        reward_shape = list(rewards.values())[0]
+        reward_shape = (
+            reward_shape.shape if isinstance(reward_shape, np.ndarray) else (1,)
+        )
+        summed_rewards = {
+            agent_id: np.zeros(reward_shape) for agent_id in self.shared_agent_ids
+        }
         for agent_id, reward in rewards.items():
             homo_id = self.get_homo_id(agent_id)
             summed_rewards[homo_id] += reward
+
         return summed_rewards
 
     def assemble_homogeneous_outputs(
@@ -1475,3 +1560,311 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
                 )
 
         return homo_outputs
+
+
+class LLMAlgorithm(EvolvableAlgorithm, ABC):
+    """Base object for all LLM algorithms in the AgileRL framework."""
+
+    def __init__(
+        self,
+        observation_space: spaces.Space,
+        action_space: spaces.Space,
+        index: int,
+        hp_config: Optional[HyperparameterConfig] = None,
+        device: Union[str, torch.device] = "cpu",
+        accelerator: Optional[Accelerator] = None,
+        name: Optional[str] = None,
+    ) -> None:
+        super().__init__(index, hp_config, device, accelerator, None, name)
+        assert isinstance(
+            observation_space, spaces.Space
+        ), "Observation space must be an instance of gymnasium.spaces.Space."
+        assert isinstance(
+            action_space, spaces.Space
+        ), "Action space must be an instance of gymnasium.spaces.Space."
+
+        self.observation_space = observation_space
+        self.action_space = action_space
+        self.zero_stage = None
+        if self.accelerator is not None:
+            self.zero_stage = self.accelerator.state.deepspeed_plugin.deepspeed_config[
+                "zero_optimization"
+            ]["stage"]
+        if (
+            self.zero_stage is not None
+            and self.zero_stage >= 2
+            and self.accelerator.is_main_process
+        ):
+            warnings.warn(
+                "Zero stage 3 support is nascent and has not been thoroughly tested. It may be unstable or subject to change. We recommend caution in production environments."
+            )
+
+        seed = 42
+        if self.accelerator is not None:
+            if accelerator.is_main_process:
+                seed = np.random.randint(0, 2**32 - 1)
+            if accelerator.num_processes > 1:
+                seed = broadcast_object_list([seed], from_process=0)[0]
+        self.rng = np.random.RandomState(seed)
+
+    def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
+        """Dummy preprocesses observations for forward pass through neural network.
+
+        :param observations: Observations of environment
+        :type observations: numpy.ndarray[float] or dict[str, numpy.ndarray[float]]
+
+        :return: Preprocessed observations
+        :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
+        """
+        return observation
+
+    def save_checkpoint(self, path: str) -> None:
+        """
+        Override the save_checkpoint method to provide guidance on the correct method to use.
+        :param path: Location to save checkpoint at
+        :type path: string
+        """
+        raise NotImplementedError(
+            "The save_checkpoint method is not supported for this algorithm class. "
+            "Please use agent.actor.save_pretrained(checkpoint_path) instead."
+        )
+
+    def load_checkpoint(self, path: str) -> None:
+        """
+        Override the load_checkpoint method to provide guidance on the correct method to use.
+
+        :param path: Location to load checkpoint from
+        :type path: string
+        """
+        raise NotImplementedError(
+            "The load_checkpoint method is not supported for this algorithm class."
+            """
+            To load a saved LLM, please load the model as follows, and then re-instantiate the GRPO
+            class.
+
+            base_model = AutoModelForCausalLM.from_pretrained(
+                "Qwen/Qwen2.5-3B",
+                torch_dtype=torch.bfloat16,
+                device_map="auto"
+            )
+            tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B")
+            model = PeftModel.from_pretrained(base_model, "/path/to/adapter/folder")
+            """
+        )
+
+    def _save_distributed_actor(self, path: str) -> None:
+        """
+        Override the save_checkpoint method to provide guidance on the correct method to use.
+
+        :param path: Output directory to save the checkpoint at
+        :type path: str
+        """
+        if self.accelerator is not None:
+            os.makedirs(path, exist_ok=True)
+            self.actor.save_checkpoint(path, tag="checkpoint")
+        else:
+            warnings.warn(
+                "Distributed actor save not supported for non-distributed training."
+            )
+
+    def _load_distributed_actor(self, path: str) -> None:
+        """
+        Override the load_checkpoint method to provide guidance on the correct method to use.
+
+        :param path: Output directory to load the checkpoint from
+        :type path: str
+        """
+        if self.accelerator is not None:
+            deepspeed_dirs = sorted(glob.glob(f"{path}/checkpoint"))
+            try:
+                assert len(deepspeed_dirs) > 0
+                load_path, _ = self.actor.load_checkpoint(
+                    path,
+                    tag="checkpoint",
+                    load_module_strict=False,
+                    load_optimizer_states=True,
+                    load_lr_scheduler_states=True,
+                )
+                if load_path is None:
+                    raise ValueError(
+                        f"Deepspeed failed to resume from checkpoint {path}"
+                    )
+
+            except Exception as e:
+                raise ValueError(
+                    f"Deepspeed failed to resume from checkpoint {path}"
+                ) from e
+        else:
+            warnings.warn(
+                "Distributed actor load not supported for non-distributed training."
+            )
+
+    @classmethod
+    def load(
+        cls,
+        path: str,
+        device: DeviceType = "cpu",
+        accelerator: Optional[Accelerator] = None,
+    ) -> None:
+        raise NotImplementedError(
+            "The load class method is not supported for this algorithm class."
+            """
+            To load a saved LLM, please load the model as follows, and then re-instantiate the GRPO
+            class, using the pre-trained model.
+
+            base_model = AutoModelForCausalLM.from_pretrained(
+                "Qwen/Qwen2.5-3B",
+                torch_dtype=torch.bfloat16,
+                device_map="auto"
+            )
+            tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B")
+            model = PeftModel.from_pretrained(base_model, "/path/to/adapter/folder")
+            """
+        )
+
+    def wrap_models(self):
+        """Wrap the models in the accelerator"""
+        if self.accelerator is not None:
+            self.actor, self.optimizer, self.lr_scheduler = self.accelerator.prepare(
+                self.actor, self.optimizer.optimizer, self.lr_scheduler
+            )
+            deepspeed_plugin = self.accelerator.state.deepspeed_plugin
+            config_kwargs = copy.deepcopy(deepspeed_plugin.deepspeed_config)
+            self.reference_actor = deepspeed.init_inference(
+                self.reference_actor,
+                tensor_parallel={"tp_size": self.accelerator.num_processes},
+                dtype=(
+                    torch.bfloat16
+                    if config_kwargs.get("bf16", {}).get("enabled", False)
+                    else (
+                        torch.float16
+                        if config_kwargs.get("fp16", {}).get("enabled", False)
+                        else torch.float32
+                    )
+                ),
+                checkpoint=None,
+                replace_with_kernel_inject=True,
+                zero=DeepSpeedZeroConfig(**config_kwargs["zero_optimization"]),
+            )
+            self.reference_actor.eval()
+
+    def clean_up(self) -> None:
+        """Clean up the algorithm."""
+
+        if self.accelerator is not None:
+            self.actor, self.reference_actor, self.optimizer, self.lr_scheduler = (
+                self.accelerator.free_memory(
+                    self.actor, self.reference_actor, self.optimizer, self.lr_scheduler
+                )
+            )
+            self.accelerator.wait_for_everyone()
+        else:
+            self.actor, self.reference_actor, self.optimizer, self.lr_scheduler = (
+                None,
+                None,
+                None,
+                None,
+            )
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    def clone(self, index: Optional[int] = None, wrap: bool = True):
+        """Creates a clone of the algorithm.
+
+        :param index: The index of the clone, defaults to None
+        :type index: Optional[int], optional
+        :param wrap: If True, wrap the models in the clone with the accelerator, defaults to False
+        :type wrap: bool, optional
+
+        :return: A clone of the algorithm
+        :rtype: EvolvableAlgorithm
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+
+            # We need to use the same temp_dir for all processes, so we broadcast the temp_dir from the main process
+            if self.accelerator is not None and self.accelerator.num_processes > 1:
+                temp_dir = broadcast_object_list([temp_dir], from_process=0)[0]
+
+            if self.zero_stage is not None and self.zero_stage >= 2:
+                self.accelerator.wait_for_everyone()
+                self._save_distributed_actor(f"{temp_dir}/agent_{self.index}")
+                self.accelerator.wait_for_everyone()
+
+            input_args = EvolvableAlgorithm.inspect_attributes(
+                self, input_args_only=True
+            )
+            input_args["clone"] = True
+            input_args["wrap"] = False
+
+            # extract base model and peft config
+            actor = (
+                self.accelerator.unwrap_model(self.actor)
+                if self.accelerator is not None
+                else self.actor
+            )
+
+            cloned_actor = clone_llm(
+                actor, load_state_dict=(self.zero_stage is None or self.zero_stage < 2)
+            )
+
+            actor = None  # De-reference the actor
+            input_args["actor_network"] = cloned_actor
+            input_args["accelerator"] = (
+                Accelerator() if self.accelerator is not None else None
+            )
+
+            clone = type(self)(**input_args)
+
+            # Maybe this needs to change -> should really init deepspeed engine after state dict is loaded
+            clone.reference_actor.load_state_dict(self.reference_actor_state_dict)
+            clone.reference_actor.eval()
+            clone.mutation_hook()
+
+            # Clone attributes
+            accelerator = clone.accelerator
+            lr_scheduler = clone.lr_scheduler
+            cloned_lr_scheduler = clone.lr_scheduler
+            original_lr_scheduler = self.lr_scheduler
+            clone.lr_scheduler = None
+            self.lr_scheduler = None
+            clone = EvolvableAlgorithm.copy_attributes(self, clone)
+            clone.accelerator = accelerator
+            clone.lr_scheduler = lr_scheduler
+            clone.lr_scheduler = cloned_lr_scheduler
+            self.lr_scheduler = original_lr_scheduler
+
+            if self.accelerator is None:
+                clone.optimizer.optimizer.load_state_dict(
+                    self.optimizer.optimizer.state_dict()
+                )
+                if self.lr_scheduler is not None:
+                    clone.lr_scheduler.load_state_dict(self.lr_scheduler.state_dict())
+
+            # Set the index
+            if index is not None:
+                clone.index = index
+
+            clone.wrap_models()
+            for param, cloned_param in zip(
+                self.reference_actor.parameters(), clone.reference_actor.parameters()
+            ):
+                cloned_param.data = param.data
+
+            if self.zero_stage is not None and self.zero_stage >= 2:
+                clone.accelerator.wait_for_everyone()
+                clone._load_distributed_actor(f"{temp_dir}/agent_{self.index}")
+                clone.accelerator.wait_for_everyone()
+            else:
+                if self.accelerator is not None:
+                    self.accelerator.wait_for_everyone()
+        return clone
+
+    @staticmethod
+    def update_lr(optimizer: DeepSpeedOptimizerWrapper, lr: float) -> None:
+        """Update the learning rate of the optimizer
+
+        :param optimizer: Optimizer
+        :type optimizer: Optimizer
+        """
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = lr

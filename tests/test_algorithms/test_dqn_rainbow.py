@@ -9,12 +9,10 @@ import torch.nn as nn
 import torch.optim as optim
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
-from gymnasium import spaces
 from tensordict import TensorDict
 
 from agilerl.algorithms.dqn_rainbow import RainbowDQN
-from agilerl.modules.cnn import EvolvableCNN
-from agilerl.modules.mlp import EvolvableMLP
+from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
 from agilerl.networks.q_networks import RainbowQNetwork
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
@@ -22,6 +20,7 @@ from tests.helper_functions import (
     generate_discrete_space,
     generate_multidiscrete_space,
     generate_random_box_space,
+    get_experiences_batch,
     get_sample_from_space,
 )
 
@@ -98,12 +97,22 @@ def simple_cnn():
 
 
 # initialize DQN with valid parameters
-def test_initialize_dqn_with_minimum_parameters():
-    observation_space = generate_random_box_space(shape=(4,))
+@pytest.mark.parametrize(
+    "observation_space, encoder_cls",
+    [
+        (generate_random_box_space(shape=(4,)), EvolvableMLP),
+        (generate_random_box_space(shape=(3, 32, 32), low=0, high=255), EvolvableCNN),
+        (generate_dict_or_tuple_space(2, 2, dict_space=True), EvolvableMultiInput),
+        (generate_dict_or_tuple_space(2, 2, dict_space=False), EvolvableMultiInput),
+    ],
+)
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+def test_initialize_dqn(observation_space, encoder_cls, accelerator):
     action_space = generate_discrete_space(2)
 
-    dqn = RainbowDQN(observation_space, action_space)
+    dqn = RainbowDQN(observation_space, action_space, accelerator=accelerator)
 
+    expected_device = accelerator.device if accelerator else "cpu"
     assert dqn.observation_space == observation_space
     assert dqn.action_space == action_space
     assert dqn.batch_size == 64
@@ -112,35 +121,46 @@ def test_initialize_dqn_with_minimum_parameters():
     assert dqn.gamma == 0.99
     assert dqn.tau == 0.001
     assert dqn.mut is None
-    assert dqn.device == "cpu"
-    assert dqn.accelerator is None
+    assert dqn.device == expected_device
+    assert dqn.accelerator == accelerator
     assert dqn.index == 0
     assert dqn.scores == []
     assert dqn.fitness == []
     assert dqn.steps == [0]
     # assert dqn.actor_network is None
-    assert isinstance(dqn.actor.encoder, EvolvableMLP)
-    assert isinstance(dqn.actor_target.encoder, EvolvableMLP)
-    assert isinstance(dqn.optimizer.optimizer, optim.Adam)
+    assert isinstance(dqn.actor.encoder, encoder_cls)
+    assert isinstance(dqn.actor_target.encoder, encoder_cls)
+    expected_opt_cls = AcceleratedOptimizer if accelerator else optim.Adam
+    assert isinstance(dqn.optimizer.optimizer, expected_opt_cls)
 
 
 @pytest.mark.parametrize(
-    "observation_space",
+    "observation_space, encoder_cls",
     [
-        (generate_random_box_space(shape=(4,))),
-        (generate_random_box_space(shape=(3, 64, 64), low=0, high=255)),
+        (generate_random_box_space(shape=(4,)), EvolvableMLP),
     ],
 )
-def test_initialize_dqn_with_actor_network_evo_net(observation_space):
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+def test_initialize_dqn_with_actor_network_evo_net(
+    observation_space, encoder_cls, accelerator
+):
     action_space = generate_discrete_space(2)
     support = torch.linspace(0, 1, 51)
+    device = accelerator.device if accelerator else "cpu"
     actor_network = RainbowQNetwork(
         observation_space=observation_space,
         action_space=action_space,
         support=support,
+        device=device,
     )
 
-    dqn = RainbowDQN(observation_space, action_space, actor_network=actor_network)
+    # Create an instance of the RainbowDQN class
+    dqn = RainbowDQN(
+        observation_space,
+        action_space,
+        actor_network=actor_network,
+        accelerator=accelerator,
+    )
 
     assert dqn.observation_space == observation_space
     assert dqn.action_space == action_space
@@ -150,15 +170,19 @@ def test_initialize_dqn_with_actor_network_evo_net(observation_space):
     assert dqn.gamma == 0.99
     assert dqn.tau == 0.001
     assert dqn.mut is None
-    assert dqn.device == "cpu"
-    assert dqn.accelerator is None
+    assert dqn.device == device
+    assert dqn.accelerator == accelerator
     assert dqn.index == 0
     assert dqn.scores == []
     assert dqn.fitness == []
     assert dqn.steps == [0]
-    # assert dqn.actor_network is None
-    # assert dqn.actor == actor_network
-    assert isinstance(dqn.optimizer.optimizer, optim.Adam)
+
+    assert isinstance(dqn.actor.encoder, encoder_cls)
+    assert isinstance(dqn.actor_target.encoder, encoder_cls)
+    if accelerator is not None:
+        assert isinstance(dqn.optimizer.optimizer, AcceleratedOptimizer)
+    else:
+        assert isinstance(dqn.optimizer.optimizer, optim.Adam)
 
 
 def test_initialize_dqn_with_incorrect_actor_net_type():
@@ -175,64 +199,8 @@ def test_initialize_dqn_with_incorrect_actor_net_type():
         )
 
 
-# Initializes actor network with EvolvableCNN based on net_config and Accelerator.
-def test_initialize_dqn_with_cnn_accelerator():
-    observation_space = spaces.Box(0, 1, shape=(3, 32, 32))
-    action_space = generate_discrete_space(2)
-    index = 0
-    net_config_cnn = {
-        "encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-    batch_size = 64
-    lr = 1e-4
-    learn_step = 5
-    gamma = 0.99
-    tau = 1e-3
-    mut = None
-    actor_network = None
-    accelerator = Accelerator()
-    wrap = True
-
-    dqn = RainbowDQN(
-        observation_space=observation_space,
-        action_space=action_space,
-        index=index,
-        net_config=net_config_cnn,
-        batch_size=batch_size,
-        lr=lr,
-        learn_step=learn_step,
-        gamma=gamma,
-        tau=tau,
-        mut=mut,
-        actor_network=actor_network,
-        accelerator=accelerator,
-        wrap=wrap,
-    )
-
-    assert dqn.observation_space == observation_space
-    assert dqn.action_space == action_space
-    assert dqn.batch_size == batch_size
-    assert dqn.lr == lr
-    assert dqn.learn_step == learn_step
-    assert dqn.gamma == gamma
-    assert dqn.tau == tau
-    assert dqn.mut == mut
-    assert dqn.accelerator == accelerator
-    assert dqn.index == index
-    assert dqn.scores == []
-    assert dqn.fitness == []
-    assert dqn.steps == [0]
-    # assert dqn.actor_network is None
-    assert isinstance(dqn.actor.encoder, EvolvableCNN)
-    assert isinstance(dqn.actor_target.encoder, EvolvableCNN)
-    assert isinstance(dqn.optimizer.optimizer, AcceleratedOptimizer)
-
-
 # Can initialize DQN with an actor network
+# TODO: This will be deprecated in the future
 @pytest.mark.parametrize(
     "observation_space, actor_network, input_tensor",
     [
@@ -244,7 +212,7 @@ def test_initialize_dqn_with_cnn_accelerator():
         ),
     ],
 )
-def test_initialize_dqn_with_actor_network(
+def test_initialize_dqn_with_make_evolvable(
     observation_space, actor_network, input_tensor, request
 ):
     action_space = generate_discrete_space(2)
@@ -272,22 +240,17 @@ def test_initialize_dqn_with_actor_network(
 
 
 @pytest.mark.parametrize(
-    "accelerator",
-    [
-        None,
-        Accelerator(),
-    ],
-)
-@pytest.mark.parametrize(
     "observation_space",
     [
         generate_discrete_space(4),
         generate_random_box_space(shape=(4,)),
+        generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
         generate_multidiscrete_space(2, 2),
         generate_dict_or_tuple_space(2, 2, dict_space=True),
         generate_dict_or_tuple_space(2, 2, dict_space=False),
     ],
 )
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
 def test_returns_expected_action(accelerator, observation_space):
     action_space = generate_discrete_space(2)
 
@@ -329,15 +292,11 @@ def test_returns_expected_action_mask_vectorized():
     [
         generate_discrete_space(4),
         generate_random_box_space(shape=(4,)),
+        generate_dict_or_tuple_space(2, 2, dict_space=True),
+        generate_dict_or_tuple_space(2, 2, dict_space=False),
     ],
 )
-@pytest.mark.parametrize(
-    "accelerator",
-    [
-        None,
-        Accelerator(),
-    ],
-)
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
 # learns from experiences and updates network parameters
 def test_learns_from_experiences(accelerator, observation_space):
     torch.autograd.set_detect_anomaly(True)
@@ -353,22 +312,9 @@ def test_learns_from_experiences(accelerator, observation_space):
     )
 
     # Create a batch of experiences
-    states = torch.from_numpy(get_sample_from_space(observation_space, batch_size))
-    actions = torch.randint(0, action_space.n, (batch_size, 1))
-    rewards = torch.randn((batch_size, 1))
-    next_states = torch.from_numpy(get_sample_from_space(observation_space, batch_size))
-    dones = torch.randint(0, 2, (batch_size, 1))
-
-    experiences = TensorDict(
-        {
-            "obs": states,
-            "action": actions,
-            "reward": rewards,
-            "next_obs": next_states,
-            "done": dones,
-        },
-        batch_size=[batch_size],
-        device=accelerator.device if accelerator else "cpu",
+    device = accelerator.device if accelerator else "cpu"
+    experiences = get_experiences_batch(
+        observation_space, action_space, batch_size, device
     )
 
     # Copy state dict before learning - should be different to after updating weights
@@ -389,15 +335,8 @@ def test_learns_from_experiences(accelerator, observation_space):
     assert actor_target_pre_learn_sd != str(dqn.actor_target.state_dict())
 
 
-@pytest.mark.parametrize(
-    "accelerator, combined",
-    [
-        (None, True),
-        (Accelerator(), True),
-        (None, False),
-        (Accelerator(), False),
-    ],
-)
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("combined", [True, False])
 # learns from experiences and updates network parameters
 def test_learns_from_experiences_n_step(accelerator, combined):
     observation_space = generate_random_box_space(shape=(4,))
@@ -470,16 +409,9 @@ def test_learns_from_experiences_n_step(accelerator, combined):
     assert actor_target_pre_learn_sd != str(dqn.actor_target.state_dict())
 
 
-@pytest.mark.parametrize(
-    "accelerator, combined",
-    [
-        (None, True),
-        (Accelerator(), True),
-        (None, False),
-        (Accelerator(), False),
-    ],
-)
 # learns from experiences and updates network parameters
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("combined", [True, False])
 def test_learns_from_experiences_per(accelerator, combined):
     observation_space = generate_random_box_space(shape=(4,))
     action_space = generate_discrete_space(2)
@@ -536,16 +468,9 @@ def test_learns_from_experiences_per(accelerator, combined):
     assert actor_target_pre_learn_sd != str(dqn.actor_target.state_dict())
 
 
-@pytest.mark.parametrize(
-    "accelerator, combined",
-    [
-        (None, True),
-        (Accelerator(), True),
-        (None, False),
-        (Accelerator(), False),
-    ],
-)
 # learns from experiences and updates network parameters
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("combined", [True, False])
 def test_learns_from_experiences_per_n_step(accelerator, combined):
     observation_space = generate_random_box_space(shape=(4,))
     action_space = generate_discrete_space(2)
@@ -667,82 +592,34 @@ def test_soft_update():
 
 
 # Runs algorithm test loop
-def test_algorithm_test_loop():
-    observation_space = generate_random_box_space(shape=(4,))
+@pytest.mark.parametrize("num_envs", [1, 3])
+@pytest.mark.parametrize(
+    "observation_space",
+    [
+        generate_random_box_space(shape=(4,)),
+        generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
+    ],
+)
+def test_algorithm_test_loop(num_envs, observation_space):
     action_space = generate_discrete_space(2)
-    num_envs = 3
-
-    env = DummyEnv(state_size=observation_space.shape, vect=True, num_envs=num_envs)
-
-    # env = make_vect_envs("CartPole-v1", num_envs=num_envs)
+    vect = num_envs > 1
+    env = DummyEnv(state_size=observation_space.shape, vect=vect, num_envs=num_envs)
     agent = RainbowDQN(observation_space=observation_space, action_space=action_space)
     mean_score = agent.test(env, max_steps=10)
-    assert isinstance(mean_score, float)
-
-
-# Runs algorithm test loop with unvectorised env
-def test_algorithm_test_loop_unvectorized():
-    observation_space = generate_random_box_space(shape=(4,))
-    action_space = generate_discrete_space(2)
-
-    env = DummyEnv(state_size=observation_space.shape, vect=False)
-
-    agent = RainbowDQN(observation_space=observation_space, action_space=action_space)
-    mean_score = agent.test(env, max_steps=10)
-    assert isinstance(mean_score, float)
-
-
-# Runs algorithm test loop with images
-def test_algorithm_test_loop_images():
-    observation_space = spaces.Box(0, 1, shape=(3, 32, 32))
-    action_space = generate_discrete_space(2)
-
-    env = DummyEnv(state_size=observation_space.shape, vect=True)
-
-    net_config_cnn = {
-        "encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-
-    agent = RainbowDQN(
-        observation_space=observation_space,
-        action_space=action_space,
-        net_config=net_config_cnn,
-    )
-    mean_score = agent.test(env, max_steps=10)
-    assert isinstance(mean_score, float)
-
-
-# Runs algorithm test loop with unvectorized images
-def test_algorithm_test_loop_images_unvectorized():
-    observation_space = spaces.Box(0, 1, shape=(32, 32, 3))
-    action_space = generate_discrete_space(2)
-
-    env = DummyEnv(state_size=observation_space.shape, vect=False)
-
-    net_config_cnn = {
-        "encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-
-    agent = RainbowDQN(
-        observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
-        action_space=action_space,
-        net_config=net_config_cnn,
-    )
-    mean_score = agent.test(env, max_steps=10, swap_channels=True)
     assert isinstance(mean_score, float)
 
 
 # Clones the agent and returns an identical agent.
-def test_clone_returns_identical_agent():
-    observation_space = generate_random_box_space(shape=(4,))
+@pytest.mark.parametrize(
+    "observation_space",
+    [
+        generate_random_box_space(shape=(4,)),
+        generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
+        generate_dict_or_tuple_space(2, 2, dict_space=True),
+        generate_dict_or_tuple_space(2, 2, dict_space=False),
+    ],
+)
+def test_clone_returns_identical_agent(observation_space):
     action_space = generate_discrete_space(2)
 
     dqn = DummyRainbowDQN(observation_space, action_space)
@@ -840,23 +717,7 @@ def test_clone_after_learning():
     batch_size = 8
     rainbow_dqn = RainbowDQN(observation_space, action_space, batch_size=batch_size)
 
-    states = torch.randn(batch_size, observation_space.shape[0])
-    actions = torch.randint(0, 2, (batch_size, 1))
-    rewards = torch.rand(batch_size, 1)
-    next_states = torch.randn(batch_size, observation_space.shape[0])
-    dones = torch.zeros(batch_size, 1)
-
-    experiences = TensorDict(
-        {
-            "obs": states,
-            "action": actions,
-            "reward": rewards,
-            "next_obs": next_states,
-            "done": dones,
-        },
-        batch_size=[batch_size],
-        device="cpu",
-    )
+    experiences = get_experiences_batch(observation_space, action_space, batch_size)
     rainbow_dqn.learn(experiences)
     clone_agent = rainbow_dqn.clone()
 
@@ -896,10 +757,21 @@ def test_unwrap_models():
 
 
 # The saved checkpoint file contains the correct data and format.
-def test_save_load_checkpoint_correct_data_and_format(tmpdir):
+@pytest.mark.parametrize(
+    "observation_space, encoder_cls",
+    [
+        (generate_random_box_space(shape=(4,)), EvolvableMLP),
+        (generate_random_box_space(shape=(3, 32, 32), low=0, high=255), EvolvableCNN),
+        (generate_dict_or_tuple_space(2, 2, dict_space=True), EvolvableMultiInput),
+        (generate_dict_or_tuple_space(2, 2, dict_space=False), EvolvableMultiInput),
+    ],
+)
+def test_save_load_checkpoint_correct_data_and_format(
+    tmpdir, observation_space, encoder_cls
+):
     # Initialize the DQN agent
     dqn = RainbowDQN(
-        observation_space=generate_random_box_space(shape=(4,)),
+        observation_space=observation_space,
         action_space=generate_discrete_space(2),
     )
     initial_actor_state_dict = dqn.actor.state_dict()
@@ -933,71 +805,8 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     dqn.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert isinstance(dqn.actor.encoder, EvolvableMLP)
-    assert isinstance(dqn.actor_target.encoder, EvolvableMLP)
-    assert dqn.lr == 1e-4
-    assert str(dqn.actor.state_dict()) == str(dqn.actor_target.state_dict())
-    assert str(initial_actor_state_dict) == str(dqn.actor.state_dict())
-    assert str(init_optim_state_dict) == str(dqn.optimizer.state_dict())
-    assert dqn.batch_size == 64
-    assert dqn.learn_step == 5
-    assert dqn.gamma == 0.99
-    assert dqn.tau == 1e-3
-    assert dqn.mut is None
-    assert dqn.index == 0
-    assert dqn.scores == []
-    assert dqn.fitness == []
-    assert dqn.steps == [0]
-
-
-def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
-    net_config_cnn = {
-        "encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-
-    # Initialize the DQN agent
-    dqn = RainbowDQN(
-        observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
-        action_space=generate_discrete_space(2),
-        net_config=net_config_cnn,
-    )
-    initial_actor_state_dict = dqn.actor.state_dict()
-    init_optim_state_dict = dqn.optimizer.state_dict()
-
-    # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    dqn.save_checkpoint(checkpoint_path)
-
-    # Load the saved checkpoint file
-    checkpoint = torch.load(checkpoint_path, pickle_module=dill)
-
-    # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint["network_info"]["modules"]
-    assert "actor_state_dict" in checkpoint["network_info"]["modules"]
-    assert "actor_target_init_dict" in checkpoint["network_info"]["modules"]
-    assert "actor_target_state_dict" in checkpoint["network_info"]["modules"]
-    assert "optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
-    assert "batch_size" in checkpoint
-    assert "lr" in checkpoint
-    assert "learn_step" in checkpoint
-    assert "gamma" in checkpoint
-    assert "tau" in checkpoint
-    assert "mut" in checkpoint
-    assert "index" in checkpoint
-    assert "scores" in checkpoint
-    assert "fitness" in checkpoint
-    assert "steps" in checkpoint
-
-    # Load checkpoint
-    dqn.load_checkpoint(checkpoint_path)
-
-    # Check if properties and weights are loaded correctly
-    assert isinstance(dqn.actor.encoder, EvolvableCNN)
-    assert isinstance(dqn.actor_target.encoder, EvolvableCNN)
+    assert isinstance(dqn.actor.encoder, encoder_cls)
+    assert isinstance(dqn.actor_target.encoder, encoder_cls)
     assert dqn.lr == 1e-4
     assert str(dqn.actor.state_dict()) == str(dqn.actor_target.state_dict())
     assert str(initial_actor_state_dict) == str(dqn.actor.state_dict())
@@ -1014,6 +823,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
 
 # The saved checkpoint file contains the correct data and format.
+# TODO: This will be deprecated in the future.
 @pytest.mark.parametrize(
     "actor_network, input_tensor",
     [
@@ -1082,17 +892,20 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 
 
 @pytest.mark.parametrize(
-    "device, accelerator",
+    "observation_space, encoder_cls",
     [
-        ("cpu", None),
-        ("cpu", Accelerator()),
+        (generate_random_box_space(shape=(4,)), EvolvableMLP),
+        (generate_random_box_space(shape=(3, 32, 32), low=0, high=255), EvolvableCNN),
+        (generate_dict_or_tuple_space(2, 2, dict_space=True), EvolvableMultiInput),
+        (generate_dict_or_tuple_space(2, 2, dict_space=False), EvolvableMultiInput),
     ],
 )
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
 # The saved checkpoint file contains the correct data and format.
-def test_load_from_pretrained(device, accelerator, tmpdir):
+def test_load_from_pretrained(observation_space, encoder_cls, accelerator, tmpdir):
     # Initialize the DQN agent
     dqn = RainbowDQN(
-        observation_space=generate_random_box_space(shape=(4,)),
+        observation_space=observation_space,
         action_space=generate_discrete_space(2),
     )
 
@@ -1101,13 +914,13 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     dqn.save_checkpoint(checkpoint_path)
 
     # Create new agent object
-    new_dqn = RainbowDQN.load(checkpoint_path, device=device, accelerator=accelerator)
+    new_dqn = RainbowDQN.load(checkpoint_path, device="cpu", accelerator=accelerator)
 
     # Check if properties and weights are loaded correctly
     assert new_dqn.observation_space == dqn.observation_space
     assert new_dqn.action_space == dqn.action_space
-    assert isinstance(new_dqn.actor.encoder, EvolvableMLP)
-    assert isinstance(new_dqn.actor_target.encoder, EvolvableMLP)
+    assert isinstance(new_dqn.actor.encoder, encoder_cls)
+    assert isinstance(new_dqn.actor_target.encoder, encoder_cls)
     assert new_dqn.lr == dqn.lr
     assert str(new_dqn.actor.to("cpu").state_dict()) == str(dqn.actor.state_dict())
     assert str(new_dqn.actor_target.to("cpu").state_dict()) == str(
@@ -1124,56 +937,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     assert new_dqn.steps == dqn.steps
 
 
-@pytest.mark.parametrize(
-    "device, accelerator",
-    [
-        ("cpu", None),
-        ("cpu", Accelerator()),
-    ],
-)
 # The saved checkpoint file contains the correct data and format.
-def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
-    # Initialize the DQN agent
-    dqn = RainbowDQN(
-        observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
-        action_space=generate_discrete_space(2),
-        net_config={
-            "encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }
-        },
-    )
-
-    # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    dqn.save_checkpoint(checkpoint_path)
-
-    # Create new agent object
-    new_dqn = RainbowDQN.load(checkpoint_path, device=device, accelerator=accelerator)
-
-    # Check if properties and weights are loaded correctly
-    assert new_dqn.observation_space == dqn.observation_space
-    assert new_dqn.action_space == dqn.action_space
-    assert isinstance(new_dqn.actor.encoder, EvolvableCNN)
-    assert isinstance(new_dqn.actor_target.encoder, EvolvableCNN)
-    assert new_dqn.lr == dqn.lr
-    assert str(new_dqn.actor.to("cpu").state_dict()) == str(dqn.actor.state_dict())
-    assert str(new_dqn.actor_target.to("cpu").state_dict()) == str(
-        dqn.actor_target.state_dict()
-    )
-    assert new_dqn.batch_size == dqn.batch_size
-    assert new_dqn.learn_step == dqn.learn_step
-    assert new_dqn.gamma == dqn.gamma
-    assert new_dqn.tau == dqn.tau
-    assert new_dqn.mut == dqn.mut
-    assert new_dqn.index == dqn.index
-    assert new_dqn.scores == dqn.scores
-    assert new_dqn.fitness == dqn.fitness
-    assert new_dqn.steps == dqn.steps
-
-
+# TODO: This will be deprecated in the future.
 @pytest.mark.parametrize(
     "observation_space, actor_network, input_tensor",
     [
@@ -1185,7 +950,6 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
         ),
     ],
 )
-# The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained_networks(
     observation_space, actor_network, input_tensor, request, tmpdir
 ):

@@ -6,16 +6,17 @@ from accelerate import Accelerator
 from minari import MinariDataset
 from minari.data_collector import EpisodeBuffer
 from requests import HTTPError
+from requests.exceptions import ReadTimeout
 
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.utils import minari_utils
 
 
-def check_delete_dataset(dataset_id: str):
+def check_delete_dataset(dataset_id: str) -> None:
     """Test deletion of local Minari datasets.
 
-    Args:
-        dataset_id (str): name of Minari dataset to test
+    :param dataset_id: name of Minari dataset to test
+    :type dataset_id: str
     """
     # check dataset name is present in local database
     local_datasets = minari.list_local_datasets()
@@ -27,7 +28,7 @@ def check_delete_dataset(dataset_id: str):
     assert dataset_id not in local_datasets
 
 
-def create_dataset_return_timesteps(dataset_id, env_id):
+def create_dataset_return_timesteps(dataset_id: str, env_id: str) -> int:
     buffer = []
 
     # delete the test dataset if it already exists
@@ -84,7 +85,7 @@ def create_dataset_return_timesteps(dataset_id, env_id):
     "dataset_id,env_id",
     [("cartpole/test-v0", "CartPole-v1")],
 )
-def test_minari_to_agile_dataset(dataset_id, env_id):
+def test_minari_to_agile_dataset(dataset_id: str, env_id: str) -> None:
     """Test create agile dataset from minari dataset."""
 
     total_timesteps = create_dataset_return_timesteps(dataset_id, env_id)
@@ -97,7 +98,7 @@ def test_minari_to_agile_dataset(dataset_id, env_id):
     "dataset_id,env_id",
     [("cartpole/test-v0", "CartPole-v1")],
 )
-def test_minari_to_agile_buffer(dataset_id, env_id):
+def test_minari_to_agile_buffer(dataset_id: str, env_id: str) -> None:
     """Test create agile buffer from minari dataset."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     memory = ReplayBuffer(10000, device=device)
@@ -115,27 +116,32 @@ def test_minari_to_agile_buffer(dataset_id, env_id):
     "dataset_id",
     ["cartpole/test-v0"],
 )
-def test_load_minari_dataset_errors(dataset_id):
+def test_load_minari_dataset_errors(dataset_id: str) -> None:
     # test load a dataset absent in local
     with pytest.raises(
         FileNotFoundError,
-        match=f"No local Dataset found for dataset id {dataset_id}. check https://minari.farama.org/ for more details on remote dataset. For loading a remote dataset assign remote=True",
+        match=f"No local Dataset found for dataset id {dataset_id}. check https://minari.farama.org/ "
+        "for more details on remote dataset. For loading a remote dataset assign remote=True",
     ):
         minari_utils.load_minari_dataset(dataset_id)
 
     # test load a dataset absent in remote
-    with pytest.raises(
-        KeyError,
-        match="Enter a valid remote Minari Dataset ID. check https://minari.farama.org/ for more details.",
-    ):
-        minari_utils.load_minari_dataset(dataset_id, remote=True)
+    try:
+        with pytest.raises(
+            KeyError,
+            match="Enter a valid remote Minari Dataset ID. check https://minari.farama.org/ "
+            "for more details.",
+        ):
+            minari_utils.load_minari_dataset(dataset_id, remote=True)
+    except ReadTimeout as e:
+        pytest.skip(f"Skipping test due to remote dataset not being available: {e}")
 
 
 @pytest.mark.parametrize(
     "dataset_id",
     ["D4RL/door/human-v2"],
 )
-def test_load_remote_minari_dataset(dataset_id):
+def test_load_remote_minari_dataset(dataset_id: str) -> None:
     try:
         dataset = minari_utils.load_minari_dataset(dataset_id, remote=True)
     except HTTPError as e:
@@ -150,7 +156,7 @@ def test_load_remote_minari_dataset(dataset_id):
     "dataset_id",
     ["D4RL/door/human-v2"],
 )
-def test_load_remote_minari_dataset_accelerator(dataset_id):
+def test_load_remote_minari_dataset_accelerator(dataset_id: str) -> None:
     accelerator = Accelerator()
 
     try:

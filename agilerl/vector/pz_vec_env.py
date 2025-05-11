@@ -98,11 +98,11 @@ class PettingZooVecEnv:
         """
         passed_actions_list = [[] for _ in list(actions.values())[0]]
         for env_idx, _ in enumerate(list(actions.values())[0]):
-            for possible_agent in self.agents:
+            for action in actions.values():
                 action = (
-                    int(actions[possible_agent][env_idx])
-                    if np.isscalar(actions[possible_agent][env_idx])
-                    else actions[possible_agent][env_idx]
+                    int(action[env_idx])
+                    if np.isscalar(action[env_idx])
+                    else action[env_idx]
                 )
                 passed_actions_list[env_idx].append(action)
         assert (

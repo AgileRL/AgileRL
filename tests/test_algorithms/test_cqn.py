@@ -11,9 +11,12 @@ from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 
 from agilerl.algorithms.cqn import CQN
-from agilerl.modules.cnn import EvolvableCNN
-from agilerl.modules.mlp import EvolvableMLP
+from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
 from agilerl.wrappers.make_evolvable import MakeEvolvable
+from tests.helper_functions import (
+    generate_dict_or_tuple_space,
+    generate_random_box_space,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -88,12 +91,21 @@ def simple_cnn():
 
 
 # initialize CQN with valid parameters
-def test_initialize_cqn_with_minimum_parameters():
-    observation_space = spaces.Box(0, 1, shape=(4,))
+@pytest.mark.parametrize(
+    "observation_space, encoder_cls",
+    [
+        (generate_random_box_space(shape=(4,)), EvolvableMLP),
+        (generate_random_box_space(shape=(3, 32, 32), low=0, high=255), EvolvableCNN),
+        (generate_dict_or_tuple_space(2, 2, dict_space=True), EvolvableMultiInput),
+        (generate_dict_or_tuple_space(2, 2, dict_space=False), EvolvableMultiInput),
+    ],
+)
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+def test_initialize_cqn(observation_space, encoder_cls, accelerator):
     action_space = spaces.Discrete(2)
+    cqn = CQN(observation_space, action_space, accelerator=accelerator)
 
-    cqn = CQN(observation_space, action_space)
-
+    expected_device = accelerator.device if accelerator else "cpu"
     assert cqn.observation_space == observation_space
     assert cqn.action_space == action_space
     assert cqn.batch_size == 64
@@ -102,80 +114,21 @@ def test_initialize_cqn_with_minimum_parameters():
     assert cqn.gamma == 0.99
     assert cqn.tau == 0.001
     assert cqn.mut is None
-    assert cqn.device == "cpu"
-    assert cqn.accelerator is None
+    assert cqn.device == expected_device
+    assert cqn.accelerator == accelerator
     assert cqn.index == 0
     assert cqn.scores == []
     assert cqn.fitness == []
     assert cqn.steps == [0]
-    assert cqn.double is False
-    assert isinstance(cqn.actor.encoder, EvolvableMLP)
-    assert isinstance(cqn.actor_target.encoder, EvolvableMLP)
-    assert isinstance(cqn.optimizer.optimizer, optim.Adam)
-    assert isinstance(cqn.criterion, nn.MSELoss)
-
-
-# Initializes actor network with EvolvableCNN based on net_config and Accelerator.
-def test_initialize_cqn_with_cnn_accelerator():
-    observation_space = spaces.Box(0, 255, shape=(3, 32, 32))
-    action_space = spaces.Discrete(2)
-    index = 0
-    net_config_cnn = {
-        "encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-    batch_size = 64
-    lr = 1e-4
-    learn_step = 5
-    gamma = 0.99
-    tau = 1e-3
-    mut = None
-    double = True
-    actor_network = None
-    accelerator = Accelerator()
-    wrap = True
-
-    cqn = CQN(
-        observation_space=observation_space,
-        action_space=action_space,
-        index=index,
-        net_config=net_config_cnn,
-        batch_size=batch_size,
-        lr=lr,
-        learn_step=learn_step,
-        gamma=gamma,
-        tau=tau,
-        mut=mut,
-        double=double,
-        actor_network=actor_network,
-        accelerator=accelerator,
-        wrap=wrap,
-    )
-
-    assert cqn.observation_space == observation_space
-    assert cqn.action_space == action_space
-    assert cqn.batch_size == batch_size
-    assert cqn.lr == lr
-    assert cqn.learn_step == learn_step
-    assert cqn.gamma == gamma
-    assert cqn.tau == tau
-    assert cqn.mut == mut
-    assert cqn.accelerator == accelerator
-    assert cqn.index == index
-    assert cqn.scores == []
-    assert cqn.fitness == []
-    assert cqn.steps == [0]
-    assert cqn.double is True
-    assert isinstance(cqn.actor.encoder, EvolvableCNN)
-    assert isinstance(cqn.actor_target.encoder, EvolvableCNN)
-    assert isinstance(cqn.optimizer.optimizer, AcceleratedOptimizer)
+    assert isinstance(cqn.actor.encoder, encoder_cls)
+    assert isinstance(cqn.actor_target.encoder, encoder_cls)
+    expected_opt_cls = AcceleratedOptimizer if accelerator else optim.Adam
+    assert isinstance(cqn.optimizer.optimizer, expected_opt_cls)
     assert isinstance(cqn.criterion, nn.MSELoss)
 
 
 # Can initialize cqn with an actor network
+# TODO: This will be deprecated in the future
 @pytest.mark.parametrize(
     "observation_space, actor_network, input_tensor",
     [
@@ -210,9 +163,6 @@ def test_initialize_cqn_with_make_evo(
     assert cqn.scores == []
     assert cqn.fitness == []
     assert cqn.steps == [0]
-    assert cqn.double is False
-    # assert cqn.actor_network == actor_network
-    # assert cqn.actor == actor_network
     assert isinstance(cqn.optimizer.optimizer, optim.Adam)
     assert isinstance(cqn.criterion, nn.MSELoss)
 
@@ -259,9 +209,6 @@ def test_initialize_cqn_with_actor_network_evo_net(observation_space, net_type):
     assert cqn.scores == []
     assert cqn.fitness == []
     assert cqn.steps == [0]
-    assert cqn.double is False
-    # assert cqn.actor_network is None
-    # assert cqn.actor == actor_network
     assert isinstance(cqn.optimizer.optimizer, optim.Adam)
     assert isinstance(cqn.criterion, nn.MSELoss)
 
@@ -451,82 +398,36 @@ def test_soft_update():
 
 
 # Runs algorithm test loop
-def test_algorithm_test_loop():
-    observation_space = spaces.Box(0, 1, shape=(4,))
-    action_space = spaces.Discrete(2)
-    num_envs = 3
-
-    env = DummyEnv(state_size=observation_space.shape, vect=True, num_envs=num_envs)
-
-    # env = make_vect_envs("CartPole-v1", num_envs=num_envs)
-    agent = CQN(observation_space=observation_space, action_space=action_space)
-    mean_score = agent.test(env, max_steps=10)
-    assert isinstance(mean_score, float)
-
-
-# Runs algorithm test loop with unvectorised env
-def test_algorithm_test_loop_unvectorized():
+@pytest.mark.parametrize(
+    "observation_space",
+    [
+        generate_random_box_space(shape=(4,)),
+        generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
+    ],
+)
+@pytest.mark.parametrize("num_envs", [1, 3])
+def test_algorithm_test_loop(observation_space, num_envs):
     observation_space = spaces.Box(0, 1, shape=(4,))
     action_space = spaces.Discrete(2)
 
-    env = DummyEnv(state_size=observation_space.shape, vect=False)
-
+    vect = num_envs > 1
+    env = DummyEnv(state_size=observation_space.shape, vect=vect, num_envs=num_envs)
     agent = CQN(observation_space=observation_space, action_space=action_space)
     mean_score = agent.test(env, max_steps=10)
-    assert isinstance(mean_score, float)
-
-
-# Runs algorithm test loop with images
-def test_algorithm_test_loop_images():
-    observation_space = spaces.Box(0, 1, shape=(3, 32, 32))
-    action_space = spaces.Discrete(2)
-
-    env = DummyEnv(state_size=observation_space.shape, vect=True)
-
-    net_config_cnn = {
-        "encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-
-    agent = CQN(
-        observation_space=observation_space,
-        action_space=action_space,
-        net_config=net_config_cnn,
-    )
-    mean_score = agent.test(env, max_steps=10)
-    assert isinstance(mean_score, float)
-
-
-# Runs algorithm test loop with unvectorized images
-def test_algorithm_test_loop_images_unvectorized():
-    observation_space = spaces.Box(0, 1, shape=(32, 32, 3))
-    action_space = spaces.Discrete(2)
-
-    env = DummyEnv(state_size=observation_space.shape, vect=False)
-
-    net_config_cnn = {
-        "encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-
-    agent = CQN(
-        observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
-        action_space=action_space,
-        net_config=net_config_cnn,
-    )
-    mean_score = agent.test(env, max_steps=10, swap_channels=True)
     assert isinstance(mean_score, float)
 
 
 # Clones the agent and returns an identical agent.
-def test_clone_returns_identical_agent():
-    observation_space = spaces.Box(0, 1, shape=(4,))
+@pytest.mark.parametrize(
+    "observation_space",
+    [
+        generate_random_box_space(shape=(4,)),
+        generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
+        generate_dict_or_tuple_space(2, 2, dict_space=True),
+        generate_dict_or_tuple_space(2, 2, dict_space=False),
+    ],
+)
+def test_clone_returns_identical_agent(observation_space):
     action_space = spaces.Discrete(2)
 
     cqn = DummyCQN(observation_space, action_space)
@@ -535,7 +436,6 @@ def test_clone_returns_identical_agent():
 
     assert clone_agent.observation_space == cqn.observation_space
     assert clone_agent.action_space == cqn.action_space
-    # assert clone_agent.actor_network == cqn.actor_network
     assert clone_agent.batch_size == cqn.batch_size
     assert clone_agent.lr == cqn.lr
     assert clone_agent.learn_step == cqn.learn_step
@@ -627,11 +527,20 @@ def test_unwrap_models():
 
 
 # The saved checkpoint file contains the correct data and format.
-def test_save_load_checkpoint_correct_data_and_format(tmpdir):
+@pytest.mark.parametrize(
+    "observation_space, encoder_cls",
+    [
+        (generate_random_box_space(shape=(4,)), EvolvableMLP),
+        (generate_random_box_space(shape=(3, 32, 32), low=0, high=255), EvolvableCNN),
+        (generate_dict_or_tuple_space(2, 2, dict_space=True), EvolvableMultiInput),
+        (generate_dict_or_tuple_space(2, 2, dict_space=False), EvolvableMultiInput),
+    ],
+)
+def test_save_load_checkpoint_correct_data_and_format(
+    observation_space, encoder_cls, tmpdir
+):
     # Initialize the cqn agent
-    cqn = CQN(
-        observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2)
-    )
+    cqn = CQN(observation_space=observation_space, action_space=spaces.Discrete(2))
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -657,77 +566,13 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    cqn = CQN(
-        observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2)
-    )
+    cqn = CQN(observation_space=observation_space, action_space=spaces.Discrete(2))
     # Load checkpoint
     cqn.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert isinstance(cqn.actor.encoder, EvolvableMLP)
-    assert isinstance(cqn.actor_target.encoder, EvolvableMLP)
-    assert cqn.lr == 1e-4
-    assert str(cqn.actor.state_dict()) == str(cqn.actor_target.state_dict())
-    assert cqn.batch_size == 64
-    assert cqn.learn_step == 5
-    assert cqn.gamma == 0.99
-    assert cqn.tau == 1e-3
-    assert cqn.mut is None
-    assert cqn.index == 0
-    assert cqn.scores == []
-    assert cqn.fitness == []
-    assert cqn.steps == [0]
-
-
-def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
-    net_config_cnn = {
-        "encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }
-    }
-
-    # Initialize the cqn agent
-    cqn = CQN(
-        observation_space=spaces.Box(0, 255, shape=(3, 32, 32)),
-        action_space=spaces.Discrete(2),
-        net_config=net_config_cnn,
-    )
-
-    # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    cqn.save_checkpoint(checkpoint_path)
-
-    # Load the saved checkpoint file
-    checkpoint = torch.load(checkpoint_path, pickle_module=dill)
-
-    # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint["network_info"]["modules"]
-    assert "actor_state_dict" in checkpoint["network_info"]["modules"]
-    assert "actor_target_init_dict" in checkpoint["network_info"]["modules"]
-    assert "actor_target_state_dict" in checkpoint["network_info"]["modules"]
-    assert "optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
-    assert "batch_size" in checkpoint
-    assert "lr" in checkpoint
-    assert "learn_step" in checkpoint
-    assert "gamma" in checkpoint
-    assert "tau" in checkpoint
-    assert "mut" in checkpoint
-    assert "index" in checkpoint
-    assert "scores" in checkpoint
-    assert "fitness" in checkpoint
-    assert "steps" in checkpoint
-
-    cqn = CQN(
-        observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2)
-    )
-    # Load checkpoint
-    cqn.load_checkpoint(checkpoint_path)
-
-    # Check if properties and weights are loaded correctly
-    assert isinstance(cqn.actor.encoder, EvolvableCNN)
-    assert isinstance(cqn.actor_target.encoder, EvolvableCNN)
+    assert isinstance(cqn.actor.encoder, encoder_cls)
+    assert isinstance(cqn.actor_target.encoder, encoder_cls)
     assert cqn.lr == 1e-4
     assert str(cqn.actor.state_dict()) == str(cqn.actor_target.state_dict())
     assert cqn.batch_size == 64
@@ -742,6 +587,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
 
 # The saved checkpoint file contains the correct data and format.
+# TODO: This will be deprecated in the future
 @pytest.mark.parametrize(
     "actor_network, input_tensor",
     [
@@ -807,19 +653,22 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert cqn.steps == [0]
 
 
+# The saved checkpoint file contains the correct data and format.
 @pytest.mark.parametrize(
-    "device, accelerator",
+    "observation_space, encoder_cls",
     [
-        ("cpu", None),
-        ("cpu", Accelerator()),
+        (generate_random_box_space(shape=(4,)), EvolvableMLP),
+        (generate_random_box_space(shape=(3, 32, 32), low=0, high=255), EvolvableCNN),
+        (generate_dict_or_tuple_space(2, 2, dict_space=True), EvolvableMultiInput),
+        (generate_dict_or_tuple_space(2, 2, dict_space=False), EvolvableMultiInput),
     ],
 )
-# The saved checkpoint file contains the correct data and format.
-def test_load_from_pretrained(device, accelerator, tmpdir):
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+def test_load_from_pretrained(observation_space, encoder_cls, accelerator, tmpdir):
+    device = "cpu"
+
     # Initialize the cqn agent
-    cqn = CQN(
-        observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2)
-    )
+    cqn = CQN(observation_space=observation_space, action_space=spaces.Discrete(2))
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -834,8 +683,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     # Check if properties and weights are loaded correctly
     assert new_cqn.observation_space == cqn.observation_space
     assert new_cqn.action_space == cqn.action_space
-    assert isinstance(new_cqn.actor.encoder, EvolvableMLP)
-    assert isinstance(new_cqn.actor_target.encoder, EvolvableMLP)
+    assert isinstance(new_cqn.actor.encoder, encoder_cls)
+    assert isinstance(new_cqn.actor_target.encoder, encoder_cls)
     assert new_cqn.lr == cqn.lr
     assert str(new_cqn.actor.to("cpu").state_dict()) == str(cqn.actor.state_dict())
     assert str(new_cqn.actor_target.to("cpu").state_dict()) == str(
@@ -852,56 +701,7 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     assert new_cqn.steps == cqn.steps
 
 
-@pytest.mark.parametrize(
-    "device, accelerator",
-    [
-        ("cpu", None),
-        ("cpu", Accelerator()),
-    ],
-)
-# The saved checkpoint file contains the correct data and format.
-def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
-    # Initialize the cqn agent
-    cqn = CQN(
-        observation_space=spaces.Box(0, 255, shape=(3, 32, 32)),
-        action_space=spaces.Discrete(2),
-        net_config={
-            "encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }
-        },
-    )
-
-    # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    cqn.save_checkpoint(checkpoint_path)
-
-    # Create new agent object
-    new_cqn = CQN.load(checkpoint_path, device=device, accelerator=accelerator)
-
-    # Check if properties and weights are loaded correctly
-    assert new_cqn.observation_space == cqn.observation_space
-    assert new_cqn.action_space == cqn.action_space
-    assert isinstance(new_cqn.actor.encoder, EvolvableCNN)
-    assert isinstance(new_cqn.actor_target.encoder, EvolvableCNN)
-    assert new_cqn.lr == cqn.lr
-    assert str(new_cqn.actor.to("cpu").state_dict()) == str(cqn.actor.state_dict())
-    assert str(new_cqn.actor_target.to("cpu").state_dict()) == str(
-        cqn.actor_target.state_dict()
-    )
-    assert new_cqn.batch_size == cqn.batch_size
-    assert new_cqn.learn_step == cqn.learn_step
-    assert new_cqn.gamma == cqn.gamma
-    assert new_cqn.tau == cqn.tau
-    assert new_cqn.mut == cqn.mut
-    assert new_cqn.index == cqn.index
-    assert new_cqn.scores == cqn.scores
-    assert new_cqn.fitness == cqn.fitness
-    assert new_cqn.steps == cqn.steps
-
-
+# TODO: This will be deprecated in the future
 @pytest.mark.parametrize(
     "observation_space, actor_network, input_tensor",
     [
@@ -914,7 +714,7 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     ],
 )
 # The saved checkpoint file contains the correct data and format.
-def test_load_from_pretrained_networks(
+def test_load_from_pretrained_make_evo(
     observation_space, actor_network, input_tensor, request, tmpdir
 ):
     action_space = spaces.Discrete(2)

@@ -49,7 +49,7 @@ def add_text_to_image(
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    env = gym.make("LunarLander-v2", render_mode="rgb_array")
+    env = gym.make("LunarLander-v3", render_mode="rgb_array")
 
     stabilize_agent = PPO.load("./models/PPO/PPO_trained_agent_stabilize.pt")
     center_agent = PPO.load("./models/PPO/PPO_trained_agent_center.pt")
@@ -132,7 +132,7 @@ if __name__ == "__main__":
     gif_path = "./videos/"
     os.makedirs(gif_path, exist_ok=True)
     imageio.mimwrite(
-        os.path.join("./videos/", "LunarLander-v2_selector.gif"),
+        os.path.join("./videos/", "LunarLander-v3_selector.gif"),
         frames,
         duration=40,
         loop=0,

@@ -1,4 +1,3 @@
-import copy
 import os
 import warnings
 from datetime import datetime
@@ -8,9 +7,9 @@ import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.distributed as dist
 import wandb
 from accelerate import Accelerator
+from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
@@ -28,13 +27,13 @@ from agilerl.algorithms import (
     NeuralUCB,
     RainbowDQN,
 )
-from agilerl.algorithms.core import EvolvableAlgorithm
+from agilerl.algorithms.core import EvolvableAlgorithm, LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules.base import EvolvableModule
 from agilerl.typing import GymSpaceType, PopulationType
-from agilerl.utils.algo_utils import CosineLRScheduleConfig
+from agilerl.utils.algo_utils import CosineLRScheduleConfig, clone_llm
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 SupportedObservationSpace = Union[
@@ -77,7 +76,9 @@ def make_vect_envs(
 
 
 def make_multi_agent_vect_envs(
-    env: Callable[[], ParallelEnv], num_envs: int = 1, **env_kwargs: Any
+    env: Callable[[], ParallelEnv],
+    num_envs: int = 1,
+    **env_kwargs: Any,
 ) -> AsyncPettingZooVecEnv:
     """Returns async-vectorized PettingZoo parallel environments.
 
@@ -85,6 +86,9 @@ def make_multi_agent_vect_envs(
     :type env: pettingzoo.utils.env.ParallelEnv
     :param num_envs: Number of vectorized environments, defaults to 1
     :type num_envs: int, optional
+
+    :return: Async-vectorized PettingZoo parallel environments
+    :rtype: agilerl.vector.pz_async_vec_env.AsyncPettingZooVecEnv
     """
     env_fns = [lambda: env(**env_kwargs) for _ in range(num_envs)]
     return AsyncPettingZooVecEnv(env_fns=env_fns)
@@ -449,6 +453,7 @@ def create_population(
                 update_epochs=INIT_HP["UPDATE_EPOCHS"],
                 actor_networks=actor_network,
                 critic_networks=critic_network,
+                action_batch_size=INIT_HP.get("ACTION_BATCH_SIZE", None),
                 device=device,
                 accelerator=accelerator,
                 torch_compiler=torch_compiler,
@@ -533,28 +538,28 @@ def create_population(
             agent = GRPO(
                 observation_space=observation_space,
                 action_space=action_space,
-                actor_network=copy.deepcopy(INIT_HP["actor_network"]),
-                pad_token_id=INIT_HP["pad_token_id"],
+                actor_network=clone_llm(actor_network),
+                pad_token_id=INIT_HP.get("PAD_TOKEN_ID"),
                 hp_config=hp_config,
                 index=idx,
-                batch_size=INIT_HP["BATCH_SIZE"],
-                beta=INIT_HP["BETA"],
-                lr=INIT_HP["LR"],
-                clip_coef=INIT_HP["CLIP_COEF"],
-                max_grad_norm=INIT_HP["MAX_GRAD_NORM"],
-                update_epochs=INIT_HP["UPDATE_EPOCHS"],
-                group_size=INIT_HP["GROUP_SIZE"],
-                temperature=INIT_HP["TEMPERATURE"],
-                calc_position_embeddings=INIT_HP["CALC_POSITION_EMBEDDINGS"],
-                reduce_memory_peak=INIT_HP["REDUCE_MEMORY_PEAK"],
-                max_output_tokens=INIT_HP["MAX_OUTPUT_TOKENS"],
-                min_output_tokens=INIT_HP["MIN_OUTPUT_TOKENS"],
+                batch_size=INIT_HP.get("BATCH_SIZE_PER_GPU", 1),
+                beta=INIT_HP.get("BETA", 0.001),
+                lr=INIT_HP.get("LR", 5e-7),
+                clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
+                max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 0.1),
+                update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
+                group_size=INIT_HP.get("GROUP_SIZE", 8),
+                temperature=INIT_HP.get("TEMPERATURE", 0.9),
+                calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
+                reduce_memory_peak=INIT_HP.get("REDUCE_MEMORY_PEAK", False),
+                max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS", 1024),
+                min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS", None),
                 cosine_lr_schedule_config=(
-                    CosineLRScheduleConfig(**INIT_HP["COSINE_lR_SCHEDULER"])
-                    if INIT_HP["COSINE_lR_SCHEDULER"] is not None
+                    CosineLRScheduleConfig(**INIT_HP.get("COSINE_lR_SCHEDULER", None))
+                    if INIT_HP.get("COSINE_lR_SCHEDULER", None) is not None
                     else None
                 ),
-                accelerator=accelerator[idx],
+                accelerator=Accelerator() if accelerator else None,
                 device=device,
                 **algo_kwargs,
             )
@@ -596,7 +601,6 @@ def save_population_checkpoint(
                     else f"{save_path}_{i}_{agent.steps[-1]}.pt"
                 )
                 agent.save_checkpoint(current_checkpoint_path)
-            print("Saved checkpoint.")
         accelerator.wait_for_everyone()
 
         # Load models back to accelerator processes
@@ -612,7 +616,6 @@ def save_population_checkpoint(
                 else f"{save_path}_{i}_{agent.steps[-1]}.pt"
             )
             agent.save_checkpoint(current_checkpoint_path)
-        print("Saved checkpoint.")
 
 
 def tournament_selection_and_mutation(
@@ -650,21 +653,31 @@ def tournament_selection_and_mutation(
     if algo is None:
         algo = population[0].__class__.__name__
 
-    # Save temporary models for accelerator processes
+    if language_model:
+        elite, population = tournament.select(population)
+        if accelerator is None or (
+            accelerator is not None and accelerator.is_main_process
+        ):
+            population = mutation.mutation(population)
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+            consolidate_mutations(population)
+            accelerator.wait_for_everyone()
+        if save_elite:
+            save_llm_checkpoint(elite, elite_path)
+        return population
+
     if accelerator is not None:
+        # Save temporary models for accelerator processes
         accel_temp_models_path = f"models/{env_name}"
         if accelerator.is_main_process:
             if not os.path.exists(accel_temp_models_path):
                 os.makedirs(accel_temp_models_path)
-
-    if accelerator is not None:
         # Need to unwrap models from acccelerator before selecting and mutating
         accelerator.wait_for_everyone()
         for model in population:
             model.unwrap_models()
-
         accelerator.wait_for_everyone()
-
         # Perform tournament selection and mutation on main process
         if accelerator.is_main_process:
             elite, population = tournament.select(population)
@@ -688,15 +701,12 @@ def tournament_selection_and_mutation(
         population = mutation.mutation(population)
 
     if save_elite:
-        if language_model:
-            save_llm_checkpoint(elite, elite_path)
-        else:
-            elite_save_path = (
-                elite_path.split(".pt")[0]
-                if elite_path is not None
-                else f"{env_name}-elite_{algo}"
-            )
-            elite.save_checkpoint(f"{elite_save_path}.pt")
+        elite_save_path = (
+            elite_path.split(".pt")[0]
+            if elite_path is not None
+            else f"{env_name}-elite_{algo}"
+        )
+        elite.save_checkpoint(f"{elite_save_path}.pt")
 
     return population
 
@@ -869,46 +879,38 @@ def get_env_defined_actions(info, agents):
     return env_defined_actions
 
 
-def gather_tensor(tensor: torch.Tensor, agent: EvolvableAlgorithm) -> torch.Tensor:
+def gather_tensor(
+    tensor: Union[torch.Tensor, float], accelerator: Accelerator
+) -> torch.Tensor:
     """Gather tensors from gpus
 
     :param tensor: Tensor to gather
     :type tensor: torch.Tensor
-    :param agent: Agent object
-    :type agent: EvolvableAlgorithm
+    :param accelerator: Accelerator object
+    :type accelerator: accelerate.Accelerator
     :return: Stacked tensors
     :rtype: torch.Tensor
     """
-    # Convert to tensor if it's a scalar
     if not isinstance(tensor, torch.Tensor):
-        tensor = torch.tensor(tensor, device=f"cuda:{agent.local_rank}")
-
-    if tensor.device != agent.device:
-        tensor = tensor.to(agent.device)
-    # Ensure tensor is on correct device
-    tensor = tensor.detach().clone()
-    # Create a list to store tensors from all processes
-    world_size = dist.get_world_size()
-    gathered_tensors = [torch.zeros_like(tensor) for _ in range(world_size)]
-
-    # Gather the tensor from all processes
-    dist.all_gather(gathered_tensors, tensor)
-    return torch.stack(gathered_tensors)
+        tensor = torch.tensor(tensor, device=accelerator.device)
+    tensor = tensor.to(accelerator.device)
+    gathered_tensors = accelerator.gather(tensor)
+    return gathered_tensors
 
 
 def aggregate_metrics_across_gpus(
-    agent: EvolvableAlgorithm, metric_tensor: torch.Tensor
+    accelerator: Accelerator, metric_tensor: Union[torch.Tensor, float]
 ) -> float:
     """Aggregate gathered tensors
 
-    :param agent: Agent
-    :type agent: EvolvableAlgorithm
+    :param accelerator: Accelerator object
+    :type accelerator: accelerate.Accelerator
     :param metric_tensor: Metrics
     :type metric_tensor: torch.Tensor
     :return: Mean metric
     :rtype: float
     """
-    all_metrics = gather_tensor(metric_tensor, agent)
+    all_metrics = gather_tensor(metric_tensor, accelerator)
     avg_metrics = all_metrics.mean().item()
     return avg_metrics
 
@@ -925,7 +927,33 @@ def save_llm_checkpoint(agent: EvolvableAlgorithm, checkpoint_path: str | None) 
     path = base_path + f"/{agent.algo}"
     os.makedirs(path, exist_ok=True)
     if agent.accelerator is not None:
-        unwrapped_model = agent.accelerator.unwrap_model(agent.actor)
-        unwrapped_model.save_pretrained(path)
+        agent.accelerator.wait_for_everyone()
+        agent.actor.save_pretrained(path)
+        agent.accelerator.wait_for_everyone()
     else:
         agent.actor.save_pretrained(path)
+
+
+def consolidate_mutations(population: PopulationType) -> None:
+    """Consolidate mutations across processes during LLM fintuning
+
+    :param population: Population of agents
+    :type population: list[EvolvableAlgorithm]
+    """
+    if not isinstance(population[0], LLMAlgorithm):
+        warnings.warn("Consolidate mutations is only supported for LLMAlgorithm.")
+        return
+    for agent in population:
+        index, mut, mut_value = broadcast_object_list(
+            [
+                agent.index,
+                agent.mut,
+                getattr(agent, agent.mut if agent.mut is not None else "None", "None"),
+            ],
+            from_process=0,
+        )
+        assert index == agent.index
+        agent.mut = mut
+        setattr(agent, mut, mut_value)
+        if mut == "lr":
+            LLMAlgorithm.update_lr(agent.optimizer, getattr(agent, mut))

@@ -1,3 +1,5 @@
+import gc
+
 import numpy as np
 import pytest
 import torch
@@ -429,6 +431,8 @@ def test_q_learning_with_probe_env():
         device=device,
     )
     check_q_learning_with_probe_env(env, DQN, algo_args, memory, learn_steps, device)
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 def test_q_learning_with_probe_env_cnn():
@@ -453,6 +457,8 @@ def test_q_learning_with_probe_env_cnn():
         device=device,
     )
     check_q_learning_with_probe_env(env, DQN, algo_args, memory, learn_steps, device)
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 def test_q_learning_with_probe_env_dict():
@@ -483,6 +489,8 @@ def test_q_learning_with_probe_env_dict():
         device=device,
     )
     check_q_learning_with_probe_env(env, DQN, algo_args, memory, learn_steps, device)
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 def test_policy_q_learning_with_probe_env():
@@ -502,6 +510,8 @@ def test_policy_q_learning_with_probe_env():
     check_policy_q_learning_with_probe_env(
         env, DDPG, algo_args, memory, learn_steps, device
     )
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 def test_policy_q_learning_with_probe_env_cnn():
@@ -533,6 +543,8 @@ def test_policy_q_learning_with_probe_env_cnn():
     check_policy_q_learning_with_probe_env(
         env, DDPG, algo_args, memory, learn_steps, device
     )
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 def test_policy_q_learning_with_probe_env_dict():
@@ -570,6 +582,8 @@ def test_policy_q_learning_with_probe_env_dict():
     check_policy_q_learning_with_probe_env(
         env, DDPG, algo_args, memory, learn_steps, device
     )
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 def test_policy_on_policy_discrete_with_probe_env():
@@ -584,6 +598,8 @@ def test_policy_on_policy_discrete_with_probe_env():
     check_policy_on_policy_with_probe_env(
         env, PPO, algo_args, learn_steps, device, True
     )
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 def test_policy_on_policy_with_probe_env():
@@ -598,6 +614,8 @@ def test_policy_on_policy_with_probe_env():
     check_policy_on_policy_with_probe_env(
         env, PPO, algo_args, learn_steps, device, False
     )
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 def test_policy_on_policy_with_probe_env_cnn():
@@ -623,6 +641,8 @@ def test_policy_on_policy_with_probe_env_cnn():
     check_policy_on_policy_with_probe_env(
         env, PPO, algo_args, learn_steps, device, False
     )
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 def test_policy_on_policy_with_probe_env_dict():
@@ -654,3 +674,5 @@ def test_policy_on_policy_with_probe_env_dict():
     check_policy_on_policy_with_probe_env(
         env, PPO, algo_args, learn_steps, device, False
     )
+    gc.collect()
+    torch.cuda.empty_cache()

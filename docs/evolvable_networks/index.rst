@@ -1,55 +1,163 @@
-.. _custom_network_architectures:
+.. _evolvable_networks:
 
-Creating Custom Networks
-========================
+Evolvable Neural Networks in AgileRL
+------------------------------------
 
-Creating Evolvable Networks from Scratch
-----------------------------------------
+Other than the hyperparemeters pertaining to the specific algorithm you're using to optimize your agent, a large source of variance in
+the performance of your agent is the choice network architecture. Tuning the architecture of your network is usually a very time-consuming and tedious task,
+requiring multiple training runs that can take days or even weeks to execute. AgileRL allows you to automatically tune the architecture of your network in
+a single training run through :ref:`evolutionary hyperparameter optimization <evo_hyperparam_opt>`.
 
-In the implemented algorithms, we allow users to pass architecture configurations for common RL networks (made evolvable)
-that are available with the framework. We employ a similar philosophy to PyTorch in our way of processing the nested structure
-of complex custom architectures to keep track of the available architecture mutation methods in a neural network.
 
-1. :class:`EvolvableModule <agilerl.modules.base.EvolvableModule>`: This is the base class to define a custom module in AgileRL. It is a wrapper around PyTorch's
-``nn.Module`` class, allowing users to create complex networks with nested :class:`EvolvableModule <agilerl.modules.base.EvolvableModule>`'s that have different available
-architecture mutations. We provide e.g. ``EvolvableMLP``, ``EvolvableCNN``, and ``EvolvableMultiInput`` modules to process
-vector, image, and dictionary / tuple observations, respectively, into a desired number of outputs. Modules in AgileRL
-each have specific mutation methods (wrapped by a ``@mutation`` decorator to signal their nature) that allow us to dynamically
-change their architectures during training. :class:`EvolvableModule <agilerl.modules.base.EvolvableModule>` objects should implement a
-:meth:`recreate_network() <agilerl.modules.base.EvolvableModule.recreate_network>` method that recreates the network with the new architecture
-after a mutation method is applied. This method is called automatically after calling a method wrapped by the ``@mutation`` decorator.
+Basic Neural Networks
+~~~~~~~~~~~~~~~~~~~~~
 
-2. :class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>`: Abstracting neural networks for RL problems is hard because different observation spaces require different
-architectures. To address this, we provide a simple way of defining custom evolvable networks for RL algorithms through the
-:class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>` class, which inherits from :class:`EvolvableModule <agilerl.modules.base.EvolvableModule>`.
-Under the hood, any network inheriting from :class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>`  automatically creates an appropriate encoder from the passed observation space. Custom networks only need to
-specify a head that acts as a mapping from the latent space to a number of outputs (e.g. actions). AgileRL provides a variety of
-common networks used in RL algorithms:
+In order to mutate the architecture of neural networks seamlessly, we define the :class:`~agilerl.modules.base.EvolvableModule` base class as a building block
+for all networks used in AgileRL. This is nothing but a wrapper around :class:`~torch.nn.Module` that allows us to keep track of the methods that mutate a network
+in networks with nested evolvable modules.
 
-   -  ``QNetwork``: State-action value function (used in e.g. DQN).
-   -  ``RainbowQNetwork``: State-action value function that uses a dueling distributional architecture for the network head (used in Rainbow DQN).
-   -  ``ContinuousQNetwork``: State-action value function for continuous action spaces, which takes the actions as input with the observations.
-   -  ``ValueNetwork``: Outputs the scalar value of an observation (used in e.g. PPO).
-   -  ``DeterministicActor``: Outputs deterministic actions given an action space.
-   -  ``StochasticActor``: Outputs an appropriate PyTorch distribution over the given action space.
+.. figure:: ../_static/module.png
+   :alt: EvolvableModule Structure
+   :width: 90%
+
+   Structure of an ``EvolvableModule`` showing the relationship with ``torch.nn.Module`` and mutation capabilities
+
+Examples of some very basic modules included in AgileRL are:
+
+- :class:`~agilerl.modules.mlp.EvolvableMLP`: Multi-layer perceptron (MLP) network that maps vector observations to a desired number of outputs, including mutation methods that allow for the random addition or removal of layers and nodes.
+
+- :class:`~agilerl.modules.cnn.EvolvableCNN`: Convolutional neural network (CNN) that maps image observations to a desired number of outputs, including mutation methods that allow for the random addition or removal of convolutional layers and neurons, as well as changing the kernel sizes.
+
+- :class:`~agilerl.modules.multi_input.EvolvableMultiInput`: Network that maps dictionary or tuple observations to a desired number of outputs. This module includes nested ``EvolvableModule``'s to process each element of the dictionary or tuple observation separately into a latent space, which are then concatenated and processed by a final dense layer to form a number of outputs. Includes the mutation methods of all nested ``EvolvableModule``'s.
+
+Policies, Value Functions, and More Complex Networks
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In Reinforcement Learning, we often require processing very different types of observations into either actions or values / state-action values.
+In order to make the implementation of evolvable policies, value functions, and more complex networks as seamless as possible, we define the :class:`~agilerl.modules.base.EvolvableNetwork`
+base class which inherits from :class:`~agilerl.modules.base.EvolvableModule`. The diagram below shows the expected structure of a neural network inheriting from this class.
+
+.. figure:: ../_static/network.png
+   :alt: EvolvableNetwork Structure
+   :width: 90%
+
+   Structure of an ``EvolvableNetwork``, showing the underlying encoder and head networks which are ``EvolvableModule``'s themselves.
+
+When inheriting from this class, we must pass in the observation space of the environment to the constructor of the class. This allows the network to automatically
+build an appropriate encoder from the observation space. Off-the-shelf ``EvolvableNetwork``'s in AgileRL natively support the following observation spaces:
+
+- :class:`~gymnasium.spaces.Box`: Use an ``EvolvableMLP``, ``EvolvableCNN``, or ``EvolvableLSTM`` as the encoder, depending on the dimensionality of the observation space.
+- :class:`~gymnasium.spaces.Dict`: Use an ``EvolvableMultiInput`` as the encoder.
+- :class:`~gymnasium.spaces.Tuple`: Use an ``EvolvableMultiInput`` as the encoder.
+- :class:`~gymnasium.spaces.MultiBinary`: Use an ``EvolvableMLP`` as the encoder.
+- :class:`~gymnasium.spaces.MultiDiscrete`: Use an ``EvolvableMLP`` as the encoder.
+
+The encoder processes observations into a latent space, which is then processed by the head network (usually a ``EvolvableMLP``) to form the final output of the network. The
+following networks, common in a variety of reinforcement learning algorithms, are supported out of the box:
+
+- :class:`~agilerl.networks.q_networks.QNetwork`: Outputs a state-action value given an observation and action (used in e.g. DQN).
+- :class:`~agilerl.networks.q_networks.RainbowQNetwork`: Uses a distributional dueling architecture to output a distribution of state-action values given an observation and action (used in e.g. Rainbow DQN).
+- :class:`~agilerl.networks.q_networks.ContinuousQNetwork`: Outputs a continuous state-action value given an observation and action (used in e.g. DDPG, TD3).
+- :class:`~agilerl.networks.value_networks.ValueNetwork`: Outputs a single value given an observation (used in e.g. PPO, bandit algorithms).
+- :class:`~agilerl.networks.actors.DeterministicActor`: Outputs deterministic actions given an observation (used in e.g. DDPG, TD3).
+- :class:`~agilerl.networks.actors.StochasticActor`: Outputs stochastic actions given an observation (used in e.g. PPO).
 
 .. note::
-  We impose that the different evolvable networks in an algorithm (e.g. actor and critic in PPO) share the same mutation methods. This
-  is done because we apply the same architecture mutations to all of the networks of an individual to reduce variance during training.
-  For this reason, we only allow mutation methods in :class:`EvolvableModule <agilerl.networks.base.EvolvableNetwork>` objects to come from the encoder and the head, assuming the same
-  modules are used in both. All of the implemented networks in AgileRL follow this structure.
+    All ``EvolvableNetwork`` objects expect that the only modules that contribute towards its mutation method are the encoder and head networks. This is
+    done to ensure that the same mutation can be applied across the different networks optimized in an algorithm during training e.g. actor and critic, since
+    these usually solve problems that are very similar in nature and thus require similar architectures.
 
-For simple use cases, it might be appropriate to create a network using ``EvolvableMLP`` or ``EvolvableCNN`` directly (depending on your
-environments observation space), and passing it in to the desired algorithm as the ``actor_network`` or ``critic_network`` argument.
 
-Please refer to the `RainbowQNetwork <Custom_networks_tutorials>`_ tutorial for an example of how to build a custom network using AgileRL.
+Configuring the Architecture of ``EvolvableNetwork``'s
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-3. :class:`DummyEvolvable <agilerl.modules.dummy.DummyEvolvable>`: This is a wrapper that allows users to load a pre-trained model that is not an
-:class:`EvolvableModule <agilerl.modules.base.EvolvableModule>` and use it in an evolvable AgileRL algorithm. This disables architecture mutations but still
-allows for RL hyperparameter and weight mutations.
+In order to configure the architecture of ``EvolvableNetwork``'s, we must pass in separate dictionaries that specify the architecture of the encoder and head networks through
+the ``encoder_config`` and ``head_config`` arguments of the constructor of the ``EvolvableNetwork`` class. These dictionaries should include the arguments of the corresponding
+``EvolvableModule``'s constructor.
 
-Example Usage
-~~~~~~~~~~~~~
+
+If your environment has a 1D ``Box`` observation space, by default the ``EvolvableNetwork`` will use a ``EvolvableMLP`` as the encoder.
+
+.. code-block:: python
+
+    from gymnasium.spaces import Box, Discrete
+
+    from agilerl.networks.q_networks import QNetwork
+
+    encoder_config = {
+        "hidden_size": [64, 64] # Two layers of 64 nodes each
+        "min_mlp_nodes": 16 # minimum number of nodes in the MLP when mutating
+        "max_mlp_nodes": 128 # maximum number of nodes in the MLP when mutating
+    }
+
+    head_config = {
+        "hidden_size": [64, 64] # Two layers of 64 nodes each
+        "min_mlp_nodes": 16, # minimum number of nodes in the MLP when mutating
+        "max_mlp_nodes": 128, # maximum number of nodes in the MLP when mutating
+    }
+
+    observation_space = Box(low=-100, high=100, shape=(10,))
+    action_space = Discrete(2)
+
+    network = QNetwork(
+        observation_space,
+        action_space,
+        encoder_config=encoder_config,
+        head_config=head_config,
+        latent_dim=32, # Dimension of the latent space representation
+        min_latent_dim=8, # Minimum dimension of the latent space representation
+        max_latent_dim=128, # Maximum dimension of the latent space representation
+    )
+
+If your environment has a 3D ``Box`` observation space, by default the ``EvolvableNetwork`` will use a ``EvolvableCNN`` as the encoder.
+
+.. code-block:: python
+
+    from gymnasium.spaces import Box, Discrete
+
+    from agilerl.networks.q_networks import StochasticActor
+
+    encoder_config = {
+        "channel_size": [32, 64, 128], # Three convolutional layers with 32, 64, and 128 channels respectively
+        "kernel_size": [8, 4, 3], # The kernel sizes of the convolutional layers
+        "stride_size": [4, 2, 1], # The stride sizes of the convolutional layers
+        "min_channel_size": 16, # minimum number of channels in the CNN when mutating
+        "max_channel_size": 256, # maximum number of channels in the CNN when mutating
+    }
+
+    head_config = {
+        "hidden_size": [64, 64] # Two layers of 64 nodes each
+        "min_mlp_nodes": 16, # minimum number of nodes in the MLP when mutating
+        "max_mlp_nodes": 128, # maximum number of nodes in the MLP when mutating
+    }
+
+    observation_space = Box(low=-100, high=100, shape=(10, 10, 10))
+    action_space = Discrete(2)
+
+    network = StochasticActor(
+        observation_space,
+        action_space,
+        encoder_config=encoder_config,
+        head_config=head_config,
+        latent_dim=32, # Dimension of the latent space representation
+        min_latent_dim=8, # Minimum dimension of the latent space representation
+        max_latent_dim=128, # Maximum dimension of the latent space representation
+    )
+
+.. note::
+    In AgileRL algorithms, pass a single ``net_config`` dictionary that includes the ``encoder_config`` and ``head_config`` dictionaries, as well as any other arguments to
+    the corresponding network used in the algorithm.
+
+
+Using Non-Evolvable Networks in an Evolvable Setting
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+It is common that users require using either pre-trained networks or custom architectures that don't inherit from ``EvolvableModule``, but still wish
+to exploit parameter optimization to automatically tune the RL hyperparameters of an algorithm. In order to do this, users can use :class:`DummyEvolvable <agilerl.modules.dummy.DummyEvolvable>`
+to wrap their non-evolvable networks in a manner compatible with our mutations framework - disabling architecture mutations but still allowing for RL hyperparameter and random weight mutations.
+
+
+**Example Usage**
 
 .. code-block:: python
 
@@ -101,7 +209,6 @@ Example Usage
         actor_network=actor
         )
 
-.. _createcustnet:
 
 Integrating Architecture Mutations Into a Custom PyTorch Network
 ----------------------------------------------------------------

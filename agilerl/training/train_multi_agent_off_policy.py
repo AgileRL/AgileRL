@@ -4,14 +4,14 @@ from copy import deepcopy
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-import gymnasium as gym
 import numpy as np
 import wandb
 from accelerate import Accelerator
+from pettingzoo import ParallelEnv
 from torch.utils.data import DataLoader
 from tqdm import trange
 
-from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
+from agilerl.algorithms import MADDPG, MATD3
 from agilerl.components.data import ReplayDataset
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.components.sampler import Sampler
@@ -23,13 +23,14 @@ from agilerl.utils.utils import (
     save_population_checkpoint,
     tournament_selection_and_mutation,
 )
+from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 InitDictType = Optional[Dict[str, Any]]
-PopulationType = List[MultiAgentRLAlgorithm]
+PopulationType = List[MADDPG | MATD3]
 
 
 def train_multi_agent_off_policy(
-    env: gym.Env,
+    env: ParallelEnv | AsyncPettingZooVecEnv,
     env_name: str,
     algo: str,
     pop: PopulationType,
@@ -259,23 +260,24 @@ def train_multi_agent_off_policy(
 
                 # Act in environment
                 next_obs, reward, termination, truncation, info = env.step(action)
+
+                # Compute score increment (replace NaNs representing inactive agents with 0)
+                agent_rewards = np.array(list(reward.values())).transpose()
+                agent_rewards = np.where(np.isnan(agent_rewards), 0, agent_rewards)
                 score_increment = (
                     (
-                        np.sum(np.array(list(reward.values())).transpose(), axis=-1)[
-                            :, np.newaxis
-                        ]
+                        np.sum(agent_rewards, axis=-1)[:, np.newaxis]
                         if is_vectorised
-                        else np.sum(
-                            np.array(list(reward.values())).transpose(), axis=-1
-                        )
+                        else np.sum(agent_rewards, axis=-1)
                     )
                     if sum_scores
-                    else np.array(list(reward.values())).transpose()
+                    else agent_rewards
                 )
 
                 scores += score_increment
                 total_steps += num_envs
                 steps += num_envs
+
                 # Save experience to replay buffer
                 if swap_channels:
                     if not is_vectorised:
@@ -333,13 +335,27 @@ def train_multi_agent_off_policy(
                 obs = next_obs
 
                 reset_noise_indices = []
+
                 # Find which agents are "done" - i.e. terminated or truncated
-                dones = {
-                    agent_id: termination[agent_id] | truncation[agent_id]
-                    for agent_id in agent.agent_ids
-                }
+                dones = {}
+                for agent_id in agent.agent_ids:
+                    terminated = termination.get(agent_id, True)
+                    truncated = truncation.get(agent_id, False)
+
+                    # Replace NaNs with True (indicate killed agent)
+                    terminated = np.where(
+                        np.isnan(terminated), True, terminated
+                    ).astype(bool)
+                    truncated = np.where(np.isnan(truncated), False, truncated).astype(
+                        bool
+                    )
+
+                    dones[agent_id] = terminated | truncated
+
                 if not is_vectorised:
-                    dones = {agent: np.array([done]) for agent, done in dones.items()}
+                    dones = {
+                        agent: np.array([dones[agent_id]]) for agent in agent.agent_ids
+                    }
 
                 for idx, agent_dones in enumerate(zip(*dones.values())):
                     if all(agent_dones):

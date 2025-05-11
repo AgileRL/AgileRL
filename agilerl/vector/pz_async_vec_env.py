@@ -30,6 +30,41 @@ PzEnvType = Union[PettingZooVecEnv, ParallelEnv]
 SharedMemoryType: TypeAlias = Union[RawArray, Tuple[RawArray, ...], Dict[str, RawArray]]
 
 
+def reshape_observation(
+    raw_data: NumpyObsType, space: spaces.Space, num_envs: int
+) -> Any:
+    """Reshape the raw data to the correct shape for the observation space.
+
+    :param raw_data: The raw data to reshape
+    :type raw_data: np.ndarray, Dict[str, np.ndarray], Tuple[np.ndarray, ...]
+    :param space: The observation space
+    :type space: gymnasium.spaces.Space
+    :param num_envs: The number of environments
+    :type num_envs: int
+
+    :return: The reshaped data
+    :rtype: Any
+    """
+    if isinstance(space, spaces.Dict):
+        result = OrderedDict()
+        for key, subspace in space.spaces.items():
+            result[key] = reshape_observation(raw_data[key], subspace, num_envs)
+
+    elif isinstance(space, spaces.Tuple):
+        result = []
+        for i, subspace in enumerate(space.spaces):
+            result.append(reshape_observation(raw_data[i], subspace, num_envs))
+
+        result = tuple(result)
+    else:
+        # Reshape to [num_envs, *shape]
+        shape = space.shape if space.shape != () else (1,)
+        reshaped = raw_data.reshape((num_envs, *shape))
+        result = reshaped.astype(space.dtype)
+
+    return result
+
+
 class AsyncState(Enum):
     """The AsyncVectorEnv possible states given the different actions."""
 
@@ -77,6 +112,8 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             else dummy_env.unwrapped.render_mode
         )
         self.possible_agents = dummy_env.possible_agents
+        self.active_agents = None
+        self.previous_active = None
         self.copy = copy
         self.agents = dummy_env.possible_agents[:]
         action_spaces = {
@@ -185,6 +222,21 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
 
         self._state = AsyncState.WAITING_RESET
 
+    def get_observations(self) -> Dict[str, NumpyObsType]:
+        """Get the observations from the environments.
+
+        :return: Observations from the environments
+        :rtype: Dict[str, NumpyObsType]
+        """
+        return (
+            {
+                agent: deepcopy(self.observations[agent])
+                for agent in self.observations.keys()
+            }
+            if self.copy
+            else self.observations
+        )
+
     def reset_wait(
         self, timeout: Optional[float] = None
     ) -> Tuple[Dict[str, NumpyObsType], Dict[str, Any]]:
@@ -219,15 +271,9 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             infos = self._add_info(infos, info, i)
 
         self._state = AsyncState.DEFAULT
+
         return (
-            (
-                {
-                    agent: deepcopy(self.observations[agent])
-                    for agent in self.observations.keys()
-                }
-                if self.copy
-                else self.observations
-            ),
+            self.get_observations(),
             infos,
         )
 
@@ -284,26 +330,26 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             env_step_return, success = pipe.recv()
             successes.append(success)
             if success:
+                reward, term, trunc, info = env_step_return
                 for agent in self.agents:
-                    rewards[agent].append(env_step_return[0][agent])
-                    terminations[agent].append(env_step_return[1][agent])
-                    truncations[agent].append(env_step_return[2][agent])
-                infos = self._add_info(infos, env_step_return[3], env_idx)
+                    rewards[agent].append(reward[agent])
+                    terminations[agent].append(term[agent])
+                    truncations[agent].append(trunc[agent])
+
+                infos = self._add_info(infos, info, env_idx)
 
         self._raise_if_errors(successes)
         self._state = AsyncState.DEFAULT
+
+        rewards = {agent: np.array(rew) for agent, rew in rewards.items()}
+        terminations = {agent: np.array(term) for agent, term in terminations.items()}
+        truncations = {agent: np.array(trunc) for agent, trunc in truncations.items()}
+
         return (
-            (
-                {
-                    agent: deepcopy(self.observations[agent])
-                    for agent in self.observations.keys()
-                }
-                if self.copy
-                else self.observations
-            ),
-            {agent: np.array(rew) for agent, rew in rewards.items()},
-            {agent: np.array(term) for agent, term in terminations.items()},
-            {agent: np.array(trunc) for agent, trunc in truncations.items()},
+            self.get_observations(),
+            rewards,
+            terminations,
+            truncations,
             infos,
         )
 
@@ -612,35 +658,9 @@ class Observations:
         """
         Get agent observation given a key (agent_id)
         """
-        space = self.obs_spaces[agent]
-        raw_data = self.obs_view[agent]
-        if isinstance(space, spaces.Dict):
-            result = OrderedDict()
-            for key, subspace in space.spaces.items():
-                subspace_data = raw_data[key]
-                shape = subspace.shape if subspace.shape != () else (1,)
-
-                # Reshape to [num_envs, *shape]
-                reshaped = subspace_data.reshape((self.num_envs, *shape))
-                result[key] = reshaped.astype(subspace.dtype)
-
-        elif isinstance(space, spaces.Tuple):
-            result = []
-            for i, subspace in enumerate(space.spaces):
-                subspace_data = raw_data[i]
-                shape = subspace.shape if subspace.shape != () else (1,)
-
-                reshaped = subspace_data.reshape((self.num_envs, *subspace.shape))
-                result.append(reshaped.astype(subspace.dtype))
-
-            result = tuple(result)
-        else:
-            shape = space.shape if space.shape != () else (1,)
-
-            reshaped = raw_data.reshape((self.num_envs, *shape))
-            result = reshaped.astype(space.dtype)
-
-        return result
+        return reshape_observation(
+            self.obs_view[agent], self.obs_spaces[agent], self.num_envs
+        )
 
     def __str__(self) -> str:
         return f"{self.obs_view}"
@@ -731,7 +751,8 @@ def get_placeholder_value(
     transition_name: str,
     obs_spaces: Optional[Dict[str, spaces.Space]] = None,
 ) -> Any:
-    """When an agent is killed, used to obtain a placeholder value to return for associated experience.
+    """Used to obtain a placeholder value to return for associated experience when an
+    agent is killed or is inactive for the current step.
 
     :param agent: Agent ID
     :type agent: str
@@ -739,14 +760,17 @@ def get_placeholder_value(
     :type transition_name: str
     :param obs_spaces: Observation spaces
     :type obs_spaces: Dict[str, gymnasium.spaces.Space]
+
+    :return: Placeholder value
+    :rtype: Any
     """
     match transition_name:
         case "reward":
-            return 0
+            return np.nan
         case "truncated":
-            return False
+            return np.nan
         case "terminated":
-            return True
+            return np.nan
         case "info":
             return {}
         case "observation":
@@ -756,25 +780,25 @@ def get_placeholder_value(
             agent_space = obs_spaces[agent]
             if isinstance(agent_space, spaces.Dict):
                 # For Dict spaces, create a dictionary of -1 arrays
-                return {k: -np.ones(v.shape) for k, v in agent_space.items()}
+                return {k: np.full(v.shape, np.nan) for k, v in agent_space.items()}
             elif isinstance(agent_space, spaces.Tuple):
                 # For Tuple spaces, create a tuple of -1 arrays
-                return tuple(-np.ones(s.shape) for s in agent_space)
+                return tuple(np.full(s.shape, np.nan) for s in agent_space)
             else:
                 # For normal spaces
-                return -np.ones_like(agent_space.shape)
+                return np.full(agent_space.shape, np.nan)
 
 
 def process_transition(
-    transitions: Tuple[Any],
+    transitions: Tuple[Dict[str, NumpyObsType], ...],
     obs_spaces: Dict[str, spaces.Space],
     transition_names: List[str],
     agents: List[str],
-) -> List[Dict[str, Any]]:
+) -> List[Dict[str, NumpyObsType]]:
     """Process transition, adds in placeholder values for killed sub-agents.
 
     :param transitions: Tuple of environment transition
-    :type transitions: Tuple[Any]
+    :type transitions: Tuple[Dict[str, NumpyObsType], ...]
     :param obs_spaces: Observation spaces
     :type obs_spaces: Dict[str, gymnasium.spaces.Space]
     :param transition_names: Names associated to transitions
@@ -782,8 +806,8 @@ def process_transition(
     :param agents: List of sub-agent names
     :type agents: List[str]
     """
-    transition_list = list(transitions)
-    for transition, name in zip(transition_list, transition_names):
+    transition_list = []
+    for transition, name in zip(list(transitions), transition_names):
         transition = {
             agent: (
                 transition[agent]
@@ -792,7 +816,34 @@ def process_transition(
             )
             for agent in agents
         }
+        transition_list.append(transition)
     return transition_list
+
+
+def write_vector_observation(
+    index: int,
+    observation: np.ndarray,
+    shared_memory: RawArray,
+    obs_space: spaces.Space,
+) -> None:
+    """Write a vector observation to the shared memory.
+
+    :param index: Environment index
+    :type index: int
+    :param observation: Observation from env.step or env.reset
+    :type observation: np.ndarray
+    :param shared_memory: Shared memory
+    :type shared_memory: multiprocessing.RawArray
+    :param obs_space: Observation space
+    :type obs_space: gymnasium.spaces.Space
+    """
+    size = int(np.prod(obs_space.shape))
+    dtype = obs_space.dtype
+    dest = np.frombuffer(shared_memory.get_obj(), dtype=dtype)
+    np.copyto(
+        dest[index * size : (index + 1) * size],
+        np.asarray(observation, dtype=dtype).flatten(),
+    )
 
 
 def write_to_shared_memory(
@@ -808,38 +859,26 @@ def write_to_shared_memory(
     :param observation: Observation from env.step or env.reset
     :type observation: Dict[str, np.ndarray]
     :param shared_memory: Shared memory
-    :type shared_memory: Dict[str, mp.Array]
+    :type shared_memory: Dict[str, mp.Array | Tuple[mp.Array, ...] | Dict[str, mp.Array]]
     :param obs_space: Observation space dictionary
     :type obs_space: Dict[str, gymnasium.spaces.Space]
     """
-    for agent, obs in observation.items():
+    for agent in shared_memory.keys():
         agent_space = obs_space[agent]
+        obs = observation[agent]
         if isinstance(agent_space, spaces.Dict):
             for key, subspace in agent_space.spaces.items():
-                size = int(np.prod(subspace.shape))
-                dtype = subspace.dtype
-                dest = np.frombuffer(shared_memory[agent][key].get_obj(), dtype=dtype)
-                np.copyto(
-                    dest[index * size : (index + 1) * size],
-                    np.asarray(obs[key], dtype=dtype).flatten(),
+                write_vector_observation(
+                    index, obs[key], shared_memory[agent][key], subspace
                 )
+
         elif isinstance(agent_space, spaces.Tuple):
             for i, subspace in enumerate(agent_space.spaces):
-                size = int(np.prod(subspace.shape))
-                dtype = subspace.dtype
-                dest = np.frombuffer(shared_memory[agent][i].get_obj(), dtype=dtype)
-                np.copyto(
-                    dest[index * size : (index + 1) * size],
-                    np.asarray(obs[i], dtype=dtype).flatten(),
+                write_vector_observation(
+                    index, obs[i], shared_memory[agent][i], subspace
                 )
         else:
-            size = int(np.prod(agent_space.shape))
-            dtype = agent_space.dtype
-            dest = np.frombuffer(shared_memory[agent].get_obj(), dtype=dtype)
-            np.copyto(
-                dest[index * size : (index + 1) * size],
-                np.asarray(obs, dtype=dtype).flatten(),
-            )
+            write_vector_observation(index, obs, shared_memory[agent], agent_space)
 
 
 def _async_worker(
@@ -880,11 +919,15 @@ def _async_worker(
     observation_space = {agent: env.observation_space(agent) for agent in agents}
     parent_pipe.close()
 
+    # Need to keep track of the active agents in the environment
+    current_active = None
     try:
         while True:
             command, data = pipe.recv()
             if command == "reset":
-                transition = env.reset(**data)
+                obs, info = env.reset(**data)
+                current_active = list(obs.keys())
+                transition = obs, info
                 observation, info = process_transition(
                     transition,
                     observation_space,
@@ -894,7 +937,7 @@ def _async_worker(
                 write_to_shared_memory(
                     index, observation, shared_memory, observation_space
                 )
-                pipe.send(((info), True))
+                pipe.send((info, True))
             elif command == "step":
                 data = {
                     possible_agent: (
@@ -902,10 +945,9 @@ def _async_worker(
                         if not isinstance(data[idx], int)
                         else data[idx]
                     )
-                    for idx, possible_agent in enumerate(agents)
+                    for idx, possible_agent in enumerate(current_active)
                 }
                 observation, reward, terminated, truncated, info = env.step(data)
-                transition = observation, reward, terminated, truncated, info
                 if all(
                     [
                         term | trunc
@@ -913,6 +955,9 @@ def _async_worker(
                     ]
                 ):
                     observation, info = env.reset()
+
+                current_active = list(observation.keys())
+                transition = observation, reward, terminated, truncated, info
                 observation, reward, terminated, truncated, info = process_transition(
                     transition,
                     observation_space,

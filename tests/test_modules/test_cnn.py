@@ -225,11 +225,9 @@ def test_add_cnn_layer_simple(
     )
     initial_channel_num = len(evolvable_cnn.channel_size)
     initial_net = evolvable_cnn.model
-    print(initial_net)
     initial_net_dict = dict(initial_net.named_parameters())
     evolvable_cnn.add_layer()
     new_net = evolvable_cnn.model
-    print(new_net)
     if initial_channel_num < 6:
         assert len(evolvable_cnn.channel_size) == initial_channel_num + 1
         for key, param in new_net.named_parameters():

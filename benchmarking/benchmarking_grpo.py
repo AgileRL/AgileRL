@@ -16,7 +16,7 @@ from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
-MODEL_PATH = "Qwen/Qwen2.5-3B"
+MODEL_PATH = "Qwen/Qwen2.5-1.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
 
@@ -27,8 +27,8 @@ def create_model(pretrained_model_name_or_path):
         attn_implementation="flash_attention_2",
     )
     peft_config = LoraConfig(
-        r=32,
-        lora_alpha=32,
+        r=16,
+        lora_alpha=64,
         target_modules=[
             "q_proj",
             "k_proj",
@@ -72,7 +72,7 @@ def countdown_chat_template(q, a, tokenizer):
 
 def make_dataset(dataset_name: str) -> Tuple[Dataset, Dataset]:
     raw_dataset = (
-        load_dataset(DATASET, split="train").shuffle(seed=42).select(range(50000))
+        load_dataset(dataset_name, split="train").shuffle(seed=42).select(range(50000))
     )
     raw_dataset = raw_dataset.rename_column("target", "answer")
     raw_dataset = raw_dataset.rename_column("nums", "question")
@@ -123,7 +123,6 @@ def equation_reward_func(completions, target, nums, **kwargs):
 
             allowed_pattern = r"^[\d+\-*/().\s]+$"
             if not re.match(allowed_pattern, equation):
-                print(f"Equation format invalid: {equation}")
                 rewards.append(0.0)
                 continue
 
@@ -132,10 +131,8 @@ def equation_reward_func(completions, target, nums, **kwargs):
             if abs(float(result) - float(gt)) < 1e-5:
                 rewards.append(1.0)
             else:
-                print(f"Result {result} doesn't match target {gt}")
                 rewards.append(0.0)
-        except Exception as e:
-            print(f"Equation error: {e}")
+        except Exception:
             rewards.append(0.0)
     return rewards
 
@@ -144,16 +141,6 @@ def combined_rewards(completion, solution, prompt):
     reward = (
         equation_reward_func([completion], [solution], [prompt])[0]
         + format_reward_func([completion], [solution])[0]
-    )
-
-    print(
-        f"""
-============================================ \n
-Completion: {completion}, \n
-Numbers: {prompt}, \n
-Correct Answer: {solution.item()} \n
-Reward: {reward}
-"""
     )
 
     if reward == 2.0:
@@ -190,7 +177,14 @@ def main(init_hp, mut_p):
     train_dataset, test_dataset = make_dataset(DATASET)
 
     # Convert the HuggingFace dataset into a Gymnasium environment
-    accelerators = [Accelerator() for _ in range(init_hp["POP_SIZE"])]
+    accelerator = Accelerator()
+    accelerator.state.deepspeed_plugin.deepspeed_config["activation_checkpointing"] = {
+        "partition_activations": True,
+        "cpu_checkpointing": True,
+        "synchronize_checkpoint_boundary": True,
+        "number_checkpoints": 2,
+    }
+
     env = HuggingFaceGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
@@ -199,10 +193,10 @@ def main(init_hp, mut_p):
         apply_chat_template_fn=countdown_chat_template,
         data_batch_size_per_gpu=2,
         custom_collate_fn=custom_collate_fn,
-        accelerator=accelerators[0],
+        accelerator=accelerator,
     )
-    init_hp["actor_network"] = model
-    init_hp["pad_token_id"] = tokenizer.eos_token_id
+
+    init_hp["PAD_TOKEN_ID"] = tokenizer.eos_token_id
 
     hp_config = HyperparameterConfig(
         beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),
@@ -211,17 +205,19 @@ def main(init_hp, mut_p):
             min=mut_p["MIN_GROUP_SIZE"], max=mut_p["MAX_GROUP_SIZE"], dtype=int
         ),
     )
-
     pop = create_population(
         algo=init_hp["ALGO"],
         observation_space=env.observation_space,
         action_space=env.action_space,
         net_config=None,
+        actor_network=model,
         INIT_HP=init_hp,
         hp_config=hp_config,
         population_size=init_hp["POP_SIZE"],
-        accelerator=accelerators,
+        accelerator=accelerator,
     )
+
+    del model
 
     tournament = TournamentSelection(
         init_hp["TOURN_SIZE"],
@@ -239,7 +235,7 @@ def main(init_hp, mut_p):
         rl_hp=mut_p["RL_HP_MUT"],
         mutation_sd=mut_p["MUT_SD"],
         rand_seed=mut_p["RAND_SEED"],
-        accelerator=accelerators[0],
+        accelerator=accelerator,
     )
 
     finetune_llm(
@@ -247,20 +243,23 @@ def main(init_hp, mut_p):
         env=env,
         init_hp=init_hp,
         evaluation_interval=10,
-        wb=False,
+        wb=True,
         save_elite=True,
         elite_path="saved_llms",
         max_reward=2.0,
-        evo_steps=1,
+        evo_steps=10,
         mutation=mutations,
         tournament=tournament,
-        accelerator=accelerators[0],
+        accelerator=accelerator,
         verbose=True,
-        max_steps=3000,
     )
+    accelerator.end_training()
 
 
 if __name__ == "__main__":
+    import os
+
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     with open("configs/training/grpo.yaml") as file:
         config = yaml.safe_load(file)
     init_hp = config["INIT_HP"]
