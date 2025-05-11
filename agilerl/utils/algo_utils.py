@@ -58,45 +58,13 @@ def share_encoder_parameters(
     param_vals: TensorDict = from_module(policy.encoder).detach()
     for other in others:
         target_params: TensorDict = param_vals.clone().lock_()
-        target_params.to_module(other.encoder, use_state_dict=True)
+        
+        # NOTE: Should we use `use_state_dict=True` here? 
+        target_params.to_module(other.encoder)
 
         # Disable architecture mutations since we will be
         # reinitializing directly through a mutation hook
         other.encoder.disable_mutations()
-
-
-# def share_encoder_parameters(
-#     policy: EvolvableNetwork, *others: EvolvableNetwork
-# ) -> None:
-#     """Shares the encoder parameters between the policy and any number of other networks.
-
-#     :param policy: The policy network whose encoder parameters will be used.
-#     :type policy: EvolvableNetwork
-#     :param others: The other networks whose encoder parameters will be pinned to the policy.
-#     :type others: EvolvableNetwork
-#     """
-#     assert isinstance(policy, EvolvableNetwork), "Policy must be an EvolvableNetwork"
-#     assert all(
-#         isinstance(other, EvolvableNetwork) for other in others
-#     ), "All others must be EvolvableNetwork"
-
-#     # Directly copy the encoder `state_dict` to every other network **before**
-#     # freezing the weights.  This keeps the destination parameters registered
-#     # as proper `torch.nn.Parameter`s so that pickling / cloning continues to
-#     # work, but prevents them from being updated during optimisation.
-
-#     src_state = policy.encoder.state_dict()
-
-#     for other in others:
-#         other.encoder.load_state_dict(src_state)
-
-#         # Freeze – we only want the policy encoder to keep training.
-#         for param in other.encoder.parameters():
-#             param.requires_grad = False
-
-#         # Disable architecture mutations since we will be
-#         # reinitializing directly through a mutation hook
-#         other.encoder.disable_mutations()
 
 
 def get_hidden_states_shape_from_model(model: Module) -> Dict[str, int]:
