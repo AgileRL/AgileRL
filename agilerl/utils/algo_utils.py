@@ -14,7 +14,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from accelerate.optimizer import AcceleratedOptimizer
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
-from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 from gymnasium import spaces
 from peft import PeftModel, get_peft_model
 from tensordict import TensorDict, from_module
@@ -1337,7 +1336,8 @@ def is_peft_model(model: nn.Module) -> bool:
 
 
 def clone_llm(
-    original_model: PreTrainedModelType, state_dict: Optional[Dict[str, torch.Tensor]] = None
+    original_model: PreTrainedModelType,
+    state_dict: Optional[Dict[str, torch.Tensor]] = None,
 ) -> PreTrainedModelType:
     """Clone the actor.
 
