@@ -27,6 +27,7 @@ import torch
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
+from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
 from gymnasium import spaces
 from numpy.typing import ArrayLike
@@ -1752,14 +1753,29 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """Clean up the algorithm."""
 
         if self.accelerator is not None:
-            self.actor, self.reference_actor, self.optimizer, self.lr_scheduler = (
-                self.accelerator.free_memory(
-                    self.actor, self.reference_actor, self.optimizer, self.lr_scheduler
-                )
+            (
+                self.actor,
+                self.reference_actor,
+                self.optimizer,
+                self.lr_scheduler,
+                self.reference_actor_state_dict,
+            ) = self.accelerator.free_memory(
+                self.actor,
+                self.reference_actor,
+                self.optimizer,
+                self.lr_scheduler,
+                self.reference_actor_state_dict,
             )
             self.accelerator.wait_for_everyone()
         else:
-            self.actor, self.reference_actor, self.optimizer, self.lr_scheduler = (
+            (
+                self.actor,
+                self.reference_actor,
+                self.optimizer,
+                self.lr_scheduler,
+                self.reference_actor_state_dict,
+            ) = (
+                None,
                 None,
                 None,
                 None,
@@ -1803,9 +1819,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 else self.actor
             )
 
-            cloned_actor = clone_llm(
-                actor, load_state_dict=(self.zero_stage is None or self.zero_stage < 2)
-            )
+            actor_state_dict = None
+            if self.zero_stage is None or self.zero_stage < 2:
+                actor_state_dict = clone_tensors_for_torch_save(actor.state_dict())
+
+            cloned_actor = clone_llm(actor, state_dict=actor_state_dict)
 
             actor = None  # De-reference the actor
             input_args["actor_network"] = cloned_actor
@@ -1845,10 +1863,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 clone.index = index
 
             clone.wrap_models()
-            for param, cloned_param in zip(
-                self.reference_actor.parameters(), clone.reference_actor.parameters()
-            ):
-                cloned_param.data = param.data
 
             if self.zero_stage is not None and self.zero_stage >= 2:
                 clone.accelerator.wait_for_everyone()
@@ -1857,6 +1871,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             else:
                 if self.accelerator is not None:
                     self.accelerator.wait_for_everyone()
+
         return clone
 
     @staticmethod

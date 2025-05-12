@@ -141,6 +141,7 @@ class RLParameter:
                 new_value = self.max
 
         new_value = min(max(new_value, self.min), self.max)
+        new_value = round(new_value) if self.dtype == int else new_value
         self.value = self.dtype(new_value)
         return self.value
 
