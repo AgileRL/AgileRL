@@ -43,6 +43,10 @@ def test_deterministic_actor_initialization(
     elif encoder_type == "cnn":
         assert isinstance(network.encoder, EvolvableCNN)
 
+    evolvable_modules = network.modules()
+    assert "encoder" in evolvable_modules
+    assert "head_net" in evolvable_modules
+
 
 @pytest.mark.parametrize("action_space", [generate_random_box_space((4,))])
 @pytest.mark.parametrize(
@@ -283,6 +287,10 @@ def test_stochastic_actor_initialization(observation_space, action_space, encode
         assert isinstance(network.encoder, EvolvableMLP)
     elif encoder_type == "cnn":
         assert isinstance(network.encoder, EvolvableCNN)
+
+    evolvable_modules = network.modules()
+    assert "encoder" in evolvable_modules
+    assert "head_net" in evolvable_modules
 
 
 @pytest.mark.parametrize(
