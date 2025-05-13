@@ -1,6 +1,6 @@
 import copy
 import warnings
-from typing import Any, Callable, Dict, Optional, Tuple, Union, List
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -11,6 +11,7 @@ from torch.nn.utils import clip_grad_norm_
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
+from agilerl.components.rollout_buffer import RolloutBuffer
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import StochasticActor
@@ -26,7 +27,6 @@ from agilerl.utils.algo_utils import (
     share_encoder_parameters,
     stack_experiences,
 )
-from agilerl.components.rollout_buffer import RolloutBuffer
 
 
 class PPO(RLAlgorithm):

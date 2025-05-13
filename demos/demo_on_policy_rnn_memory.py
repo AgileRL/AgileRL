@@ -8,7 +8,6 @@ import gymnasium as gym
 import numpy as np
 import torch
 from tqdm import trange
-import os
 
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection

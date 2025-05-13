@@ -3,7 +3,6 @@ from pathlib import Path
 
 import dill
 import gymnasium
-from gymnasium.vector import SyncVectorEnv
 import numpy as np
 import pytest
 import torch
@@ -13,8 +12,8 @@ from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 
-from agilerl.components.rollout_buffer import RolloutBuffer
 from agilerl.algorithms.ppo import PPO
+from agilerl.components.rollout_buffer import RolloutBuffer
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (

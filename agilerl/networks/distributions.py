@@ -454,8 +454,13 @@ class EvolvableDistribution(EvolvableWrapper):
         return masked_logits
 
     def forward(
-        self, latent: torch.Tensor, action_mask: Optional[ArrayOrTensor] = None, sample: bool = True
-    ) -> Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], Tuple[None, None, torch.Tensor]]:
+        self,
+        latent: torch.Tensor,
+        action_mask: Optional[ArrayOrTensor] = None,
+        sample: bool = True,
+    ) -> Union[
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor], Tuple[None, None, torch.Tensor]
+    ]:
         """Forward pass of the network.
 
         :param latent: Latent space representation.

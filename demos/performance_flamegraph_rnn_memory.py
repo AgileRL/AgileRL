@@ -2,29 +2,24 @@
 # This script demonstrates profiling AgileRL training using flamegraphs to identify bottlenecks
 # for the Memory Game RNN/MLP demo (see demo_on_policy_rnn_memory.py).
 
-import webbrowser
-import torch
-from tqdm import trange
-import time
-import os
-import glob
-import io
-import gymnasium as gym
-
 # Profiling tools
 import cProfile
+import io
+import os
 import pstats
-import pyinstrument
-from torch.profiler import profile, record_function, ProfilerActivity
-from IPython.display import display, HTML, Video
-import tempfile
+import time
+import webbrowser
 
-from agilerl.hpo.mutation import Mutations
-from agilerl.hpo.tournament import TournamentSelection
-from agilerl.utils.utils import create_population
+import gymnasium as gym
 
 # --- Memory Game Environment (from demo_on_policy_rnn_memory.py) ---
 import numpy as np
+import pyinstrument
+import torch
+from torch.profiler import ProfilerActivity, profile, record_function
+from tqdm import trange
+
+from agilerl.utils.utils import create_population
 
 
 class MemoryGameEnv(gym.Env):

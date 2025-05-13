@@ -136,24 +136,24 @@ class EvolvableMultiInput(EvolvableModule):
 
         assert num_outputs > 0, "Number of outputs must be greater than 0."
         assert latent_dim > 0, "Latent dimension must be greater than 0."
-        assert isinstance(observation_space, (spaces.Dict, spaces.Tuple)), (
-            "Observation space must be a Dict or Tuple space."
-        )
-        assert latent_dim <= max_latent_dim, (
-            "Latent dimension must be less than or equal to max latent dimension."
-        )
-        assert latent_dim >= min_latent_dim, (
-            "Latent dimension must be greater than or equal to min latent dimension."
-        )
+        assert isinstance(
+            observation_space, (spaces.Dict, spaces.Tuple)
+        ), "Observation space must be a Dict or Tuple space."
+        assert (
+            latent_dim <= max_latent_dim
+        ), "Latent dimension must be less than or equal to max latent dimension."
+        assert (
+            latent_dim >= min_latent_dim
+        ), "Latent dimension must be greater than or equal to min latent dimension."
 
         subspaces = (
             observation_space.spaces.values()
             if isinstance(observation_space, spaces.Dict)
             else observation_space.spaces
         )
-        assert all([isinstance(space, self._SupportedSpaces) for space in subspaces]), (
-            "Observation space must contain only Box, Discrete, or MultiDiscrete spaces."
-        )
+        assert all(
+            [isinstance(space, self._SupportedSpaces) for space in subspaces]
+        ), "Observation space must contain only Box, Discrete, or MultiDiscrete spaces."
 
         # Convert Tuple space to Dict space for consistency
         self.is_tuple_space = False

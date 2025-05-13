@@ -1,13 +1,12 @@
-from copy import deepcopy
-import warnings
 import random  # Added to support random sequence sampling for BPTT
-from typing import Dict, List, Optional, Union, Tuple, Any
+import warnings
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
 from gymnasium import spaces
 
-from agilerl.typing import ArrayOrTensor, TorchObsType, ObservationType
+from agilerl.typing import ArrayOrTensor, ObservationType
 
 
 class RolloutBuffer:

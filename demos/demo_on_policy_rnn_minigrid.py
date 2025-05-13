@@ -4,15 +4,14 @@
 # The observation wrapper flattens the image and concatenates a one-hot encoding of the agent's direction.
 # This version follows the training structure of performance_flamegraph_cartpole.py and performance_flamegraph_lunar_lander.py,
 # using a population and a simple evolutionary loop.
+import os
 import shutil
-import imageio
-import minigrid  # lgtm[py/unused-import] noqa: F401 pylint: disable=unused-import
+
 import gymnasium as gym
+import imageio
 import numpy as np
 import torch
 from tqdm import trange
-import os
-from gymnasium.wrappers import RecordVideo
 
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection

@@ -1,12 +1,11 @@
-from copy import deepcopy
 import inspect
 import warnings
+from copy import deepcopy
 from dataclasses import asdict
 from typing import Any, Dict, Optional, Tuple, Type, TypeVar, Union
 
 import numpy as np
 import torch
-import torch.nn as nn
 from gymnasium import spaces
 
 from agilerl.modules import (
@@ -425,7 +424,11 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         if self.recurrent:
 
             # if the hidden state is not initialized, initialize it
-            if self.cached_hidden_state is None or len(self.cached_hidden_state) == 0 or self.cached_hidden_state_batch_size != batch_size:
+            if (
+                self.cached_hidden_state is None
+                or len(self.cached_hidden_state) == 0
+                or self.cached_hidden_state_batch_size != batch_size
+            ):
                 self.cached_hidden_state = {}
                 self.cached_hidden_state_batch_size = batch_size
                 for name, shape in get_hidden_states_shape_from_model(

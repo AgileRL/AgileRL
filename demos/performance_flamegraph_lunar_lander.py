@@ -1,22 +1,22 @@
 # AgileRL Performance Profiling with Flamegraphs
 # This script demonstrates profiling AgileRL training using flamegraphs to identify bottlenecks.
 
-import webbrowser
-import torch
-from tqdm import trange
-import time
-import os
-import glob
-import io
-import gymnasium as gym
-
 # Profiling tools
 import cProfile
+import glob
+import io
+import os
 import pstats
+import time
+import webbrowser
+
+import gymnasium as gym
 import pyinstrument
-from torch.profiler import profile, record_function, ProfilerActivity
-from IPython.display import display, HTML, Video
-import tempfile
+import torch
+from IPython.display import Video, display
+from torch.profiler import ProfilerActivity, profile, record_function
+from tqdm import trange
+
 from agilerl.utils.utils import create_population, make_vect_envs
 
 # !Note: If you are running this demo without having installed agilerl,

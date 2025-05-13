@@ -1,16 +1,16 @@
-import math, torch
-import torch.nn.functional as F
-from typing import Dict, List, Optional, Protocol, Tuple, Type, Union
+import math
+from typing import Optional, Tuple, Union
 
 import numpy as np
+import torch
+import torch.nn.functional as F
 from gymnasium import spaces
-
-# NOTE: we still import Normal / Bernoulli solely for continuous & binary helpers,
-#       but no Categorical objects are ever instantiated any more.
-from torch.distributions import Bernoulli, Normal
 
 from agilerl.modules.base import EvolvableModule, EvolvableWrapper
 from agilerl.typing import ArrayOrTensor, ConfigType, DeviceType
+
+# NOTE: we still import Normal / Bernoulli solely for continuous & binary helpers,
+#       but no Categorical objects are ever instantiated any more.
 
 
 def apply_action_mask_discrete(
@@ -409,7 +409,7 @@ class EvolvableDistribution(EvolvableWrapper):
                 ):
                     try:
                         action_mask = np.stack(action_mask)
-                    except Exception as e:
+                    except Exception:
                         # If stacking fails, it might be a non-uniform list or other structure not directly convertible.
                         # This path assumes action_mask should become a single tensor.
                         # If it's already a correct tensor, as_tensor below handles it.

@@ -64,9 +64,9 @@ def get_architecture_mut_method(
     # All of the offsprings should be the same EvolvableModule type, so we can
     # just sample the mutation method from the first offspring
     if isinstance(eval, list):
-        assert all(isinstance(offspring, eval[0].__class__) for offspring in eval), (
-            "All offspring should be of the same type."
-        )
+        assert all(
+            isinstance(offspring, eval[0].__class__) for offspring in eval
+        ), "All offspring should be of the same type."
 
         # NOTE: For multi-agent settings we apply the same architecture mutations to
         # all agents. However, depending on use-case it might be beneficial to have agents
@@ -175,54 +175,54 @@ class Mutations:
         device: str = "cpu",
         accelerator: Optional[Accelerator] = None,
     ):
-        assert isinstance(no_mutation, (float, int)), (
-            "Probability of no mutation must be a float or integer."
-        )
-        assert no_mutation >= 0, (
-            "Probability of no mutation must be greater than or equal to zero."
-        )
-        assert isinstance(architecture, (float, int)), (
-            "Probability of architecture mutation must be a float or integer."
-        )
-        assert architecture >= 0, (
-            "Probability of architecture mutation must be greater than or equal to zero."
-        )
-        assert isinstance(new_layer_prob, (float, int)), (
-            "Probability of new layer architecture mutation must be a float or integer."
-        )
-        assert 1 >= new_layer_prob >= 0, (
-            "Probability of new layer architecture mutation must be between zero and one (inclusive)."
-        )
-        assert isinstance(parameters, (float, int)), (
-            "Probability of parameters mutation must be a float or integer."
-        )
-        assert parameters >= 0, (
-            "Probability of parameters mutation must be greater than or equal to zero."
-        )
-        assert isinstance(activation, (float, int)), (
-            "Probability of activation mutation must be a float or integer."
-        )
-        assert activation >= 0, (
-            "Probability of activation mutation must be greater than or equal to zero."
-        )
-        assert isinstance(rl_hp, (float, int)), (
-            "Probability of reinforcement learning hyperparameter mutation must be a float or integer."
-        )
-        assert rl_hp >= 0, (
-            "Probability of reinforcement learning hyperparameter mutation must be greater than or equal to zero."
-        )
-        assert mutation_sd >= 0, (
-            "Mutation strength must be greater than or equal to zero."
-        )
-        assert isinstance(mutation_sd, (float, int)), (
-            "Mutation strength must be a float or integer."
-        )
-        assert isinstance(mutate_elite, bool), (
-            "Mutate elite must be boolean value True or False."
-        )
-        assert isinstance(rand_seed, int) or rand_seed is None, (
-            "Random seed must be an integer or None."
-        )
+        assert isinstance(
+            no_mutation, (float, int)
+        ), "Probability of no mutation must be a float or integer."
+        assert (
+            no_mutation >= 0
+        ), "Probability of no mutation must be greater than or equal to zero."
+        assert isinstance(
+            architecture, (float, int)
+        ), "Probability of architecture mutation must be a float or integer."
+        assert (
+            architecture >= 0
+        ), "Probability of architecture mutation must be greater than or equal to zero."
+        assert isinstance(
+            new_layer_prob, (float, int)
+        ), "Probability of new layer architecture mutation must be a float or integer."
+        assert (
+            1 >= new_layer_prob >= 0
+        ), "Probability of new layer architecture mutation must be between zero and one (inclusive)."
+        assert isinstance(
+            parameters, (float, int)
+        ), "Probability of parameters mutation must be a float or integer."
+        assert (
+            parameters >= 0
+        ), "Probability of parameters mutation must be greater than or equal to zero."
+        assert isinstance(
+            activation, (float, int)
+        ), "Probability of activation mutation must be a float or integer."
+        assert (
+            activation >= 0
+        ), "Probability of activation mutation must be greater than or equal to zero."
+        assert isinstance(
+            rl_hp, (float, int)
+        ), "Probability of reinforcement learning hyperparameter mutation must be a float or integer."
+        assert (
+            rl_hp >= 0
+        ), "Probability of reinforcement learning hyperparameter mutation must be greater than or equal to zero."
+        assert (
+            mutation_sd >= 0
+        ), "Mutation strength must be greater than or equal to zero."
+        assert isinstance(
+            mutation_sd, (float, int)
+        ), "Mutation strength must be a float or integer."
+        assert isinstance(
+            mutate_elite, bool
+        ), "Mutate elite must be boolean value True or False."
+        assert (
+            isinstance(rand_seed, int) or rand_seed is None
+        ), "Random seed must be an integer or None."
         if isinstance(rand_seed, int):
             assert rand_seed >= 0, "Random seed must be greater than or equal to zero."
 

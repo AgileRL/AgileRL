@@ -223,9 +223,9 @@ class TorchDistribution:
         squash_output: bool = False,
     ) -> None:
         if isinstance(distribution, list):
-            assert all(isinstance(d, Categorical) for d in distribution), (
-                "Only list of Categorical distributions are supported (for MultiDiscrete action spaces)."
-            )
+            assert all(
+                isinstance(d, Categorical) for d in distribution
+            ), "Only list of Categorical distributions are supported (for MultiDiscrete action spaces)."
 
         self.distribution = distribution
         self.squash_output = squash_output
