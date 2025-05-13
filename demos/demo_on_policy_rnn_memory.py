@@ -171,11 +171,12 @@ pop = create_population(
 )
 
 # --- Setup Evolution Components ---
+eval_loop = 10
 tournament = TournamentSelection(
     tournament_size=2,
     elitism=True,
     population_size=INIT_HP["POP_SIZE"],
-    eval_loop=1,
+    eval_loop=eval_loop,
 )
 
 mutations = Mutations(
@@ -197,7 +198,6 @@ max_steps = 5_000_000 // num_envs
 required_score = 0.95
 evo_steps = num_envs * INIT_HP["LEARN_STEP"] * 100
 eval_steps = None
-eval_loop = 5
 
 total_steps = 0
 training_complete = False

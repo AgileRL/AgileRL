@@ -877,7 +877,7 @@ class PPO(RLAlgorithm):
                 mb_old_log_probs = old_log_probs[minibatch_indices]
                 mb_advantages = advantages[minibatch_indices]
                 mb_returns = returns[minibatch_indices]
-                mb_old_values = values[minibatch_indices]
+                # mb_old_values = values[minibatch_indices]
 
                 mb_hidden_states = None
                 if self.recurrent:
@@ -1036,7 +1036,7 @@ class PPO(RLAlgorithm):
                     old_log_prob_t = mb_old_log_probs_seq[:, t]
                     adv_t = mb_advantages_seq[:, t]
                     return_t = mb_returns_seq[:, t]
-                    old_value_t = mb_old_values_seq[:, t]
+                    # old_value_t = mb_old_values_seq[:, t]
 
                     # Get values, entropy, and next hidden state directly
                     # step_hidden_state is already (layer, batch, hidden)

@@ -4,7 +4,8 @@
 # The observation wrapper flattens the image and concatenates a one-hot encoding of the agent's direction.
 # This version follows the training structure of performance_flamegraph_cartpole.py and performance_flamegraph_lunar_lander.py,
 # using a population and a simple evolutionary loop.
-
+import shutil
+import imageio
 import minigrid  # lgtm[py/unused-import] noqa: F401 pylint: disable=unused-import
 import gymnasium as gym
 import numpy as np
@@ -59,6 +60,7 @@ if recurrent:
     NET_CONFIG = {
         "encoder_config": {
             "hidden_state_size": 128,  # LSTM hidden state size
+            "max_seq_len": 128,
         },
     }
 else:
@@ -117,11 +119,7 @@ pop = create_population(
     population_size=INIT_HP["POP_SIZE"],
     num_envs=num_envs,
     device=device,
-    algo_kwargs={
-        "use_rollout_buffer": True,
-        **({"recurrent": True, "hidden_state_size": 128} if recurrent else {}),
-        "max_seq_len": 128,
-    },
+    algo_kwargs={"use_rollout_buffer": True, "recurrent": recurrent},
 )
 
 # --- Setup Evolution Components ---
@@ -229,7 +227,6 @@ render_env = gym.wrappers.RecordVideo(
     env_to_wrap, video_folder="temp_video", disable_logger=True
 )
 
-import imageio
 
 frames = []
 total_steps = 0
@@ -277,7 +274,6 @@ avg_steps = total_steps / len(episode_rewards)
 print(f"Average Reward: {avg_reward:.2f}, Average Steps: {avg_steps:.2f}")
 
 render_env.close()
-import shutil
 
 if os.path.exists("temp_video"):
     shutil.rmtree("temp_video")
