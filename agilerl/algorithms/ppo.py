@@ -850,7 +850,7 @@ class PPO(RLAlgorithm):
         old_log_probs = buffer_data["log_probs"]
         advantages = buffer_data["advantages"]
         returns = buffer_data["returns"]
-        values = buffer_data["values"]
+        # values = buffer_data["values"]
 
         # Normalize advantages
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -965,7 +965,7 @@ class PPO(RLAlgorithm):
         old_log_probs = buffer_data["log_probs"]
         advantages = buffer_data["advantages"]
         returns = buffer_data["returns"]
-        values = buffer_data["values"]
+        # values = buffer_data["values"]
 
         # Normalize advantages across all timesteps and batches
         flat_adv = advantages.reshape(-1)
@@ -1002,7 +1002,7 @@ class PPO(RLAlgorithm):
                 mb_old_log_probs_seq = old_log_probs[batch_indices]
                 mb_advantages_seq = advantages[batch_indices]
                 mb_returns_seq = returns[batch_indices]
-                mb_old_values_seq = values[batch_indices]
+                # mb_old_values_seq = values[batch_indices]
 
                 # Prepare initial hidden states for this minibatch
                 mb_hidden_state = None
