@@ -1042,7 +1042,7 @@ def test_clone_llm_peft(vocab_size, input_size, max_tokens):
     peft_model = get_peft_model(base_model, peft_config)
 
     # Clone the PEFT model
-    cloned_model = clone_llm(peft_model)
+    cloned_model = clone_llm(peft_model, peft_model.state_dict())
 
     # Verify the cloned model is a PEFT model
     assert isinstance(cloned_model, type(peft_model))

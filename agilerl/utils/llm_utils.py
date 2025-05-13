@@ -1,3 +1,4 @@
+import copy
 import warnings
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
@@ -152,11 +153,13 @@ class HuggingFaceGym(gym.Env):
     def eval(self) -> Generator[None, None, None]:
         self.dataloader = self.test_dataloader_iter
         self.eval_mode = True
+        last_tokenized_prompts = copy.deepcopy(self.last_tokenized_prompts)
         try:
             yield
         finally:
             self.dataloader = self.train_dataloader_iter
             self.eval_mode = False
+            self.last_tokenized_prompts = last_tokenized_prompts
 
     def __len__(self):
         if self.eval_mode:

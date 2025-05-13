@@ -538,7 +538,9 @@ def create_population(
             agent = GRPO(
                 observation_space=observation_space,
                 action_space=action_space,
-                actor_network=clone_llm(actor_network),
+                actor_network=clone_llm(
+                    actor_network, state_dict=actor_network.state_dict()
+                ),
                 pad_token_id=INIT_HP.get("PAD_TOKEN_ID"),
                 hp_config=hp_config,
                 index=idx,
