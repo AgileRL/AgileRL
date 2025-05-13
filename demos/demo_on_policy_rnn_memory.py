@@ -103,10 +103,17 @@ print(f"Using device: {device}")
 # Toggle this to True for RNN (LSTM), False for MLP
 recurrent = True  # <--- CHANGE THIS TO ENABLE/DISABLE RECURRENT
 
+
+# --- Create Environment and Population ---
+n_symbols = 5
+delay_steps = 5
+num_envs = 64  # Can be higher for faster training
+
 if recurrent:
     NET_CONFIG = {
         "encoder_config": {
             "hidden_state_size": 64,  # LSTM hidden state size
+            "max_seq_len": delay_steps + 2,  # Match episode length
         },
     }
 else:
@@ -117,17 +124,11 @@ else:
     }
 
 
-# --- Create Environment and Population ---
-n_symbols = 5
-delay_steps = 5
-num_envs = 64  # Can be higher for faster training
-
 # Hyperparameters
 INIT_HP = {
     "POP_SIZE": 2,  # Population size
     "BATCH_SIZE": 256,
     "LEARN_STEP": (delay_steps + 2),  # Match episode length (delay_steps + 2)
-    "HIDDEN_STATE_SIZE": 64,
     "LR": 1e-4,
     "GAMMA": 0.99,
     "GAE_LAMBDA": 1.0,
@@ -166,15 +167,7 @@ pop = create_population(
     population_size=INIT_HP["POP_SIZE"],
     num_envs=num_envs,
     device=device,
-    algo_kwargs={
-        "use_rollout_buffer": True,
-        **(
-            {"recurrent": True, "hidden_state_size": INIT_HP["HIDDEN_STATE_SIZE"]}
-            if recurrent
-            else {}
-        ),
-        "max_seq_len": delay_steps + 2,  # Match episode length
-    },
+    algo_kwargs={"use_rollout_buffer": True, "recurrent": recurrent},
 )
 
 # --- Setup Evolution Components ---

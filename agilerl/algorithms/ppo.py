@@ -1155,7 +1155,7 @@ class PPO(RLAlgorithm):
                 test_hidden_state = (
                     self.get_initial_hidden_state(num_envs) if self.recurrent else None
                 )
-                print(f"test_hidden_state of {num_envs}: {test_hidden_state}")
+
                 last_infos = (
                     [{}] * num_envs if vectorized else {}
                 )  # Initialize last_info holder
