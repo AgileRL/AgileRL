@@ -865,11 +865,7 @@ class PPO(RLAlgorithm):
             return 0.0
 
         observations = buffer_td["observations"]  # Tensor
-        # actions = buffer_td["actions"]  # Tensor
-        # old_log_probs = buffer_td["log_probs"]  # Tensor
         advantages = buffer_td["advantages"]  # Tensor
-        # returns = buffer_td["returns"]  # Tensor
-        # values = buffer_td["values"] # old values, might not be needed if recomputed
 
         # Normalize advantages
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -877,14 +873,6 @@ class PPO(RLAlgorithm):
         batch_size = self.batch_size
         # The observations tensor from TensorDict will be (total_samples, *obs_shape)
         num_samples = observations.size(0)
-        # Assert num_samples matches buffer.size(), which is total_samples (capacity * num_envs or pos * num_envs)
-        # self.rollout_buffer.size() returns total samples in the buffer currently.
-        # buffer_td.batch_size[0] will be total_samples if get_tensor_batch returns a TD with flat batch_size.
-        # assert num_samples == self.rollout_buffer.size(), (
-        #     f"Expected {self.rollout_buffer.size()} samples based on buffer.size(), but got {num_samples} from TensorDict batch size."
-        # )
-        # The TensorDict returned by get_tensor_batch will have a batch_size of [total_samples]
-        # So num_samples = buffer_td.batch_size[0] is equivalent to observations.size(0)
 
         indices = np.arange(num_samples)
         mean_loss = 0.0
@@ -1041,10 +1029,6 @@ class PPO(RLAlgorithm):
                     "Failed to get sequence tensor batch or observations missing. Skipping BPTT learning step."
                 )
                 return 0.0
-
-            # observations_full = sequences_td_full[
-            #     "observations"
-            # ]  # (total_sequences, seq_len, *obs_dims)
 
             advantages_full = sequences_td_full[
                 "advantages"
