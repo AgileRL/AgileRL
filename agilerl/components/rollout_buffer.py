@@ -208,7 +208,7 @@ class RolloutBuffer:
             batch_size=[self.capacity, self.num_envs],
             device="cpu",  # Keep buffer on CPU, move to device in get_tensor_batch
         )
-        print(self.buffer)
+
 
     def add(
         self,
