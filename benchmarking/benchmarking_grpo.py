@@ -16,7 +16,7 @@ from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
-MODEL_PATH = "Qwen/Qwen2.5-1.5B"
+MODEL_PATH = "Qwen/Qwen2.5-3B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
 
@@ -25,6 +25,7 @@ def create_model(pretrained_model_name_or_path):
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         torch_dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
+        device_map="cpu",
     )
     peft_config = LoraConfig(
         r=16,
@@ -84,9 +85,7 @@ def make_dataset(dataset_name: str) -> Tuple[Dataset, Dataset]:
 
 def format_reward_func(completions, target, **kwargs):
     rewards = []
-
     for completion, gt in zip(completions, target):
-
         try:
             # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
             completion = "<think>" + completion

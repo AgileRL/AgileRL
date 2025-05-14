@@ -187,6 +187,7 @@ class GRPO(LLMAlgorithm):
         )
         self.cosine_lr_schedule_config = cosine_lr_schedule_config
         self.wrap = wrap
+        self.reference_actor_state_dict = None
         if max_grad_norm and (accelerator is not None) and accelerator.is_main_process:
             warnings.warn(
                 "Argument 'max_grad_norm' will be overwritten by the 'gradient_clipping' value set in the deepspeed config."
@@ -525,11 +526,12 @@ class GRPO(LLMAlgorithm):
         :return: Policy network and reference network
         :rtype: Union[nn.Module, DeepSpeedEngine]
         """
-        self.reference_actor_state_dict = clone_tensors_for_torch_save(
-            network.state_dict()
-        )
+        if load_reference_state_dict:
+            self.reference_actor_state_dict = clone_tensors_for_torch_save(
+                network.state_dict()
+            )
         self.reference_actor = clone_llm(
-            network, load_state_dict=load_reference_state_dict
+            network, state_dict=self.reference_actor_state_dict
         )
         self.reference_actor.eval()
         for param in self.reference_actor.parameters():
