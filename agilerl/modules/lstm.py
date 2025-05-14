@@ -189,7 +189,8 @@ class EvolvableLSTM(EvolvableModule):
 
             lstm_output, (h_n, c_n) = self.model[f"{self.name}_lstm"](x, (h0, c0))
         else:
-            lstm_output, (h_n, c_n) = self.model[f"{self.name}_lstm"](x)
+            raise ValueError("Hidden state is required for LSTM forward pass.")
+            # lstm_output, (h_n, c_n) = self.model[f"{self.name}_lstm"](x)
 
         # Process output
         lstm_output = self.model[f"{self.name}_lstm_output"](lstm_output[:, -1, :])

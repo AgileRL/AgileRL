@@ -90,6 +90,8 @@ class PPO(RLAlgorithm):
     :type accelerator: accelerate.Accelerator(), optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
+    :param load_bptt_full_buffer: Flag to load full buffer for BPTT learning, defaults to False. This could possibly lead to faster training if the buffer is large enough and the memory is not an issue. In most cases this should be False.
+    :type load_bptt_full_buffer: bool, optional
     """
 
     def __init__(
@@ -123,6 +125,7 @@ class PPO(RLAlgorithm):
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
+        load_bptt_full_buffer: bool = False,
     ) -> None:
         super().__init__(
             observation_space,
@@ -239,6 +242,7 @@ class PPO(RLAlgorithm):
         self.num_envs = num_envs
         self.recurrent = recurrent
         self.rollout_buffer_config = rollout_buffer_config
+        self.load_bptt_full_buffer = load_bptt_full_buffer
 
         if actor_network is not None and critic_network is not None:
             if not isinstance(actor_network, EvolvableModule):
@@ -421,13 +425,13 @@ class PPO(RLAlgorithm):
 
         actor_hidden = self.actor.initialize_hidden_state(batch_size=num_envs)
         for k, v in actor_hidden.items():
-            flat_hidden[f"{self.actor.encoder_name}_{k}"] = v
+            flat_hidden[k] = v
 
         # also add the critic hidden state if not sharing encoders
         if not self.share_encoders:
             critic_hidden = self.critic.initialize_hidden_state(batch_size=num_envs)
             for k, v in critic_hidden.items():
-                flat_hidden[f"{self.critic.encoder_name}_{k}"] = v
+                flat_hidden[k] = v
 
         return flat_hidden
 
@@ -956,162 +960,286 @@ class PPO(RLAlgorithm):
     def _learn_from_rollout_buffer_bptt(self) -> float:
         """Learning procedure using truncated BPTT for recurrent networks."""
         seq_len = self.max_seq_len
-        buffer_data = self.rollout_buffer.get_sequence_tensor_batch(
-            seq_len=seq_len, device=self.device
+
+        # Get current actual size of buffer to prevent errors with insufficient data
+        buffer_actual_size = (
+            self.rollout_buffer.capacity
+            if self.rollout_buffer.full
+            else self.rollout_buffer.pos
         )
+        if buffer_actual_size < seq_len:
+            warnings.warn(
+                f"Buffer size {buffer_actual_size} is less than seq_len {seq_len}. Skipping BPTT learning step."
+            )
+            return 0.0
 
-        observations = buffer_data["observations"]  # (batch, seq_len, *obs)
-        actions = buffer_data["actions"]
-        old_log_probs = buffer_data["log_probs"]
-        advantages = buffer_data["advantages"]
-        returns = buffer_data["returns"]
-        # values = buffer_data["values"]
+        # Normalize advantages globally once before epochs if using minibatch loading
+        if not self.load_bptt_full_buffer:
+            # Ensure advantages are computed
+            if not np.any(
+                self.rollout_buffer.advantages
+            ):  # Simple check, might need a more robust flag
+                warnings.warn(
+                    "Advantages not computed in rollout buffer. Ensure compute_returns_and_advantages is called."
+                )
+                # Optionally compute them here if sure about last_value/last_done, or raise error
 
-        # Normalize advantages across all timesteps and batches
-        flat_adv = advantages.reshape(-1)
-        advantages = (advantages - flat_adv.mean()) / (flat_adv.std() + 1e-8)
+            # Flatten advantages from (capacity, num_envs) to (capacity * num_envs) for normalization
+            # then reshape back. Only normalize the valid part of the buffer.
+            valid_advantages = self.rollout_buffer.advantages[:buffer_actual_size]
+            original_shape = valid_advantages.shape
+            flat_adv = valid_advantages.reshape(-1)
+            normalized_flat_adv = (flat_adv - flat_adv.mean()) / (flat_adv.std() + 1e-8)
+            self.rollout_buffer.advantages[:buffer_actual_size] = (
+                normalized_flat_adv.reshape(original_shape)
+            )
 
-        initial_hidden_states = buffer_data.get("initial_hidden_states", None)
+        # Option 1: Load all sequences into GPU memory at once (original, memory-intensive way)
+        if self.load_bptt_full_buffer:
+            buffer_data = self.rollout_buffer.get_sequence_tensor_batch(
+                seq_len=seq_len, device=self.device
+            )
+            if (
+                not buffer_data
+                or "observations" not in buffer_data
+                or buffer_data["observations"] is None
+            ):
+                warnings.warn(
+                    "Failed to get sequence tensor batch or observations missing. Skipping BPTT learning step."
+                )
+                return 0.0
 
-        if isinstance(observations, dict):
-            num_sequences = observations[list(observations.keys())[0]].size(0)
+            observations = buffer_data[
+                "observations"
+            ]  # (total_sequences, seq_len, *obs)
+            actions = buffer_data["actions"]
+            old_log_probs = buffer_data["log_probs"]
+            advantages_full = buffer_data["advantages"]  # Already on device
+            returns = buffer_data["returns"]
+            initial_hidden_states_full = buffer_data.get("initial_hidden_states", None)
+
+            # Normalize advantages across all timesteps and sequences if loaded full
+            flat_adv_full = advantages_full.reshape(-1)
+            advantages_full = (advantages_full - flat_adv_full.mean()) / (
+                flat_adv_full.std() + 1e-8
+            )
+
+            if isinstance(observations, dict):
+                num_total_sequences = observations[list(observations.keys())[0]].size(0)
+            else:
+                num_total_sequences = observations.size(0)
+
+            indices_full_buffer = np.arange(num_total_sequences)
+            sequences_per_minibatch = (
+                self.batch_size
+            )  # PPO's batch_size is num sequences here
+
+        # Option 2: Prepare for minibatch loading (memory-efficient)
         else:
-            num_sequences = observations.size(0)
+            num_possible_starts_per_env = buffer_actual_size - seq_len + 1
+            if num_possible_starts_per_env <= 0:
+                warnings.warn(
+                    f"Not enough data in buffer ({buffer_actual_size} steps) to form sequences of length {seq_len}. Skipping BPTT."
+                )
+                return 0.0
 
-        indices = np.arange(num_sequences)
+            all_start_coords = []  # List of (env_idx, time_idx_in_env_rollout)
+            for env_idx in range(self.num_envs):
+                for t_idx in range(num_possible_starts_per_env):
+                    all_start_coords.append((env_idx, t_idx))
+
+            if not all_start_coords:
+                warnings.warn(
+                    "No possible BPTT sequences to sample. Skipping learning step."
+                )
+                return 0.0
+            sequences_per_minibatch = (
+                self.batch_size
+            )  # PPO's batch_size is num sequences here
+
         mean_loss = 0.0
         approx_kl_divs = []
-
-        # Determine how many sequences per minibatch. Use self.batch_size as number of sequences.
-        seq_batch_size = self.batch_size
+        num_minibatch_updates = 0
 
         for epoch in range(self.update_epochs):
-            np.random.shuffle(indices)
+            if self.load_bptt_full_buffer:
+                np.random.shuffle(indices_full_buffer)
+                # Iterate through the pre-loaded full buffer data in minibatches
+                for i in range(0, num_total_sequences, sequences_per_minibatch):
+                    minibatch_indices = indices_full_buffer[
+                        i : i + sequences_per_minibatch
+                    ]
+                    if len(minibatch_indices) == 0:
+                        continue
 
-            for start_idx in range(0, num_sequences, seq_batch_size):
-                end_idx = min(start_idx + seq_batch_size, num_sequences)
-                batch_indices = indices[start_idx:end_idx]
-
-                # Slice batch sequences
-                if isinstance(observations, dict):
-                    mb_obs_seq = {k: v[batch_indices] for k, v in observations.items()}
-                else:
-                    mb_obs_seq = observations[batch_indices]  # (batch, seq_len, obs...)
-
-                mb_actions_seq = actions[batch_indices]
-                mb_old_log_probs_seq = old_log_probs[batch_indices]
-                mb_advantages_seq = advantages[batch_indices]
-                mb_returns_seq = returns[batch_indices]
-                # mb_old_values_seq = values[batch_indices]
-
-                # Prepare initial hidden states for this minibatch
-                mb_hidden_state = None
-                if initial_hidden_states is not None:
-                    mb_hidden_state = {
-                        key: val[batch_indices].clone()
-                        for key, val in initial_hidden_states.items()
-                    }
-
-                # Accumulate losses over time
-                policy_loss_total = 0.0
-                value_loss_total = 0.0
-                entropy_loss_total = 0.0
-
-                # Prepare hidden state for first timestep (layer, batch, hidden)
-                if self.recurrent and mb_hidden_state is not None:
-                    step_hidden_state = {
-                        k: v.permute(1, 0, 2).contiguous()
-                        for k, v in mb_hidden_state.items()
-                    }
-                else:
-                    step_hidden_state = None
-
-                for t in range(seq_len):
-                    if isinstance(mb_obs_seq, dict):
-                        obs_t = {k: v[:, t] for k, v in mb_obs_seq.items()}
+                    if isinstance(observations, dict):
+                        mb_obs_seq = {
+                            k: v[minibatch_indices] for k, v in observations.items()
+                        }
                     else:
-                        obs_t = mb_obs_seq[:, t]
+                        mb_obs_seq = observations[minibatch_indices]
 
-                    actions_t = mb_actions_seq[:, t]
-                    old_log_prob_t = mb_old_log_probs_seq[:, t]
-                    adv_t = mb_advantages_seq[:, t]
-                    return_t = mb_returns_seq[:, t]
-                    # old_value_t = mb_old_values_seq[:, t]
+                    mb_actions_seq = actions[minibatch_indices]
+                    mb_old_log_probs_seq = old_log_probs[minibatch_indices]
+                    mb_advantages_seq = advantages_full[
+                        minibatch_indices
+                    ]  # Use globally normalized from full load
+                    mb_returns_seq = returns[minibatch_indices]
 
-                    # Get values, entropy, and next hidden state directly
-                    # step_hidden_state is already (layer, batch, hidden)
-                    _, _, entropy_t, new_value_t, next_hidden = (
-                        self._get_action_and_values(
-                            obs_t,
-                            hidden_state=step_hidden_state,
-                            sample=False,  # No need to sample here
+                    mb_hidden_state_init_for_batch = None
+                    if initial_hidden_states_full is not None:
+                        mb_hidden_state_init_for_batch = {
+                            key: val[minibatch_indices].clone()
+                            for key, val in initial_hidden_states_full.items()
+                        }
+            else:
+                # Minibatch loading: shuffle coordinates and fetch data per minibatch
+                np.random.shuffle(all_start_coords)
+                for i in range(0, len(all_start_coords), sequences_per_minibatch):
+                    current_coords_minibatch = all_start_coords[
+                        i : i + sequences_per_minibatch
+                    ]
+                    if not current_coords_minibatch:
+                        continue
+
+                    # Fetch ONLY the current minibatch of sequences using specific coordinates
+                    buffer_data_minibatch = (
+                        self.rollout_buffer.get_specific_sequences_tensor_batch(
+                            seq_len=seq_len,
+                            sequence_coords=current_coords_minibatch,
+                            device=self.device,
                         )
                     )
 
-                    # Compute log prob of taken actions
-                    new_log_prob_t = self.actor.action_log_prob(actions_t)
-
-                    # Use -log_prob as entropy when head returns None (continuous actions w/ squashing)
-                    if entropy_t is None:
-                        entropy_t = -new_log_prob_t
-
-                    # PPO losses per timestep
-                    ratio = torch.exp(new_log_prob_t - old_log_prob_t)
-                    policy_loss1 = -adv_t * ratio
-                    policy_loss2 = -adv_t * torch.clamp(
-                        ratio, 1 - self.clip_coef, 1 + self.clip_coef
-                    )
-                    policy_loss = torch.max(policy_loss1, policy_loss2).mean()
-
-                    value_loss = 0.5 * ((new_value_t - return_t) ** 2).mean()
-                    entropy_step = -entropy_t.mean()
-
-                    policy_loss_total += policy_loss
-                    value_loss_total += value_loss
-                    entropy_loss_total += entropy_step
-
-                    # Track KL for early stopping
-                    with torch.no_grad():
-                        log_ratio = new_log_prob_t - old_log_prob_t
-                        approx_kl = (
-                            ((torch.exp(log_ratio) - 1) - log_ratio).mean().item()
+                    if (
+                        not buffer_data_minibatch
+                        or "observations" not in buffer_data_minibatch
+                        or buffer_data_minibatch["observations"] is None
+                    ):
+                        warnings.warn(
+                            "Failed to get a valid minibatch of specific sequences. Skipping this minibatch."
                         )
-                        approx_kl_divs.append(approx_kl)
+                        continue
 
-                    # Update hidden state for next timestep *without* detaching so that
-                    # gradients flow through time. We only detach outside the sequence.
-                    if self.recurrent and next_hidden is not None:
-                        step_hidden_state = next_hidden
+                    mb_obs_seq = buffer_data_minibatch["observations"]
+                    mb_actions_seq = buffer_data_minibatch["actions"]
+                    mb_old_log_probs_seq = buffer_data_minibatch["log_probs"]
+                    # Advantages from buffer are already globally normalized if not load_bptt_full_buffer
+                    mb_advantages_seq = buffer_data_minibatch["advantages"]
+                    mb_returns_seq = buffer_data_minibatch["returns"]
+                    mb_hidden_state_init_for_batch = buffer_data_minibatch.get(
+                        "initial_hidden_states", None
+                    )
+                    # mb_hidden_state_init_for_batch items are already cloned in get_specific_sequences_tensor_batch if needed
 
-                # Average losses over sequence length
-                policy_loss_total = policy_loss_total / seq_len
-                value_loss_total = value_loss_total / seq_len
-                entropy_loss_total = entropy_loss_total / seq_len
+            # Common BPTT processing logic for the current minibatch (mb_... variables)
+            policy_loss_total = 0.0
+            value_loss_total = 0.0
+            entropy_loss_total = 0.0
 
-                loss = (
-                    policy_loss_total
-                    + self.vf_coef * value_loss_total
-                    + self.ent_coef * entropy_loss_total
+            # Prepare initial hidden state for the first timestep of sequences in the minibatch
+            # mb_hidden_state_init_for_batch has shape (minibatch_size, num_layers, hidden_size_per_layer)
+            # For _get_action_and_values, it needs to be (num_layers, minibatch_size, hidden_size_per_layer)
+            current_step_hidden_state = None
+            if self.recurrent and mb_hidden_state_init_for_batch is not None:
+                current_step_hidden_state = {
+                    k: v.permute(1, 0, 2).contiguous()  # (layers, batch, size)
+                    for k, v in mb_hidden_state_init_for_batch.items()
+                }
+
+            for t in range(seq_len):
+                if isinstance(mb_obs_seq, dict):
+                    obs_t = {k_obs: v_obs[:, t] for k_obs, v_obs in mb_obs_seq.items()}
+                else:
+                    obs_t = mb_obs_seq[:, t]
+
+                actions_t = mb_actions_seq[:, t]
+                old_log_prob_t = mb_old_log_probs_seq[:, t]
+                adv_t = mb_advantages_seq[:, t]
+                return_t = mb_returns_seq[:, t]
+
+                _, _, entropy_t, new_value_t, next_hidden_state_for_step = (
+                    self._get_action_and_values(
+                        obs_t,
+                        hidden_state=current_step_hidden_state,  # Pass dict (layers, batch, size)
+                        sample=False,
+                    )
                 )
 
-                self.optimizer.zero_grad()
-                loss.backward()
-                clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
-                clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
-                self.optimizer.step()
+                new_log_prob_t = self.actor.action_log_prob(actions_t)
+                if entropy_t is None:
+                    entropy_t = (
+                        -new_log_prob_t.mean()
+                    )  # Ensure entropy_t is scalar if new_log_prob_t is not
+                else:
+                    entropy_t = entropy_t.mean()  # Ensure scalar
 
-                mean_loss += loss.item()
+                ratio = torch.exp(new_log_prob_t - old_log_prob_t)
+                policy_loss1 = -adv_t * ratio
+                policy_loss2 = -adv_t * torch.clamp(
+                    ratio, 1 - self.clip_coef, 1 + self.clip_coef
+                )
+                policy_loss = torch.max(policy_loss1, policy_loss2).mean()
+                value_loss = 0.5 * ((new_value_t - return_t) ** 2).mean()
+                entropy_step_loss = -entropy_t  # entropy_t is already mean
+
+                policy_loss_total += policy_loss
+                value_loss_total += value_loss
+                entropy_loss_total += entropy_step_loss
+
+                with torch.no_grad():
+                    log_ratio = new_log_prob_t - old_log_prob_t
+                    approx_kl = ((torch.exp(log_ratio) - 1) - log_ratio).mean().item()
+                    approx_kl_divs.append(approx_kl)
+
+                if self.recurrent and next_hidden_state_for_step is not None:
+                    current_step_hidden_state = (
+                        next_hidden_state_for_step  # Already (layers, batch, size)
+                    )
+
+            # Average losses over sequence length
+            policy_loss_avg_over_seq = policy_loss_total / seq_len
+            value_loss_avg_over_seq = value_loss_total / seq_len
+            entropy_loss_avg_over_seq = entropy_loss_total / seq_len
+
+            loss = (
+                policy_loss_avg_over_seq
+                + self.vf_coef * value_loss_avg_over_seq
+                + self.ent_coef * entropy_loss_avg_over_seq
+            )
+
+            self.optimizer.zero_grad()
+            loss.backward()  # Gradients accumulate over the sequence within this backward call
+            clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+            clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+            self.optimizer.step()
+
+            mean_loss += loss.item()
+            num_minibatch_updates += 1
 
             if self.target_kl is not None and len(approx_kl_divs) > 0:
-                if np.mean(approx_kl_divs) > self.target_kl:
-                    break
+                if (
+                    np.mean(
+                        approx_kl_divs[
+                            -len(
+                                current_coords_minibatch
+                                if not self.load_bptt_full_buffer
+                                else minibatch_indices
+                            )
+                            * seq_len :
+                        ]
+                    )
+                    > self.target_kl
+                ):
+                    # Check KL only for the current minibatch of sequences
+                    warnings.warn(
+                        f"Epoch {epoch}: KL divergence {np.mean(approx_kl_divs[-len(current_coords_minibatch if not self.load_bptt_full_buffer else minibatch_indices)*seq_len:]):.4f} exceeded target {self.target_kl}. Stopping update for this epoch."
+                    )
+                    approx_kl_divs.clear()  # Clear for next epoch or outer check
+                    break  # Break from minibatch loop for this epoch
 
-        # Compute average loss
-        num_updates = (
-            num_sequences // seq_batch_size + int(num_sequences % seq_batch_size > 0)
-        ) * self.update_epochs
-        mean_loss = mean_loss / max(1e-8, num_updates)
-
+        # End of epoch loop
+        mean_loss = mean_loss / max(1e-8, num_minibatch_updates)
         return mean_loss
 
     def test(

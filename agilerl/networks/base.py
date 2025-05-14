@@ -259,7 +259,15 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             else:
                 encoder_config["num_outputs"] = self.latent_dim
 
-            self.encoder = self.encoder_cls(**encoder_config)
+            self.encoder = self.encoder_cls(
+                **{
+                    "observation_space": self.observation_space,
+                    "num_outputs": self.latent_dim,
+                    "device": self.device,
+                    "name": self.encoder_name,
+                    **encoder_config,
+                }
+            )
         else:
             self.encoder = self._build_encoder(encoder_config)
 
