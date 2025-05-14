@@ -710,7 +710,9 @@ class RolloutBuffer:
     def get_specific_sequences_tensor_batch(
         self,
         seq_len: int,
-        sequence_coords: List[Tuple[int, int]], # List of (env_idx, time_idx_in_env_rollout)
+        sequence_coords: List[
+            Tuple[int, int]
+        ],  # List of (env_idx, time_idx_in_env_rollout)
         device: Optional[str] = None,
     ) -> Dict[str, Union[torch.Tensor, Dict[str, torch.Tensor]]]:
         """
@@ -739,7 +741,8 @@ class RolloutBuffer:
             # sequence_coords are (env_idx, time_idx_in_env_rollout)
             # We need to slice: array[time_idx : time_idx + seq_len, env_idx]
             seqs = [
-                array[time_idx : time_idx + seq_len, env_idx] for env_idx, time_idx in sequence_coords
+                array[time_idx : time_idx + seq_len, env_idx]
+                for env_idx, time_idx in sequence_coords
             ]  # Each element is (seq_len, *dims)
             return np.stack(seqs, axis=0)  # (batch_size, seq_len, *dims)
 
@@ -749,7 +752,9 @@ class RolloutBuffer:
         if self.observations.dtype == object:
             seq_data_np["observations"] = np.array(
                 [
-                    np.concatenate(self.observations[time_idx : time_idx + seq_len, env_idx])
+                    np.concatenate(
+                        self.observations[time_idx : time_idx + seq_len, env_idx]
+                    )
                     for env_idx, time_idx in sequence_coords
                 ],
                 dtype=object,
@@ -758,18 +763,23 @@ class RolloutBuffer:
             seq_data_np["observations"] = _stack_specific_seq(self.observations)
 
         # Handle next_observations if they exist
-        if hasattr(self, 'next_observations') and self.next_observations is not None:
+        if hasattr(self, "next_observations") and self.next_observations is not None:
             if self.next_observations.dtype == object:
                 seq_data_np["next_observations"] = np.array(
                     [
-                        np.concatenate(self.next_observations[time_idx : time_idx + seq_len, env_idx])
+                        np.concatenate(
+                            self.next_observations[
+                                time_idx : time_idx + seq_len, env_idx
+                            ]
+                        )
                         for env_idx, time_idx in sequence_coords
                     ],
                     dtype=object,
                 )
             else:
-                seq_data_np["next_observations"] = _stack_specific_seq(self.next_observations)
-
+                seq_data_np["next_observations"] = _stack_specific_seq(
+                    self.next_observations
+                )
 
         # Scalar / vector data
         for name, array_attr_name in [
@@ -810,8 +820,9 @@ class RolloutBuffer:
                     # Corrected slicing:
                     init_h_list.append(self.hidden_states[key][time_idx, :, env_idx, :])
 
-                seq_data_np["initial_hidden_states"][key] = np.stack(init_h_list, axis=0)
-
+                seq_data_np["initial_hidden_states"][key] = np.stack(
+                    init_h_list, axis=0
+                )
 
         # Convert numpy batch to tensor batch
         tensor_batch: Dict[str, Union[torch.Tensor, Dict[str, torch.Tensor]]] = {}
@@ -820,8 +831,8 @@ class RolloutBuffer:
                 tensor_batch[key] = {
                     k: torch.from_numpy(v).to(device) for k, v in data.items()
                 }
-            elif isinstance(data, dict): # For observations if they are dicts
-                 tensor_batch[key] = {
+            elif isinstance(data, dict):  # For observations if they are dicts
+                tensor_batch[key] = {
                     k: torch.from_numpy(v).to(device) for k, v in data.items()
                 }
             elif isinstance(data, np.ndarray):
@@ -829,11 +840,11 @@ class RolloutBuffer:
                     warnings.warn(
                         f"Cannot automatically convert object array '{key}' in get_specific_sequences_tensor_batch to tensor. Skipping conversion for this key."
                     )
-                    tensor_batch[key] = data # Keep as numpy object array
+                    tensor_batch[key] = data  # Keep as numpy object array
                 else:
                     tensor_batch[key] = torch.from_numpy(data).to(device)
             else:
-                tensor_batch[key] = data # Should not happen
+                tensor_batch[key] = data  # Should not happen
 
         return tensor_batch
 

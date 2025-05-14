@@ -90,7 +90,12 @@ def get_hidden_states_shape_from_model(model: Module) -> Dict[str, int]:
 
     for name, module in model.named_modules():
         if hasattr(module, "hidden_state_architecture"):
-            hidden_state_architecture.update({f"{module.name}_{k}": v for k, v in module.hidden_state_architecture.items()})
+            hidden_state_architecture.update(
+                {
+                    f"{module.name}_{k}": v
+                    for k, v in module.hidden_state_architecture.items()
+                }
+            )
 
     return hidden_state_architecture
 

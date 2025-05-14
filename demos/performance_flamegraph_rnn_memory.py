@@ -119,7 +119,7 @@ if recurrent:
     NET_CONFIG = {
         "encoder_config": {
             "hidden_state_size": 128,  # LSTM hidden state size
-            "max_seq_len": delay_steps + 2
+            "max_seq_len": delay_steps + 2,
         },
     }
 else:
@@ -174,10 +174,7 @@ pop = create_population(
     population_size=INIT_HP["POP_SIZE"],
     num_envs=num_envs,
     device=device,
-    algo_kwargs={
-        "use_rollout_buffer": True,
-        "recurrent": recurrent
-    },
+    algo_kwargs={"use_rollout_buffer": True, "recurrent": recurrent},
 )
 
 agent = pop[0]
