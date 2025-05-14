@@ -4,10 +4,14 @@ import torch
 import torch.nn.functional as F
 from gymnasium import spaces
 
-from agilerl.modules.base import EvolvableModule
-from agilerl.modules.cnn import EvolvableCNN
-from agilerl.modules.mlp import EvolvableMLP
-from agilerl.modules.multi_input import EvolvableMultiInput
+from agilerl.modules import (
+    EvolvableCNN,
+    EvolvableLSTM,
+    EvolvableMLP,
+    EvolvableModule,
+    EvolvableMultiInput,
+    EvolvableSimBa,
+)
 from agilerl.networks.actors import DeterministicActor, StochasticActor
 from agilerl.networks.base import EvolvableNetwork
 from tests.helper_functions import (
@@ -42,6 +46,32 @@ def test_deterministic_actor_initialization(
         assert isinstance(network.encoder, EvolvableMLP)
     elif encoder_type == "cnn":
         assert isinstance(network.encoder, EvolvableCNN)
+
+    evolvable_modules = network.modules()
+    assert "encoder" in evolvable_modules
+    assert "head_net" in evolvable_modules
+
+
+def test_deterministic_actor_initialization_recurrent():
+    observation_space = generate_random_box_space((32, 8))
+    action_space = spaces.Box(low=-1, high=1, shape=(4,))
+    network = DeterministicActor(observation_space, action_space, recurrent=True)
+
+    assert network.observation_space == observation_space
+    assert isinstance(network.encoder, EvolvableLSTM)
+
+    evolvable_modules = network.modules()
+    assert "encoder" in evolvable_modules
+    assert "head_net" in evolvable_modules
+
+
+def test_deterministic_actor_initialization_simba():
+    observation_space = generate_random_box_space((8,))
+    action_space = spaces.Box(low=-1, high=1, shape=(4,))
+    network = DeterministicActor(observation_space, action_space, simba=True)
+
+    assert network.observation_space == observation_space
+    assert isinstance(network.encoder, EvolvableSimBa)
 
     evolvable_modules = network.modules()
     assert "encoder" in evolvable_modules
@@ -287,6 +317,32 @@ def test_stochastic_actor_initialization(observation_space, action_space, encode
         assert isinstance(network.encoder, EvolvableMLP)
     elif encoder_type == "cnn":
         assert isinstance(network.encoder, EvolvableCNN)
+
+    evolvable_modules = network.modules()
+    assert "encoder" in evolvable_modules
+    assert "head_net" in evolvable_modules
+
+
+def test_stochastic_actor_initialization_recurrent():
+    observation_space = generate_random_box_space((32, 8))
+    action_space = spaces.Box(low=-1, high=1, shape=(4,))
+    network = StochasticActor(observation_space, action_space, recurrent=True)
+
+    assert network.observation_space == observation_space
+    assert isinstance(network.encoder, EvolvableLSTM)
+
+    evolvable_modules = network.modules()
+    assert "encoder" in evolvable_modules
+    assert "head_net" in evolvable_modules
+
+
+def test_stochastic_actor_initialization_simba():
+    observation_space = generate_random_box_space((8,))
+    action_space = spaces.Box(low=-1, high=1, shape=(4,))
+    network = StochasticActor(observation_space, action_space, simba=True)
+
+    assert network.observation_space == observation_space
+    assert isinstance(network.encoder, EvolvableSimBa)
 
     evolvable_modules = network.modules()
     assert "encoder" in evolvable_modules
