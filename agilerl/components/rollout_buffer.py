@@ -5,8 +5,32 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 from gymnasium import spaces
+from tensordict import TensorDict  # Add import
 
 from agilerl.typing import ArrayOrTensor, ObservationType
+
+# from agilerl.utils.utils import convert_np_to_torch_dtype # Import the utility
+
+
+# Define the utility function locally to avoid circular import
+def convert_np_to_torch_dtype(np_dtype):
+    """Converts a numpy dtype to a torch dtype."""
+    if np_dtype == np.float32:
+        return torch.float32
+    elif np_dtype == np.float64:
+        return torch.float64
+    elif np_dtype == np.int32:
+        return torch.int32
+    elif np_dtype == np.int64:
+        return torch.int64
+    elif np_dtype == np.uint8:
+        return torch.uint8
+    elif np_dtype == np.bool_:
+        return torch.bool
+    else:
+        # Fallback or raise error for unhandled dtypes
+        warnings.warn(f"Unhandled numpy dtype {np_dtype}, defaulting to torch.float32")
+        return torch.float32
 
 
 class RolloutBuffer:
@@ -79,92 +103,111 @@ class RolloutBuffer:
 
     def _initialize_buffers(self) -> None:
         """Initialize buffer arrays with correct shapes for vectorized environments."""
+        # Determine shapes and dtypes for all expected fields
         if isinstance(self.observation_space, spaces.Discrete):
             obs_shape = (1,)
+            obs_dtype = (
+                torch.float32
+            )  # Or torch.float32 if directly using torch tensors
         elif isinstance(self.observation_space, spaces.Box):
             obs_shape = self.observation_space.shape
+            obs_dtype = convert_np_to_torch_dtype(
+                self.observation_space.dtype
+            )  # Convert numpy dtype to torch dtype
         elif isinstance(self.observation_space, (spaces.Dict, spaces.Tuple)):
-            # Assuming Dict/Tuple spaces are handled element-wise later
+            # For Dict/Tuple, we'll store them as nested TensorDicts or handle them
+            # by creating multiple flat entries in the main TensorDict.
+            # For now, let's assume we'll pre-allocate based on flattened or example structure.
+            # This part might need refinement based on how Dict/Tuple observations are handled.
+            # If obs are dicts of tensors, TensorDict can handle them naturally.
             obs_shape = ()  # Placeholder, will be determined by actual data
+            obs_dtype = torch.float32  # Placeholder
         else:
             obs_shape = self.observation_space.shape
+            obs_dtype = torch.float32  # Default
 
-        # Initialize buffers with zeros, adding the num_envs dimension
-        # Note: Handling Dict/Tuple spaces requires dynamic shape inference or preprocessing
-        if obs_shape:
-            self.observations = np.zeros(
-                (self.capacity, self.num_envs, *obs_shape), dtype=np.float32
-            )
-            self.next_observations = np.zeros(
-                (self.capacity, self.num_envs, *obs_shape), dtype=np.float32
-            )
-        else:  # Placeholder for Dict/Tuple - consider initializing with None or object dtype
-            self.observations = np.empty((self.capacity, self.num_envs), dtype=object)
-            self.next_observations = np.empty(
-                (self.capacity, self.num_envs), dtype=object
-            )
-
-        self.episode_starts = np.zeros((self.capacity, self.num_envs), dtype=np.bool_)
-        self.rewards = np.zeros((self.capacity, self.num_envs), dtype=np.float32)
-        self.dones = np.zeros((self.capacity, self.num_envs), dtype=np.bool_)
-        self.values = np.zeros((self.capacity, self.num_envs), dtype=np.float32)
-        self.log_probs = np.zeros((self.capacity, self.num_envs), dtype=np.float32)
-        self.advantages = np.zeros((self.capacity, self.num_envs), dtype=np.float32)
-        self.returns = np.zeros((self.capacity, self.num_envs), dtype=np.float32)
-
-        # Initialize action buffer based on action space type
         if isinstance(self.action_space, spaces.Discrete):
             action_shape = ()
-            action_dtype = np.int64
+            action_dtype = torch.int64
         elif isinstance(self.action_space, spaces.Box):
             action_shape = self.action_space.shape
-            action_dtype = np.float32
+            action_dtype = convert_np_to_torch_dtype(
+                self.action_space.dtype
+            )  # Convert numpy dtype to torch dtype
         elif isinstance(self.action_space, spaces.MultiDiscrete):
             action_shape = (len(self.action_space.nvec),)
-            action_dtype = np.int64
+            action_dtype = torch.int64
         elif isinstance(self.action_space, spaces.MultiBinary):
             action_shape = (self.action_space.n,)
-            action_dtype = np.int64
+            action_dtype = torch.int64
         else:
-            # Attempt to handle other spaces, assuming they have a shape attribute
             try:
                 action_shape = self.action_space.shape
-                action_dtype = getattr(
-                    self.action_space, "dtype", np.float32
-                )  # Use float32 as default
+                action_dtype = convert_np_to_torch_dtype(
+                    getattr(self.action_space, "dtype", np.float32)
+                )  # Convert numpy dtype to torch dtype
             except AttributeError:
                 raise TypeError(
                     f"Unsupported action space type without shape: {type(self.action_space)}"
                 )
 
-        # Initialize actions buffer based on determined shape and dtype
-        # For Discrete spaces, action_shape is now empty, resulting in shape (capacity, num_envs)
-        self.actions = np.zeros(
-            (self.capacity, self.num_envs, *action_shape), dtype=action_dtype
-        )
+        # Create a source TensorDict with appropriately sized tensors
+        # The tensors will be on the CPU by default, can be moved to device later if needed.
+        source_dict = {
+            "observations": torch.zeros(
+                (self.capacity, self.num_envs, *obs_shape), dtype=obs_dtype
+            ),
+            "next_observations": torch.zeros(
+                (self.capacity, self.num_envs, *obs_shape), dtype=obs_dtype
+            ),
+            "actions": torch.zeros(
+                (self.capacity, self.num_envs, *action_shape), dtype=action_dtype
+            ),
+            "rewards": torch.zeros((self.capacity, self.num_envs), dtype=torch.float32),
+            "dones": torch.zeros((self.capacity, self.num_envs), dtype=torch.bool),
+            "values": torch.zeros((self.capacity, self.num_envs), dtype=torch.float32),
+            "log_probs": torch.zeros(
+                (self.capacity, self.num_envs), dtype=torch.float32
+            ),
+            "advantages": torch.zeros(
+                (self.capacity, self.num_envs), dtype=torch.float32
+            ),
+            "returns": torch.zeros((self.capacity, self.num_envs), dtype=torch.float32),
+            "episode_starts": torch.zeros(
+                (self.capacity, self.num_envs), dtype=torch.bool
+            ),
+        }
 
         if self.recurrent:
-            # Initialize hidden states buffer as dict of numpy arrays
             if self.hidden_state_architecture is None:
                 raise ValueError(
                     "hidden_state_architecture must be provided if recurrent=True"
                 )
+            # self.hidden_state_architecture is Dict[str, Tuple[num_layers, num_envs_at_ppo_init, hidden_size]]
+            # For buffer storage, each hidden state key should map to a tensor of shape:
+            # (capacity, num_envs, num_layers, hidden_size)
+            source_dict["hidden_states"] = {
+                key: torch.zeros(
+                    (
+                        self.capacity,
+                        self.num_envs,
+                        self.hidden_state_architecture[key][0],  # num_layers
+                        self.hidden_state_architecture[key][2],  # hidden_size
+                    ),
+                    dtype=torch.float32,
+                )
+                for key in self.hidden_state_architecture.keys()
+            }
+            # `next_hidden_states` might not be strictly necessary if we only store initial hidden states
+            # for sequences. If we store step-by-step next_hidden_states, it would be:
+            # source_dict["next_hidden_states"] = { ... similar structure ... }
 
-            # preallocate hidden states
-            self.hidden_states = {
-                key: np.zeros(
-                    (self.capacity, *self.hidden_state_architecture[key]),
-                    dtype=np.float32,
-                )
-                for key in self.hidden_state_architecture.keys()
-            }
-            self.next_hidden_states = {
-                key: np.zeros(
-                    (self.capacity, *self.hidden_state_architecture[key]),
-                    dtype=np.float32,
-                )
-                for key in self.hidden_state_architecture.keys()
-            }
+        # Initialize the main buffer as a TensorDict
+        self.buffer = TensorDict(
+            source_dict,
+            batch_size=[self.capacity, self.num_envs],
+            device="cpu",  # Keep buffer on CPU, move to device in get_tensor_batch
+        )
 
     def add(
         self,
@@ -176,7 +219,9 @@ class RolloutBuffer:
         log_prob: Union[float, np.ndarray],
         next_obs: Optional[ObservationType] = None,
         hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
-        next_hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
+        next_hidden_state: Optional[
+            Dict[str, ArrayOrTensor]
+        ] = None,  # Not used if only initial hidden states are stored
         episode_start: Optional[Union[bool, np.ndarray]] = None,
     ) -> None:
         """
@@ -201,104 +246,118 @@ class RolloutBuffer:
                     f"Buffer has reached capacity ({self.capacity} transitions) but received more transitions. Either increase buffer capacity or set wrap_at_capacity=True."
                 )
 
-        if self.num_envs == 1:
-            obs = np.expand_dims(obs, axis=0)
-            action = np.expand_dims(action, axis=0)
-            reward = np.expand_dims(reward, axis=0)
-            done = np.expand_dims(done, axis=0)
-            value = np.expand_dims(value, axis=0)
-            log_prob = np.expand_dims(log_prob, axis=0)
+        # Prepare data as a dictionary of tensors for the current time step
+        current_step_data = {}
 
-        # Convert tensors to numpy arrays if needed
-        if isinstance(obs, torch.Tensor):
-            obs = obs.cpu().numpy()
-        if next_obs is not None and isinstance(next_obs, torch.Tensor):
-            next_obs = next_obs.cpu().numpy()
-        if isinstance(action, torch.Tensor):
-            action = action.cpu().numpy()
-        if isinstance(reward, torch.Tensor):
-            reward = reward.cpu().numpy()
-        if isinstance(done, torch.Tensor):
-            done = done.cpu().numpy()
-        if isinstance(value, torch.Tensor):
-            value = value.cpu().numpy()
-        if isinstance(log_prob, torch.Tensor):
-            log_prob = log_prob.cpu().numpy()
-        if hidden_state is not None and isinstance(hidden_state, torch.Tensor):
-            hidden_state = hidden_state.cpu().numpy()
-        if next_hidden_state is not None and isinstance(
-            next_hidden_state, torch.Tensor
-        ):
-            next_hidden_state = next_hidden_state.cpu().numpy()
-        if episode_start is not None and isinstance(episode_start, torch.Tensor):
-            episode_start = episode_start.cpu().numpy()
+        # Convert inputs to tensors and ensure correct device (CPU for buffer storage)
+        # Also ensure they have the (num_envs, ...) shape
 
-        # Ensure inputs are at least 1D arrays for consistent batch handling
-        reward = np.atleast_1d(reward)
-        done = np.atleast_1d(done)
-        value = np.atleast_1d(value)
-        log_prob = np.atleast_1d(log_prob)
-        if episode_start is not None:
-            episode_start = np.atleast_1d(episode_start)
-
-        # Check if input dimensions match num_envs
-        if obs is not None and obs.shape[0] != self.num_envs:
-            raise ValueError(
-                f"Observation batch size {obs.shape[0]} does not match num_envs {self.num_envs}"
+        # Observations
+        if isinstance(
+            obs, dict
+        ):  # Assuming obs can be a dict for Dict observation spaces
+            current_step_data["observations"] = TensorDict(
+                {
+                    k: (
+                        torch.as_tensor(v, device="cpu").unsqueeze(0)
+                        if self.num_envs == 1
+                        else torch.as_tensor(v, device="cpu")
+                    )
+                    for k, v in obs.items()
+                },
+                batch_size=[self.num_envs],
             )
-        # Add similar checks for action, reward, done, value, log_prob, next_obs if needed
-
-        # Store the data batch at the current position
-        self.observations[self.pos] = obs
-        self.actions[self.pos] = action
-        self.rewards[self.pos] = reward
-        self.dones[self.pos] = done
-        self.values[self.pos] = value
-        self.log_probs[self.pos] = log_prob
-
-        if next_obs is not None:
-            self.next_observations[self.pos] = next_obs
-
-        if episode_start is not None:
-            self.episode_starts[self.pos] = episode_start
         else:
-            # Default episode_start to False if not provided
-            self.episode_starts[self.pos] = np.zeros(self.num_envs, dtype=bool)
+            obs_tensor = torch.as_tensor(obs, device="cpu")
+            if (
+                self.num_envs == 1
+                and obs_tensor.ndim < len(self.observation_space.shape) + 1
+            ):  # Add batch dim for single env
+                obs_tensor = obs_tensor.unsqueeze(0)
+            current_step_data["observations"] = obs_tensor
 
-        # Store hidden states if enabled
-        if self.recurrent:
-            # Use hidden_state_architecture to validate hidden state shapes
-            if hidden_state is not None:
-                for key in self.hidden_state_architecture.keys():
-                    state = hidden_state.get(key)
-                    if state is None:
-                        raise ValueError(f"Hidden state missing key: {key}")
-                    # Convert state to numpy if it's a tensor
-                    if isinstance(state, torch.Tensor):
-                        state = state.cpu().numpy()
-                    # Get expected shape from hidden_state_architecture
-                    expected_shape = self.hidden_state_architecture[key]
-                    if state.shape != expected_shape:
-                        raise ValueError(
-                            f"Hidden state['{key}'] shape {state.shape} does not match expected {expected_shape}"
-                        )
-                    self.hidden_states[key][self.pos] = state
+        # Actions
+        action_tensor = torch.as_tensor(action, device="cpu")
+        if (
+            self.num_envs == 1 and action_tensor.ndim < len(self.action_space.shape) + 1
+        ):  # Add batch dim
+            action_tensor = action_tensor.unsqueeze(0)
+        current_step_data["actions"] = action_tensor
 
-            if next_hidden_state is not None:
-                for key in self.hidden_state_architecture.keys():
-                    next_state = next_hidden_state.get(key)
-                    if next_state is None:
-                        raise ValueError(f"Next hidden state missing key: {key}")
-                    # Convert state to numpy if it's a tensor
-                    if isinstance(next_state, torch.Tensor):
-                        next_state = next_state.cpu().numpy()
-                    # Get expected shape from hidden_state_architecture
-                    expected_shape = self.hidden_state_architecture[key]
-                    if next_state.shape != expected_shape:
-                        raise ValueError(
-                            f"Next hidden state['{key}'] shape {next_state.shape} does not match expected {expected_shape}"
+        # Rewards
+        reward_tensor = torch.as_tensor(reward, dtype=torch.float32, device="cpu")
+        current_step_data["rewards"] = reward_tensor.reshape(self.num_envs)
+
+        # Dones
+        done_tensor = torch.as_tensor(done, dtype=torch.bool, device="cpu")
+        current_step_data["dones"] = done_tensor.reshape(self.num_envs)
+
+        # Values
+        value_tensor = torch.as_tensor(value, dtype=torch.float32, device="cpu")
+        current_step_data["values"] = value_tensor.reshape(self.num_envs)
+
+        # Log_probs
+        log_prob_tensor = torch.as_tensor(log_prob, dtype=torch.float32, device="cpu")
+        current_step_data["log_probs"] = log_prob_tensor.reshape(self.num_envs)
+
+        # Next Observations
+        if next_obs is not None:
+            if isinstance(next_obs, dict):
+                current_step_data["next_observations"] = TensorDict(
+                    {
+                        k: (
+                            torch.as_tensor(v, device="cpu").unsqueeze(0)
+                            if self.num_envs == 1
+                            else torch.as_tensor(v, device="cpu")
                         )
-                    self.next_hidden_states[key][self.pos] = next_state
+                        for k, v in next_obs.items()
+                    },
+                    batch_size=[self.num_envs],
+                )
+            else:
+                next_obs_tensor = torch.as_tensor(next_obs, device="cpu")
+                if (
+                    self.num_envs == 1
+                    and next_obs_tensor.ndim < len(self.observation_space.shape) + 1
+                ):  # Add batch dim
+                    next_obs_tensor = next_obs_tensor.unsqueeze(0)
+                current_step_data["next_observations"] = next_obs_tensor
+
+        # Episode Starts
+        if episode_start is not None:
+            episode_start_tensor = torch.as_tensor(
+                episode_start, dtype=torch.bool, device="cpu"
+            )
+            current_step_data["episode_starts"] = episode_start_tensor.reshape(
+                self.num_envs
+            )
+        else:
+            current_step_data["episode_starts"] = torch.zeros(
+                self.num_envs, dtype=torch.bool, device="cpu"
+            )
+
+        # Hidden States (assuming they are dictionaries of tensors)
+        if self.recurrent and hidden_state is not None:
+            # hidden_state is Dict[str, Tensor] from PPO -> {key: (layers, num_envs, size)}
+            # We need to populate current_step_data["hidden_states"]
+            # with {key: (num_envs, layers, size)}
+            current_step_data["hidden_states"] = {}
+            for key, ppo_tensor_val in hidden_state.items():
+                current_step_data["hidden_states"][key] = ppo_tensor_val.permute(
+                    1, 0, 2
+                )  # Shape: (num_envs, layers, size)
+
+        # Create a TensorDict for the current step's data
+        # This will have batch_size [num_envs]
+        current_td_slice = TensorDict(
+            current_step_data, batch_size=[self.num_envs], device="cpu"
+        )
+
+        # Assign this slice to the buffer at the current position
+        # self.buffer has batch_size [capacity, num_envs]
+        # self.buffer[self.pos] should be a TensorDict with batch_size [num_envs]
+        # This assignment will correctly place the data, including the nested hidden_states TD.
+        self.buffer[self.pos] = current_td_slice
 
         # Update buffer position
         self.pos += 1
@@ -314,51 +373,63 @@ class RolloutBuffer:
         :param last_value: Value estimate for the last observation in each environment (shape: (num_envs,))
         :param last_done: Done flag for the last state in each environment (shape: (num_envs,))
         """
-        # Convert tensors to numpy
+        # Convert inputs to numpy arrays if they are tensors, and ensure correct shape
         if isinstance(last_value, torch.Tensor):
-            last_value = last_value.cpu().numpy()
-        if isinstance(last_done, torch.Tensor):
-            last_done = last_done.cpu().numpy()
+            last_value_np = last_value.cpu().numpy().reshape(self.num_envs)
+        else:
+            last_value_np = np.asarray(last_value).reshape(self.num_envs)
 
-        # Ensure last_value and last_done have the correct shape
-        last_value = np.atleast_1d(last_value).reshape(self.num_envs)
-        last_done = np.atleast_1d(last_done).reshape(self.num_envs)
+        if isinstance(last_done, torch.Tensor):
+            last_done_np = last_done.cpu().numpy().reshape(self.num_envs)
+        else:
+            last_done_np = np.asarray(last_done).reshape(self.num_envs)
 
         buffer_size = self.capacity if self.full else self.pos
+
+        # Temporary numpy arrays for computation, will be assigned back to TensorDict
+        advantages_np = np.zeros((buffer_size, self.num_envs), dtype=np.float32)
+        returns_np = np.zeros((buffer_size, self.num_envs), dtype=np.float32)
+
+        # Get necessary data from TensorDict as numpy arrays for computation
+        # Slicing to buffer_size for all components.
+        rewards_np = self.buffer["rewards"][:buffer_size].numpy()
+        dones_np = self.buffer["dones"][:buffer_size].numpy()
+        values_np = self.buffer["values"][:buffer_size].numpy()
 
         if self.use_gae:
             last_gae_lambda = np.zeros(self.num_envs, dtype=np.float32)
             for t in reversed(range(buffer_size)):
                 if t == buffer_size - 1:
-                    next_non_terminal = 1.0 - last_done.astype(float)
-                    next_values = last_value
+                    next_non_terminal = 1.0 - last_done_np.astype(float)
+                    next_values = last_value_np.astype(float)
                 else:
-                    next_non_terminal = 1.0 - self.dones[t + 1].astype(float)
-                    next_values = self.values[t + 1]
+                    next_non_terminal = 1.0 - dones_np[t + 1].astype(float)
+                    next_values = values_np[t + 1]
 
                 delta = (
-                    self.rewards[t]
+                    rewards_np[t]
                     + self.gamma * next_values * next_non_terminal
-                    - self.values[t]
+                    - values_np[t]
                 )
-                self.advantages[t] = last_gae_lambda = (
+                advantages_np[t] = last_gae_lambda = (
                     delta
                     + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lambda
                 )
-            self.returns = (
-                self.advantages[:buffer_size] + self.values[:buffer_size]
-            )  # Only assign up to current size
+            returns_np = advantages_np + values_np
         else:
             # Monte Carlo returns
-            last_returns = last_value * (1.0 - last_done.astype(float))
+            last_returns_np = last_value_np.astype(float) * (
+                1.0 - last_done_np.astype(float)
+            )
             for t in reversed(range(buffer_size)):
-                self.returns[t] = last_returns = self.rewards[
+                returns_np[t] = last_returns_np = rewards_np[
                     t
-                ] + self.gamma * last_returns * (1.0 - self.dones[t].astype(float))
+                ] + self.gamma * last_returns_np * (1.0 - dones_np[t].astype(float))
+            advantages_np = returns_np - values_np
 
-            self.advantages = (
-                self.returns - self.values[:buffer_size]
-            )  # Only assign up to current size
+        # Assign computed advantages and returns back to the TensorDict
+        self.buffer["advantages"][:buffer_size] = torch.from_numpy(advantages_np)
+        self.buffer["returns"][:buffer_size] = torch.from_numpy(returns_np)
 
     def get(
         self, batch_size: Optional[int] = None
@@ -376,163 +447,114 @@ class RolloutBuffer:
             # Return empty dictionary or raise error if buffer is empty
             return {}
 
-        # Flatten the data across time and environment dimensions
-        flattened_data = {}
-        # Handle potential object dtype for obs/next_obs if Dict/Tuple spaces were used
-        if self.observations.dtype == object:
-            # Need careful stacking if obs are dicts/tuples
-            # This is a simplified placeholder - real implementation might need more logic
-            flattened_data["observations"] = np.concatenate(
-                self.observations[:buffer_size].ravel()
-            )
-            if self.next_observations is not None:
-                flattened_data["next_observations"] = np.concatenate(
-                    self.next_observations[:buffer_size].ravel()
-                )
-        else:
-            obs_shape = self.observations.shape[2:]
-            flattened_data["observations"] = self.observations[:buffer_size].reshape(
-                total_samples, *obs_shape
-            )
-            if self.next_observations is not None:
-                flattened_data["next_observations"] = self.next_observations[
-                    :buffer_size
-                ].reshape(total_samples, *obs_shape)
+        # Get a view of the buffer up to the current position and for all envs
+        # This slice will have batch_size [buffer_size, num_envs]
+        valid_buffer_data = self.buffer[:buffer_size]
 
-        action_shape = self.actions.shape[2:]
-        flattened_data["actions"] = self.actions[:buffer_size].reshape(
-            total_samples, *action_shape
-        )
-        flattened_data["rewards"] = self.rewards[:buffer_size].reshape(total_samples)
-        flattened_data["dones"] = self.dones[:buffer_size].reshape(total_samples)
-        flattened_data["values"] = self.values[:buffer_size].reshape(total_samples)
-        flattened_data["log_probs"] = self.log_probs[:buffer_size].reshape(
-            total_samples
-        )
-        flattened_data["advantages"] = self.advantages[:buffer_size].reshape(
-            total_samples
-        )
-        flattened_data["returns"] = self.returns[:buffer_size].reshape(total_samples)
-        flattened_data["episode_starts"] = self.episode_starts[:buffer_size].reshape(
-            total_samples
-        )
+        # Reshape to flatten the num_envs dimension into the first batch dimension
+        # New batch_size will be [buffer_size * num_envs]
+        flattened_td = valid_buffer_data.reshape(-1)  # or .view(-1) if we want a view
 
-        if self.recurrent:
-            flattened_data["hidden_states"] = {}
-            flattened_data["next_hidden_states"] = {}
-            total_samples = (
-                buffer_size * self.num_envs
-            )  # Recalculate or ensure it's available
-
-            for key in self.hidden_state_architecture.keys():
-                if self.hidden_states is not None and key in self.hidden_states:
-                    # Shape: (buffer_size, 1, num_envs, hidden_size)
-                    data = self.hidden_states[key][:buffer_size]
-                    # Swap num_envs and layer_dim axes, then reshape
-                    flattened_data["hidden_states"][key] = data.swapaxes(1, 2).reshape(
-                        total_samples,
-                        self.hidden_state_architecture[key][0],
-                        self.hidden_state_architecture[key][2],
-                    )
-
-                if (
-                    self.next_hidden_states is not None
-                    and key in self.next_hidden_states
-                ):
-                    # Shape: (buffer_size, 1, num_envs, hidden_size)
-                    next_data = self.next_hidden_states[key][:buffer_size]
-                    # Swap num_envs and layer_dim axes, then reshape
-                    flattened_data["next_hidden_states"][key] = next_data.swapaxes(
-                        1, 2
-                    ).reshape(
-                        total_samples,
-                        self.hidden_state_architecture[key][0],
-                        self.hidden_state_architecture[key][2],
-                    )
-
-        # Sample a minibatch if batch_size is specified
         if batch_size is not None:
             if batch_size > total_samples:
                 warnings.warn(
                     f"Batch size {batch_size} is larger than buffer size {total_samples}. Returning all data."
                 )
-                indices = np.arange(total_samples)
-            else:
-                indices = np.random.choice(
-                    total_samples, size=batch_size, replace=False
-                )
+                # Convert the flattened TensorDict to the old dictionary format
+                # For hidden_states, we need to handle the nested TensorDict structure
+                np_dict = {}
+                for key, value in flattened_td.items():
+                    if key == "hidden_states" and isinstance(value, TensorDict):
+                        np_dict[key] = {
+                            k_hid: v_hid.cpu().numpy() for k_hid, v_hid in value.items()
+                        }
+                    else:
+                        np_dict[key] = value.cpu().numpy()
+                return np_dict
 
-            # Sample from flattened data, handling the dict structure for hidden states
-            sampled_batch = {}
-            for key, data in flattened_data.items():
-                if key in ["hidden_states", "next_hidden_states"] and isinstance(
-                    data, dict
-                ):
-                    sampled_batch[key] = {
-                        sub_key: sub_data[indices] for sub_key, sub_data in data.items()
+            indices = np.random.choice(total_samples, size=batch_size, replace=False)
+            sampled_td = flattened_td[indices]
+            # Convert the sampled TensorDict to the old dictionary format
+            np_dict = {}
+            for key, value in sampled_td.items():
+                if key == "hidden_states" and isinstance(value, TensorDict):
+                    np_dict[key] = {
+                        k_hid: v_hid.cpu().numpy() for k_hid, v_hid in value.items()
                     }
-                elif isinstance(data, np.ndarray):
-                    sampled_batch[key] = data[indices]
                 else:
-                    sampled_batch[key] = data  # Should not happen ideally
-
-            return sampled_batch
+                    np_dict[key] = value.cpu().numpy()
+            return np_dict
         else:
-            # Return all flattened data
-            return flattened_data
+            # Convert the entire flattened TensorDict to the old dictionary format
+            np_dict = {}
+            for key, value in flattened_td.items():
+                if key == "hidden_states" and isinstance(value, TensorDict):
+                    # The hidden states in flattened_td might still be (total_samples, layers, size)
+                    # if the hidden_states TD was not reshaped along with the main TD.
+                    # This needs careful handling of how hidden_states are stored and flattened.
+
+                    # Let's assume hidden_states inside self.buffer[key] are (capacity, num_envs, layers, size)
+                    # valid_buffer_data[key] would be (buffer_size, num_envs, layers, size)
+                    # flattened_td[key] would be (total_samples, layers, size)
+
+                    np_dict[key] = {
+                        # k_hid: v_hid.reshape(total_samples, *v_hid.shape[1:]).cpu().numpy() # if v_hid was (buffer_size, num_envs, ...)
+                        k_hid: v_hid.cpu().numpy()  # if v_hid is already (total_samples, ...)
+                        for k_hid, v_hid in value.items()  # `value` is the TensorDict for hidden_states
+                    }
+
+                else:
+                    np_dict[key] = value.cpu().numpy()
+            return np_dict
 
     def get_tensor_batch(
         self, batch_size: Optional[int] = None, device: Optional[str] = None
     ) -> Dict[str, Union[torch.Tensor, Dict[str, torch.Tensor]]]:
         """
         Get data from the buffer as PyTorch tensors, flattened and optionally sampled.
+        The output is a TensorDict.
 
         :param batch_size: Size of batch to sample, if None returns all data, defaults to None.
         :param device: Device to put tensors on, defaults to None (uses self.device).
-        :return: Dictionary with tensor data.
+        :return: TensorDict containing the data.
         """
-        np_batch = self.get(batch_size)
-        device = device or self.device
+        target_device = device or self.device
+        buffer_size = self.capacity if self.full else self.pos
+        total_samples = buffer_size * self.num_envs
 
-        tensor_batch: Dict[str, Union[torch.Tensor, Dict[str, torch.Tensor]]] = {}
-        for key, data in np_batch.items():
-            if key in ["hidden_states", "next_hidden_states"] and isinstance(
-                data, dict
-            ):
-                tensor_batch[key] = {
-                    sub_key: torch.from_numpy(sub_data).to(device)
-                    for sub_key, sub_data in data.items()
-                }
-            elif isinstance(data, np.ndarray):
-                # Handle potential object dtype for observations (Dict/Tuple)
-                # This requires knowing how to convert the specific dict/tuple structure to tensors
-                if data.dtype == object:
-                    # Placeholder: Assumes data is a list/array of dicts/tuples that can be processed
-                    # This part needs custom logic based on the actual structure
-                    # Example: Convert list of dicts to a dict of tensors
-                    if isinstance(data[0], dict):
-                        tensor_batch[key] = {
-                            k: torch.stack([torch.from_numpy(d[k]) for d in data]).to(
-                                device
-                            )
-                            for k in data[0]
-                        }
-                    # Add handling for tuples if needed
-                    else:
-                        # Fallback or raise error if structure not handled
-                        warnings.warn(
-                            f"Cannot automatically convert object array '{key}' to tensor. Skipping."
-                        )
-                        tensor_batch[key] = (
-                            data  # Keep as numpy object array? Or handle specific types
-                        )
-                else:
-                    tensor_batch[key] = torch.from_numpy(data).to(device)
-            else:
-                # Should not happen if get() returns numpy arrays/dicts, but handle just in case
-                tensor_batch[key] = data  # Or raise error?
+        if total_samples == 0:
+            # Return an empty TensorDict with the correct device and structure if possible,
+            # or simply an empty dict if structure is complex to define when empty.
+            # For now, returning an empty dict to match previous behavior.
+            return {}
 
-        return tensor_batch
+        # Get a view of the buffer up to the current position and for all envs
+        # This slice will have batch_size [buffer_size, num_envs]
+        # All tensors inside self.buffer are already torch.Tensors on CPU
+        valid_buffer_data_view = self.buffer[:buffer_size]
+
+        # Reshape to flatten the num_envs dimension into the first batch dimension
+        # New batch_size will be [buffer_size * num_envs]
+        # .view(-1) is crucial for not creating a copy if possible
+        flattened_td = valid_buffer_data_view.reshape(-1)
+
+        if batch_size is not None:
+            if batch_size > total_samples:
+                warnings.warn(
+                    f"Batch size {batch_size} is larger than buffer_size {total_samples}. "
+                    "Returning all data."
+                )
+                # Move the whole flattened_td to the target device
+                return flattened_td.to(target_device)
+
+            indices = torch.randperm(total_samples, device="cpu")[
+                :batch_size
+            ]  # Sample on CPU then move
+            sampled_td = flattened_td[indices]
+            return sampled_td.to(target_device)
+        else:
+            # Return all flattened data, moved to the target device
+            return flattened_td.to(target_device)
 
     def size(self) -> int:
         """
@@ -569,16 +591,27 @@ class RolloutBuffer:
                 f"Requested sequence length {seq_len} exceeds current buffer size {buffer_size}."
             )
 
-        # Compute valid starting indices along the time dimension
-        max_start = buffer_size - seq_len
-        valid_pairs: List[Tuple[int, int]] = [
-            (t, env) for env in range(self.num_envs) for t in range(max_start + 1)
+        # Compute valid starting indices along the time dimension for each environment
+        max_start_time_idx = (
+            buffer_size - seq_len
+        )  # This is the max start index within one env's rollout
+
+        if max_start_time_idx < 0:  # Not enough data in buffer for even one sequence
+            return []
+
+        valid_coords: List[Tuple[int, int]] = [
+            (env_idx, t_idx)
+            for env_idx in range(self.num_envs)
+            for t_idx in range(max_start_time_idx + 1)
         ]
 
-        if batch_size is None or batch_size >= len(valid_pairs):
-            return valid_pairs  # Return all pairs if batch_size too large / None
+        if not valid_coords:  # Should be caught by max_start_time_idx < 0 check too
+            return []
 
-        return random.sample(valid_pairs, batch_size)
+        if batch_size is None or batch_size >= len(valid_coords):
+            return valid_coords  # Return all pairs if batch_size too large / None
+
+        return random.sample(valid_coords, batch_size)
 
     def get_sequences(
         self,
@@ -595,75 +628,71 @@ class RolloutBuffer:
                            possible sequences.
         :return: Dictionary mirroring :pyfunc:`get`, but with sequences.
         """
-        # Sample starting indices
-        start_indices = self._sample_sequence_start_indices(seq_len, batch_size)
+        # Sample starting coordinates: list of (env_idx, time_idx_in_env_rollout)
+        start_coords = self._sample_sequence_start_indices(seq_len, batch_size)
 
-        actual_batch_size = len(start_indices)
+        actual_batch_size = len(start_coords)
 
         if actual_batch_size == 0:
             return {}
 
-        # Helper to stack sequences along batch dimension
-        def _stack_seq(array: np.ndarray) -> np.ndarray:
-            seqs = [
-                array[t : t + seq_len, env_idx] for t, env_idx in start_indices
-            ]  # Each with shape (seq_len, *dims)
-            return np.stack(seqs, axis=0)  # (batch, seq_len, *dims)
+        # For each key in the buffer, we need to extract sequences.
+        # The buffer has shape [capacity, num_envs, ...] for most keys.
+        # Or for hidden_states, it's a nested TD with tensors of shape [capacity, layers, envs, size]
 
-        seq_data: Dict[str, Union[np.ndarray, Dict[str, np.ndarray]]] = {}
+        list_of_sequence_tds = []
+        for env_idx, time_idx in start_coords:
+            # Slice for one sequence: buffer[time_idx : time_idx + seq_len, env_idx]
+            # This slice will have batch_size [seq_len]
+            sequence_slice = self.buffer[time_idx : time_idx + seq_len, env_idx]
+            list_of_sequence_tds.append(sequence_slice)
 
-        # Handle observations (possibly object dtype)
-        if self.observations.dtype == object:
-            seq_data["observations"] = np.array(
-                [
-                    np.concatenate(self.observations[t : t + seq_len, env_idx])
-                    for t, env_idx in start_indices
-                ],
-                dtype=object,
-            )
-        else:
-            seq_data["observations"] = _stack_seq(self.observations)
+        # Stack these sequence TensorDicts along a new batch dimension
+        # Each TD in list_of_sequence_tds has batch_size [seq_len]
+        # torch.stack will create a new TD with batch_size [actual_batch_size, seq_len]
+        sequences_td = torch.stack(list_of_sequence_tds, dim=0)
 
-        if self.next_observations is not None:
-            if self.next_observations.dtype == object:
-                seq_data["next_observations"] = np.array(
-                    [
-                        np.concatenate(self.next_observations[t : t + seq_len, env_idx])
-                        for t, env_idx in start_indices
-                    ],
-                    dtype=object,
-                )
+        # Convert the TensorDict to the old dictionary of numpy arrays format
+        np_dict = {}
+        for key, value in sequences_td.items():
+            if key == "hidden_states" and isinstance(value, TensorDict):
+                # For hidden states, we want the *initial* hidden state for each sequence.
+                # The `value` here would be a TensorDict where each key (e.g., "h_actor")
+                # has a tensor of shape (actual_batch_size, seq_len, layers, hidden_size)
+                # We need to take the first time step [:, 0]
+                # This block will be superseded by the explicit addition of "initial_hidden_states" below
+                # but kept for structural reference or if full hidden sequences were needed in np_dict form.
+                np_dict[key] = {
+                    k_hid: v_hid.cpu().numpy() for k_hid, v_hid in value.items()
+                }
+            elif isinstance(
+                value, TensorDict
+            ):  # For nested like observations if it's a Dict space
+                np_dict[key] = {
+                    k_sub: v_sub.cpu().numpy() for k_sub, v_sub in value.items()
+                }
             else:
-                seq_data["next_observations"] = _stack_seq(self.next_observations)
+                np_dict[key] = value.cpu().numpy()
 
-        # Scalar / vector data
-        for name, array in [
-            ("actions", self.actions),
-            ("rewards", self.rewards),
-            ("dones", self.dones),
-            ("values", self.values),
-            ("log_probs", self.log_probs),
-            ("advantages", self.advantages),
-            ("returns", self.returns),
-            ("episode_starts", self.episode_starts),
-        ]:
-            seq_data[name] = _stack_seq(array)
+        # Explicitly add initial_hidden_states if recurrent
+        if self.recurrent and self.buffer.get("hidden_states", None) is not None:
+            initial_hidden_states_for_np_dict = {}
+            # sequences_td.get("hidden_states") is a TensorDict itself, where each value is a tensor
+            # of shape (actual_batch_size, seq_len, layers, size)
+            if sequences_td.get("hidden_states") is not None:
+                for h_key_orig, h_val_seq_tensor in sequences_td.get(
+                    "hidden_states"
+                ).items():
+                    initial_hidden_states_for_np_dict[h_key_orig] = (
+                        h_val_seq_tensor[:, 0].cpu().numpy()
+                    )  # take t=0
+            np_dict["initial_hidden_states"] = initial_hidden_states_for_np_dict
 
-        # Handle recurrent states
-        if self.recurrent and self.hidden_states is not None:
-            seq_data["initial_hidden_states"] = {}
-            for key in self.hidden_state_architecture.keys():
-                # Shape in buffer: (time, layer, env, hidden)
-                init_h = np.stack(
-                    [
-                        self.hidden_states[key][t, :, env_idx]
-                        for t, env_idx in start_indices
-                    ],
-                    axis=0,
-                )  # (batch, layer, hidden)
-                seq_data["initial_hidden_states"][key] = init_h
+            # We might also remove the full "hidden_states" from np_dict if PPO doesn't need it.
+            if "hidden_states" in np_dict and "initial_hidden_states" in np_dict:
+                del np_dict["hidden_states"]
 
-        return seq_data
+        return np_dict
 
     def get_sequence_tensor_batch(
         self,
@@ -680,32 +709,53 @@ class RolloutBuffer:
                        :pyattr:`self.device`.
         :return: Dictionary with tensor sequences.
         """
-        device = device or self.device
-        np_batch = self.get_sequences(seq_len=seq_len, batch_size=batch_size)
+        target_device = device or self.device
+        start_coords = self._sample_sequence_start_indices(seq_len, batch_size)
+        actual_batch_size = len(start_coords)
 
-        tensor_batch: Dict[str, Union[torch.Tensor, Dict[str, torch.Tensor]]] = {}
-        for key, data in np_batch.items():
-            if key == "initial_hidden_states" and isinstance(data, dict):
-                tensor_batch[key] = {
-                    k: torch.from_numpy(v).to(device) for k, v in data.items()
-                }
-            elif isinstance(data, dict):
-                tensor_batch[key] = {
-                    k: torch.from_numpy(v).to(device) for k, v in data.items()
-                }
-            elif isinstance(data, np.ndarray):
-                if data.dtype == object:
-                    # See note in get_tensor_batch
-                    warnings.warn(
-                        f"Cannot automatically convert object array '{key}' to tensor. Skipping."
-                    )
-                    tensor_batch[key] = data
-                else:
-                    tensor_batch[key] = torch.from_numpy(data).to(device)
-            else:
-                tensor_batch[key] = data
+        if actual_batch_size == 0:
+            return {}  # Return empty TensorDict or dict
 
-        return tensor_batch
+        list_of_sequence_tds = []
+        for env_idx, time_idx in start_coords:
+            # Slice for one sequence: self.buffer[time_idx : time_idx + seq_len, env_idx]
+            # This slice will have batch_size [seq_len] and tensors are on CPU.
+            sequence_slice = self.buffer[
+                time_idx : time_idx + seq_len, env_idx
+            ].clone()  # Clone to make them independent for stack
+            list_of_sequence_tds.append(sequence_slice)
+
+        if not list_of_sequence_tds:  # Should be caught by actual_batch_size == 0
+            return {}
+
+        # Stack these sequence TensorDicts along a new batch dimension
+        # Each TD in list_of_sequence_tds has batch_size [seq_len]
+        # torch.stack will create a new TD with batch_size [actual_batch_size, seq_len]
+        sequences_td = torch.stack(list_of_sequence_tds, dim=0)
+
+        # Now, create the "initial_hidden_states" part for the output TensorDict
+        # This will be a nested TensorDict with batch_size [actual_batch_size]
+        # Its keys will be the hidden state keys (e.g. "h_actor"), and values will be tensors
+        # of shape (actual_batch_size, num_layers, hidden_size)
+        if self.recurrent and sequences_td.get("hidden_states", None) is not None:
+            initial_hidden_states_source = {}
+            full_hidden_sequences = sequences_td.get("hidden_states")
+            for h_key, h_val_tensor_sequences in full_hidden_sequences.items():
+                initial_hidden_states_source[h_key] = h_val_tensor_sequences[
+                    :, 0
+                ].clone()
+
+            # Use set_non_tensor for the dictionary of initial hidden state tensors
+            sequences_td.set_non_tensor(
+                "initial_hidden_states", initial_hidden_states_source
+            )
+
+            if (
+                "hidden_states" in sequences_td.keys()
+            ):  # Exclude original full hidden_states sequence
+                sequences_td = sequences_td.exclude("hidden_states")
+
+        return sequences_td.to(target_device)
 
     def get_specific_sequences_tensor_batch(
         self,
@@ -729,235 +779,72 @@ class RolloutBuffer:
         :param device: Torch device to move tensors to. Defaults to self.device.
         :return: Dictionary with tensor sequences.
         """
-        device = device or self.device
+        target_device = device or self.device
         actual_batch_size = len(sequence_coords)
 
         if actual_batch_size == 0:
+            return {}  # Return empty TensorDict or dict
+
+        list_of_sequence_tds = []
+        for env_idx, time_idx in sequence_coords:
+            sequence_slice = self.buffer[time_idx : time_idx + seq_len, env_idx].clone()
+            list_of_sequence_tds.append(sequence_slice)
+
+        if not list_of_sequence_tds:
             return {}
 
-        # Helper to stack sequences along batch dimension for specific coordinates
-        def _stack_specific_seq(array: np.ndarray) -> np.ndarray:
-            # array has shape (capacity, num_envs, *dims)
-            # sequence_coords are (env_idx, time_idx_in_env_rollout)
-            # We need to slice: array[time_idx : time_idx + seq_len, env_idx]
-            seqs = [
-                array[time_idx : time_idx + seq_len, env_idx]
-                for env_idx, time_idx in sequence_coords
-            ]  # Each element is (seq_len, *dims)
-            return np.stack(seqs, axis=0)  # (batch_size, seq_len, *dims)
+        sequences_td = torch.stack(list_of_sequence_tds, dim=0)
 
-        seq_data_np: Dict[str, Union[np.ndarray, Dict[str, np.ndarray]]] = {}
+        if self.recurrent and sequences_td.get("hidden_states", None) is not None:
+            initial_hidden_states_source = {}
+            full_hidden_sequences = sequences_td.get("hidden_states")
+            for h_key, h_val_tensor_sequences in full_hidden_sequences.items():
+                initial_hidden_states_source[h_key] = h_val_tensor_sequences[
+                    :, 0
+                ].clone()
 
-        # Handle observations
-        if self.observations.dtype == object:
-            seq_data_np["observations"] = np.array(
-                [
-                    np.concatenate(
-                        self.observations[time_idx : time_idx + seq_len, env_idx]
-                    )
-                    for env_idx, time_idx in sequence_coords
-                ],
-                dtype=object,
+            # Use set_non_tensor for the dictionary of initial hidden state tensors
+            sequences_td.set_non_tensor(
+                "initial_hidden_states", initial_hidden_states_source
             )
-        else:
-            seq_data_np["observations"] = _stack_specific_seq(self.observations)
 
-        # Handle next_observations if they exist
-        if hasattr(self, "next_observations") and self.next_observations is not None:
-            if self.next_observations.dtype == object:
-                seq_data_np["next_observations"] = np.array(
-                    [
-                        np.concatenate(
-                            self.next_observations[
-                                time_idx : time_idx + seq_len, env_idx
-                            ]
-                        )
-                        for env_idx, time_idx in sequence_coords
-                    ],
-                    dtype=object,
-                )
-            else:
-                seq_data_np["next_observations"] = _stack_specific_seq(
-                    self.next_observations
-                )
+            if (
+                "hidden_states" in sequences_td.keys()
+            ):  # Exclude original full hidden_states sequence
+                sequences_td = sequences_td.exclude("hidden_states")
 
-        # Scalar / vector data
-        for name, array_attr_name in [
-            ("actions", "actions"),
-            ("rewards", "rewards"),
-            ("dones", "dones"),
-            ("values", "values"),
-            ("log_probs", "log_probs"),
-            ("advantages", "advantages"),
-            ("returns", "returns"),
-            ("episode_starts", "episode_starts"),
-        ]:
-            array = getattr(self, array_attr_name)
-            seq_data_np[name] = _stack_specific_seq(array)
-
-        # Handle recurrent states (initial hidden state for each sequence)
-        if self.recurrent and self.hidden_states is not None:
-            seq_data_np["initial_hidden_states"] = {}
-            for key in self.hidden_state_architecture.keys():
-                # self.hidden_states[key] has shape (capacity, num_layers, num_envs, hidden_dim_per_layer)
-                # We need hidden_states[key][time_idx, :, env_idx, :]
-                init_h_list = []
-                for env_idx, time_idx in sequence_coords:
-                    # Correct slicing for hidden states:
-                    # hidden_states[key] has shape e.g. (capacity, layers, envs, size)
-                    # We need the state at time_idx for env_idx.
-                    # It should be (layers, size) for that specific (time_idx, env_idx)
-                    # The batch dimension for hidden states in RolloutBuffer.add is (num_envs, layers, hidden_size)
-                    # So, in self.hidden_states[key], it's (capacity, num_envs, layers, hidden_size) if architecture is (layers, 1, hidden_size)
-                    # Or (capacity, layers, num_envs, hidden_size) if architecture is (layers, num_envs, hidden_size) - check add()
-                    # Current RolloutBuffer.add expects hidden_state of shape (num_envs, layers, size) for each key in the dict
-                    # And stores it as self.hidden_states[key][pos] = state (where state is (num_envs, layers, size))
-                    # So self.hidden_states[key] is (capacity, num_envs, layers, size)
-
-                    # The target shape for PPO BPTT's initial_hidden_states for a batch of sequences is:
-                    # (batch_size_of_sequences, num_layers, hidden_size_per_layer)
-                    # init_h_list.append(self.hidden_states[key][time_idx, env_idx, :, :])
-                    # Corrected slicing:
-                    init_h_list.append(self.hidden_states[key][time_idx, :, env_idx, :])
-
-                seq_data_np["initial_hidden_states"][key] = np.stack(
-                    init_h_list, axis=0
-                )
-
-        # Convert numpy batch to tensor batch
-        tensor_batch: Dict[str, Union[torch.Tensor, Dict[str, torch.Tensor]]] = {}
-        for key, data in seq_data_np.items():
-            if key == "initial_hidden_states" and isinstance(data, dict):
-                tensor_batch[key] = {
-                    k: torch.from_numpy(v).to(device) for k, v in data.items()
-                }
-            elif isinstance(data, dict):  # For observations if they are dicts
-                tensor_batch[key] = {
-                    k: torch.from_numpy(v).to(device) for k, v in data.items()
-                }
-            elif isinstance(data, np.ndarray):
-                if data.dtype == object:
-                    warnings.warn(
-                        f"Cannot automatically convert object array '{key}' in get_specific_sequences_tensor_batch to tensor. Skipping conversion for this key."
-                    )
-                    tensor_batch[key] = data  # Keep as numpy object array
-                else:
-                    tensor_batch[key] = torch.from_numpy(data).to(device)
-            else:
-                tensor_batch[key] = data  # Should not happen
-
-        return tensor_batch
+        return sequences_td.to(target_device)
 
     def __getstate__(self) -> Dict[str, Any]:
         """Gets the state dictionary for pickling, ensuring arrays are copied."""
-        state = self.__dict__.copy()
-        # Explicitly copy numpy arrays to avoid issues with read-only views after unpickling
-        buffer_size = self.capacity if self.full else self.pos
-        array_keys = [
-            "observations",
-            "actions",
-            "rewards",
-            "dones",
-            "values",
-            "log_probs",
-            "next_observations",
-            "advantages",
-            "returns",
-            "episode_starts",
-        ]
-        for key in array_keys:
-            if hasattr(self, key) and getattr(self, key) is not None:
-                # Slice up to current size and copy
-                state[key] = np.array(getattr(self, key)[:buffer_size], copy=True)
-
-        # Handle hidden_states dictionary (contains tensors or numpy arrays)
-        if self.recurrent and self.hidden_states is not None:
-            state["hidden_states"] = {}
-            for key, val in self.hidden_states.items():
-                # Slice up to current size and copy
-                sliced_val = val[:buffer_size]
-                state["hidden_states"][key] = (
-                    sliced_val.clone()
-                    if isinstance(sliced_val, torch.Tensor)
-                    else np.array(sliced_val, copy=True)
-                )
-
-        if self.recurrent and self.next_hidden_states is not None:
-            state["next_hidden_states"] = {}
-            for key, val in self.next_hidden_states.items():
-                # Slice up to current size and copy
-                sliced_val = val[:buffer_size]
-                state["next_hidden_states"][key] = (
-                    sliced_val.clone()
-                    if isinstance(sliced_val, torch.Tensor)
-                    else np.array(sliced_val, copy=True)
-                )
-
-        # Remove attributes that might not be easily serializable or needed
-        # state.pop('observation_space', None)
-        # state.pop('action_space', None)
-        # We need observation_space and action_space for _initialize_buffers in __setstate__
-
-        return state
+        return self.__dict__.copy()
 
     def __setstate__(self, state: Dict[str, Any]) -> None:
         """Sets the state dictionary when unpickling, re-initializing buffers."""
         self.__dict__.update(state)
 
-        # Re-initialize buffers to ensure they are correctly sized and writable
-        # We need observation_space and action_space for this, ensured they are in state
-        if not hasattr(self, "observation_space") or not hasattr(self, "action_space"):
+        # Let's assume self.buffer is correctly loaded by `self.__dict__.update(state)`.
+        # We should verify its integrity or re-initialize if it's somehow corrupted/not present.
+
+        if not hasattr(self, "buffer") or not isinstance(self.buffer, TensorDict):
             warnings.warn(
-                "Observation or action space missing during RolloutBuffer unpickling. Buffer might be invalid."
+                "TensorDict buffer not found or invalid during unpickling. Re-initializing."
             )
-            return  # Cannot properly reinitialize
-
-        self._initialize_buffers()  # Creates fresh, writable arrays
-
-        # Restore data into the newly created buffers
-        buffer_size = self.capacity if self.full else self.pos
-        array_keys = [
-            "observations",
-            "actions",
-            "rewards",
-            "dones",
-            "values",
-            "log_probs",
-            "next_observations",
-            "advantages",
-            "returns",
-            "episode_starts",
-        ]
-        for key in array_keys:
-            if key in state and hasattr(self, key) and getattr(self, key) is not None:
-                saved_array = state[key]
-                # Ensure the loaded array length matches the expected buffer size based on pos/full
-                current_buffer_len = min(len(saved_array), buffer_size)
-                if current_buffer_len > 0:
-                    getattr(self, key)[:current_buffer_len] = saved_array[
-                        :current_buffer_len
-                    ]
-
-        # Restore hidden states
-        if self.recurrent:
-            if "hidden_states" in state and self.hidden_states is not None:
-                saved_hidden_states = state["hidden_states"]
-                for key, saved_array_val in saved_hidden_states.items():
-                    if key in self.hidden_states:
-                        # Ensure the loaded array length matches the expected buffer size
-                        current_buffer_len = min(len(saved_array_val), buffer_size)
-                        if current_buffer_len > 0:
-                            self.hidden_states[key][:current_buffer_len] = (
-                                saved_array_val[:current_buffer_len]
-                            )
-
-            if "next_hidden_states" in state and self.next_hidden_states is not None:
-                saved_next_hidden_states = state["next_hidden_states"]
-                for key, saved_array_val in saved_next_hidden_states.items():
-                    if key in self.next_hidden_states:
-                        # Ensure the loaded array length matches the expected buffer size
-                        current_buffer_len = min(len(saved_array_val), buffer_size)
-                        if current_buffer_len > 0:
-                            self.next_hidden_states[key][:current_buffer_len] = (
-                                saved_array_val[:current_buffer_len]
-                            )
+            if not hasattr(self, "observation_space") or not hasattr(
+                self, "action_space"
+            ):
+                warnings.warn(
+                    "Observation or action space missing during RolloutBuffer unpickling. Buffer might be invalid."
+                )
+                return
+            self._initialize_buffers()  # Fallback to re-initialize if buffer is not good
+        else:
+            # Ensure the loaded buffer is on the correct device (CPU) as expected by internal logic
+            self.buffer = self.buffer.to("cpu")
+            # Verify batch_size and keys if necessary
+            expected_batch_size = torch.Size([self.capacity, self.num_envs])
+            if self.buffer.batch_size != expected_batch_size:
+                warnings.warn(
+                    f"Loaded TensorDict has batch_size {self.buffer.batch_size}, expected {expected_batch_size}. Re-initializing."
+                )
+                self._initialize_buffers()
