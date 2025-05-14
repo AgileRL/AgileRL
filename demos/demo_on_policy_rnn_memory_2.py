@@ -101,10 +101,16 @@ print(f"Using device: {device}")
 # Toggle this to True for RNN (LSTM), False for MLP
 recurrent = True  # <--- CHANGE THIS TO ENABLE/DISABLE RECURRENT
 
+# --- Create Environment and Population ---
+seq_len = 2
+num_envs = 64  # Fewer envs, since task is simple
+
+
 if recurrent:
     NET_CONFIG = {
         "encoder_config": {
             "hidden_state_size": 32,  # LSTM hidden state size (small, task is simple)
+            "max_seq_len": seq_len + 1,
         },
     }
 else:
@@ -114,9 +120,6 @@ else:
         },
     }
 
-# --- Create Environment and Population ---
-seq_len = 2
-num_envs = 64  # Fewer envs, since task is simple
 
 # Hyperparameters
 INIT_HP = {
@@ -164,12 +167,7 @@ pop = create_population(
     device=device,
     algo_kwargs={
         "use_rollout_buffer": True,
-        **(
-            {"recurrent": True, "hidden_state_size": INIT_HP["HIDDEN_STATE_SIZE"]}
-            if recurrent
-            else {}
-        ),
-        "max_seq_len": seq_len + 1,
+        "recurrent": recurrent
     },
 )
 
