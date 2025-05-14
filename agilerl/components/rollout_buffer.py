@@ -208,6 +208,7 @@ class RolloutBuffer:
             batch_size=[self.capacity, self.num_envs],
             device="cpu",  # Keep buffer on CPU, move to device in get_tensor_batch
         )
+        print(self.buffer)
 
     def add(
         self,
@@ -801,7 +802,7 @@ class RolloutBuffer:
             for h_key, h_val_tensor_sequences in full_hidden_sequences.items():
                 initial_hidden_states_source[h_key] = h_val_tensor_sequences[
                     :, 0
-                ].clone()
+                ].clone().to(target_device)
 
             # Use set_non_tensor for the dictionary of initial hidden state tensors
             sequences_td.set_non_tensor(

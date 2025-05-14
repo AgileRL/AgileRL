@@ -1119,18 +1119,10 @@ class PPO(RLAlgorithm):
             # current_minibatch_td has batch_size [current_batch_num_sequences, seq_len]
             # where current_batch_num_sequences is len(minibatch_indices) or len(current_coords_minibatch_coords)
 
-            mb_obs_seq = current_minibatch_td[
-                "observations"
-            ]  # (batch_seq, seq_len, *obs_dims) or nested TD
-            mb_actions_seq = current_minibatch_td[
-                "actions"
-            ]  # (batch_seq, seq_len, *act_dims)
-            mb_old_log_probs_seq = current_minibatch_td[
-                "log_probs"
-            ]  # (batch_seq, seq_len)
-            mb_advantages_seq = current_minibatch_td[
-                "advantages"
-            ]  # (batch_seq, seq_len) (already normalized)
+            mb_obs_seq = current_minibatch_td["observations"]  # (batch_seq, seq_len, *obs_dims) or nested TD
+            mb_actions_seq = current_minibatch_td["actions"]  # (batch_seq, seq_len, *act_dims)
+            mb_old_log_probs_seq = current_minibatch_td["log_probs"]  # (batch_seq, seq_len)
+            mb_advantages_seq = current_minibatch_td["advantages"]  # (batch_seq, seq_len) (already normalized)
             mb_returns_seq = current_minibatch_td["returns"]  # (batch_seq, seq_len)
 
             # Retrieve initial_hidden_states (Dict[str, Tensor]) using get_non_tensor
@@ -1146,11 +1138,12 @@ class PPO(RLAlgorithm):
             current_step_hidden_state_actor = (
                 None  # For actor: {key: (layers, batch_seq_size, hidden_size)}
             )
+            
             if self.recurrent and mb_initial_hidden_states_dict is not None:
                 current_step_hidden_state_actor = {
                     # val is (batch_seq_size, layers, size) from initial_hidden_states_dict
                     # permute to (layers, batch_seq_size, size)
-                    key: val.permute(1, 0, 2).contiguous()
+                    key: val.permute(1, 0, 2).contiguous().to(self.device)
                     for key, val in mb_initial_hidden_states_dict.items()
                 }
 
