@@ -707,6 +707,136 @@ class RolloutBuffer:
 
         return tensor_batch
 
+    def get_specific_sequences_tensor_batch(
+        self,
+        seq_len: int,
+        sequence_coords: List[Tuple[int, int]], # List of (env_idx, time_idx_in_env_rollout)
+        device: Optional[str] = None,
+    ) -> Dict[str, Union[torch.Tensor, Dict[str, torch.Tensor]]]:
+        """
+        Returns a dictionary with batched sequences for specific, pre-determined
+        starting coordinates, as PyTorch tensors.
+
+        The returned arrays have a leading batch dimension (size = len(sequence_coords))
+        and a time dimension of size ``seq_len``.
+
+        :param seq_len: Length of each sequence in timesteps.
+        :param sequence_coords: A list of (env_idx, time_idx) tuples.
+                                Each tuple specifies the starting environment and time
+                                for a sequence within that environment's rollout.
+        :param device: Torch device to move tensors to. Defaults to self.device.
+        :return: Dictionary with tensor sequences.
+        """
+        device = device or self.device
+        actual_batch_size = len(sequence_coords)
+
+        if actual_batch_size == 0:
+            return {}
+
+        # Helper to stack sequences along batch dimension for specific coordinates
+        def _stack_specific_seq(array: np.ndarray) -> np.ndarray:
+            # array has shape (capacity, num_envs, *dims)
+            # sequence_coords are (env_idx, time_idx_in_env_rollout)
+            # We need to slice: array[time_idx : time_idx + seq_len, env_idx]
+            seqs = [
+                array[time_idx : time_idx + seq_len, env_idx] for env_idx, time_idx in sequence_coords
+            ]  # Each element is (seq_len, *dims)
+            return np.stack(seqs, axis=0)  # (batch_size, seq_len, *dims)
+
+        seq_data_np: Dict[str, Union[np.ndarray, Dict[str, np.ndarray]]] = {}
+
+        # Handle observations
+        if self.observations.dtype == object:
+            seq_data_np["observations"] = np.array(
+                [
+                    np.concatenate(self.observations[time_idx : time_idx + seq_len, env_idx])
+                    for env_idx, time_idx in sequence_coords
+                ],
+                dtype=object,
+            )
+        else:
+            seq_data_np["observations"] = _stack_specific_seq(self.observations)
+
+        # Handle next_observations if they exist
+        if hasattr(self, 'next_observations') and self.next_observations is not None:
+            if self.next_observations.dtype == object:
+                seq_data_np["next_observations"] = np.array(
+                    [
+                        np.concatenate(self.next_observations[time_idx : time_idx + seq_len, env_idx])
+                        for env_idx, time_idx in sequence_coords
+                    ],
+                    dtype=object,
+                )
+            else:
+                seq_data_np["next_observations"] = _stack_specific_seq(self.next_observations)
+
+
+        # Scalar / vector data
+        for name, array_attr_name in [
+            ("actions", "actions"),
+            ("rewards", "rewards"),
+            ("dones", "dones"),
+            ("values", "values"),
+            ("log_probs", "log_probs"),
+            ("advantages", "advantages"),
+            ("returns", "returns"),
+            ("episode_starts", "episode_starts"),
+        ]:
+            array = getattr(self, array_attr_name)
+            seq_data_np[name] = _stack_specific_seq(array)
+
+        # Handle recurrent states (initial hidden state for each sequence)
+        if self.recurrent and self.hidden_states is not None:
+            seq_data_np["initial_hidden_states"] = {}
+            for key in self.hidden_state_architecture.keys():
+                # self.hidden_states[key] has shape (capacity, num_layers, num_envs, hidden_dim_per_layer)
+                # We need hidden_states[key][time_idx, :, env_idx, :]
+                init_h_list = []
+                for env_idx, time_idx in sequence_coords:
+                    # Correct slicing for hidden states:
+                    # hidden_states[key] has shape e.g. (capacity, layers, envs, size)
+                    # We need the state at time_idx for env_idx.
+                    # It should be (layers, size) for that specific (time_idx, env_idx)
+                    # The batch dimension for hidden states in RolloutBuffer.add is (num_envs, layers, hidden_size)
+                    # So, in self.hidden_states[key], it's (capacity, num_envs, layers, hidden_size) if architecture is (layers, 1, hidden_size)
+                    # Or (capacity, layers, num_envs, hidden_size) if architecture is (layers, num_envs, hidden_size) - check add()
+                    # Current RolloutBuffer.add expects hidden_state of shape (num_envs, layers, size) for each key in the dict
+                    # And stores it as self.hidden_states[key][pos] = state (where state is (num_envs, layers, size))
+                    # So self.hidden_states[key] is (capacity, num_envs, layers, size)
+
+                    # The target shape for PPO BPTT's initial_hidden_states for a batch of sequences is:
+                    # (batch_size_of_sequences, num_layers, hidden_size_per_layer)
+                    # init_h_list.append(self.hidden_states[key][time_idx, env_idx, :, :])
+                    # Corrected slicing:
+                    init_h_list.append(self.hidden_states[key][time_idx, :, env_idx, :])
+
+                seq_data_np["initial_hidden_states"][key] = np.stack(init_h_list, axis=0)
+
+
+        # Convert numpy batch to tensor batch
+        tensor_batch: Dict[str, Union[torch.Tensor, Dict[str, torch.Tensor]]] = {}
+        for key, data in seq_data_np.items():
+            if key == "initial_hidden_states" and isinstance(data, dict):
+                tensor_batch[key] = {
+                    k: torch.from_numpy(v).to(device) for k, v in data.items()
+                }
+            elif isinstance(data, dict): # For observations if they are dicts
+                 tensor_batch[key] = {
+                    k: torch.from_numpy(v).to(device) for k, v in data.items()
+                }
+            elif isinstance(data, np.ndarray):
+                if data.dtype == object:
+                    warnings.warn(
+                        f"Cannot automatically convert object array '{key}' in get_specific_sequences_tensor_batch to tensor. Skipping conversion for this key."
+                    )
+                    tensor_batch[key] = data # Keep as numpy object array
+                else:
+                    tensor_batch[key] = torch.from_numpy(data).to(device)
+            else:
+                tensor_batch[key] = data # Should not happen
+
+        return tensor_batch
+
     def __getstate__(self) -> Dict[str, Any]:
         """Gets the state dictionary for pickling, ensuring arrays are copied."""
         state = self.__dict__.copy()
