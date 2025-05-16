@@ -1041,6 +1041,31 @@ class PPO(RLAlgorithm):
             for env_idx in range(self.num_envs):
                 for t_idx in range(num_possible_starts_per_env):
                     all_start_coords.append((env_idx, t_idx))
+        elif self.bptt_sequence_type == BPTTSequenceType.FIFTY_PERCENT_OVERLAP:
+            step_size = seq_len // 2
+            if step_size == 0: # Avoid infinite loop if seq_len is 1
+                warnings.warn(
+                    f"Sequence length {seq_len} is too short for 50% overlap. Falling back to CHUNKED behavior."
+                )
+                # Fallback to CHUNKED logic
+                num_chunks_per_env = buffer_actual_size // seq_len
+                if num_chunks_per_env == 0:
+                    warnings.warn(
+                        f"Not enough data in buffer ({buffer_actual_size} steps) "
+                        f"to form any full chunks of length {seq_len} for BPTT. Skipping BPTT."
+                    )
+                    return 0.0
+                for env_idx in range(self.num_envs):
+                    for chunk_i in range(num_chunks_per_env):
+                        time_idx = chunk_i * seq_len
+                        all_start_coords.append((env_idx, time_idx))
+            else:
+                for env_idx in range(self.num_envs):
+                    time_idx = 0
+                    while time_idx + seq_len <= buffer_actual_size:
+                        all_start_coords.append((env_idx, time_idx))
+                        time_idx += step_size
+
         else:
             raise ValueError(f"Unknown BPTTSequenceType: {self.bptt_sequence_type}")
 
