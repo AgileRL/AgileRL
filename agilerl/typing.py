@@ -1,5 +1,6 @@
 from numbers import Number
 from typing import Any, ClassVar, Dict, List, Protocol, Tuple, Union
+from enum import Enum
 
 import gymnasium as gym
 import numpy as np
@@ -61,3 +62,10 @@ StateDict = Union[Dict[str, Any], List[Dict[str, Any]]]
 class BatchDimension:
     def __repr__(self):
         return "BatchDimension"
+
+
+class BPTTSequenceType(Enum):
+    """Enum for BPTT sequence generation methods."""
+
+    CHUNKED = "chunked"  # Generate sequences by non-overlapping chunks
+    MAXIMUM = "maximum"  # Generate all possible overlapping sequences

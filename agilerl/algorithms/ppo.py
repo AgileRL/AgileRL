@@ -18,7 +18,7 @@ from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import StochasticActor
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.value_networks import ValueNetwork
-from agilerl.typing import ArrayOrTensor, ExperiencesType, GymEnvType
+from agilerl.typing import ArrayOrTensor, ExperiencesType, GymEnvType, BPTTSequenceType
 from agilerl.utils.algo_utils import (
     flatten_experiences,
     get_experiences_samples,
@@ -91,6 +91,8 @@ class PPO(RLAlgorithm):
     :type accelerator: accelerate.Accelerator(), optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
+    :param bptt_sequence_type: Type of sequence for BPTT learning, defaults to BPTTSequenceType.CHUNKED
+    :type bptt_sequence_type: BPTTSequenceType, optional
     """
 
     def __init__(
@@ -124,6 +126,7 @@ class PPO(RLAlgorithm):
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
+        bptt_sequence_type: BPTTSequenceType = BPTTSequenceType.CHUNKED,
     ) -> None:
         super().__init__(
             observation_space,
@@ -199,6 +202,7 @@ class PPO(RLAlgorithm):
         assert isinstance(
             recurrent, bool
         ), "Has hidden states flag must be boolean value True or False."
+        assert isinstance(bptt_sequence_type, BPTTSequenceType), "bptt_sequence_type must be a BPTTSequenceType enum value."
 
         if not use_rollout_buffer:
             warnings.warn(
@@ -240,6 +244,7 @@ class PPO(RLAlgorithm):
         self.num_envs = num_envs
         self.recurrent = recurrent
         self.rollout_buffer_config = rollout_buffer_config
+        self.bptt_sequence_type = bptt_sequence_type
 
         if actor_network is not None and critic_network is not None:
             if not isinstance(actor_network, EvolvableModule):
@@ -1017,9 +1022,27 @@ class PPO(RLAlgorithm):
             return 0.0
 
         all_start_coords = []  # List of (env_idx, time_idx_in_env_rollout)
-        for env_idx in range(self.num_envs):
-            for t_idx in range(num_possible_starts_per_env):
-                all_start_coords.append((env_idx, t_idx))
+
+        if self.bptt_sequence_type == BPTTSequenceType.CHUNKED:
+            num_chunks_per_env = buffer_actual_size // seq_len
+            if num_chunks_per_env == 0:
+                warnings.warn(
+                    f"Not enough data in buffer ({buffer_actual_size} steps) "
+                    f"to form any full chunks of length {seq_len} for BPTT chunking. Skipping BPTT."
+                )
+                return 0.0
+            for env_idx in range(self.num_envs):
+                for chunk_i in range(num_chunks_per_env):
+                    time_idx = chunk_i * seq_len
+                    all_start_coords.append((env_idx, time_idx))
+        
+        elif self.bptt_sequence_type == BPTTSequenceType.MAXIMUM:
+            # num_possible_starts_per_env already calculated above
+            for env_idx in range(self.num_envs):
+                for t_idx in range(num_possible_starts_per_env):
+                    all_start_coords.append((env_idx, t_idx))
+        else:
+            raise ValueError(f"Unknown BPTTSequenceType: {self.bptt_sequence_type}")
 
         if not all_start_coords:
             warnings.warn(
@@ -1029,10 +1052,10 @@ class PPO(RLAlgorithm):
         sequences_per_minibatch = self.batch_size
 
         mean_loss = 0.0
-        approx_kl_divs = []
         num_minibatch_updates = 0
 
         for epoch in range(self.update_epochs):
+            approx_kl_divs = []  # Initialize per epoch
             np.random.shuffle(all_start_coords)
             for i in range(0, len(all_start_coords), sequences_per_minibatch):
                 current_coords_minibatch_coords = all_start_coords[
@@ -1177,21 +1200,14 @@ class PPO(RLAlgorithm):
                         warnings.warn(
                             f"Epoch {epoch}: KL divergence {kl_for_current_minibatch_sequences:.4f} exceeded target {self.target_kl}. Stopping update for this epoch."
                         )
-                        # approx_kl_divs.clear() # Clearing here might be too soon if outer loop uses it
-                        break  # Break from minibatch loop for this epoch
-                
-                # cleanup memory
-                del current_minibatch_td
-                del mb_obs_seq
-                del mb_actions_seq
-                del mb_old_log_probs_seq
-                del mb_advantages_seq
-                del mb_returns_seq
-                del mb_initial_hidden_states_dict
-                del current_step_hidden_state_actor
-                del next_hidden_state_for_actor_step
+                        approx_kl_divs.clear()
+                        break 
+
                 
                 # End of minibatch loop
+            if self.target_kl is not None and len(approx_kl_divs) > 0 and np.mean(approx_kl_divs) > self.target_kl: # Check if loop broke due to KL
+                # This break is for the epoch loop if KL was exceeded in a minibatch
+                break
             # End of epoch loop
         mean_loss = mean_loss / max(1e-8, num_minibatch_updates)
         return mean_loss
