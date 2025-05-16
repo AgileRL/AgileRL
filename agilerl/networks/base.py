@@ -314,14 +314,14 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         return self.forward(*args, **kwargs)
 
     def extract_features(
-        self, x: torch.Tensor, hidden_state=None
+        self, x: torch.Tensor, hidden_state: Optional[Dict[str, torch.Tensor]] = None
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Extract features from the encoder part of the network.
 
         :param x: Input tensor to extract features from
         :type x: torch.Tensor
         :param hidden_states: Hidden states for recurrent networks (unused in non-recurrent networks)
-        :type hidden_states: torch.Tensor, optional
+        :type hidden_states: Dict[str, torch.Tensor], optional
         :return: The encoded features
         :rtype: torch.Tensor
         """
