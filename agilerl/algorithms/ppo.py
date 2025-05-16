@@ -553,6 +553,7 @@ class PPO(RLAlgorithm):
         self,
         env: GymEnvType,
         n_steps: int = None,
+        reset_on_collect: bool = True,
     ) -> None:
         """
         Collect rollouts from the environment and store them in the rollout buffer.
@@ -572,7 +573,8 @@ class PPO(RLAlgorithm):
 
         # Initial reset
         obs, info = env.reset()
-
+        
+        # Tensor (num_envs, num_layers, (dict[str, Tensor]))
         self.hidden_state = (
             self.get_initial_hidden_state(self.num_envs) if self.recurrent else None
         )
@@ -690,152 +692,122 @@ class PPO(RLAlgorithm):
             last_value=last_value, last_done=last_done
         )
 
-    def learn(self, experiences: Union[ExperiencesType, None] = None) -> float:
-        """Updates agent network parameters to learn from experiences.
+    def _create_buffer_td_from_experiences(self, experiences: ExperiencesType) -> TensorDict:
+        """Converts a tuple of experiences into a TensorDict suitable for learning."""
+        # Unpack experiences tuple. It's expected to be:
+        # (raw_states_list, raw_actions_list, ..., raw_final_next_state_array, raw_final_next_done_array)
+        # stack_experiences converts these to tensors.
+        # self.to_device moves them to the configured device.
+        (
+            states_t, actions_t, old_log_probs_t, rewards_t,
+            dones_t, values_t, final_next_state_t, final_next_done_t
+        ) = self.to_device(*stack_experiences(*experiences))
 
-        :param experience: List of batched states, actions, log_probs, rewards, dones, values, next_state, next_done in that order.
-                        If use_rollout_buffer=True and experiences=None, uses data from rollout buffer.
-        :type experience: Tuple[Union[numpy.ndarray, Dict[str, numpy.ndarray]], ...] or None
-        """
-        # Use rollout buffer if enabled and no experiences provided
-        if self.use_rollout_buffer and experiences is None:
-            return self._learn_from_rollout_buffer()
-        elif self.use_rollout_buffer and experiences is not None:
-            warnings.warn(
-                "Both rollout buffer and experiences provided. Using provided experiences."
-            )
-        elif not self.use_rollout_buffer and experiences is None:
-            raise ValueError(
-                "Experiences cannot be None when use_rollout_buffer is False"
-            )
+        # Dones need to be long for GAE arithmetic, then float for non_terminal calculation
+        dones_long_t = dones_t.long()
+        final_next_done_long_t = final_next_done_t.long()
 
-        # Legacy learning from experiences tuple
-        (states, actions, log_probs, rewards, dones, values, next_state, next_done) = (
-            stack_experiences(*experiences)
-        )
-
-        # Bootstrapping returns using GAE advantage estimation
-        dones = dones.long()
+        # GAE Computation
         with torch.no_grad():
-            num_steps = rewards.size(0)
-            next_state = self.preprocess_observation(next_state)
-            next_value = self.critic(next_state).reshape(1, -1).cpu()
-            advantages = torch.zeros_like(rewards).float()
-            last_gae_lambda = 0
+            num_steps = rewards_t.size(0)  # learn_step or rollout length
+            
+            # Preprocess final_next_state_t (it's already on device)
+            processed_final_next_state = self.preprocess_observation(final_next_state_t)
+            next_value_at_final_step = self.critic(processed_final_next_state).squeeze(-1) # Shape: (num_envs,)
+
+            advantages_t = torch.zeros_like(rewards_t) # (L, num_envs)
+            # Assumes rewards_t has shape (L, num_envs) or (L,) if num_envs=1 and squeezed
+            # Adjust last_gae_lambda size if num_envs > 1
+            if rewards_t.ndim > 1:
+                last_gae_lambda = torch.zeros(rewards_t.size(1), device=self.device) # (num_envs,)
+            else:
+                last_gae_lambda = torch.zeros(1, device=self.device) # (1,) if rewards_t is (L,)
+
             for t in reversed(range(num_steps)):
                 if t == num_steps - 1:
-                    next_non_terminal = 1.0 - next_done
-                    nextvalue = next_value.squeeze()
+                    next_non_terminal = 1.0 - final_next_done_long_t.float()
+                    current_next_value = next_value_at_final_step
                 else:
-                    next_non_terminal = 1.0 - dones[t + 1]
-                    nextvalue = values[t + 1]
-
-                # Calculate delta (TD error)
+                    next_non_terminal = 1.0 - dones_long_t[t + 1].float()
+                    current_next_value = values_t[t + 1]
+                
                 delta = (
-                    rewards[t] + self.gamma * nextvalue * next_non_terminal - values[t]
+                    rewards_t[t]
+                    + self.gamma * current_next_value * next_non_terminal
+                    - values_t[t]
                 )
-
-                # Use recurrence relation to compute advantage
-                advantages[t] = last_gae_lambda = (
+                advantages_t[t] = last_gae_lambda = (
                     delta
                     + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lambda
                 )
+            returns_t = advantages_t + values_t
 
-            returns = advantages + values
+        # Prepare experiences for TensorDict (flatten if necessary)
+        # _learn_from_rollout_buffer_flat expects 'observations', 'actions', 'log_probs', 'advantages', 'returns'
+        experiences_for_td = (
+            states_t, actions_t, old_log_probs_t, advantages_t, returns_t
+        )
 
-        # Flatten experiences from (batch_size, num_envs, ...) to (batch_size*num_envs, ...)
-        # after checking if experiences are vectorized
-        experiences = (states, actions, log_probs, advantages, returns, values)
-        if is_vectorized_experiences(*experiences):
-            experiences = flatten_experiences(*experiences)
+        if is_vectorized_experiences(*experiences_for_td):
+            (
+                flat_states, flat_actions, flat_old_log_probs,
+                flat_advantages, flat_returns
+            ) = flatten_experiences(*experiences_for_td)
+        else:
+            flat_states, flat_actions, flat_old_log_probs, flat_advantages, flat_returns = experiences_for_td
 
-        # Move experiences to algo device
-        experiences = self.to_device(*experiences)
+        source_dict = {
+            "observations": flat_states,
+            "actions": flat_actions,
+            "log_probs": flat_old_log_probs,
+            "advantages": flat_advantages,
+            "returns": flat_returns,
+        }
+        
+        if flat_states.numel() == 0: # Check if the primary data tensor is empty
+            warnings.warn("Warning: No data to create TensorDict from experiences.")
+            return TensorDict({}, batch_size=[0], device=self.device) # Return empty TD
+            
+        return TensorDict(source_dict, batch_size=[flat_states.size(0)], device=self.device)
 
-        # Get number of samples from the returns tensor
-        num_samples = experiences[4].size(0)
-        batch_idxs = np.arange(num_samples)
-        mean_loss = 0
-        for epoch in range(self.update_epochs):
-            np.random.shuffle(batch_idxs)
-            for start in range(0, num_samples, self.batch_size):
-                minibatch_idxs = batch_idxs[start : start + self.batch_size]
-                (
-                    batch_states,
-                    batch_actions,
-                    batch_log_probs,
-                    batch_advantages,
-                    batch_returns,
-                    batch_values,
-                ) = get_experiences_samples(minibatch_idxs, *experiences)
+    def learn(self, experiences: Union[ExperiencesType, None] = None) -> float:
+        """Updates agent network parameters to learn from experiences.
 
-                batch_actions = batch_actions.squeeze()
-                batch_returns = batch_returns.squeeze()
-                batch_log_probs = batch_log_probs.squeeze()
-                batch_advantages = batch_advantages.squeeze()
-                batch_values = batch_values.squeeze()
+        :param experiences: Tuple of batched states, actions, log_probs, rewards, dones, values, next_state, next_done.
+                            If use_rollout_buffer=True and experiences=None, uses data from rollout buffer.
+        :type experiences: Tuple[Union[numpy.ndarray, Dict[str, numpy.ndarray]], ...] or None
+        """
+        buffer_td_to_learn_from: Optional[TensorDict] = None
 
-                if len(minibatch_idxs) > 1:
-                    log_prob, entropy, value = self.evaluate_actions(
-                        obs=batch_states, actions=batch_actions
-                    )
-
-                    logratio = log_prob - batch_log_probs
-                    ratio = logratio.exp()
-
-                    with torch.no_grad():
-                        approx_kl = ((ratio - 1) - logratio).mean()
-
-                    minibatch_advs = batch_advantages
-                    minibatch_advs = (minibatch_advs - minibatch_advs.mean()) / (
-                        minibatch_advs.std() + 1e-8
-                    )
-
-                    # Policy loss
-                    pg_loss1 = -minibatch_advs * ratio
-                    pg_loss2 = -minibatch_advs * torch.clamp(
-                        ratio, 1 - self.clip_coef, 1 + self.clip_coef
-                    )
-
-                    pg_loss = torch.max(pg_loss1, pg_loss2).mean()
-
-                    # Value loss
-                    value = value.view(-1)
-                    v_loss_unclipped = (value - batch_returns) ** 2
-                    v_clipped = batch_values + torch.clamp(
-                        value - batch_values, -self.clip_coef, self.clip_coef
-                    )
-
-                    v_loss_clipped = (v_clipped - batch_returns) ** 2
-                    v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
-                    v_loss = 0.5 * v_loss_max.mean()
-
-                    entropy_loss = entropy.mean()
-                    loss = (
-                        pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
-                    )
-
-                    # actor + critic loss backprop
-                    self.optimizer.zero_grad()
-                    if self.accelerator is not None:
-                        self.accelerator.backward(loss)
-                    else:
-                        loss.backward()
-
-                    # Clip gradients
-                    clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
-                    clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
-
-                    self.optimizer.step()
-
-                    mean_loss += loss.item()
-
-            if self.target_kl is not None:
-                if approx_kl > self.target_kl:
-                    break
-
-        mean_loss /= num_samples * self.update_epochs
-        return mean_loss
+        if self.use_rollout_buffer:
+            if experiences is None:
+                # This will call _learn_from_rollout_buffer_bptt or _learn_from_rollout_buffer_flat (which handles its own data fetching)
+                return self._learn_from_rollout_buffer()
+            else:
+                warnings.warn(
+                    "Both rollout buffer and experiences provided. Using provided experiences for flat learning."
+                )
+                buffer_td_to_learn_from = self._create_buffer_td_from_experiences(experiences)
+        else:  # Not self.use_rollout_buffer
+            if experiences is None:
+                raise ValueError(
+                    "Experiences cannot be None when use_rollout_buffer is False"
+                )
+            
+            buffer_td_to_learn_from = self._create_buffer_td_from_experiences(experiences)
+            
+            if buffer_td_to_learn_from.is_empty():
+                warnings.warn(
+                    "Created TensorDict from experiences is empty. Skipping learning step."
+                )
+                return 0.0
+            
+            return self._learn_from_rollout_buffer_flat(buffer_td_external=buffer_td_to_learn_from)
+    
+        warnings.warn(
+            "Learn function reached an unexpected state where no data source was resolved. Skipping learning."
+        )
+        return 0.0
 
     def _learn_from_rollout_buffer(self) -> float:
         """
@@ -857,13 +829,16 @@ class PPO(RLAlgorithm):
     # Original flattened learning logic moved to separate helper
     # ------------------------------------------------------------------
 
-    def _learn_from_rollout_buffer_flat(self) -> float:
+    def _learn_from_rollout_buffer_flat(self, buffer_td_external: Optional[TensorDict] = None) -> float:
         """Original learning procedure using flattened samples (no BPTT)."""
-        # .get_tensor_batch() now returns a TensorDict on the specified device
-        buffer_td = self.rollout_buffer.get_tensor_batch(device=self.device)
+        if buffer_td_external is not None:
+            buffer_td = buffer_td_external
+        else:
+            # .get_tensor_batch() now returns a TensorDict on the specified device
+            buffer_td = self.rollout_buffer.get_tensor_batch(device=self.device)
 
         if buffer_td.is_empty():  # Changed from `if not buffer_td:`
-            warnings.warn("Rollout buffer is empty. Skipping learning step.")
+            warnings.warn("Buffer data is empty. Skipping learning step.")
             return 0.0
 
         observations = buffer_td["observations"]  # Tensor
