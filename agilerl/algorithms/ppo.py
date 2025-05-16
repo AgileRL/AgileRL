@@ -127,6 +127,7 @@ class PPO(RLAlgorithm):
         accelerator: Optional[Any] = None,
         wrap: bool = True,
         bptt_sequence_type: BPTTSequenceType = BPTTSequenceType.CHUNKED,
+        
     ) -> None:
         super().__init__(
             observation_space,
