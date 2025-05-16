@@ -715,7 +715,7 @@ class RolloutBuffer:
         actual_batch_size = len(start_coords)
 
         if actual_batch_size == 0:
-            return {}  # Return empty TensorDict or dict
+            return {}
 
         list_of_sequence_tds = []
         for env_idx, time_idx in start_coords:
@@ -765,56 +765,76 @@ class RolloutBuffer:
             Tuple[int, int]
         ],  # List of (env_idx, time_idx_in_env_rollout)
         device: Optional[str] = None,
-    ) -> Dict[str, Union[torch.Tensor, Dict[str, torch.Tensor]]]:
+    ) -> TensorDict:
         """
-        Returns a dictionary with batched sequences for specific, pre-determined
+        Returns a TensorDict with batched sequences for specific, pre-determined
         starting coordinates, as PyTorch tensors.
 
-        The returned arrays have a leading batch dimension (size = len(sequence_coords))
-        and a time dimension of size ``seq_len``.
+        The returned TensorDict has batch_size [len(sequence_coords), seq_len]
+        and its tensors are on the specified device.
 
         :param seq_len: Length of each sequence in timesteps.
         :param sequence_coords: A list of (env_idx, time_idx) tuples.
                                 Each tuple specifies the starting environment and time
                                 for a sequence within that environment's rollout.
         :param device: Torch device to move tensors to. Defaults to self.device.
-        :return: Dictionary with tensor sequences.
+        :return: TensorDict with tensor sequences.
         """
-        target_device = device or self.device
+        output_device = device or self.device
         actual_batch_size = len(sequence_coords)
 
         if actual_batch_size == 0:
-            return {}  # Return empty TensorDict or dict
+            return {}  # Maintain original behavior for empty coordinates
 
-        list_of_sequence_tds = []
-        for env_idx, time_idx in sequence_coords:
-            sequence_slice = self.buffer[time_idx : time_idx + seq_len, env_idx].clone()
-            list_of_sequence_tds.append(sequence_slice)
+        # self.buffer is on CPU. Indices should be created on CPU.
+        # time_indices: shape (actual_batch_size, seq_len)
+        # Each row k contains [t_start_k, t_start_k+1, ..., t_start_k+seq_len-1]
+        time_indices = torch.stack(
+            [
+                torch.arange(time_idx, time_idx + seq_len, device="cpu")
+                for _, time_idx in sequence_coords
+            ]
+        )
 
-        if not list_of_sequence_tds:
-            return {}
+        # env_indices_for_batch: shape (actual_batch_size)
+        env_indices_for_batch = torch.tensor(
+            [env_idx for env_idx, _ in sequence_coords], device="cpu"
+        )
+        # env_indices_expanded: shape (actual_batch_size, seq_len)
+        # Each row k contains [env_idx_k, env_idx_k, ..., env_idx_k] (repeated seq_len times)
+        env_indices_expanded = env_indices_for_batch.unsqueeze(1).expand(-1, seq_len)
 
-        sequences_td = torch.stack(list_of_sequence_tds, dim=0)
+        # Perform advanced indexing on the CPU buffer.
+        # self.buffer has batch_dims (capacity, num_envs).
+        # The resulting sequences_td_cpu will have batch_dims (actual_batch_size, seq_len) and be on CPU.
+        sequences_td_cpu = self.buffer[time_indices, env_indices_expanded]
 
-        if self.recurrent and sequences_td.get("hidden_states", None) is not None:
-            initial_hidden_states_source = {}
-            full_hidden_sequences = sequences_td.get("hidden_states")
-            for h_key, h_val_tensor_sequences in full_hidden_sequences.items():
-                initial_hidden_states_source[h_key] = h_val_tensor_sequences[
-                    :, 0
-                ].clone().to(target_device)
+        # Handle initial hidden states if recurrent
+        if self.recurrent and "hidden_states" in sequences_td_cpu.keys(include_nested=True):
+            initial_hidden_states_for_output = {}
+            # sequences_td_cpu.get("hidden_states") is a TensorDict on CPU.
+            # Its tensors have shape (actual_batch_size, seq_len, num_layers, hidden_size).
+            hidden_states_sequences_td_cpu = sequences_td_cpu.get("hidden_states")
 
-            # Use set_non_tensor for the dictionary of initial hidden state tensors
-            sequences_td.set_non_tensor(
-                "initial_hidden_states", initial_hidden_states_source
-            )
+            if hidden_states_sequences_td_cpu is not None and isinstance(hidden_states_sequences_td_cpu, TensorDict):
+                for h_key, h_sequence_cpu in hidden_states_sequences_td_cpu.items():
+                    # h_sequence_cpu is a tensor on CPU.
+                    # Get the t=0 slice for each sequence, clone it, then move to output_device.
+                    # Shape of h_sequence_cpu[:, 0] is (actual_batch_size, num_layers, hidden_size).
+                    initial_state_for_key_device = h_sequence_cpu[:, 0].clone().to(output_device)
+                    initial_hidden_states_for_output[h_key] = initial_state_for_key_device
+            
+                # Add the dictionary of initial hidden states (tensors on output_device)
+                # as a non-tensor item to sequences_td_cpu.
+                sequences_td_cpu.set_non_tensor("initial_hidden_states", initial_hidden_states_for_output)
+                
+                # Exclude the full hidden_states sequences from the final TensorDict.
+                sequences_td_cpu = sequences_td_cpu.exclude("hidden_states")
 
-            if (
-                "hidden_states" in sequences_td.keys()
-            ):  # Exclude original full hidden_states sequence
-                sequences_td = sequences_td.exclude("hidden_states")
-
-        return sequences_td.to(target_device)
+        # Move the entire TensorDict (with its primary tensors) to the output_device.
+        # The "initial_hidden_states" (if present) is a non-tensor item containing tensors
+        # already on output_device, so they won't be re-moved by this .to() call.
+        return sequences_td_cpu.to(output_device)
 
     def __getstate__(self) -> Dict[str, Any]:
         """Gets the state dictionary for pickling, ensuring arrays are copied."""

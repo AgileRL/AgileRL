@@ -44,9 +44,7 @@ from agilerl.typing import (
 PreTrainedModelType = Union[PeftModel, PreTrainedModel]
 
 
-def share_encoder_parameters(
-    policy: EvolvableNetwork, *others: EvolvableNetwork, destructive: bool = False
-) -> None:
+def share_encoder_parameters(policy: EvolvableNetwork, *others: EvolvableNetwork) -> None:
     """Shares the encoder parameters between the policy and any number of other networks.
 
     :param policy: The policy network whose encoder parameters will be used.
