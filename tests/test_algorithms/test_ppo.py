@@ -750,16 +750,10 @@ def test_clone_after_learning(device, use_rollout_buffer, recurrent, share_encod
 
     if share_encoders and recurrent:
         # the critic might be different if share_encoders is True
-        # (the encoder might be different because of the logic in the share_encoder_parameters)
+        # (the encoder state might be different because of the logic in the share_encoder_parameters)
         # The important thing is that the head_net is the same as the encoder is neither ran during
         # the forward of the exploration, nor the learning step.
 
-        # !IMPORTANT: I'm having trouble understanding why the critic is different here.
-        # ! I'm not sure if this is an issue or not. the agent is learning, so it's not like
-        # ! the encoder is not being used. we might need to look into this more.
-        # ! it could be because of something inside the LSTM, or possibly the optimizer
-        # ! however, the parameters are being detached from the encoder.
-        # !IMPORTANT
         assert str(clone_agent.critic.head_net.state_dict()) == str(
             ppo.critic.head_net.state_dict()
         )
