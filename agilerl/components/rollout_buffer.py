@@ -64,8 +64,6 @@ class RolloutBuffer:
     :type max_seq_len: int, optional
     """
 
-    hidden_states: Optional[Dict[str, np.ndarray]] = None
-    next_hidden_states: Optional[Dict[str, np.ndarray]] = None
 
     def __init__(
         self,
@@ -202,11 +200,11 @@ class RolloutBuffer:
             # for sequences. If we store step-by-step next_hidden_states, it would be:
             # source_dict["next_hidden_states"] = { ... similar structure ... }
 
-        # Initialize the main buffer as a TensorDict
+        # Initialize the main buffer as a TensorDict with batch_size [capacity, num_envs]
         self.buffer = TensorDict(
             source_dict,
             batch_size=[self.capacity, self.num_envs],
-            device="cpu",  # Keep buffer on CPU, move to device in get_tensor_batch
+            device="cpu",  # Keep buffer on CPU for memory efficiency, move to device in get_tensor_batch
         )
 
 

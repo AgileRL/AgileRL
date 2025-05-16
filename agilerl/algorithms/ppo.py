@@ -675,78 +675,6 @@ class PPO(RLAlgorithm):
             last_value=last_value, last_done=last_done
         )
 
-    def _create_buffer_td_from_experiences(self, experiences: ExperiencesType) -> TensorDict:
-        """Converts a tuple of experiences into a TensorDict suitable for learning."""
-        # Unpack experiences tuple and convert to tensors on the correct device
-        (
-            states_t, actions_t, old_log_probs_t, rewards_t,
-            dones_t, values_t, final_next_state_t, final_next_done_t
-        ) = self.to_device(*stack_experiences(*experiences))
-
-        # Dones need to be long for GAE arithmetic, then float for non_terminal calculation
-        dones_long_t = dones_t.long()
-        final_next_done_long_t = final_next_done_t.long()
-
-        # GAE Computation
-        with torch.no_grad():
-            num_steps = rewards_t.size(0)
-            
-            processed_final_next_state = self.preprocess_observation(final_next_state_t)
-            next_value_at_final_step = self.critic(processed_final_next_state).squeeze(-1) # Shape: (num_envs,)
-
-            advantages_t = torch.zeros_like(rewards_t) # Shape: (L, num_envs) or (L,)
-            
-            if rewards_t.ndim > 1: # Vectorized environment
-                last_gae_lambda = torch.zeros(rewards_t.size(1), device=self.device) # Shape: (num_envs,)
-            else: # Single environment
-                last_gae_lambda = torch.zeros(1, device=self.device) # Shape: (1,)
-
-            for t in reversed(range(num_steps)):
-                if t == num_steps - 1:
-                    next_non_terminal = 1.0 - final_next_done_long_t.float()
-                    current_next_value = next_value_at_final_step
-                else:
-                    next_non_terminal = 1.0 - dones_long_t[t + 1].float()
-                    current_next_value = values_t[t + 1]
-                
-                delta = (
-                    rewards_t[t]
-                    + self.gamma * current_next_value * next_non_terminal
-                    - values_t[t]
-                )
-                advantages_t[t] = last_gae_lambda = (
-                    delta
-                    + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lambda
-                )
-            returns_t = advantages_t + values_t
-
-        # Prepare experiences for TensorDict
-        experiences_for_td = (
-            states_t, actions_t, old_log_probs_t, advantages_t, returns_t
-        )
-
-        if is_vectorized_experiences(*experiences_for_td):
-            (
-                flat_states, flat_actions, flat_old_log_probs,
-                flat_advantages, flat_returns
-            ) = flatten_experiences(*experiences_for_td)
-        else:
-            flat_states, flat_actions, flat_old_log_probs, flat_advantages, flat_returns = experiences_for_td
-
-        source_dict = {
-            "observations": flat_states,
-            "actions": flat_actions,
-            "log_probs": flat_old_log_probs,
-            "advantages": flat_advantages,
-            "returns": flat_returns,
-        }
-        
-        if flat_states.numel() == 0: # Check if the primary data tensor is empty
-            warnings.warn("Warning: No data to create TensorDict from experiences.")
-            return TensorDict({}, batch_size=[0], device=self.device) # Return empty TensorDict
-            
-        return TensorDict(source_dict, batch_size=[flat_states.size(0)], device=self.device)
-
     def learn(self, experiences: Optional[ExperiencesType] = None) -> float:
         """Updates agent network parameters to learn from experiences.
 
@@ -757,45 +685,161 @@ class PPO(RLAlgorithm):
         :rtype: float
         """
         if self.use_rollout_buffer:
+            # NOTE: we are still allowing experiences to be passed in for backwards compatibility
+            # but we will remove this in a future releases. 
+            # i.e. it's possible to do one learn with rollouts, then another with experiences on the same agent
+            
             if experiences is None:
                 # Learn from the internal rollout buffer
-                return self._learn_from_rollout_buffer()
-            else:
-                # Experiences provided externally, even if use_rollout_buffer is True.
-                # This path is for compatibility or specific use cases.
-                warnings.warn(
-                    "Both use_rollout_buffer=True and experiences provided. Using provided experiences for flat learning."
-                )
-                buffer_td_to_learn_from = self._create_buffer_td_from_experiences(experiences)
-                if buffer_td_to_learn_from.is_empty():
-                    warnings.warn("Created TensorDict from experiences is empty. Skipping learning step.")
-                    return 0.0
-                return self._learn_from_rollout_buffer_flat(buffer_td_external=buffer_td_to_learn_from)
-        else:  # Not self.use_rollout_buffer
-            if experiences is None:
-                raise ValueError(
-                    "Experiences cannot be None when use_rollout_buffer is False"
-                )
-            
-            buffer_td_to_learn_from = self._create_buffer_td_from_experiences(experiences)
-            
-            if buffer_td_to_learn_from.is_empty():
-                warnings.warn(
-                    "Created TensorDict from experiences is empty. Skipping learning step."
-                )
-                return 0.0
-            
-            return self._learn_from_rollout_buffer_flat(buffer_td_external=buffer_td_to_learn_from)
-    
-    def _learn_from_rollout_buffer(self) -> float:
+                if self.recurrent and self.max_seq_len is not None and self.max_seq_len > 0:
+                    return self._learn_from_rollout_buffer_bptt()
+                else:
+                    return self._learn_from_rollout_buffer_flat()
+        return self._deprecated_learn_from_experiences(experiences)
+        
+    def _deprecated_learn_from_experiences(self, experiences: ExperiencesType) -> float:
+        """Deprecated method for learning from experiences tuple format.
+
+        This method is deprecated and will be removed in a future release. The PPO implementation
+        now uses a rollout buffer for improved performance, cleaner support for recurrent policies,
+        and easier integration with custom environments.
+
+        To migrate:
+        1. Set use_rollout_buffer=True when creating PPO agent
+        2. If using recurrent policies, set recurrent=True
+        3. Use collect_rollouts() to gather experiences instead of passing experiences tuple
+        4. Call learn() without arguments to train on collected rollouts
         """
-        Learn from data in the rollout buffer.
-        Decides whether to use BPTT or flattened learning based on configuration.
-        """
-        if self.recurrent and self.max_seq_len is not None and self.max_seq_len > 0:
-            return self._learn_from_rollout_buffer_bptt()
-        else:
-            return self._learn_from_rollout_buffer_flat()
+        if not experiences:
+            raise ValueError("Experiences must be provided when use_rollout_buffer is False")
+        
+        # Not self.use_rollout_buffer
+        (states, actions, log_probs, rewards, dones, values, next_state, next_done) = (
+            stack_experiences(*experiences)
+        )
+
+        # Bootstrapping returns using GAE advantage estimation
+        dones = dones.long()
+        with torch.no_grad():
+            num_steps = rewards.size(0)
+            next_state = self.preprocess_observation(next_state)
+            next_value = self.critic(next_state).reshape(1, -1).cpu()
+            advantages = torch.zeros_like(rewards).float()
+            last_gae_lambda = 0
+            for t in reversed(range(num_steps)):
+                if t == num_steps - 1:
+                    next_non_terminal = 1.0 - next_done
+                    nextvalue = next_value.squeeze()
+                else:
+                    next_non_terminal = 1.0 - dones[t + 1]
+                    nextvalue = values[t + 1]
+
+                # Calculate delta (TD error)
+                delta = (
+                    rewards[t] + self.gamma * nextvalue * next_non_terminal - values[t]
+                )
+
+                # Use recurrence relation to compute advantage
+                advantages[t] = last_gae_lambda = (
+                    delta
+                    + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lambda
+                )
+
+            returns = advantages + values
+
+        # Flatten experiences from (batch_size, num_envs, ...) to (batch_size*num_envs, ...)
+        # after checking if experiences are vectorized
+        experiences = (states, actions, log_probs, advantages, returns, values)
+        if is_vectorized_experiences(*experiences):
+            experiences = flatten_experiences(*experiences)
+
+        # Move experiences to algo device
+        experiences = self.to_device(*experiences)
+
+        # Get number of samples from the returns tensor
+        num_samples = experiences[4].size(0)
+        batch_idxs = np.arange(num_samples)
+        mean_loss = 0
+        for epoch in range(self.update_epochs):
+            np.random.shuffle(batch_idxs)
+            for start in range(0, num_samples, self.batch_size):
+                minibatch_idxs = batch_idxs[start : start + self.batch_size]
+                (
+                    batch_states,
+                    batch_actions,
+                    batch_log_probs,
+                    batch_advantages,
+                    batch_returns,
+                    batch_values,
+                ) = get_experiences_samples(minibatch_idxs, *experiences)
+
+                batch_actions = batch_actions.squeeze()
+                batch_returns = batch_returns.squeeze()
+                batch_log_probs = batch_log_probs.squeeze()
+                batch_advantages = batch_advantages.squeeze()
+                batch_values = batch_values.squeeze()
+
+                if len(minibatch_idxs) > 1:
+                    log_prob, entropy, value = self.evaluate_actions(
+                        obs=batch_states, actions=batch_actions
+                    )
+
+                    logratio = log_prob - batch_log_probs
+                    ratio = logratio.exp()
+
+                    with torch.no_grad():
+                        approx_kl = ((ratio - 1) - logratio).mean()
+
+                    minibatch_advs = batch_advantages
+                    minibatch_advs = (minibatch_advs - minibatch_advs.mean()) / (
+                        minibatch_advs.std() + 1e-8
+                    )
+
+                    # Policy loss
+                    pg_loss1 = -minibatch_advs * ratio
+                    pg_loss2 = -minibatch_advs * torch.clamp(
+                        ratio, 1 - self.clip_coef, 1 + self.clip_coef
+                    )
+
+                    pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+
+                    # Value loss
+                    value = value.view(-1)
+                    v_loss_unclipped = (value - batch_returns) ** 2
+                    v_clipped = batch_values + torch.clamp(
+                        value - batch_values, -self.clip_coef, self.clip_coef
+                    )
+
+                    v_loss_clipped = (v_clipped - batch_returns) ** 2
+                    v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
+                    v_loss = 0.5 * v_loss_max.mean()
+
+                    entropy_loss = entropy.mean()
+                    loss = (
+                        pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
+                    )
+
+                    # actor + critic loss backprop
+                    self.optimizer.zero_grad()
+                    if self.accelerator is not None:
+                        self.accelerator.backward(loss)
+                    else:
+                        loss.backward()
+
+                    # Clip gradients
+                    clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+                    clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+
+                    self.optimizer.step()
+
+                    mean_loss += loss.item()
+
+            if self.target_kl is not None:
+                if approx_kl > self.target_kl:
+                    break
+
+        mean_loss /= num_samples * self.update_epochs
+        return mean_loss
 
     def _learn_from_rollout_buffer_flat(self, buffer_td_external: Optional[TensorDict] = None) -> float:
         """Learning procedure using flattened samples (no BPTT)."""
@@ -974,6 +1018,7 @@ class PPO(RLAlgorithm):
         sequences_per_minibatch = self.batch_size # Here, batch_size means number of sequences per minibatch
         mean_loss = 0.0
         num_minibatch_updates_total = 0
+        total_minibatch_updates_total = 0
 
         for epoch in range(self.update_epochs):
             approx_kl_divs_epoch = [] # KL divergences for this epoch's minibatches
