@@ -750,9 +750,10 @@ def test_clone_after_learning(device, use_rollout_buffer, recurrent, share_encod
 
     if share_encoders and recurrent:
         # the critic might be different if share_encoders is True
-        # (the encoder might be different because of the logic in the share_encoder_parameters)
+        # (the encoder state might be different because of the logic in the share_encoder_parameters)
         # The important thing is that the head_net is the same as the encoder is neither ran during
         # the forward of the exploration, nor the learning step.
+        
         assert str(clone_agent.critic.head_net.state_dict()) == str(
             ppo.critic.head_net.state_dict()
         )
