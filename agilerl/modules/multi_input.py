@@ -359,16 +359,13 @@ class EvolvableMultiInput(EvolvableModule):
                     name=init_dict.pop("name", key),
                     **init_dict,
                 )
-            elif (
-                isinstance(space, spaces.Box)
-                and len(space.shape) == 2
-                and key not in self.vector_spaces.keys()
-            ):
+            elif self.recurrent:
                 # EvolvableLSTM for 2D Box spaces if recurrent=True
                 init_dict = copy.deepcopy(self.get_inner_init_dict(key, default="lstm"))
                 feature_extractor = EvolvableLSTM(
-                    input_size=space.shape[1],
-                    name=init_dict.pop("name", key),
+                    input_size=space.shape[0],
+                    name=init_dict.pop("name", key) + "_lstm",
+                    device=self.device,
                     **init_dict,
                 )
             # Flatten other observation types

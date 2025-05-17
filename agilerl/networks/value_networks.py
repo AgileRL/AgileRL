@@ -1,5 +1,5 @@
 from dataclasses import asdict
-from typing import Optional, Type, Union
+from typing import Optional, Tuple, Type, Union
 
 import torch
 from gymnasium import spaces
@@ -53,6 +53,7 @@ class ValueNetwork(EvolvableNetwork):
         simba: bool = False,
         recurrent: bool = False,
         device: str = "cpu",
+        encoder_name: str = "encoder",
     ):
 
         super().__init__(
@@ -67,6 +68,7 @@ class ValueNetwork(EvolvableNetwork):
             simba=simba,
             recurrent=recurrent,
             device=device,
+            encoder_name=encoder_name,
         )
 
         if head_config is None:
@@ -96,7 +98,9 @@ class ValueNetwork(EvolvableNetwork):
             net_config=net_config,
         )
 
-    def forward(self, x: TorchObsType) -> torch.Tensor:
+    def forward(
+        self, x: TorchObsType, hidden_state: Optional[TorchObsType] = None
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Forward pass of the network.
 
         :param x: Input tensor.
@@ -104,8 +108,12 @@ class ValueNetwork(EvolvableNetwork):
         :return: Output tensor.
         :rtype: torch.Tensor
         """
-        latent = self.extract_features(x)
-        return self.head_net(latent)
+        if self.recurrent:
+            latent, hidden_state = self.extract_features(x, hidden_state=hidden_state)
+            return self.head_net(latent), hidden_state
+        else:
+            latent = self.extract_features(x)
+            return self.head_net(latent)
 
     def recreate_network(self) -> None:
         """Recreates the network."""
