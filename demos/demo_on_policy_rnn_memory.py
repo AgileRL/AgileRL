@@ -169,7 +169,6 @@ pop = create_population(
     algo_kwargs={
         "use_rollout_buffer": True,
         "recurrent": recurrent,
-        "load_bptt_full_buffer": False,
     },
 )
 

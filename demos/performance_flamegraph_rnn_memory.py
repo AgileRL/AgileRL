@@ -133,7 +133,7 @@ else:
 # Hyperparameters
 INIT_HP = {
     "POP_SIZE": 1,  # Single agent for profiling
-    "BATCH_SIZE": 256,
+    "BATCH_SIZE": 512,
     "LEARN_STEP": (delay_steps + 2),  # Match episode length (delay_steps + 2)
     "HIDDEN_STATE_SIZE": 128,
     "LR": 1e-4,
@@ -208,7 +208,7 @@ profiler.stop()
 # =====================================================================
 use_profiler = True  # Set to True to enable flamegraph profiling for the full loop
 
-max_steps = 1_000_000 // num_envs  # Reduced for profiling
+max_steps = 10_000_000 // num_envs  # Reduced for profiling
 total_steps = 0
 start_time = time.time()
 
