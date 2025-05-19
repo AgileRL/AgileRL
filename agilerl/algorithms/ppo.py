@@ -1162,7 +1162,11 @@ class PPO(RLAlgorithm):
         :return: Mean test score of agent in environment
         :rtype: float
         """
+        # set to evaluation mode. This is important for batch norm and dropout layers
+        self.actor.eval()
+        self.critic.eval()
         self.set_training_mode(False)
+        
         with torch.no_grad():
             rewards = []
             num_envs = env.num_envs if hasattr(env, "num_envs") and vectorized else 1
@@ -1280,4 +1284,10 @@ class PPO(RLAlgorithm):
 
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
+        
+        # cleanup evaluation mode back into the default training mode (e.g. batch norm and dropout layers)
+        self.set_training_mode(True)
+        self.actor.train()
+        self.critic.train()
+        
         return mean_fit
