@@ -581,16 +581,16 @@ class PPO(RLAlgorithm):
             )
 
         n_steps = n_steps or self.learn_step
-        self.rollout_buffer.reset() # reset_on_collect is effectively always True here
-
-        # Initial reset
-        obs, info = env.reset()
         
-        # self.hidden_state stores the current hidden state for the actor across steps
-        self.hidden_state = (
-            self.get_initial_hidden_state(self.num_envs) if self.recurrent else None
-        )
-
+        if reset_on_collect:
+            # Initial reset
+            obs, info = env.reset()
+        
+            # self.hidden_state stores the current hidden state for the actor across steps
+            self.hidden_state = self.get_initial_hidden_state(self.num_envs) if self.recurrent else None
+        else: 
+            obs, info = self.last_obs
+        self.rollout_buffer.reset() 
         current_hidden_state_for_actor = self.hidden_state
 
         for _ in range(n_steps):
@@ -654,8 +654,11 @@ class PPO(RLAlgorithm):
             if self.recurrent:
                 current_hidden_state_for_actor = self.hidden_state # Update for next actor call
 
+            
             obs = next_obs
             info = next_info
+
+        self.last_obs = (next_obs, info) # Store the last observation for the next step
 
         with torch.no_grad():
             if self.recurrent:
