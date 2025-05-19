@@ -391,9 +391,9 @@ class RolloutBuffer:
 
         # Get necessary data from TensorDict as numpy arrays for computation
         # Slicing to buffer_size for all components.
-        rewards_np = self.buffer["rewards"][:buffer_size].numpy()
-        dones_np = self.buffer["dones"][:buffer_size].numpy()
-        values_np = self.buffer["values"][:buffer_size].numpy()
+        rewards_np = self.buffer["rewards"][:buffer_size].cpu().numpy()
+        dones_np = self.buffer["dones"][:buffer_size].cpu().numpy()
+        values_np = self.buffer["values"][:buffer_size].cpu().numpy()
 
         if self.use_gae:
             last_gae_lambda = np.zeros(self.num_envs, dtype=np.float32)
@@ -856,10 +856,10 @@ class RolloutBuffer:
                     "Observation or action space missing during RolloutBuffer unpickling. Buffer might be invalid."
                 )
                 return
-            self._initialize_buffers()  # Fallback to re-initialize if buffer is not good
+            
+            self._initialize_buffers()
+            self.buffer = self.buffer.to("cpu") # Ensure the buffer is on CPU
         else:
-            # Ensure the loaded buffer is on the correct device (CPU) as expected by internal logic
-            self.buffer = self.buffer.to("cpu")
             # Verify batch_size and keys if necessary
             expected_batch_size = torch.Size([self.capacity, self.num_envs])
             if self.buffer.batch_size != expected_batch_size:
@@ -867,3 +867,5 @@ class RolloutBuffer:
                     f"Loaded TensorDict has batch_size {self.buffer.batch_size}, expected {expected_batch_size}. Re-initializing."
                 )
                 self._initialize_buffers()
+            
+            self.buffer = self.buffer.to("cpu") # Ensure the loaded buffer is on the correct device (CPU) as expected by internal logic
