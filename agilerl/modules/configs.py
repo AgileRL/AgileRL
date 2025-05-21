@@ -108,7 +108,7 @@ class SimBaNetConfig(NetConfig):
 
 
 @dataclass
-class LSTMNetConfig(NetConfig):
+class LstmNetConfig(NetConfig):
     hidden_size: int
     num_layers: int
     output_activation: Optional[str] = field(default=None)
@@ -147,18 +147,6 @@ class CnnNetConfig(NetConfig):
 
 
 @dataclass
-class LstmNetConfig(NetConfig):
-    hidden_size: int
-    num_layers: int = field(default=1)
-    min_hidden_size: int = field(default=16)
-    max_hidden_size: int = field(default=500)
-    min_layers: int = field(default=1)
-    max_layers: int = field(default=4)
-    output_activation: Optional[str] = field(default=None)
-    dropout: float = field(default=0.0)
-
-
-@dataclass
 class MultiInputNetConfig(NetConfig):
     """Configuration for the EvolvableMultiInput network.
 
@@ -193,7 +181,7 @@ class MultiInputNetConfig(NetConfig):
         # Validate network configurations if provided
         if self.cnn_config is not None:
             assert isinstance(
-                self.cnn_config, CnnNetConfig
+                self.cnn_config, (dict, CnnNetConfig)
             ), "CNN config must be an instance of CnnNetConfig"
         else:
             self.cnn_config = CnnNetConfig(
@@ -204,7 +192,7 @@ class MultiInputNetConfig(NetConfig):
             )
         if self.mlp_config is not None:
             assert isinstance(
-                self.mlp_config, MlpNetConfig
+                self.mlp_config, (dict, MlpNetConfig)
             ), "MLP config must be an instance of MlpNetConfig"
         else:
             self.mlp_config = MlpNetConfig(
@@ -214,7 +202,7 @@ class MultiInputNetConfig(NetConfig):
 
         if self.lstm_config is not None:
             assert isinstance(
-                self.lstm_config, LstmNetConfig
+                self.lstm_config, (dict, LstmNetConfig)
             ), "LSTM config must be an instance of LstmNetConfig"
         else:
             self.lstm_config = LstmNetConfig(

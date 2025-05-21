@@ -283,8 +283,6 @@ def test_initialize_matd3_with_net_config(
     for noise_vec in matd3.expl_noise:
         assert torch.all(noise_vec == expl_noise)
     assert matd3.batch_size == batch_size
-    # assert matd3.total_state_dims == sum(state.shape[0] for state in observation_spaces)
-    assert matd3.total_actions == sum(space.shape[0] for space in action_spaces)
     assert matd3.scores == []
     assert matd3.fitness == []
     assert matd3.steps == [0]
@@ -415,9 +413,6 @@ def test_initialize_matd3_with_mlp_networks(
     assert matd3.n_agents == 2
     assert matd3.policy_freq == 2
     assert matd3.agent_ids == ["agent_0", "other_agent_0"]
-    assert matd3.discrete_actions is True
-    assert matd3.total_state_dims == sum(state.shape[0] for state in observation_spaces)
-    assert matd3.total_actions == sum(space.n for space in action_spaces)
     assert matd3.scores == []
     assert matd3.fitness == []
     assert matd3.steps == [0]
@@ -504,9 +499,6 @@ def test_initialize_matd3_with_cnn_networks(
     assert matd3.action_spaces == action_spaces
     assert matd3.n_agents == 2
     assert matd3.agent_ids == ["agent_0", "other_agent_0"]
-    assert matd3.discrete_actions is True
-    assert matd3.total_state_dims == sum(state.shape[0] for state in observation_spaces)
-    assert matd3.total_actions == sum(space.n for space in action_spaces)
     assert matd3.scores == []
     assert matd3.fitness == []
     assert matd3.steps == [0]
@@ -577,11 +569,7 @@ def test_initialize_matd3_with_evo_networks(
 
     evo_actors = [
         DeterministicActor(
-            observation_spaces[x],
-            action_spaces[x],
-            n_agents=2,
-            device=device,
-            **net_config
+            observation_spaces[x], action_spaces[x], device=device, **net_config
         )
         for x in range(2)
     ]
@@ -590,7 +578,6 @@ def test_initialize_matd3_with_evo_networks(
             ContinuousQNetwork(
                 observation_space=concatenate_spaces(observation_spaces),
                 action_space=concatenate_spaces(action_spaces),
-                n_agents=2,
                 device=device,
                 **critic_net_config
             )
@@ -625,9 +612,6 @@ def test_initialize_matd3_with_evo_networks(
     assert matd3.action_spaces == action_spaces
     assert matd3.n_agents == 2
     assert matd3.agent_ids == ["agent_0", "other_agent_0"]
-    assert matd3.discrete_actions is True
-    # assert matd3.total_state_dims == sum(state.shape[0] for state in observation_spaces)
-    assert matd3.total_actions == sum(space.n for space in action_spaces)
     assert matd3.scores == []
     assert matd3.fitness == []
     assert matd3.steps == [0]
@@ -785,11 +769,11 @@ def test_matd3_get_action(
         device=device,
         torch_compiler=compile_mode,
     )
-    cont_actions, discrete_action = matd3.get_action(state, training)
+    action, raw_action = matd3.get_action(state, training)
     discrete_actions = all(
         isinstance(space, spaces.Discrete) for space in action_spaces
     )
-    for idx, env_actions in enumerate(list(cont_actions.values())):
+    for idx, env_actions in enumerate(list(action.values())):
         action_dim = (
             action_spaces[idx].shape[0]
             if isinstance(action_spaces[idx], spaces.Box)
@@ -809,7 +793,7 @@ def test_matd3_get_action(
             assert -1 <= act.all() <= 1
 
     if discrete_actions:
-        for idx, env_action in enumerate(list(discrete_action.values())):
+        for idx, env_action in enumerate(list(action.values())):
             for action in env_action:
                 assert action <= action_spaces[idx].n - 1
     matd3 = None
@@ -853,17 +837,16 @@ def test_matd3_get_action_distributed(
             action_space=actor.action_space,
             encoder_config=actor.encoder.net_config,
             head_config=actor.head_net.net_config,
-            n_agents=actor.n_agents,
             device=actor.device,
         )
         for actor in matd3.actors
     ]
     matd3.actors = new_actors
-    cont_actions, discrete_action = matd3.get_action(state, training)
+    action, raw_action = matd3.get_action(state, training)
     discrete_actions = all(
         isinstance(space, spaces.Discrete) for space in action_spaces
     )
-    for idx, env_actions in enumerate(list(cont_actions.values())):
+    for idx, env_actions in enumerate(list(action.values())):
         action_dim = (
             action_spaces[idx].shape[0]
             if isinstance(action_spaces[idx], spaces.Box)
@@ -883,7 +866,7 @@ def test_matd3_get_action_distributed(
             assert -1 <= act.all() <= 1
 
     if discrete_actions:
-        for idx, env_action in enumerate(list(discrete_action.values())):
+        for idx, env_action in enumerate(list(action.values())):
             action_dim = (
                 action_spaces[idx].shape[0]
                 if isinstance(action_spaces[idx], spaces.Box)
@@ -935,15 +918,11 @@ def test_matd3_get_action_agent_masking(
         device=device,
         torch_compiler=compile_mode,
     )
-    cont_actions, discrete_action = matd3.get_action(state, training, infos=info)
+    action, raw_action = matd3.get_action(state, training, infos=info)
     if discrete_actions:
-        assert np.array_equal(
-            discrete_action["agent_0"], np.array([[1]])
-        ), discrete_action["agent_0"]
+        assert np.array_equal(action["agent_0"], np.array([[1]])), action["agent_0"]
     else:
-        assert np.array_equal(
-            cont_actions["agent_0"], np.array([[0, 1]])
-        ), cont_actions["agent_0"]
+        assert np.array_equal(action["agent_0"], np.array([[0, 1]])), action["agent_0"]
 
 
 @pytest.mark.parametrize(
@@ -996,15 +975,15 @@ def test_matd3_get_action_vectorized_agent_masking(
         device=device,
         torch_compiler=compile_mode,
     )
-    cont_actions, discrete_action = matd3.get_action(state, training, infos=info)
+    action, raw_action = matd3.get_action(state, training, infos=info)
     if discrete_actions:
         assert np.array_equal(
-            discrete_action["agent_0"].squeeze(), info["agent_0"]["env_defined_actions"]
-        ), discrete_action["agent_0"]
+            action["agent_0"].squeeze(), info["agent_0"]["env_defined_actions"]
+        ), action["agent_0"]
     else:
         assert np.isclose(
-            cont_actions["agent_0"], info["agent_0"]["env_defined_actions"]
-        ).all(), cont_actions["agent_0"]
+            action["agent_0"], info["agent_0"]["env_defined_actions"]
+        ).all(), action["agent_0"]
 
 
 @pytest.mark.parametrize(
@@ -1040,7 +1019,7 @@ def test_matd3_get_action_action_masking_exception(
         device=device,
     )
     with pytest.raises(AssertionError):
-        _, discrete_action = matd3.get_action(state, training)
+        _, raw_action = matd3.get_action(state, training)
 
 
 @pytest.mark.parametrize("training", [0, 1])
@@ -1064,8 +1043,8 @@ def test_matd3_get_action_action_masking(training, device):
         agent_ids=agent_ids,
         device=device,
     )
-    _, discrete_action = matd3.get_action(state, training, info)
-    assert all(i in [1, 3] for i in discrete_action.values())
+    action, _ = matd3.get_action(state, training, info)
+    assert all(i in [1, 3] for i in action.values())
 
 
 @pytest.mark.parametrize(
@@ -1454,15 +1433,12 @@ def test_matd3_clone_returns_identical_agent(
     assert clone_agent.action_spaces == matd3.action_spaces
     assert clone_agent.n_agents == matd3.n_agents
     assert clone_agent.agent_ids == matd3.agent_ids
-    assert np.all(np.stack(clone_agent.max_action) == np.stack(matd3.max_action))
-    assert np.all(np.stack(clone_agent.min_action) == np.stack(matd3.min_action))
     assert all(
         torch.equal(clone_expl_noise, expl_noise)
         for clone_expl_noise, expl_noise in zip(
             clone_agent.expl_noise, matd3.expl_noise
         )
     )
-    assert clone_agent.discrete_actions == matd3.discrete_actions
     assert clone_agent.index == matd3.index
     assert clone_agent.batch_size == matd3.batch_size
     assert clone_agent.lr_actor == matd3.lr_actor
@@ -1472,7 +1448,6 @@ def test_matd3_clone_returns_identical_agent(
     assert clone_agent.tau == matd3.tau
     assert clone_agent.device == matd3.device
     assert clone_agent.accelerator == matd3.accelerator
-
     assert clone_agent.torch_compiler == matd3.torch_compiler
 
     for clone_actor, actor in zip(clone_agent.actors, matd3.actors):
@@ -1556,15 +1531,12 @@ def test_clone_after_learning(compile_mode):
     assert clone_agent.action_spaces == matd3.action_spaces
     assert clone_agent.n_agents == matd3.n_agents
     assert clone_agent.agent_ids == matd3.agent_ids
-    assert np.all(np.stack(clone_agent.max_action) == np.stack(matd3.max_action))
-    assert np.all(np.stack(clone_agent.min_action) == np.stack(matd3.min_action))
     assert all(
         torch.equal(clone_expl_noise, expl_noise)
         for clone_expl_noise, expl_noise in zip(
             clone_agent.expl_noise, matd3.expl_noise
         )
     )
-    assert clone_agent.discrete_actions == matd3.discrete_actions
     assert clone_agent.index == matd3.index
     assert clone_agent.batch_size == matd3.batch_size
     assert clone_agent.lr_actor == matd3.lr_actor
@@ -2004,8 +1976,6 @@ def test_load_from_pretrained(
     assert new_matd3.action_spaces == matd3.action_spaces
     assert new_matd3.n_agents == matd3.n_agents
     assert new_matd3.agent_ids == matd3.agent_ids
-    assert new_matd3.min_action == matd3.min_action
-    assert new_matd3.max_action == matd3.max_action
     assert new_matd3.lr_actor == matd3.lr_actor
     assert new_matd3.lr_critic == matd3.lr_critic
     for (
@@ -2169,8 +2139,6 @@ def test_load_from_pretrained_make_evo(
     assert new_matd3.action_spaces == matd3.action_spaces
     assert new_matd3.n_agents == matd3.n_agents
     assert new_matd3.agent_ids == matd3.agent_ids
-    assert new_matd3.min_action == matd3.min_action
-    assert new_matd3.max_action == matd3.max_action
     assert new_matd3.lr_actor == matd3.lr_actor
     assert new_matd3.lr_critic == matd3.lr_critic
     for (

@@ -261,7 +261,6 @@ class DummyMultiAgent(DummyAgentOffPolicy):
         self.lr_actor = 0.001
         self.lr_critic = 0.01
         self.lr = 0.01
-        self.discrete_actions = False
         self.num_envs = 1
         self.on_policy = on_policy
         self.actors = [MagicMock() for _ in range(2)]
@@ -276,8 +275,11 @@ class DummyMultiAgent(DummyAgentOffPolicy):
             }
         )
 
-    def get_homo_id(self, agent_id: str) -> str:
+    def get_group_id(self, agent_id: str) -> str:
         return agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
+
+    def has_grouped_agents(self) -> bool:
+        return True
 
     def get_action(self, *args, **kwargs):
         output_dict = {
@@ -329,7 +331,7 @@ class DummyMultiAgent(DummyAgentOffPolicy):
     def reset_action_noise(self, *args, **kwargs):
         return
 
-    def assemble_homogeneous_outputs(self, agent_outputs, vect_dim):
+    def assemble_grouped_outputs(self, agent_outputs, vect_dim):
         return {
             "agent": np.random.randn(vect_dim, self.action_size),
             "other_agent": np.random.randn(vect_dim, self.action_size),
@@ -743,16 +745,16 @@ def mocked_multi_agent(multi_env, algo):
     mock_agent.fitness = []
     mock_agent.mut = "mutation"
     mock_agent.index = 1
-    mock_agent.discrete_actions = False
     mock_agent.action_space = Dict(
         {
             "agent_0": multi_env.action_space("agent_0"),
             "other_agent_0": multi_env.action_space("other_agent_0"),
         }
     )
-    mock_agent.get_homo_id.side_effect = lambda x: (
+    mock_agent.get_group_id.side_effect = lambda x: (
         x.rsplit("_", 1)[0] if isinstance(x, str) else x
     )
+    mock_agent.has_grouped_agents.side_effect = lambda: algo == IPPO
 
     def get_action(*args, **kwargs):
         out = {
@@ -762,9 +764,6 @@ def mocked_multi_agent(multi_env, algo):
         if algo == IPPO:
             return out, out, out, out
         return out, None
-
-    def extract_inactive_agents(obs):
-        return {}, obs
 
     mock_agent.get_action.side_effect = get_action
     mock_agent.test.side_effect = lambda *args, **kwargs: np.random.uniform(0, 400)
@@ -782,7 +781,6 @@ def mocked_multi_agent(multi_env, algo):
     mock_agent.load_checkpoint.side_effect = lambda *args, **kwargs: None
     mock_agent.wrap_models.side_effect = lambda *args, **kwargs: None
     mock_agent.unwrap_models.side_effect = lambda *args, **kwargs: None
-    mock_agent.extract_inactive_agents.side_effect = extract_inactive_agents
     if algo != IPPO:
         mock_agent.reset_action_noise.side_effect = lambda *args, **kwargs: None
     mock_agent.algo = {MADDPG: "MADDPG", MATD3: "MATD3", IPPO: "IPPO"}[algo]

@@ -15,11 +15,9 @@ from agilerl.protocols import EvolvableNetwork
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     apply_image_normalization,
-    assert_supported_space,
     chkpt_attribute_to_device,
     compile_model,
     concatenate_spaces,
-    contains_image_space,
     create_warmup_cosine_scheduler,
     flatten_experiences,
     get_experiences_samples,
@@ -31,7 +29,6 @@ from agilerl.utils.algo_utils import (
     key_in_nested_dict,
     make_safe_deepcopies,
     maybe_add_batch_dim,
-    multi_agent_sample_tensor_from_space,
     obs_channels_to_first,
     obs_to_tensor,
     preprocess_observation,
@@ -218,64 +215,6 @@ def test_is_image_space():
     # Test with 4D space (not an image)
     not_image_space_4d = spaces.Box(low=0, high=1, shape=(1, 84, 84, 3))
     assert not is_image_space(not_image_space_4d)
-
-
-def test_contains_image_space():
-    # Test with Dict space containing an image
-    image_space = spaces.Box(low=0, high=255, shape=(84, 84, 3))
-    dict_with_image = spaces.Dict(
-        {"image": image_space, "vector": spaces.Box(low=0, high=1, shape=(10,))}
-    )
-    assert contains_image_space(dict_with_image)
-
-    # Test with Dict space not containing an image
-    dict_without_image = spaces.Dict(
-        {
-            "vector1": spaces.Box(low=0, high=1, shape=(10,)),
-            "vector2": spaces.Box(low=0, high=1, shape=(5,)),
-        }
-    )
-    assert not contains_image_space(dict_without_image)
-
-    # Test with Tuple space containing an image
-    tuple_with_image = spaces.Tuple(
-        (image_space, spaces.Box(low=0, high=1, shape=(10,)))
-    )
-    assert contains_image_space(tuple_with_image)
-
-    # Test with Tuple space not containing an image
-    tuple_without_image = spaces.Tuple(
-        (spaces.Box(low=0, high=1, shape=(10,)), spaces.Box(low=0, high=1, shape=(5,)))
-    )
-    assert not contains_image_space(tuple_without_image)
-
-    # Test with non-container space
-    assert contains_image_space(image_space)
-    assert not contains_image_space(spaces.Box(low=0, high=1, shape=(10,)))
-
-    # Test with Discrete space (not an image)
-    assert not contains_image_space(spaces.Discrete(10))
-
-
-def test_assert_supported_space():
-    # Test with supported spaces
-    box_space = spaces.Box(low=0, high=1, shape=(10,))
-    dict_space = spaces.Dict({"vector1": spaces.Box(low=0, high=1, shape=(10,))})
-    tuple_space = spaces.Tuple((spaces.Box(low=0, high=1, shape=(10,)),))
-
-    # These should return None (no error)
-    assert_supported_space(box_space)
-    assert_supported_space(dict_space)
-    assert_supported_space(tuple_space)
-
-    # Test with nested Dict space (unsupported) - should raise TypeError
-    nested_dict_space = spaces.Dict(
-        {"level1": spaces.Dict({"level2": spaces.Box(low=0, high=1, shape=(10,))})}
-    )
-
-    # Function should raise TypeError
-    with pytest.raises(TypeError):
-        assert_supported_space(nested_dict_space)
 
 
 def test_key_in_nested_dict():
@@ -677,68 +616,6 @@ def test_share_encoder_parameters():
 
     with pytest.raises(AssertionError):
         share_encoder_parameters(policy, not_evolvable)
-
-
-def test_multi_agent_sample_tensor_from_space():
-    # Test with a simple Box space (image)
-    image_space = spaces.Box(low=0, high=255, shape=(84, 84, 3))
-    n_agents = 3
-    device = torch.device("cpu")
-
-    # For non-critic case
-    sample_tensor = multi_agent_sample_tensor_from_space(
-        image_space, n_agents, critic=False, device=device
-    )
-    assert isinstance(sample_tensor, torch.Tensor)
-    # After examining the actual function, the shape differs from our expectation
-    # The function creates tensor with shape (1, H, W, C) and then unsqueezes dim 2
-    assert sample_tensor.shape[0] == 1  # Batch dimension
-    assert 84 in sample_tensor.shape  # Height
-    assert 84 in sample_tensor.shape  # Width
-    assert 3 in sample_tensor.shape  # Channels
-    assert sample_tensor.device == device
-
-    # For critic case
-    sample_tensor_critic = multi_agent_sample_tensor_from_space(
-        image_space, n_agents, critic=True, device=device
-    )
-    assert isinstance(sample_tensor_critic, torch.Tensor)
-    assert n_agents in sample_tensor_critic.shape  # Should include n_agents dimension
-    assert sample_tensor_critic.device == device
-
-    # Test with a Dict space containing an image
-    dict_space = spaces.Dict(
-        {"image": image_space, "vector": spaces.Box(low=0, high=1, shape=(10,))}
-    )
-
-    sample_dict = multi_agent_sample_tensor_from_space(
-        dict_space, n_agents, critic=False, device=device
-    )
-    assert isinstance(sample_dict, dict)
-    assert "image" in sample_dict
-    assert 84 in sample_dict["image"].shape
-    assert 84 in sample_dict["image"].shape
-    assert 3 in sample_dict["image"].shape
-    assert "vector" not in sample_dict  # vector is not an image space
-
-    # Test with a Tuple space containing an image
-    tuple_space = spaces.Tuple((image_space, spaces.Box(low=0, high=1, shape=(10,))))
-
-    sample_tuple = multi_agent_sample_tensor_from_space(
-        tuple_space, n_agents, critic=False, device=device
-    )
-    assert isinstance(sample_tuple, tuple)
-    assert 84 in sample_tuple[0].shape
-    assert 84 in sample_tuple[0].shape
-    assert 3 in sample_tuple[0].shape
-    assert sample_tuple[1] is None  # second element is not an image space
-
-    # Test with a non-image space (should return None)
-    non_image_space = spaces.Box(low=0, high=1, shape=(10,))
-    sample_non_image = multi_agent_sample_tensor_from_space(
-        non_image_space, n_agents, critic=False, device=device
-    )
-    assert sample_non_image is None
 
 
 def test_isroutine():

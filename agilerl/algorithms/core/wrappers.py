@@ -288,6 +288,25 @@ class OptimizerWrapper:
 
         return self.optimizer.state_dict()
 
+    def checkpoint_dict(self, name: str) -> Dict[str, Any]:
+        """
+        Return a dictionary of the optimizer's state and parameters.
+
+        :param name: The name of the optimizer.
+        :type name: str
+
+        :return: A dictionary of the optimizer's state and parameters.
+        :rtype: Dict[str, Any]
+        """
+        return {
+            f"{name}_cls": self.optimizer_cls.__name__,
+            f"{name}_state_dict": self.state_dict(),
+            f"{name}_networks": self.network_names,
+            f"{name}_lr": self.lr_name,
+            f"{name}_kwargs": self.optimizer_kwargs,
+            f"{name}_multiagent": self.multiagent,
+        }
+
     def zero_grad(self) -> None:
         """
         Zero the gradients of the optimizer.

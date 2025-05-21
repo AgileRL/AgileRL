@@ -892,7 +892,6 @@ def test_load_from_pretrained(observation_space, encoder_cls, accelerator, tmpdi
     # Check if properties and weights are loaded correctly
     assert new_ppo.observation_space == ppo.observation_space
     assert new_ppo.action_space == ppo.action_space
-    assert new_ppo.discrete_actions == ppo.discrete_actions
     assert isinstance(new_ppo.actor.encoder, encoder_cls)
     assert isinstance(new_ppo.critic.encoder, encoder_cls)
     assert new_ppo.lr == ppo.lr
@@ -949,7 +948,6 @@ def test_load_from_pretrained_networks(
     # Check if properties and weights are loaded correctly
     assert new_ppo.observation_space == ppo.observation_space
     assert new_ppo.action_space == ppo.action_space
-    assert new_ppo.discrete_actions == ppo.discrete_actions
     assert isinstance(new_ppo.actor, nn.Module)
     assert isinstance(new_ppo.critic, nn.Module)
     assert new_ppo.lr == ppo.lr

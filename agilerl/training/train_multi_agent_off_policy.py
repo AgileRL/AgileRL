@@ -247,14 +247,10 @@ def train_multi_agent_off_policy(
             start_time = time.time()
             for idx_step in range(evo_steps // num_envs):
                 # Get next action from agent
-                cont_actions, discrete_action = agent.get_action(obs=obs, infos=info)
-                action = discrete_action if agent.discrete_actions else cont_actions
+                action, raw_action = agent.get_action(obs=obs, infos=info)
 
                 if not is_vectorised:
                     action = {agent: act[0] for agent, act in action.items()}
-                    cont_actions = {
-                        agent: act[0] for agent, act in cont_actions.items()
-                    }
 
                 # Act in environment
                 next_obs, reward, termination, truncation, info = env.step(action)
@@ -288,7 +284,7 @@ def train_multi_agent_off_policy(
 
                 memory.save_to_memory(
                     obs,
-                    cont_actions,
+                    raw_action,
                     reward,
                     next_obs,
                     termination,

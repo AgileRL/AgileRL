@@ -7,12 +7,12 @@ import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl.algorithms import (
     CQN,
     DDPG,
@@ -31,7 +31,7 @@ from agilerl.algorithms.core import EvolvableAlgorithm, LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.modules.base import EvolvableModule
+from agilerl.modules import EvolvableModule
 from agilerl.typing import GymSpaceType, PopulationType
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, clone_llm
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
@@ -897,11 +897,11 @@ def aggregate_metrics_across_gpus(
     return avg_metrics
 
 
-def save_llm_checkpoint(agent: EvolvableAlgorithm, checkpoint_path: str | None) -> None:
+def save_llm_checkpoint(agent: LLMAlgorithm, checkpoint_path: str | None) -> None:
     """Checkpoint the LLM
 
     :param agent: Agent
-    :type agent: EvolvableAlgorithm
+    :type agent: LLMAlgorithm
     :param checkpoint_path: Checkpoint path
     :type checkpoint_path: str
     """

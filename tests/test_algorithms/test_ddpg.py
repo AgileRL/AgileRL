@@ -33,8 +33,8 @@ def cleanup():
 
 
 class DummyDDPG(DDPG):
-    def __init__(self, observation_space, action_space, one_hot, *args, **kwargs):
-        super().__init__(observation_space, action_space, one_hot, *args, **kwargs)
+    def __init__(self, observation_space, action_space, *args, **kwargs):
+        super().__init__(observation_space, action_space, *args, **kwargs)
 
         self.tensor_test = torch.randn(1)
 

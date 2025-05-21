@@ -386,8 +386,7 @@ class MutationRegistry:
         """
         return {config.name: config.networks for config in self.optimizers}
 
-    @property
-    def policy(self) -> Optional[str]:
+    def policy(self, return_group: bool = False) -> Optional[Union[str, NetworkGroup]]:
         """Get the name of the policy network in the registry.
 
         :return: The name of the policy network in the registry.
@@ -395,8 +394,8 @@ class MutationRegistry:
         """
         for group in self.groups:
             if group.policy:
-                return group.eval
-        return None
+                return group.eval if not return_group else group
+        return
 
     def all_registered(self) -> List[str]:
         """Returns all of the members in the registry."""

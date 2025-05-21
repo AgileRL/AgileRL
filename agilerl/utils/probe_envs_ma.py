@@ -1696,8 +1696,7 @@ def check_policy_q_learning_with_probe_env(
     for _ in range(10000):
         # Make vectorized
         state = {agent_id: np.expand_dims(s, 0) for agent_id, s in state.items()}
-        cont_actions, discrete_action = agent.get_action(state, training=True)
-        action = discrete_action if agent.discrete_actions else cont_actions
+        action, _ = agent.get_action(state, training=True)
         next_state, reward, done, _, _ = env.step(action)
         reward = {
             agent_id: np.expand_dims(np.array(r), 0) for agent_id, r in reward.items()
@@ -1709,7 +1708,7 @@ def check_policy_q_learning_with_probe_env(
             agent_id: np.expand_dims(ns, 0) for agent_id, ns in next_state.items()
         }
         memory.save_to_memory(
-            state, cont_actions, reward, mem_next_state, done, is_vectorised=True
+            state, action, reward, mem_next_state, done, is_vectorised=True
         )
         state = next_state
         if done[agent.agent_ids[0]]:

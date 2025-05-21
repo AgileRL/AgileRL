@@ -1,7 +1,6 @@
 import copy
 from collections import OrderedDict
 from dataclasses import asdict
-from enum import Enum
 from typing import Any, Dict, Optional, Tuple, TypeVar, Union
 
 import numpy as np
@@ -12,7 +11,7 @@ from gymnasium import spaces
 from agilerl.modules import EvolvableCNN, EvolvableLSTM, EvolvableMLP
 from agilerl.modules.base import EvolvableModule, ModuleDict, MutationType, mutation
 from agilerl.modules.configs import CnnNetConfig, LstmNetConfig, MlpNetConfig, NetConfig
-from agilerl.typing import ArrayOrTensor, ConfigType
+from agilerl.typing import ArrayOrTensor, ConfigType, ModuleType
 from agilerl.utils.evolvable_networks import (
     get_activation,
     is_box_space_ndim,
@@ -21,11 +20,8 @@ from agilerl.utils.evolvable_networks import (
     tuple_to_dict_space,
 )
 
-MultiInputType = TypeVar("MultiInputType", bound="EvolvableMultiInput")
-ModuleType = Union[EvolvableModule, nn.Module]
-SupportedEvolvableTypes = Union[
-    EvolvableCNN, EvolvableMLP, EvolvableLSTM, MultiInputType
-]
+SelfMultiInput = TypeVar("SelfMultiInput", bound="EvolvableMultiInput")
+SupportedEncoderTypes = Union[EvolvableCNN, EvolvableMLP, EvolvableLSTM, SelfMultiInput]
 MultiInputConfigType = Union[ConfigType, Dict[str, ConfigType]]
 TupleOrDictSpace = Union[spaces.Tuple, spaces.Dict]
 TupleOrDictObservation = Union[Dict[str, ArrayOrTensor], Tuple[ArrayOrTensor]]
@@ -49,13 +45,6 @@ DefaultLstmConfig = LstmNetConfig(
 )
 
 
-class FeatureExtractorType(Enum):
-    CNN = "cnn"
-    LSTM = "lstm"
-    MLP = "mlp"
-    MULTI_INPUT = "multi_input"
-
-
 def get_total_flatdim(observation_spaces: spaces.Dict) -> int:
     """Get the total flat dimension of the observation space.
 
@@ -66,7 +55,7 @@ def get_total_flatdim(observation_spaces: spaces.Dict) -> int:
     return sum([spaces.flatdim(space) for space in observation_spaces.spaces.values()])
 
 
-def is_adhoc_vector_space(space: spaces.Space, recurrent: bool = False) -> bool:
+def vector_space_check(space: spaces.Space, recurrent: bool = False) -> bool:
     """Check if the space is a vector space.
 
     :param space: Input space
@@ -191,7 +180,7 @@ class EvolvableMultiInput(EvolvableModule):
             {
                 key: space
                 for key, space in observation_space.spaces.items()
-                if is_adhoc_vector_space(space, self.recurrent)
+                if vector_space_check(space, self.recurrent)
             }
         )
         self.total_vector_dims = get_total_flatdim(self.vector_spaces)
@@ -317,15 +306,13 @@ class EvolvableMultiInput(EvolvableModule):
             ]
         )
 
-    def get_inner_init_dict(
-        self, key: str, default: FeatureExtractorType
-    ) -> ConfigType:
+    def get_inner_init_dict(self, key: str, default: ModuleType) -> ConfigType:
         """Returns the initialization dictionary for the specified key.
 
         :param key: Key of the observation space.
         :type key: str
         :param default: Default value to return if the key is not found.
-        :type default: FeatureExtractorType
+        :type default: ModuleType
         :return: Initialization dictionary.
         :rtype: ConfigType
         """
@@ -337,10 +324,10 @@ class EvolvableMultiInput(EvolvableModule):
             return init_dict
 
         init_dict = {
-            FeatureExtractorType.CNN: self.cnn_init_dict,
-            FeatureExtractorType.MLP: self.mlp_init_dict,
-            FeatureExtractorType.LSTM: self.lstm_init_dict,
-            FeatureExtractorType.MULTI_INPUT: self.net_config,
+            ModuleType.CNN: self.cnn_init_dict,
+            ModuleType.MLP: self.mlp_init_dict,
+            ModuleType.RNN: self.lstm_init_dict,
+            ModuleType.MULTI_INPUT: self.net_config,
         }.get(default)
 
         if init_dict is None:
@@ -363,11 +350,11 @@ class EvolvableMultiInput(EvolvableModule):
         init_dict["device"] = self.device
         return init_dict
 
-    def build_feature_extractor(self) -> Dict[str, SupportedEvolvableTypes]:
+    def build_feature_extractor(self) -> Dict[str, SupportedEncoderTypes]:
         """Creates the feature extractor and final MLP networks.
 
         :return: Dictionary of feature extractors.
-        :rtype: Dict[str, Union[EvolvableCNN, EvolvableMLP]]
+        :rtype: Dict[str, EvolvableMLP | EvolvableCNN | EvolvableLSTM | EvolvableMultiInput]
         """
         # Automatically build feature extractors from subspaces
         feature_net = ModuleDict(device=self.device)
@@ -378,7 +365,7 @@ class EvolvableMultiInput(EvolvableModule):
             # EvolvableMultiInput for nested multi-input spaces
             elif isinstance(space, (spaces.Dict, spaces.Tuple)):
                 init_dict = self.get_inner_init_dict(
-                    key, default=FeatureExtractorType.MULTI_INPUT
+                    key, default=ModuleType.MULTI_INPUT
                 )
                 feature_extractor = EvolvableMultiInput(
                     observation_space=space,
@@ -387,9 +374,7 @@ class EvolvableMultiInput(EvolvableModule):
                 )
             # EvolvableCNN for image spaces
             elif is_image_space(space):
-                init_dict = self.get_inner_init_dict(
-                    key, default=FeatureExtractorType.CNN
-                )
+                init_dict = self.get_inner_init_dict(key, default=ModuleType.CNN)
                 feature_extractor = EvolvableCNN(
                     input_shape=space.shape,
                     name=init_dict.pop("name", key),
@@ -402,9 +387,7 @@ class EvolvableMultiInput(EvolvableModule):
                 and len(space.shape) == 2
                 and key not in self.vector_spaces.keys()
             ):
-                init_dict = self.get_inner_init_dict(
-                    key, default=FeatureExtractorType.LSTM
-                )
+                init_dict = self.get_inner_init_dict(key, default=ModuleType.RNN)
                 feature_extractor = EvolvableLSTM(
                     input_size=space.shape[1],
                     name=init_dict.pop("name", key),
@@ -419,9 +402,7 @@ class EvolvableMultiInput(EvolvableModule):
 
         # Optionally, use an EvolvableMLP for all concatenated vector inputs
         if self.vector_space_mlp:
-            init_dict = self.get_inner_init_dict(
-                "vector_mlp", default=FeatureExtractorType.MLP
-            )
+            init_dict = self.get_inner_init_dict("vector_mlp", default=ModuleType.MLP)
 
             self.mlp_name = init_dict.pop("name", "vector_mlp")
             vector_mlp = EvolvableMLP(

@@ -350,7 +350,7 @@ def test_mutation_applies_random_mutations(algo, device, accelerator, init_pop):
     assert len(mutated_population) == len(population)
     assert mutated_population[0].mut == "None"  # Satisfies mutate_elite=False condition
     for individual in mutated_population:
-        policy = getattr(individual, individual.registry.policy)
+        policy = getattr(individual, individual.registry.policy())
         assert individual.mut in [
             "None",
             "batch_size",
@@ -422,7 +422,7 @@ def test_mutation_applies_random_mutations_simba(algo, device, accelerator, init
     assert len(mutated_population) == len(population)
     assert mutated_population[0].mut == "None"  # Satisfies mutate_elite=False condition
     for individual in mutated_population:
-        policy = getattr(individual, individual.registry.policy)
+        policy = getattr(individual, individual.registry.policy())
         assert individual.mut in [
             "None",
             "batch_size",
@@ -834,7 +834,7 @@ def test_mutation_applies_parameter_mutations(algo, device, accelerator, init_po
         assert old.index == individual.index
 
         # Compare state dictionaries of the actor (or network)
-        policy_name = old.registry.policy
+        policy_name = old.registry.policy()
         old_policy = getattr(old, policy_name)
         new_policy = getattr(individual, policy_name)
         old_sd = old_policy.state_dict()
@@ -918,7 +918,7 @@ def test_mutation_applies_architecture_mutations(algo, device, accelerator, init
 
         assert len(mutated_population) == len(population)
         for old, individual in zip(population, mutated_population):
-            policy = getattr(individual, individual.registry.policy)
+            policy = getattr(individual, individual.registry.policy())
             assert individual.mut == policy.last_mutation_attr
             # Due to randomness and constraints on size, sometimes architectures are not different
             # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
@@ -1016,7 +1016,7 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
 
     assert len(mutated_population) == len(population)
     for old, individual in zip(population, mutated_population):
-        policy = getattr(individual, individual.registry.policy)
+        policy = getattr(individual, individual.registry.policy())
         assert individual.mut == policy.last_mutation_attr
         # Due to randomness and constraints on size, sometimes architectures are not different
         # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
@@ -1078,7 +1078,7 @@ def test_mutation_applies_random_mutations_multi_agent(
 
     assert len(mutated_population) == len(population)
     for individual in mutated_population:
-        policy = getattr(individual, individual.registry.policy)
+        policy = getattr(individual, individual.registry.policy())
         assert individual.mut in [
             "None",
             "batch_size",
@@ -1367,7 +1367,7 @@ def test_mutation_applies_parameter_mutations_multi_agent(
         assert old.index == individual.index
 
         # Compare state dictionaries of the actor (or network)
-        policy_name = old.registry.policy
+        policy_name = old.registry.policy()
         old_policy = getattr(old, policy_name)
         new_policy = getattr(individual, policy_name)
         old_sd = old_policy[0].state_dict()
@@ -1443,7 +1443,7 @@ def test_mutation_applies_architecture_mutations_multi_agent(
 
         assert len(mutated_population) == len(population)
         for old, individual in zip(population, mutated_population):
-            policy = getattr(individual, individual.registry.policy)
+            policy = getattr(individual, individual.registry.policy())
             assert individual.mut == policy[0].last_mutation_attr
             # Due to randomness and constraints on size, sometimes architectures are not different
             # assert str(old.actors[0].state_dict()) != str(individual.actors[0].state_dict())
@@ -1584,7 +1584,7 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
 
     assert len(mutated_population) == len(population)
     for old, individual in zip(population, mutated_population):
-        policy = getattr(individual, individual.registry.policy)
+        policy = getattr(individual, individual.registry.policy())
         assert individual.mut == policy[0].last_mutation_attr
         # Due to randomness and constraints on size, sometimes architectures are not different
         # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())

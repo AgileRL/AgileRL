@@ -6,6 +6,8 @@ import os
 import tempfile
 import warnings
 from abc import ABC, ABCMeta, abstractmethod
+from collections import OrderedDict, defaultdict
+from dataclasses import asdict
 from importlib.metadata import version
 from typing import (
     Any,
@@ -40,6 +42,13 @@ from agilerl.algorithms.core.registry import (
     OptimizerConfig,
 )
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
+from agilerl.modules.configs import (
+    CnnNetConfig,
+    LstmNetConfig,
+    MlpNetConfig,
+    MultiInputNetConfig,
+    SimBaNetConfig,
+)
 from agilerl.protocols import (
     AgentWrapper,
     EvolvableAttributeDict,
@@ -49,33 +58,44 @@ from agilerl.protocols import (
 from agilerl.typing import (
     ActionType,
     ArrayDict,
+    ConfigType,
     DeviceType,
     ExperiencesType,
     GymSpaceType,
     InfosDict,
+    ModuleType,
+    MultiAgentObservationType,
+    MultiAgentSetup,
+    NetConfigType,
     ObservationType,
     TorchObsType,
 )
 from agilerl.utils.algo_utils import (
-    assert_supported_space,
     chkpt_attribute_to_device,
     clone_llm,
     compile_model,
     is_module_list,
     isroutine,
     key_in_nested_dict,
+    module_checkpoint_dict,
     preprocess_observation,
     recursive_check_module_attrs,
-    remove_compile_prefix,
+    stack_experiences,
 )
-from agilerl.utils.evolvable_networks import is_image_space
+from agilerl.utils.evolvable_networks import (
+    config_from_dict,
+    get_action_dim_networks,
+    get_default_encoder_config,
+    get_state_dim_networks,
+    is_image_space,
+    is_vector_space,
+)
 
 __all__ = ["EvolvableAlgorithm", "RLAlgorithm", "MultiAgentRLAlgorithm"]
 
 SelfEvolvableAlgorithm = TypeVar("SelfEvolvableAlgorithm", bound="EvolvableAlgorithm")
 SelfRLAlgorithm = TypeVar("SelfRLAlgorithm", bound="RLAlgorithm")
 SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound="AgentWrapper")
-MARLObservationType = Dict[str, ObservationType]
 
 
 class _RegistryMeta(type):
@@ -109,55 +129,24 @@ def get_checkpoint_dict(agent: SelfEvolvableAlgorithm) -> Dict[str, Any]:
     """
     attribute_dict = EvolvableAlgorithm.inspect_attributes(agent)
 
-    # Extract info on evolvable modules and optimizers in the algorithm
+    # Get checkpoint dictionaries for evolvable modules and optimizers
     network_info: Dict[str, Dict[str, Any]] = {"modules": {}, "optimizers": {}}
     for attr in agent.evolvable_attributes():
-        obj: EvolvableAttributeType = getattr(agent, attr)
-        if isinstance(obj, OptimizerWrapper):
-            network_info["optimizers"].update(
-                {
-                    f"{attr}_cls": obj.optimizer_cls.__name__,
-                    f"{attr}_state_dict": obj.state_dict(),
-                    f"{attr}_networks": obj.network_names,
-                    f"{attr}_lr": obj.lr_name,
-                    f"{attr}_kwargs": obj.optimizer_kwargs,
-                    f"{attr}_multiagent": obj.multiagent,
-                }
-            )
-        elif isinstance(obj, (OptimizedModule, EvolvableModule)) or is_module_list(obj):
-            if is_module_list(obj):
-                obj_list = obj
-                obj_cls = [
-                    (
-                        m._orig_mod.__class__
-                        if isinstance(m, OptimizedModule)
-                        else m.__class__
-                    )
-                    for m in obj_list
-                ]
-                init_dict = [m.init_dict for m in obj_list]
-                state_dict = [remove_compile_prefix(m.state_dict()) for m in obj_list]
-            else:
-                obj_list = [obj]
-                obj_cls = (
-                    obj._orig_mod.__class__
-                    if isinstance(obj, OptimizedModule)
-                    else obj.__class__
-                )
-                init_dict = obj.init_dict
-                state_dict = remove_compile_prefix(obj.state_dict())
+        evolvable_obj: EvolvableAttributeType = getattr(agent, attr)
+        if isinstance(evolvable_obj, OptimizerWrapper):
+            optimizer_chkpt = evolvable_obj.checkpoint_dict(attr)
+            network_info["optimizers"].update(optimizer_chkpt)
 
-            network_info["modules"].update(
-                {
-                    f"{attr}_cls": obj_cls,
-                    f"{attr}_init_dict": init_dict,
-                    f"{attr}_state_dict": state_dict,
-                }
-            )
+        elif isinstance(
+            evolvable_obj, (OptimizedModule, EvolvableModule)
+        ) or is_module_list(evolvable_obj):
+            module_chkpt = module_checkpoint_dict(evolvable_obj, attr)
+            network_info["modules"].update(module_chkpt)
+
         else:
             raise TypeError(
                 f"Something went wrong. Identified '{attr}' as an evolvable module "
-                f"when it is of type {type(obj)}."
+                f"when it is of type {type(evolvable_obj)}."
             )
 
     network_attr_names = [
@@ -174,8 +163,10 @@ def get_checkpoint_dict(agent: SelfEvolvableAlgorithm) -> Dict[str, Any]:
     attribute_dict["network_info"] = network_info
     attribute_dict["agilerl_version"] = version("agilerl")
     attribute_dict.pop("accelerator", None)
+
     if attribute_dict.pop("lr_scheduler", None) is not None:
         attribute_dict["lr_scheduler"] = agent.lr_scheduler.state_dict()
+
     return attribute_dict
 
 
@@ -271,7 +262,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
     @abstractmethod
     def get_action(
-        self, obs: Union[ObservationType, MARLObservationType], *args, **kwargs
+        self, obs: Union[ObservationType, MultiAgentObservationType], *args, **kwargs
     ) -> ActionType:
         """Abstract method for getting an action from the algorithm."""
         raise NotImplementedError
@@ -290,33 +281,16 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :type observation_space: spaces.Space or List[spaces.Space].
 
         :return: The dimension of the state space.
-        :rtype: Tuple[int, ...]."""
-        if isinstance(observation_space, (list, tuple, spaces.Tuple)):
-            assert_supported_space(observation_space)
-            return tuple(
-                EvolvableAlgorithm.get_state_dim(space) for space in observation_space
-            )
-        elif isinstance(observation_space, spaces.Dict):
-            assert_supported_space(observation_space)
-            return {
-                key: EvolvableAlgorithm.get_state_dim(subspace)
-                for key, subspace in observation_space.spaces.items()
-            }
-        elif isinstance(observation_space, spaces.Discrete):
-            return (observation_space.n,)
-        elif isinstance(observation_space, spaces.MultiDiscrete):
-            return (sum(observation_space.nvec),)
-        elif isinstance(observation_space, spaces.Box):
-            return observation_space.shape
-        elif isinstance(observation_space, spaces.MultiBinary):
-            return (observation_space.n,)
-        else:
-            raise AttributeError(
-                f"Can't access state dimensions for {type(observation_space)} spaces."
-            )
+        :rtype: Tuple[int, ...].
+        """
+        warnings.warn(
+            "This method is deprecated. Use get_state_dim_networks instead.",
+            category=DeprecationWarning,
+        )
+        return get_state_dim_networks(observation_space)
 
     @staticmethod
-    def get_action_dim(action_space: GymSpaceType) -> int:
+    def get_action_dim(action_space: GymSpaceType) -> Tuple[int, ...]:
         """Returns the dimension of the action space as it pertains to the underlying
         networks (i.e. the output size of the networks).
 
@@ -326,24 +300,11 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :return: The dimension of the action space.
         :rtype: int.
         """
-        if isinstance(action_space, (list, tuple)):
-            return tuple(
-                EvolvableAlgorithm.get_action_dim(space) for space in action_space
-            )
-        elif isinstance(action_space, spaces.MultiBinary):
-            return action_space.n
-        elif isinstance(action_space, spaces.Discrete):
-            return action_space.n
-        elif isinstance(action_space, spaces.MultiDiscrete):
-            return sum(action_space.nvec)
-        elif isinstance(action_space, spaces.Box):
-            # NOTE: Here we assume the action space only has one dimension
-            #       (i.e. the actions correspond to a one-dimensional vector)
-            return action_space.shape[0]
-        else:
-            raise AttributeError(
-                f"Can't access action dimensions for {type(action_space)} spaces."
-            )
+        warnings.warn(
+            "This method is deprecated. Use get_action_dim_networks instead.",
+            category=DeprecationWarning,
+        )
+        return get_action_dim_networks(action_space)
 
     @staticmethod
     def inspect_attributes(
@@ -1100,23 +1061,6 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         self.action_space = action_space
         self.normalize_images = normalize_images
 
-        # TODO: Temporary hack to support legacy code
-        self.state_dim = self.get_state_dim(observation_space)
-        self.action_dim = self.get_action_dim(action_space)
-        self.discrete_actions = isinstance(
-            action_space, (spaces.Discrete, spaces.MultiDiscrete)
-        )
-        self.min_action = (
-            np.array(action_space.low).astype(np.float32)
-            if hasattr(action_space, "low")
-            else None
-        )
-        self.max_action = (
-            np.array(action_space.high).astype(np.float32)
-            if hasattr(action_space, "high")
-            else None
-        )
-
     def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
         """Preprocesses observations for forward pass through neural network.
 
@@ -1161,6 +1105,14 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
     :type name: Optional[str], optional
     """
 
+    observation_space: Dict[str, spaces.Space]
+    action_space: Dict[str, spaces.Space]
+
+    shared_agent_ids: List[str]
+    grouped_agents: Dict[str, List[str]]
+    unique_observation_spaces: Dict[str, spaces.Space]
+    unique_action_spaces: Dict[str, spaces.Space]
+
     def __init__(
         self,
         observation_spaces: Iterable[spaces.Space],
@@ -1197,80 +1149,58 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             isinstance(_space, spaces.Space) for _space in action_spaces
         ), "Action spaces must be instances of gymnasium.spaces.Space."
 
-        if not all(
-            isinstance(space, observation_spaces[0].__class__)
-            for space in observation_spaces
-        ):
-            raise ValueError(
-                "AgileRL 2.0 only supports homogeneous multi-agent environments "
-                "(i.e. all agents have the same type of observation space)"
-            )
-
-        # TODO: This can be removed once we have a more robust implementation
-        self.state_dims = self.get_state_dim(observation_spaces)
-        self.action_dims = self.get_action_dim(action_spaces)
-        self.one_hot = all(
-            isinstance(space, (spaces.Discrete, spaces.MultiDiscrete))
-            for space in observation_spaces
-        )
-        self.discrete_actions = all(
-            isinstance(space, (spaces.Discrete, spaces.MultiDiscrete))
-            for space in action_spaces
-        )
-
-        # For continuous action spaces, store the min and max action values
-        if all(isinstance(space, spaces.Box) for space in action_spaces):
-            self.min_action = [
-                np.array(space.low).astype(np.float32) for space in action_spaces
-            ]
-            self.max_action = [
-                np.array(space.high).astype(np.float32) for space in action_spaces
-            ]
-        else:
-            self.min_action, self.max_action = None, None
-
         self.agent_ids = agent_ids
         self.n_agents = len(agent_ids)
         self.placeholder_value = placeholder_value
-
-        self.shared_agent_ids = []
-        self.homogeneous_agents = {}
-        self.unique_observation_spaces = {}
-        self.unique_action_spaces = {}
-        for agent_id, obs_space, action_space in zip(
-            self.agent_ids, observation_spaces, action_spaces
-        ):
-            # Split agent names on expected pattern of e.g. speaker_0, speaker_1,
-            # listener_0, listener_1, to determine which agents are homogeneous
-            homo_id = self.get_homo_id(agent_id)
-            if homo_id in self.homogeneous_agents:
-                self.homogeneous_agents[homo_id].append(agent_id)
-                assert obs_space == self.unique_observation_spaces[homo_id], (
-                    f"Homogeneous agents, i.e. agents that share the prefix {homo_id}, "
-                    f"must have the same observation space. Found {self.unique_observation_spaces[homo_id]} and {obs_space}."
-                )
-                assert action_space == self.unique_action_spaces[homo_id], (
-                    f"Homogeneous agents, i.e. agents that share the prefix {homo_id}, "
-                    f"must have the same action space. Found {self.unique_action_spaces[homo_id]} and {action_space}."
-                )
-            else:
-                self.shared_agent_ids.append(homo_id)
-                self.homogeneous_agents[homo_id] = [agent_id]
-                self.unique_observation_spaces[homo_id] = obs_space
-                self.unique_action_spaces[homo_id] = action_space
-
-        self.n_unique_agents = len(self.shared_agent_ids)
         self.normalize_images = normalize_images
         self.observation_spaces = observation_spaces
         self.action_spaces = action_spaces
-        self.total_actions = sum(self.action_dims)
-        self.total_state_dims = None
+        self.action_dims = get_action_dim_networks(self.action_spaces)
 
-        if not any(
-            isinstance(space, (spaces.Dict, spaces.Tuple))
-            for space in observation_spaces
+        self.max_action = OrderedDict()
+        self.min_action = OrderedDict()
+        for agent_id, action_space in zip(self.agent_ids, self.action_spaces):
+            if isinstance(action_space, spaces.Box):
+                _max = action_space.high
+                _min = action_space.low
+                assert np.all(
+                    _max > _min
+                ), "Max action must be greater than min action."
+            else:
+                _max = None
+                _min = None
+
+            self.max_action[agent_id] = _max
+            self.min_action[agent_id] = _min
+
+        # Determine groups of agents from their IDs
+        self.shared_agent_ids = []
+        self.grouped_agents = defaultdict(list)
+        self.unique_observation_spaces = OrderedDict()
+        self.unique_action_spaces = OrderedDict()
+        for agent_id, obs_space, action_space in zip(
+            self.agent_ids, self.observation_spaces, self.action_spaces
         ):
-            self.total_state_dims = sum(state_dim[0] for state_dim in self.state_dims)
+            # Split agent names on expected pattern of e.g. speaker_0, speaker_1,
+            # listener_0, listener_1, to determine which agents are homogeneous
+            group_id = self.get_group_id(agent_id)
+            if group_id not in self.grouped_agents:
+                self.shared_agent_ids.append(group_id)
+                self.unique_observation_spaces[group_id] = obs_space
+                self.unique_action_spaces[group_id] = action_space
+
+            assert obs_space == self.unique_observation_spaces[group_id], (
+                f"Grouped agents, i.e. agents that share the prefix {group_id}, "
+                f"must have the same observation space. Found {self.unique_observation_spaces[group_id]} and {obs_space}."
+            )
+            assert action_space == self.unique_action_spaces[group_id], (
+                f"Grouped agents, i.e. agents that share the prefix {group_id}, "
+                f"must have the same action space. Found {self.unique_action_spaces[group_id]} and {action_space}."
+            )
+
+            self.grouped_agents[group_id].append(agent_id)
+
+        self.n_unique_agents = len(self.shared_agent_ids)
 
         # Build observation and action space dictionaries using agent IDs
         self.single_space = observation_spaces[0]
@@ -1281,14 +1211,50 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             {agent_id: space for agent_id, space in zip(agent_ids, action_spaces)}
         )
 
-    def get_homo_id(self, agent_id: str) -> str:
-        """Get the homogeneous ID for an agent.
+        # Dictionary containing groups of agents for each space type
+        self.grouped_spaces = defaultdict(list)
+        for agent_id, obs_space in self.observation_space.items():
+            if is_vector_space(obs_space):
+                self.grouped_spaces[ModuleType.MLP].append(agent_id)
+            elif is_image_space(obs_space):
+                self.grouped_spaces[ModuleType.CNN].append(agent_id)
+            elif isinstance(obs_space, (spaces.Dict, spaces.Tuple)):
+                self.grouped_spaces[ModuleType.MULTI_INPUT].append(agent_id)
+            else:
+                raise ValueError(f"Unknown observation space type: {type(obs_space)}")
 
-        :param agent_id: The agent ID
-        :type agent_id: str
-        :return: The homogeneous ID
+        self.setup = self.get_setup()
+
+    def has_grouped_agents(self) -> bool:
+        """Whether the algorithm contains groups of agents assigned to the same
+        policy for centralized execution.
+
+        :rtype: bool
         """
-        return agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
+        policy = self.registry.policy(return_group=True)
+        return len(policy.eval) < len(self.agent_ids)
+
+    def get_setup(self) -> MultiAgentSetup:
+        """Get the type of multi-agent setup, as determined by the observation spaces of the agents.
+        By having the 'same' observation space, we mean that the spaces are analogous, i.e. we can use
+        the same `EvolvableModule` to process their observations.
+
+        1. HOMOGENEOUS: All agents have the same observation space.
+        2. MIXED: Agents can be grouped by their observation spaces.
+        3. HETEROGENEOUS: All agents have different observation spaces.
+
+        :return: The type of multi-agent setup.
+        :rtype: MultiAgentSetup
+        """
+        return (
+            MultiAgentSetup.HOMOGENEOUS
+            if len(self.grouped_spaces) == 1
+            else (
+                MultiAgentSetup.MIXED
+                if len(self.grouped_spaces) < len(self.agent_ids)
+                else MultiAgentSetup.HETEROGENEOUS
+            )
+        )
 
     def preprocess_observation(
         self, observation: ObservationType
@@ -1322,25 +1288,32 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         :return: Action masks
         :rtype: Dict[str, np.ndarray]
         """
+        # Get dict of form {"agent_id" : [1, 0, 0, 0]...} etc
         action_masks = {
             agent: info.get("action_mask", None) if isinstance(info, dict) else None
             for agent, info in infos.items()
             if agent in self.agent_ids
-        }  # Get dict of form {"agent_id" : [1, 0, 0, 0]...} etc
+        }
 
         return action_masks
 
-    def extract_agent_masks(self, infos: InfosDict) -> Tuple[ArrayDict, ArrayDict]:
+    def extract_agent_masks(
+        self, infos: Optional[InfosDict] = None
+    ) -> Tuple[ArrayDict, ArrayDict]:
         """Extract env_defined_actions from info dictionary and determine agent masks
 
         :param infos: Info dict
         :type infos: Dict[str, Dict[...]]
-        """
 
+        :return: Env defined actions and agent masks
+        :rtype: Tuple[ArrayDict, ArrayDict]
+        """
         # Deal with case of no env_defined_actions defined in the info dict
         # Deal with empty info dicts for each sub agent
-        if not key_in_nested_dict(infos, "env_defined_actions") or all(
-            not info for agent, info in infos.items() if agent in self.agent_ids
+        if (
+            infos is None
+            or not key_in_nested_dict(infos, "env_defined_actions")
+            or all(not info for agent, info in infos.items() if agent in self.agent_ids)
         ):
             return None, None
 
@@ -1359,11 +1332,12 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             for idx, agent in enumerate(env_defined_actions.keys()):
                 # Handle None if environment isn't vectorized
                 if env_defined_actions[agent] is None:
-                    if not self.discrete_actions:
+                    if not isinstance(self.action_space[agent], spaces.Discrete):
                         nan_arr = np.empty(self.action_dims[idx])
                         nan_arr[:] = np.nan
                     else:
                         nan_arr = np.array([[np.nan]])
+
                     env_defined_actions[agent] = nan_arr
 
                 # Handle discrete actions + env not vectorized
@@ -1376,7 +1350,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
                 if len(env_defined_actions[agent].shape) == 1:
                     env_defined_actions[agent] = (
                         env_defined_actions[agent][:, np.newaxis]
-                        if self.discrete_actions
+                        if isinstance(self.action_space[agent], spaces.Discrete)
                         else env_defined_actions[agent][np.newaxis, :]
                     )
                 agent_masks[agent] = np.where(
@@ -1385,133 +1359,247 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         return env_defined_actions, agent_masks
 
-    def stack_critic_observations(self, obs: Dict[str, TorchObsType]) -> TorchObsType:
-        """Process observations for critic network input.
+    def extract_net_config(
+        self,
+        net_config: Optional[NetConfigType] = None,
+        grouped_agents: bool = False,
+        return_encoders: bool = False,
+    ) -> Union[NetConfigType, Tuple[NetConfigType, Dict[str, NetConfigType]]]:
+        """Extract an appropriate net config for each sub-agent from the passed net config dictionary. If
+        grouped_agents is True, the net config will be built for the grouped agents i.e. through their
+        common prefix in their agent_id, whenever the passed net config is None.
 
-        .. note:: Assumes that the observation spaces for the different agents are the same.
+        .. note::
+            If return_encoders is True, we return the encoder configs for each sub-agent. The only exception is
+            for MLPs, where we only return the deepest architecture found for MLPs. This is useful for algorithms
+            with shared critics that process the observations of all agents, and therefore use an `EvolvableMultiInput`
+            module to process the observations of all agents (assigning an encoder to each sub-agent and, optionally, a
+            single `EvolvableMLP` to process the concatenated vector observations).
 
-        :param obs: Observation dict
-        :type obs: Dict[str, torch.Tensor]
-
-        :return: Stacked observations
-        :rtype: torch.Tensor
+        :param net_config: Net config dictionary
+        :type net_config: Optional[NetConfigType]
+        :param grouped_agents: Whether the net config should be built for the grouped agents i.e.
+        through their common prefix in their agent_id, whenever the passed net config is None. Defaults to False.
+        :type grouped_agents: bool, optional
+        :param return_encoders: Whether to return the encoder configs for each sub-agent. Defaults to False.
+        :type return_encoders: bool, optional
+        :return: Net config dictionary for each sub-agent
+        :rtype: NetConfigType
         """
-        obs = list(obs.values())
-        if isinstance(self.single_space, spaces.Dict):
-            processed_obs = {}
-            for key, space in self.single_space.spaces.items():
-                if is_image_space(space):
-                    processed_obs[key] = torch.stack(
-                        [obs[i][key] for i in range(self.n_agents)], dim=2
-                    )
+        agent_ids = self.shared_agent_ids if grouped_agents else self.agent_ids
+        observation_spaces = (
+            self.unique_observation_spaces if grouped_agents else self.observation_space
+        )
+        encoder_configs = {}
+
+        # Helper function to append unique configs to the unique_configs dictionary
+        # -> Access to unique configs is relevant for algorithms with networks that process
+        # multiple agents' observations (e.g. shared critic in MADDPG)
+        def _add_to_encoder_configs(config: ConfigType, agent_id: str = "") -> None:
+            config_types = [
+                MlpNetConfig,
+                CnnNetConfig,
+                LstmNetConfig,
+                MultiInputNetConfig,
+                SimBaNetConfig,
+            ]
+            for config_type in config_types:
+                if config_type == MlpNetConfig or not agent_id:
+                    config_key = "mlp_config"
                 else:
-                    processed_obs[key] = torch.cat(
-                        [obs[i][key] for i in range(self.n_agents)], dim=1
+                    config_key = agent_id
+
+                if (
+                    config_key not in encoder_configs
+                    # Only update the mlp_config if it has a deeper architecture than the previous mlp_config
+                    or (
+                        config_key == "mlp_config"
+                        and len(config["hidden_size"])
+                        > len(encoder_configs["mlp_config"]["hidden_size"])
                     )
+                ):
+                    if isinstance(config, dict):
+                        config = config_from_dict(config)
+                        if isinstance(config, config_type):
+                            encoder_configs[config_key] = config
 
-        elif isinstance(self.single_space, spaces.Tuple):
-            processed_obs = []
-            for i, space in enumerate(self.single_space):
-                if is_image_space(space):
-                    processed_obs.append(
-                        torch.stack([obs[j][i] for j in range(self.n_agents)], dim=2)
-                    )
-                else:
-                    processed_obs.append(
-                        torch.cat([obs[j][i] for j in range(self.n_agents)], dim=1)
-                    )
-            processed_obs = tuple(processed_obs)
+                    elif isinstance(config, config_type):
+                        encoder_configs[config_key] = asdict(config)
 
-        elif is_image_space(self.single_space):
-            processed_obs = torch.stack(obs, dim=2)
-        else:
-            processed_obs = torch.cat(obs, dim=1)
-
-        return processed_obs
-
-    def extract_inactive_agents(
-        self, obs: Dict[str, ObservationType]
-    ) -> Tuple[Dict[str, np.ndarray], Dict[str, ObservationType]]:
-        """Extract inactive agents from observation.
-
-        :param obs: Observation dictionary
-        :type obs: Dict[str, ObservationType]
-
-        :return: Tuple of inactive agents and filtered observations
-        :rtype: Tuple[Dict[str, np.ndarray], Dict[str, ObservationType]]
-        """
-        inactive_agents = {}
-        agents_to_remove = []
-        for agent_id, agent_obs in obs.items():
-            if isinstance(agent_obs, dict):
-                sample = next(iter(agent_obs.values()))
-            elif isinstance(agent_obs, tuple):
-                sample = agent_obs[0]
+        # Helper function to check if any agent ID exists in the net_config
+        def _has_agent_ids(config: NetConfigType) -> bool:
+            config_keys = config.keys()
+            if grouped_agents:
+                return any(
+                    group_id in config_keys for group_id in self.shared_agent_ids
+                )
             else:
-                sample = agent_obs
+                return any(
+                    agent_id in config_keys
+                    or self.get_group_id(agent_id) in config_keys
+                    for agent_id in self.agent_ids
+                )
 
-            # For non-vectorised environments we assume observations for
-            # inactive agents are not returned
-            if len(sample.shape) == 1:
-                continue
+        # Helper function to get or create encoder config for an agent
+        def _get_encoder_config(config: ConfigType, agent_id: str) -> NetConfigType:
+            encoder_config = config.get("encoder_config")
+            simba = config.get("simba", False)
+            if encoder_config is None:
+                encoder_config = get_default_encoder_config(
+                    observation_spaces[agent_id], simba
+                )
+                config["encoder_config"] = asdict(encoder_config)
 
-            # Extract rows where all values are -1
-            inactive_agent_indices = np.where(np.isnan(sample).all(axis=1))[0]
+            return encoder_config
 
-            # If agent is active in all environments, don't need to save info
-            if inactive_agent_indices.shape[0] == 0:
-                continue
+        # 1. net_config is None -> Automatically define an encoder for each sub-agent or group
+        if net_config is None:
+            net_config = defaultdict(OrderedDict)
+            for agent_id in agent_ids:
+                encoder_config = get_default_encoder_config(
+                    observation_spaces[agent_id]
+                )
+                net_config[agent_id]["encoder_config"] = asdict(encoder_config)
+                _add_to_encoder_configs(encoder_config)
 
-            filtered_obs: np.ndarray = np.delete(
-                obs[agent_id], inactive_agent_indices, axis=0
+            if return_encoders:
+                return net_config, encoder_configs
+
+            return net_config
+
+        # 2a. (Legacy) -> Passed a single-level config in a multi-agent setting - can only
+        # do this in homogeneous settings where all agents have the same observation space as
+        # it pertains to the network (i.e. allow as long as the observation spaces result in the
+        # same encoder)
+        if not _has_agent_ids(net_config):
+            assert self.setup == MultiAgentSetup.HOMOGENEOUS, (
+                "Single-level net config can only be passed when the multi-agent environment is homogeneous "
+                "(i.e. all agents can use the same encoder to process their observations). Please specify "
+                "a net config for some combination of agents (or groups of agents) in the multi-agent environment."
             )
 
-            # Don't need to save info if same agent is inactive in all environments
-            if filtered_obs.shape[0] == 0:
-                agents_to_remove.append(agent_id)
-                continue
+            encoder_config = _get_encoder_config(net_config, agent_ids[0])
+            if return_encoders:
+                _add_to_encoder_configs(encoder_config)
 
-            obs[agent_id] = filtered_obs
-            inactive_agents[agent_id] = inactive_agent_indices
+            # Create a copy of the config for each agent
+            full_config = {agent_id: net_config.copy() for agent_id in agent_ids}
+            if return_encoders:
+                return full_config, encoder_configs
 
-        for agent_id in agents_to_remove:
-            obs.pop(agent_id)
+            return full_config
 
-        return inactive_agents, obs
+        # TODO: Do we need a check here for heterogeneous settings?
 
-    def disassemble_homogeneous_outputs(
+        # 2b. Handle nested config with agent/group IDs
+        result_config = {}
+        config_keys = net_config.keys()
+        for agent_id in agent_ids:
+            group_id = self.get_group_id(agent_id)
+
+            # 2bi. Check if agent_id is present in net_config
+            if agent_id in config_keys:
+                agent_config = net_config[agent_id]
+                encoder_config = _get_encoder_config(agent_config, agent_id)
+                result_config[agent_id] = agent_config
+
+                if return_encoders:
+                    _add_to_encoder_configs(encoder_config, agent_id)
+
+            # 2bii. Check if group_id is present in net_config
+            elif group_id in config_keys:
+                group_config = net_config[group_id]
+                encoder_config = _get_encoder_config(group_config, agent_id)
+                result_config[agent_id] = group_config
+
+                if return_encoders:
+                    _add_to_encoder_configs(encoder_config, agent_id)
+
+            # 2biii. agent_id or group_id not in net_config -> Add default encoder config
+            else:
+                default_config = {}
+                encoder_config = get_default_encoder_config(
+                    observation_spaces[agent_id]
+                )
+                default_config["encoder_config"] = asdict(encoder_config)
+                result_config[agent_id] = default_config
+
+                if return_encoders:
+                    _add_to_encoder_configs(encoder_config, agent_id)
+
+        if return_encoders:
+            return result_config, encoder_configs
+
+        return result_config
+
+    ####---------------------------------------####
+    #### Grouped Multi-Agent Utility Functions ####
+    ####---------------------------------------####
+    def get_group_id(self, agent_id: str) -> str:
+        """Get the group ID for an agent.
+
+        :param agent_id: The agent ID
+        :type agent_id: str
+        :return: The group ID
+        """
+        return agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
+
+    def assemble_shared_inputs(self, experience: ExperiencesType) -> ExperiencesType:
+        """Preprocesses inputs by constructing dictionaries by shared agents.
+
+        :param experience: experience to reshape from environment
+        :type experience: ExperiencesType
+
+        :return: Preprocessed inputs
+        :rtype: ExperiencesType
+        """
+        stacked_experience = {group_id: {} for group_id in self.shared_agent_ids}
+        for agent_id, inp in experience.items():
+            group_id = self.get_group_id(agent_id)
+            if isinstance(inp, list):
+                stacked_exp = (
+                    stack_experiences(inp, to_torch=False)[0] if len(inp) > 0 else None
+                )
+            else:
+                stacked_exp = inp
+
+            stacked_experience[group_id][agent_id] = stacked_exp
+
+        return stacked_experience
+
+    def disassemble_grouped_outputs(
         self,
-        homo_outputs: ArrayDict,
+        group_outputs: ArrayDict,
         vect_dim: int,
-        homogeneous_agents: Dict[str, List[str]],
+        grouped_agents: Dict[str, List[str]],
     ) -> ArrayDict:
-        """Disassembles batched output by shared policies into their homogeneous agents' outputs.
+        """Disassembles batched output by shared policies into their grouped agents' outputs.
 
         .. note:: This assumes that for any given sub-agent the termination condition is deterministic,
             i.e. any given agent will always terminate at the same timestep in different vectorized environments.
 
-        :param homo_outputs: Dictionary to be disassembled, has the form {'agent': [4, 7, 8]}
-        :type homo_outputs: Dict[str, np.ndarray]
+        :param group_outputs: Dictionary to be disassembled, has the form {'agent': [4, 7, 8]}
+        :type group_outputs: Dict[str, np.ndarray]
         :param vect_dim: Vectorization dimension size, i.e. number of vect envs
         :type vect_dim: int
-        :param homogeneous_agents: Dictionary of homogeneous agent IDs
-        :type homogeneous_agents: Dict[str, List[str]]
+        :param grouped_agents: Dictionary of grouped agent IDs
+        :type grouped_agents: Dict[str, List[str]]
         :return: Assembled dictionary, e.g. {'agent_0': 4, 'agent_1': 7, 'agent_2': 8}
         :rtype: Dict[str, np.ndarray]
         """
         output_dict = {}
-        for homo_id, agent_ids in homogeneous_agents.items():
-            homo_outputs[homo_id] = np.reshape(
-                homo_outputs[homo_id],
+        for group_id, agent_ids in grouped_agents.items():
+            group_outputs[group_id] = np.reshape(
+                group_outputs[group_id],
                 (len(agent_ids), vect_dim, -1),
             )
             for i, agent_id in enumerate(agent_ids):
-                output_dict[agent_id] = homo_outputs[homo_id][i]
+                output_dict[agent_id] = group_outputs[group_id][i]
 
         return output_dict
 
     def sum_shared_rewards(self, rewards: ArrayDict) -> ArrayDict:
-        """Sums the rewards for homogeneous agents
+        """Sums the rewards for grouped agents
 
         :param rewards: Reward dictionary from environment
         :type rewards: Dict[str, np.ndarray]
@@ -1526,12 +1614,12 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             agent_id: np.zeros(reward_shape) for agent_id in self.shared_agent_ids
         }
         for agent_id, reward in rewards.items():
-            homo_id = self.get_homo_id(agent_id)
-            summed_rewards[homo_id] += reward
+            group_id = self.get_group_id(agent_id)
+            summed_rewards[group_id] += reward
 
         return summed_rewards
 
-    def assemble_homogeneous_outputs(
+    def assemble_grouped_outputs(
         self, agent_outputs: ArrayDict, vect_dim: int
     ) -> ArrayDict:
         """Assembles individual agent outputs into batched outputs for shared policies.
@@ -1543,27 +1631,43 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         :return: Assembled dictionary with the form {'agent': [4, 7, 8]}
         :rtype: Dict[str, np.ndarray]
         """
-        homo_outputs = {}
-        for unique_id in self.shared_agent_ids:
+        group_outputs = {}
+        for group_id in self.shared_agent_ids:
             # Get all outputs for agents that share this ID
-            homo_agent_outputs = []
-            for homo_id in self.homogeneous_agents[unique_id]:
-                if homo_id in agent_outputs:
-                    homo_agent_outputs.append(agent_outputs[homo_id])
+            group_agent_outputs = []
+            for group_id in self.grouped_agents[group_id]:
+                if group_id in agent_outputs:
+                    group_agent_outputs.append(agent_outputs[group_id])
 
-            if homo_agent_outputs:
+            if group_agent_outputs:
                 # Stack outputs along first dimension
-                stacked_outputs = np.stack(homo_agent_outputs, axis=0)
+                stacked_outputs = np.stack(group_agent_outputs, axis=0)
                 # Reshape into a form suitable for batch processing
-                homo_outputs[unique_id] = np.reshape(
-                    stacked_outputs, (len(homo_agent_outputs) * vect_dim, -1)
+                group_outputs[group_id] = np.reshape(
+                    stacked_outputs, (len(group_agent_outputs) * vect_dim, -1)
                 )
 
-        return homo_outputs
+        return group_outputs
 
 
 class LLMAlgorithm(EvolvableAlgorithm, ABC):
-    """Base object for all LLM algorithms in the AgileRL framework."""
+    """Base object for all LLM algorithms in the AgileRL framework.
+
+    :param observation_space: The observation space of the environment.
+    :type observation_space: gymnasium.spaces.Space
+    :param action_space: The action space of the environment.
+    :type action_space: gymnasium.spaces.Space
+    :param index: The index of the algorithm.
+    :type index: int
+    :param hp_config: The hyperparameter configuration.
+    :type hp_config: Optional[HyperparameterConfig]
+    :param device: The device to run the algorithm on.
+    :type device: Union[str, torch.device]
+    :param accelerator: The accelerator to use.
+    :type accelerator: Optional[Accelerator]
+    :param name: The name of the algorithm.
+    :type name: Optional[str]
+    """
 
     def __init__(
         self,

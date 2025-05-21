@@ -30,12 +30,12 @@ Action Space
      - ✔️
 
 
-Homogeneous Agents
-------------------
+Grouped Agents
+--------------
 
 IPPO can efficiently solve environments with large numbers of homogeneous (identical) agents because they share actor and critic networks.
 This is useful for problems where we want multiple agents to learn the same behaviour, and can avoid training them all individually. Allowing
-all homogeneous agents to learn from the experiences collected by each other can be a very fast way to explore an environment.
+all grouped agents to learn from the experiences collected by each other can be a very fast way to explore an environment.
 
 Labelling agents as homogeneous (or not) is as simple as choosing the names of agents in an environment. The agent_ids will be
 read from the environment, and split on the final ``"_"``. Any agent_ids with matching prefixes will be assumed to be homogeneous.
@@ -79,11 +79,7 @@ multi-agent training function by passing the info dictionary into the agents get
 .. code-block:: python
 
     state, info = env.reset()  # or: next_state, reward, done, truncation, info = env.step(action)
-    cont_actions, discrete_action = agent.get_action(state, infos=info)
-    if agent.discrete_actions:
-        action = discrete_action
-    else:
-        action = cont_actions
+    action = agent.get_action(state, infos=info)
 
 
 Example Training Loop
@@ -157,8 +153,8 @@ Example Training Loop
                 # Clip to action space
                 clipped_action = {}
                 for agent_id, agent_action in action.items():
-                    shared_id = agent.get_homo_id(agent_id)
-                    actor_idx = agent.shared_agent_ids.index(shared_id)
+                    group_id = agent.get_group_id(agent_id)
+                    actor_idx = agent.shared_agent_ids.index(group_id)
                     agent_space = agent.action_space[agent_id]
                     if isinstance(agent_space, spaces.Box):
                         if agent.actors[actor_idx].squash_output:

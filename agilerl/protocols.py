@@ -4,6 +4,7 @@ from typing import (
     Callable,
     Dict,
     Generator,
+    Generic,
     Iterable,
     List,
     Optional,
@@ -166,9 +167,13 @@ class EvolvableAlgorithm(Protocol):
     def recompile(self) -> None: ...
 
 
+# Define a TypeVar for EvolvableAlgorithm that can be used for generic typing
+T_EvolvableAlgorithm = TypeVar("T_EvolvableAlgorithm", bound=EvolvableAlgorithm)
+
+
 @runtime_checkable
-class AgentWrapper(Protocol):
-    agent: EvolvableAlgorithm
+class AgentWrapper(Protocol, Generic[T_EvolvableAlgorithm]):
+    agent: T_EvolvableAlgorithm
 
     def get_action(self, obs: ObservationType, **kwargs) -> Any: ...
     def learn(

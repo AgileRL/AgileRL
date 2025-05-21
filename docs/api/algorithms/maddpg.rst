@@ -59,11 +59,7 @@ multi-agent training function by passing the info dictionary into the agents get
 .. code-block:: python
 
     state, info = env.reset()  # or: next_state, reward, done, truncation, info = env.step(action)
-    cont_actions, discrete_action = agent.get_action(state, infos=info)
-    if agent.discrete_actions:
-        action = discrete_action
-    else:
-        action = cont_actions
+    action, _ = agent.get_action(state, infos=info)
 
 Example
 ------------
@@ -126,15 +122,11 @@ Example
         for _ in range(1000):
 
             # Get next action from agent
-            cont_actions, discrete_action = agent.get_action(
+            action, raw_action = agent.get_action(
                 states=state,
                 training=True,
                 infos=info,
             )
-            if agent.discrete_actions:
-                action = discrete_action
-            else:
-                action = cont_actions
 
             # Act in environment
             next_state, reward, termination, truncation, info = env.step(action)
@@ -149,7 +141,7 @@ Example
                     agent_id: obs_channels_to_first(ns)
                     for agent_id, ns in next_state.items()
                 }
-            memory.save_to_memory(state, cont_actions, reward, next_state, done, is_vectorised=True)
+            memory.save_to_memory(state, raw_action, reward, next_state, done, is_vectorised=True)
 
             # Learn according to learning frequency
             if len(memory) >= agent.batch_size:

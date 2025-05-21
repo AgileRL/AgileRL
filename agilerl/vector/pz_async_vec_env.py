@@ -920,13 +920,11 @@ def _async_worker(
     parent_pipe.close()
 
     # Need to keep track of the active agents in the environment
-    current_active = None
     try:
         while True:
             command, data = pipe.recv()
             if command == "reset":
                 obs, info = env.reset(**data)
-                current_active = list(obs.keys())
                 transition = obs, info
                 observation, info = process_transition(
                     transition,
@@ -939,14 +937,6 @@ def _async_worker(
                 )
                 pipe.send((info, True))
             elif command == "step":
-                data = {
-                    possible_agent: (
-                        np.array(data[idx]).squeeze()
-                        if not isinstance(data[idx], int)
-                        else data[idx]
-                    )
-                    for idx, possible_agent in enumerate(current_active)
-                }
                 observation, reward, terminated, truncated, info = env.step(data)
                 if all(
                     [
@@ -956,7 +946,6 @@ def _async_worker(
                 ):
                     observation, info = env.reset()
 
-                current_active = list(observation.keys())
                 transition = observation, reward, terminated, truncated, info
                 observation, reward, terminated, truncated, info = process_transition(
                     transition,

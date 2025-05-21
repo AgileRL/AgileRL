@@ -50,7 +50,8 @@ def is_evolvable(attr: str, obj: Any) -> bool:
 def mutation(
     mutation_type: MutationType, **recreate_kwargs
 ) -> Callable[[Callable], MutationMethod]:
-    """Decorator to register a method as a mutation function of a specific type.
+    """Decorator to register a method as a mutation function of a specific type. This signals
+    that the module should be recreated after the function has been called on the module.
 
     :param mutation_type: The type of mutation function.
     :type mutation_type: MutationType
@@ -103,8 +104,12 @@ class MutationContext:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """
+        Exit the context manager. If the mutation depth is 0, then we have exited the outermost
+        mutation method and need to recreate the network. Otherwise, we have exited a nested
+        mutation method and do not need to do anything.
+        """
         self.module._mutation_depth -= 1
-
         if self.module._mutation_depth == 0:
             # Identify the mutation method that was actually applied
             final_mutation_attr = self._resolve_final_mutation_attr()
@@ -229,7 +234,6 @@ def _get_filtered_methods(
     return _filtered
 
 
-# TODO: Think of a way that doesn't require the use of a metaclass
 class ModuleMeta(type):
     """Metaclass to parse the mutation methods of an EvolvableModule instance
     and its superclasses. Allows us to dynamically keep track of the last mutation

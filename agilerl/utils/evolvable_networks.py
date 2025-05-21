@@ -1,4 +1,3 @@
-# This file contains utility functions for tuning
 from collections import OrderedDict
 from typing import Dict, Iterable, List, Literal, Optional, Tuple, Union
 
@@ -11,9 +10,10 @@ from torch.optim import Optimizer
 
 from agilerl.modules.configs import (
     CnnNetConfig,
-    LSTMNetConfig,
+    LstmNetConfig,
     MlpNetConfig,
     MultiInputNetConfig,
+    NetConfig,
     SimBaNetConfig,
 )
 from agilerl.modules.custom_components import (
@@ -23,9 +23,139 @@ from agilerl.modules.custom_components import (
     ResidualBlock,
     SimbaResidualBlock,
 )
-from agilerl.typing import ConfigType, DeviceType
+from agilerl.typing import ConfigType, DeviceType, GymSpaceType, NetConfigType
 
 TupleorInt = Union[Tuple[int, ...], int]
+
+
+def get_state_dim_networks(observation_space: GymSpaceType) -> Tuple[int, ...]:
+    """Returns the dimension of the state space as it pertains to the underlying
+    networks (i.e. the input size of the networks).
+
+    :param observation_space: The observation space of the environment.
+    :type observation_space: spaces.Space or List[spaces.Space].
+
+    :return: The dimension of the state space.
+    :rtype: Tuple[int, ...]."""
+    if isinstance(observation_space, (list, tuple, spaces.Tuple)):
+        return tuple(get_state_dim_networks(space) for space in observation_space)
+    elif isinstance(observation_space, spaces.Dict):
+        return {
+            key: get_state_dim_networks(subspace)
+            for key, subspace in observation_space.spaces.items()
+        }
+    elif isinstance(observation_space, spaces.Discrete):
+        return (observation_space.n,)
+    elif isinstance(observation_space, spaces.MultiDiscrete):
+        return (sum(observation_space.nvec),)
+    elif isinstance(observation_space, spaces.Box):
+        return observation_space.shape
+    elif isinstance(observation_space, spaces.MultiBinary):
+        return (observation_space.n,)
+    else:
+        raise AttributeError(
+            f"Can't access state dimensions for {type(observation_space)} spaces."
+        )
+
+
+def get_action_dim_networks(action_space: GymSpaceType) -> int:
+    """Returns the dimension of the action space as it pertains to the underlying
+    networks (i.e. the output size of the networks).
+
+    :param action_space: The action space of the environment.
+    :type action_space: spaces.Space or List[spaces.Space].
+
+    :return: The dimension of the action space.
+    :rtype: int.
+    """
+    if isinstance(action_space, (list, tuple)):
+        return tuple(get_action_dim_networks(space) for space in action_space)
+    elif isinstance(action_space, spaces.MultiBinary):
+        return action_space.n
+    elif isinstance(action_space, spaces.Discrete):
+        return action_space.n
+    elif isinstance(action_space, spaces.MultiDiscrete):
+        return sum(action_space.nvec)
+    elif isinstance(action_space, spaces.Box):
+        # NOTE: Assume continuous actions are always one-dimensional
+        return action_space.shape[0]
+    else:
+        raise AttributeError(
+            f"Can't access action dimensions for {type(action_space)} spaces."
+        )
+
+
+def is_image_space(space: spaces.Space) -> bool:
+    """Check if the space is an image space. We ignore dtype and number of channels
+    checks.
+
+    :param space: Input space
+    :type space: spaces.Space
+
+    :return: True if the space is an image space, False otherwise
+    :rtype: bool
+    """
+    return isinstance(space, spaces.Box) and len(space.shape) == 3
+
+
+def is_box_space_ndim(space: spaces.Space, ndim: int) -> bool:
+    """Check if the space is a Box space with the given number of dimensions.
+
+    :param space: Input space
+    :type space: spaces.Space
+    :param ndim: Number of dimensions
+    :type ndim: int
+
+    :return: True if the space is a Box space with the given number of dimensions, False otherwise
+    """
+    return isinstance(space, spaces.Box) and len(space.shape) == ndim
+
+
+def is_vector_space(space: spaces.Space) -> bool:
+    """Check if the space is a vector space.
+
+    :param space: Input space
+    :type space: spaces.Space
+
+    :return: True if the space is a vector space, False otherwise
+    :rtype: bool
+    """
+    return (
+        (isinstance(space, spaces.Box) and len(space.shape) in [0, 1])
+        or isinstance(space, spaces.Discrete)
+        or isinstance(space, spaces.MultiDiscrete)
+    )
+
+
+def config_from_dict(config_dict: NetConfigType) -> NetConfig:
+    """Get the class of the net config from the dictionary.
+
+    :param config_dict: The dictionary to get the class from.
+    :type config_dict: NetConfigType
+    :return: The net config class.
+    :rtype: NetConfig
+    """
+    config_keys = config_dict.keys()
+    if "hidden_size" in config_keys:
+        if "num_layers" in config_keys:
+            config_cls = LstmNetConfig
+        elif "num_blocks" in config_keys:
+            config_cls = SimBaNetConfig
+        else:
+            config_cls = MlpNetConfig
+    elif "channel_size" in config_keys:
+        config_cls = CnnNetConfig
+    elif any(
+        key in MultiInputNetConfig.__dataclass_fields__.keys() for key in config_keys
+    ):
+        config_cls = MultiInputNetConfig
+    else:
+        raise ValueError(
+            f"Unable to determine net config class from: {config_dict}. "
+            "Please verify that the keys correspond to the arguments of the net config class."
+        )
+
+    return config_cls.from_dict(config_dict)
 
 
 def tuple_to_dict_space(tuple_space: spaces.Tuple) -> spaces.Dict:
@@ -78,7 +208,7 @@ def get_default_encoder_config(
         if simba and len(observation_space.shape) == 1:
             return SimBaNetConfig(hidden_size=128, num_blocks=2, output_activation=None)
         elif recurrent and len(observation_space.shape) == 2:
-            return LSTMNetConfig(hidden_size=128, num_layers=2, output_activation=None)
+            return LstmNetConfig(hidden_size=128, num_layers=2, output_activation=None)
 
         return MlpNetConfig(
             hidden_size=[16, 16], output_activation=None, output_vanish=False
@@ -388,48 +518,6 @@ def calc_max_kernel_sizes(
         width_in = width_out
 
     return max_kernel_list
-
-
-def is_image_space(space: spaces.Space) -> bool:
-    """Check if the space is an image space. We ignore dtype and number of channels
-    checks.
-
-    :param space: Input space
-    :type space: spaces.Space
-
-    :return: True if the space is an image space, False otherwise
-    :rtype: bool
-    """
-    return is_box_space_ndim(space, 3)
-
-
-def is_box_space_ndim(space: spaces.Space, ndim: int) -> bool:
-    """Check if the space is a Box space with the given number of dimensions.
-
-    :param space: Input space
-    :type space: spaces.Space
-    :param ndim: Number of dimensions
-    :type ndim: int
-
-    :return: True if the space is a Box space with the given number of dimensions, False otherwise
-    """
-    return isinstance(space, spaces.Box) and len(space.shape) == ndim
-
-
-def is_vector_space(space: spaces.Space) -> bool:
-    """Check if the space is a vector space.
-
-    :param space: Input space
-    :type space: spaces.Space
-
-    :return: True if the space is a vector space, False otherwise
-    :rtype: bool
-    """
-    return (
-        (isinstance(space, spaces.Box) and len(space.shape) in [0, 1])
-        or isinstance(space, spaces.Discrete)
-        or isinstance(space, spaces.MultiDiscrete)
-    )
 
 
 def create_cnn(

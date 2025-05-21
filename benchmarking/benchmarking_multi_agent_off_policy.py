@@ -6,13 +6,16 @@ import yaml
 from accelerate import Accelerator
 from pettingzoo.utils import env_logger
 
-from agilerl.algorithms.core import MultiAgentRLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components import MultiAgentReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules import EvolvableMLP
 from agilerl.training.train_multi_agent_off_policy import train_multi_agent_off_policy
+from agilerl.utils.evolvable_networks import (
+    get_action_dim_networks,
+    get_state_dim_networks,
+)
 from agilerl.utils.utils import (
     create_population,
     make_multi_agent_vect_envs,
@@ -122,8 +125,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Tru
         ),
     )
 
-    state_dims = MultiAgentRLAlgorithm.get_state_dim(observation_spaces)
-    action_dims = MultiAgentRLAlgorithm.get_action_dim(action_spaces)
+    state_dims = get_state_dim_networks(observation_spaces)
+    action_dims = get_action_dim_networks(action_spaces)
     total_state_dims = sum(state_dim[0] for state_dim in state_dims)
     total_action_dims = sum(action_dims)
     if use_net:

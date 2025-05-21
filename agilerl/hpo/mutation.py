@@ -693,7 +693,7 @@ class Mutations:
 
         # We only apply parameter mutations to the evaluation policy network
         # (i.e. the network used to select actions)
-        offspring_policy: OffspringType = getattr(individual, registry.policy)
+        offspring_policy: OffspringType = getattr(individual, registry.policy())
         if isinstance(offspring_policy, list):
             offspring_policy = [
                 self.classic_parameter_mutation(mod) for mod in offspring_policy
@@ -704,7 +704,7 @@ class Mutations:
         if self.accelerator is None:
             offspring_policy = self.to_device(offspring_policy)
 
-        setattr(individual, registry.policy, offspring_policy)
+        setattr(individual, registry.policy(), offspring_policy)
 
         self.reinit_opt(individual)  # Reinitialise optimizer
         individual.mut = "param"

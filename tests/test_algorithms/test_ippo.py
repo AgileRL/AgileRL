@@ -77,101 +77,6 @@ class DummyMultiEnv(ParallelEnv):
         )
 
 
-class DummyMultiEnvAsync(ParallelEnv):
-    def __init__(self, observation_spaces, action_spaces):
-        super().__init__()
-        self.observation_spaces = observation_spaces
-        self.action_spaces = action_spaces
-        self.agents = ["agent_0", "agent_1", "other_agent_0"]
-        self.possible_agents = ["agent_0", "agent_1", "other_agent_0"]
-        self.metadata = None
-        self.render_mode = None
-
-        # Define observation frequencies (every N steps)
-        self.observation_frequencies = {
-            "agent_0": 1,  # observes every step
-            "agent_1": 1,  # observes every 2 steps
-            "other_agent_0": 4,  # observes every 4 steps
-        }
-
-        # Initialize step counters for each agent
-        self.agent_step_counters = {agent: 0 for agent in self.agents}
-
-        self.active_agents = self.agents.copy()  # Initially all agents are active
-        self.current_step = 0
-
-    def action_space(self, agent):
-        idx = self.possible_agents.index(agent)
-        return self.action_spaces[idx]
-
-    def observation_space(self, agent):
-        idx = self.possible_agents.index(agent)
-        return self.observation_spaces[idx]
-
-    def reset(self, seed=None, options=None):
-        # Reset step counters
-        self.current_step = 0
-        self.agent_step_counters = {agent: 0 for agent in self.agents}
-
-        # All agents observe at reset (step 0)
-        self.active_agents = self.agents.copy()
-
-        observations = {
-            agent: np.random.rand(
-                *self.observation_spaces[self.possible_agents.index(agent)].shape
-            )
-            for agent in self.active_agents
-        }
-
-        infos = {agent: {} for agent in self.active_agents}
-        for agent in self.active_agents:
-            infos[agent]["env_defined_actions"] = None
-
-        # Always provide env_defined_actions for agent_0 if active
-        if "agent_0" in self.active_agents:
-            infos["agent_0"]["env_defined_actions"] = np.array([1])
-
-        return observations, infos
-
-    def step(self, action):
-        # Increment the global step counter
-        self.current_step += 1
-
-        # Increment step counters for each agent
-        for agent in self.agents:
-            self.agent_step_counters[agent] += 1
-
-        # Determine which agents should observe based on their frequency
-        self.active_agents = [
-            agent
-            for agent in self.agents
-            if self.agent_step_counters[agent] % self.observation_frequencies[agent]
-            == 0
-        ]
-
-        observations = {
-            agent: np.random.rand(
-                *self.observation_spaces[self.possible_agents.index(agent)].shape
-            )
-            for agent in self.active_agents
-        }
-
-        rewards = {agent: np.random.randint(0, 5) for agent in action.keys()}
-
-        # Different homogeneous agents done at different times
-        dones = {}
-        for agent in self.active_agents:
-            if agent in ["agent_0", "agent_1"]:
-                dones[agent] = self.current_step >= 30
-            else:
-                dones[agent] = self.current_step >= 40
-
-        truncated = {agent: False for agent in self.active_agents}
-        infos = {agent: {} for agent in self.active_agents}
-
-        return observations, rewards, dones, truncated, infos
-
-
 class MultiAgentCNNActor(nn.Module):
     def __init__(self):
         super().__init__()
@@ -564,10 +469,8 @@ def test_ippo_clone_returns_identical_agent(
     assert isinstance(clone_agent, IPPO)
     assert clone_agent.observation_spaces == ippo.observation_spaces
     assert clone_agent.action_spaces == ippo.action_spaces
-    assert clone_agent.one_hot == ippo.one_hot
     assert clone_agent.n_agents == ippo.n_agents
     assert clone_agent.agent_ids == ippo.agent_ids
-    assert clone_agent.discrete_actions == ippo.discrete_actions
     assert clone_agent.index == ippo.index
     assert clone_agent.batch_size == ippo.batch_size
     assert clone_agent.lr == ippo.lr
@@ -656,10 +559,8 @@ def test_clone_after_learning(compile_mode):
     assert isinstance(clone_agent, IPPO)
     assert clone_agent.observation_spaces == ippo.observation_spaces
     assert clone_agent.action_spaces == ippo.action_spaces
-    assert clone_agent.one_hot == ippo.one_hot
     assert clone_agent.n_agents == ippo.n_agents
     assert clone_agent.agent_ids == ippo.agent_ids
-    assert clone_agent.discrete_actions == ippo.discrete_actions
     assert clone_agent.index == ippo.index
     assert clone_agent.batch_size == ippo.batch_size
     assert clone_agent.lr == ippo.lr
@@ -967,7 +868,6 @@ def test_load_from_pretrained(
     # Check if properties and weights are loaded correctly
     assert new_ippo.observation_spaces == ippo.observation_spaces
     assert new_ippo.action_spaces == ippo.action_spaces
-    assert new_ippo.one_hot == ippo.one_hot
     assert new_ippo.n_agents == ippo.n_agents
     assert new_ippo.agent_ids == ippo.agent_ids
     assert new_ippo.lr == ippo.lr
@@ -1096,7 +996,6 @@ def test_load_from_pretrained_networks(
     # Check if properties and weights are loaded correctly
     assert new_ippo.observation_spaces == ippo.observation_spaces
     assert new_ippo.action_spaces == ippo.action_spaces
-    assert new_ippo.one_hot == ippo.one_hot
     assert new_ippo.n_agents == ippo.n_agents
     assert new_ippo.agent_ids == ippo.agent_ids
     assert new_ippo.lr == ippo.lr
@@ -1824,10 +1723,8 @@ def test_initialize_ippo_with_mlp_networks(
 
     assert ippo.observation_spaces == observation_spaces
     assert ippo.action_spaces == action_spaces
-    assert ippo.one_hot is False
     assert ippo.n_agents == 3
     assert ippo.agent_ids == ["agent_0", "agent_1", "other_agent_0"]
-    assert ippo.discrete_actions is True
     assert ippo.scores == []
     assert ippo.fitness == []
     assert ippo.steps == [0]
@@ -1947,10 +1844,8 @@ def test_initialize_ippo_with_cnn_networks(
 
     assert ippo.observation_spaces == observation_spaces
     assert ippo.action_spaces == action_spaces
-    assert ippo.one_hot is False
     assert ippo.n_agents == 3
     assert ippo.agent_ids == ["agent_0", "agent_1", "other_agent_0"]
-    assert ippo.discrete_actions is True
     assert ippo.scores == []
     assert ippo.fitness == []
     assert ippo.steps == [0]
@@ -2061,10 +1956,8 @@ def test_initialize_ippo_with_evo_networks(
 
     assert ippo.observation_spaces == observation_spaces
     assert ippo.action_spaces == action_spaces
-    assert ippo.one_hot is False
     assert ippo.n_agents == 3
     assert ippo.agent_ids == ["agent_0", "agent_1", "other_agent_0"]
-    assert ippo.discrete_actions is True
     assert ippo.scores == []
     assert ippo.fitness == []
     assert ippo.steps == [0]
@@ -2146,11 +2039,11 @@ def test_ippo_init_warning(
         )
 
 
-def test_homogeneous_outputs_functions():
-    """Test that the assemble_homogeneous_outputs and disassemble_homogeneous_outputs
+def test_grouped_outputs_functions():
+    """Test that the assemble_grouped_outputs and disassemble_grouped_outputs
     functions work as expected and are inverses of each other."""
 
-    # Initialize agent with homogeneous agents
+    # Initialize agent with grouped agents
     observation_spaces = generate_multi_agent_box_spaces(3, (6,))
     action_spaces = generate_multi_agent_discrete_spaces(3, 2)
     compile_mode = None
@@ -2163,9 +2056,9 @@ def test_homogeneous_outputs_functions():
         torch_compiler=compile_mode,
     )
 
-    # Setting up homogeneous agent configuration
+    # Setting up grouped agent configuration
     agent.shared_agent_ids = ["agent", "other_agent"]
-    agent.homogeneous_agents = {
+    agent.grouped_agents = {
         "agent": ["agent_0", "agent_1"],
         "other_agent": ["other_agent_0"],
     }
@@ -2179,19 +2072,19 @@ def test_homogeneous_outputs_functions():
         "other_agent_0": np.random.rand(vect_dim, output_dim),
     }
 
-    # Test assemble_homogeneous_outputs
-    homo_outputs = agent.assemble_homogeneous_outputs(agent_outputs, vect_dim)
+    # Test assemble_grouped_outputs
+    grouped_outputs = agent.assemble_grouped_outputs(agent_outputs, vect_dim)
 
-    # Check that the homogeneous outputs have the correct keys
-    assert set(homo_outputs.keys()) == {"agent", "other_agent"}
+    # Check that the grouped outputs have the correct keys
+    assert set(grouped_outputs.keys()) == {"agent", "other_agent"}
 
     # Check that the agent outputs are assembled correctly
-    assert homo_outputs["agent"].shape == (2 * vect_dim, output_dim)
-    assert homo_outputs["other_agent"].shape == (1 * vect_dim, output_dim)
+    assert grouped_outputs["agent"].shape == (2 * vect_dim, output_dim)
+    assert grouped_outputs["other_agent"].shape == (1 * vect_dim, output_dim)
 
-    # Test disassemble_homogeneous_outputs
-    disassembled_outputs = agent.disassemble_homogeneous_outputs(
-        homo_outputs, vect_dim, agent.homogeneous_agents
+    # Test disassemble_grouped_outputs
+    disassembled_outputs = agent.disassemble_grouped_outputs(
+        grouped_outputs, vect_dim, agent.grouped_agents
     )
 
     # Check that the disassembled outputs have the correct keys
@@ -2257,141 +2150,3 @@ def test_get_action_distributed(compile_mode):
         assert agent_id in log_probs
         assert agent_id in dist_entropy
         assert agent_id in state_values
-
-
-@pytest.mark.parametrize("compile_mode", [None, "default"])
-@pytest.mark.parametrize("num_envs", [1, 2])
-def test_ippo_custom_training_with_async_env(device, compile_mode, num_envs):
-    # Create async environment with agents that return observations asynchronously
-    observation_spaces = generate_multi_agent_box_spaces(3, (6,))
-    action_spaces = generate_multi_agent_discrete_spaces(3, 2)
-    vectorized = num_envs > 1
-    if vectorized:
-        env = make_multi_agent_vect_envs(
-            DummyMultiEnvAsync,
-            num_envs=num_envs,
-            **dict(observation_spaces=observation_spaces, action_spaces=action_spaces),
-        )
-    else:
-        env = DummyMultiEnvAsync(observation_spaces, action_spaces)
-
-    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
-
-    # Initialize IPPO agent
-    agent = IPPO(
-        observation_spaces=observation_spaces,
-        action_spaces=action_spaces,
-        agent_ids=agent_ids,
-        device=device,
-        batch_size=64,
-        lr=0.001,
-        gamma=0.99,
-        gae_lambda=0.95,
-        clip_coef=0.2,
-        ent_coef=0.01,
-        vf_coef=0.5,
-        torch_compiler=compile_mode,
-    )
-
-    # Custom training loop for multiple iterations
-    for iteration in range(5):
-        # Reset environment
-        observations, infos = env.reset()
-
-        states = {agent_id: [] for agent_id in agent_ids}
-        actions = {agent_id: [] for agent_id in agent_ids}
-        log_probs = {agent_id: [] for agent_id in agent_ids}
-        rewards = {agent_id: [] for agent_id in agent_ids}
-        dones = {agent_id: [] for agent_id in agent_ids}
-        values = {agent_id: [] for agent_id in agent_ids}
-
-        done = {
-            agent_id: np.zeros((num_envs,), dtype=np.int8) for agent_id in agent_ids
-        }
-
-        # Collect experiences for multiple steps
-        max_steps = 105
-        for step in range(max_steps):
-            inactive, observations = agent.extract_inactive_agents(observations)
-
-            # Get actions for current active agents
-            action_dict, logprob_dict, _, value_dict = agent.get_action(
-                observations, infos
-            )
-
-            # Verify actions are only for active agents
-            assert all(agent_id in observations for agent_id in action_dict)
-
-            # Step the environment
-            next_observations, reward_dict, terminated, truncated, next_infos = (
-                env.step(action_dict)
-            )
-
-            # Store experiences for active agents
-            for agent_id in observations:
-                states[agent_id].append(observations[agent_id])
-                actions[agent_id].append(action_dict[agent_id])
-                log_probs[agent_id].append(logprob_dict[agent_id])
-                values[agent_id].append(value_dict[agent_id])
-                dones[agent_id].append(done[agent_id])
-                rewards[agent_id].append(reward_dict[agent_id])
-
-            next_dones = {}
-            for agent_id in terminated:
-                term = terminated[agent_id]
-                trunc = truncated[agent_id]
-
-                # Process asynchronous dones
-                if vectorized:
-                    mask = ~(np.isnan(term) | np.isnan(trunc))
-                    result = np.full_like(mask, np.nan, dtype=float)
-                    result[mask] = np.logical_or(term[mask], trunc[mask])
-
-                    next_dones[agent_id] = result
-                else:
-                    next_dones[agent_id] = np.array(
-                        [np.logical_or(term, trunc)]
-                    ).astype(np.int8)
-
-            # Update for next step
-            observations = next_observations
-            done = next_dones
-            infos = next_infos
-
-            # Break if all agents report done
-            for idx, agent_dones in enumerate(zip(*next_dones.values())):
-                if all(agent_dones):
-                    if not vectorized:
-                        observations, info = env.reset()
-
-                    done = {
-                        agent_id: np.zeros(num_envs) for agent_id in agent.agent_ids
-                    }
-
-        # Skip learning if no experiences collected
-        if not any(states.values()):
-            continue
-
-        # Create experience tuple for learning
-        experiences = (
-            states,
-            actions,
-            log_probs,
-            rewards,
-            dones,
-            values,
-            next_observations,  # next_states
-            next_dones,
-        )
-
-        # Train on collected experiences if we have any
-        if any(len(states[agent_id]) > 0 for agent_id in states):
-            loss_info = agent.learn(experiences)
-
-            # Verify that learning worked for at least one agent
-            assert any(agent_id in loss_info for agent_id in agent.shared_agent_ids)
-
-    # Final test: verify agent can handle completely different set of active agents
-    test_observations, test_infos = env.reset()
-    test_actions, _, _, _ = agent.get_action(test_observations, test_infos)
-    assert all(agent_id in test_observations for agent_id in test_actions)

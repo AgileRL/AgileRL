@@ -335,8 +335,6 @@ def test_initialize_maddpg_with_net_config(
     for noise_vec in maddpg.expl_noise:
         assert torch.all(noise_vec == expl_noise)
     assert maddpg.batch_size == batch_size
-    # assert maddpg.total_state_dims == expected_total_state_dims
-    assert maddpg.total_actions == sum(space.shape[0] for space in action_spaces)
     assert maddpg.scores == []
     assert maddpg.fitness == []
     assert maddpg.steps == [0]
@@ -413,14 +411,8 @@ def test_initialize_maddpg_with_mlp_networks(
     assert all(isinstance(critic, expected_module_cls) for critic in maddpg.critics)
     assert maddpg.observation_spaces == observation_spaces
     assert maddpg.action_spaces == action_spaces
-    assert maddpg.one_hot is False
     assert maddpg.n_agents == 2
     assert maddpg.agent_ids == ["agent_0", "other_agent_0"]
-    assert maddpg.discrete_actions is True
-    assert maddpg.total_state_dims == sum(
-        state.shape[0] for state in observation_spaces
-    )
-    assert maddpg.total_actions == sum(space.n for space in action_spaces)
     assert maddpg.scores == []
     assert maddpg.fitness == []
     assert maddpg.steps == [0]
@@ -521,14 +513,8 @@ def test_initialize_maddpg_with_cnn_networks(
     assert all(isinstance(critic, expected_module_cls) for critic in maddpg.critics)
     assert maddpg.observation_spaces == observation_spaces
     assert maddpg.action_spaces == action_spaces
-    assert maddpg.one_hot is False
     assert maddpg.n_agents == 2
     assert maddpg.agent_ids == ["agent_0", "other_agent_0"]
-    assert maddpg.discrete_actions is True
-    assert maddpg.total_state_dims == sum(
-        state.shape[0] for state in observation_spaces
-    )
-    assert maddpg.total_actions == sum(space.n for space in action_spaces)
     assert maddpg.scores == []
     assert maddpg.fitness == []
     assert maddpg.steps == [0]
@@ -594,11 +580,7 @@ def test_initialize_maddpg_with_evo_networks(
 
     evo_actors = [
         DeterministicActor(
-            observation_spaces[x],
-            action_spaces[x],
-            n_agents=2,
-            device=device,
-            **net_config
+            observation_spaces[x], action_spaces[x], device=device, **net_config
         )
         for x in range(2)
     ]
@@ -606,7 +588,6 @@ def test_initialize_maddpg_with_evo_networks(
         ContinuousQNetwork(
             observation_space=concatenate_spaces(observation_spaces),
             action_space=concatenate_spaces(action_spaces),
-            n_agents=2,
             device=device,
             **critic_net_config
         )
@@ -631,14 +612,8 @@ def test_initialize_maddpg_with_evo_networks(
         assert all(isinstance(critic.encoder, encoder_cls) for critic in maddpg.critics)
     assert maddpg.observation_spaces == observation_spaces
     assert maddpg.action_spaces == action_spaces
-    assert maddpg.one_hot is False
     assert maddpg.n_agents == 2
     assert maddpg.agent_ids == ["agent_0", "other_agent_0"]
-    assert maddpg.discrete_actions is True
-    # assert maddpg.total_state_dims == sum(
-    #     state.shape[0] for state in observation_spaces
-    # )
-    assert maddpg.total_actions == sum(space.n for space in action_spaces)
     assert maddpg.scores == []
     assert maddpg.fitness == []
     assert maddpg.steps == [0]
@@ -785,11 +760,11 @@ def test_maddpg_get_action(
         device=device,
         torch_compiler=compile_mode,
     )
-    cont_actions, discrete_action = maddpg.get_action(state, training)
+    action, _ = maddpg.get_action(state, training)
     discrete_actions = all(
         isinstance(space, spaces.Discrete) for space in action_spaces
     )
-    for idx, env_actions in enumerate(list(cont_actions.values())):
+    for idx, env_actions in enumerate(list(action.values())):
         action_dim = (
             action_spaces[idx].shape[0]
             if isinstance(action_spaces[idx], spaces.Box)
@@ -809,7 +784,7 @@ def test_maddpg_get_action(
             assert -1 <= act.all() <= 1
 
     if discrete_actions:
-        for idx, env_action in enumerate(list(discrete_action.values())):
+        for idx, env_action in enumerate(list(action.values())):
             for action in env_action:
                 assert action <= action_spaces[idx].n - 1
     maddpg = None
@@ -903,16 +878,15 @@ def test_get_action_distributed(
             encoder_config=actor.encoder.net_config,
             head_config=actor.head_net.net_config,
             device=actor.device,
-            n_agents=actor.n_agents,
         )
         for actor in maddpg.actors
     ]
     maddpg.actors = new_actors
-    cont_actions, discrete_action = maddpg.get_action(state, training)
+    action, raw_action = maddpg.get_action(state, training)
     discrete_actions = all(
         isinstance(space, spaces.Discrete) for space in action_spaces
     )
-    for idx, env_actions in enumerate(list(cont_actions.values())):
+    for idx, env_actions in enumerate(list(action.values())):
         action_dim = (
             action_spaces[idx].shape[0]
             if isinstance(action_spaces[idx], spaces.Box)
@@ -932,7 +906,7 @@ def test_get_action_distributed(
             assert -1 <= act.all() <= 1
 
     if discrete_actions:
-        for idx, env_action in enumerate(list(discrete_action.values())):
+        for idx, env_action in enumerate(list(action.values())):
             action_dim = (
                 action_spaces[idx].shape[0]
                 if isinstance(action_spaces[idx], spaces.Box)
@@ -984,15 +958,11 @@ def test_maddpg_get_action_agent_masking(
         device=device,
         torch_compiler=compile_mode,
     )
-    cont_actions, discrete_action = maddpg.get_action(state, training, infos=info)
+    action, raw_action = maddpg.get_action(state, training, infos=info)
     if discrete_actions:
-        assert np.array_equal(
-            discrete_action["agent_0"], np.array([1])
-        ), discrete_action["agent_0"]
+        assert np.array_equal(action["agent_0"], np.array([1])), action["agent_0"]
     else:
-        assert np.array_equal(
-            cont_actions["agent_0"], np.array([[0, 1]])
-        ), cont_actions["agent_0"]
+        assert np.array_equal(action["agent_0"], np.array([[0, 1]])), action["agent_0"]
 
 
 @pytest.mark.parametrize("training", [0, 1])
@@ -1046,15 +1016,15 @@ def test_maddpg_get_action_vectorized_agent_masking(
         agent_ids=agent_ids,
         device=device,
     )
-    cont_actions, discrete_action = maddpg.get_action(state, training, infos=info)
+    action, raw_action = maddpg.get_action(state, training, infos=info)
     if discrete_actions:
         assert np.array_equal(
-            discrete_action["agent_0"].squeeze(), info["agent_0"]["env_defined_actions"]
-        ), discrete_action["agent_0"]
+            action["agent_0"].squeeze(), info["agent_0"]["env_defined_actions"]
+        ), action["agent_0"]
     else:
         assert np.isclose(
-            cont_actions["agent_0"], info["agent_0"]["env_defined_actions"]
-        ).all(), cont_actions["agent_0"]
+            action["agent_0"], info["agent_0"]["env_defined_actions"]
+        ).all(), action["agent_0"]
 
 
 @pytest.mark.parametrize(
@@ -1299,18 +1269,14 @@ def test_maddpg_clone_returns_identical_agent(
     assert isinstance(clone_agent, MADDPG)
     assert clone_agent.observation_spaces == maddpg.observation_spaces
     assert clone_agent.action_spaces == maddpg.action_spaces
-    assert clone_agent.one_hot == maddpg.one_hot
     assert clone_agent.n_agents == maddpg.n_agents
     assert clone_agent.agent_ids == maddpg.agent_ids
-    assert np.all(np.stack(clone_agent.max_action) == np.stack(maddpg.max_action))
-    assert np.all(np.stack(clone_agent.min_action) == np.stack(maddpg.min_action))
     assert all(
         torch.equal(clone_expl_noise, expl_noise)
         for clone_expl_noise, expl_noise in zip(
             clone_agent.expl_noise, maddpg.expl_noise
         )
     )
-    assert clone_agent.discrete_actions == maddpg.discrete_actions
     assert clone_agent.index == maddpg.index
     assert clone_agent.batch_size == maddpg.batch_size
     assert clone_agent.lr_actor == maddpg.lr_actor
@@ -1387,13 +1353,9 @@ def test_clone_after_learning(compile_mode):
     assert isinstance(clone_agent, MADDPG)
     assert clone_agent.observation_spaces == maddpg.observation_spaces
     assert clone_agent.action_spaces == maddpg.action_spaces
-    assert clone_agent.one_hot == maddpg.one_hot
     assert clone_agent.n_agents == maddpg.n_agents
     assert clone_agent.agent_ids == maddpg.agent_ids
-    assert np.all(np.stack(clone_agent.max_action) == np.stack(maddpg.max_action))
-    assert np.all(np.stack(clone_agent.min_action) == np.stack(maddpg.min_action))
     assert np.array_equal(clone_agent.expl_noise, maddpg.expl_noise)
-    assert clone_agent.discrete_actions == maddpg.discrete_actions
     assert clone_agent.index == maddpg.index
     assert clone_agent.batch_size == maddpg.batch_size
     assert clone_agent.lr_actor == maddpg.lr_actor
@@ -1752,11 +1714,8 @@ def test_load_from_pretrained(
     # Check if properties and weights are loaded correctly
     assert new_maddpg.observation_spaces == maddpg.observation_spaces
     assert new_maddpg.action_spaces == maddpg.action_spaces
-    assert new_maddpg.one_hot == maddpg.one_hot
     assert new_maddpg.n_agents == maddpg.n_agents
     assert new_maddpg.agent_ids == maddpg.agent_ids
-    assert new_maddpg.min_action == maddpg.min_action
-    assert new_maddpg.max_action == maddpg.max_action
     assert new_maddpg.lr_actor == maddpg.lr_actor
     assert new_maddpg.lr_critic == maddpg.lr_critic
     for (
@@ -1899,11 +1858,8 @@ def test_load_from_pretrained_make_evo(
     # Check if properties and weights are loaded correctly
     assert new_maddpg.observation_spaces == maddpg.observation_spaces
     assert new_maddpg.action_spaces == maddpg.action_spaces
-    assert new_maddpg.one_hot == maddpg.one_hot
     assert new_maddpg.n_agents == maddpg.n_agents
     assert new_maddpg.agent_ids == maddpg.agent_ids
-    assert new_maddpg.min_action == maddpg.min_action
-    assert new_maddpg.max_action == maddpg.max_action
     assert new_maddpg.lr_actor == maddpg.lr_actor
     assert new_maddpg.lr_critic == maddpg.lr_critic
     for (
