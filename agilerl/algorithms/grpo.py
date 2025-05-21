@@ -34,6 +34,7 @@ DeepSpeedOptimizerType = Union[
     DeepSpeedZeroOptimizer,  # ZeRO Stage 1 & 2 optimizer
     DeepSpeedZeroOptimizer_Stage3,  # ZeRO Stage 3 optimizer
 ]
+import copy  # FIXME delete me
 
 
 class GRPO(LLMAlgorithm):
@@ -312,7 +313,18 @@ class GRPO(LLMAlgorithm):
                 )
                 if not loss.isfinite():
                     raise ValueError(f"Loss is not finite: {loss}")
+                actor_adapter_state_dict = copy.deepcopy(
+                    self.actor.get_adapter_state_dict("actor")
+                )
                 self._backward_pass(loss)
+                print("LOSS", loss.item())
+                if loss.item() != 0:
+                    for pre_param, new_param in zip(
+                        actor_adapter_state_dict.values(),
+                        self.actor.get_adapter_state_dict("actor").values(),
+                    ):
+                        if torch.equal(pre_param, new_param):
+                            print("PARAMS ARE THE SAME")
                 mean_loss += loss.item()
                 mean_kl += kl.item()
         mean_loss /= len(completion_ids)
@@ -497,9 +509,7 @@ class GRPO(LLMAlgorithm):
                     .squeeze(-1)
                 )
                 log_probs_list.append(log_prob)
-                del logit
             log_probs = torch.cat(log_probs_list)
-            del log_probs_list
         else:
             logits = self.actor.forward(**model_kwargs).logits
             log_probs = (
@@ -507,6 +517,7 @@ class GRPO(LLMAlgorithm):
                 .gather(dim=-1, index=ids[:, 1:].unsqueeze(-1))
                 .squeeze(-1)
             )
+        print("LOG PROBS", log_probs.requires_grad, log_probs.grad_fn)
         return log_probs
 
     # def _create_policy_network(
@@ -554,9 +565,13 @@ class GRPO(LLMAlgorithm):
         :param loss: Loss
         :type loss: float
         """
+        print("LOSS", loss.requires_grad, loss.grad_fn, loss)
         if self.accelerator is not None:
             self.accelerator.backward(loss)
             self.optimizer.step()
+            # for name, param in self.actor.named_parameters():
+            #     if param.requires_grad:
+            #         print(name, param.grad)
             self.optimizer.zero_grad()
         else:
             loss.backward()

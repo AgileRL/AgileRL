@@ -225,6 +225,13 @@ def grpo(request, accelerator, monkeypatch):
             high=vocab_size - 1,
             shape=(20,),
         )
+        lora_config = LoraConfig(
+            r=16,
+            lora_alpha=64,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+        )
         grpo = GRPO(
             observation_space,
             action_space,
@@ -238,6 +245,7 @@ def grpo(request, accelerator, monkeypatch):
             pad_token_id=vocab_size - 1,
             device="cuda" if torch.cuda.is_available() else "cpu",
             group_size=group_size,
+            lora_config=lora_config,
             cosine_lr_schedule_config=CosineLRScheduleConfig(
                 num_epochs=10, warmup_proportion=0.05
             ),
@@ -382,6 +390,13 @@ def test_init_grpo_zero3_warning(monkeypatch, accelerator, request):
             pad_token_id=vocab_size - 1,
             device="cuda" if torch.cuda.is_available() else "cpu",
             group_size=group_size,
+            lora_config=LoraConfig(
+                r=16,
+                lora_alpha=64,
+                target_modules=["linear_1"],
+                task_type="CAUSAL_LM",
+                lora_dropout=0.05,
+            ),
             cosine_lr_schedule_config=CosineLRScheduleConfig(
                 num_epochs=10, warmup_proportion=0.05
             ),
@@ -422,6 +437,13 @@ def test_init_grpo_max_grad_norm_warning(monkeypatch, accelerator, request):
             high=vocab_size - 1,
             shape=(20,),
         )
+        lora_config = LoraConfig(
+            r=16,
+            lora_alpha=64,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+        )
         GRPO(
             observation_space,
             action_space,
@@ -435,6 +457,7 @@ def test_init_grpo_max_grad_norm_warning(monkeypatch, accelerator, request):
             pad_token_id=vocab_size - 1,
             device="cuda" if torch.cuda.is_available() else "cpu",
             group_size=group_size,
+            lora_config=lora_config,
             cosine_lr_schedule_config=CosineLRScheduleConfig(
                 num_epochs=10, warmup_proportion=0.05
             ),
@@ -652,23 +675,27 @@ def test_grpo_learn(grpo, accelerator, request, batch_size):
         dim=0,
     )
 
-    pre_learn_actor_state_dict = copy.deepcopy(grpo.actor.state_dict())
-    pre_learn_reference_actor_state_dict = copy.deepcopy(
-        grpo.reference_actor.state_dict()
+    pre_learn_actor_adapter_state_dict = copy.deepcopy(
+        grpo.actor.get_adapter_state_dict("actor")
+    )
+    pre_learn_reference_actor_adapter_state_dict = copy.deepcopy(
+        grpo.actor.get_adapter_state_dict("reference")
     )
 
     mean_loss, mean_kl = grpo.learn((completions, action_masks, rewards))
+    print("=-=-=-=-=-=", mean_loss, mean_kl)
     assert isinstance(mean_loss, float)
     assert isinstance(mean_kl, float)
 
     # Check that the actor network is updated and the reference actor is not
     for param, pre_learn_param in zip(
-        grpo.actor.state_dict().values(), pre_learn_actor_state_dict.values()
+        grpo.actor.get_adapter_state_dict("actor").values(),
+        pre_learn_actor_adapter_state_dict.values(),
     ):
         assert not torch.equal(param, pre_learn_param)
     for param, pre_learn_param in zip(
-        grpo.reference_actor.state_dict().values(),
-        pre_learn_reference_actor_state_dict.values(),
+        grpo.actor.get_adapter_state_dict("reference").values(),
+        pre_learn_reference_actor_adapter_state_dict.values(),
     ):
         assert torch.equal(param, pre_learn_param)
     AcceleratorState._reset_state(True)
@@ -886,6 +913,13 @@ def test_grpo_save_load_checkpoint(grpo, accelerator, request, tmpdir):
         pad_token_id=vocab_size - 1,
         device="cuda" if torch.cuda.is_available() else "cpu",
         group_size=group_size,
+        lora_config=LoraConfig(
+            r=16,
+            lora_alpha=64,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+        ),
         cosine_lr_schedule_config=CosineLRScheduleConfig(
             num_epochs=10, warmup_proportion=0.05
         ),

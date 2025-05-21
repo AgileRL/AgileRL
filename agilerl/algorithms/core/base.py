@@ -1935,5 +1935,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """
         network.set_adapter(adapter_name)
         if adapter_name == "reference":
-            for param in network.parameters():
-                param.requires_grad = False
+            for name, param in network.named_parameters():
+                if "lora" in name:
+                    param.requires_grad = False

@@ -230,8 +230,8 @@ def main(init_hp, mut_p):
         elite_path="saved_llms",
         max_reward=2.0,
         evo_steps=1,
-        mutation=mutations,
-        tournament=tournament,
+        mutation=None,  # mutations,
+        tournament=None,  # tournament,
         accelerator=accelerator,
         verbose=True,
     )
