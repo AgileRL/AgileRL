@@ -7,12 +7,12 @@ import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl.algorithms import (
     CQN,
     DDPG,
@@ -33,7 +33,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules.base import EvolvableModule
 from agilerl.typing import GymSpaceType, PopulationType
-from agilerl.utils.algo_utils import CosineLRScheduleConfig, clone_llm
+from agilerl.utils.algo_utils import CosineLRScheduleConfig, clone_base_model
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 SupportedObservationSpace = Union[
@@ -521,8 +521,8 @@ def create_population(
             agent = GRPO(
                 observation_space=observation_space,
                 action_space=action_space,
-                actor_network=clone_llm(
-                    actor_network, state_dict=actor_network.state_dict()
+                actor_network=clone_base_model(
+                    actor_network, actor_network.config, actor_network.state_dict()
                 ),
                 pad_token_id=INIT_HP.get("PAD_TOKEN_ID"),
                 hp_config=hp_config,
@@ -548,7 +548,6 @@ def create_population(
                 device=device,
             )
             population.append(agent)
-
     return population
 
 

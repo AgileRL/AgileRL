@@ -5,18 +5,14 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from accelerate import Accelerator
-from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
-from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from gymnasium import spaces
-from peft import PeftModel
+from peft import LoraConfig, PeftModel
 from torch.nn.utils import clip_grad_norm_
-from torch.optim import Optimizer
 from transformers import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
 
@@ -26,7 +22,6 @@ from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.typing import ExperiencesType
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
-    clone_llm,
     create_warmup_cosine_scheduler,
     get_experiences_samples,
     stack_and_pad_experiences,
@@ -48,8 +43,8 @@ class GRPO(LLMAlgorithm):
     :type observation_space: gym.spaces.Space
     :param action_space: Action space of the environment
     :type action_space: gym.spaces.Space
-    :param actor_network: HuggingFace LLM
-    :type actor_network: PreTrainedModel
+    :param base_model: HuggingFace LLM
+    :type base_model: PreTrainedModel
     :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
     :type hp_config: HyperparameterConfig, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
@@ -76,6 +71,8 @@ class GRPO(LLMAlgorithm):
     :type max_output_tokens: int, optional
     :param min_output_tokens: Minimum output tokens, defaults to 0
     :type min_output_tokens: int, optional
+    :param lora_config: Config for LoRA, defaults to None
+    :type lora_config: LoraConfig, optional
     :param cosine_lr_schedule_config: Config for cosine lr scheduling, defaults to None
     :type cosine_lr_schedule_config: CosineLRScheduleConfig, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -108,11 +105,12 @@ class GRPO(LLMAlgorithm):
         reduce_memory_peak: bool = False,
         max_output_tokens: int = 1024,
         min_output_tokens: Optional[int] = None,
+        lora_config: Optional[LoraConfig] = None,
         cosine_lr_schedule_config: Optional[CosineLRScheduleConfig] = None,
         accelerator: Optional[Accelerator] = None,
         device: str = "cpu",
-        clone: bool = False,
         wrap: bool = True,
+        clone: bool = False,
     ) -> None:
         device = (
             f"cuda:{os.getenv('LOCAL_RANK', '0')}"
@@ -185,9 +183,25 @@ class GRPO(LLMAlgorithm):
             min_new_tokens=min_output_tokens,
             pad_token_id=pad_token_id,
         )
+        if lora_config is None:
+            lora_config = LoraConfig(
+                r=16,
+                lora_alpha=64,
+                target_modules=[
+                    "q_proj",
+                    "k_proj",
+                    "v_proj",
+                    "o_proj",
+                    "up_proj",
+                    "down_proj",
+                    "gate_proj",
+                ],
+                task_type="CAUSAL_LM",
+                lora_dropout=0.05,
+            )
+        self.lora_config = lora_config
         self.cosine_lr_schedule_config = cosine_lr_schedule_config
         self.wrap = wrap
-        self.reference_actor_state_dict = None
         if max_grad_norm and (accelerator is not None) and accelerator.is_main_process:
             warnings.warn(
                 "Argument 'max_grad_norm' will be overwritten by the 'gradient_clipping' value set in the deepspeed config."
@@ -197,16 +211,12 @@ class GRPO(LLMAlgorithm):
             self.max_grad_norm = max_grad_norm
         self.reduce_memory_peak = reduce_memory_peak
         self.local_rank = device.split(":")[-1]
-        self._initialize_actors(actor_network, not clone)
+        self._initialize_actors(actor_network)
 
         # Register network groups for mutations
         self.register_network_group(NetworkGroup(eval=self.actor, policy=True))
-        self.register_network_group(
-            NetworkGroup(eval=self.reference_actor, policy=True)
-        )
         if self.wrap:
             self.wrap_models()
-        del actor_network
 
     def get_action(
         self, states: List[Dict[str, torch.Tensor]], training: bool = True
@@ -221,6 +231,7 @@ class GRPO(LLMAlgorithm):
         :type training: bool, optional
         """
         group_size = self.group_size if training else 1
+        LLMAlgorithm.set_adapter(self.actor, "actor")
         self.actor.eval()
         with torch.no_grad():
             action_masks = []
@@ -336,21 +347,30 @@ class GRPO(LLMAlgorithm):
         return reward_tensor
 
     def _initialize_actors(
-        self, actor_network: PreTrainedModel, load_reference_state_dict: bool
+        self,
+        base_model: PreTrainedModel,
     ):
         """Initialize the actor network and reference network.
 
-        :param actor_network: Actor network
-        :type actor_network: PreTrainedModel
-        :param load_reference_state_dict: Flag to indicate to load the reference network state dict
-        :type load_reference_state_dict: bool
+        :param base_model: Base model
+        :type base_model: PreTrainedModel
         """
-        self._create_policy_network(actor_network)
-        self._create_reference_policy_network(actor_network, load_reference_state_dict)
-        if self.accelerator is None:
-            self.actor = self.actor.to(self.device)
-            self.actor.gradient_checkpointing_enable()
-            self.reference_actor = self.reference_actor.to(self.device)
+        self.actor = base_model
+        self.actor.add_adapter(adapter_config=self.lora_config, adapter_name="actor")
+        self.actor.add_adapter(
+            adapter_config=self.lora_config, adapter_name="reference"
+        )
+
+        self.optimizer = OptimizerWrapper(
+            optim.AdamW, networks=[self.actor], lr=self.lr
+        )
+        self.lr_scheduler = (
+            create_warmup_cosine_scheduler(
+                self.optimizer.optimizer, self.cosine_lr_schedule_config, 1e-8, self.lr
+            )
+            if self.cosine_lr_schedule_config is not None
+            else None
+        )
 
     def _calculate_advantage(
         self, rewards: torch.Tensor, eps: float = 1e-8
@@ -447,8 +467,9 @@ class GRPO(LLMAlgorithm):
         :return: Log probabilities of the completion IDs.
         :rtype: torch.Tensor
         """
-        policy = self.reference_actor if use_reference else self.actor
-        policy.train(mode=not eval_mode)
+        LLMAlgorithm.set_adapter(self.actor, "reference" if use_reference else "actor")
+        self.actor.train(mode=not eval_mode)
+
         attention_mask = ids != self.pad_token_id
         model_kwargs = {
             "input_ids": ids,
@@ -469,7 +490,7 @@ class GRPO(LLMAlgorithm):
                     "attention_mask": mask,
                     "use_cache": False,
                 }
-                logit = policy.forward(**kwargs).logits
+                logit = self.actor.forward(**kwargs).logits
                 log_prob = (
                     F.log_softmax(logit[:, :-1], dim=-1)
                     .gather(dim=-1, index=input_id[:, 1:].unsqueeze(-1))
@@ -480,7 +501,7 @@ class GRPO(LLMAlgorithm):
             log_probs = torch.cat(log_probs_list)
             del log_probs_list
         else:
-            logits = policy.forward(**model_kwargs).logits
+            logits = self.actor.forward(**model_kwargs).logits
             log_probs = (
                 F.log_softmax(logits[:, :-1], dim=-1)
                 .gather(dim=-1, index=ids[:, 1:].unsqueeze(-1))
@@ -488,54 +509,44 @@ class GRPO(LLMAlgorithm):
             )
         return log_probs
 
-    def _create_policy_network(
-        self, network: PreTrainedModel
-    ) -> Tuple[
-        Union[nn.Module, DeepSpeedEngine], Union[Optimizer, DeepSpeedOptimizerType]
-    ]:
-        """Create policy network.
+    # def _create_policy_network(
+    #     self, base_model: PreTrainedModel
+    # ) -> Tuple[
+    #     Union[nn.Module, DeepSpeedEngine], Union[Optimizer, DeepSpeedOptimizerType]
+    # ]:
+    #     """Create policy network.
 
-        :param network: Pre-trained LLM
-        :type network: PreTrainedModel
-        :param ds_config: Deepspeed config
-        :type ds_config: Union[Dict[str, Any], None]
-        :return: Policy network and reference network
-        :rtype: Tuple[Union[nn.Module, DeepSpeedEngine], Union[Optimizer, DeepSpeedOptimizerType]]
-        """
-        self.actor = network
-        self.optimizer = OptimizerWrapper(
-            optim.AdamW, networks=[self.actor], lr=self.lr
-        )
-        self.lr_scheduler = (
-            create_warmup_cosine_scheduler(
-                self.optimizer.optimizer, self.cosine_lr_schedule_config, 1e-8, self.lr
-            )
-            if self.cosine_lr_schedule_config is not None
-            else None
-        )
+    #     :param base_model: Pre-trained LLM
+    #     :type base_model: PreTrainedModel
+    #     :return: Policy network and reference network
+    #     :rtype: Tuple[Union[nn.Module, DeepSpeedEngine], Union[Optimizer, DeepSpeedOptimizerType]]
+    #     """
+    #     self.actor = PeftModel(base_model, self.lora_config, adapter_name="actor")
+    # self.optimizer = OptimizerWrapper(
+    #     optim.AdamW, networks=[self.actor], lr=self.lr
+    # )
+    # self.lr_scheduler = (
+    #     create_warmup_cosine_scheduler(
+    #         self.optimizer.optimizer, self.cosine_lr_schedule_config, 1e-8, self.lr
+    #     )
+    #     if self.cosine_lr_schedule_config is not None
+    #     else None
+    # )
 
-    def _create_reference_policy_network(
-        self, network: PreTrainedModel, load_reference_state_dict: bool = True
-    ) -> Union[nn.Module, DeepSpeedEngine]:
-        """Create reference policy network.
+    # def _create_reference_policy_network(
+    #     self, base_model: PreTrainedModel, lora_config: LoraConfig
+    # ) -> Union[nn.Module, DeepSpeedEngine]:
+    #     """Create reference policy network.
 
-        :param network: Pre-trained LLM
-        :type network: PreTrainedModel
-        :param load_reference_state_dict: Flag to indicate to load the reference network state dict
-        :type load_reference_state_dict: bool
-        :return: Policy network and reference network
-        :rtype: Union[nn.Module, DeepSpeedEngine]
-        """
-        if load_reference_state_dict:
-            self.reference_actor_state_dict = clone_tensors_for_torch_save(
-                network.state_dict()
-            )
-        self.reference_actor = clone_llm(
-            network, state_dict=self.reference_actor_state_dict
-        )
-        self.reference_actor.eval()
-        for param in self.reference_actor.parameters():
-            param.requires_grad = False
+    #     :param network: Pre-trained LLM
+    #     :type network: PreTrainedModel
+    #     :return: Policy network and reference network
+    #     :rtype: Union[nn.Module, DeepSpeedEngine]
+    #     """
+    #     self.reference_actor = PeftModel(base_model, lora_config, adapter_name="reference")
+    #     self.reference_actor.eval()
+    #     for param in self.reference_actor.parameters():
+    #         param.requires_grad = False
 
     def _backward_pass(self, loss: float) -> None:
         """Perform a backward pass

@@ -22,7 +22,7 @@ from torch._dynamo import OptimizedModule
 from torch.nn import Module
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
-from transformers import PreTrainedModel
+from transformers import PretrainedConfig, PreTrainedModel
 
 from agilerl.protocols import (
     EvolvableAttributeType,
@@ -1355,4 +1355,26 @@ def clone_llm(
         model = get_peft_model(model, peft_config)
     if state_dict is not None:
         model.load_state_dict(state_dict)
+    return model
+
+
+def clone_base_model(
+    base_model: PreTrainedModel,
+    config: PretrainedConfig,
+    state_dict: Optional[Dict[str, torch.Tensor]] = None,
+):
+    """
+    Clone the base model.
+
+    :param base_model: Base model to clone
+    :type base_model: PreTrainedModel
+    :param config: Config to clone the base model to
+    :type config: PreTrainedConfig
+    :param state_dict: State dict to load, defaults to None
+    :type state_dict: Optional[Dict[str, torch.Tensor]], optional
+    """
+    model = type(base_model)(config)
+    if state_dict is not None:
+        model.load_state_dict(state_dict)
+
     return model

@@ -5,7 +5,6 @@ import torch
 import yaml
 from accelerate import Accelerator
 from datasets import load_dataset
-from peft import LoraConfig, get_peft_model
 from torch.utils.data import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -16,7 +15,7 @@ from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
-MODEL_PATH = "Qwen/Qwen2.5-3B"
+MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
 
@@ -27,22 +26,6 @@ def create_model(pretrained_model_name_or_path):
         attn_implementation="flash_attention_2",
         device_map="cpu",
     )
-    peft_config = LoraConfig(
-        r=16,
-        lora_alpha=64,
-        target_modules=[
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",
-            "up_proj",
-            "down_proj",
-            "gate_proj",
-        ],
-        task_type="CAUSAL_LM",
-        lora_dropout=0.05,
-    )
-    model = get_peft_model(model, peft_config)
     return model
 
 
@@ -241,12 +224,12 @@ def main(init_hp, mut_p):
         pop=pop,
         env=env,
         init_hp=init_hp,
-        evaluation_interval=10,
-        wb=True,
+        evaluation_interval=4,
+        wb=False,
         save_elite=True,
         elite_path="saved_llms",
         max_reward=2.0,
-        evo_steps=10,
+        evo_steps=1,
         mutation=mutations,
         tournament=tournament,
         accelerator=accelerator,
