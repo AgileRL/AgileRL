@@ -375,6 +375,7 @@ class EvolvableMultiInput(EvolvableModule):
             # EvolvableCNN for image spaces
             elif is_image_space(space):
                 init_dict = self.get_inner_init_dict(key, default=ModuleType.CNN)
+                print(init_dict)
                 feature_extractor = EvolvableCNN(
                     input_shape=space.shape,
                     name=init_dict.pop("name", key),

@@ -283,7 +283,7 @@ class IPPO(MultiAgentRLAlgorithm):
                     action_space,
                     action_std_init=self.action_std_init,
                     device=self.device,
-                    **copy.deepcopy(net_config),
+                    **copy.deepcopy(agent_config),
                 )
 
                 critic = ValueNetwork(

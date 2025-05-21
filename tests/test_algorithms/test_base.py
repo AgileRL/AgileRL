@@ -836,7 +836,7 @@ def test_extract_net_config_heterogeneous_agent_level(
         "mixed_agent",
     ],
 )
-def test_extract_net_config_return_unique(request, setup):
+def test_extract_net_config_return_encoders(request, setup):
     """Test that extract_net_config returns unique configs when requested."""
     agent = request.getfixturevalue(setup)
 
@@ -848,7 +848,7 @@ def test_extract_net_config_return_unique(request, setup):
         setup_net_config = request.getfixturevalue("mixed_agent_net_config")
 
     result, unique_configs = agent.extract_net_config(
-        setup_net_config, return_unique=True
+        setup_net_config, return_encoders=True
     )
 
     # Check that the result contains configs for all agents

@@ -546,41 +546,11 @@ def test_initialize_maddpg_with_evo_networks(
     observation_spaces, encoder_cls, device, compile_mode, accelerator
 ):
     action_spaces = generate_multi_agent_discrete_spaces(2, 2)
-    net_config = get_default_encoder_config(observation_spaces[0])
-
-    # For image spaces we need to give a sample input tensor to build networks
-    critic_net_config = copy.deepcopy(net_config)
-    if len(observation_spaces[0].shape) == 3:
-        net_config["sample_input"] = torch.zeros(
-            (1, *observation_spaces[0].shape), dtype=torch.float32, device=device
-        ).unsqueeze(2)
-
-        critic_net_config["sample_input"] = (
-            torch.zeros(
-                (1, *observation_spaces[0].shape), dtype=torch.float32, device=device
-            )
-            .unsqueeze(2)
-            .repeat(1, 1, 2, 1, 1)
-        )
-
-    head_config = {
-        "output_activation": "Tanh",
-        "activation": "ReLU",
-        "hidden_size": [64, 64],
-    }
-
-    critic_head_config = copy.deepcopy(head_config)
-    critic_head_config.update({"output_activation": None})
-
-    net_config = {"encoder_config": net_config, "head_config": head_config}
-    critic_net_config = {
-        "encoder_config": critic_net_config,
-        "head_config": critic_head_config,
-    }
-
     evo_actors = [
         DeterministicActor(
-            observation_spaces[x], action_spaces[x], device=device, **net_config
+            observation_spaces[x],
+            action_spaces[x],
+            device=device,
         )
         for x in range(2)
     ]
@@ -589,7 +559,6 @@ def test_initialize_maddpg_with_evo_networks(
             observation_space=concatenate_spaces(observation_spaces),
             action_space=concatenate_spaces(action_spaces),
             device=device,
-            **critic_net_config
         )
         for x in range(2)
     ]
@@ -760,7 +729,8 @@ def test_maddpg_get_action(
         device=device,
         torch_compiler=compile_mode,
     )
-    action, _ = maddpg.get_action(state, training)
+    maddpg.set_training_mode(bool(training))
+    action, _ = maddpg.get_action(state)
     discrete_actions = all(
         isinstance(space, spaces.Discrete) for space in action_spaces
     )
@@ -809,7 +779,8 @@ def test_maddpg_get_action_action_masking_exception(training, device):
         device=device,
     )
     with pytest.raises(AssertionError):
-        _, discrete_action = maddpg.get_action(state, training)
+        maddpg.set_training_mode(bool(training))
+        _, discrete_action = maddpg.get_action(state)
 
 
 @pytest.mark.parametrize("training", [0, 1])
@@ -833,7 +804,8 @@ def test_maddpg_get_action_action_masking(training, device):
         agent_ids=agent_ids,
         device=device,
     )
-    _, discrete_action = maddpg.get_action(state, training, info)
+    maddpg.set_training_mode(bool(training))
+    _, discrete_action = maddpg.get_action(state, info)
     assert all(i in [1, 3] for i in discrete_action.values())
 
 
@@ -882,7 +854,8 @@ def test_get_action_distributed(
         for actor in maddpg.actors
     ]
     maddpg.actors = new_actors
-    action, raw_action = maddpg.get_action(state, training)
+    maddpg.set_training_mode(bool(training))
+    action, raw_action = maddpg.get_action(state)
     discrete_actions = all(
         isinstance(space, spaces.Discrete) for space in action_spaces
     )
@@ -958,7 +931,8 @@ def test_maddpg_get_action_agent_masking(
         device=device,
         torch_compiler=compile_mode,
     )
-    action, raw_action = maddpg.get_action(state, training, infos=info)
+    maddpg.set_training_mode(bool(training))
+    action, raw_action = maddpg.get_action(state, infos=info)
     if discrete_actions:
         assert np.array_equal(action["agent_0"], np.array([1])), action["agent_0"]
     else:
@@ -1016,7 +990,8 @@ def test_maddpg_get_action_vectorized_agent_masking(
         agent_ids=agent_ids,
         device=device,
     )
-    action, raw_action = maddpg.get_action(state, training, infos=info)
+    maddpg.set_training_mode(bool(training))
+    action, raw_action = maddpg.get_action(state, infos=info)
     if discrete_actions:
         assert np.array_equal(
             action["agent_0"].squeeze(), info["agent_0"]["env_defined_actions"]

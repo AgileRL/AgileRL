@@ -250,12 +250,12 @@ class MADDPG(MultiAgentRLAlgorithm):
                         head_config.pop("output_activation")
 
                 agent_config["head_config"] = head_config
-                net_config[agent_id] = agent_config
+                agent_configs[agent_id] = agent_config
 
             # Format critic net config from actor net configs
             critic_encoder_config = format_shared_critic_encoder(encoder_configs)
-            critic_head_config = get_deepest_head_config(net_config, self.agent_ids)
-            critic_net_config = {
+            critic_head_config = get_deepest_head_config(agent_configs, self.agent_ids)
+            critic_config = {
                 "encoder_config": critic_encoder_config,
                 "head_config": critic_head_config,
             }
@@ -268,7 +268,7 @@ class MADDPG(MultiAgentRLAlgorithm):
                     self.action_space[agent_id],
                     device=self.device,
                     clip_actions=clip_actions,
-                    **copy.deepcopy(net_config[agent_id]),
+                    **copy.deepcopy(agent_configs[agent_id]),
                 )
 
             # Critic uses observations + actions of all agents to predict Q-value
@@ -277,7 +277,7 @@ class MADDPG(MultiAgentRLAlgorithm):
                     observation_space=self.observation_space,
                     action_space=concatenate_spaces(self.action_spaces),
                     device=self.device,
-                    **copy.deepcopy(critic_net_config),
+                    **copy.deepcopy(critic_config),
                 )
 
             self.actors = [create_actor(agent_id) for agent_id in self.agent_ids]

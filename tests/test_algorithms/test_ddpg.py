@@ -952,8 +952,6 @@ def test_load_from_pretrained(observation_space, encoder_cls, accelerator, tmpdi
     # Check if properties and weights are loaded correctly
     assert new_ddpg.observation_space == ddpg.observation_space
     assert new_ddpg.action_space == ddpg.action_space
-    assert np.all(new_ddpg.min_action == ddpg.min_action)
-    assert np.all(new_ddpg.max_action == ddpg.max_action)
     assert isinstance(new_ddpg.actor.encoder, encoder_cls)
     assert isinstance(new_ddpg.actor_target.encoder, encoder_cls)
     assert isinstance(new_ddpg.critic.encoder, encoder_cls)
@@ -1014,8 +1012,6 @@ def test_load_from_pretrained_networks(
     # Check if properties and weights are loaded correctly
     assert new_ddpg.observation_space == ddpg.observation_space
     assert new_ddpg.action_space == ddpg.action_space
-    assert np.all(new_ddpg.min_action == ddpg.min_action)
-    assert np.all(new_ddpg.max_action == ddpg.max_action)
     assert isinstance(new_ddpg.actor, nn.Module)
     assert isinstance(new_ddpg.actor_target, nn.Module)
     assert isinstance(new_ddpg.critic, nn.Module)

@@ -43,11 +43,7 @@ from agilerl.algorithms.core.registry import (
 )
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.configs import (
-    CnnNetConfig,
-    LstmNetConfig,
     MlpNetConfig,
-    MultiInputNetConfig,
-    SimBaNetConfig,
 )
 from agilerl.protocols import (
     AgentWrapper,
@@ -1060,6 +1056,7 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         self.observation_space = observation_space
         self.action_space = action_space
         self.normalize_images = normalize_images
+        self.action_dim = get_action_dim_networks(self.action_space)
 
     def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
         """Preprocesses observations for forward pass through neural network.
@@ -1396,35 +1393,17 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         # -> Access to unique configs is relevant for algorithms with networks that process
         # multiple agents' observations (e.g. shared critic in MADDPG)
         def _add_to_encoder_configs(config: ConfigType, agent_id: str = "") -> None:
-            config_types = [
-                MlpNetConfig,
-                CnnNetConfig,
-                LstmNetConfig,
-                MultiInputNetConfig,
-                SimBaNetConfig,
-            ]
-            for config_type in config_types:
-                if config_type == MlpNetConfig or not agent_id:
-                    config_key = "mlp_config"
-                else:
-                    config_key = agent_id
+            config = config_from_dict(config) if isinstance(config, dict) else config
+            config_key = "mlp_config" if isinstance(config, MlpNetConfig) else agent_id
 
-                if (
-                    config_key not in encoder_configs
-                    # Only update the mlp_config if it has a deeper architecture than the previous mlp_config
-                    or (
-                        config_key == "mlp_config"
-                        and len(config["hidden_size"])
-                        > len(encoder_configs["mlp_config"]["hidden_size"])
-                    )
-                ):
-                    if isinstance(config, dict):
-                        config = config_from_dict(config)
-                        if isinstance(config, config_type):
-                            encoder_configs[config_key] = config
+            if config_key not in encoder_configs:
+                encoder_configs[config_key] = asdict(config)
 
-                    elif isinstance(config, config_type):
-                        encoder_configs[config_key] = asdict(config)
+            # Update MLP config if new one has deeper architecture
+            elif isinstance(config, MlpNetConfig) and len(config["hidden_size"]) > len(
+                encoder_configs["mlp_config"]["hidden_size"]
+            ):
+                encoder_configs[config_key] = asdict(config)
 
         # Helper function to check if any agent ID exists in the net_config
         def _has_agent_ids(config: NetConfigType) -> bool:
@@ -1460,7 +1439,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
                     observation_spaces[agent_id]
                 )
                 net_config[agent_id]["encoder_config"] = asdict(encoder_config)
-                _add_to_encoder_configs(encoder_config)
+                _add_to_encoder_configs(encoder_config, agent_id)
 
             if return_encoders:
                 return net_config, encoder_configs
@@ -1635,9 +1614,9 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         for group_id in self.shared_agent_ids:
             # Get all outputs for agents that share this ID
             group_agent_outputs = []
-            for group_id in self.grouped_agents[group_id]:
-                if group_id in agent_outputs:
-                    group_agent_outputs.append(agent_outputs[group_id])
+            for group in self.grouped_agents[group_id]:
+                if group in agent_outputs:
+                    group_agent_outputs.append(agent_outputs[group])
 
             if group_agent_outputs:
                 # Stack outputs along first dimension

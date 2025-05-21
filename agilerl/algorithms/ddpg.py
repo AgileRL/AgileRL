@@ -181,7 +181,6 @@ class DDPG(RLAlgorithm):
         self.O_U_noise = O_U_noise
         self.vect_noise_dim = vect_noise_dim
         self.share_encoders = share_encoders
-        self.action_dim = self.action_space.shape[0]
         self.expl_noise = (
             expl_noise
             if isinstance(expl_noise, np.ndarray)
@@ -415,7 +414,7 @@ class DDPG(RLAlgorithm):
             noise = self.multi_dim_clamp(-noise_clip, noise_clip, noise)
             next_actions = next_actions + noise
             next_actions = self.multi_dim_clamp(
-                self.min_action, self.max_action, next_actions
+                self.action_space.low, self.action_space.high, next_actions
             )
 
             q_value_next_state = self.critic_target(next_obs, next_actions)
