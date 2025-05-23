@@ -15,6 +15,7 @@ from peft import LoraConfig, PeftModel
 from torch.nn.utils import clip_grad_norm_
 from transformers import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
+from peft import get_peft_model, get_peft_model_state_dict
 
 from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
@@ -44,8 +45,8 @@ class GRPO(LLMAlgorithm):
     :type observation_space: gym.spaces.Space
     :param action_space: Action space of the environment
     :type action_space: gym.spaces.Space
-    :param base_model: HuggingFace LLM
-    :type base_model: PreTrainedModel
+    :param actor_network: HuggingFace LLM
+    :type actor_network: PreTrainedModel
     :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
     :type hp_config: HyperparameterConfig, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
@@ -212,7 +213,7 @@ class GRPO(LLMAlgorithm):
             self.max_grad_norm = max_grad_norm
         self.reduce_memory_peak = reduce_memory_peak
         self.local_rank = device.split(":")[-1]
-        self._initialize_actors(actor_network)
+        self._initialize_actors(actor_network, not clone)
 
         # Register network groups for mutations
         self.register_network_group(NetworkGroup(eval=self.actor, policy=True))
@@ -275,7 +276,7 @@ class GRPO(LLMAlgorithm):
                 completion_ids, use_reference=True, eval_mode=True
             )
             old_log_probs = self._get_logprobs(
-                completion_ids, use_reference=False, eval_mode=True
+                completion_ids, use_reference=False, eval_mode=False
             )
         experiences = (
             completion_ids,
@@ -313,18 +314,7 @@ class GRPO(LLMAlgorithm):
                 )
                 if not loss.isfinite():
                     raise ValueError(f"Loss is not finite: {loss}")
-                actor_adapter_state_dict = copy.deepcopy(
-                    self.actor.get_adapter_state_dict("actor")
-                )
                 self._backward_pass(loss)
-                print("LOSS", loss.item())
-                if loss.item() != 0:
-                    for pre_param, new_param in zip(
-                        actor_adapter_state_dict.values(),
-                        self.actor.get_adapter_state_dict("actor").values(),
-                    ):
-                        if torch.equal(pre_param, new_param):
-                            print("PARAMS ARE THE SAME")
                 mean_loss += loss.item()
                 mean_kl += kl.item()
         mean_loss /= len(completion_ids)
@@ -361,17 +351,27 @@ class GRPO(LLMAlgorithm):
     def _initialize_actors(
         self,
         base_model: PreTrainedModel,
+        add_adapters: bool = True
     ):
         """Initialize the actor network and reference network.
 
         :param base_model: Base model
         :type base_model: PreTrainedModel
         """
-        self.actor = base_model
-        self.actor.add_adapter(adapter_config=self.lora_config, adapter_name="actor")
-        self.actor.add_adapter(
-            adapter_config=self.lora_config, adapter_name="reference"
-        )
+        if add_adapters:
+            self.actor = get_peft_model(base_model, self.lora_config, adapter_name="actor")
+            self.actor.add_adapter(peft_config=self.lora_config, adapter_name="reference")
+            self.actor.set_adapter("reference")
+            print(type(self.actor))
+            get_peft_model_state_dict(self.actor, adapter_name="actor")
+            print("After calling state dict", type(self.actor))
+            self.actor.load_adapter_state_dict(get_peft_model_state_dict(self.actor, adapter_name="actor"))
+            
+        else:
+            self.actor = base_model
+        LLMAlgorithm.set_adapter(self.actor, "actor")
+
+        print("INITIAL ACTOR TYPE", type(self.actor))
 
         self.optimizer = OptimizerWrapper(
             optim.AdamW, networks=[self.actor], lr=self.lr
@@ -517,7 +517,6 @@ class GRPO(LLMAlgorithm):
                 .gather(dim=-1, index=ids[:, 1:].unsqueeze(-1))
                 .squeeze(-1)
             )
-        print("LOG PROBS", log_probs.requires_grad, log_probs.grad_fn)
         return log_probs
 
     # def _create_policy_network(
@@ -565,13 +564,9 @@ class GRPO(LLMAlgorithm):
         :param loss: Loss
         :type loss: float
         """
-        print("LOSS", loss.requires_grad, loss.grad_fn, loss)
         if self.accelerator is not None:
             self.accelerator.backward(loss)
             self.optimizer.step()
-            # for name, param in self.actor.named_parameters():
-            #     if param.requires_grad:
-            #         print(name, param.grad)
             self.optimizer.zero_grad()
         else:
             loss.backward()

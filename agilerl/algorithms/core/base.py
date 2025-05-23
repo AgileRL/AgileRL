@@ -29,7 +29,7 @@ from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 from gymnasium import spaces
 from numpy.typing import ArrayLike
-from peft import PeftModel
+from peft import PeftModel, get_peft_model_state_dict
 from tensordict import TensorDict
 from torch._dynamo import OptimizedModule
 from transformers import PreTrainedModel
@@ -60,7 +60,7 @@ from agilerl.typing import (
 from agilerl.utils.algo_utils import (
     assert_supported_space,
     chkpt_attribute_to_device,
-    clone_base_model,
+    clone_llm,
     compile_model,
     is_module_list,
     isroutine,
@@ -68,6 +68,7 @@ from agilerl.utils.algo_utils import (
     preprocess_observation,
     recursive_check_module_attrs,
     remove_compile_prefix,
+    get_base_state_dict,
 )
 from agilerl.utils.evolvable_networks import is_image_space
 
@@ -1663,7 +1664,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if self.accelerator is not None:
             os.makedirs(path, exist_ok=True)
             self.actor.set_adapter("actor")
-            # self.actor.set_adapter("reference")
             self.actor.save_checkpoint(path, tag="checkpoint")
         else:
             warnings.warn(
@@ -1679,23 +1679,23 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """
         if self.accelerator is not None:
             deepspeed_dirs = sorted(glob.glob(f"{path}/checkpoint"))
-            # try:
-            assert len(deepspeed_dirs) > 0
-            self.actor.set_adapter("actor")
-            load_path, _ = self.actor.load_checkpoint(
-                path,
-                tag="checkpoint",
-                load_module_strict=False,
-                load_optimizer_states=True,
-                load_lr_scheduler_states=True,
-            )
-            if load_path is None:
-                raise ValueError(f"Deepspeed failed to resume from checkpoint {path}")
+            try:
+                assert len(deepspeed_dirs) > 0
+                self.actor.set_adapter("actor")
+                load_path, _ = self.actor.load_checkpoint(
+                    path,
+                    tag="checkpoint",
+                    load_module_strict=False,
+                    load_optimizer_states=True,
+                    load_lr_scheduler_states=True,
+                )
+                if load_path is None:
+                    raise ValueError(f"Deepspeed failed to resume from checkpoint {path}")
 
-            # except Exception as e:
-            #     raise ValueError(
-            #         f"Deepspeed failed to resume from checkpoint {path}"
-            #     ) from e
+            except Exception as e: 
+                raise ValueError(
+                    f"Deepspeed failed to resume from checkpoint {path}"
+                ) from e
         else:
             warnings.warn(
                 "Distributed actor load not supported for non-distributed training."
@@ -1730,25 +1730,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self.actor, self.optimizer, self.lr_scheduler = self.accelerator.prepare(
                 self.actor, self.optimizer.optimizer, self.lr_scheduler
             )
-            # deepspeed_plugin = self.accelerator.state.deepspeed_plugin
-            # config_kwargs = copy.deepcopy(deepspeed_plugin.deepspeed_config)
-            # self.reference_actor = deepspeed.init_inference(
-            #     self.reference_actor,
-            #     tensor_parallel={"tp_size": self.accelerator.num_processes},
-            #     dtype=(
-            #         torch.bfloat16
-            #         if config_kwargs.get("bf16", {}).get("enabled", False)
-            #         else (
-            #             torch.float16
-            #             if config_kwargs.get("fp16", {}).get("enabled", False)
-            #             else torch.float32
-            #         )
-            #     ),
-            #     checkpoint=None,
-            #     replace_with_kernel_inject=True,
-            #     zero=DeepSpeedZeroConfig(**config_kwargs["zero_optimization"]),
-            # )
-            # self.reference_actor.eval()
         else:
             self.actor = self.actor.to(self.device)
             self.actor.gradient_checkpointing_enable()
@@ -1759,25 +1740,19 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if self.accelerator is not None:
             (
                 self.actor,
-                # self.reference_actor,
                 self.optimizer,
                 self.lr_scheduler,
-                # self.reference_actor_state_dict,
             ) = self.accelerator.free_memory(
                 self.actor,
-                # self.reference_actor,
                 self.optimizer,
                 self.lr_scheduler,
-                # self.reference_actor_state_dict,
             )
             self.accelerator.wait_for_everyone()
         else:
             (
                 self.actor,
-                #   self.reference_actor,
                 self.optimizer,
                 self.lr_scheduler,
-                # self.reference_actor_state_dict,
             ) = (
                 None,
                 None,
@@ -1816,35 +1791,25 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             input_args["wrap"] = False
             input_args["clone"] = True
 
-            # extract base model and peft config
+            
             actor = (
                 self.accelerator.unwrap_model(self.actor)
                 if self.accelerator is not None
                 else self.actor
             )
-
-            (
-                base_model,
-                config,
-                actor_adapter_state_dict,
-                reference_adapter_state_dict,
-            ) = (
-                actor,
-                actor.config,
-                actor.get_adapter_state_dict("actor"),
-                actor.get_adapter_state_dict("reference"),
-            )
+            print("ACTOR TYPE POST UNWRAP", type(actor))
 
             actor_state_dict = None
             if self.zero_stage is None or self.zero_stage < 2:
-                actor_state_dict = clone_tensors_for_torch_save(base_model.state_dict())
+                actor_state_dict = clone_tensors_for_torch_save(actor.state_dict())
 
-            cloned_base_model = clone_base_model(
-                base_model, config, state_dict=actor_state_dict
+
+            cloned_model = clone_llm(
+                actor, state_dict=actor_state_dict
             )
 
-            base_model = None  # De-reference the actor
-            input_args["actor_network"] = cloned_base_model
+            actor = None  # De-reference the actor
+            input_args["actor_network"] = cloned_model
             input_args["accelerator"] = (
                 Accelerator() if self.accelerator is not None else None
             )
@@ -1883,12 +1848,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 clone._load_distributed_actor(f"{temp_dir}/agent_{self.index}")
                 clone.accelerator.wait_for_everyone()
             else:
-                LLMAlgorithm.update_adaptor(
-                    "actor", actor_adapter_state_dict, clone.actor
-                )
-                LLMAlgorithm.update_adaptor(
-                    "reference", reference_adapter_state_dict, clone.reference_actor
-                )
                 if self.accelerator is not None:
                     self.accelerator.wait_for_everyone()
 
@@ -1904,23 +1863,25 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
 
-    @classmethod
-    def update_adaptor(
-        cls,
-        adapter_name: str,
-        new_adapter_state_dict: Dict[str, Any],
-        network: PreTrainedModel | PeftModel,
-    ) -> None:
-        """Update the adaptor of the actor network
+    # @classmethod
+    # def update_adapter(
+    #     cls,
+    #     adapter_name: str,
+    #     new_adapter_state_dict: Dict[str, Any],
+    #     network: PreTrainedModel | PeftModel,
+    #     peft_config#: PeftConfig,
+    # ) -> None:
+    #     """Update the adaptor of the actor network
 
-        :param adapter_name: Name of the adaptor
-        :type adapter_name: str
-        :param new_adapter_state_dict: New state dict of the adaptor
-        :type new_adapter_state_dict: Dict[str, Any]
-        """
-        network.load_adapter(
-            adapter_name=adapter_name, adapter_state_dict=new_adapter_state_dict
-        )
+    #     :param adapter_name: Name of the adaptor
+    #     :type adapter_name: str
+    #     :param new_adapter_state_dict: New state dict of the adaptor
+    #     :type new_adapter_state_dict: Dict[str, Any]
+    #     """
+    #     network.load_adapter(
+    #         model_id=peft_config.base_model_name_or_path,
+    #         adapter_name=adapter_name, adapter_state_dict=new_adapter_state_dict
+    #     )
 
     @classmethod
     def set_adapter(

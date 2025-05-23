@@ -17,7 +17,7 @@ from accelerate.state import AcceleratorState
 from accelerate.utils import DeepSpeedPlugin
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from deepspeed.runtime.engine import DeepSpeedEngine
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, get_peft_model, get_peft_model_state_dict
 from torch.optim.lr_scheduler import SequentialLR
 from transformers import GenerationConfig, PretrainedConfig, PreTrainedModel
 
@@ -293,9 +293,9 @@ def test_init_grpo_with_accelerator(
     assert isinstance(grpo.actor, DeepSpeedEngine)
     assert isinstance(grpo.optimizer, DeepSpeedOptimizerWrapper)
     assert isinstance(grpo.lr_scheduler, AcceleratedScheduler), grpo.lr_scheduler
-    assert not isinstance(grpo.reference_actor, DummyMLPPreTrainedModel)
     for ref_param, param in zip(
-        grpo.reference_actor.parameters(), grpo.actor.parameters()
+        get_peft_model_state_dict(grpo.actor, adapter_name="reference").values(),
+        get_peft_model_state_dict(grpo.actor, adapter_name="actor").values(),
     ):
         assert torch.equal(ref_param, param)
     AcceleratorState._reset_state(True)
@@ -676,25 +676,24 @@ def test_grpo_learn(grpo, accelerator, request, batch_size):
     )
 
     pre_learn_actor_adapter_state_dict = copy.deepcopy(
-        grpo.actor.get_adapter_state_dict("actor")
+        get_peft_model_state_dict(grpo.actor, adapter_name="actor")
     )
     pre_learn_reference_actor_adapter_state_dict = copy.deepcopy(
-        grpo.actor.get_adapter_state_dict("reference")
+        get_peft_model_state_dict(grpo.actor, adapter_name="reference")
     )
 
     mean_loss, mean_kl = grpo.learn((completions, action_masks, rewards))
-    print("=-=-=-=-=-=", mean_loss, mean_kl)
     assert isinstance(mean_loss, float)
     assert isinstance(mean_kl, float)
 
     # Check that the actor network is updated and the reference actor is not
     for param, pre_learn_param in zip(
-        grpo.actor.get_adapter_state_dict("actor").values(),
+        get_peft_model_state_dict(grpo.actor, adapter_name="actor").values(),
         pre_learn_actor_adapter_state_dict.values(),
     ):
         assert not torch.equal(param, pre_learn_param)
     for param, pre_learn_param in zip(
-        grpo.actor.get_adapter_state_dict("reference").values(),
+        get_peft_model_state_dict(grpo.actor, adapter_name="reference").values(),
         pre_learn_reference_actor_adapter_state_dict.values(),
     ):
         assert torch.equal(param, pre_learn_param)
@@ -976,14 +975,19 @@ def test_grpo_clone_with_accelerator(grpo, accelerator, request, tmpdir):
     grpo_optimizer = grpo.optimizer
     grpo.fitness = [1, 2, 3]
     new_grpo = grpo.clone(index=1)
-    for param, pre_learn_param in zip(
-        new_grpo.actor.parameters(), grpo.actor.parameters()
+
+    # Check that the actor network is updated and the reference actor is not
+    for cloned_param, param in zip(
+        get_peft_model_state_dict(new_grpo.actor, adapter_name="actor").values(),
+        get_peft_model_state_dict(grpo.actor, adapter_name="actor").values(),
     ):
-        assert torch.equal(param, pre_learn_param)
-    for param, pre_learn_param in zip(
-        new_grpo.reference_actor.parameters(), grpo.reference_actor.parameters()
+        assert torch.equal(cloned_param, param)
+    for cloned_param, param in zip(
+        get_peft_model_state_dict(new_grpo.actor, adapter_name="reference").values(),
+        get_peft_model_state_dict(grpo.actor, adapter_name="reference").values(),
     ):
-        assert torch.equal(param, pre_learn_param)
+        assert torch.equal(cloned_param, param)
+
     assert new_grpo.index == 1
     if grpo.accelerator is not None:
         assert new_grpo.accelerator != grpo_accelerator
@@ -1124,44 +1128,8 @@ def test_clone_llm_peft(vocab_size, input_size, max_tokens):
 )
 @pytest.mark.parametrize("batch_size", [8])
 def test_grpo_clean_up(grpo, accelerator, request, batch_size):
-    # # @pytest.mark
-    # @pytest.mark.parametrize("vocab_size", [1000])
-    # @pytest.mark.parametrize("input_size", [10])
-    # @pytest.mark.parametrize("max_tokens", [20])
-    # @pytest.mark.parametrize("group_size", [5])
-    # @pytest.mark.parametrize("batch_size", [8])
-    # def test_grpo_clean_up(
-    #     vocab_size, input_size, max_tokens, group_size, batch_size, tmpdir
-    # ):
-    #     observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
-    #     action_space = gym.spaces.Box(
-    #         low=0,
-    #         high=vocab_size - 1,
-    #         shape=(20,),
-    #     )
-    #     grpo = GRPO(
-    #         observation_space,
-    #         action_space,
-    #         actor_network=create_module(
-    #             input_size=input_size,
-    #             max_tokens=max_tokens,
-    #             vocab_size=vocab_size,
-    #             device="cuda" if torch.cuda.is_available() else "cpu",
-    #         ),
-    #         pad_token_id=vocab_size - 1,
-    #         device="cuda" if torch.cuda.is_available() else "cpu",
-    #         group_size=group_size,
-    #         cosine_lr_schedule_config=CosineLRScheduleConfig(
-    #             num_epochs=10, warmup_proportion=0.05
-    #         ),
-    #         accelerator=None,
-    #     )
-    #     mock_accelerator = MagicMock(spec=Accelerator)
-    #     mock_accelerator.free_memory = lambda *args: (None,) * len(args)
-    #     grpo.accelerator = mock_accelerator
     grpo.clean_up()
     assert grpo.actor is None
-    assert grpo.reference_actor is None
     assert grpo.optimizer is None
     assert grpo.lr_scheduler is None
     del grpo
