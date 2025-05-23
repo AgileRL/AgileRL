@@ -22,7 +22,7 @@ from torch._dynamo import OptimizedModule
 from torch.nn import Module
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
-from transformers import PretrainedConfig, PreTrainedModel
+from transformers import PreTrainedModel
 
 from agilerl.protocols import (
     EvolvableAttributeType,
@@ -1347,43 +1347,29 @@ def clone_llm(
     :type state_dict: Optional[Dict[str, torch.Tensor]], optional
     :return: Cloned model
     """
-    model_config = original_model.config
-    base_model = original_model.model
-    model = type(base_model)(model_config)
-    # Get all adapter names
-    adapter_names = list(original_model.peft_config.keys())
+    if isinstance(original_model, PeftModel):
+        model_config = original_model.config
+        base_model = original_model.model
+        model = type(base_model)(model_config)
+        # Get all adapter names
+        adapter_names = list(original_model.peft_config.keys())
 
-    # Add first adapter using get_peft_model
-    first_adapter = adapter_names[0]
-    first_config = original_model.peft_config[first_adapter]
-    model = get_peft_model(model, first_config, adapter_name=first_adapter)
+        if len(adapter_names) > 1:
+            warnings.warn(
+                "Multiple adapters detected. Only the first adapter will be used for RL finetuning."
+            )
 
-    # Add remaining adapters using add_adapter
-    for adapter_name in adapter_names[1:]:
-        peft_config = original_model.peft_config[adapter_name]
-        model.add_adapter(peft_config=peft_config, adapter_name=adapter_name)
+        # Add first adapter using get_peft_model
+        first_adapter = adapter_names[0]
+        first_config = original_model.peft_config[first_adapter]
+        model = get_peft_model(model, first_config, adapter_name=first_adapter)
 
-    if state_dict is not None:
-        model.load_state_dict(state_dict)
-    return model
-
-
-def clone_base_model(
-    base_model: PreTrainedModel,
-    config: PretrainedConfig,
-    state_dict: Optional[Dict[str, torch.Tensor]] = None,
-):
-    """
-    Clone the base model.
-
-    :param base_model: Base model to clone
-    :type base_model: PreTrainedModel
-    :param config: Config to clone the base model to
-    :type config: PreTrainedConfig
-    :param state_dict: State dict to load, defaults to None
-    :type state_dict: Optional[Dict[str, torch.Tensor]], optional
-    """
-    model = type(base_model)(config)
+        # Add remaining adapters using add_adapter
+        for adapter_name in adapter_names[1:]:
+            peft_config = original_model.peft_config[adapter_name]
+            model.add_adapter(peft_config=peft_config, adapter_name=adapter_name)
+    else:
+        model = type(original_model)(original_model.config)
     if state_dict is not None:
         model.load_state_dict(state_dict)
     return model

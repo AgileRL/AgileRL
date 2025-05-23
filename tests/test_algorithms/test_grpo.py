@@ -1224,3 +1224,114 @@ def test_init_grpo_lora_config_warning(monkeypatch, accelerator, request):
         gc.collect()
         torch.cuda.empty_cache()
     AcceleratorState._reset_state(True)
+
+
+@pytest.mark.parametrize(
+    "accelerator",
+    [
+        {"config": None},
+    ],
+    indirect=["accelerator"],
+)
+def test_init_grpo_multiple_adapters(monkeypatch, accelerator, request):
+    """Test GRPO initialization with a PEFT model containing multiple adapters."""
+    with pytest.warns(
+        UserWarning, match="AgileRL RL finetuning is only compatible with one adapter."
+    ), mock.patch.dict(os.environ, clear=True):
+        # Set up environment variables
+        env_vars = {
+            "ACCELERATE_USE_DEEPSPEED": "true",
+            "MASTER_ADDR": "localhost",
+            "MASTER_PORT": "10999",
+            "RANK": "0",
+            "LOCAL_RANK": "0",
+            "WORLD_SIZE": "1",
+        }
+        for key, value in env_vars.items():
+            monkeypatch.setenv(key, value)
+
+        # Clean up GPU memory
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        # Set up test parameters
+        vocab_size = 1000
+        input_size = 10
+        max_tokens = 20
+        group_size = 5
+
+        # Create spaces
+        observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
+        action_space = gym.spaces.Box(
+            low=0,
+            high=vocab_size - 1,
+            shape=(20,),
+        )
+
+        # Create base model
+        base_model = create_module(
+            input_size=input_size,
+            max_tokens=max_tokens,
+            vocab_size=vocab_size,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+        )
+
+        # Create first adapter
+        lora_config_1 = LoraConfig(
+            r=16,
+            lora_alpha=64,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+        )
+        peft_model = get_peft_model(base_model, lora_config_1, adapter_name="adapter1")
+
+        # Add second adapter
+        lora_config_2 = LoraConfig(
+            r=8,
+            lora_alpha=32,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+        )
+        peft_model.add_adapter(adapter_name="adapter2", peft_config=lora_config_2)
+
+        # Initialize GRPO with the multi-adapter model
+        grpo = GRPO(
+            observation_space,
+            action_space,
+            actor_network=peft_model,
+            lr=0.1,
+            pad_token_id=vocab_size - 1,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            group_size=group_size,
+            cosine_lr_schedule_config=CosineLRScheduleConfig(
+                num_epochs=10, warmup_proportion=0.05
+            ),
+            accelerator=accelerator,
+            clone=False,
+        )
+
+        # Verify that only the first adapter is used
+        assert len(grpo.actor.peft_config) == 1
+        assert "actor" in grpo.actor.peft_config
+        assert (
+            grpo.actor.peft_config["actor"].r == lora_config_1.r
+        )  # Check that first adapter's config is used
+
+        # Test that the model still functions
+        test_input = torch.randint(0, vocab_size - 1, (1, input_size))
+        test_attention_mask = torch.ones_like(test_input)
+        test_state = {"input_ids": test_input, "attention_mask": test_attention_mask}
+
+        # Test get_action
+        completion_ids, action_masks = grpo.get_action([test_state], training=True)
+        assert isinstance(completion_ids, list)
+        assert isinstance(action_masks, list)
+        assert len(completion_ids) == 1
+        assert len(action_masks) == 1
+
+        # Clean up
+        gc.collect()
+        torch.cuda.empty_cache()
+        AcceleratorState._reset_state(True)

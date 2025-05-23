@@ -356,6 +356,18 @@ class GRPO(LLMAlgorithm):
         :param base_model: Base model
         :type base_model: PreTrainedModel
         """
+        if isinstance(base_model, PeftModel) and add_adapters:
+            # Handles backwards compatibility with user providing a peft model as the actor network
+            adapter_name = list(base_model.peft_config.keys())
+            if len(adapter_name) > 1:
+                warnings.warn(
+                    "AgileRL RL finetuning is only compatible with one adapter."
+                )
+            self.lora_config = base_model.peft_config[adapter_name[0]]
+            for adapter in adapter_name:
+                base_model.delete_adapter(adapter)
+            base_model = base_model.model
+
         self.actor = (
             get_peft_model(base_model, self.lora_config, adapter_name="actor")
             if add_adapters
