@@ -11,11 +11,10 @@ from accelerate import Accelerator
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from gymnasium import spaces
-from peft import LoraConfig, PeftModel
+from peft import LoraConfig, PeftModel, get_peft_model
 from torch.nn.utils import clip_grad_norm_
 from transformers import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
-from peft import get_peft_model, get_peft_model_state_dict
 
 from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
@@ -35,7 +34,6 @@ DeepSpeedOptimizerType = Union[
     DeepSpeedZeroOptimizer,  # ZeRO Stage 1 & 2 optimizer
     DeepSpeedZeroOptimizer_Stage3,  # ZeRO Stage 3 optimizer
 ]
-import copy  # FIXME delete me
 
 
 class GRPO(LLMAlgorithm):
@@ -186,6 +184,9 @@ class GRPO(LLMAlgorithm):
             pad_token_id=pad_token_id,
         )
         if lora_config is None:
+            warnings.warn(
+                "No LoRA config provided. Using default LoRA configuration for RL finetuning."
+            )
             lora_config = LoraConfig(
                 r=16,
                 lora_alpha=64,
@@ -233,7 +234,6 @@ class GRPO(LLMAlgorithm):
         :type training: bool, optional
         """
         group_size = self.group_size if training else 1
-        LLMAlgorithm.set_adapter(self.actor, "actor")
         self.actor.eval()
         with torch.no_grad():
             action_masks = []
@@ -349,29 +349,19 @@ class GRPO(LLMAlgorithm):
         return reward_tensor
 
     def _initialize_actors(
-        self,
-        base_model: PreTrainedModel,
-        add_adapters: bool = True
+        self, base_model: PreTrainedModel, add_adapters: bool = True
     ):
-        """Initialize the actor network and reference network.
+        """Initialize the actor network.
 
         :param base_model: Base model
         :type base_model: PreTrainedModel
         """
-        if add_adapters:
-            self.actor = get_peft_model(base_model, self.lora_config, adapter_name="actor")
-            self.actor.add_adapter(peft_config=self.lora_config, adapter_name="reference")
-            self.actor.set_adapter("reference")
-            print(type(self.actor))
-            get_peft_model_state_dict(self.actor, adapter_name="actor")
-            print("After calling state dict", type(self.actor))
-            self.actor.load_adapter_state_dict(get_peft_model_state_dict(self.actor, adapter_name="actor"))
-            
-        else:
-            self.actor = base_model
-        LLMAlgorithm.set_adapter(self.actor, "actor")
-
-        print("INITIAL ACTOR TYPE", type(self.actor))
+        self.actor = (
+            get_peft_model(base_model, self.lora_config, adapter_name="actor")
+            if add_adapters
+            else base_model
+        )
+        self.actor.set_adapter("actor")
 
         self.optimizer = OptimizerWrapper(
             optim.AdamW, networks=[self.actor], lr=self.lr
@@ -479,9 +469,9 @@ class GRPO(LLMAlgorithm):
         :return: Log probabilities of the completion IDs.
         :rtype: torch.Tensor
         """
-        LLMAlgorithm.set_adapter(self.actor, "reference" if use_reference else "actor")
+        if use_reference:
+            self.actor.base_model.disable_adapter_layers()
         self.actor.train(mode=not eval_mode)
-
         attention_mask = ids != self.pad_token_id
         model_kwargs = {
             "input_ids": ids,
@@ -517,46 +507,8 @@ class GRPO(LLMAlgorithm):
                 .gather(dim=-1, index=ids[:, 1:].unsqueeze(-1))
                 .squeeze(-1)
             )
+        self.actor.base_model.enable_adapter_layers()
         return log_probs
-
-    # def _create_policy_network(
-    #     self, base_model: PreTrainedModel
-    # ) -> Tuple[
-    #     Union[nn.Module, DeepSpeedEngine], Union[Optimizer, DeepSpeedOptimizerType]
-    # ]:
-    #     """Create policy network.
-
-    #     :param base_model: Pre-trained LLM
-    #     :type base_model: PreTrainedModel
-    #     :return: Policy network and reference network
-    #     :rtype: Tuple[Union[nn.Module, DeepSpeedEngine], Union[Optimizer, DeepSpeedOptimizerType]]
-    #     """
-    #     self.actor = PeftModel(base_model, self.lora_config, adapter_name="actor")
-    # self.optimizer = OptimizerWrapper(
-    #     optim.AdamW, networks=[self.actor], lr=self.lr
-    # )
-    # self.lr_scheduler = (
-    #     create_warmup_cosine_scheduler(
-    #         self.optimizer.optimizer, self.cosine_lr_schedule_config, 1e-8, self.lr
-    #     )
-    #     if self.cosine_lr_schedule_config is not None
-    #     else None
-    # )
-
-    # def _create_reference_policy_network(
-    #     self, base_model: PreTrainedModel, lora_config: LoraConfig
-    # ) -> Union[nn.Module, DeepSpeedEngine]:
-    #     """Create reference policy network.
-
-    #     :param network: Pre-trained LLM
-    #     :type network: PreTrainedModel
-    #     :return: Policy network and reference network
-    #     :rtype: Union[nn.Module, DeepSpeedEngine]
-    #     """
-    #     self.reference_actor = PeftModel(base_model, lora_config, adapter_name="reference")
-    #     self.reference_actor.eval()
-    #     for param in self.reference_actor.parameters():
-    #         param.requires_grad = False
 
     def _backward_pass(self, loss: float) -> None:
         """Perform a backward pass

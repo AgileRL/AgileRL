@@ -29,10 +29,8 @@ from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 from gymnasium import spaces
 from numpy.typing import ArrayLike
-from peft import PeftModel, get_peft_model_state_dict
 from tensordict import TensorDict
 from torch._dynamo import OptimizedModule
-from transformers import PreTrainedModel
 
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
@@ -68,7 +66,6 @@ from agilerl.utils.algo_utils import (
     preprocess_observation,
     recursive_check_module_attrs,
     remove_compile_prefix,
-    get_base_state_dict,
 )
 from agilerl.utils.evolvable_networks import is_image_space
 
@@ -1690,9 +1687,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     load_lr_scheduler_states=True,
                 )
                 if load_path is None:
-                    raise ValueError(f"Deepspeed failed to resume from checkpoint {path}")
+                    raise ValueError(
+                        f"Deepspeed failed to resume from checkpoint {path}"
+                    )
 
-            except Exception as e: 
+            except Exception as e:
                 raise ValueError(
                     f"Deepspeed failed to resume from checkpoint {path}"
                 ) from e
@@ -1757,8 +1756,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 None,
                 None,
                 None,
-                None,
-                None,
             )
         gc.collect()
         torch.cuda.empty_cache()
@@ -1791,22 +1788,17 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             input_args["wrap"] = False
             input_args["clone"] = True
 
-            
             actor = (
                 self.accelerator.unwrap_model(self.actor)
                 if self.accelerator is not None
                 else self.actor
             )
-            print("ACTOR TYPE POST UNWRAP", type(actor))
 
             actor_state_dict = None
             if self.zero_stage is None or self.zero_stage < 2:
                 actor_state_dict = clone_tensors_for_torch_save(actor.state_dict())
 
-
-            cloned_model = clone_llm(
-                actor, state_dict=actor_state_dict
-            )
+            cloned_model = clone_llm(actor, state_dict=actor_state_dict)
 
             actor = None  # De-reference the actor
             input_args["actor_network"] = cloned_model
@@ -1862,40 +1854,3 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
-
-    # @classmethod
-    # def update_adapter(
-    #     cls,
-    #     adapter_name: str,
-    #     new_adapter_state_dict: Dict[str, Any],
-    #     network: PreTrainedModel | PeftModel,
-    #     peft_config#: PeftConfig,
-    # ) -> None:
-    #     """Update the adaptor of the actor network
-
-    #     :param adapter_name: Name of the adaptor
-    #     :type adapter_name: str
-    #     :param new_adapter_state_dict: New state dict of the adaptor
-    #     :type new_adapter_state_dict: Dict[str, Any]
-    #     """
-    #     network.load_adapter(
-    #         model_id=peft_config.base_model_name_or_path,
-    #         adapter_name=adapter_name, adapter_state_dict=new_adapter_state_dict
-    #     )
-
-    @classmethod
-    def set_adapter(
-        cls, network: PreTrainedModel | PeftModel, adapter_name: str
-    ) -> None:
-        """Set the adapter of the actor network
-
-        :param network: Network
-        :type network: PreTrainedModel | PeftModel
-        :param adapter_name: Name of the adapter
-        :type adapter_name: str
-        """
-        network.set_adapter(adapter_name)
-        if adapter_name == "reference":
-            for name, param in network.named_parameters():
-                if "lora" in name:
-                    param.requires_grad = False
