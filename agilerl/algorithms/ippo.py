@@ -10,10 +10,9 @@ import torch.optim as optim
 from gymnasium import spaces
 from torch.nn.utils import clip_grad_norm_
 
-from agilerl.algorithms.core import MultiAgentRLAlgorithm
+from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.modules.base import EvolvableModule
+from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import StochasticActor
 from agilerl.networks.value_networks import ValueNetwork
@@ -87,9 +86,9 @@ class IPPO(MultiAgentRLAlgorithm):
     :param update_epochs: Number of policy update epochs, defaults to 4
     :type update_epochs: int, optional
     :param actor_networks: List of custom actor networks, defaults to None
-    :type actor_networks: list[nn.Module], optional
+    :type actor_networks: agilerl.modules.ModuleDict, optional
     :param critic_networks: List of custom critic networks, defaults to None
-    :type critic_networks: list[nn.Module], optional
+    :type critic_networks: agilerl.modules.ModuleDict, optional
     :param action_batch_size: Size of batches to use when getting an action for stepping in the environment.
         Defaults to None, whereby the entire observation is used at once.
     :type action_batch_size: int, optional
@@ -128,8 +127,8 @@ class IPPO(MultiAgentRLAlgorithm):
         target_kl: Optional[float] = None,
         normalize_images: bool = True,
         update_epochs: int = 4,
-        actor_networks: Optional[list[EvolvableModule]] = None,
-        critic_networks: Optional[list[EvolvableModule]] = None,
+        actor_networks: Optional[ModuleDict] = None,
+        critic_networks: Optional[ModuleDict] = None,
         action_batch_size: Optional[int] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
@@ -227,18 +226,24 @@ class IPPO(MultiAgentRLAlgorithm):
         self.action_batch_size = action_batch_size
 
         if actor_networks is not None and critic_networks is not None:
-            assert (
-                len({type(net) for net in actor_networks}) == 1
+            actors_list = list(actor_networks.values())
+            critics_list = list(critic_networks.values())
+            assert all(
+                isinstance(net, actors_list[0].__class__) for net in actors_list
             ), "'actor_networks' must all be the same type"
-            assert (
-                len({type(net) for net in critic_networks}) == 1
+            assert all(
+                isinstance(net, critics_list[0].__class__) for net in critics_list
             ), "'critic_networks' must all be the same type"
 
-            if not all(isinstance(net, EvolvableModule) for net in actor_networks):
+            if not all(
+                isinstance(net, EvolvableModule) for net in actor_networks.values()
+            ):
                 raise TypeError(
                     "All actor networks must be instances of EvolvableModule"
                 )
-            if not all(isinstance(net, EvolvableModule) for net in critic_networks):
+            if not all(
+                isinstance(net, EvolvableModule) for net in critic_networks.values()
+            ):
                 raise TypeError(
                     "All critic networks must be instances of EvolvableModule"
                 )
@@ -246,8 +251,8 @@ class IPPO(MultiAgentRLAlgorithm):
                 f"Length of actor_networks ({len(actor_networks)}) does not match number of unique "
                 f"agents defined in environment ({self.n_unique_agents}: {self.shared_agent_ids})"
             )
-            assert len(actor_networks) == self.n_unique_agents, (
-                f"Length of critic_networks ({len(actor_networks)}) does not match number of unique "
+            assert len(critic_networks) == self.n_unique_agents, (
+                f"Length of critic_networks ({len(critic_networks)}) does not match number of unique "
                 f"agents defined in environment ({self.n_unique_agents}: {self.shared_agent_ids})"
             )
 
@@ -255,12 +260,12 @@ class IPPO(MultiAgentRLAlgorithm):
                 actor_networks, critic_networks
             )
         else:
-            net_config: NetConfigType = self.extract_net_config(
+            net_config: NetConfigType = self.build_net_config(
                 net_config, grouped_agents=True
             )
 
-            self.actors = []
-            self.critics = []
+            self.actors = ModuleDict()
+            self.critics = ModuleDict()
             for agent_id in self.shared_agent_ids:
                 obs_space = self.unique_observation_spaces[agent_id]
                 action_space = self.unique_action_spaces[agent_id]
@@ -292,22 +297,25 @@ class IPPO(MultiAgentRLAlgorithm):
                     **copy.deepcopy(critic_net_config),
                 )
 
-                self.actors.append(actor)
-                self.critics.append(critic)
+                self.actors[agent_id] = actor
+                self.critics[agent_id] = critic
 
         # Optimizers
         self.actor_optimizers = OptimizerWrapper(
-            optim.Adam, networks=self.actors, lr=self.lr, multiagent=True
+            optim.Adam, networks=self.actors, lr=self.lr
         )
         self.critic_optimizers = OptimizerWrapper(
-            optim.Adam, networks=self.critics, lr=self.lr, multiagent=True
+            optim.Adam, networks=self.critics, lr=self.lr
         )
 
         if self.accelerator is not None and wrap:
             self.wrap_models()
         elif self.torch_compiler:
             if (
-                any(actor.output_activation == "GumbelSoftmax" for actor in self.actors)
+                any(
+                    actor.output_activation == "GumbelSoftmax"
+                    for actor in self.actors.values()
+                )
                 and self.torch_compiler != "default"
             ):
                 warnings.warn(
@@ -325,13 +333,11 @@ class IPPO(MultiAgentRLAlgorithm):
             NetworkGroup(
                 eval=self.actors,
                 policy=True,
-                multiagent=True,
             )
         )
         self.register_network_group(
             NetworkGroup(
                 eval=self.critics,
-                multiagent=True,
             )
         )
 
@@ -521,10 +527,9 @@ class IPPO(MultiAgentRLAlgorithm):
         dist_entropy_dict = {}
         state_values_dict = {}
         for shared_id, obs in preprocessed.items():
-            agent_idx = self.shared_agent_ids.index(shared_id)
             action_mask = action_masks[shared_id]
-            actor = self.actors[agent_idx]
-            critic = self.critics[agent_idx]
+            actor = self.actors[shared_id]
+            critic = self.critics[shared_id]
 
             with torch.no_grad():
                 action, log_prob, entropy, values = self._get_action_and_values(
@@ -591,11 +596,10 @@ class IPPO(MultiAgentRLAlgorithm):
 
         loss_dict = {}
         for shared_id, state in states.items():
-            agent_idx = self.shared_agent_ids.index(shared_id)
-            actor = self.actors[agent_idx]
-            critic = self.critics[agent_idx]
-            actor_optimizer = self.actor_optimizers[agent_idx]
-            critic_optimizer = self.critic_optimizers[agent_idx]
+            actor = self.actors[shared_id]
+            critic = self.critics[shared_id]
+            actor_optimizer = self.actor_optimizers[shared_id]
+            critic_optimizer = self.critic_optimizers[shared_id]
             obs_space = self.unique_observation_spaces[shared_id]
             action_space = self.unique_action_spaces[shared_id]
 

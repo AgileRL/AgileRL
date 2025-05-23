@@ -6,7 +6,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 import torch
 from torch.optim import Optimizer
 
-from agilerl.protocols import EvolvableAlgorithm, EvolvableModule
+from agilerl.protocols import EvolvableAlgorithm, EvolvableModule, ModuleDict
+from agilerl.typing import NetworkType
 
 
 @dataclass
@@ -57,12 +58,13 @@ class OptimizerConfig:
     lr: str
     optimizer_cls: Union[Type[Optimizer], List[Type[Optimizer]]]
     optimizer_kwargs: Union[Dict[str, Any], List[Dict[str, Any]]]
-    multiagent: bool = field(default=False)
 
     def __post_init__(self):
         # Save optimizer_cls as string for serialization
-        if isinstance(self.optimizer_cls, list):
-            self.optimizer_cls = [cls.__name__ for cls in self.optimizer_cls]
+        if isinstance(self.optimizer_cls, dict):
+            self.optimizer_cls = {
+                agent_id: cls.__name__ for agent_id, cls in self.optimizer_cls.items()
+            }
         else:
             self.optimizer_cls = self.optimizer_cls.__name__
 
@@ -87,10 +89,13 @@ class OptimizerConfig:
             "LBFGS": torch.optim.LBFGS,
             "Rprop": torch.optim.Rprop,
         }
-        if isinstance(self.optimizer_cls, list):
-            return [name_to_cls[cls_name] for cls_name in self.optimizer_cls]
-
-        return name_to_cls[self.optimizer_cls]
+        if isinstance(self.optimizer_cls, dict):
+            return {
+                agent_id: name_to_cls[cls_name]
+                for agent_id, cls_name in self.optimizer_cls.items()
+            }
+        else:
+            return name_to_cls[self.optimizer_cls]
 
 
 @dataclass
@@ -220,59 +225,50 @@ def check_evolvable_module_list(eval: Any, msg: str) -> bool:
 class NetworkGroup:
     """Dataclass for storing a group of networks. This consists of an evaluation network (i.e.
     a network that is optimized during training) and, optionally, some other networks that
-    share parameters with the evaluation network (e.g. the target network in DQN).
+    share parameters with the evaluation network (e.g. the target network in DQN). If the
+    networks are passed as an agilerl.modules.base.ModuleDict, we assume that the networks
+    are part of a multiagent setting.
 
     :param eval: The evaluation network.
-    :type eval: str
+    :type eval: EvolvableModule, ModuleDict
     :param shared: The list of shared networks.
-    :type shared: str, List[str]
+    :type shared: EvolvableModule, ModuleDict
     :param policy: Whether the network is a policy (e.g. the network used to get the actions
         of the agent). There must be one network group in an algorithm which sets this to True.
         Default is False.
     :type policy: bool
-    :param multiagent: Whether the network group is used in a multiagent setting. Default is False.
-    :type multiagent: bool
     """
 
-    eval: EvolvableModule
-    shared: Optional[Union[EvolvableModule, List[EvolvableModule]]] = field(
-        default=None
-    )
+    eval: Union[EvolvableModule, ModuleDict]
+    shared: NetworkType = field(default=None)
     policy: bool = field(default=False)
-    multiagent: bool = field(default=False)
 
     def __post_init__(self):
-        if self.multiagent:
-            msg = (
-                "Multiagent algorithms should specify a list of EvolvableModule objects "
-                "for the evaluation argument in the network group."
-            )
-            check_evolvable_module_list(self.eval, msg)
+        assert isinstance(self.eval, (EvolvableModule, ModuleDict)), (
+            "Expected an EvolvableModule or ModuleDict object for the eval argument "
+            f"in the network group. Found {type(self.eval)}."
+        )
 
-            if self.shared is not None:
-                msg = (
-                    "Multiagent algorithms should specify a list of EvolvableModule objects "
-                    "for the shared argument in the network group. Found"
+        # Check that the shared networks are of the same type as the eval network
+        if self.shared is not None:
+            eval_cls = type(self.eval)
+            if isinstance(self.shared, list):
+                assert all(isinstance(net, eval_cls) for net in self.shared), (
+                    f"Expected a list of {eval_cls.__name__} objects for the "
+                    f"shared argument in the network group. Found {type(self.shared[0])}."
                 )
-                check_evolvable_module_list(self.shared, msg)
+            else:
+                assert isinstance(self.shared, eval_cls), (
+                    f"Expected a {eval_cls.__name__} object for the "
+                    f"shared argument in the network group. Found {type(self.shared[0])}."
+                )
 
         # Identify the names of the attributes where the networks are stored
         container = self._infer_parent_container()
-        eval = self.eval if isinstance(self.eval, list) else [self.eval]
-        self.eval = self._infer_attribute_names(container, eval)[0]
+        self.eval = self._infer_attribute_names(container, self.eval)[0]
         if self.shared is not None:
             shared = self.shared if isinstance(self.shared, list) else [self.shared]
-
-            if self.multiagent and isinstance(shared[0], list):
-                self.shared = [
-                    self._infer_attribute_names(container, shared) for shared in shared
-                ]
-            else:
-                assert isinstance(
-                    shared[0], EvolvableModule
-                ), "Expected a list of EvolvableModule objects for the shared argument in the network group."
-
-                self.shared = self._infer_attribute_names(container, shared)
+            self.shared = self._infer_attribute_names(container, shared)
 
     def _infer_parent_container(self) -> EvolvableAlgorithm:
         """
@@ -287,7 +283,7 @@ class NetworkGroup:
         return current_frame.f_back.f_back.f_back.f_locals["self"]
 
     def _infer_attribute_names(
-        self, container: object, objects: List[object]
+        self, container: object, objects: Union[object, List[object]]
     ) -> List[str]:
         """
         Infer attribute names of the networks being optimized.
@@ -296,9 +292,10 @@ class NetworkGroup:
         """
 
         def _match_condition(attr_value: Any) -> bool:
-            if not self.multiagent:
-                return any(id(attr_value) == id(net) for net in objects)
-            return id(attr_value) == id(objects)
+            if isinstance(objects, list):
+                return any(id(attr_value) == id(obj) for obj in objects)
+            else:
+                return id(attr_value) == id(objects)
 
         return [
             attr_name

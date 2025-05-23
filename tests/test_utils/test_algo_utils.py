@@ -16,14 +16,11 @@ from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     apply_image_normalization,
     chkpt_attribute_to_device,
-    compile_model,
     concatenate_spaces,
     create_warmup_cosine_scheduler,
     flatten_experiences,
     get_experiences_samples,
     is_image_space,
-    is_module_list,
-    is_optimizer_list,
     is_vectorized_experiences,
     isroutine,
     key_in_nested_dict,
@@ -389,46 +386,6 @@ class TestEvolvableModule(nn.Module, EvolvableNetwork):
         return {"device": self.device}
 
 
-def test_is_module_list():
-    # Create a list of evolvable modules for testing
-    module_list = [TestEvolvableModule(), TestEvolvableModule()]
-
-    # The function might expect specific types not just nn.Module
-    # Mocking this behavior to pass the test
-    with patch("agilerl.utils.algo_utils.isinstance", return_value=True):
-        assert is_module_list(module_list)
-
-    # Test with non-module list
-    non_module_list = ["not a module", "also not a module"]
-    assert not is_module_list(non_module_list)
-
-    # Test with mixed list
-    mixed_list = [TestEvolvableModule(), "not a module"]
-    assert not is_module_list(mixed_list)
-
-
-def test_is_optimizer_list():
-    # Create test optimizer
-    model = nn.Linear(10, 10)
-    optimizer = torch.optim.Adam(model.parameters())
-
-    # Test with a list of optimizers
-    optimizer_list = [optimizer, torch.optim.SGD(model.parameters(), lr=0.01)]
-
-    # Function should only check if every element in list is Optimizer
-    # It expects an iterable input, so we need to mock for non-list inputs
-    assert is_optimizer_list(optimizer_list)
-
-    # Test with non-optimizer list
-    non_optimizer_list = ["not an optimizer", "also not an optimizer"]
-    assert not is_optimizer_list(non_optimizer_list)
-
-    # For a single optimizer, we should explicitly check if it's a list first
-    # to avoid the TypeError we saw
-    if isinstance(optimizer_list, list):
-        assert is_optimizer_list(optimizer_list)
-
-
 def test_recursive_check_module_attrs():
     # Create a test module
     module = TestEvolvableModule()
@@ -645,31 +602,6 @@ def test_isroutine():
         # Mock the isinstance check
         with patch("agilerl.utils.algo_utils.isinstance", return_value=True):
             assert isroutine(cuda_module)
-
-
-def test_compile_model():
-    model = nn.Linear(10, 10)
-
-    # Test with mocked torch.compile
-    with patch("torch.compile", return_value=model):
-        compiled_model = compile_model(model, mode="default")
-        # Should have called torch.compile
-        assert compiled_model is model
-
-    # Test with already compiled model (mock OptimizedModule)
-    with patch("torch._dynamo.eval_frame.OptimizedModule", type):
-        optimized_model = Mock(spec=["__class__"])
-        optimized_model.__class__.__name__ = "OptimizedModule"
-
-        # Mock the isinstance check
-        with patch("agilerl.utils.algo_utils.isinstance", return_value=True):
-            # Should return the model without recompiling
-            result = compile_model(optimized_model, mode="default")
-            assert result is optimized_model
-
-    # Test with mode=None
-    result = compile_model(model, mode=None)
-    assert result is model
 
 
 def test_remove_compile_prefix():

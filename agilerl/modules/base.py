@@ -763,7 +763,21 @@ ModuleType = TypeVar("ModuleType", bound=Union[EvolvableModule, nn.Module])
 
 class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleType]):
     """Analogous to ``nn.ModuleDict``, but allows for the inheritance of the
-    mutation methods of nested evolvable modules."""
+    mutation methods of nested evolvable modules.
+
+    :param modules: The modules to add to the dictionary.
+    :type modules: Optional[Dict[str, EvolvableModule]]
+    :param device: The device to use for the modules.
+    :type device: str
+    """
+
+    def __init__(
+        self, modules: Optional[Dict[str, EvolvableModule]] = None, device: str = "cpu"
+    ) -> None:
+        super().__init__(device)
+        if modules is not None:
+            for name, module in modules.items():
+                self.add_module(name, module)
 
     @property
     def layer_mutation_methods(self) -> List[str]:
@@ -821,3 +835,11 @@ class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleType]):
             return getattr(self[key], method)
 
         return {name: get_method_from_name(name) for name in self.mutation_methods}
+
+    def clone(self) -> "ModuleDict":
+        """Returns clone of an `ModuleDict` with identical parameters.
+
+        :return: A clone of the `ModuleDict`.
+        :rtype: ModuleDict
+        """
+        return ModuleDict({key: module.clone() for key, module in self.items()})

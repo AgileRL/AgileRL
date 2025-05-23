@@ -6,7 +6,7 @@ from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from functools import singledispatch
 from numbers import Number
-from typing import Any, Dict, Iterable, List, Optional, Tuple, TypeGuard, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -20,7 +20,6 @@ from peft import PeftModel, get_peft_model
 from tensordict import TensorDict, from_module
 from tensordict.nn import CudaGraphModule
 from torch._dynamo import OptimizedModule
-from torch.nn import Module
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from transformers import PreTrainedModel
@@ -29,6 +28,7 @@ from agilerl.protocols import (
     EvolvableAttributeType,
     EvolvableModule,
     EvolvableNetwork,
+    ModuleDict,
     OptimizerWrapper,
 )
 from agilerl.typing import (
@@ -108,35 +108,6 @@ def make_safe_deepcopies(
         copies.append(arg_copy)
 
     return copies[0] if len(copies) == 1 else copies
-
-
-def is_module_list(obj: EvolvableAttributeType) -> TypeGuard[Iterable[EvolvableModule]]:
-    """Type guard to check if an object is a list of EvolvableModule objects.
-
-    :param obj: The object to check.
-    :type obj: EvolvableAttributeType.
-
-    :return: True if the object is a list of EvolvableModule objects, False otherwise.
-    :rtype: bool.
-    """
-    if not isinstance(obj, list):
-        return False
-
-    return all(
-        isinstance(inner_obj, (OptimizedModule, EvolvableModule)) for inner_obj in obj
-    )
-
-
-def is_optimizer_list(obj: EvolvableAttributeType) -> TypeGuard[Iterable[Optimizer]]:
-    """Type guard to check if an object is a list of Optimizer's.
-
-    :param obj: The object to check.
-    :type obj: EvolvableAttributeType.
-
-    :return: True if the object is a list of Optimizer's, False otherwise.
-    :rtype: bool.
-    """
-    return all(isinstance(inner_obj, Optimizer) for inner_obj in obj)
 
 
 def isroutine(obj: object) -> bool:
@@ -258,26 +229,6 @@ def key_in_nested_dict(nested_dict: Dict[str, Any], target: str) -> bool:
     return False
 
 
-def compile_model(
-    model: Module, mode: Optional[str] = "default"
-) -> Union[OptimizedModule, Module]:
-    """Compiles torch model if not already compiled
-
-    :param model: torch model
-    :type model: nn.Module
-    :param mode: torch compile mode, defaults to "default"
-    :type mode: str, optional
-    :return: compiled model
-    :rtype: OptimizedModule | Module
-    """
-    return (
-        torch.compile(model, mode=mode)
-        if not isinstance(model, torch._dynamo.eval_frame.OptimizedModule)
-        and mode is not None
-        else model
-    )
-
-
 def remove_compile_prefix(state_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Removes _orig_mod prefix on state dict created by torch compile
 
@@ -298,32 +249,65 @@ def module_checkpoint_dict(module: EvolvableAttributeType, name: str) -> Dict[st
     """Returns a dictionary containing the module's class, init dict, and state dict.
 
     :param module: The module to checkpoint.
+    :type module: EvolvableAttributeType
+    :param name: The name of the attribute to checkpoint.
+    :type name: str
+
+    :return: A dictionary containing the module's class, init dict, and state dict.
+    :rtype: Dict[str, Any]
+    """
+    if isinstance(module, ModuleDict):
+        return module_checkpoint_multiagent(module, name)
+    else:
+        return module_checkpoint_single(module, name)
+
+
+def module_checkpoint_single(module: EvolvableModule, name: str) -> Dict[str, Any]:
+    """Returns a dictionary containing the module's class, init dict, and state dict.
+
+    :param module: The module to checkpoint.
     :type module: Union[EvolvableModule, List[EvolvableModule]]
     :param name: The name of the attribute to checkpoint.
     :type name: str
     :return: A dictionary containing the module's class, init dict, and state dict.
     :rtype: Dict[str, Any]
     """
-    modules = [module] if not is_module_list(module) else module
-
-    # Extract class, init dict and state dict for each module
-    module_cls = [
-        m._orig_mod.__class__ if isinstance(m, OptimizedModule) else m.__class__
-        for m in modules
-    ]
-    init_dict = [m.init_dict for m in modules]
-    state_dict = [remove_compile_prefix(m.state_dict()) for m in modules]
-
-    # Return single values if only one module
-    if not is_module_list(module):
-        module_cls = module_cls[0]
-        init_dict = init_dict[0]
-        state_dict = state_dict[0]
-
+    module_cls = (
+        module._orig_mod.__class__
+        if isinstance(module, OptimizedModule)
+        else module.__class__
+    )
+    init_dict = module.init_dict
+    state_dict = remove_compile_prefix(module.state_dict())
     return {
         f"{name}_cls": module_cls,
         f"{name}_init_dict": init_dict,
         f"{name}_state_dict": state_dict,
+        f"{name}_module_dict_cls": None,
+    }
+
+
+def module_checkpoint_multiagent(module: ModuleDict, name: str) -> Dict[str, Any]:
+    """Returns a dictionary containing the module's class, init dict, and state dict.
+
+    :param module: The module to checkpoint.
+    :type module: ModuleDict
+    :param name: The name of the attribute to checkpoint.
+
+    :return: A dictionary containing the module's class, init dict, and state dict.
+    :rtype: Dict[str, Any]
+    """
+    module_cls = {agent_id: m.__class__ for agent_id, m in module.items()}
+    init_dict = {agent_id: m.init_dict for agent_id, m in module.items()}
+    state_dict = {
+        agent_id: remove_compile_prefix(m.state_dict())
+        for agent_id, m in module.items()
+    }
+    return {
+        f"{name}_cls": module_cls,
+        f"{name}_init_dict": init_dict,
+        f"{name}_state_dict": state_dict,
+        f"{name}_module_dict_cls": module.__class__,
     }
 
 

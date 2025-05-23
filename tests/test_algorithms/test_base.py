@@ -13,6 +13,7 @@ from agilerl.algorithms.core.registry import (
     RLParameter,
 )
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
+from agilerl.modules.base import ModuleDict
 from agilerl.utils.evolvable_networks import is_image_space
 from tests.helper_functions import (
     gen_multi_agent_dict_or_tuple_spaces,
@@ -272,15 +273,13 @@ class DummyMARLAlgorithm(MultiAgentRLAlgorithm):
                 }
                 return EvolvableMultiInput(obs_space, num_outputs, **config)
 
-        self.dummy_actors = [create_actor(idx) for idx in range(self.n_agents)]
+        self.dummy_actors = ModuleDict(
+            {agent_id: create_actor(idx) for idx, agent_id in enumerate(self.agent_ids)}
+        )
         self.lr = 0.1
-        self.dummy_optimizer = OptimizerWrapper(
-            optim.Adam, self.dummy_actors, self.lr, multiagent=True
-        )
+        self.dummy_optimizer = OptimizerWrapper(optim.Adam, self.dummy_actors, self.lr)
 
-        self.register_network_group(
-            NetworkGroup(eval=self.dummy_actors, policy=True, multiagent=True)
-        )
+        self.register_network_group(NetworkGroup(eval=self.dummy_actors, policy=True))
 
     def get_action(self, *args, **kwargs):
         return
@@ -527,12 +526,13 @@ def test_save_load_checkpoint_multi_agent(tmpdir, with_hp_config, observation_sp
     new_agent.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    for i in range(len(agent.dummy_actors)):
+    for agent_id in agent.agent_ids:
         assert isinstance(
-            new_agent.dummy_actors[i], (EvolvableMLP, EvolvableCNN, EvolvableMultiInput)
+            new_agent.dummy_actors[agent_id],
+            (EvolvableMLP, EvolvableCNN, EvolvableMultiInput),
         )
-        assert str(new_agent.dummy_actors[i].state_dict()) == str(
-            agent.dummy_actors[i].state_dict()
+        assert str(new_agent.dummy_actors[agent_id].state_dict()) == str(
+            agent.dummy_actors[agent_id].state_dict()
         )
 
     assert new_agent.lr == agent.lr
@@ -661,12 +661,13 @@ def test_load_from_pretrained_multi_agent(
         )
         assert new_agent.action_space[agent_id] == agent.action_space[agent_id]
 
-    for i in range(len(agent.dummy_actors)):
+    for agent_id in agent.agent_ids:
         assert isinstance(
-            new_agent.dummy_actors[i], (EvolvableMLP, EvolvableCNN, EvolvableMultiInput)
+            new_agent.dummy_actors[agent_id],
+            (EvolvableMLP, EvolvableCNN, EvolvableMultiInput),
         )
-        assert str(new_agent.dummy_actors[i].to("cpu").state_dict()) == str(
-            agent.dummy_actors[i].state_dict()
+        assert str(new_agent.dummy_actors[agent_id].to("cpu").state_dict()) == str(
+            agent.dummy_actors[agent_id].state_dict()
         )
 
     assert new_agent.lr == agent.lr
@@ -710,11 +711,11 @@ def test_missing_attribute_warning(tmpdir, observation_space):
     assert new_agent.dummy_attribute == "test_value"
 
 
-def test_extract_net_config_homogeneous_single_level(
+def test_build_net_config_homogeneous_single_level(
     homogeneous_agent, single_level_net_config
 ):
-    """Test extract_net_config with homogeneous setup and single-level config."""
-    result = homogeneous_agent.extract_net_config(single_level_net_config)
+    """Test build_net_config with homogeneous setup and single-level config."""
+    result = homogeneous_agent.build_net_config(single_level_net_config)
 
     # Should have entries for all agents
     assert set(result.keys()) == set(homogeneous_agent.agent_ids)
@@ -727,11 +728,11 @@ def test_extract_net_config_homogeneous_single_level(
         assert result[agent_id]["encoder_config"]["max_mlp_nodes"] == 80
 
 
-def test_extract_net_config_homogeneous_group_level(
+def test_build_net_config_homogeneous_group_level(
     homogeneous_agent, homogeneous_group_net_config
 ):
-    """Test extract_net_config with homogeneous setup and group-level config."""
-    result = homogeneous_agent.extract_net_config(homogeneous_group_net_config)
+    """Test build_net_config with homogeneous setup and group-level config."""
+    result = homogeneous_agent.build_net_config(homogeneous_group_net_config)
 
     # Should have entries for all agents
     assert set(result.keys()) == set(homogeneous_agent.agent_ids)
@@ -743,11 +744,11 @@ def test_extract_net_config_homogeneous_group_level(
         assert "hidden_size" in result[agent_id]["encoder_config"]
 
 
-def test_extract_net_config_homogeneous_agent_level(
+def test_build_net_config_homogeneous_agent_level(
     homogeneous_agent, homogeneous_agent_net_config
 ):
-    """Test extract_net_config with homogeneous setup and agent-level config."""
-    result = homogeneous_agent.extract_net_config(homogeneous_agent_net_config)
+    """Test build_net_config with homogeneous setup and agent-level config."""
+    result = homogeneous_agent.build_net_config(homogeneous_agent_net_config)
 
     # Should have entries for all agents
     assert set(result.keys()) == set(homogeneous_agent.agent_ids)
@@ -761,16 +762,16 @@ def test_extract_net_config_homogeneous_agent_level(
         )
 
 
-def test_extract_net_config_mixed_single_level(mixed_agent, single_level_net_config):
-    """Test extract_net_config with mixed setup and single-level config."""
+def test_build_net_config_mixed_single_level(mixed_agent, single_level_net_config):
+    """Test build_net_config with mixed setup and single-level config."""
     # This should raise an assertion error because we can't use single-level config with non-homogeneous setup
     with pytest.raises(AssertionError):
-        mixed_agent.extract_net_config(single_level_net_config)
+        mixed_agent.build_net_config(single_level_net_config)
 
 
-def test_extract_net_config_mixed_group_level(mixed_agent, mixed_group_net_config):
-    """Test extract_net_config with mixed setup and group-level config."""
-    result = mixed_agent.extract_net_config(mixed_group_net_config)
+def test_build_net_config_mixed_group_level(mixed_agent, mixed_group_net_config):
+    """Test build_net_config with mixed setup and group-level config."""
+    result = mixed_agent.build_net_config(mixed_group_net_config)
 
     # Should have entries for all agents
     assert set(result.keys()) == set(mixed_agent.agent_ids)
@@ -785,9 +786,9 @@ def test_extract_net_config_mixed_group_level(mixed_agent, mixed_group_net_confi
         )
 
 
-def test_extract_net_config_mixed_agent_level(mixed_agent, mixed_agent_net_config):
-    """Test extract_net_config with mixed setup and agent-level config."""
-    result = mixed_agent.extract_net_config(mixed_agent_net_config)
+def test_build_net_config_mixed_agent_level(mixed_agent, mixed_agent_net_config):
+    """Test build_net_config with mixed setup and agent-level config."""
+    result = mixed_agent.build_net_config(mixed_agent_net_config)
 
     # Should have entries for all agents
     assert set(result.keys()) == set(mixed_agent.agent_ids)
@@ -801,20 +802,20 @@ def test_extract_net_config_mixed_agent_level(mixed_agent, mixed_agent_net_confi
         )
 
 
-def test_extract_net_config_heterogeneous_single_level(
+def test_build_net_config_heterogeneous_single_level(
     heterogeneous_agent, single_level_net_config
 ):
-    """Test extract_net_config with heterogeneous setup and single-level config."""
+    """Test build_net_config with heterogeneous setup and single-level config."""
     # This should raise an assertion error because we can't use single-level config with non-homogeneous setup
     with pytest.raises(AssertionError):
-        heterogeneous_agent.extract_net_config(single_level_net_config)
+        heterogeneous_agent.build_net_config(single_level_net_config)
 
 
-def test_extract_net_config_heterogeneous_agent_level(
+def test_build_net_config_heterogeneous_agent_level(
     heterogeneous_agent, heterogeneous_agent_net_config
 ):
-    """Test extract_net_config with heterogeneous setup and agent-level config."""
-    result = heterogeneous_agent.extract_net_config(heterogeneous_agent_net_config)
+    """Test build_net_config with heterogeneous setup and agent-level config."""
+    result = heterogeneous_agent.build_net_config(heterogeneous_agent_net_config)
 
     # Should have entries for all agents
     assert set(result.keys()) == set(heterogeneous_agent.agent_ids)
@@ -836,8 +837,8 @@ def test_extract_net_config_heterogeneous_agent_level(
         "mixed_agent",
     ],
 )
-def test_extract_net_config_return_encoders(request, setup):
-    """Test that extract_net_config returns unique configs when requested."""
+def test_build_net_config_return_encoders(request, setup):
+    """Test that build_net_config returns unique configs when requested."""
     agent = request.getfixturevalue(setup)
 
     if setup == "homogeneous_agent":
@@ -847,7 +848,7 @@ def test_extract_net_config_return_encoders(request, setup):
     elif setup == "mixed_agent":
         setup_net_config = request.getfixturevalue("mixed_agent_net_config")
 
-    result, unique_configs = agent.extract_net_config(
+    result, unique_configs = agent.build_net_config(
         setup_net_config, return_encoders=True
     )
 
@@ -863,9 +864,9 @@ def test_extract_net_config_return_encoders(request, setup):
         assert "other_agent_0" in unique_configs
 
 
-def test_extract_net_config_grouped_agents(mixed_agent, mixed_group_net_config):
-    """Test extract_net_config with grouped_agents=True."""
-    result = mixed_agent.extract_net_config(mixed_group_net_config, grouped_agents=True)
+def test_build_net_config_grouped_agents(mixed_agent, mixed_group_net_config):
+    """Test build_net_config with grouped_agents=True."""
+    result = mixed_agent.build_net_config(mixed_group_net_config, grouped_agents=True)
 
     # Should have entries for shared agent IDs only, not individual agents
     assert set(result.keys()) == set(mixed_agent.shared_agent_ids)
@@ -879,9 +880,9 @@ def test_extract_net_config_grouped_agents(mixed_agent, mixed_group_net_config):
         )
 
 
-def test_extract_net_config_none(homogeneous_agent):
-    """Test extract_net_config with None input."""
-    result = homogeneous_agent.extract_net_config(None)
+def test_build_net_config_none(homogeneous_agent):
+    """Test build_net_config with None input."""
+    result = homogeneous_agent.build_net_config(None)
 
     # Should have entries for all agents with default configs
     assert set(result.keys()) == set(homogeneous_agent.agent_ids)

@@ -4,16 +4,15 @@ import pytest
 import torch
 import torch.nn as nn
 
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.protocols import EvolvableAlgorithm, EvolvableNetwork
+from agilerl.algorithms.core import EvolvableAlgorithm, OptimizerWrapper
+from agilerl.modules import EvolvableModule, ModuleDict
 
 
 # Mock classes for testing
-class MockEvolvableNetwork(nn.Module, EvolvableNetwork):
-    def __init__(self, input_dim=10, output_dim=5, name="mock_network"):
-        super().__init__()
+class MockEvolvableNetwork(EvolvableModule):
+    def __init__(self, input_dim=10, output_dim=5, name="mock_network", device="cpu"):
+        super().__init__(device=device)
         self.name = name
-        self.device = "cpu"
         # Use fixed initialization for stable testing
         self.layer = nn.Linear(input_dim, output_dim)
         # Initialize with small weights to avoid exploding gradients
@@ -64,7 +63,7 @@ class MockAlgorithm(EvolvableAlgorithm):
             self.lr_actor = lr
             self.optimizer_cls = optimizer_cls or torch.optim.Adam
             self.optimizer = OptimizerWrapper(
-                self.optimizer_cls, self.networks, self.lr_actor, multiagent=True
+                self.optimizer_cls, self.networks, self.lr_actor
             )
 
 
@@ -78,23 +77,23 @@ class MockMultiAgentAlgorithm(EvolvableAlgorithm):
         optimizer_cls=None,
     ):
         # Separate actor and critic networks for multi-agent
-        self.actors = actors or [
-            MockEvolvableNetwork(name=f"actor_{i}") for i in range(3)
-        ]
-        self.critics = critics or [
-            MockEvolvableNetwork(name=f"critic_{i}") for i in range(3)
-        ]
+        self.actors = actors or ModuleDict(
+            {f"actor_{i}": MockEvolvableNetwork(name=f"actor_{i}") for i in range(3)}
+        )
+        self.critics = critics or ModuleDict(
+            {f"critic_{i}": MockEvolvableNetwork(name=f"critic_{i}") for i in range(3)}
+        )
         self.lr_actor = lr_actor
         self.lr_critic = lr_critic
         self.optimizer_cls = optimizer_cls or torch.optim.Adam
 
         # Create optimizers like in MADDPG
         self.actor_optimizers = OptimizerWrapper(
-            self.optimizer_cls, self.actors, self.lr_actor, multiagent=True
+            self.optimizer_cls, self.actors, self.lr_actor
         )
 
         self.critic_optimizers = OptimizerWrapper(
-            self.optimizer_cls, self.critics, self.lr_critic, multiagent=True
+            self.optimizer_cls, self.critics, self.lr_critic
         )
 
 
@@ -121,7 +120,6 @@ class TestOptimizerWrapper:
         assert algo.optimizer.networks[0] is network
         assert algo.optimizer.network_names == ["actor"]
         assert algo.optimizer.lr_name == "learning_rate"
-        assert not algo.optimizer.multiagent
 
     def test_init_with_multiple_networks(self):
         """Test initializing with multiple networks like in PPO."""
@@ -148,7 +146,6 @@ class TestOptimizerWrapper:
         assert algo.optimizer.networks[1] is critic
         assert set(algo.optimizer.network_names) == {"actor", "critic"}
         assert algo.optimizer.lr_name == "learning_rate"
-        assert not algo.optimizer.multiagent
 
         # Test parameter groups
         param_groups = algo.optimizer.optimizer.param_groups
@@ -159,7 +156,9 @@ class TestOptimizerWrapper:
 
     def test_init_with_multiagent(self):
         """Test initializing with multiagent=True like in MADDPG."""
-        networks = [MockEvolvableNetwork(name=f"net_{i}") for i in range(3)]
+        networks = ModuleDict(
+            {f"net_{i}": MockEvolvableNetwork(name=f"net_{i}") for i in range(3)}
+        )
         lr = 0.001
 
         # Test with multiple networks in multi-agent mode
@@ -172,16 +171,16 @@ class TestOptimizerWrapper:
                 ):
                     algo = MockAlgorithm(networks=networks, lr=lr)
 
-        assert isinstance(algo.optimizer.optimizer, list)
+        assert isinstance(algo.optimizer.optimizer, dict)
         assert len(algo.optimizer.optimizer) == 3
         assert all(
-            isinstance(opt, torch.optim.Adam) for opt in algo.optimizer.optimizer
+            isinstance(opt, torch.optim.Adam)
+            for opt in algo.optimizer.optimizer.values()
         )
         assert algo.optimizer.lr == lr
-        assert algo.optimizer.networks is networks
+        assert algo.optimizer.networks[0] is networks
         assert algo.optimizer.network_names == ["networks"]
         assert algo.optimizer.lr_name == "lr_actor"
-        assert algo.optimizer.multiagent
 
     def test_maddpg_style_optimizers(self):
         """Test MADDPG-style setup with separate actor and critic optimizers."""
@@ -199,27 +198,26 @@ class TestOptimizerWrapper:
                     algo = MockMultiAgentAlgorithm()
 
         # Check actor optimizers
-        assert isinstance(algo.actor_optimizers.optimizer, list)
+        assert isinstance(algo.actor_optimizers.optimizer, dict)
         assert len(algo.actor_optimizers.optimizer) == 3
         assert all(
-            isinstance(opt, torch.optim.Adam) for opt in algo.actor_optimizers.optimizer
+            isinstance(opt, torch.optim.Adam)
+            for opt in algo.actor_optimizers.optimizer.values()
         )
         assert algo.actor_optimizers.lr == algo.lr_actor
-        assert len(algo.actor_optimizers.networks) == 3
+        assert len(algo.actor_optimizers.networks[0]) == 3
         assert algo.actor_optimizers.network_names == ["actors"]
-        assert algo.actor_optimizers.multiagent
 
         # Check critic optimizers
-        assert isinstance(algo.critic_optimizers.optimizer, list)
+        assert isinstance(algo.critic_optimizers.optimizer, dict)
         assert len(algo.critic_optimizers.optimizer) == 3
         assert all(
             isinstance(opt, torch.optim.Adam)
-            for opt in algo.critic_optimizers.optimizer
+            for opt in algo.critic_optimizers.optimizer.values()
         )
         assert algo.critic_optimizers.lr == algo.lr_critic
-        assert len(algo.critic_optimizers.networks) == 3
+        assert len(algo.critic_optimizers.networks[0]) == 3
         assert algo.critic_optimizers.network_names == ["critics"]
-        assert algo.critic_optimizers.multiagent
 
     def test_init_with_explicit_names(self):
         """Test initialization with explicitly provided network_names and lr_name."""
@@ -272,12 +270,18 @@ class TestOptimizerWrapper:
                     algo = MockMultiAgentAlgorithm()
 
         # Test indexing for actor optimizers
-        for i in range(3):
-            assert algo.actor_optimizers[i] is algo.actor_optimizers.optimizer[i]
+        for agent_name in algo.actor_optimizers.optimizer.keys():
+            assert (
+                algo.actor_optimizers[agent_name]
+                is algo.actor_optimizers.optimizer[agent_name]
+            )
 
         # Test indexing for critic optimizers
-        for i in range(3):
-            assert algo.critic_optimizers[i] is algo.critic_optimizers.optimizer[i]
+        for agent_name in algo.critic_optimizers.optimizer.keys():
+            assert (
+                algo.critic_optimizers[agent_name]
+                is algo.critic_optimizers.optimizer[agent_name]
+            )
 
     def test_method_delegation(self):
         """Test method delegation to underlying optimizer(s)."""
@@ -298,12 +302,13 @@ class TestOptimizerWrapper:
         wrapper.optimizer.zero_grad.assert_called_once()
 
         # Multi-agent case - attribute delegation should fail
-        networks = [MockEvolvableNetwork() for _ in range(2)]
+        networks = ModuleDict(
+            {f"net_{i}": MockEvolvableNetwork(name=f"net_{i}") for i in range(2)}
+        )
         multi_wrapper = OptimizerWrapper(
             torch.optim.Adam,
             networks,
             0.001,
-            multiagent=True,
             network_names=["networks"],
             lr_name="lr",
         )
@@ -331,32 +336,33 @@ class TestOptimizerWrapper:
         wrapper.optimizer.zero_grad = original_zero_grad
 
         # Multiple networks in multi-agent case
-        networks = [MockEvolvableNetwork() for _ in range(3)]
+        networks = ModuleDict(
+            {f"net_{i}": MockEvolvableNetwork(name=f"net_{i}") for i in range(3)}
+        )
         multi_wrapper = OptimizerWrapper(
             torch.optim.Adam,
             networks,
             0.001,
-            multiagent=True,
             network_names=["networks"],
             lr_name="lr",
         )
 
         # Mock zero_grad for each optimizer
-        original_methods = []
-        for opt in multi_wrapper.optimizer:
-            original_methods.append(opt.zero_grad)
+        original_methods = {}
+        for agent_name, opt in multi_wrapper.optimizer.items():
+            original_methods[agent_name] = opt.zero_grad
             opt.zero_grad = Mock()
 
-        for opt in multi_wrapper.optimizer:
+        for agent_name, opt in multi_wrapper.optimizer.items():
             opt.zero_grad()
 
         # Each optimizer's zero_grad should be called once
-        for opt in multi_wrapper.optimizer:
+        for agent_name, opt in multi_wrapper.optimizer.items():
             opt.zero_grad.assert_called_once()
 
         # Restore methods
-        for i, opt in enumerate(multi_wrapper.optimizer):
-            opt.zero_grad = original_methods[i]
+        for agent_name, opt in multi_wrapper.optimizer.items():
+            opt.zero_grad = original_methods[agent_name]
 
     def test_step(self):
         """Test step method across different setups."""
@@ -377,32 +383,33 @@ class TestOptimizerWrapper:
         wrapper.optimizer.step = original_step
 
         # Multiple networks in multi-agent case
-        networks = [MockEvolvableNetwork() for _ in range(3)]
+        networks = ModuleDict(
+            {f"net_{i}": MockEvolvableNetwork(name=f"net_{i}") for i in range(3)}
+        )
         multi_wrapper = OptimizerWrapper(
             torch.optim.Adam,
             networks,
             0.001,
-            multiagent=True,
             network_names=["networks"],
             lr_name="lr",
         )
 
         # Mock step for each optimizer
-        original_methods = []
-        for opt in multi_wrapper.optimizer:
-            original_methods.append(opt.step)
+        original_methods = {}
+        for agent_name, opt in multi_wrapper.optimizer.items():
+            original_methods[agent_name] = opt.step
             opt.step = Mock()
 
-        for opt in multi_wrapper.optimizer:
+        for agent_name, opt in multi_wrapper.optimizer.items():
             opt.step()
 
         # Each optimizer's step should be called once
-        for opt in multi_wrapper.optimizer:
+        for agent_name, opt in multi_wrapper.optimizer.items():
             opt.step.assert_called_once()
 
         # Restore methods
-        for i, opt in enumerate(multi_wrapper.optimizer):
-            opt.step = original_methods[i]
+        for agent_name, opt in multi_wrapper.optimizer.items():
+            opt.step = original_methods[agent_name]
 
     def test_state_dict_and_load_state_dict(self):
         """Test state_dict and load_state_dict methods."""
@@ -428,37 +435,38 @@ class TestOptimizerWrapper:
         wrapper.optimizer.load_state_dict = original_load
 
         # Multi-agent case
-        networks = [MockEvolvableNetwork() for _ in range(3)]
+        networks = ModuleDict(
+            {f"net_{i}": MockEvolvableNetwork(name=f"net_{i}") for i in range(3)}
+        )
         multi_wrapper = OptimizerWrapper(
             torch.optim.Adam,
             networks,
             0.001,
-            multiagent=True,
             network_names=["networks"],
             lr_name="lr",
         )
 
         # Get state dicts
         state_dicts = multi_wrapper.state_dict()
-        assert isinstance(state_dicts, list)
+        assert isinstance(state_dicts, dict)
         assert len(state_dicts) == 3
 
         # Mock load_state_dict for each optimizer
-        original_methods = []
-        for opt in multi_wrapper.optimizer:
-            original_methods.append(opt.load_state_dict)
+        original_methods = {}
+        for agent_name, opt in multi_wrapper.optimizer.items():
+            original_methods[agent_name] = opt.load_state_dict
             opt.load_state_dict = Mock()
 
         # Load state dicts
         multi_wrapper.load_state_dict(state_dicts)
 
         # Each optimizer's load_state_dict should be called once with the correct state dict
-        for i, opt in enumerate(multi_wrapper.optimizer):
-            opt.load_state_dict.assert_called_once_with(state_dicts[i])
+        for agent_name, opt in multi_wrapper.optimizer.items():
+            opt.load_state_dict.assert_called_once_with(state_dicts[agent_name])
 
         # Restore methods
-        for i, opt in enumerate(multi_wrapper.optimizer):
-            opt.load_state_dict = original_methods[i]
+        for agent_name, opt in multi_wrapper.optimizer.items():
+            opt.load_state_dict = original_methods[agent_name]
 
     def test_invalid_load_state_dict(self):
         """Test load_state_dict with invalid inputs."""
@@ -472,12 +480,13 @@ class TestOptimizerWrapper:
             wrapper.load_state_dict([{}])
 
         # Multi-agent optimizer receiving dict
-        networks = [MockEvolvableNetwork() for _ in range(3)]
+        networks = ModuleDict(
+            {f"net_{i}": MockEvolvableNetwork(name=f"net_{i}") for i in range(3)}
+        )
         multi_wrapper = OptimizerWrapper(
             torch.optim.Adam,
             networks,
             0.001,
-            multiagent=True,
             network_names=["networks"],
             lr_name="lr",
         )
@@ -595,10 +604,17 @@ class TestOptimizerWrapper:
     def test_actual_learning_multiagent(self):
         """Test that multi-agent optimizers work correctly."""
         # Create networks for 3 agents
-        networks = [MockEvolvableNetwork(input_dim=2, output_dim=1) for _ in range(3)]
+        networks = ModuleDict(
+            {
+                f"net_{i}": MockEvolvableNetwork(
+                    name=f"net_{i}", input_dim=2, output_dim=1
+                )
+                for i in range(3)
+            }
+        )
 
         # Set models to a known stable state
-        for network in networks:
+        for network in networks.values():
             with torch.no_grad():
                 nn.init.zeros_(network.layer.weight)
                 nn.init.zeros_(network.layer.bias)
@@ -607,7 +623,6 @@ class TestOptimizerWrapper:
             torch.optim.SGD,
             networks,
             lr=0.01,  # Smaller learning rate
-            multiagent=True,
             network_names=["networks"],
             lr_name="lr",
         )
@@ -616,38 +631,38 @@ class TestOptimizerWrapper:
 
         # Create simple regression data for each agent
         x = torch.tensor([[1.0, 2.0], [2.0, 3.0], [3.0, 4.0], [4.0, 5.0]])
-        y_targets = [
-            torch.tensor([[3.0], [5.0], [7.0], [9.0]]),
-            torch.tensor([[2.0], [4.0], [6.0], [8.0]]),
-            torch.tensor([[1.0], [3.0], [5.0], [7.0]]),
-        ]
+        y_targets = {
+            "net_0": torch.tensor([[3.0], [5.0], [7.0], [9.0]]),
+            "net_1": torch.tensor([[2.0], [4.0], [6.0], [8.0]]),
+            "net_2": torch.tensor([[1.0], [3.0], [5.0], [7.0]]),
+        }
 
         # Initial losses
-        initial_losses = []
-        for i, network in enumerate(networks):
+        initial_losses = {}
+        for agent_name, network in networks.items():
             output = network(x)
-            loss = criterion(output, y_targets[i])
-            initial_losses.append(loss.item())
+            loss = criterion(output, y_targets[agent_name])
+            initial_losses[agent_name] = loss.item()
 
         # Train each network separately
         for _ in range(100):  # More iterations with smaller learning rate
-            for i, network in enumerate(networks):
-                optimizer[i].zero_grad()
+            for agent_name, network in networks.items():
+                optimizer[agent_name].zero_grad()
                 output = network(x)
-                loss = criterion(output, y_targets[i])
+                loss = criterion(output, y_targets[agent_name])
                 loss.backward()
-                optimizer[i].step()
+                optimizer[agent_name].step()
 
         # Final losses
-        final_losses = []
-        for i, network in enumerate(networks):
+        final_losses = {}
+        for agent_name, network in networks.items():
             output = network(x)
-            loss = criterion(output, y_targets[i])
-            final_losses.append(loss.item())
+            loss = criterion(output, y_targets[agent_name])
+            final_losses[agent_name] = loss.item()
 
         # All losses should decrease
-        for i in range(3):
-            assert final_losses[i] < initial_losses[i]
+        for agent_name in networks.keys():
+            assert final_losses[agent_name] < initial_losses[agent_name]
 
     def test_repr(self):
         """Test __repr__ method."""
@@ -661,7 +676,6 @@ class TestOptimizerWrapper:
         assert "Adam" in repr_str
         assert "0.001" in repr_str
         assert "['network']" in repr_str
-        assert "multiagent=False" in repr_str
 
     def test_parent_container_inference(self):
         """Test that parent container inference works correctly."""
@@ -694,54 +708,67 @@ class TestOptimizerWrapper:
 
     def test_different_optimizers_multiagent(self):
         """Test with different optimizer classes for each agent."""
-        networks = [MockEvolvableNetwork() for _ in range(2)]
-        optimizer_classes = [torch.optim.SGD, torch.optim.Adam]
+        networks = ModuleDict(
+            {f"net_{i}": MockEvolvableNetwork(name=f"net_{i}") for i in range(2)}
+        )
+        opt_cls = {
+            "net_0": torch.optim.SGD,
+            "net_1": torch.optim.Adam,
+        }
 
         wrapper = OptimizerWrapper(
-            optimizer_classes,
+            opt_cls,
             networks,
             lr=0.01,
-            multiagent=True,
             network_names=["networks"],
             lr_name="lr",
         )
 
-        assert isinstance(wrapper.optimizer[0], torch.optim.SGD)
-        assert isinstance(wrapper.optimizer[1], torch.optim.Adam)
+        assert isinstance(wrapper.optimizer["net_0"], torch.optim.SGD)
+        assert isinstance(wrapper.optimizer["net_1"], torch.optim.Adam)
 
     def test_different_kwargs_multiagent(self):
         """Test with different kwargs for each agent's optimizer."""
-        networks = [MockEvolvableNetwork() for _ in range(2)]
-        kwargs_list = [{"momentum": 0.9}, {"betas": (0.9, 0.999)}]
+        networks = ModuleDict(
+            {f"net_{i}": MockEvolvableNetwork(name=f"net_{i}") for i in range(2)}
+        )
+        kwargs_dict = {
+            "net_0": {"momentum": 0.9},
+            "net_1": {"betas": (0.9, 0.999)},
+        }
 
+        opt_cls = {
+            "net_0": torch.optim.SGD,
+            "net_1": torch.optim.Adam,
+        }
         wrapper = OptimizerWrapper(
-            [torch.optim.SGD, torch.optim.Adam],
+            opt_cls,
             networks,
             lr=0.01,
-            optimizer_kwargs=kwargs_list,
-            multiagent=True,
+            optimizer_kwargs=kwargs_dict,
             network_names=["networks"],
             lr_name="lr",
         )
 
-        assert wrapper.optimizer[0].defaults["momentum"] == 0.9
-        assert wrapper.optimizer[1].defaults["betas"] == (0.9, 0.999)
+        assert wrapper.optimizer["net_0"].defaults["momentum"] == 0.9
+        assert wrapper.optimizer["net_1"].defaults["betas"] == (0.9, 0.999)
 
     def test_iteration_multiagent(self):
         """Test iteration through optimizers in multiagent setting."""
-        networks = [MockEvolvableNetwork() for _ in range(3)]
+        networks = ModuleDict(
+            {f"net_{i}": MockEvolvableNetwork(name=f"net_{i}") for i in range(3)}
+        )
         wrapper = OptimizerWrapper(
             torch.optim.Adam,
             networks,
             lr=0.01,
-            multiagent=True,
             network_names=["networks"],
             lr_name="lr",
         )
 
         # Count through iteration
         count = 0
-        for opt in wrapper:
+        for opt in wrapper.values():
             assert isinstance(opt, torch.optim.Adam)
             count += 1
 

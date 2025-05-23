@@ -1,8 +1,11 @@
+from unittest.mock import Mock, patch
+
 import pytest
 import torch.nn as nn
 
 from agilerl.utils.evolvable_networks import (
     calc_max_kernel_sizes,
+    compile_model,
     create_cnn,
     create_mlp,
     get_activation,
@@ -96,6 +99,31 @@ def test_create_cnn(noisy, output_vanish):
 
     assert isinstance(head, nn.Module)
     assert isinstance(feature_net, nn.Module)
+
+
+def test_compile_model():
+    model = nn.Linear(10, 10)
+
+    # Test with mocked torch.compile
+    with patch("torch.compile", return_value=model):
+        compiled_model = compile_model(model, mode="default")
+        # Should have called torch.compile
+        assert compiled_model is model
+
+    # Test with already compiled model (mock OptimizedModule)
+    with patch("torch._dynamo.eval_frame.OptimizedModule", type):
+        optimized_model = Mock(spec=["__class__"])
+        optimized_model.__class__.__name__ = "OptimizedModule"
+
+        # Mock the isinstance check
+        with patch("agilerl.utils.algo_utils.isinstance", return_value=True):
+            # Should return the model without recompiling
+            result = compile_model(optimized_model, mode="default")
+            assert result is optimized_model
+
+    # Test with mode=None
+    result = compile_model(model, mode=None)
+    assert result is model
 
 
 @pytest.mark.parametrize("noisy, output_vanish", [(False, True), (True, False)])

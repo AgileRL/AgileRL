@@ -9,10 +9,14 @@ import torch
 import torch.nn as nn
 from accelerate import Accelerator
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
-from numpy.random import Generator
 from torch._dynamo.eval_frame import OptimizedModule
 
-from agilerl.algorithms.core import EvolvableAlgorithm, LLMAlgorithm
+from agilerl.algorithms.core import (
+    EvolvableAlgorithm,
+    LLMAlgorithm,
+    MultiAgentRLAlgorithm,
+    RLAlgorithm,
+)
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.algorithms.neural_ts_bandit import NeuralTS
 from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
@@ -48,37 +52,8 @@ def set_global_seed(seed: Optional[int]) -> None:
     fastrand.pcg32_seed(seed)
 
 
-def get_architecture_mut_method(
-    eval: OffspringType, new_layer_prob: float, rng: Generator
-) -> str:
-    """Get the mutation method and its return type of the individual.
-
-    :param individual: The individual to inspect
-    :type individual: EvolvableAlgorithm
-    :param new_layer_prob: Relative probability of new layer mutation (type of architecture mutation)
-    :type new_layer_prob: float
-    :param rng: Random number generator
-    :type rng: Generator
-    :return: The mutation methods name
-    :rtype: str
-    """
-    # All of the offsprings should be the same EvolvableModule type, so we can
-    # just sample the mutation method from the first offspring
-    if isinstance(eval, list):
-        assert all(
-            isinstance(offspring, eval[0].__class__) for offspring in eval
-        ), "All offspring should be of the same type."
-
-        # NOTE: For multi-agent settings we apply the same architecture mutations to
-        # all agents. However, depending on use-case it might be beneficial to have agents
-        # with different architectures; please raise an issue if you would like this!
-        eval = eval[0]
-
-    return eval.sample_mutation_method(new_layer_prob, rng)
-
-
 def get_offspring_eval_modules(
-    individual: SelfEvolvableAlgorithm,
+    individual: SelfEvolvableAlgorithm, agent_idx
 ) -> Tuple[Dict[str, OffspringType], ...]:
     """Get the offsprings of all of the evaluation modules in the individual.
 
@@ -96,11 +71,7 @@ def get_offspring_eval_modules(
         eval_module: OffspringType = getattr(individual, group.eval)
 
         # Clone the offspring prior to applying mutations
-        offspring = (
-            [mod.clone() for mod in eval_module]
-            if isinstance(eval_module, list)
-            else eval_module.clone()
-        )
+        offspring = eval_module.clone()
 
         if group.policy:
             offspring_policy[group.eval] = offspring
@@ -741,7 +712,7 @@ class Mutations:
         chosen_keys = self.rng.choice(potential_keys, how_many, replace=False)
 
         for key in chosen_keys:
-            W = model_params[key]
+            W: torch.Tensor = model_params[key]
             num_weights = W.shape[0] * W.shape[1]
             num_mutations = int(np.ceil(num_mutation_frac * num_weights))
             if num_mutations < 1:
@@ -803,6 +774,7 @@ class Mutations:
 
         return network
 
+    @singledispatch
     def architecture_mutate(
         self, individual: SelfEvolvableAlgorithm
     ) -> SelfEvolvableAlgorithm:
@@ -815,26 +787,36 @@ class Mutations:
         :return: Individual from population with network architecture mutation
         :rtype: EvolvableAlgorithm
         """
+        warnings.warn(
+            f"Architecture mutations are not supported for {type(individual)}."
+        )
+        individual.mut = "None"
+        return individual
 
-        if isinstance(individual, LLMAlgorithm):
-            warnings.warn(
-                "Architecture mutations are not supported for LLM algorithms."
-            )
-            individual.mut = "None"
-            return individual
+    @architecture_mutate.register(RLAlgorithm)
+    def _architecture_mutate_single(self, individual: RLAlgorithm) -> RLAlgorithm:
+        """
+        Apply an architecture mutation to a single-agent RL algorithm. Since all of the
+        networks in a single-agent algorithm share the same architecture (given there is
+        only one observation space), we first sample a mutation method from the policy network
+        and then apply the same mutation to the rest of the evaluation modules (e.g. critics).
+        This is preferred since it reduces variance attributed to evolutionary HPO during training
+        and different evaluation networks usually solve tasks of similar complexity and should
+        therefore share a similar architecture.
 
+        :param individual: Individual agent from population
+        :type individual: RLAlgorithm
+
+        :return: Individual from population with network architecture mutation
+        :rtype: RLAlgorithm
+        """
         # Get the offspring evaluation modules
         # We first extract and apply a mutation to the policy and then apply
         # the same mutation to the rest of the evaluation modules e.g. critics
         policy, offspring_evals = get_offspring_eval_modules(individual)
         policy_name, policy_offspring = list(policy.items())[0]
 
-        sample_policy = (
-            policy_offspring[0]
-            if isinstance(policy_offspring, list)
-            else policy_offspring
-        )
-        if not sample_policy.mutation_methods:
+        if not policy_offspring.mutation_methods:
             warnings.warn(
                 "No mutation methods found for the policy network. Skipping architecture mutation. "
                 "We advise setting the probability of architecture mutations to zero."
@@ -843,38 +825,57 @@ class Mutations:
             return individual
 
         # Sample mutation method from policy network
-        mut_method = get_architecture_mut_method(
-            policy_offspring, self.new_layer_prob, self.rng
+        mut_method = policy_offspring.sample_mutation_method(
+            self.new_layer_prob, self.rng
         )
 
-        applied_mutations, mut_dict = Mutations.apply_arch_mutation(
+        applied_mutation, mut_dict = Mutations.apply_arch_mutation(
             policy_offspring, mut_method
         )
         self.to_device_and_set_individual(individual, policy_name, policy_offspring)
 
+        # This should ideally not be here!
         if isinstance(individual, (NeuralTS, NeuralUCB)):
             old_exp_layer = get_exp_layer(policy_offspring)
             self._reinit_bandit_grads(individual, policy_offspring, old_exp_layer)
 
         # Apply the same mutation to the rest of the evaluation modules
         for name, offsprings in offspring_evals.items():
-            Mutations.apply_arch_mutation(offsprings, applied_mutations, mut_dict)
+            Mutations.apply_arch_mutation(offsprings, applied_mutation, mut_dict)
             self.to_device_and_set_individual(individual, name, offsprings)
-
-            # Reinitialize bandit gradients after architecture mutation
-            if isinstance(individual, (NeuralTS, NeuralUCB)):
-                old_exp_layer = get_exp_layer(offsprings)
-                self._reinit_bandit_grads(individual, offsprings, old_exp_layer)
 
         individual.mutation_hook()  # Apply mutation hook
 
         self.reinit_opt(individual)  # Reinitialise optimizer
-        individual.mut = (
-            applied_mutations[0]
-            if isinstance(applied_mutations, list)
-            else applied_mutations
-        )
+        individual.mut = applied_mutation
         return individual
+
+    @architecture_mutate.register(MultiAgentRLAlgorithm)
+    def _architecture_mutate_multi(
+        self, individual: MultiAgentRLAlgorithm
+    ) -> MultiAgentRLAlgorithm:
+        """
+        Apply an architecture mutation to a multi-agent RL algorithm. Since each agent has its own
+        observation space, we can't generally apply the same architecture mutation to all sub-agents.
+        Instead, we sample a sub-agent to perform the mutation on. There is also a possibility for
+        networks to be 'shared' between agents (e.g. critics in MADDPG / MATD3), therefore different
+        evaluation networks for the same sub-agent can have different architectures. To handle this,
+        we check if for all sub-agents the same mutation methods are available across the different
+        evaluation networks, in which case we apply the same mutation to all networks. Otherwise, we
+        also sample an evaluation network to perform the mutation on.
+
+        :param individual: Individual agent from population
+        :type individual: MultiAgentRLAlgorithm
+
+        :return: Individual from population with network architecture mutation
+        :rtype: MultiAgentRLAlgorithm
+        """
+        # Sample an agent to perform the mutation on
+        # agent_id = self.rng.choice(individual.agent_ids)
+
+        # # Get the offspring evaluation modules
+        # policy, offspring_evals = get_offspring_eval_modules(individual)
+        # policy_name, policy_offspring = list(policy.items())[0]
 
     @singledispatch
     @staticmethod
@@ -976,7 +977,7 @@ class Mutations:
 
         return applied_muts, mut_dict
 
-    # TODO: This can be implemented as a mutation hook for the bandit algorithms
+    # TODO: Can this be implemented as a mutation hook for the bandit algorithms?
     def _reinit_bandit_grads(
         self,
         individual: BanditAlgorithm,

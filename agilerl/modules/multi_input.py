@@ -249,6 +249,7 @@ class EvolvableMultiInput(EvolvableModule):
         reformatted_dicts = {}
         for key, net in self.feature_net.modules().items():
             init_dict = net.init_dict
+            init_dict.pop("observation_space", None)  # MultiInput
             init_dict.pop("input_size", None)  # LSTM
             init_dict.pop("input_shape", None)  # CNN
             init_dict.pop("num_inputs", None)  # MLP
@@ -372,10 +373,10 @@ class EvolvableMultiInput(EvolvableModule):
                     name=init_dict.pop("name", key),
                     **init_dict,
                 )
+
             # EvolvableCNN for image spaces
             elif is_image_space(space):
                 init_dict = self.get_inner_init_dict(key, default=ModuleType.CNN)
-                print(init_dict)
                 feature_extractor = EvolvableCNN(
                     input_shape=space.shape,
                     name=init_dict.pop("name", key),

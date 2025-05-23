@@ -1,5 +1,6 @@
 import copy
 import warnings
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -11,7 +12,7 @@ from gymnasium import spaces
 from agilerl.algorithms.core import MultiAgentRLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.modules.base import EvolvableModule
+from agilerl.modules.base import EvolvableModule, ModuleDict
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
@@ -160,7 +161,7 @@ class MADDPG(MultiAgentRLAlgorithm):
         ), "Wrap models flag must be boolean value True or False."
         if (actor_networks is not None) != (critic_networks is not None):
             warnings.warn(
-                "Actor and critic network lists must both be supplied to use custom networks. Defaulting to net config."
+                "Actor and critic network ModuleDicts must both be supplied to use custom networks. Defaulting to net config."
             )
 
         self.batch_size = batch_size
@@ -174,49 +175,54 @@ class MADDPG(MultiAgentRLAlgorithm):
         self.learn_counter = 0
         self.O_U_noise = O_U_noise
         self.vect_noise_dim = vect_noise_dim
-        self.sample_gaussian = [
-            torch.zeros(*(vect_noise_dim, self.action_dims[idx]), device=self.device)
-            for idx in range(self.n_agents)
-        ]
-        self.expl_noise = (
-            expl_noise
-            if isinstance(expl_noise, list)
-            else [
-                expl_noise
-                * torch.ones(*(vect_noise_dim, action_dim), device=self.device)
-                for action_dim in self.action_dims
-            ]
-        )
-        self.mean_noise = (
-            mean_noise
-            if isinstance(mean_noise, list)
-            else [
-                mean_noise
-                * torch.ones(*(vect_noise_dim, action_dim), device=self.device)
-                for action_dim in self.action_dims
-            ]
-        )
-        self.current_noise = [
-            torch.zeros(*(vect_noise_dim, action_dim), device=self.device)
-            for action_dim in self.action_dims
-        ]
         self.theta = theta
         self.dt = dt
         self.sqdt = dt ** (0.5)
 
+        # Initialise noise for exploration
+        self.sample_gaussian = {
+            agent_id: torch.zeros(*(vect_noise_dim, action_dim), device=self.device)
+            for agent_id, action_dim in self.action_dims.items()
+        }
+        self.expl_noise = (
+            expl_noise
+            if isinstance(expl_noise, dict)
+            else {
+                agent_id: expl_noise
+                * torch.ones(*(vect_noise_dim, action_dim), device=self.device)
+                for agent_id, action_dim in self.action_dims.items()
+            }
+        )
+        self.mean_noise = (
+            mean_noise
+            if isinstance(mean_noise, dict)
+            else {
+                agent_id: mean_noise
+                * torch.ones(*(vect_noise_dim, action_dim), device=self.device)
+                for agent_id, action_dim in self.action_dims.items()
+            }
+        )
+        self.current_noise = {
+            agent_id: torch.zeros(*(vect_noise_dim, action_dim), device=self.device)
+            for agent_id, action_dim in self.action_dims.items()
+        }
+
         if actor_networks is not None and critic_networks is not None:
-            assert (
-                len({type(net) for net in actor_networks}) == 1
+            actors_list = list(actor_networks.values())
+            critics_list = list(critic_networks.values())
+
+            assert all(
+                isinstance(net, actors_list[0].__class__) for net in actors_list
             ), "'actor_networks' must all be the same type"
-            assert (
-                len({type(net) for net in critic_networks}) == 1
+            assert all(
+                isinstance(net, critics_list[0].__class__) for net in critics_list
             ), "'critic_networks' must all be the same type"
 
-            if not all(isinstance(net, EvolvableModule) for net in actor_networks):
+            if not all(isinstance(net, EvolvableModule) for net in actors_list):
                 raise TypeError(
                     "All actor networks must be instances of EvolvableModule"
                 )
-            if not all(isinstance(net, EvolvableModule) for net in critic_networks):
+            if not all(isinstance(net, EvolvableModule) for net in critics_list):
                 raise TypeError(
                     "All critic networks must be instances of EvolvableModule"
                 )
@@ -227,7 +233,7 @@ class MADDPG(MultiAgentRLAlgorithm):
                 actor_networks, critic_networks
             )
         else:
-            agent_configs, encoder_configs = self.extract_net_config(
+            agent_configs, encoder_configs = self.build_net_config(
                 net_config, return_encoders=True
             )
 
@@ -280,30 +286,45 @@ class MADDPG(MultiAgentRLAlgorithm):
                     **copy.deepcopy(critic_config),
                 )
 
-            self.actors = [create_actor(agent_id) for agent_id in self.agent_ids]
-            self.critics = [create_critic() for _ in range(self.n_agents)]
-            self.actor_targets = [create_actor(agent_id) for agent_id in self.agent_ids]
-            self.critic_targets = [create_critic() for _ in range(self.n_agents)]
+            self.actors = ModuleDict(
+                {agent_id: create_actor(agent_id) for agent_id in self.agent_ids}
+            )
+            self.critics = ModuleDict(
+                {agent_id: create_critic() for agent_id in self.agent_ids}
+            )
+            self.actor_targets = ModuleDict(
+                {agent_id: create_actor(agent_id) for agent_id in self.agent_ids}
+            )
+            self.critic_targets = ModuleDict(
+                {agent_id: create_critic() for agent_id in self.agent_ids}
+            )
 
         # Initialise target network parameters
-        for actor, actor_target in zip(self.actors, self.actor_targets):
+        for actor, actor_target in zip(
+            self.actors.values(), self.actor_targets.values()
+        ):
             actor_target.load_state_dict(actor.state_dict())
-        for critic, critic_target in zip(self.critics, self.critic_targets):
+        for critic, critic_target in zip(
+            self.critics.values(), self.critic_targets.values()
+        ):
             critic_target.load_state_dict(critic.state_dict())
 
         # Optimizers
         self.actor_optimizers = OptimizerWrapper(
-            optim.Adam, networks=self.actors, lr=self.lr_actor, multiagent=True
+            optim.Adam, networks=self.actors, lr=self.lr_actor
         )
         self.critic_optimizers = OptimizerWrapper(
-            optim.Adam, networks=self.critics, lr=self.lr_critic, multiagent=True
+            optim.Adam, networks=self.critics, lr=self.lr_critic
         )
 
         if self.accelerator is not None and wrap:
             self.wrap_models()
         elif self.torch_compiler:
             if (
-                any(actor.output_activation == "GumbelSoftmax" for actor in self.actors)
+                any(
+                    actor.output_activation == "GumbelSoftmax"
+                    for actor in self.actors.values()
+                )
                 and self.torch_compiler != "default"
             ):
                 warnings.warn(
@@ -323,14 +344,12 @@ class MADDPG(MultiAgentRLAlgorithm):
                 eval=self.actors,
                 shared=self.actor_targets,
                 policy=True,
-                multiagent=True,
             )
         )
         self.register_network_group(
             NetworkGroup(
                 eval=self.critics,
                 shared=self.critic_targets,
-                multiagent=True,
             )
         )
 
@@ -376,9 +395,8 @@ class MADDPG(MultiAgentRLAlgorithm):
         preprocessed_states = self.preprocess_observation(obs)
 
         action_dict: Dict[str, np.ndarray] = {}
-        for idx, (agent_id, obs) in enumerate(preprocessed_states.items()):
-            agent_idx = self.agent_ids.index(agent_id)
-            actor = self.actors[agent_idx]
+        for agent_id, obs in preprocessed_states.items():
+            actor = self.actors[agent_id]
             actor.eval()
             if self.accelerator is not None:
                 with actor.no_sync(), torch.no_grad():
@@ -388,7 +406,7 @@ class MADDPG(MultiAgentRLAlgorithm):
                     actions = actor(obs)
 
             if self.torch_compiler is not None and isinstance(
-                self.action_spaces[idx], spaces.Box
+                self.action_space[agent_id], spaces.Box
             ):
                 actions = DeterministicActor.rescale_action(
                     action=actions,
@@ -399,17 +417,17 @@ class MADDPG(MultiAgentRLAlgorithm):
 
             actor.train()
             if self.training:
-                if isinstance(self.action_spaces[idx], spaces.Discrete):
+                if isinstance(self.action_space[agent_id], spaces.Discrete):
                     min_action, max_action = 0, 1
                 else:
                     min_action, max_action = (
-                        self.min_action[idx][0],
-                        self.max_action[idx][0],
+                        self.min_action[agent_id][0],
+                        self.max_action[agent_id][0],
                     )
 
                 # Add noise to actions for exploration
                 actions = torch.clamp(
-                    actions + self.action_noise(idx),
+                    actions + self.action_noise(agent_id),
                     min_action,
                     max_action,
                 )
@@ -417,7 +435,7 @@ class MADDPG(MultiAgentRLAlgorithm):
             action_dict[agent_id] = actions.cpu().numpy()
 
         # Process agents with discrete actions
-        processed_action_dict = {}
+        processed_action_dict: ArrayDict = OrderedDict()
         for agent_id, space in self.action_space.items():
             if isinstance(space, spaces.Discrete):
                 action = action_dict[agent_id]
@@ -429,7 +447,10 @@ class MADDPG(MultiAgentRLAlgorithm):
                 action: np.ndarray = np.ma.array(action, mask=mask)
                 processed_action_dict[agent_id] = action.argmax(axis=-1)
 
-                if len(action_dict[agent_id].shape) == 1 and env_defined_actions:
+                if (
+                    len(processed_action_dict[agent_id].shape) == 1
+                    and env_defined_actions
+                ):
                     env_defined_actions = {
                         agent: action.squeeze(1) if len(action.shape) > 1 else action
                         for agent, action in env_defined_actions.items()
@@ -450,31 +471,33 @@ class MADDPG(MultiAgentRLAlgorithm):
 
         return processed_action_dict, action_dict
 
-    def action_noise(self, idx: int) -> torch.Tensor:
+    def action_noise(self, agent_id: str) -> torch.Tensor:
         """Create action noise for exploration, either Ornstein Uhlenbeck or
             from a normal distribution.
 
-        :param idx: Agent index for action dims
-        :type idx: int
+        :param agent_id: Agent ID for action dims
+        :type agent_id: str
         :return: Action noise
         :rtype: torch.Tensor
         """
         if self.O_U_noise:
             noise = (
-                self.current_noise[idx]
+                self.current_noise[agent_id]
                 + self.theta
-                * (self.mean_noise[idx] - self.current_noise[idx])
+                * (self.mean_noise[agent_id] - self.current_noise[agent_id])
                 * self.dt
-                + self.expl_noise[idx] * self.sqdt * self.sample_gaussian[idx].normal_()
+                + self.expl_noise[agent_id]
+                * self.sqdt
+                * self.sample_gaussian[agent_id].normal_()
             )
-            self.current_noise[idx] = noise
+            self.current_noise[agent_id] = noise
         else:
             torch.normal(
-                self.mean_noise[idx],
-                self.expl_noise[idx],
-                out=self.sample_gaussian[idx],
+                self.mean_noise[agent_id],
+                self.expl_noise[agent_id],
+                out=self.sample_gaussian[agent_id],
             )
-            noise = self.sample_gaussian[idx]
+            noise = self.sample_gaussian[agent_id]
         return noise
 
     def reset_action_noise(self, indices: List[int]) -> None:
@@ -519,39 +542,22 @@ class MADDPG(MultiAgentRLAlgorithm):
         # Get next actions
         next_actions = []
         with torch.no_grad():
-            for i, agent_id_label in enumerate(self.agent_ids):
-                next_actions.append(self.actor_targets[i](next_states[agent_id_label]))
+            for agent_id in self.agent_ids:
+                next_actions.append(self.actor_targets[agent_id](next_states[agent_id]))
 
         # Stack states and actions
         stacked_actions = torch.cat(list(actions.values()), dim=1)
         stacked_next_actions = torch.cat(next_actions, dim=1)
 
         loss_dict = {}
-        for idx, (
-            agent_id,
-            actor,
-            critic,
-            critic_target,
-            actor_optimizer,
-            critic_optimizer,
-        ) in enumerate(
-            zip(
-                self.agent_ids,
-                self.actors,
-                self.critics,
-                self.critic_targets,
-                self.actor_optimizers,
-                self.critic_optimizers,
-            )
-        ):
+        for agent_id in self.agent_ids:
             loss_dict[f"{agent_id}"] = self._learn_individual(
-                idx,
                 agent_id,
-                actor,
-                critic,
-                critic_target,
-                actor_optimizer,
-                critic_optimizer,
+                self.actors[agent_id],
+                self.critics[agent_id],
+                self.critic_targets[agent_id],
+                self.actor_optimizers[agent_id],
+                self.critic_optimizers[agent_id],
                 stacked_actions,
                 stacked_next_actions,
                 states,
@@ -561,17 +567,14 @@ class MADDPG(MultiAgentRLAlgorithm):
                 dones,
             )
 
-        for actor, actor_target, critic, critic_target in zip(
-            self.actors, self.actor_targets, self.critics, self.critic_targets
-        ):
-            self.soft_update(actor, actor_target)
-            self.soft_update(critic, critic_target)
+        for agent_id in self.agent_ids:
+            self.soft_update(self.actors[agent_id], self.actor_targets[agent_id])
+            self.soft_update(self.critics[agent_id], self.critic_targets[agent_id])
 
         return loss_dict
 
     def _learn_individual(
         self,
-        idx: int,
         agent_id: str,
         actor: nn.Module,
         critic: nn.Module,
@@ -590,8 +593,6 @@ class MADDPG(MultiAgentRLAlgorithm):
         Inner call to each agent for the learning/algo training steps, up until the soft updates.
         Applies all forward/backward props.
 
-        :param idx: Index of the agent
-        :type idx: int
         :param agent_id: ID of the agent
         :type agent_id: str
         :param actor: Actor network of the agent

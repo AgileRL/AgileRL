@@ -83,10 +83,10 @@ PzStepReturn = Tuple[
 ]
 
 SingleAgentModule = Union[T, EvolvableModule, OptimizedModule, EvolvableNetwork]
-MultiAgentModule = Union[List[SingleAgentModule[T]], Tuple[SingleAgentModule[T], ...]]
+MultiAgentModule = Dict[str, SingleAgentModule[T]]
 NetworkType = Union[SingleAgentModule[T], MultiAgentModule[T]]
 PopulationType = List[EvolvableAlgorithm]
 DeviceType = Union[str, torch.device]
 OptimizerType = Union[Optimizer, AcceleratedOptimizer]
 ConfigType = Union[IsDataclass, NetConfigType]
-StateDict = Union[Dict[str, Any], List[Dict[str, Any]]]
+StateDict = Union[Dict[str, Any], Dict[str, Dict[str, Any]]]

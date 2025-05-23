@@ -6,8 +6,10 @@ import torch
 import torch.nn as nn
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
+from torch._dynamo.eval_frame import OptimizedModule
 from torch.optim import Optimizer
 
+from agilerl.modules import ModuleDict
 from agilerl.modules.configs import (
     CnnNetConfig,
     LstmNetConfig,
@@ -58,18 +60,25 @@ def get_state_dim_networks(observation_space: GymSpaceType) -> Tuple[int, ...]:
         )
 
 
-def get_action_dim_networks(action_space: GymSpaceType) -> int:
+def get_action_dim_networks(
+    action_space: GymSpaceType,
+) -> Union[int, Dict[str, int], Tuple[int, ...]]:
     """Returns the dimension of the action space as it pertains to the underlying
     networks (i.e. the output size of the networks).
 
     :param action_space: The action space of the environment.
-    :type action_space: spaces.Space or List[spaces.Space].
+    :type action_space: spaces.Space or list[spaces.Space]
 
     :return: The dimension of the action space.
-    :rtype: int.
+    :rtype: Union[int, Dict[str, int], Tuple[int, ...]]
     """
     if isinstance(action_space, (list, tuple)):
         return tuple(get_action_dim_networks(space) for space in action_space)
+    elif isinstance(action_space, spaces.Dict):
+        return {
+            key: get_action_dim_networks(subspace)
+            for key, subspace in action_space.spaces.items()
+        }
     elif isinstance(action_space, spaces.MultiBinary):
         return action_space.n
     elif isinstance(action_space, spaces.Discrete):
@@ -83,6 +92,30 @@ def get_action_dim_networks(action_space: GymSpaceType) -> int:
         raise AttributeError(
             f"Can't access action dimensions for {type(action_space)} spaces."
         )
+
+
+def compile_model(
+    model: nn.Module, mode: Optional[str] = "default"
+) -> Union[OptimizedModule, nn.Module]:
+    """Compiles torch model if not already compiled
+
+    :param model: torch model
+    :type model: nn.Module
+    :param mode: torch compile mode, defaults to "default"
+    :type mode: str, optional
+    :return: compiled model
+    :rtype: OptimizedModule | Module
+    """
+    if isinstance(model, ModuleDict):
+        return ModuleDict(
+            {agent_id: compile_model(m, mode) for agent_id, m in model.items()}
+        )
+
+    return (
+        torch.compile(model, mode=mode)
+        if not isinstance(model, OptimizedModule) and mode is not None
+        else model
+    )
 
 
 def is_image_space(space: spaces.Space) -> bool:

@@ -43,11 +43,10 @@ class MutationMethod(Protocol):
 
 @runtime_checkable
 class OptimizerWrapper(Protocol):
-    optimizer: Union[Optimizer, Iterable[Optimizer]]
-    optimizer_cls: Union[Type[Optimizer], Iterable[Type[Optimizer]]]
+    optimizer: Union[Optimizer, Dict[str, Optimizer]]
+    optimizer_cls: Union[Type[Optimizer], Dict[str, Type[Optimizer]]]
     lr: Callable[[], float]
     optimizer_kwargs: Dict[str, Any]
-    multiagent: bool
 
 
 @runtime_checkable
@@ -74,7 +73,22 @@ class EvolvableModule(Protocol):
 
 
 @runtime_checkable
-class EvolvableNetwork(EvolvableModule, Protocol):
+class ModuleDict(Protocol):
+    def __getitem__(self, key: str) -> EvolvableModule: ...
+    def values(self) -> Iterable[EvolvableModule]: ...
+    def items(self) -> Iterable[Tuple[str, EvolvableModule]]: ...
+    def modules(self) -> Dict[str, EvolvableModule]: ...
+    def get_mutation_methods(self) -> Dict[str, MutationMethod]: ...
+
+    @property
+    def layer_mutation_methods(self) -> List[str]: ...
+
+    @property
+    def node_mutation_methods(self) -> List[str]: ...
+
+
+@runtime_checkable
+class EvolvableNetwork(Protocol):
     encoder: EvolvableModule
     head_net: EvolvableModule
 
@@ -84,8 +98,8 @@ class EvolvableNetwork(EvolvableModule, Protocol):
     def _build_encoder(self, *args, **kwargs) -> None: ...
 
 
-EvolvableNetworkType = Union[EvolvableModule, List[EvolvableModule]]
-OptimizerType = Union[Optimizer, Iterable[Optimizer], OptimizerWrapper]
+EvolvableNetworkType = Union[EvolvableModule, ModuleDict]
+OptimizerType = Union[Optimizer, Dict[str, Optimizer], OptimizerWrapper]
 EvolvableAttributeType = Union[EvolvableNetworkType, OptimizerType]
 EvolvableNetworkDict = Dict[str, EvolvableNetworkType]
 EvolvableAttributeDict = Dict[str, EvolvableAttributeType]
@@ -100,8 +114,8 @@ class NetworkConfig(Protocol):
 
 @runtime_checkable
 class NetworkGroup(Protocol):
-    eval: EvolvableModule
-    shared: Optional[Union[EvolvableModule, List[EvolvableModule]]]
+    eval: EvolvableNetworkType
+    shared: Optional[Union[EvolvableNetworkType, List[EvolvableNetworkType]]]
     policy: bool
     multiagent: bool
 
