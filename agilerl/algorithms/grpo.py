@@ -79,10 +79,10 @@ class GRPO(LLMAlgorithm):
     :type accelerator: accelerate.Accelerator(), optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
-    :param clone: Flag to indicate if the instantiation is a cloning, defaults to False
-    :type clone: bool, optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
+    :param clone: Flag to indicate if the instantiation is a cloning, defaults to False
+    :type clone: bool, optional
     """
 
     def __init__(
@@ -355,6 +355,8 @@ class GRPO(LLMAlgorithm):
 
         :param base_model: Base model
         :type base_model: PreTrainedModel
+        :param add_adapters: Flag to indicate if adapters should be added to the model, defaults to True
+        :type add_adapters: bool, optional
         """
         if isinstance(base_model, PeftModel) and add_adapters:
             # Handles backwards compatibility with user providing a peft model as the actor network

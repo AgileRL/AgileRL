@@ -1341,8 +1341,8 @@ def clone_llm(
 ) -> PreTrainedModelType:
     """Clone the actor.
 
-    :param model: Model to clone
-    :type model: PreTrainedModelType
+    :param original_model: Model to clone
+    :type original_model: PreTrainedModelType
     :param state_dict: State dict to load, defaults to None
     :type state_dict: Optional[Dict[str, torch.Tensor]], optional
     :return: Cloned model
