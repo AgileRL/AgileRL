@@ -225,8 +225,7 @@ for displaying these behaviours, the agent itself discovers the best way to achi
 Now we have defined our reward functions, we must also design our prompt. This forms the input given
 to the agent and provides the context necessary to complete the task. This is a task-specific feature,
 and different reasoning problems will require different chat templates, although they can follow a similar
-format. We must also define a function to collate our questions and answers, and standardise their length.
-Combining all these components, we can now initialise the HuggingFaceGym object.
+format. Combining all these components, we can now initialise the HuggingFaceGym object.
 
 .. code-block:: python
 
@@ -238,7 +237,7 @@ Combining all these components, we can now initialise the HuggingFaceGym object.
             },
             {
                 "role": "user",
-                "content": f"Using each number in this tensor only once {tuple(i.item() for i in q)}, create an equation that equals {a.item()}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
+                "content": f"Using each number in this tensor only once {tuple(i for i in q)}, create an equation that equals {a}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
             },
             {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
         ]
@@ -254,22 +253,6 @@ Combining all these components, we can now initialise the HuggingFaceGym object.
         )
         return tokenized_prompt
 
-    def custom_collate_fn(batch):
-        # Extract answers and questions
-        answers = torch.tensor([item["answer"] for item in batch])
-
-        # For questions of variable length, we need to pad them
-        # First, find the maximum length
-        max_len = max(len(item["question"]) for item in batch)
-
-        # Create padded tensor
-        questions = torch.zeros(len(batch), max_len, dtype=torch.long)
-        for i, item in enumerate(batch):
-            q_len = len(item["question"])
-            questions[i, :q_len] = torch.tensor(item["question"])
-
-        return {"answer": answers, "question": questions}
-
 
     # Define accelerators for distributed training
     accelerator = Accelerator()
@@ -282,7 +265,6 @@ Combining all these components, we can now initialise the HuggingFaceGym object.
         reward_fn=combined_rewards,
         apply_chat_template_fn=countdown_chat_template,
         data_batch_size=8,
-        custom_collate_fn=custom_collate_fn,
         accelerator=accelerator,
     )
 
