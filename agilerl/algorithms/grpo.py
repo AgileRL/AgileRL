@@ -223,9 +223,7 @@ class GRPO(LLMAlgorithm):
 
     def get_action(
         self, states: List[Dict[str, torch.Tensor]], training: bool = True
-    ) -> Tuple[
-        Union[np.ndarray, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor
-    ]:
+    ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
         """Returns the next action to take in the environment.
 
         :param states: Environment observation, or multiple observations in a batch
