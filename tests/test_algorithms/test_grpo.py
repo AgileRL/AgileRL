@@ -17,7 +17,12 @@ from accelerate.state import AcceleratorState
 from accelerate.utils import DeepSpeedPlugin
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from deepspeed.runtime.engine import DeepSpeedEngine
-from peft import LoraConfig, get_peft_model
+from peft import (
+    LoraConfig,
+    PeftModelForCausalLM,
+    get_peft_model,
+    get_peft_model_state_dict,
+)
 from torch.optim.lr_scheduler import SequentialLR
 from transformers import GenerationConfig, PretrainedConfig, PreTrainedModel
 
@@ -225,6 +230,13 @@ def grpo(request, accelerator, monkeypatch):
             high=vocab_size - 1,
             shape=(20,),
         )
+        lora_config = LoraConfig(
+            r=16,
+            lora_alpha=64,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+        )
         grpo = GRPO(
             observation_space,
             action_space,
@@ -238,6 +250,7 @@ def grpo(request, accelerator, monkeypatch):
             pad_token_id=vocab_size - 1,
             device="cuda" if torch.cuda.is_available() else "cpu",
             group_size=group_size,
+            lora_config=lora_config,
             cosine_lr_schedule_config=CosineLRScheduleConfig(
                 num_epochs=10, warmup_proportion=0.05
             ),
@@ -285,11 +298,6 @@ def test_init_grpo_with_accelerator(
     assert isinstance(grpo.actor, DeepSpeedEngine)
     assert isinstance(grpo.optimizer, DeepSpeedOptimizerWrapper)
     assert isinstance(grpo.lr_scheduler, AcceleratedScheduler), grpo.lr_scheduler
-    assert not isinstance(grpo.reference_actor, DummyMLPPreTrainedModel)
-    for ref_param, param in zip(
-        grpo.reference_actor.parameters(), grpo.actor.parameters()
-    ):
-        assert torch.equal(ref_param, param)
     AcceleratorState._reset_state(True)
 
 
@@ -328,14 +336,9 @@ def test_init_grpo_with_no_accelerator(
     assert grpo.fitness == []
     assert grpo.steps == [0]
     assert isinstance(grpo.generation_config, GenerationConfig)
-    assert isinstance(grpo.actor, DummyMLPPreTrainedModel)
+    assert isinstance(grpo.actor, PeftModelForCausalLM)
     assert isinstance(grpo.optimizer, OptimizerWrapper)
     assert isinstance(grpo.lr_scheduler, SequentialLR), grpo.lr_scheduler
-    for ref_param, param in zip(
-        grpo.reference_actor.parameters(), grpo.actor.parameters()
-    ):
-        assert torch.equal(ref_param, param)
-    assert not grpo.reference_actor.gradient_checkpointing_enabled
     AcceleratorState._reset_state(True)
 
 
@@ -382,6 +385,13 @@ def test_init_grpo_zero3_warning(monkeypatch, accelerator, request):
             pad_token_id=vocab_size - 1,
             device="cuda" if torch.cuda.is_available() else "cpu",
             group_size=group_size,
+            lora_config=LoraConfig(
+                r=16,
+                lora_alpha=64,
+                target_modules=["linear_1"],
+                task_type="CAUSAL_LM",
+                lora_dropout=0.05,
+            ),
             cosine_lr_schedule_config=CosineLRScheduleConfig(
                 num_epochs=10, warmup_proportion=0.05
             ),
@@ -422,6 +432,13 @@ def test_init_grpo_max_grad_norm_warning(monkeypatch, accelerator, request):
             high=vocab_size - 1,
             shape=(20,),
         )
+        lora_config = LoraConfig(
+            r=16,
+            lora_alpha=64,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+        )
         GRPO(
             observation_space,
             action_space,
@@ -435,6 +452,7 @@ def test_init_grpo_max_grad_norm_warning(monkeypatch, accelerator, request):
             pad_token_id=vocab_size - 1,
             device="cuda" if torch.cuda.is_available() else "cpu",
             group_size=group_size,
+            lora_config=lora_config,
             cosine_lr_schedule_config=CosineLRScheduleConfig(
                 num_epochs=10, warmup_proportion=0.05
             ),
@@ -652,25 +670,30 @@ def test_grpo_learn(grpo, accelerator, request, batch_size):
         dim=0,
     )
 
-    pre_learn_actor_state_dict = copy.deepcopy(grpo.actor.state_dict())
-    pre_learn_reference_actor_state_dict = copy.deepcopy(
-        grpo.reference_actor.state_dict()
+    pre_learn_actor_adapter_state_dict = copy.deepcopy(
+        get_peft_model_state_dict(grpo.actor, adapter_name="actor")
     )
-
+    pre_learn_actor_state_dict = copy.deepcopy(grpo.actor.state_dict())
     mean_loss, mean_kl = grpo.learn((completions, action_masks, rewards))
     assert isinstance(mean_loss, float)
     assert isinstance(mean_kl, float)
 
     # Check that the actor network is updated and the reference actor is not
     for param, pre_learn_param in zip(
-        grpo.actor.state_dict().values(), pre_learn_actor_state_dict.values()
+        get_peft_model_state_dict(grpo.actor, adapter_name="actor").values(),
+        pre_learn_actor_adapter_state_dict.values(),
     ):
         assert not torch.equal(param, pre_learn_param)
-    for param, pre_learn_param in zip(
-        grpo.reference_actor.state_dict().values(),
-        pre_learn_reference_actor_state_dict.values(),
+
+    for param_name, pre_param_name in zip(
+        grpo.actor.state_dict().keys(),
+        pre_learn_actor_state_dict.keys(),
     ):
-        assert torch.equal(param, pre_learn_param)
+        if "lora" not in param_name.lower():
+            assert torch.equal(
+                grpo.actor.state_dict()[param_name],
+                pre_learn_actor_state_dict[pre_param_name],
+            )
     AcceleratorState._reset_state(True)
 
 
@@ -886,6 +909,13 @@ def test_grpo_save_load_checkpoint(grpo, accelerator, request, tmpdir):
         pad_token_id=vocab_size - 1,
         device="cuda" if torch.cuda.is_available() else "cpu",
         group_size=group_size,
+        lora_config=LoraConfig(
+            r=16,
+            lora_alpha=64,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+        ),
         cosine_lr_schedule_config=CosineLRScheduleConfig(
             num_epochs=10, warmup_proportion=0.05
         ),
@@ -942,14 +972,14 @@ def test_grpo_clone_with_accelerator(grpo, accelerator, request, tmpdir):
     grpo_optimizer = grpo.optimizer
     grpo.fitness = [1, 2, 3]
     new_grpo = grpo.clone(index=1)
-    for param, pre_learn_param in zip(
-        new_grpo.actor.parameters(), grpo.actor.parameters()
+
+    # Check that the actor network is updated and the reference actor is not
+    for cloned_param, param in zip(
+        new_grpo.actor.state_dict().values(),
+        grpo.actor.state_dict().values(),
     ):
-        assert torch.equal(param, pre_learn_param)
-    for param, pre_learn_param in zip(
-        new_grpo.reference_actor.parameters(), grpo.reference_actor.parameters()
-    ):
-        assert torch.equal(param, pre_learn_param)
+        assert torch.equal(cloned_param, param)
+
     assert new_grpo.index == 1
     if grpo.accelerator is not None:
         assert new_grpo.accelerator != grpo_accelerator
@@ -1090,44 +1120,8 @@ def test_clone_llm_peft(vocab_size, input_size, max_tokens):
 )
 @pytest.mark.parametrize("batch_size", [8])
 def test_grpo_clean_up(grpo, accelerator, request, batch_size):
-    # # @pytest.mark
-    # @pytest.mark.parametrize("vocab_size", [1000])
-    # @pytest.mark.parametrize("input_size", [10])
-    # @pytest.mark.parametrize("max_tokens", [20])
-    # @pytest.mark.parametrize("group_size", [5])
-    # @pytest.mark.parametrize("batch_size", [8])
-    # def test_grpo_clean_up(
-    #     vocab_size, input_size, max_tokens, group_size, batch_size, tmpdir
-    # ):
-    #     observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
-    #     action_space = gym.spaces.Box(
-    #         low=0,
-    #         high=vocab_size - 1,
-    #         shape=(20,),
-    #     )
-    #     grpo = GRPO(
-    #         observation_space,
-    #         action_space,
-    #         actor_network=create_module(
-    #             input_size=input_size,
-    #             max_tokens=max_tokens,
-    #             vocab_size=vocab_size,
-    #             device="cuda" if torch.cuda.is_available() else "cpu",
-    #         ),
-    #         pad_token_id=vocab_size - 1,
-    #         device="cuda" if torch.cuda.is_available() else "cpu",
-    #         group_size=group_size,
-    #         cosine_lr_schedule_config=CosineLRScheduleConfig(
-    #             num_epochs=10, warmup_proportion=0.05
-    #         ),
-    #         accelerator=None,
-    #     )
-    #     mock_accelerator = MagicMock(spec=Accelerator)
-    #     mock_accelerator.free_memory = lambda *args: (None,) * len(args)
-    #     grpo.accelerator = mock_accelerator
     grpo.clean_up()
     assert grpo.actor is None
-    assert grpo.reference_actor is None
     assert grpo.optimizer is None
     assert grpo.lr_scheduler is None
     del grpo
@@ -1176,3 +1170,168 @@ def test_load_distributed_actor_warning(grpo, accelerator, request, batch_size):
     del grpo
     gc.collect()
     torch.cuda.empty_cache()
+
+
+@pytest.mark.parametrize(
+    "accelerator",
+    [
+        {"config": None},
+    ],
+    indirect=["accelerator"],
+)
+def test_init_grpo_lora_config_warning(monkeypatch, accelerator, request):
+    with pytest.warns(UserWarning), mock.patch.dict(os.environ, clear=True):
+        env_vars = {
+            "ACCELERATE_USE_DEEPSPEED": "true",
+            "MASTER_ADDR": "localhost",
+            "MASTER_PORT": "10999",
+            "RANK": "0",
+            "LOCAL_RANK": "0",
+            "WORLD_SIZE": "1",
+        }
+        for key, value in env_vars.items():
+            monkeypatch.setenv(key, value)
+        gc.collect()
+        vocab_size = 1000
+        input_size = 10
+        max_tokens = 20
+        group_size = 5
+        observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
+        action_space = gym.spaces.Box(
+            low=0,
+            high=vocab_size - 1,
+            shape=(20,),
+        )
+        with pytest.raises(ValueError):
+            GRPO(
+                observation_space,
+                action_space,
+                actor_network=create_module(
+                    input_size=input_size,
+                    max_tokens=max_tokens,
+                    vocab_size=vocab_size,
+                    device="cuda" if torch.cuda.is_available() else "cpu",
+                ),
+                lr=0.1,
+                pad_token_id=vocab_size - 1,
+                device="cuda" if torch.cuda.is_available() else "cpu",
+                group_size=group_size,
+                cosine_lr_schedule_config=CosineLRScheduleConfig(
+                    num_epochs=10, warmup_proportion=0.05
+                ),
+                accelerator=accelerator,
+            )
+        gc.collect()
+        torch.cuda.empty_cache()
+    AcceleratorState._reset_state(True)
+
+
+@pytest.mark.parametrize(
+    "accelerator",
+    [
+        {"config": None},
+    ],
+    indirect=["accelerator"],
+)
+def test_init_grpo_multiple_adapters(monkeypatch, accelerator, request):
+    """Test GRPO initialization with a PEFT model containing multiple adapters."""
+    with pytest.warns(
+        UserWarning, match="AgileRL RL finetuning is only compatible with one adapter."
+    ), mock.patch.dict(os.environ, clear=True):
+        # Set up environment variables
+        env_vars = {
+            "ACCELERATE_USE_DEEPSPEED": "true",
+            "MASTER_ADDR": "localhost",
+            "MASTER_PORT": "10999",
+            "RANK": "0",
+            "LOCAL_RANK": "0",
+            "WORLD_SIZE": "1",
+        }
+        for key, value in env_vars.items():
+            monkeypatch.setenv(key, value)
+
+        # Clean up GPU memory
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        # Set up test parameters
+        vocab_size = 1000
+        input_size = 10
+        max_tokens = 20
+        group_size = 5
+
+        # Create spaces
+        observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
+        action_space = gym.spaces.Box(
+            low=0,
+            high=vocab_size - 1,
+            shape=(20,),
+        )
+
+        # Create base model
+        base_model = create_module(
+            input_size=input_size,
+            max_tokens=max_tokens,
+            vocab_size=vocab_size,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+        )
+
+        # Create first adapter
+        lora_config_1 = LoraConfig(
+            r=16,
+            lora_alpha=64,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+        )
+        peft_model = get_peft_model(base_model, lora_config_1, adapter_name="adapter1")
+
+        # Add second adapter
+        lora_config_2 = LoraConfig(
+            r=8,
+            lora_alpha=32,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+        )
+        peft_model.add_adapter(adapter_name="adapter2", peft_config=lora_config_2)
+
+        # Initialize GRPO with the multi-adapter model
+        grpo = GRPO(
+            observation_space,
+            action_space,
+            actor_network=peft_model,
+            lr=0.1,
+            pad_token_id=vocab_size - 1,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            group_size=group_size,
+            cosine_lr_schedule_config=CosineLRScheduleConfig(
+                num_epochs=10, warmup_proportion=0.05
+            ),
+            accelerator=accelerator,
+            clone=False,
+        )
+
+        # Verify that only the first adapter is used
+        assert len(grpo.actor.peft_config) == 1
+        assert "actor" in grpo.actor.peft_config
+        assert (
+            grpo.actor.peft_config["actor"].r == lora_config_1.r
+        )  # Check that first adapter's config is used
+
+        # Test that the model still functions
+        test_input = torch.randint(0, vocab_size - 1, (1, input_size))
+        test_attention_mask = torch.ones_like(test_input)
+        test_state = {"input_ids": test_input, "attention_mask": test_attention_mask}
+
+        # Test get_action
+        completion_ids, action_masks = grpo.get_action([test_state], training=True)
+        assert isinstance(completion_ids, list)
+        assert isinstance(action_masks, list)
+        assert len(completion_ids) == 1
+        assert len(action_masks) == 1
+
+        # Clean up
+        gc.collect()
+        torch.cuda.empty_cache()
+        AcceleratorState._reset_state(True)
