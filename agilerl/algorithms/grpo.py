@@ -213,7 +213,9 @@ class GRPO(LLMAlgorithm):
         else:
             self.max_grad_norm = max_grad_norm
         self.reduce_memory_peak = reduce_memory_peak
-        self.local_rank = device.split(":")[-1]
+        self.local_rank = (
+            "0" if self.accelerator is None else self.accelerator.local_process_index
+        )
         self._initialize_actors(actor_network, not clone)
 
         # Register network groups for mutations
