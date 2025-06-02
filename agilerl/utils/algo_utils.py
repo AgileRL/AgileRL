@@ -41,6 +41,7 @@ from agilerl.typing import (
     ObservationType,
     OptimizerType,
     SupportedObsSpaces,
+    MultiAgentModule,
     TorchObsType,
 )
 
@@ -287,7 +288,7 @@ def module_checkpoint_single(module: EvolvableModule, name: str) -> Dict[str, An
     }
 
 
-def module_checkpoint_multiagent(module: ModuleDict, name: str) -> Dict[str, Any]:
+def module_checkpoint_multiagent(module: MultiAgentModule, name: str) -> Dict[str, Any]:
     """Returns a dictionary containing the module's class, init dict, and state dict.
 
     :param module: The module to checkpoint.
@@ -297,16 +298,23 @@ def module_checkpoint_multiagent(module: ModuleDict, name: str) -> Dict[str, Any
     :return: A dictionary containing the module's class, init dict, and state dict.
     :rtype: Dict[str, Any]
     """
-    module_cls = {agent_id: m.__class__ for agent_id, m in module.items()}
-    init_dict = {agent_id: m.init_dict for agent_id, m in module.items()}
-    state_dict = {
-        agent_id: remove_compile_prefix(m.state_dict())
-        for agent_id, m in module.items()
-    }
+    agent_module_cls = OrderedDict()
+    agent_init_dicts = OrderedDict()
+    agent_state_dicts = OrderedDict()
+    for agent_id, agent_mod in module.items():
+        agent_mod_cls = (
+            agent_mod._orig_mod.__class__
+            if isinstance(agent_mod, OptimizedModule)
+            else agent_mod.__class__
+        )
+        agent_module_cls[agent_id] = agent_mod_cls
+        agent_init_dicts[agent_id] = agent_mod.init_dict
+        agent_state_dicts[agent_id] = remove_compile_prefix(agent_mod.state_dict())
+
     return {
-        f"{name}_cls": module_cls,
-        f"{name}_init_dict": init_dict,
-        f"{name}_state_dict": state_dict,
+        f"{name}_cls": agent_module_cls,
+        f"{name}_init_dict": agent_init_dicts,
+        f"{name}_state_dict": agent_state_dicts,
         f"{name}_module_dict_cls": module.__class__,
     }
 

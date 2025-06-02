@@ -20,7 +20,7 @@ from agilerl.algorithms.core import (
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.algorithms.neural_ts_bandit import NeuralTS
 from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
-from agilerl.modules.base import EvolvableModule
+from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.protocols import OptimizerConfig
 from agilerl.utils.algo_utils import remove_compile_prefix
 
@@ -31,7 +31,7 @@ MutationMethod = Callable[[SelfEvolvableAlgorithm], SelfEvolvableAlgorithm]
 AlgoConfig = Dict[str, Union[NetworkConfig, NetworkList]]
 PopulationType = Iterable[SelfEvolvableAlgorithm]
 ModuleType = Union[OptimizedModule, EvolvableModule]
-OffspringType = Union[List[EvolvableModule], EvolvableModule]
+OffspringType = Union[ModuleDict, EvolvableModule]
 MutationReturnType = Union[Dict[str, Any], List[Dict[str, Any]]]
 BanditAlgorithm = Union[NeuralUCB, NeuralTS]
 
@@ -60,8 +60,8 @@ def get_offspring_eval_modules(
     :param individual: The individual to inspect
     :type individual: EvolvableAlgorithm
 
-    :return: The offspring evaluation modules
-    :rtype: Dict[str, OffspringType]
+    :return: Tuple of offspring policy and the rest of the evaluation modules
+    :rtype: Tuple[Dict[str, OffspringType], Dict[str, OffspringType]]
     """
     registry = individual.registry
 
@@ -72,7 +72,6 @@ def get_offspring_eval_modules(
 
         # Clone the offspring prior to applying mutations
         offspring = eval_module.clone()
-
         if group.policy:
             offspring_policy[group.eval] = offspring
         else:

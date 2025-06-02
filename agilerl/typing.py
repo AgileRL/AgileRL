@@ -14,7 +14,12 @@ from torch._dynamo import OptimizedModule
 from torch.nn import Module
 from torch.optim import Optimizer
 
-from agilerl.protocols import EvolvableAlgorithm, EvolvableModule, EvolvableNetwork
+from agilerl.protocols import (
+    EvolvableAlgorithm,
+    EvolvableModule,
+    EvolvableNetwork,
+    ModuleDict,
+)
 
 # Type variable for module types - bound to Module to ensure all types inherit from it
 T = TypeVar("T", bound=Union[Module, OptimizedModule])
@@ -83,7 +88,7 @@ PzStepReturn = Tuple[
 ]
 
 SingleAgentModule = Union[T, EvolvableModule, OptimizedModule, EvolvableNetwork]
-MultiAgentModule = Dict[str, SingleAgentModule[T]]
+MultiAgentModule = ModuleDict[SingleAgentModule[T]]
 NetworkType = Union[SingleAgentModule[T], MultiAgentModule[T]]
 PopulationType = List[EvolvableAlgorithm]
 DeviceType = Union[str, torch.device]

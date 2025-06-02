@@ -280,8 +280,9 @@ def test_initialize_matd3_with_net_config(
     assert matd3.policy_freq == policy_freq
     assert matd3.n_agents == len(agent_ids)
     assert matd3.agent_ids == agent_ids
-    for noise_vec in matd3.expl_noise:
+    for noise_vec in matd3.expl_noise.values():
         assert torch.all(noise_vec == expl_noise)
+
     assert matd3.batch_size == batch_size
     assert matd3.scores == []
     assert matd3.fitness == []
@@ -570,7 +571,7 @@ def test_initialize_matd3_with_evo_networks(
             for idx, agent_id in enumerate(agent_ids)
         }
     )
-    evo_critics = ModuleDict(
+    evo_critics_1 = ModuleDict(
         {
             agent_id: ContinuousQNetwork(
                 observation_space=observation_space,
@@ -580,6 +581,17 @@ def test_initialize_matd3_with_evo_networks(
             for agent_id in agent_ids
         }
     )
+    evo_critics_2 = ModuleDict(
+        {
+            agent_id: ContinuousQNetwork(
+                observation_space=observation_space,
+                action_space=concatenate_spaces(action_spaces),
+                device=device,
+            )
+            for agent_id in agent_ids
+        }
+    )
+    evo_critics = [evo_critics_1, evo_critics_2]
     matd3 = MATD3(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
@@ -658,7 +670,7 @@ def test_initialize_matd3_with_incorrect_evo_networks(compile_mode):
 def test_matd3_init_warning(
     mlp_actor, device, compile_mode, observation_spaces, action_spaces
 ):
-    warning_string = "Actor and critic network ModuleDicts must both be supplied to use custom networks. Defaulting to net config."
+    warning_string = "Actor and critic network must both be supplied to use custom networks. Defaulting to net config."
     agent_ids = ["agent_0", "other_agent_0"]
     evo_actors = ModuleDict(
         {
@@ -885,7 +897,7 @@ def test_matd3_get_action_distributed(
         generate_multi_agent_discrete_spaces(2, 2),
     ],
 )
-@pytest.mark.parametrize("training", [0, 1])
+@pytest.mark.parametrize("training", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_matd3_get_action_agent_masking(
     training, observation_spaces, action_spaces, device, compile_mode
@@ -914,10 +926,10 @@ def test_matd3_get_action_agent_masking(
         device=device,
         torch_compiler=compile_mode,
     )
-    matd3.set_training_mode(bool(training))
+    matd3.set_training_mode(training)
     action, _ = matd3.get_action(state, infos=info)
     if discrete_actions:
-        assert np.array_equal(action["agent_0"], np.array([[1]])), action["agent_0"]
+        assert np.array_equal(action["agent_0"], np.array([1])), action["agent_0"]
     else:
         assert np.array_equal(action["agent_0"], np.array([[0, 1]])), action["agent_0"]
 
@@ -932,7 +944,7 @@ def test_matd3_get_action_agent_masking(
         generate_multi_agent_discrete_spaces(2, 6),
     ],
 )
-@pytest.mark.parametrize("training", [0, 1])
+@pytest.mark.parametrize("training", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_matd3_get_action_vectorized_agent_masking(
     training, observation_spaces, action_spaces, device, compile_mode
@@ -972,7 +984,7 @@ def test_matd3_get_action_vectorized_agent_masking(
         device=device,
         torch_compiler=compile_mode,
     )
-    matd3.set_training_mode(bool(training))
+    matd3.set_training_mode(training)
     action, _ = matd3.get_action(state, infos=info)
     if discrete_actions:
         assert np.array_equal(
@@ -984,7 +996,7 @@ def test_matd3_get_action_vectorized_agent_masking(
         ).all(), action["agent_0"]
 
 
-@pytest.mark.parametrize("training", [0, 1])
+@pytest.mark.parametrize("training", [False, True])
 @pytest.mark.parametrize(
     "observation_spaces, action_spaces",
     [
@@ -1010,11 +1022,11 @@ def test_matd3_get_action_action_masking_exception(
         device=device,
     )
     with pytest.raises(AssertionError):
-        matd3.set_training_mode(bool(training))
+        matd3.set_training_mode(training)
         _, raw_action = matd3.get_action(state)
 
 
-@pytest.mark.parametrize("training", [0, 1])
+@pytest.mark.parametrize("training", [False, True])
 def test_matd3_get_action_action_masking(training, device):
     observation_spaces = generate_multi_agent_box_spaces(2, (6,))
     action_spaces = generate_multi_agent_discrete_spaces(2, 4)
@@ -1035,7 +1047,7 @@ def test_matd3_get_action_action_masking(training, device):
         agent_ids=agent_ids,
         device=device,
     )
-    matd3.set_training_mode(bool(training))
+    matd3.set_training_mode(training)
     action, _ = matd3.get_action(state, info)
     assert all(i in [1, 3] for i in action.values())
 

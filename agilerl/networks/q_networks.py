@@ -40,7 +40,7 @@ class QNetwork(EvolvableNetwork):
     :param simba: If True, use a SimBa network for the encoder for vector spaces. Defaults to False.
     :type simba: bool
     :param recurrent: If True, use a recurrent network. Defaults to False. If False and the observation
-    space is a 2D Box space, an `EvolvableMLP` is used as an encoder whereby observations are flattened.
+        space is a 2D Box space, an `EvolvableMLP` is used as an encoder whereby observations are flattened.
     Otherwise, an `EvolvableLSTM` is used as an encoder.
     :type recurrent: bool
     :param device: Device to use for the network.

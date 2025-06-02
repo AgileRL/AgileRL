@@ -150,11 +150,6 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     :type min_latent_dim: int
     :param max_latent_dim: Maximum dimension of the latent space representation. Defaults to 128.
     :type max_latent_dim: int
-    :param n_agents: Number of agents in the environment. Defaults to None, which corresponds to
-        single-agent environments.
-    :type n_agents: Optional[int]
-    :param encoder_mutations: If True, allow mutations to the encoder. Defaults to False.
-    :type encoder_mutations: bool
     :param latent_dim: Dimension of the latent space representation. Defaults to 32.
     :type latent_dim: int
     :param simba: If True, use a SimBa network for the encoder for vector spaces. Defaults to False.

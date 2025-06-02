@@ -270,6 +270,9 @@ class NetworkGroup:
             shared = self.shared if isinstance(self.shared, list) else [self.shared]
             self.shared = self._infer_attribute_names(container, shared)
 
+    def __hash__(self) -> int:
+        return hash((self.eval, self.shared, self.policy))
+
     def _infer_parent_container(self) -> EvolvableAlgorithm:
         """
         Infer the parent container dynamically using the stack frame.

@@ -162,7 +162,7 @@ class MATD3(MultiAgentRLAlgorithm):
         assert policy_freq > 0, "Policy frequency must be greater than zero."
         if (actor_networks is not None) != (critic_networks is not None):
             warnings.warn(
-                "Actor and critic network ModuleDicts must both be supplied to use custom networks. Defaulting to net config."
+                "Actor and critic network must both be supplied to use custom networks. Defaulting to net config."
             )
         assert isinstance(
             wrap, bool
@@ -213,6 +213,24 @@ class MATD3(MultiAgentRLAlgorithm):
         }
 
         if actor_networks is not None and critic_networks is not None:
+            assert isinstance(critic_networks, list), "critic_networks must be a list containing the two critics in MATD3."
+
+            if isinstance(actor_networks, list):
+                assert len(actor_networks) == len(self.agent_ids), "actor_networks must be a list of the same length as the number of agents"
+                actor_networks = ModuleDict(
+                    {self.agent_ids[i]: actor_networks[i] for i in range(len(self.agent_ids))}
+                )
+            if isinstance(critic_networks[0], list):
+                assert len(critic_networks[0]) == len(self.agent_ids), "critic_networks at index 0 must be a list of the same length as the number of agents"
+                assert len(critic_networks[1]) == len(self.agent_ids), "critic_networks at index 1 must be a list of the same length as the number of agents"
+
+                critic_networks[0] = ModuleDict(
+                    {self.agent_ids[i]: critic_networks[0][i] for i in range(len(self.agent_ids))}
+                )
+                critic_networks[1] = ModuleDict(
+                    {self.agent_ids[i]: critic_networks[1][i] for i in range(len(self.agent_ids))}
+                )
+
             actors_list = list(actor_networks.values())
             critics_list = list(critic_networks[0].values()) + list(
                 critic_networks[1].values()
@@ -448,6 +466,7 @@ class MATD3(MultiAgentRLAlgorithm):
                 with torch.no_grad():
                     actions = actor(obs)
 
+            # Need to rescale actions outside of forward pass if using torch.compile
             if self.torch_compiler is not None and isinstance(
                 self.action_space[agent_id], spaces.Box
             ):

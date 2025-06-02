@@ -161,9 +161,9 @@ class MADDPG(MultiAgentRLAlgorithm):
         ), "Wrap models flag must be boolean value True or False."
         if (actor_networks is not None) != (critic_networks is not None):
             warnings.warn(
-                "Actor and critic network ModuleDicts must both be supplied to use custom networks. Defaulting to net config."
+                "Actor and critic network must both be supplied to use custom networks. Defaulting to net config."
             )
-
+        
         self.batch_size = batch_size
         self.lr_actor = lr_actor
         self.lr_critic = lr_critic
@@ -208,6 +208,18 @@ class MADDPG(MultiAgentRLAlgorithm):
         }
 
         if actor_networks is not None and critic_networks is not None:
+            if isinstance(actor_networks, list):
+                assert len(actor_networks) == len(self.agent_ids), "actor_networks must be a list of the same length as the number of agents"
+                actor_networks = ModuleDict(
+                    {self.agent_ids[i]: actor_networks[i] for i in range(len(self.agent_ids))}
+                )
+            if isinstance(critic_networks, list):
+                assert len(critic_networks) == len(self.agent_ids), "critic_networks must be a list of the same length as the number of agents"
+
+                critic_networks = ModuleDict(
+                    {self.agent_ids[i]: critic_networks[i] for i in range(len(self.agent_ids))}
+                )
+
             actors_list = list(actor_networks.values())
             critics_list = list(critic_networks.values())
 
@@ -300,14 +312,13 @@ class MADDPG(MultiAgentRLAlgorithm):
             )
 
         # Initialise target network parameters
-        for actor, actor_target in zip(
-            self.actors.values(), self.actor_targets.values()
-        ):
-            actor_target.load_state_dict(actor.state_dict())
-        for critic, critic_target in zip(
-            self.critics.values(), self.critic_targets.values()
-        ):
-            critic_target.load_state_dict(critic.state_dict())
+        for agent_id in self.agent_ids:
+            self.actor_targets[agent_id].load_state_dict(
+                self.actors[agent_id].state_dict()
+            )
+            self.critic_targets[agent_id].load_state_dict(
+                self.critics[agent_id].state_dict()
+            )
 
         # Optimizers
         self.actor_optimizers = OptimizerWrapper(
@@ -405,6 +416,7 @@ class MADDPG(MultiAgentRLAlgorithm):
                 with torch.no_grad():
                     actions = actor(obs)
 
+            # Need to rescale actions outside of forward pass if using torch.compile
             if self.torch_compiler is not None and isinstance(
                 self.action_space[agent_id], spaces.Box
             ):

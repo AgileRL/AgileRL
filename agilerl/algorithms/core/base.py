@@ -1332,11 +1332,11 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         agent_masks = None
         if env_defined_actions is not None:
             agent_masks = {}
-            for idx, agent in enumerate(env_defined_actions.keys()):
+            for agent in env_defined_actions.keys():
                 # Handle None if environment isn't vectorized
                 if env_defined_actions[agent] is None:
                     if not isinstance(self.action_space[agent], spaces.Discrete):
-                        nan_arr = np.empty(self.action_dims[idx])
+                        nan_arr = np.empty(self.action_dims[agent])
                         nan_arr[:] = np.nan
                     else:
                         nan_arr = np.array([[np.nan]])

@@ -666,7 +666,7 @@ def test_initialize_maddpg_with_incorrect_evo_networks(compile_mode):
 def test_maddpg_init_warning(
     mlp_actor, device, compile_mode, observation_spaces, action_spaces
 ):
-    warning_string = "Actor and critic network lists must both be supplied to use custom networks. Defaulting to net config."
+    warning_string = "Actor and critic network must both be supplied to use custom networks. Defaulting to net config."
     evo_actors = [
         MakeEvolvable(network=mlp_actor, input_tensor=torch.randn(1, 6), device=device)
         for _ in range(2)
@@ -1375,7 +1375,12 @@ def test_clone_after_learning(compile_mode):
     assert clone_agent.action_spaces == maddpg.action_spaces
     assert clone_agent.n_agents == maddpg.n_agents
     assert clone_agent.agent_ids == maddpg.agent_ids
-    assert np.array_equal(clone_agent.expl_noise.values(), maddpg.expl_noise.values())
+    assert all(
+        torch.equal(clone_expl_noise, expl_noise)
+        for clone_expl_noise, expl_noise in zip(
+            clone_agent.expl_noise.values(), maddpg.expl_noise.values()
+        )
+    )
     assert clone_agent.index == maddpg.index
     assert clone_agent.batch_size == maddpg.batch_size
     assert clone_agent.lr_actor == maddpg.lr_actor
