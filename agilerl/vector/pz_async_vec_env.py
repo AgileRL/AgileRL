@@ -937,6 +937,14 @@ def _async_worker(
                 )
                 pipe.send((info, True))
             elif command == "step":
+                data = {
+                    active_agent: (
+                        np.array(data[active_agent]).squeeze()
+                        if not isinstance(data[active_agent], int)
+                        else data[active_agent]
+                    )
+                    for active_agent in data
+                }
                 observation, reward, terminated, truncated, info = env.step(data)
                 if all(
                     [

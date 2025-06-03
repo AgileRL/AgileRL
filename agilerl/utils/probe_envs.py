@@ -945,9 +945,9 @@ def check_policy_q_learning_with_probe_env(
     state, _ = env.reset()
     for _ in range(5000):
         action = (
-            (agent.max_action - agent.min_action)
+            (agent.action_space.high - agent.action_space.low)
             * np.random.rand(1, agent.action_dim).astype("float32")
-        ) + agent.min_action
+        ) + agent.action_space.low
         action = action[0]
         next_state, reward, done, _, _ = env.step(action)
         transition = Transition(

@@ -546,7 +546,10 @@ def test_env_order_preserved():
     env.reset()
     for obs_view in env.observations.obs_view.values():
         obs_view[:] = 0
-    actions = [0, 1]
+    actions = {
+        agent_id: env.single_action_space(agent_id).sample()
+        for agent_id in env.possible_agents
+    }
     rand_env = np.random.randint(0, 16)
     env.parent_pipes[rand_env].send(("step", actions))
     env.parent_pipes[rand_env].recv()
@@ -921,9 +924,10 @@ def test_worker_step_simple():
     vec_env = AsyncPettingZooVecEnv(env_fns)
     vec_env.reset()
 
-    actions = {agent: vec_env.action_space(agent).sample() for agent in vec_env.agents}
+    actions = {
+        agent: vec_env.single_action_space(agent).sample() for agent in vec_env.agents
+    }
     vec_env.close()
-    actions = actions_to_list_helper(actions)
     parent_pipe, child_pipe = mp.Pipe()
     queue = mp.Queue()
     p = Process(
@@ -945,7 +949,7 @@ def test_worker_step_simple():
     parent_pipe.recv()
     time.sleep(1)
 
-    parent_pipe.send(("step", actions[0]))
+    parent_pipe.send(("step", actions))
     results, success = parent_pipe.recv()
     assert success
     for dic in results:
@@ -986,7 +990,6 @@ def test_worker_step_autoreset():
         for agent in vec_env.agents
     }
     vec_env.close()
-    actions = actions_to_list_helper(actions)
     parent_pipe, child_pipe = mp.Pipe()
     queue = mp.Queue()
     p = Process(
@@ -1007,14 +1010,14 @@ def test_worker_step_autoreset():
     parent_pipe.send(("reset", {}))
     parent_pipe.recv()
     time.sleep(1)
-    parent_pipe.send(("step", actions[0]))
+    parent_pipe.send(("step", actions))
     results, success = parent_pipe.recv()
     assert success
     for dic in results:
         assert list(sorted(dic.keys())) == sorted(vec_env.agents)
 
     # Send step again and autoreset should be True
-    parent_pipe.send(("step", actions[0]))
+    parent_pipe.send(("step", actions))
     parent_pipe.recv()
     parent_pipe.close()
     p.terminate()

@@ -1658,23 +1658,22 @@ class MultiPolicyImageEnv:
         return self.last_obs, info
 
 
-def prepare_ma_states(states, one_hot, state_dims, device="cpu"):
-    if one_hot:
-        states = {
-            agent_id: nn.functional.one_hot(
-                torch.Tensor(state).long(), num_classes=state_dim[0]
+def prepare_ma_states(states, observation_space, device="cpu"):
+    processed_states = {}
+    for agent_id, state in states.items():
+        agent_space = observation_space[agent_id]
+        if isinstance(agent_space, spaces.Discrete):
+            processed_states[agent_id] = (
+                nn.functional.one_hot(
+                    torch.Tensor(state).long(), num_classes=agent_space.n
+                )
+                .float()
+                .squeeze(1)
+                .to(device)
             )
-            .float()
-            .squeeze(1)
-            .to(device)
-            for (agent_id, state), state_dim in zip(states.items(), state_dims)
-        }
-    else:
-        states = {
-            agent_id: torch.Tensor(state).to(device)
-            for (agent_id, state) in states.items()
-        }
-    return states
+        else:
+            processed_states[agent_id] = torch.Tensor(state).to(device)
+    return processed_states
 
 
 def prepare_ma_actions(actions, device="cpu"):
@@ -1693,10 +1692,11 @@ def check_policy_q_learning_with_probe_env(
     agent = algo_class(**algo_args, vect_noise_dim=1, device=device)
 
     state, _ = env.reset()
+    agent.set_training_mode(True)
     for _ in range(10000):
         # Make vectorized
         state = {agent_id: np.expand_dims(s, 0) for agent_id, s in state.items()}
-        action, _ = agent.get_action(state, training=True)
+        action, _ = agent.get_action(state)
         next_state, reward, done, _, _ = env.step(action)
         reward = {
             agent_id: np.expand_dims(np.array(r), 0) for agent_id, r in reward.items()
@@ -1721,33 +1721,21 @@ def check_policy_q_learning_with_probe_env(
         # Learn according to agent's RL algorithm
         agent.learn(experiences)
 
+    agent.set_training_mode(False)
     with torch.no_grad():
-        for agent_id, actor, critic in zip(
-            agent.agent_ids, agent.actors, agent.critics
-        ):
+        for agent_id in agent.agent_ids:
+            actor = agent.actors[agent_id]
+            critic = agent.critics[agent_id]
             for sample_obs, sample_action, q_values, policy_values in zip(
                 env.sample_obs, env.sample_actions, env.q_values, env.policy_values
             ):
-                state = prepare_ma_states(
-                    sample_obs, agent.one_hot, agent.state_dims, device
-                )
+
+                state = prepare_ma_states(sample_obs, agent.observation_space, device)
 
                 if q_values is not None:
                     action = prepare_ma_actions(sample_action, device)
 
-                    # Stack states and actions
-                    if agent.is_image_space:
-                        stacked_states = torch.stack(list(state.values()), dim=2)
-                    else:
-                        stacked_states = torch.cat(list(state.values()), dim=1)
-
-                    stacked_actions = torch.cat(list(action.values()), dim=1)
-                    predicted_q_values = (
-                        critic(stacked_states, stacked_actions)
-                        .detach()
-                        .cpu()
-                        .numpy()[0]
-                    )
+                    predicted_q_values = critic(state, action).detach().cpu().numpy()[0]
                     # print("---")
                     # print(agent_id, "q", q_values[agent_id], predicted_q_values)
                     # assert np.allclose(q_values[agent_id], predicted_q_values, atol=0.1):
@@ -1851,9 +1839,7 @@ def check_on_policy_learning_with_probe_env(
             for sample_obs, v_values, policy_values in zip(
                 env.sample_obs, env.v_values, env.policy_values
             ):
-                state = prepare_ma_states(
-                    sample_obs, agent.one_hot, agent.state_dims, device
-                )
+                state = prepare_ma_states(sample_obs, agent.observation_space, device)
 
                 if v_values is not None:
                     predicted_v_values = (

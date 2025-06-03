@@ -163,7 +163,6 @@ def test_initialize_td3(observation_space, encoder_cls, accelerator):
     expected_device = accelerator.device if accelerator else "cpu"
     assert td3.observation_space == observation_space
     assert td3.action_space == action_space
-    assert np.all(td3.max_action == 1)
     assert td3.batch_size == 64
     assert td3.lr_actor == 0.0001
     assert td3.lr_critic == 0.001
@@ -214,7 +213,6 @@ def test_initialize_td3_with_actor_network(
     request,
 ):
     action_space = generate_random_box_space(shape=(2,), low=0, high=1)
-    max_action = 1
     actor_network = request.getfixturevalue(actor_network)
     actor_network = MakeEvolvable(actor_network, input_tensor)
     critic_1_network = request.getfixturevalue(critic_1_network)
@@ -225,7 +223,6 @@ def test_initialize_td3_with_actor_network(
     td3 = TD3(
         observation_space,
         action_space,
-        max_action,
         expl_noise=np.zeros((1, action_space.shape[0])),
         actor_network=actor_network,
         critic_networks=[critic_1_network, critic_2_network],
@@ -233,7 +230,6 @@ def test_initialize_td3_with_actor_network(
 
     assert td3.observation_space == observation_space
     assert td3.action_space == action_space
-    assert np.all(td3.max_action == max_action)
     assert td3.batch_size == 64
     assert td3.lr_actor == 0.0001
     assert td3.lr_critic == 0.001
@@ -281,21 +277,18 @@ def test_initialize_td3_with_actor_network_no_critics(
     request,
 ):
     action_space = generate_random_box_space(shape=(2,), low=0, high=1)
-    max_action = 1
     actor_network = request.getfixturevalue(actor_network)
     actor_network = MakeEvolvable(actor_network, input_tensor)
 
     td3 = TD3(
         observation_space,
         action_space,
-        max_action,
         actor_network=actor_network,
         critic_networks=None,
     )
 
     assert td3.observation_space == observation_space
     assert td3.action_space == action_space
-    assert np.all(td3.max_action == max_action)
     assert td3.batch_size == 64
     assert td3.lr_actor == 0.0001
     assert td3.lr_critic == 0.001
@@ -331,7 +324,6 @@ def test_initialize_td3_with_actor_network_cnn(
     observation_space, actor_network, input_tensor, request
 ):
     action_space = generate_random_box_space(shape=(2,), low=0, high=1)
-    max_action = 1
     actor_network = request.getfixturevalue(actor_network)
     actor_network = MakeEvolvable(actor_network, input_tensor)
     critic_1_network = SimpleCNN()
@@ -350,14 +342,12 @@ def test_initialize_td3_with_actor_network_cnn(
     td3 = TD3(
         observation_space,
         action_space,
-        max_action,
         actor_network=actor_network,
         critic_networks=[critic_1_network, critic_2_network],
     )
 
     assert td3.observation_space == observation_space
     assert td3.action_space == action_space
-    assert np.all(td3.max_action == max_action)
     assert td3.batch_size == 64
     assert td3.lr_actor == 0.0001
     assert td3.lr_critic == 0.001
@@ -556,7 +546,6 @@ def test_learns_from_experiences(
 def test_soft_update():
     observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
     action_space = generate_random_box_space(shape=(2,), low=0, high=1)
-    max_action = 1
     net_config = {"encoder_config": {"hidden_size": [64, 64]}}
     batch_size = 64
     lr_actor = 1e-4
@@ -573,7 +562,6 @@ def test_soft_update():
     td3 = TD3(
         observation_space,
         action_space,
-        max_action,
         net_config=net_config,
         batch_size=batch_size,
         lr_actor=lr_actor,
@@ -671,7 +659,6 @@ def test_clone_returns_identical_agent(observation_space):
 
     assert clone_agent.observation_space == td3.observation_space
     assert clone_agent.action_space == td3.action_space
-    assert np.all(clone_agent.max_action == td3.max_action)
     assert clone_agent.batch_size == td3.batch_size
     assert clone_agent.lr_actor == td3.lr_actor
     assert clone_agent.lr_critic == td3.lr_critic
@@ -714,7 +701,6 @@ def test_clone_returns_identical_agent(observation_space):
 
     assert clone_agent.observation_space == td3.observation_space
     assert clone_agent.action_space == td3.action_space
-    assert np.all(clone_agent.max_action == td3.max_action)
     assert clone_agent.batch_size == td3.batch_size
     assert clone_agent.lr_actor == td3.lr_actor
     assert clone_agent.lr_critic == td3.lr_critic
@@ -755,7 +741,6 @@ def test_clone_returns_identical_agent(observation_space):
 
     assert clone_agent.observation_space == td3.observation_space
     assert clone_agent.action_space == td3.action_space
-    assert np.all(clone_agent.max_action == td3.max_action)
     assert clone_agent.batch_size == td3.batch_size
     assert clone_agent.lr_actor == td3.lr_actor
     assert clone_agent.lr_critic == td3.lr_critic
@@ -911,7 +896,6 @@ def test_save_load_checkpoint_correct_data_and_format(
     assert "critic_target_2_init_dict" in checkpoint["network_info"]["modules"]
     assert "critic_target_2_state_dict" in checkpoint["network_info"]["modules"]
     assert "critic_2_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
-    assert "max_action" in checkpoint
     assert "batch_size" in checkpoint
     assert "lr_actor" in checkpoint
     assert "lr_critic" in checkpoint
@@ -943,7 +927,6 @@ def test_save_load_checkpoint_correct_data_and_format(
     assert str(td3.actor.state_dict()) == str(td3.actor_target.state_dict())
     assert str(td3.critic_1.state_dict()) == str(td3.critic_target_1.state_dict())
     assert str(td3.critic_2.state_dict()) == str(td3.critic_target_2.state_dict())
-    assert np.all(td3.max_action == 1)
     assert td3.batch_size == 64
     assert td3.learn_step == 5
     assert td3.gamma == 0.99
@@ -1016,7 +999,6 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "critic_target_2_init_dict" in checkpoint["network_info"]["modules"]
     assert "critic_target_2_state_dict" in checkpoint["network_info"]["modules"]
     assert "critic_2_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
-    assert "max_action" in checkpoint
     assert "batch_size" in checkpoint
     assert "lr_actor" in checkpoint
     assert "lr_critic" in checkpoint
@@ -1050,7 +1032,6 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert str(td3.actor.state_dict()) == str(td3.actor_target.state_dict())
     assert str(td3.critic_1.state_dict()) == str(td3.critic_target_1.state_dict())
     assert str(td3.critic_2.state_dict()) == str(td3.critic_target_2.state_dict())
-    assert np.all(td3.max_action == 1)
     assert td3.batch_size == 64
     assert td3.learn_step == 5
     assert td3.gamma == 0.99
@@ -1071,7 +1052,6 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 )
 def test_initialize_td3_with_actor_network_evo_net(observation_space, net_type):
     action_space = generate_random_box_space(shape=(2,), low=0, high=1)
-    max_action = 1
 
     actor_network = DeterministicActor(observation_space, action_space)
     critic_networks = [
@@ -1087,7 +1067,6 @@ def test_initialize_td3_with_actor_network_evo_net(observation_space, net_type):
 
     assert td3.observation_space == observation_space
     assert td3.action_space == action_space
-    assert np.all(td3.max_action == max_action)
     assert td3.batch_size == 64
     assert td3.lr_actor == 0.0001
     assert td3.lr_critic == 0.001
@@ -1191,8 +1170,6 @@ def test_load_from_pretrained(observation_space, encoder_cls, accelerator, tmpdi
     # Check if properties and weights are loaded correctly
     assert new_td3.observation_space == td3.observation_space
     assert new_td3.action_space == td3.action_space
-    assert np.all(new_td3.min_action == td3.min_action)
-    assert np.all(new_td3.max_action == td3.max_action)
     assert isinstance(new_td3.actor.encoder, encoder_cls)
     assert isinstance(new_td3.actor_target.encoder, encoder_cls)
     assert isinstance(new_td3.critic_1.encoder, encoder_cls)
@@ -1271,8 +1248,6 @@ def test_load_from_pretrained_networks(
     # Check if properties and weights are loaded correctly
     assert new_td3.observation_space == td3.observation_space
     assert new_td3.action_space == td3.action_space
-    assert np.all(new_td3.min_action == td3.min_action)
-    assert np.all(new_td3.max_action == td3.max_action)
     assert isinstance(new_td3.actor, nn.Module)
     assert isinstance(new_td3.actor_target, nn.Module)
     assert isinstance(new_td3.critic_1, nn.Module)

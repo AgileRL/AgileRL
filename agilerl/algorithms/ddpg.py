@@ -392,7 +392,7 @@ class DDPG(RLAlgorithm):
         """Updates agent network parameters to learn from experiences.
 
         :param experiences: TensorDict of batched observations, actions, rewards, next_observations, dones.
-        :type experiences: tensordict.TensorDict
+        :type experiences: dict[str, torch.Tensor[float]]
         :param noise_clip: Maximum noise limit to apply to actions, defaults to 0.5
         :type noise_clip: float, optional
         :param policy_noise: Standard deviation of noise applied to policy, defaults to 0.2

@@ -1,3 +1,4 @@
+import copy
 import glob
 import os
 from collections import OrderedDict
@@ -384,6 +385,9 @@ class TestEvolvableModule(nn.Module, EvolvableNetwork):
 
     def get_init_dict(self):
         return {"device": self.device}
+
+    def clone(self):
+        return copy.deepcopy(self)
 
 
 def test_recursive_check_module_attrs():

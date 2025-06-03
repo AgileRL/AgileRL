@@ -19,11 +19,11 @@ from agilerl.networks.value_networks import ValueNetwork
 from agilerl.typing import (
     ArrayDict,
     ExperiencesType,
-    GymEnvType,
     InfosDict,
     MultiAgentModule,
     NetConfigType,
     ObservationType,
+    PzEnvType,
     StandardTensorDict,
     TorchObsType,
 )
@@ -822,7 +822,7 @@ class IPPO(MultiAgentRLAlgorithm):
 
     def test(
         self,
-        env: GymEnvType,
+        env: PzEnvType,
         swap_channels: bool = False,
         max_steps: Optional[int] = None,
         loop: int = 3,
@@ -831,7 +831,7 @@ class IPPO(MultiAgentRLAlgorithm):
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
-        :type env: Gym-style environment
+        :type env: PettingZoo environment
         :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
         :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to None

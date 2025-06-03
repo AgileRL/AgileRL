@@ -1374,7 +1374,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         .. note::
             If return_encoders is True, we return the encoder configs for each sub-agent. The only exception is
-            for MLPs, where we only return the deepest architecture found for MLPs. This is useful for algorithms
+            for MLPs, where we only return the deepest architecture found. This is useful for algorithms
             with shared critics that process the observations of all agents, and therefore use an `EvolvableMultiInput`
             module to process the observations of all agents (assigning an encoder to each sub-agent and, optionally, a
             single `EvolvableMLP` to process the concatenated vector observations).

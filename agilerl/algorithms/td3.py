@@ -177,8 +177,6 @@ class TD3(RLAlgorithm):
         self.vect_noise_dim = vect_noise_dim
         self.share_encoders = share_encoders
         self.action_dim = action_space.shape[0]
-        self.min_action = action_space.low
-        self.max_action = action_space.high
         self.current_noise = np.zeros((vect_noise_dim, self.action_dim))
         self.theta = theta
         self.dt = dt
@@ -410,8 +408,8 @@ class TD3(RLAlgorithm):
     ) -> Tuple[Optional[float], float]:
         """Updates agent network parameters to learn from experiences.
 
-        :param experience: List of batched states, actions, rewards, next_states, dones in that order.
-        :type experience: list[torch.Tensor[float]]
+        :param experiences: TensorDict of batched observations, actions, rewards, next_observations, dones.
+        :type experiences: dict[str, torch.Tensor[float]]
         :param noise_clip: Maximum noise limit to apply to actions, defaults to 0.5
         :type noise_clip: float, optional
         :param policy_noise: Standard deviation of noise applied to policy, defaults to 0.2
@@ -438,7 +436,7 @@ class TD3(RLAlgorithm):
             noise = self.multi_dim_clamp(-noise_clip, noise_clip, noise.to(self.device))
             next_actions = next_actions + noise
             next_actions = self.multi_dim_clamp(
-                self.min_action, self.max_action, next_actions
+                self.action_space.low, self.action_space.high, next_actions
             )
 
             # Compute the target, y_j, making use of twin critic networks

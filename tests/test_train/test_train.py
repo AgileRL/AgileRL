@@ -263,11 +263,14 @@ class DummyMultiAgent(DummyAgentOffPolicy):
         self.lr = 0.01
         self.num_envs = 1
         self.on_policy = on_policy
-        self.actors = [MagicMock() for _ in range(2)]
-        self.actors[0].squash_output = False
-        self.actors[0].scale_action = lambda x: x
-        self.actors[1].squash_output = False
-        self.actors[1].scale_action = lambda x: x
+        self.actors = {
+            "agent_0": MagicMock(),
+            "other_agent_0": MagicMock(),
+        }
+        self.actors["agent_0"].squash_output = False
+        self.actors["agent_0"].scale_action = lambda x: x
+        self.actors["other_agent_0"].squash_output = False
+        self.actors["other_agent_0"].scale_action = lambda x: x
         self.action_space = Dict(
             {
                 "agent_0": Discrete(2),
@@ -288,7 +291,7 @@ class DummyMultiAgent(DummyAgentOffPolicy):
         }
         if self.on_policy:
             return output_dict, output_dict, output_dict, output_dict
-        return output_dict, None
+        return output_dict, output_dict
 
     def learn(self, experiences):
         if self.on_policy:
@@ -763,7 +766,7 @@ def mocked_multi_agent(multi_env, algo):
         }
         if algo == IPPO:
             return out, out, out, out
-        return out, None
+        return out, out
 
     mock_agent.get_action.side_effect = get_action
     mock_agent.test.side_effect = lambda *args, **kwargs: np.random.uniform(0, 400)

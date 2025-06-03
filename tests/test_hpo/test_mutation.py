@@ -14,7 +14,7 @@ from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.algorithms.grpo import GRPO
 from agilerl.hpo.mutation import Mutations
-from agilerl.modules.bert import EvolvableBERT
+from agilerl.modules import EvolvableBERT, ModuleDict
 from agilerl.utils.utils import create_population
 from tests.helper_functions import (
     assert_equal_state_dict,
@@ -25,8 +25,7 @@ from tests.helper_functions import (
     generate_multi_agent_discrete_spaces,
     generate_random_box_space,
 )
-
-from ..test_algorithms.test_grpo import create_module
+from tests.test_algorithms.test_grpo import create_module
 
 # Shared HP dict that can be used by any algorithm
 SHARED_INIT_HP = {
@@ -55,7 +54,7 @@ SHARED_INIT_HP = {
     "MAX_GRAD_NORM": 0.5,
     "TARGET_KL": None,
     "UPDATE_EPOCHS": 4,
-    "AGENT_IDS": ["agent1", "agent2"],
+    "AGENT_IDS": ["agent_0", "agent_1"],
     "LAMBDA": 1.0,
     "REG": 0.000625,
     "CHANNELS_LAST": False,
@@ -91,7 +90,7 @@ SHARED_INIT_HP_MA = {
     "MAX_GRAD_NORM": 0.5,
     "TARGET_KL": None,
     "UPDATE_EPOCHS": 4,
-    "AGENT_IDS": ["agent1", "agent2"],
+    "AGENT_IDS": ["agent_0", "agent_1"],
     "LAMBDA": 1.0,
     "REG": 0.000625,
     "CHANNELS_LAST": False,
@@ -135,7 +134,7 @@ def grpo_hp_config():
 
 @pytest.fixture
 def encoder_mlp_config():
-    yield {"encoder_config": {"hidden_size": [8]}}
+    yield {"encoder_config": {"hidden_size": [8], "min_mlp_nodes": 4}}
 
 
 @pytest.fixture
@@ -169,9 +168,7 @@ def encoder_multi_input_config():
                 "kernel_size": [3],
                 "stride_size": [1],
             },
-            "mlp_config": {
-                "hidden_size": [8],
-            },
+            "mlp_config": {"hidden_size": [8], "min_mlp_nodes": 4},
             "lstm_config": {
                 "hidden_size": 8,
             },
@@ -1088,7 +1085,7 @@ def test_mutation_applies_random_mutations_multi_agent(
             "learn_step",
             "act",
             "param",
-            policy[0].last_mutation_attr,
+            policy.last_mutation_attr,
         ]
 
     del mutations
@@ -1370,8 +1367,8 @@ def test_mutation_applies_parameter_mutations_multi_agent(
         policy_name = old.registry.policy()
         old_policy = getattr(old, policy_name)
         new_policy = getattr(individual, policy_name)
-        old_sd = old_policy[0].state_dict()
-        new_sd = new_policy[0].state_dict()
+        old_sd = old_policy.state_dict()
+        new_sd = new_policy.state_dict()
         mutation_found = False
         for key in old_sd.keys():
             if "norm" in key:  # Skip normalization layers
@@ -1425,7 +1422,7 @@ def test_mutation_applies_architecture_mutations_multi_agent(
         accelerator=accelerator,
     )
 
-    mut_methods = population[0].actors[0].mutation_methods
+    mut_methods = population[0].actors.mutation_methods
     for mut_method in mut_methods:
 
         class DummyRNG:
@@ -1444,7 +1441,7 @@ def test_mutation_applies_architecture_mutations_multi_agent(
         assert len(mutated_population) == len(population)
         for old, individual in zip(population, mutated_population):
             policy = getattr(individual, individual.registry.policy())
-            assert individual.mut == policy[0].last_mutation_attr
+            assert individual.mut == policy.last_mutation_attr
             # Due to randomness and constraints on size, sometimes architectures are not different
             # assert str(old.actors[0].state_dict()) != str(individual.actors[0].state_dict())
             assert old.index == individual.index
@@ -1475,20 +1472,8 @@ def test_mutation_applies_architecture_mutations_multi_agent(
     "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
-@pytest.mark.parametrize(
-    "mut_method",
-    [
-        [
-            "add_encoder_layer",
-            "remove_encoder_layer",
-            "add_decoder_layer",
-            "remove_decoder_layer",
-        ],
-        ["add_node", "remove_node"],
-    ],
-)
 def test_mutation_applies_bert_architecture_mutations_multi_agent(
-    algo, device, accelerator, init_pop, mut_method
+    algo, device, accelerator, init_pop
 ):
     population = init_pop
 
@@ -1504,30 +1489,28 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
         accelerator=accelerator,
     )
 
-    class DummyRNG:
-        def choice(self, a, size=None, replace=True, p=None):
-            return [np.random.choice(mut_method)]
-
-    mutations.rng = DummyRNG()
+    def create_moduledict(device):
+        return ModuleDict(
+            {
+                "agent_0": EvolvableBERT([12], [12], device=device),
+                "agent_1": EvolvableBERT([12], [12], device=device),
+            }
+        )
 
     for individual in population:
-        individual.actors = [EvolvableBERT([12], [12], device=device)]
-        individual.actor_targets = [EvolvableBERT([12], [12], device=device)]
-        individual.actor_targets[0].load_state_dict(individual.actors[0].state_dict())
+        individual.actors = create_moduledict(device)
+        individual.actor_targets = create_moduledict(device)
+        individual.actor_targets.load_state_dict(individual.actors.state_dict())
         if algo == "MADDPG":
-            individual.critics = [EvolvableBERT([12], [12], device=device)]
-            individual.critic_targets = [EvolvableBERT([12], [12], device=device)]
-            individual.critic_targets[0].load_state_dict(
-                individual.critics[0].state_dict()
-            )
-
+            individual.critics = create_moduledict(device)
+            individual.critic_targets = create_moduledict(device)
+            individual.critic_targets.load_state_dict(individual.critics.state_dict())
             individual.actor_optimizers = OptimizerWrapper(
                 torch.optim.Adam,
                 individual.actors,
                 lr=individual.lr_actor,
                 network_names=individual.actor_optimizers.network_names,
                 lr_name=individual.actor_optimizers.lr_name,
-                multiagent=True,
             )
             individual.critic_optimizers = OptimizerWrapper(
                 torch.optim.Adam,
@@ -1535,19 +1518,18 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
                 lr=individual.lr_critic,
                 network_names=individual.critic_optimizers.network_names,
                 lr_name=individual.critic_optimizers.lr_name,
-                multiagent=True,
             )
 
         else:
-            individual.critics_1 = [EvolvableBERT([12], [12], device=device)]
-            individual.critic_targets_1 = [EvolvableBERT([12], [12], device=device)]
-            individual.critic_targets_1[0].load_state_dict(
-                individual.critics_1[0].state_dict()
+            individual.critics_1 = create_moduledict(device)
+            individual.critic_targets_1 = create_moduledict(device)
+            individual.critic_targets_1.load_state_dict(
+                individual.critics_1.state_dict()
             )
-            individual.critics_2 = [EvolvableBERT([12], [12], device=device)]
-            individual.critic_targets_2 = [EvolvableBERT([12], [12], device=device)]
-            individual.critic_targets_2[0].load_state_dict(
-                individual.critics_2[0].state_dict()
+            individual.critics_2 = create_moduledict(device)
+            individual.critic_targets_2 = create_moduledict(device)
+            individual.critic_targets_2.load_state_dict(
+                individual.critics_2.state_dict()
             )
             individual.actor_optimizers = OptimizerWrapper(
                 torch.optim.Adam,
@@ -1555,7 +1537,6 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
                 lr=individual.lr_actor,
                 network_names=individual.actor_optimizers.network_names,
                 lr_name=individual.actor_optimizers.lr_name,
-                multiagent=True,
             )
             individual.critic_1_optimizers = OptimizerWrapper(
                 torch.optim.Adam,
@@ -1563,7 +1544,6 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
                 lr=individual.lr_critic,
                 network_names=individual.critic_1_optimizers.network_names,
                 lr_name=individual.critic_1_optimizers.lr_name,
-                multiagent=True,
             )
 
             individual.critic_2_optimizers = OptimizerWrapper(
@@ -1572,23 +1552,31 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
                 lr=individual.lr_critic,
                 network_names=individual.critic_2_optimizers.network_names,
                 lr_name=individual.critic_2_optimizers.lr_name,
-                multiagent=True,
             )
 
-    new_population = [agent.clone(wrap=False) for agent in population]
-    mutated_population = [
-        mutations.architecture_mutate(agent) for agent in new_population
-    ]
+    mut_methods = population[0].actors.mutation_methods
+    for mut_method in mut_methods:
 
-    torch.cuda.empty_cache()  # Free up GPU memory
+        class DummyRNG:
+            def choice(self, a, size=None, replace=True, p=None):
+                return [mut_method]
 
-    assert len(mutated_population) == len(population)
-    for old, individual in zip(population, mutated_population):
-        policy = getattr(individual, individual.registry.policy())
-        assert individual.mut == policy[0].last_mutation_attr
-        # Due to randomness and constraints on size, sometimes architectures are not different
-        # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
-        assert old.index == individual.index
+        mutations.rng = DummyRNG()
+
+        new_population = [agent.clone(wrap=False) for agent in population]
+        mutated_population = [
+            mutations.architecture_mutate(agent) for agent in new_population
+        ]
+
+        torch.cuda.empty_cache()  # Free up GPU memory
+
+        assert len(mutated_population) == len(population)
+        for old, individual in zip(population, mutated_population):
+            policy = getattr(individual, individual.registry.policy())
+            assert individual.mut == policy.last_mutation_attr
+            # Due to randomness and constraints on size, sometimes architectures are not different
+            # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
+            assert old.index == individual.index
 
     # assert_equal_state_dict(population, mutated_population)
 
