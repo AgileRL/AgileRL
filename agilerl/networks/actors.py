@@ -1,14 +1,21 @@
+import os
 from typing import Optional, Tuple, Type, Union
 
+import dotenv
 import torch
 from gymnasium import spaces
 
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.base import EvolvableNetwork
-# from agilerl.networks.distributions_experimental import EvolvableDistribution
-from agilerl.networks.distributions import EvolvableDistribution
 from agilerl.typing import ArrayOrTensor, ConfigType, TorchObsType
+
+dotenv.load_dotenv()
+
+if os.getenv("USE_EXPERIMENTAL_DISTRIBUTIONS", "False") == "True":
+    from agilerl.networks.distributions_experimental import EvolvableDistribution
+else:
+    from agilerl.networks.distributions import EvolvableDistribution
 
 
 class DeterministicActor(EvolvableNetwork):
