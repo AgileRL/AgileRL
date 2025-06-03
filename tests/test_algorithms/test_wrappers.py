@@ -3,8 +3,10 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 import torch
 import torch.nn as nn
+from gymnasium import spaces
 
-from agilerl.algorithms.core import EvolvableAlgorithm, OptimizerWrapper
+from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper, RLAlgorithm
+from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.modules import EvolvableModule, ModuleDict
 
 
@@ -34,13 +36,22 @@ class MockEvolvableNetwork(EvolvableModule):
         return {"device": self.device}
 
 
-class MockAlgorithm(EvolvableAlgorithm):
-    def __init__(
-        self, actor=None, critic=None, lr=0.001, networks=None, optimizer_cls=None
-    ):
+class MockAlgorithm(RLAlgorithm):
+    def __init__(self, actor=None, critic=None, lr=0.001, optimizer_cls=None):
+        observation_space = spaces.Box(low=-1, high=1, shape=(10,))
+        action_space = spaces.Box(low=-1, high=1, shape=(5,))
+        super().__init__(
+            observation_space=observation_space,
+            action_space=action_space,
+            index=0,
+        )
         # Single network setup (like DQN)
-        if actor is not None and critic is None and networks is None:
-            self.actor = actor or MockEvolvableNetwork(name="actor")
+        if actor is not None and critic is None:
+            self.actor = actor or MockEvolvableNetwork(
+                input_dim=observation_space.shape[0],
+                output_dim=action_space.shape[0],
+                name="actor",
+            )
             self.learning_rate = lr
             self.optimizer_cls = optimizer_cls or torch.optim.Adam
             self.optimizer = OptimizerWrapper(
@@ -48,7 +59,7 @@ class MockAlgorithm(EvolvableAlgorithm):
             )
 
         # Two network setup (like PPO)
-        elif actor is not None and critic is not None and networks is None:
+        elif actor is not None and critic is not None:
             self.actor = actor
             self.critic = critic
             self.learning_rate = lr
@@ -57,17 +68,21 @@ class MockAlgorithm(EvolvableAlgorithm):
                 self.optimizer_cls, [self.actor, self.critic], self.learning_rate
             )
 
-        # Multi-agent setup (like MADDPG)
-        elif networks is not None:
-            self.networks = networks
-            self.lr_actor = lr
-            self.optimizer_cls = optimizer_cls or torch.optim.Adam
-            self.optimizer = OptimizerWrapper(
-                self.optimizer_cls, self.networks, self.lr_actor
-            )
+        self.register_network_group(NetworkGroup(eval=self.actor, policy=True))
+        if critic is not None:
+            self.register_network_group(NetworkGroup(eval=self.critic, policy=False))
+
+    def get_action(self, obs):
+        return
+
+    def learn(self, experiences):
+        return 0.0
+
+    def test(self, env, swap_channels=False, max_steps=None, loop=3):
+        return 0.0
 
 
-class MockMultiAgentAlgorithm(EvolvableAlgorithm):
+class MockMultiAgentAlgorithm(MultiAgentRLAlgorithm):
     def __init__(
         self,
         actors=None,
@@ -76,12 +91,25 @@ class MockMultiAgentAlgorithm(EvolvableAlgorithm):
         lr_critic=0.01,
         optimizer_cls=None,
     ):
+        agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+        observation_spaces = {
+            agent_id: spaces.Box(low=-1, high=1, shape=(10,)) for agent_id in agent_ids
+        }
+        action_spaces = {
+            agent_id: spaces.Box(low=-1, high=1, shape=(5,)) for agent_id in agent_ids
+        }
+        super().__init__(
+            observation_spaces=list(observation_spaces.values()),
+            action_spaces=list(action_spaces.values()),
+            agent_ids=agent_ids,
+            index=0,
+        )
         # Separate actor and critic networks for multi-agent
         self.actors = actors or ModuleDict(
-            {f"actor_{i}": MockEvolvableNetwork(name=f"actor_{i}") for i in range(3)}
+            {agent_id: self.make_network(agent_id) for agent_id in agent_ids}
         )
         self.critics = critics or ModuleDict(
-            {f"critic_{i}": MockEvolvableNetwork(name=f"critic_{i}") for i in range(3)}
+            {agent_id: self.make_network(agent_id) for agent_id in agent_ids}
         )
         self.lr_actor = lr_actor
         self.lr_critic = lr_critic
@@ -95,6 +123,25 @@ class MockMultiAgentAlgorithm(EvolvableAlgorithm):
         self.critic_optimizers = OptimizerWrapper(
             self.optimizer_cls, self.critics, self.lr_critic
         )
+        self.register_network_group(NetworkGroup(eval=self.actors, policy=True))
+        self.register_network_group(NetworkGroup(eval=self.critics, policy=False))
+
+    def make_network(self, agent_id: str):
+        return MockEvolvableNetwork(
+            input_dim=self.observation_space[agent_id].shape[0],
+            output_dim=self.action_space[agent_id].shape[0],
+            name=f"{agent_id}",
+            device=self.device,
+        )
+
+    def get_action(self, obs):
+        return
+
+    def learn(self, experiences):
+        return 0.0
+
+    def test(self, env, swap_channels=False, max_steps=None, loop=3):
+        return 0.0
 
 
 class TestOptimizerWrapper:
@@ -169,18 +216,16 @@ class TestOptimizerWrapper:
                 with patch.object(
                     OptimizerWrapper, "_infer_lr_name", return_value="lr_actor"
                 ):
-                    algo = MockAlgorithm(networks=networks, lr=lr)
+                    algo = MockMultiAgentAlgorithm(actors=networks, lr_actor=lr)
 
-        assert isinstance(algo.optimizer.optimizer, dict)
-        assert len(algo.optimizer.optimizer) == 3
         assert all(
             isinstance(opt, torch.optim.Adam)
-            for opt in algo.optimizer.optimizer.values()
+            for opt in algo.actor_optimizers.optimizer.values()
         )
-        assert algo.optimizer.lr == lr
-        assert algo.optimizer.networks[0] is networks
-        assert algo.optimizer.network_names == ["networks"]
-        assert algo.optimizer.lr_name == "lr_actor"
+        assert algo.actor_optimizers.lr == lr
+        assert len(algo.actor_optimizers.networks) == 1
+        assert algo.actor_optimizers.networks[0] is networks
+        assert algo.actor_optimizers.lr_name == "lr_actor"
 
     def test_maddpg_style_optimizers(self):
         """Test MADDPG-style setup with separate actor and critic optimizers."""

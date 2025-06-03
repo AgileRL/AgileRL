@@ -6,7 +6,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 import torch
 from torch.optim import Optimizer
 
-from agilerl.protocols import EvolvableAlgorithm, EvolvableModule, ModuleDict
+from agilerl.protocols import EvolvableAlgorithm
 from agilerl.typing import NetworkType
 
 
@@ -205,22 +205,6 @@ class HyperparameterConfig:
         return list(self.config.keys())[key], list(self.config.values())[key]
 
 
-def check_evolvable_module_list(eval: Any, msg: str) -> bool:
-    """Check if the evaluation network is a list of EvolvableModule objects.
-
-    :param eval: The evaluation network.
-    :type eval: Union[EvolvableModule, List[EvolvableModule]]
-    :param msg: The message to raise if the evaluation network is not a list of EvolvableModule objects.
-    :type msg: str
-    :return: Whether the evaluation network is a list of EvolvableModule objects.
-    :rtype: bool
-    """
-    if not isinstance(eval, list) and not all(
-        isinstance(net, EvolvableModule) for net in eval
-    ):
-        raise TypeError(msg + f" Found: {eval}.")
-
-
 @dataclass
 class NetworkGroup:
     """Dataclass for storing a group of networks. This consists of an evaluation network (i.e.
@@ -230,25 +214,20 @@ class NetworkGroup:
     are part of a multiagent setting.
 
     :param eval: The evaluation network.
-    :type eval: EvolvableModule, ModuleDict
+    :type eval: NetworkType
     :param shared: The list of shared networks.
-    :type shared: EvolvableModule, ModuleDict
+    :type shared: NetworkType
     :param policy: Whether the network is a policy (e.g. the network used to get the actions
         of the agent). There must be one network group in an algorithm which sets this to True.
         Default is False.
     :type policy: bool
     """
 
-    eval: Union[EvolvableModule, ModuleDict]
+    eval: NetworkType
     shared: NetworkType = field(default=None)
     policy: bool = field(default=False)
 
     def __post_init__(self):
-        assert isinstance(self.eval, (EvolvableModule, ModuleDict)), (
-            "Expected an EvolvableModule or ModuleDict object for the eval argument "
-            f"in the network group. Found {type(self.eval)}."
-        )
-
         # Check that the shared networks are of the same type as the eval network
         if self.shared is not None:
             eval_cls = type(self.eval)

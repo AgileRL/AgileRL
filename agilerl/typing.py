@@ -1,6 +1,6 @@
 from enum import Enum
 from numbers import Number
-from typing import Any, ClassVar, Dict, List, Protocol, Tuple, TypeVar, Union
+from typing import Any, Callable, ClassVar, Dict, List, Protocol, Tuple, TypeVar, Union
 
 import gymnasium as gym
 import numpy as np
@@ -90,8 +90,14 @@ PzStepReturn = Tuple[
 SingleAgentModule = Union[T, EvolvableModule, OptimizedModule, EvolvableNetwork]
 MultiAgentModule = ModuleDict[SingleAgentModule[T]]
 NetworkType = Union[SingleAgentModule[T], MultiAgentModule[T]]
-PopulationType = List[EvolvableAlgorithm]
+EvolvableNetworkType = Union[EvolvableModule, ModuleDict]
 DeviceType = Union[str, torch.device]
 OptimizerType = Union[Optimizer, AcceleratedOptimizer]
 ConfigType = Union[IsDataclass, NetConfigType]
 StateDict = Union[Dict[str, Any], Dict[str, Dict[str, Any]]]
+
+SingleAgentMutReturnType = Dict[str, Any]
+MultiAgentMutReturnType = Dict[str, Dict[str, Any]]
+MutationReturnType = Union[SingleAgentMutReturnType, MultiAgentMutReturnType]
+PopulationType = List[EvolvableAlgorithm]
+MutationMethod = Callable[[EvolvableAlgorithm], EvolvableAlgorithm]

@@ -177,6 +177,14 @@ class TD3(RLAlgorithm):
         self.vect_noise_dim = vect_noise_dim
         self.share_encoders = share_encoders
         self.action_dim = action_space.shape[0]
+        self.min_action = action_space.low
+        self.max_action = action_space.high
+        self.current_noise = np.zeros((vect_noise_dim, self.action_dim))
+        self.theta = theta
+        self.dt = dt
+        self.learn_counter = 0
+
+        # Exploration noise
         self.expl_noise = (
             expl_noise
             if isinstance(expl_noise, np.ndarray)
@@ -187,10 +195,6 @@ class TD3(RLAlgorithm):
             if isinstance(mean_noise, np.ndarray)
             else mean_noise * np.ones((vect_noise_dim, self.action_dim))
         )
-        self.current_noise = np.zeros((vect_noise_dim, self.action_dim))
-        self.theta = theta
-        self.dt = dt
-        self.learn_counter = 0
 
         if actor_network is not None and critic_networks is not None:
             assert isinstance(

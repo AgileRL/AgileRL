@@ -799,7 +799,7 @@ def test_maddpg_get_action(
     maddpg = None
 
 
-@pytest.mark.parametrize("training", [0, 1])
+@pytest.mark.parametrize("training", [False, True])
 def test_maddpg_get_action_action_masking_exception(training, device):
     observation_spaces = generate_multi_agent_box_spaces(2, (6,))
     action_spaces = generate_multi_agent_discrete_spaces(2, 4)
@@ -818,11 +818,11 @@ def test_maddpg_get_action_action_masking_exception(training, device):
         device=device,
     )
     with pytest.raises(AssertionError):
-        maddpg.set_training_mode(bool(training))
+        maddpg.set_training_mode(training)
         _, raw_action = maddpg.get_action(state)
 
 
-@pytest.mark.parametrize("training", [0, 1])
+@pytest.mark.parametrize("training", [False, True])
 def test_maddpg_get_action_action_masking(training, device):
     observation_spaces = generate_multi_agent_box_spaces(2, (6,))
     action_spaces = generate_multi_agent_discrete_spaces(2, 4)
@@ -843,7 +843,7 @@ def test_maddpg_get_action_action_masking(training, device):
         agent_ids=agent_ids,
         device=device,
     )
-    maddpg.set_training_mode(bool(training))
+    maddpg.set_training_mode(training)
     action, _ = maddpg.get_action(state, info)
     assert all(i in [1, 3] for i in action.values())
 
@@ -862,7 +862,7 @@ def test_maddpg_get_action_action_masking(training, device):
         generate_multi_agent_box_spaces(2, (2,)),
     ],
 )
-@pytest.mark.parametrize("training", [0, 1])
+@pytest.mark.parametrize("training", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_get_action_distributed(
     training, observation_spaces, action_spaces, compile_mode
@@ -895,7 +895,7 @@ def test_get_action_distributed(
         }
     )
     maddpg.actors = new_actors
-    maddpg.set_training_mode(bool(training))
+    maddpg.set_training_mode(training)
     processed_action, raw_action = maddpg.get_action(state)
     discrete_actions = all(
         isinstance(space, spaces.Discrete) for space in action_spaces
@@ -943,7 +943,7 @@ def test_get_action_distributed(
         generate_multi_agent_discrete_spaces(2, 2),
     ],
 )
-@pytest.mark.parametrize("training", [0, 1])
+@pytest.mark.parametrize("training", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_maddpg_get_action_agent_masking(
     training, observation_spaces, action_spaces, device, compile_mode
@@ -972,7 +972,7 @@ def test_maddpg_get_action_agent_masking(
         device=device,
         torch_compiler=compile_mode,
     )
-    maddpg.set_training_mode(bool(training))
+    maddpg.set_training_mode(training)
     action, _ = maddpg.get_action(state, infos=info)
     if discrete_actions:
         assert np.array_equal(action["agent_0"], np.array([1])), action["agent_0"]
@@ -980,7 +980,7 @@ def test_maddpg_get_action_agent_masking(
         assert np.array_equal(action["agent_0"], np.array([[0, 1]])), action["agent_0"]
 
 
-@pytest.mark.parametrize("training", [0, 1])
+@pytest.mark.parametrize("training", [False, True])
 @pytest.mark.parametrize(
     "observation_spaces",
     [
@@ -1031,7 +1031,7 @@ def test_maddpg_get_action_vectorized_agent_masking(
         agent_ids=agent_ids,
         device=device,
     )
-    maddpg.set_training_mode(bool(training))
+    maddpg.set_training_mode(training)
     action, raw_action = maddpg.get_action(state, infos=info)
     if discrete_actions:
         assert np.array_equal(

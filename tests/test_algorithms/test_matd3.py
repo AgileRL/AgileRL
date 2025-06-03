@@ -997,16 +997,9 @@ def test_matd3_get_action_vectorized_agent_masking(
 
 
 @pytest.mark.parametrize("training", [False, True])
-@pytest.mark.parametrize(
-    "observation_spaces, action_spaces",
-    [
-        generate_multi_agent_box_spaces(2, (6,)),
-        generate_multi_agent_discrete_spaces(2, 4),
-    ],
-)
-def test_matd3_get_action_action_masking_exception(
-    training, observation_spaces, action_spaces, device
-):
+def test_matd3_get_action_action_masking_exception(training, device):
+    observation_spaces = generate_multi_agent_box_spaces(2, (6,))
+    action_spaces = generate_multi_agent_discrete_spaces(2, 4)
     agent_ids = ["agent_0", "other_agent_0"]
     state = {
         agent: {
@@ -1414,12 +1407,6 @@ def test_matd3_clone_returns_identical_agent(
     assert clone_agent.action_spaces == matd3.action_spaces
     assert clone_agent.n_agents == matd3.n_agents
     assert clone_agent.agent_ids == matd3.agent_ids
-    assert all(
-        torch.equal(clone_expl_noise, expl_noise)
-        for clone_expl_noise, expl_noise in zip(
-            clone_agent.expl_noise, matd3.expl_noise
-        )
-    )
     assert clone_agent.index == matd3.index
     assert clone_agent.batch_size == matd3.batch_size
     assert clone_agent.lr_actor == matd3.lr_actor
@@ -1432,6 +1419,8 @@ def test_matd3_clone_returns_identical_agent(
     assert clone_agent.torch_compiler == matd3.torch_compiler
 
     for agent_id in clone_agent.agent_ids:
+        assert torch.equal(clone_agent.expl_noise[agent_id], matd3.expl_noise[agent_id])
+
         clone_actor = clone_agent.actors[agent_id]
         actor = matd3.actors[agent_id]
         assert str(clone_actor.state_dict()) == str(actor.state_dict())
@@ -1516,12 +1505,6 @@ def test_clone_after_learning(compile_mode):
     assert clone_agent.action_spaces == matd3.action_spaces
     assert clone_agent.n_agents == matd3.n_agents
     assert clone_agent.agent_ids == matd3.agent_ids
-    assert all(
-        torch.equal(clone_expl_noise, expl_noise)
-        for clone_expl_noise, expl_noise in zip(
-            clone_agent.expl_noise, matd3.expl_noise
-        )
-    )
     assert clone_agent.index == matd3.index
     assert clone_agent.batch_size == matd3.batch_size
     assert clone_agent.lr_actor == matd3.lr_actor
@@ -1531,11 +1514,12 @@ def test_clone_after_learning(compile_mode):
     assert clone_agent.tau == matd3.tau
     assert clone_agent.device == matd3.device
     assert clone_agent.accelerator == matd3.accelerator
-
     assert clone_agent.torch_compiler == compile_mode
     assert matd3.torch_compiler == compile_mode
 
     for agent_id in clone_agent.agent_ids:
+        assert torch.equal(clone_agent.expl_noise[agent_id], matd3.expl_noise[agent_id])
+
         clone_actor = clone_agent.actors[agent_id]
         actor = matd3.actors[agent_id]
         assert str(clone_actor.state_dict()) == str(actor.state_dict())
@@ -1813,32 +1797,46 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_make_evo(
     loaded_matd3.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    expected_module_class = (
-        OptimizedModule
-        if compile_mode is not None and accelerator is None
-        else MakeEvolvable
-    )
-    assert all(
-        isinstance(actor, expected_module_class) for actor in loaded_matd3.actors
-    )
-    assert all(
-        isinstance(actor_target, expected_module_class)
-        for actor_target in loaded_matd3.actor_targets
-    )
-    assert all(
-        isinstance(critic, expected_module_class) for critic in loaded_matd3.critics_1
-    )
-    assert all(
-        isinstance(critic_target, expected_module_class)
-        for critic_target in loaded_matd3.critic_targets_1
-    )
-    assert all(
-        isinstance(critic, expected_module_class) for critic in loaded_matd3.critics_2
-    )
-    assert all(
-        isinstance(critic_target, expected_module_class)
-        for critic_target in loaded_matd3.critic_targets_2
-    )
+    if compile_mode is not None and accelerator is None:
+        assert all(
+            isinstance(actor, OptimizedModule) for actor in loaded_matd3.actors.values()
+        )
+        assert all(
+            isinstance(actor_target, OptimizedModule)
+            for actor_target in loaded_matd3.actor_targets.values()
+        )
+        assert all(
+            isinstance(critic_1, OptimizedModule)
+            for critic_1 in loaded_matd3.critics_1.values()
+        )
+        assert all(
+            isinstance(critic_target_1, OptimizedModule)
+            for critic_target_1 in loaded_matd3.critic_targets_1.values()
+        )
+        assert all(
+            isinstance(critic_2, OptimizedModule)
+            for critic_2 in loaded_matd3.critics_2.values()
+        )
+        assert all(
+            isinstance(critic_target_2, OptimizedModule)
+            for critic_target_2 in loaded_matd3.critic_targets_2.values()
+        )
+    else:
+        for agent_id, actor in loaded_matd3.actors.items():
+            actor_target = loaded_matd3.actor_targets[agent_id]
+            assert isinstance(actor, MakeEvolvable)
+            assert isinstance(actor_target, MakeEvolvable)
+
+            critic_1 = loaded_matd3.critics_1[agent_id]
+            critic_target_1 = loaded_matd3.critic_targets_1[agent_id]
+            assert isinstance(critic_1, MakeEvolvable)
+            assert isinstance(critic_target_1, MakeEvolvable)
+
+            critic_2 = loaded_matd3.critics_2[agent_id]
+            critic_target_2 = loaded_matd3.critic_targets_2[agent_id]
+            assert isinstance(critic_2, MakeEvolvable)
+            assert isinstance(critic_target_2, MakeEvolvable)
+
     assert matd3.lr_actor == 0.001
     assert matd3.lr_critic == 0.01
 

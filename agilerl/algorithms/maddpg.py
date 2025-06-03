@@ -163,7 +163,7 @@ class MADDPG(MultiAgentRLAlgorithm):
             warnings.warn(
                 "Actor and critic network must both be supplied to use custom networks. Defaulting to net config."
             )
-        
+
         self.batch_size = batch_size
         self.lr_actor = lr_actor
         self.lr_critic = lr_critic
@@ -209,15 +209,25 @@ class MADDPG(MultiAgentRLAlgorithm):
 
         if actor_networks is not None and critic_networks is not None:
             if isinstance(actor_networks, list):
-                assert len(actor_networks) == len(self.agent_ids), "actor_networks must be a list of the same length as the number of agents"
+                assert len(actor_networks) == len(
+                    self.agent_ids
+                ), "actor_networks must be a list of the same length as the number of agents"
                 actor_networks = ModuleDict(
-                    {self.agent_ids[i]: actor_networks[i] for i in range(len(self.agent_ids))}
+                    {
+                        self.agent_ids[i]: actor_networks[i]
+                        for i in range(len(self.agent_ids))
+                    }
                 )
             if isinstance(critic_networks, list):
-                assert len(critic_networks) == len(self.agent_ids), "critic_networks must be a list of the same length as the number of agents"
+                assert len(critic_networks) == len(
+                    self.agent_ids
+                ), "critic_networks must be a list of the same length as the number of agents"
 
                 critic_networks = ModuleDict(
-                    {self.agent_ids[i]: critic_networks[i] for i in range(len(self.agent_ids))}
+                    {
+                        self.agent_ids[i]: critic_networks[i]
+                        for i in range(len(self.agent_ids))
+                    }
                 )
 
             actors_list = list(actor_networks.values())
@@ -518,9 +528,9 @@ class MADDPG(MultiAgentRLAlgorithm):
         :param indices: List of indices to reset
         :type indices: List[int]
         """
-        for i in range(len(self.current_noise)):
+        for agent_id in self.agent_ids:
             for idx in indices:
-                self.current_noise[i][idx, :] = 0
+                self.current_noise[agent_id][idx, :] = 0
 
     def learn(self, experiences: ExperiencesType) -> Dict[str, torch.Tensor]:
         """Updates agent network parameters to learn from experiences.
@@ -674,6 +684,7 @@ class MADDPG(MultiAgentRLAlgorithm):
             self.accelerator.backward(critic_loss)
         else:
             critic_loss.backward()
+
         critic_optimizer.step()
 
         # Get actions from actor

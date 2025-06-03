@@ -1,6 +1,7 @@
 import inspect
 from typing import Any, Dict, List, Optional, Union
 
+import torch.nn as nn
 from torch.optim import Optimizer
 
 from agilerl.modules.base import EvolvableModule, ModuleDict
@@ -95,12 +96,12 @@ class OptimizerWrapper:
 
         if isinstance(networks, EvolvableModule):
             self.networks = [networks]
-        else:
-            assert isinstance(networks, list) and all(
-                isinstance(net, EvolvableModule) for net in networks
-            ), f"Expected a list of EvolvableModule objects, got {type(networks)}."
-
+        elif isinstance(networks, list) and all(
+            isinstance(net, nn.Module) for net in networks
+        ):
             self.networks = networks
+        else:
+            raise TypeError("Expected a list of torch.nn.Module objects.")
 
         # NOTE: This should be passed when reintializing the optimizer
         # when mutating an individual.

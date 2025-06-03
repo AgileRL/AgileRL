@@ -171,7 +171,7 @@ class CQN(RLAlgorithm):
 
         :param obs: State observation, or multiple observations in a batch
         :type obs: numpy.ndarray[float]
-        :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
+        :param epsilon: Probability of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: numpy.ndarray, optional

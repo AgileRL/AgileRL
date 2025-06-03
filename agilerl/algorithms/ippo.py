@@ -226,27 +226,39 @@ class IPPO(MultiAgentRLAlgorithm):
         self.action_batch_size = action_batch_size
 
         if actor_networks is not None and critic_networks is not None:
+            if isinstance(actor_networks, list):
+                assert len(actor_networks) == len(
+                    self.shared_agent_ids
+                ), "actor_networks must be a list of the same length as the number of homogeneous agents"
+                actor_networks = ModuleDict(
+                    {
+                        self.shared_agent_ids[i]: actor_networks[i]
+                        for i in range(len(self.shared_agent_ids))
+                    }
+                )
+            if isinstance(critic_networks, list):
+                assert len(critic_networks) == len(
+                    self.shared_agent_ids
+                ), "critic_networks must be a list of the same length as the number of homogeneous agents"
+
+                critic_networks = ModuleDict(
+                    {
+                        self.shared_agent_ids[i]: critic_networks[i]
+                        for i in range(len(self.shared_agent_ids))
+                    }
+                )
+
             actors_list = list(actor_networks.values())
             critics_list = list(critic_networks.values())
-            assert all(
-                isinstance(net, actors_list[0].__class__) for net in actors_list
-            ), "'actor_networks' must all be the same type"
-            assert all(
-                isinstance(net, critics_list[0].__class__) for net in critics_list
-            ), "'critic_networks' must all be the same type"
-
-            if not all(
-                isinstance(net, EvolvableModule) for net in actor_networks.values()
-            ):
+            if not all(isinstance(net, EvolvableModule) for net in actors_list):
                 raise TypeError(
                     "All actor networks must be instances of EvolvableModule"
                 )
-            if not all(
-                isinstance(net, EvolvableModule) for net in critic_networks.values()
-            ):
+            if not all(isinstance(net, EvolvableModule) for net in critics_list):
                 raise TypeError(
                     "All critic networks must be instances of EvolvableModule"
                 )
+
             assert len(actor_networks) == self.n_unique_agents, (
                 f"Length of actor_networks ({len(actor_networks)}) does not match number of unique "
                 f"agents defined in environment ({self.n_unique_agents}: {self.shared_agent_ids})"
