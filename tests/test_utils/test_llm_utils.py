@@ -35,7 +35,6 @@ class DummyDataset(Dataset):
         self.info = Info("dummy_dataset")
 
     def __len__(self):
-        print("QUESTION LENGTH", len(self.questions))
         return len(self.questions)
 
     def __getitem__(self, index):
@@ -196,6 +195,7 @@ def test_hugging_face_gym_len(dataset, num_samples):
         apply_chat_template_fn=dummy_chat_template_fn,
         data_batch_size_per_gpu=data_batch_size,
     )
+    env.reset()
     assert len(env) == 200 * 0.8  # Length returns the training length
     with env.eval():
         assert len(env) == 200 * 0.2

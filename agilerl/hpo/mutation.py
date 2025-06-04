@@ -11,7 +11,7 @@ from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from numpy.random import Generator
 from torch._dynamo.eval_frame import OptimizedModule
 
-from agilerl.algorithms.core import EvolvableAlgorithm
+from agilerl.algorithms.core import EvolvableAlgorithm, LLMAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.algorithms.neural_ts_bandit import NeuralTS
 from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
@@ -508,8 +508,7 @@ class Mutations:
             # Multiple optimizers in a single attribute (i.e. multi-agent)
             # or one module optimized by a single optimizer
             if isinstance(opt, DeepSpeedOptimizerWrapper):
-                for param_group in opt.param_groups:
-                    param_group["lr"] = individual.lr
+                LLMAlgorithm.update_lr(opt, individual.lr)
             else:
                 if isinstance(optimizer, list) or len(opt.network_names) == 1:
                     opt_nets = getattr(individual, opt.network_names[0])
@@ -591,7 +590,10 @@ class Mutations:
         # NOTE: Could set up an algorithm registry to make algo checks more robust
         # OR perform activation mutations within evolvable modules directly and disable
         # on an algorithm basis
-        if individual.algo in ["PPO", "DDPG", "TD3", "IPPO", "MADDPG", "MATD3"]:
+        if individual.algo in ["PPO", "DDPG", "TD3", "IPPO", "MADDPG", "MATD3", "GRPO"]:
+            warnings.warn(
+                f"Activation mutations are not supported for {individual.algo}."
+            )
             individual.mut = "None"
             return individual
 
@@ -666,6 +668,11 @@ class Mutations:
         :param individual: Individual agent from population
         :type individual: EvolvableAlgorithm
         """
+        if isinstance(individual, LLMAlgorithm):
+            warnings.warn("Parameter mutations are not supported for LLM algorithms.")
+            individual.mut = "None"
+            return individual
+
         registry = individual.registry
 
         # We only apply parameter mutations to the evaluation policy network
@@ -789,6 +796,14 @@ class Mutations:
         :param individual: Individual agent from population
         :type individual: object
         """
+
+        if isinstance(individual, LLMAlgorithm):
+            warnings.warn(
+                "Architecture mutations are not supported for LLM algorithms."
+            )
+            individual.mut = "None"
+            return individual
+
         # Get the offspring evaluation modules
         # We first extract and apply a mutation for the algo policy and then apply
         # the same mutation to the rest of the evaluation modules e.g. critics

@@ -1,24 +1,28 @@
-import glob
 import inspect
 import os
+import shutil
 import warnings
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
+from functools import singledispatch
 from numbers import Number
 from typing import Any, Dict, Iterable, List, Optional, Tuple, TypeGuard, Union
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from accelerate.optimizer import AcceleratedOptimizer
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from gymnasium import spaces
+from peft import PeftModel, get_peft_model
 from tensordict import TensorDict, from_module
 from tensordict.nn import CudaGraphModule
 from torch._dynamo import OptimizedModule
 from torch.nn import Module
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+from transformers import PreTrainedModel
 
 from agilerl.protocols import (
     EvolvableAttributeType,
@@ -27,8 +31,8 @@ from agilerl.protocols import (
     OptimizerWrapper,
 )
 from agilerl.typing import (
-    ArrayDict,
     ArrayOrTensor,
+    ExperiencesType,
     MaybeObsList,
     NetworkType,
     NumpyObsType,
@@ -36,6 +40,8 @@ from agilerl.typing import (
     OptimizerType,
     TorchObsType,
 )
+
+PreTrainedModelType = Union[PeftModel, PreTrainedModel]
 
 
 def share_encoder_parameters(
@@ -482,122 +488,339 @@ def obs_to_tensor(
         }
     elif isinstance(obs, tuple):
         return tuple(torch.as_tensor(_obs, device=device).float() for _obs in obs)
-    elif isinstance(obs, Number):
+    elif isinstance(obs, (list, Number)):
         return torch.tensor(obs, device=device).float()
     else:
         raise Exception(f"Unrecognized type of observation {type(obs)}")
 
 
 def maybe_add_batch_dim(
-    obs: TorchObsType, space_shape: Tuple[int, ...]
-) -> TorchObsType:
+    obs: ObservationType, space_shape: Tuple[int, ...]
+) -> ObservationType:
     """Adds batch dimension if necessary.
 
     :param obs: Observation tensor
-    :type obs: torch.Tensor[float]
+    :type obs: ObservationType
     :param space_shape: Observation space shape
     :type space_shape: Tuple[int, ...]
     :return: Observation tensor with batch dimension
-    :rtype: torch.Tensor[float]
+    :rtype: ObservationType
     """
-    if obs.dim() == len(space_shape):
-        obs = obs.unsqueeze(0)
-    elif obs.dim() == len(space_shape) + 2:
-        obs = obs.view(-1, *space_shape)
-    elif obs.dim() != len(space_shape) + 1:
+    if len(obs.shape) == len(space_shape):
+        if isinstance(obs, np.ndarray):
+            obs = np.expand_dims(obs, 0)
+        else:
+            obs = obs.unsqueeze(0)
+    elif len(obs.shape) == len(space_shape) + 2:
+        if isinstance(obs, np.ndarray):
+            obs = obs.reshape(-1, *space_shape)
+        else:
+            obs = obs.view(-1, *space_shape)
+    elif len(obs.shape) != len(space_shape) + 1:
         raise ValueError(
-            f"Expected observation to have {len(space_shape) + 1} dimensions, got {obs.dim()}."
+            f"Expected observation to have {len(space_shape) + 1} dimensions, got {len(obs.shape)}."
         )
 
     return obs
 
 
+def get_vect_dim(observation: NumpyObsType, observation_space: spaces.Space) -> int:
+    """Returns the number of vectorized environments given an observation and
+    its corresponding space.
+
+    :param observation: Observation
+    :type observation: NumpyObsType
+    :param observation_space: Observation space
+    :type observation_space: spaces.Space
+    :return: Number of vectorized environments
+    """
+    if isinstance(observation_space, spaces.Dict):
+        first_key, first_obs = next(iter(observation.items()))
+        return get_vect_dim(first_obs, observation_space[first_key])
+    elif isinstance(observation_space, spaces.Tuple):
+        return get_vect_dim(observation[0], observation_space[0])
+    elif isinstance(observation_space, spaces.MultiBinary):
+        observation = (
+            observation
+            if isinstance(observation, np.ndarray)
+            else np.array(observation)
+        )
+        return (
+            observation.shape[0]
+            if len(observation.shape) > observation_space.shape
+            else 1
+        )
+    else:
+        observation = (
+            observation
+            if isinstance(observation, np.ndarray)
+            else np.array(observation)
+        )
+        array_shape = observation.shape
+        return array_shape[0] if len(array_shape) > len(observation_space.shape) else 1
+
+
+@singledispatch
 def preprocess_observation(
-    observation: NumpyObsType,
     observation_space: spaces.Space,
+    observation: ObservationType,
     device: Union[str, torch.device] = "cpu",
     normalize_images: bool = True,
+    placeholder_value: Optional[Any] = None,
 ) -> TorchObsType:
     """Preprocesses observations for forward pass through neural network.
 
-    :param observations: Observations of environment
-    :type observations: ObservationType
     :param observation_space: The observation space of the environment, defaults to the agent's observation space
     :type observation_space: spaces.Space
+    :param observation: Observations of environment
+    :type observation: ObservationType
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to "cpu"
     :type device: Union[str, torch.device], optional
     :param normalize_images: Normalize images from [0. 255] to [0, 1], defaults to True
     :type normalize_images: bool, optional
+    :param placeholder_value: The value to use as placeholder for missing observations, defaults to None.
+    :type placeholder_value: Optional[Any], optional
 
     :return: Preprocessed observations
     :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
     """
+    raise TypeError(
+        f"AgileRL currently doesn't support {type(observation_space)} spaces."
+    )
+
+
+@preprocess_observation.register(spaces.Dict)
+def preprocess_dict_observation(
+    observation_space: spaces.Dict,
+    observation: Dict[str, np.ndarray | torch.Tensor],
+    device: Union[str, torch.device] = "cpu",
+    normalize_images: bool = True,
+    placeholder_value: Optional[Any] = None,
+) -> Dict[str, TorchObsType]:
+    """Preprocess dictionary observations.
+
+    :param observation: Dictionary observation
+    :param observation_space: Dictionary observation space
+    :param device: Computing device
+    :param normalize_images: Whether to normalize images
+    :param placeholder_value: Value to replace NaNs with
+    :return: Preprocessed dictionary observation
+    """
+    assert isinstance(
+        observation, (dict, TensorDict)
+    ), f"Expected dict, got {type(observation)}"
+
+    preprocessed_obs = {}
+    for key, _obs in observation.items():
+        preprocessed_obs[key] = preprocess_observation(
+            observation_space[key],
+            observation=_obs,
+            device=device,
+            normalize_images=normalize_images,
+            placeholder_value=placeholder_value,
+        )
+
+    return preprocessed_obs
+
+
+@preprocess_observation.register(spaces.Tuple)
+def preprocess_tuple_observation(
+    observation_space: spaces.Tuple,
+    observation: Tuple[np.ndarray | torch.Tensor, ...],
+    device: Union[str, torch.device] = "cpu",
+    normalize_images: bool = True,
+    placeholder_value: Optional[Any] = None,
+) -> Tuple[TorchObsType, ...]:
+    """Preprocess tuple observations.
+
+    :param observation: Tuple observation
+    :param observation_space: Tuple observation space
+    :param device: Computing device
+    :param normalize_images: Whether to normalize images
+    :param placeholder_value: Value to replace NaNs with
+    :return: Preprocessed tuple observation
+    """
+    if isinstance(observation, TensorDict):
+        # Convert to tuple with values ordered by index at the end of key
+        dict_keys = list(observation.keys())
+        dict_keys.sort(key=lambda x: int(x.split("_")[-1]))
+        observation = tuple(observation[key] for key in dict_keys)
+
+    assert isinstance(observation, tuple), f"Expected tuple, got {type(observation)}"
+
+    return tuple(
+        preprocess_observation(
+            _space,
+            observation=_obs,
+            device=device,
+            normalize_images=normalize_images,
+            placeholder_value=placeholder_value,
+        )
+        for _obs, _space in zip(observation, observation_space.spaces)
+    )
+
+
+@preprocess_observation.register(spaces.Box)
+def preprocess_box_observation(
+    observation_space: spaces.Box,
+    observation: NumpyObsType,
+    device: Union[str, torch.device] = "cpu",
+    normalize_images: bool = True,
+    placeholder_value: Optional[Any] = None,
+) -> torch.Tensor:
+    """Preprocess box observations (continuous spaces).
+
+    :param observation: Box observation
+    :param observation_space: Box observation space
+    :param device: Computing device
+    :param normalize_images: Whether to normalize images
+    :param placeholder_value: Value to replace NaNs with
+    :return: Preprocessed box observation
+    """
+    # Convert to tensor
     observation = obs_to_tensor(observation, device)
 
-    # Preprocess different spaces accordingly
-    if isinstance(observation_space, spaces.Dict):
-        assert isinstance(
-            observation, (dict, TensorDict)
-        ), f"Expected dict, got {type(observation)}"
-        preprocessed_obs = {}
-        for key, _obs in observation.items():
-            preprocessed_obs[key] = preprocess_observation(
-                observation=_obs,
-                observation_space=observation_space[key],
-                device=device,
-                normalize_images=normalize_images,
-            )
+    # Replace NaNs with placeholder value if specified
+    if placeholder_value is not None:
+        observation = torch.where(
+            torch.isnan(observation),
+            torch.full_like(observation, placeholder_value),
+            observation,
+        ).to(torch.float32)
 
-        return preprocessed_obs
+    # Normalize images if applicable and specified
+    if len(observation_space.shape) == 3 and normalize_images:
+        observation = apply_image_normalization(observation, observation_space)
 
-    elif isinstance(observation_space, spaces.Tuple):
-        assert isinstance(
-            observation, tuple
-        ), f"Expected tuple, got {type(observation)}"
-        return tuple(
-            preprocess_observation(_obs, _space, device, normalize_images)
-            for _obs, _space in zip(observation, observation_space.spaces)
-        )
+    space_shape = observation_space.shape
 
-    assert isinstance(
-        observation, torch.Tensor
-    ), f"Expected torch.Tensor, got {type(observation)}"
+    # Check add batch dimension if necessary
+    observation = maybe_add_batch_dim(observation, space_shape)
 
-    if isinstance(observation_space, spaces.Box):
-        # Normalize images if applicable and specified
-        if len(observation_space.shape) == 3 and normalize_images:
-            observation = observation / 255.0
+    return observation
 
-        space_shape = observation_space.shape
 
-    elif isinstance(observation_space, spaces.Discrete):
-        # One hot encoding of discrete observation
-        observation = F.one_hot(
-            observation.long(), num_classes=int(observation_space.n)
-        ).float()
-        if observation_space.n > 1:
-            observation = (
-                observation.squeeze()
-            )  # If n == 1 then squeeze removes obs dim
+@preprocess_observation.register(spaces.Discrete)
+def preprocess_discrete_observation(
+    observation_space: spaces.Discrete,
+    observation: NumpyObsType,
+    device: Union[str, torch.device] = "cpu",
+    normalize_images: bool = True,
+    placeholder_value: Optional[Any] = None,
+) -> torch.Tensor:
+    """Preprocess discrete observations.
 
-        space_shape = (observation_space.n,)
+    :param observation: Discrete observation
+    :param observation_space: Discrete observation space
+    :param device: Computing device
+    :param normalize_images: Whether to normalize images
+    :param placeholder_value: Value to replace NaNs with
+    :return: Preprocessed discrete observation (one-hot encoded)
+    """
+    # Convert to tensor
+    observation = obs_to_tensor(observation, device)
 
-    elif isinstance(observation_space, spaces.MultiDiscrete):
-        # Tensor concatenation of one hot encodings of each Categorical sub-space
-        observation = torch.cat(
-            [
-                F.one_hot(
-                    obs_.long(), num_classes=int(observation_space.nvec[idx])
-                ).float()
-                for idx, obs_ in enumerate(torch.split(observation.long(), 1, dim=1))
-            ],
-            dim=-1,
-        )
-        space_shape = (sum(observation_space.nvec),)
-    else:
-        raise TypeError(
-            f"AgileRL currently doesn't support {type(observation_space)} spaces."
-        )
+    # Replace NaNs with placeholder value if specified
+    if placeholder_value is not None:
+        observation = torch.where(
+            torch.isnan(observation),
+            torch.full_like(observation, placeholder_value),
+            observation,
+        ).to(torch.float32)
+
+    # One hot encoding of discrete observation
+    observation = F.one_hot(
+        observation.long(), num_classes=int(observation_space.n)
+    ).float()
+
+    if observation_space.n > 1:
+        observation = observation.squeeze()  # If n == 1 then squeeze removes obs dim
+
+    space_shape = (observation_space.n,)
+
+    # Check add batch dimension if necessary
+    observation = maybe_add_batch_dim(observation, space_shape)
+
+    return observation
+
+
+@preprocess_observation.register(spaces.MultiDiscrete)
+def preprocess_multidiscrete_observation(
+    observation_space: spaces.MultiDiscrete,
+    observation: NumpyObsType,
+    device: Union[str, torch.device] = "cpu",
+    normalize_images: bool = True,
+    placeholder_value: Optional[Any] = None,
+) -> torch.Tensor:
+    """Preprocess multi-discrete observations.
+
+    :param observation: Multi-discrete observation
+    :param observation_space: Multi-discrete observation space
+    :param device: Computing device
+    :param normalize_images: Whether to normalize images
+    :param placeholder_value: Value to replace NaNs with
+    :return: Preprocessed multi-discrete observation (one-hot encoded)
+    """
+    # Convert to tensor
+    observation = obs_to_tensor(observation, device)
+
+    # Replace NaNs with placeholder value if specified
+    if placeholder_value is not None:
+        observation = torch.where(
+            torch.isnan(observation),
+            torch.full_like(observation, placeholder_value),
+            observation,
+        ).to(torch.float32)
+
+    # Need to add batch dimension prior to splitting
+    space_shape = (sum(observation_space.nvec),)
+    observation: torch.Tensor = maybe_add_batch_dim(observation, space_shape)
+
+    # Tensor concatenation of one hot encodings of each Categorical sub-space
+    observation = torch.cat(
+        [
+            F.one_hot(obs_.long(), num_classes=int(observation_space.nvec[idx])).float()
+            for idx, obs_ in enumerate(torch.split(observation.long(), 1, dim=1))
+        ],
+        dim=-1,
+    )
+
+    # Check add batch dimension if necessary
+    observation = maybe_add_batch_dim(observation, space_shape)
+
+    return observation
+
+
+@preprocess_observation.register(spaces.MultiBinary)
+def preprocess_multibinary_observation(
+    observation_space: spaces.MultiBinary,
+    observation: NumpyObsType,
+    device: Union[str, torch.device] = "cpu",
+    normalize_images: bool = True,
+    placeholder_value: Optional[Any] = None,
+) -> torch.Tensor:
+    """Preprocess multi-binary observations.
+
+    :param observation: Multi-binary observation
+    :param observation_space: Multi-binary observation space
+    :param device: Computing device
+    :param normalize_images: Whether to normalize images
+    :param placeholder_value: Value to replace NaNs with
+    :return: Preprocessed multi-binary observation
+    """
+    # Convert to tensor
+    observation = obs_to_tensor(observation, device)
+
+    # Replace NaNs with placeholder value if specified
+    if placeholder_value is not None:
+        observation = torch.where(
+            torch.isnan(observation),
+            torch.full_like(observation, placeholder_value),
+            observation,
+        ).to(torch.float32)
+
+    observation = observation.float()
+    space_shape = (observation_space.n,)
 
     # Check add batch dimension if necessary
     observation = maybe_add_batch_dim(observation, space_shape)
@@ -606,17 +829,20 @@ def preprocess_observation(
 
 
 def apply_image_normalization(
-    observation: NumpyObsType, observation_space: spaces.Space
-) -> NumpyObsType:
+    observation: ArrayOrTensor, observation_space: spaces.Box
+) -> ArrayOrTensor:
     """Normalize images using minmax scaling
 
     :param observation: Observation
-    :type observation: NumpyObsType
+    :type observation: ArrayOrTensor
     :param observation_space: Observation space
-    :type observation_space: spaces.Space
+    :type observation_space: spaces.Box
     :return: Observation
-    :rtype: NumpyObsType
+    :rtype: ArrayOrTensor
     """
+    if not isinstance(observation_space, spaces.Box):
+        raise TypeError(f"Expected spaces.Box, got {type(observation_space)}")
+
     if np.inf in observation_space.high:
         warnings.warn(
             "np.inf detected in observation_space.high, bypassing normalization."
@@ -630,13 +856,20 @@ def apply_image_normalization(
         return observation
 
     if np.all(observation_space.high == 1) and np.all(observation_space.low == 0):
-        # minmax scaling
         return observation
 
-    observation = (observation - observation_space.low) / (
-        observation_space.high - observation_space.low
-    )
-    return observation
+    if isinstance(observation, torch.Tensor):
+        low = torch.tensor(
+            observation_space.low, device=observation.device, dtype=observation.dtype
+        )
+        high = torch.tensor(
+            observation_space.high, device=observation.device, dtype=observation.dtype
+        )
+    else:
+        low = observation_space.low
+        high = observation_space.high
+
+    return (observation - low) / (high - low)
 
 
 # TODO: The following functions are currently used in PPO (on-policy) as a means of handling
@@ -672,7 +905,7 @@ def get_experiences_samples(
 
 def stack_experiences(
     *experiences: MaybeObsList, to_torch: bool = True
-) -> Tuple[ArrayOrTensor, ...]:
+) -> Tuple[ObservationType, ...]:
     """Stacks experiences into a single array or tensor.
 
     :param experiences: Experiences to stack
@@ -718,7 +951,7 @@ def stack_experiences(
             stacked_exp = tuple(stacked_exp)
 
         elif isinstance(exp[0], (np.ndarray, Number)):
-            stacked_exp = np.array(exp)
+            stacked_exp = np.stack(exp)
             if to_torch:
                 stacked_exp = torch.from_numpy(stacked_exp)
 
@@ -770,7 +1003,6 @@ def stack_and_pad_experiences(
                     )
                     for e, padding_size in zip(exp, padding_sizes)
                 ]
-
             stacked_exp = torch.cat(exp, dim=0)
         else:
             raise TypeError(f"Unsupported experience type: {type(exp[0])}")
@@ -890,7 +1122,7 @@ def create_warmup_cosine_scheduler(
     return scheduler
 
 
-def remove_nested_files(files: str) -> None:
+def remove_nested_files(files: List[str]) -> None:
     """Remove nested files from a list of files.
 
     :param files: List of files to remove nested files from
@@ -898,17 +1130,16 @@ def remove_nested_files(files: str) -> None:
     :param depth: Depth of the nested files, defaults to 0
     :type depth: int, optional
     """
-    for _file in files:
-        if os.path.isdir(_file):
-            remove_nested_files(glob.glob(_file + "/*"))
-            os.rmdir(_file)
+    for f in files:
+        if os.path.isdir(f):
+            shutil.rmtree(f)
         else:
-            os.remove(_file)
+            os.remove(f)
 
 
 def vectorize_experiences_by_agent(
-    experiences: ArrayDict, dim: int = 1
-) -> torch.Tensor:
+    experiences: ExperiencesType, dim: int = 1
+) -> Union[torch.Tensor, Dict[str, torch.Tensor], Tuple[torch.Tensor, ...]]:
     """Reorganizes experiences into a tensor, vectorized by time step
 
     Example input:
@@ -917,22 +1148,157 @@ def vectorize_experiences_by_agent(
     torch.Tensor([[1, 2, 3, 4, 5, 6, 7, 8]])
 
     :param experiences: Dictionaries containing experiences indexed by agent_id that share a policy agent.
-    :type experiences: Tuple[Dict[str, np.ndarray]]
+    :type experiences: ExperiencesType
     :param dim: New dimension to stack along
     :type dim: int
-    :return: Tensor of experiences, stacked along provided dimension
-    :rtype: torch.Tensor
+    :return: Tensor, dict of tensors, or tuple of tensors of experiences, stacked along provided dimension
+    :rtype: Union[torch.Tensor, Dict[str, torch.Tensor], Tuple[torch.Tensor, ...]]
     """
-    tensors = [
-        torch.Tensor(np.array(experiences[agent_id])) for agent_id in experiences.keys()
-    ]
-    stacked_tensor = torch.stack(tensors, dim=dim)
-    return stacked_tensor
+    if not experiences:
+        return torch.tensor([])
+
+    # Get a sample value to determine the type
+    sample_value = next(iter(experiences.values()))
+
+    if isinstance(sample_value, dict):
+        # Handle dictionary observations
+        keys = sample_value.keys()
+        return {
+            k: vectorize_experiences_by_agent(
+                {agent_id: experiences[agent_id][k] for agent_id in experiences},
+                dim=dim,
+            )
+            for k in keys
+        }
+    elif isinstance(sample_value, tuple):
+        # Handle tuple observations
+        tuple_length = len(sample_value)
+        return tuple(
+            vectorize_experiences_by_agent(
+                {agent_id: experiences[agent_id][i] for agent_id in experiences},
+                dim=dim,
+            )
+            for i in range(tuple_length)
+        )
+    else:
+        # Original implementation for array/tensor observations
+        tensors: List[torch.Tensor] = []
+        for experience in experiences.values():
+            if experience is None:
+                continue
+            tensors.append(torch.Tensor(np.array(experience)))
+
+        # Check if all tensors have the same shape
+        if all(t.shape == tensors[0].shape for t in tensors):
+            stacked_tensor = torch.stack(tensors, dim=dim)
+        else:
+            # Concatenate along the specified dimension
+            stacked_tensor = torch.cat(tensors)
+
+        return stacked_tensor
+
+
+def get_space_shape(space: spaces.Space) -> Tuple[int, ...]:
+    """Get the shape of a space
+
+    :param space: Space to get shape of
+    :type space: spaces.Space
+    :return: Shape of space
+    :rtype: Tuple[int, ...]
+    """
+    if isinstance(space, spaces.Discrete):
+        return (1,)
+    elif isinstance(space, spaces.Box):
+        return space.shape
+    elif isinstance(space, spaces.MultiDiscrete):
+        return (len(space.nvec),)
+    elif isinstance(space, spaces.MultiBinary):
+        return (space.n,)
+    else:
+        raise TypeError(f"Unsupported space type: {type(space)}")
+
+
+def experience_to_tensors(
+    experience: dict | tuple | np.ndarray, space: spaces.Space
+) -> TorchObsType:
+    """Convert experience to numpy array
+
+    :param experience: Experience to convert
+    :type experience: dict | tuple | np.ndarray
+    :param space: Space to convert experience to
+    :type space: spaces.Space
+    :return: Numpy array of experience
+    :rtype: np.ndarray
+    """
+    if isinstance(experience, dict):
+        return {
+            key: experience_to_tensors(value, space[key])
+            for key, value in experience.items()
+        }
+    elif isinstance(experience, tuple):
+        return tuple(
+            experience_to_tensors(exp, space[i]) for i, exp in enumerate(experience)
+        )
+    else:
+        array = np.array(experience)
+
+        # Ensure experience has a batch dimension
+        space_shape = get_space_shape(space)
+        array = maybe_add_batch_dim(array, space_shape)
+        return torch.from_numpy(array)
+
+
+def concatenate_tensors(tensors: List[TorchObsType]) -> TorchObsType:
+    """Concatenate tensors along first dimension
+
+    :param tensors: List of tensors to concatenate
+    :type tensors: List[TorchObsType]
+    :return: Concatenated tensor
+    :rtype: TorchObsType
+    """
+    if isinstance(tensors[0], dict):
+        return {
+            key: concatenate_tensors([t[key] for t in tensors])
+            for key in tensors[0].keys()
+        }
+    elif isinstance(tensors[0], tuple):
+        return tuple(
+            concatenate_tensors([t[i] for t in tensors]) for i in range(len(tensors[0]))
+        )
+    else:
+        return torch.cat(tensors, dim=0)
+
+
+def reshape_from_space(tensor: TorchObsType, space: spaces.Space) -> TorchObsType:
+    """Reshape tensor from space
+
+    :param tensor: Tensor to reshape
+    :type tensor: TorchObsType
+    :param space: Space to reshape tensor to
+    :type space: spaces.Space
+    :return: Reshaped tensor
+    :rtype: TorchObsType
+    """
+    if isinstance(tensor, dict):
+        return {
+            key: reshape_from_space(value, space[key]) for key, value in tensor.items()
+        }
+    elif isinstance(tensor, tuple):
+        return tuple(
+            reshape_from_space(value, space[i]) for i, value in enumerate(tensor)
+        )
+    else:
+        #
+        reshaped: torch.Tensor = tensor.reshape(-1, *space.shape)
+        for squeeze_dim in [0, -1]:
+            if reshaped.size(squeeze_dim) == 1:
+                reshaped = reshaped.squeeze(squeeze_dim)
+        return reshaped
 
 
 def concatenate_experiences_into_batches(
-    experiences: ArrayDict, shape: Tuple[int]
-) -> torch.Tensor:
+    experiences: ExperiencesType, space: spaces.Space
+) -> TorchObsType:
     """Reorganizes experiences into a batched tensor
 
     Example input:
@@ -943,21 +1309,50 @@ def concatenate_experiences_into_batches(
     torch.Tensor([...1], [...2], [...3], [...4], [...5], [...6], [...7], [...8])
 
     :param experiences: Dictionaries containing experiences indexed by agent_id that share a policy agent.
-    :type experiences: Dict[str, np.ndarray]
-    :param shape: Observation/action/etc shape space to maintain
-    :type obs_space: Tuple[int]
-    :return: Tensor of experiences, stacked along first dimension, with shape (num_experiences, *shape)
-    :rtype: torch.Tensor
+    :type experiences: ExperiencesType
+    :param space: Observation/action/etc space to maintain
+    :type space: spaces.Space
+    :return: Tensor, dict of tensors, or tuple of tensors of experiences, stacked along first dimension, with shape (num_experiences, *shape)
+    :rtype: Union[torch.Tensor, Dict[str, torch.Tensor], Tuple[torch.Tensor, ...]]
     """
     tensors = []
     for agent_id in experiences.keys():
-        exp = np.array(experiences[agent_id])
-        if len(exp.shape) < 2:
-            exp = np.expand_dims(exp, 0)
-        tensors.append(torch.Tensor(exp))
-    stacked_tensor = torch.cat(tensors, dim=0)
-    stacked_tensor = stacked_tensor.reshape(-1, *shape)
-    for squeeze_dim in [0, -1]:
-        if stacked_tensor.size(squeeze_dim) == 1:
-            stacked_tensor = stacked_tensor.squeeze(squeeze_dim)
-    return stacked_tensor
+        exp = experience_to_tensors(experiences[agent_id], space)
+        tensors.append(exp)
+
+    stacked_tensor = concatenate_tensors(tensors)
+    return reshape_from_space(stacked_tensor, space)
+
+
+def is_peft_model(model: nn.Module) -> bool:
+    """Check if a model is a PEFT model.
+
+    :param model: Model to check
+    :type model: nn.Module
+    :return: True if the model is a PEFT model, False otherwise
+    :rtype: bool
+    """
+    return isinstance(model, PeftModel)
+
+
+def clone_llm(
+    original_model: PreTrainedModelType,
+    state_dict: Optional[Dict[str, torch.Tensor]] = None,
+) -> PreTrainedModelType:
+    """Clone the actor.
+
+    :param model: Model to clone
+    :type model: PreTrainedModelType
+    :param state_dict: State dict to load, defaults to None
+    :type state_dict: Optional[Dict[str, torch.Tensor]], optional
+    :return: Cloned model
+    """
+    model_config = original_model.config
+    base_model = original_model.model
+    model = type(base_model)(model_config)
+    if is_peft_model(original_model):
+        peft_config = original_model.peft_config[original_model.active_adapter]
+        model = get_peft_model(model, peft_config)
+    if state_dict is not None:
+        model.load_state_dict(state_dict)
+    return model

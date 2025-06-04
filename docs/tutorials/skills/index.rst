@@ -228,7 +228,7 @@ Once the skills have been defined, training agents to solve them is very straigh
       }
 
       INIT_HP = {
-         "ENV_NAME": "LunarLander-v2",
+         "ENV_NAME": "LunarLander-v3",
          "ALGO": "PPO",
          "POPULATION_SIZE": 1,  # Population size
          "BATCH_SIZE": 128,  # Batch size
@@ -416,6 +416,15 @@ Finally, we can run the training loop for the selector agent. Each skill agent's
                for idx_step in range(500):
                   # Get next action from agent
                   action, log_prob, _, value = agent.get_action(state)
+
+                  # Clip to action space
+                  if isinstance(agent.action_space, spaces.Box):
+                      if agent.actor.squash_output:
+                          clipped_action = agent.actor.scale_action(action)
+                      else:
+                          clipped_action = np.clip(action, agent.action_space.low, agent.action_space.high)
+                  else:
+                      clipped_action = action
 
                   # Internal loop to execute trained skill
                   skill_agent = trained_skills[action[0]]["agent"]

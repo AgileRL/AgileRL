@@ -46,7 +46,6 @@ def test_sampling_batch_from_buffer():
     iterator = iter(dataset)
     batch = next(iterator)
 
-    print(batch)
     assert len(batch) == batch_size
     assert len(batch["obs"]) == batch_size
     assert torch.equal(batch["obs"][0], torch.from_numpy(state1).float())

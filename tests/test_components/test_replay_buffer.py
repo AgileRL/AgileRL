@@ -514,7 +514,6 @@ def test_nstep_early_termination():
     # Expected reward: r1 + gamma*r2 (no r3 because episode terminates)
     expected_reward = 1.0 + 0.9 * 2.0
 
-    print(n_step_data["reward"], expected_reward)
     assert torch.isclose(n_step_data["reward"], torch.tensor(expected_reward))
     assert torch.all(n_step_data["next_state"] == data2["next_state"])
     assert torch.all(n_step_data["done"] == data2["done"])

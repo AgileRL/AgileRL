@@ -29,4 +29,4 @@ wandb==0.17.6
 huggingface
 datasets==3.3.2
 transformers==4.48.1
-peft==0.14.0
+peft==0.15.2

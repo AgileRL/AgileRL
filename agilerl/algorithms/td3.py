@@ -16,7 +16,7 @@ from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.q_networks import ContinuousQNetwork
-from agilerl.typing import ArrayOrTensor, ExperiencesType, GymEnvType, NumpyObsType
+from agilerl.typing import ExperiencesType, GymEnvType, NumpyObsType
 from agilerl.utils.algo_utils import (
     make_safe_deepcopies,
     obs_channels_to_first,
@@ -83,10 +83,12 @@ class TD3(RLAlgorithm):
     :type wrap: bool, optional
     """
 
+    action_space: spaces.Box
+
     def __init__(
         self,
         observation_space: spaces.Space,
-        action_space: spaces.Space,
+        action_space: spaces.Box,
         O_U_noise: bool = True,
         vect_noise_dim: int = 1,
         expl_noise: float = 0.1,
@@ -341,17 +343,16 @@ class TD3(RLAlgorithm):
 
         return torch.max(torch.min(input, max), min)
 
-    def get_action(self, obs: NumpyObsType, training: bool = True) -> ArrayOrTensor:
-        """Returns the next action to take in the environment.
-        Epsilon is the probability of taking a random action, used for exploration.
-        For epsilon-greedy behaviour, set epsilon to 0.
+    def get_action(self, obs: NumpyObsType, training: bool = True) -> np.ndarray:
+        """Returns the next action to take in the environment. If training, random noise
+        is added to the action to promote exploration.
 
         :param obs: Environment observation, or multiple observations in a batch
         :type obs: numpy.ndarray[float], dict, tuple
         :param training: Agent is training, use exploration noise, defaults to True
         :type training: bool, optional
         :return: Action
-        :rtype: numpy.ndarray[float], torch.Tensor
+        :rtype: numpy.ndarray[float]
         """
         obs = self.preprocess_observation(obs)
 
@@ -359,13 +360,13 @@ class TD3(RLAlgorithm):
         with torch.no_grad():
             action = self.actor(obs)
 
+        action = action.cpu().data.numpy()
+
         self.actor.train()
         if training:
-            action = (action.cpu().data.numpy() + self.action_noise()).clip(
-                self.min_action, self.max_action
-            )
+            action += self.action_noise()
 
-        return action
+        return action.clip(self.action_space.low, self.action_space.high)
 
     def action_noise(self) -> np.ndarray:
         """Create action noise for exploration, either Ornstein Uhlenbeck or
@@ -409,22 +410,24 @@ class TD3(RLAlgorithm):
         :type noise_clip: float, optional
         :param policy_noise: Standard deviation of noise applied to policy, defaults to 0.2
         :type policy_noise: float, optional
+        :return: Actor loss and critic loss
+        :rtype: tuple[float, float]
         """
-        states, actions, rewards, next_states, dones = experiences
+        obs = experiences["obs"]
+        actions = experiences["action"]
+        rewards = experiences["reward"]
+        next_obs = experiences["next_obs"]
+        dones = experiences["done"]
 
-        actions = actions.to(self.device)
-        rewards = rewards.to(self.device)
-        dones = dones.to(self.device)
-
-        states = self.preprocess_observation(states)
-        next_states = self.preprocess_observation(next_states)
+        obs = self.preprocess_observation(obs)
+        next_obs = self.preprocess_observation(next_obs)
 
         # Compute the Q values
-        q_value_1 = self.critic_1(states, actions)
-        q_value_2 = self.critic_2(states, actions)
+        q_value_1 = self.critic_1(obs, actions)
+        q_value_2 = self.critic_2(obs, actions)
 
         with torch.no_grad():
-            next_actions = self.actor_target(next_states)
+            next_actions = self.actor_target(next_obs)
             noise = actions.data.normal_(0, policy_noise)
             noise = self.multi_dim_clamp(-noise_clip, noise_clip, noise.to(self.device))
             next_actions = next_actions + noise
@@ -433,8 +436,8 @@ class TD3(RLAlgorithm):
             )
 
             # Compute the target, y_j, making use of twin critic networks
-            q_value_next_state_1 = self.critic_target_1(next_states, next_actions)
-            q_value_next_state_2 = self.critic_target_2(next_states, next_actions)
+            q_value_next_state_1 = self.critic_target_1(next_obs, next_actions)
+            q_value_next_state_2 = self.critic_target_2(next_obs, next_actions)
 
             q_value_next_state = torch.min(q_value_next_state_1, q_value_next_state_2)
 
@@ -459,10 +462,10 @@ class TD3(RLAlgorithm):
         # update actor and targets every policy_freq learn steps
         self.learn_counter += 1
         if self.learn_counter % self.policy_freq == 0:
-            policy_actions = self.actor(states)
+            policy_actions = self.actor(obs)
 
             # Compute actor loss
-            actor_loss = -self.critic_1(states, policy_actions).mean()
+            actor_loss = -self.critic_1(obs, policy_actions).mean()
 
             # actor loss backprop
             self.actor_optimizer.zero_grad()

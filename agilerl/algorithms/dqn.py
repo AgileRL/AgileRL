@@ -230,6 +230,8 @@ class DQN(RLAlgorithm):
             if isinstance(torch_obs, dict):
                 sample = next(iter(torch_obs.values()))
                 batch_size = sample.size(0)
+            elif isinstance(torch_obs, tuple):
+                batch_size = torch_obs[0].size(0)
             else:
                 batch_size = torch_obs.size(0)
 

@@ -7,6 +7,7 @@ import torch
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 from numpy.typing import ArrayLike
+from pettingzoo import ParallelEnv
 from tensordict import TensorDict
 from torch.nn import Module
 from torch.optim import Optimizer
@@ -26,10 +27,16 @@ ArrayTuple = Tuple[ArrayLike, ...]
 NetConfigType = Dict[str, Any]
 KernelSizeType = Union[int, Tuple[int, ...]]
 SupportedGymSpaces = Union[
-    spaces.Box, spaces.Discrete, spaces.MultiDiscrete, spaces.Dict, spaces.Tuple
+    spaces.Box,
+    spaces.Discrete,
+    spaces.MultiDiscrete,
+    spaces.Dict,
+    spaces.Tuple,
+    spaces.MultiBinary,
 ]
 GymSpaceType = Union[SupportedGymSpaces, List[SupportedGymSpaces]]
 GymEnvType = Union[str, gym.Env, gym.vector.VectorEnv]
+PzEnvType = Union[str, ParallelEnv]
 
 NumpyObsType = Union[np.ndarray, ArrayDict, ArrayTuple]
 TorchObsType = Union[torch.Tensor, TensorDict, TensorTuple, StandardTensorDict]

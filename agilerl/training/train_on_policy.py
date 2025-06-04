@@ -7,9 +7,10 @@ import gymnasium as gym
 import numpy as np
 import wandb
 from accelerate import Accelerator
+from gymnasium import spaces
 from tqdm import trange
 
-from agilerl.algorithms.core.base import RLAlgorithm
+from agilerl.algorithms import PPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.algo_utils import obs_channels_to_first
@@ -20,7 +21,8 @@ from agilerl.utils.utils import (
 )
 
 InitDictType = Optional[Dict[str, Any]]
-PopulationType = List[RLAlgorithm]
+OnPolicyAlgorithms = PPO
+PopulationType = List[OnPolicyAlgorithms]
 
 
 def train_on_policy(
@@ -206,13 +208,14 @@ def train_on_policy(
         pop_episode_scores = []
         pop_fps = []
         for agent_idx, agent in enumerate(pop):  # Loop through population
+            agent.set_training_mode(True)
+
             state, info = env.reset()  # Reset environment at start of episode
             scores = np.zeros(num_envs)
             completed_episode_scores = []
             steps = 0
             start_time = time.time()
             for _ in range(-(evo_steps // -agent.learn_step)):
-
                 states = []
                 actions = []
                 log_probs = []
@@ -241,8 +244,19 @@ def train_on_policy(
                     # Store entropy value
                     pop_entropy[agent_idx].append(entropy)
 
+                    # Clip to action space
+                    if isinstance(agent.action_space, spaces.Box):
+                        if agent.actor.squash_output:
+                            clipped_action = agent.actor.scale_action(action)
+                        else:
+                            clipped_action = np.clip(
+                                action, agent.action_space.low, agent.action_space.high
+                            )
+                    else:
+                        clipped_action = action
+
                     # Act in environment
-                    next_state, reward, term, trunc, info = env.step(action)
+                    next_state, reward, term, trunc, info = env.step(clipped_action)
                     next_done = np.logical_or(term, trunc).astype(np.int8)
 
                     total_steps += num_envs
@@ -269,8 +283,6 @@ def train_on_policy(
                             agent.scores.append(scores[idx])
                             scores[idx] = 0
 
-                    pbar.update(num_envs)
-
                 if swap_channels:
                     next_state = obs_channels_to_first(next_state)
 
@@ -291,6 +303,7 @@ def train_on_policy(
             agent.steps[-1] += steps
             fps = steps / (time.time() - start_time)
             pop_fps.append(fps)
+            pbar.update(evo_steps // len(pop))
             pop_episode_scores.append(completed_episode_scores)
 
         # Evaluate population

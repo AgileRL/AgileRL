@@ -61,7 +61,6 @@ def test_evolvable_bert_init_no_e2e():
 def test_generate_square_subsequent_mask():
     model = EvolvableBERT([1], [1])
     mask = model.generate_square_subsequent_mask(2)
-    print(mask)
     assert str(mask) == str(torch.Tensor([[0.0, -np.inf], [0.0, 0.0]]))
 
 
