@@ -134,45 +134,59 @@ def grpo_hp_config():
 
 @pytest.fixture
 def encoder_mlp_config():
-    yield {"encoder_config": {"hidden_size": [8], "min_mlp_nodes": 4}}
+    yield {
+        "latent_dim": 34,
+        "min_latent_dim": 1,
+        "encoder_config": {"hidden_size": [66], "min_mlp_nodes": 1},
+        "head_config": {"hidden_size": [66], "min_mlp_nodes": 1},
+    }
 
 
 @pytest.fixture
 def encoder_simba_config():
     yield {
+        "latent_dim": 34,
+        "min_latent_dim": 1,
         "simba": True,
         "encoder_config": {
             "hidden_size": 64,
             "num_blocks": 3,
         },
+        "head_config": {"hidden_size": [66], "min_mlp_nodes": 1},
     }
 
 
 @pytest.fixture
 def encoder_cnn_config():
     yield {
+        "latent_dim": 34,
+        "min_latent_dim": 1,
         "encoder_config": {
             "channel_size": [3],
             "kernel_size": [3],
             "stride_size": [1],
-        }
+        },
+        "head_config": {"hidden_size": [66], "min_mlp_nodes": 1},
     }
 
 
 @pytest.fixture
 def encoder_multi_input_config():
     yield {
+        "latent_dim": 34,
+        "min_latent_dim": 1,
         "encoder_config": {
             "cnn_config": {
                 "channel_size": [3],
                 "kernel_size": [3],
                 "stride_size": [1],
             },
-            "mlp_config": {"hidden_size": [8], "min_mlp_nodes": 4},
+            "mlp_config": {"hidden_size": [66], "min_mlp_nodes": 1},
             "lstm_config": {
                 "hidden_size": 8,
             },
-        }
+        },
+        "head_config": {"hidden_size": [66], "min_mlp_nodes": 1},
     }
 
 
@@ -916,9 +930,13 @@ def test_mutation_applies_architecture_mutations(algo, device, accelerator, init
         assert len(mutated_population) == len(population)
         for old, individual in zip(population, mutated_population):
             policy = getattr(individual, individual.registry.policy())
+            old_policy = getattr(old, old.registry.policy())
             assert individual.mut == policy.last_mutation_attr
-            # Due to randomness and constraints on size, sometimes architectures are not different
-            # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
+
+            if policy.last_mutation_attr is not None:
+
+                assert str(old_policy.state_dict()) != str(policy.state_dict())
+
             assert old.index == individual.index
 
         assert_equal_state_dict(population, mutated_population)
@@ -1031,7 +1049,7 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
 
 #### Multi-agent algorithm mutations ####
 # The mutation method applies random mutations to the population and returns the mutated population.
-@pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
+@pytest.mark.parametrize("algo", ["MADDPG", "MATD3", "IPPO"])
 @pytest.mark.parametrize(
     "observation_space, net_config",
     [
@@ -1096,7 +1114,7 @@ def test_mutation_applies_random_mutations_multi_agent(
 
 
 # The mutation method applies no mutations to the population and returns the mutated population.
-@pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
+@pytest.mark.parametrize("algo", ["MADDPG", "MATD3", "IPPO"])
 @pytest.mark.parametrize(
     "observation_space, net_config",
     [(generate_multi_agent_box_spaces(2, shape=(4,)), "encoder_mlp_config")],
@@ -1144,7 +1162,7 @@ def test_mutation_applies_no_mutations_multi_agent(algo, device, accelerator, in
 
 
 # The mutation method applies RL hyperparameter mutations to the population and returns the mutated population.
-@pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
+@pytest.mark.parametrize("algo", ["MADDPG", "MATD3", "IPPO"])
 @pytest.mark.parametrize(
     "observation_space, net_config",
     [(generate_multi_agent_box_spaces(2, shape=(4,)), "encoder_mlp_config")],
@@ -1200,7 +1218,7 @@ def test_mutation_applies_rl_hp_mutations_multi_agent(
 
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
-@pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
+@pytest.mark.parametrize("algo", ["MADDPG", "MATD3", "IPPO"])
 @pytest.mark.parametrize(
     "observation_space, net_config",
     [
@@ -1260,7 +1278,7 @@ def test_mutation_applies_activation_mutations_multi_agent(
 
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
-@pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
+@pytest.mark.parametrize("algo", ["MADDPG", "MATD3", "IPPO"])
 @pytest.mark.parametrize(
     "observation_space, net_config",
     [(generate_multi_agent_box_spaces(2, shape=(4,)), "encoder_mlp_config")],
@@ -1318,7 +1336,7 @@ def test_mutation_applies_activation_mutations_multi_agent_no_skip(
 
 
 # The mutation method applies parameter mutations to the population and returns the mutated population.
-@pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
+@pytest.mark.parametrize("algo", ["MADDPG", "MATD3", "IPPO"])
 @pytest.mark.parametrize(
     "observation_space, net_config",
     [
@@ -1389,7 +1407,7 @@ def test_mutation_applies_parameter_mutations_multi_agent(
 
 
 # The mutation method applies architecture mutations to the population and returns the mutated population.
-@pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
+@pytest.mark.parametrize("algo", ["MADDPG", "MATD3", "IPPO"])
 @pytest.mark.parametrize(
     "observation_space, net_config",
     [
@@ -1441,17 +1459,29 @@ def test_mutation_applies_architecture_mutations_multi_agent(
         assert len(mutated_population) == len(population)
         for old, individual in zip(population, mutated_population):
             policy = getattr(individual, individual.registry.policy())
-            assert individual.mut == policy.last_mutation_attr
-            # Due to randomness and constraints on size, sometimes architectures are not different
-            # assert str(old.actors[0].state_dict()) != str(individual.actors[0].state_dict())
+            old_policy = getattr(old, old.registry.policy())
+            if policy.last_mutation_attr is not None:
+                sampled_mutation = ".".join(policy.last_mutation_attr.split(".")[1:])
+            else:
+                sampled_mutation = None
+
+            assert individual.mut == sampled_mutation
+
+            if sampled_mutation is not None:
+                print("Mutation = ", sampled_mutation)
+                print("Old policy = ", old_policy)
+                print("New policy = ", policy)
+                assert str(old_policy.state_dict()) != str(policy.state_dict())
+
             assert old.index == individual.index
 
         assert_equal_state_dict(population, mutated_population)
 
+        del mutated_population
+        del new_population
+
     del mutations
     del population
-    del mutated_population
-    del new_population
 
 
 # The mutation method applies BERT architecture mutations to the population and returns the mutated population.
@@ -1573,9 +1603,17 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
         assert len(mutated_population) == len(population)
         for old, individual in zip(population, mutated_population):
             policy = getattr(individual, individual.registry.policy())
-            assert individual.mut == policy.last_mutation_attr
-            # Due to randomness and constraints on size, sometimes architectures are not different
-            # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
+            old_policy = getattr(old, old.registry.policy())
+            if policy.last_mutation_attr is not None:
+                sampled_mutation = ".".join(policy.last_mutation_attr.split(".")[1:])
+            else:
+                sampled_mutation = None
+
+            assert individual.mut == sampled_mutation
+
+            if sampled_mutation is not None:
+                assert str(old_policy.state_dict()) != str(policy.state_dict())
+
             assert old.index == individual.index
 
     # assert_equal_state_dict(population, mutated_population)

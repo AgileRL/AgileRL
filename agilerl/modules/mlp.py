@@ -191,7 +191,7 @@ class EvolvableMLP(EvolvableModule):
         self.recreate_network()
 
     @mutation(MutationType.LAYER)
-    def add_layer(self) -> None:
+    def add_layer(self) -> Optional[Dict[str, int]]:
         """Adds a hidden layer to neural network. Falls back on ``add_node()`` if
         max hidden layers reached."""
         # add layer to hyper params
@@ -201,7 +201,7 @@ class EvolvableMLP(EvolvableModule):
             return self.add_node()
 
     @mutation(MutationType.LAYER)
-    def remove_layer(self) -> None:
+    def remove_layer(self) -> Optional[Dict[str, int]]:
         """Removes a hidden layer from neural network. Falls back on ``add_node()`` if
         min hidden layers reached."""
         if len(self.hidden_size) > self.min_hidden_layers:  # HARD LIMIT
@@ -219,6 +219,9 @@ class EvolvableMLP(EvolvableModule):
         :type hidden_layer: int, optional
         :param numb_new_nodes: Number of nodes to add to hidden layer, defaults to None
         :type numb_new_nodes: int, optional
+
+        :return: Dictionary containing the hidden layer and number of new nodes.
+        :rtype: Dict[str, int]
         """
         if hidden_layer is None:
             hidden_layer = np.random.randint(0, len(self.hidden_size), 1)[0]
@@ -228,9 +231,8 @@ class EvolvableMLP(EvolvableModule):
         if numb_new_nodes is None:
             numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
 
-        if (
-            self.hidden_size[hidden_layer] + numb_new_nodes <= self.max_mlp_nodes
-        ):  # HARD LIMIT
+        # HARD LIMIT
+        if self.hidden_size[hidden_layer] + numb_new_nodes <= self.max_mlp_nodes:
             self.hidden_size[hidden_layer] += numb_new_nodes
 
         return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}

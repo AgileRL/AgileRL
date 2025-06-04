@@ -46,6 +46,9 @@ It learns through trial and error which approaches tend to produce correct answe
 This allows the emergence of sophisticated reasoning patterns that weren't necessarily anticipated
 by the model's creators, similar to how AlphaGo discovered novel chess strategies through self-play.
 
+This example demonstrates how to use the GRPO algorithm to finetune a LLM on a reasoning task.
 
-.. literalinclude:: ../../tutorials/LLM_Finetuning/grpo_reasoning.py
-    :language: python
+.. collapse:: Example
+
+  .. literalinclude:: ../../tutorials/LLM_Finetuning/grpo_reasoning.py
+      :language: python

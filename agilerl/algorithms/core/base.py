@@ -1228,6 +1228,22 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         self.setup = self.get_setup()
 
+    def _registry_init(self) -> None:
+        super()._registry_init()
+
+        # Additional check to ensure multi-agent networks are initialized with valid keys
+        for name, network in self.evolvable_attributes(networks_only=True).items():
+            if isinstance(network, ModuleDict):
+                for key in network.keys():
+                    if (key not in self.agent_ids) and (
+                        key not in self.shared_agent_ids
+                    ):
+                        raise ValueError(
+                            f"Network '{name}' contains key '{key}' which is not present in `self.agent_ids` "
+                            f"or `self.shared_agent_ids`. Please initialize multi-agent networks through agilerl.modules.ModuleDict "
+                            "objects with the agent or group/shared IDs as keys."
+                        )
+
     def has_grouped_agents(self) -> bool:
         """Whether the algorithm contains groups of agents assigned to the same
         policy for centralized execution.

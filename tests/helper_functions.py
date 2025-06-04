@@ -262,7 +262,6 @@ def check_equal_params_ind(
                 slice_index = tuple(
                     slice(0, min(o, n)) for o, n in zip(old_size, new_size)
                 )
-                print(mutated_ind.last_mutation_attr)
                 assert torch.all(
                     torch.eq(param.data[slice_index], old_param.data[slice_index])
                 ), f"Parameter {key} not equal after mutation {mutated_ind.last_mutation_attr}:\n{param.data[slice_index]}\n{old_param.data[slice_index]}"

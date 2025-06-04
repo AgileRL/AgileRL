@@ -9,8 +9,8 @@ requiring multiple training runs that can take days or even weeks to execute. Ag
 a single training run through :ref:`evolutionary hyperparameter optimization <evo_hyperparam_opt>`.
 
 
-Basic Neural Networks
-~~~~~~~~~~~~~~~~~~~~~
+Neural Network Building Blocks
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 In order to mutate the architecture of neural networks seamlessly, we define the :class:`~agilerl.modules.base.EvolvableModule` base class as a building block
 for all networks used in AgileRL. This is nothing but a wrapper around :class:`~torch.nn.Module` that allows us to keep track of the methods that mutate a network
@@ -78,71 +78,75 @@ the ``encoder_config`` and ``head_config`` arguments of the constructor of the `
 
 If your environment has a 1D ``Box`` observation space, by default the ``EvolvableNetwork`` will use a ``EvolvableMLP`` as the encoder.
 
-.. code-block:: python
+.. collapse:: MLP Example
 
-    from gymnasium.spaces import Box, Discrete
+  .. code-block:: python
 
-    from agilerl.networks.q_networks import QNetwork
+      from gymnasium.spaces import Box, Discrete
 
-    encoder_config = {
-        "hidden_size": [64, 64] # Two layers of 64 nodes each
-        "min_mlp_nodes": 16 # minimum number of nodes in the MLP when mutating
-        "max_mlp_nodes": 128 # maximum number of nodes in the MLP when mutating
-    }
+      from agilerl.networks.q_networks import QNetwork
 
-    head_config = {
-        "hidden_size": [64, 64] # Two layers of 64 nodes each
-        "min_mlp_nodes": 16, # minimum number of nodes in the MLP when mutating
-        "max_mlp_nodes": 128, # maximum number of nodes in the MLP when mutating
-    }
+      encoder_config = {
+          "hidden_size": [64, 64] # Two layers of 64 nodes each
+          "min_mlp_nodes": 16 # minimum number of nodes in the MLP when mutating
+          "max_mlp_nodes": 128 # maximum number of nodes in the MLP when mutating
+      }
 
-    observation_space = Box(low=-100, high=100, shape=(10,))
-    action_space = Discrete(2)
+      head_config = {
+          "hidden_size": [64, 64] # Two layers of 64 nodes each
+          "min_mlp_nodes": 16, # minimum number of nodes in the MLP when mutating
+          "max_mlp_nodes": 128, # maximum number of nodes in the MLP when mutating
+      }
 
-    network = QNetwork(
-        observation_space,
-        action_space,
-        encoder_config=encoder_config,
-        head_config=head_config,
-        latent_dim=32, # Dimension of the latent space representation
-        min_latent_dim=8, # Minimum dimension of the latent space representation
-        max_latent_dim=128, # Maximum dimension of the latent space representation
-    )
+      observation_space = Box(low=-100, high=100, shape=(10,))
+      action_space = Discrete(2)
+
+      network = QNetwork(
+          observation_space,
+          action_space,
+          encoder_config=encoder_config,
+          head_config=head_config,
+          latent_dim=32, # Dimension of the latent space representation
+          min_latent_dim=8, # Minimum dimension of the latent space representation
+          max_latent_dim=128, # Maximum dimension of the latent space representation
+      )
 
 If your environment has a 3D ``Box`` observation space, by default the ``EvolvableNetwork`` will use a ``EvolvableCNN`` as the encoder.
 
-.. code-block:: python
+.. collapse:: CNN Example
 
-    from gymnasium.spaces import Box, Discrete
+  .. code-block:: python
 
-    from agilerl.networks.q_networks import StochasticActor
+      from gymnasium.spaces import Box, Discrete
 
-    encoder_config = {
-        "channel_size": [32, 64, 128], # Three convolutional layers with 32, 64, and 128 channels respectively
-        "kernel_size": [8, 4, 3], # The kernel sizes of the convolutional layers
-        "stride_size": [4, 2, 1], # The stride sizes of the convolutional layers
-        "min_channel_size": 16, # minimum number of channels in the CNN when mutating
-        "max_channel_size": 256, # maximum number of channels in the CNN when mutating
-    }
+      from agilerl.networks.q_networks import StochasticActor
 
-    head_config = {
-        "hidden_size": [64, 64] # Two layers of 64 nodes each
-        "min_mlp_nodes": 16, # minimum number of nodes in the MLP when mutating
-        "max_mlp_nodes": 128, # maximum number of nodes in the MLP when mutating
-    }
+      encoder_config = {
+          "channel_size": [32, 64, 128], # Three convolutional layers with 32, 64, and 128 channels respectively
+          "kernel_size": [8, 4, 3], # The kernel sizes of the convolutional layers
+          "stride_size": [4, 2, 1], # The stride sizes of the convolutional layers
+          "min_channel_size": 16, # minimum number of channels in the CNN when mutating
+          "max_channel_size": 256, # maximum number of channels in the CNN when mutating
+      }
 
-    observation_space = Box(low=-100, high=100, shape=(10, 10, 10))
-    action_space = Discrete(2)
+      head_config = {
+          "hidden_size": [64, 64] # Two layers of 64 nodes each
+          "min_mlp_nodes": 16, # minimum number of nodes in the MLP when mutating
+          "max_mlp_nodes": 128, # maximum number of nodes in the MLP when mutating
+      }
 
-    network = StochasticActor(
-        observation_space,
-        action_space,
-        encoder_config=encoder_config,
-        head_config=head_config,
-        latent_dim=32, # Dimension of the latent space representation
-        min_latent_dim=8, # Minimum dimension of the latent space representation
-        max_latent_dim=128, # Maximum dimension of the latent space representation
-    )
+      observation_space = Box(low=-100, high=100, shape=(10, 10, 10))
+      action_space = Discrete(2)
+
+      network = StochasticActor(
+          observation_space,
+          action_space,
+          encoder_config=encoder_config,
+          head_config=head_config,
+          latent_dim=32, # Dimension of the latent space representation
+          min_latent_dim=8, # Minimum dimension of the latent space representation
+          max_latent_dim=128, # Maximum dimension of the latent space representation
+      )
 
 .. note::
     In AgileRL algorithms, pass a single ``net_config`` dictionary that includes the ``encoder_config`` and ``head_config`` dictionaries, as well as any other arguments to
@@ -156,62 +160,61 @@ It is common that users require using either pre-trained networks or custom arch
 to exploit parameter optimization to automatically tune the RL hyperparameters of an algorithm. In order to do this, users can use :class:`DummyEvolvable <agilerl.modules.dummy.DummyEvolvable>`
 to wrap their non-evolvable networks in a manner compatible with our mutations framework - disabling architecture mutations but still allowing for RL hyperparameter and random weight mutations.
 
+.. collapse:: Example
 
-**Example Usage**
+  .. code-block:: python
 
-.. code-block:: python
+      import torch
+      import torch.nn as nn
 
-    import torch
-    import torch.nn as nn
+      from sgilerl.algorithms import DQN
+      from agilerl.modules.dummy import DummyEvolvable
 
-    from sgilerl.algorithms import DQN
-    from agilerl.modules.dummy import DummyEvolvable
+      class BasicNetActorDQN(nn.Module):
+        def __init__(self, input_size, hidden_sizes, output_size):
+            super().__init__()
+            layers = []
 
-    class BasicNetActorDQN(nn.Module):
-      def __init__(self, input_size, hidden_sizes, output_size):
-          super().__init__()
-          layers = []
+            # Add input layer
+            layers.append(nn.Linear(input_size, hidden_sizes[0]))
+            layers.append(nn.ReLU())  # Activation function
 
-          # Add input layer
-          layers.append(nn.Linear(input_size, hidden_sizes[0]))
-          layers.append(nn.ReLU())  # Activation function
+            # Add hidden layers
+            for i in range(len(hidden_sizes) - 1):
+                layers.append(nn.Linear(hidden_sizes[i], hidden_sizes[i + 1]))
+                layers.append(nn.ReLU())  # Activation function
 
-          # Add hidden layers
-          for i in range(len(hidden_sizes) - 1):
-              layers.append(nn.Linear(hidden_sizes[i], hidden_sizes[i + 1]))
-              layers.append(nn.ReLU())  # Activation function
+            # Add output layer with a sigmoid activation
+            layers.append(nn.Linear(hidden_sizes[-1], output_size))
 
-          # Add output layer with a sigmoid activation
-          layers.append(nn.Linear(hidden_sizes[-1], output_size))
+            # Combine all layers into a sequential model
+            self.model = nn.Sequential(*layers)
 
-          # Combine all layers into a sequential model
-          self.model = nn.Sequential(*layers)
+        def forward(self, x):
+            return self.model(x)
 
-      def forward(self, x):
-          return self.model(x)
+      device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+      actor_kwargs = {
+          "input_size": 4,  # Input size
+          "hidden_sizes": [64, 64],  # Hidden layer sizes
+          "output_size": 2  # Output size
+      }
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    actor_kwargs = {
-        "input_size": 4,  # Input size
-        "hidden_sizes": [64, 64],  # Hidden layer sizes
-        "output_size": 2  # Output size
-    }
+      actor = DummyEvolvable(BasicNetActor, actor_kwargs, device=device)
 
-    actor = DummyEvolvable(BasicNetActor, actor_kwargs, device=device)
-
-    # Use the actor in an algorithm
-    observation_space = ...
-    action_space = ...
-    population = DQN.population(
-        size=4,
-        observation_space=observation_space,
-        action_space=action_space
-        actor_network=actor
-        )
+      # Use the actor in an algorithm
+      observation_space = ...
+      action_space = ...
+      population = DQN.population(
+          size=4,
+          observation_space=observation_space,
+          action_space=action_space
+          actor_network=actor
+          )
 
 
 Integrating Architecture Mutations Into a Custom PyTorch Network
-----------------------------------------------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. warning::
   The following section pertains to the :class:`MakeEvolvable <agilerl.wrappers.make_evolvable.MakeEvolvable>` wrapper, which will be deprecated in a
@@ -219,54 +222,60 @@ Integrating Architecture Mutations Into a Custom PyTorch Network
   classes to create custom networks, or wrapping your ``nn.Module`` objects with :class:`DummyEvolvable <agilerl.modules.dummy.DummyEvolvable>`.
 
 For sequential architectures that users have already implemented using PyTorch, it is also possible to add
-evolvable functionality through the ``MakeEvolvable`` wrapper. Below is an example of a simple multi-layer
-perceptron that can be used by a DQN agent to solve the Lunar Lander environment. The input size is set as
-the state dimensions and output size the action dimensions. It's worth noting that, during the model definition,
-it is imperative to employ the ``torch.nn`` module to define all layers instead of relying on functions from
-``torch.nn.functional`` within the forward() method of the network. This is crucial as the forward hooks implemented
-will only be able to detect layers derived from ``nn.Module``.
+evolvable functionality through the :class:`MakeEvolvable <agilerl.wrappers.make_evolvable.MakeEvolvable>` wrapper. Below is an example of a simple multi-layer
+perceptron that can be used by a DQN agent to solve the Lunar Lander environment. The input size is set as the state dimensions and output size the action dimensions.
+It's worth noting that, during the model definition, it is imperative to employ the ``torch.nn`` module to define all layers instead of relying on functions from
+``torch.nn.functional`` within the ``forward()`` method of the network. This is crucial as the forward hooks implemented will only be able to detect layers derived from ``nn.Module``.
 
-.. code-block:: python
+.. collapse:: Example PyTorch Network
+  :open:
 
-    import torch.nn as nn
-    import torch
+  .. code-block:: python
+
+      import torch.nn as nn
+      import torch
+
+      class MLPActor(nn.Module):
+          def __init__(self, input_size, output_size):
+              super(MLPActor, self).__init__()
+
+              self.linear_layer_1 = nn.Linear(input_size, 64)
+              self.linear_layer_2 = nn.Linear(64, output_size)
+              self.relu = nn.ReLU()
+
+          def forward(self, x):
+              x = self.relu(self.linear_layer_1(x))
+              x = self.linear_layer_2(x)
+              return x
 
 
-    class MLPActor(nn.Module):
-        def __init__(self, input_size, output_size):
-            super(MLPActor, self).__init__()
-
-            self.linear_layer_1 = nn.Linear(input_size, 64)
-            self.linear_layer_2 = nn.Linear(64, output_size)
-            self.relu = nn.ReLU()
-
-        def forward(self, x):
-            x = self.relu(self.linear_layer_1(x))
-            x = self.linear_layer_2(x)
-            return x
-
-
-To make this network evolvable, simply instantiate an MLP Actor object and then pass it, along with an input tensor into
+To make this network evolvable, simply instantiate an ``MLPActor`` object and then pass it, along with an input tensor into
 the ``MakeEvolvable`` wrapper.
 
-.. code-block:: python
+.. collapse:: Making it Evolvable
+  :open:
 
-    from agilerl.wrappers.make_evolvable import MakeEvolvable
+  .. code-block:: python
 
-    observation_space = env.single_observation_space
-    action_space = env.single_action_space
+      from agilerl.wrappers.make_evolvable import MakeEvolvable
 
-    actor = MLPActor(observation_space.shape[0], action_space.n)
-    evolvable_actor = MakeEvolvable(
-                        actor,
-                        input_tensor=torch.randn(observation_space.shape[0]),
-                        device=device
-                      )
+      observation_space = env.single_observation_space
+      action_space = env.single_action_space
+
+      actor = MLPActor(observation_space.shape[0], action_space.n)
+      evolvable_actor = MakeEvolvable(
+        actor,
+        input_tensor=torch.randn(observation_space.shape[0]),
+        device=device
+      )
 
 When instantiating using ``create_population`` to generate a population of agents with a custom actor,
 you need to set ``actor_network`` to ``evolvable_actor``.
 
-.. code-block:: python
+.. collapse:: Using it in a Population
+  :open:
+
+  .. code-block:: python
 
     pop = create_population(
             algo="DQN",                                  # Algorithm
@@ -281,7 +290,10 @@ you need to set ``actor_network`` to ``evolvable_actor``.
 If you are using an algorithm that also uses a single critic (PPO, DDPG), define the critic network and pass it into the
 ``create_population`` class.
 
-.. code-block:: python
+.. collapse:: Using it in a Population with a Single Critic
+  :open:
+
+  .. code-block:: python
 
     pop = create_population(
             algo="PPO",                                  # Algorithm
@@ -296,7 +308,9 @@ If you are using an algorithm that also uses a single critic (PPO, DDPG), define
 
 If the single agent algorithm has more than one critic (e.g. TD3), then pass the ``critic_network`` argument a list of two critics.
 
-.. code-block:: python
+.. collapse:: Using it in a Population with Multiple Critics
+  :open:
+  .. code-block:: python
 
     pop = create_population(
             algo="TD3",                                           # Algorithm
@@ -314,7 +328,9 @@ If you are using a multi-agent algorithm, define ``actor_network`` and ``critic_
 multi-agent environment. The example below outlines how this would work for a two agent environment (asumming you have initialised a multi-agent
 environment in the variable ``env``).
 
-.. code-block:: python
+.. collapse:: Example
+  :open:
+  .. code-block:: python
 
     # For MADDPG
     evolvable_actors = [actor_network_1, actor_network_2]
@@ -347,7 +363,9 @@ before flattening the output, combining with the actions tensor, and then passin
 This means that when defining the critic, the ``.forward()`` method must account for two input tensors (states and actions). Below are examples of
 how to define actor and critic networks for a two agent system with state tensors of shape (4, 210, 160):
 
-.. code-block:: python
+.. collapse:: Example CNN Networks
+
+  .. code-block:: python
 
   from agilerl.networks.custom_activation import GumbelSoftmax
 
@@ -428,7 +446,9 @@ how to define actor and critic networks for a two agent system with state tensor
 
 To then make these two CNNs evolvable we pass them, along with input tensors into the ``MakeEvolvable`` wrapper.
 
-.. code-block:: python
+.. collapse:: Example
+
+  .. code-block:: python
 
   actor = MultiAgentCNNActor()
   evolvable_actor = MakeEvolvable(network=actor,
