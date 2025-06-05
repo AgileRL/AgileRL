@@ -454,13 +454,8 @@ class EvolvableDistribution(EvolvableWrapper):
         return masked_logits
 
     def forward(
-        self,
-        latent: torch.Tensor,
-        action_mask: Optional[ArrayOrTensor] = None,
-        sample: bool = True,
-    ) -> Union[
-        Tuple[torch.Tensor, torch.Tensor, torch.Tensor], Tuple[None, None, torch.Tensor]
-    ]:
+        self, latent: torch.Tensor, action_mask: Optional[ArrayOrTensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Forward pass of the network.
 
         :param latent: Latent space representation.
@@ -486,13 +481,8 @@ class EvolvableDistribution(EvolvableWrapper):
         self.dist = self.get_distribution(logits)
 
         # Sample action, compute log probability and entropy
-        if sample:
-            action = self.dist.sample()
-            log_prob = self.dist.log_prob(action)
-        else:
-            action = None
-            log_prob = None
-
+        action = self.dist.sample()
+        log_prob = self.dist.log_prob(action)
         entropy = self.dist.entropy()
         return action, log_prob, entropy
 
