@@ -1693,11 +1693,11 @@ def check_policy_q_learning_with_probe_env(
 
     state, _ = env.reset()
     agent.set_training_mode(True)
-    for _ in range(10000):
+    for _ in range(1000):
         # Make vectorized
         state = {agent_id: np.expand_dims(s, 0) for agent_id, s in state.items()}
-        action, _ = agent.get_action(state)
-        next_state, reward, done, _, _ = env.step(action)
+        processed_action, raw_action = agent.get_action(state)
+        next_state, reward, done, _, _ = env.step(processed_action)
         reward = {
             agent_id: np.expand_dims(np.array(r), 0) for agent_id, r in reward.items()
         }
@@ -1708,7 +1708,7 @@ def check_policy_q_learning_with_probe_env(
             agent_id: np.expand_dims(ns, 0) for agent_id, ns in next_state.items()
         }
         memory.save_to_memory(
-            state, action, reward, mem_next_state, done, is_vectorised=True
+            state, raw_action, reward, mem_next_state, done, is_vectorised=True
         )
         state = next_state
         if done[agent.agent_ids[0]]:
@@ -1734,8 +1734,10 @@ def check_policy_q_learning_with_probe_env(
 
                 if q_values is not None:
                     action = prepare_ma_actions(sample_action, device)
-
-                    predicted_q_values = critic(state, action).detach().cpu().numpy()[0]
+                    stacked_actions = torch.cat(list(action.values()), dim=1)
+                    predicted_q_values = (
+                        critic(state, stacked_actions).detach().cpu().numpy()[0]
+                    )
                     # print("---")
                     # print(agent_id, "q", q_values[agent_id], predicted_q_values)
                     # assert np.allclose(q_values[agent_id], predicted_q_values, atol=0.1):
@@ -1833,9 +1835,10 @@ def check_on_policy_learning_with_probe_env(
         #     print("Loss = ", _loss)
 
     with torch.no_grad():
-        for agent_id, actor, critic in zip(
-            agent.agent_ids, agent.actors, agent.critics
-        ):
+        for agent_id in agent.agent_ids:
+            group_id = agent.get_group_id(agent_id)
+            actor = agent.actors[group_id]
+            critic = agent.critics[group_id]
             for sample_obs, v_values, policy_values in zip(
                 env.sample_obs, env.v_values, env.policy_values
             ):

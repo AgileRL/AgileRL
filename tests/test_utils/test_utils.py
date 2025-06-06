@@ -152,7 +152,7 @@ def test_create_initial_population_single_agent():
 def test_create_initial_population_multi_agent():
     observation_space = [spaces.Box(0, 1, shape=(4,)) for _ in range(2)]
     action_space = [spaces.Discrete(2) for _ in range(2)]
-    net_config = {"encoder_config": {"hidden_size": [8]}}
+    net_config = {"encoder_config": {"hidden_size": [8], "min_mlp_nodes": 2}}
     population_size = 4
     device = "cpu"
     accelerator = None

@@ -1,4 +1,5 @@
 from collections import OrderedDict
+from dataclasses import asdict
 from typing import Dict, Iterable, List, Literal, Optional, Tuple, Union
 
 import numpy as np
@@ -9,7 +10,7 @@ from gymnasium import spaces
 from torch._dynamo.eval_frame import OptimizedModule
 from torch.optim import Optimizer
 
-from agilerl.modules import ModuleDict
+from agilerl.modules.base import ModuleDict
 from agilerl.modules.configs import (
     CnnNetConfig,
     LstmNetConfig,
@@ -229,9 +230,9 @@ def get_default_encoder_config(
     :rtype: Dict[str, Any]
     """
     if isinstance(observation_space, (spaces.Dict, spaces.Tuple)):
-        return MultiInputNetConfig(output_activation=None)
+        config = MultiInputNetConfig(output_activation=None)
     elif is_image_space(observation_space):
-        return CnnNetConfig(
+        config = CnnNetConfig(
             channel_size=[16, 16],
             kernel_size=[3, 3],
             stride_size=[1, 1],
@@ -239,13 +240,19 @@ def get_default_encoder_config(
         )
     else:
         if simba and len(observation_space.shape) == 1:
-            return SimBaNetConfig(hidden_size=128, num_blocks=2, output_activation=None)
+            config = SimBaNetConfig(
+                hidden_size=128, num_blocks=2, output_activation=None
+            )
         elif recurrent and len(observation_space.shape) == 2:
-            return LstmNetConfig(hidden_size=128, num_layers=2, output_activation=None)
+            config = LstmNetConfig(
+                hidden_size=128, num_layers=2, output_activation=None
+            )
+        else:
+            config = MlpNetConfig(
+                hidden_size=[16, 16], output_activation=None, output_vanish=False
+            )
 
-        return MlpNetConfig(
-            hidden_size=[16, 16], output_activation=None, output_vanish=False
-        )
+    return asdict(config)
 
 
 def unwrap_optimizer(
@@ -510,47 +517,6 @@ def init_weights_gaussian(m: nn.Module, mean: float, std: float) -> None:
         torch.nn.init.normal_(m.weight, mean=mean, std=std)
         if m.bias is not None:
             torch.nn.init.constant_(m.bias, 0)
-
-
-def calc_max_kernel_sizes(
-    channel_size: List[int],
-    kernel_size: List[int],
-    stride_size: List[int],
-    input_shape: List[int],
-) -> List[int]:
-    """Calculates the max kernel size for each convolutional layer of the feature net.
-
-    :param channel_size: List of channel sizes for each convolutional layer
-    :type channel_size: list[int]
-    :param kernel_size: List of kernel sizes for each convolutional layer
-    :type kernel_size: list[int]
-    :param stride_size: List of stride sizes for each convolutional layer
-    :type stride_size: list[int]
-    :param input_shape: Input shape of the network
-    :type input_shape: list[int]
-    :return: List of max kernel sizes for each convolutional layer
-    :rtype: list[int]
-    """
-    max_kernel_list = []
-    height_in, width_in = input_shape[-2:]
-    for idx, _ in enumerate(channel_size):
-        height_out = 1 + np.floor(
-            (height_in + 2 * (0) - kernel_size[idx]) / (stride_size[idx])
-        )
-        width_out = 1 + np.floor(
-            (width_in + 2 * (0) - kernel_size[idx]) / (stride_size[idx])
-        )
-        max_kernel_size = min(height_out, width_out) * 0.25
-        max_kernel_size = int(max_kernel_size)
-        if max_kernel_size <= 0:
-            max_kernel_size = 1
-        elif max_kernel_size > 9:
-            max_kernel_size = 9
-        max_kernel_list.append(max_kernel_size)
-        height_in = height_out
-        width_in = width_out
-
-    return max_kernel_list
 
 
 def create_cnn(

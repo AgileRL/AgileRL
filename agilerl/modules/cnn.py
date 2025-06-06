@@ -1,3 +1,4 @@
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
@@ -7,11 +8,7 @@ import torch.nn as nn
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
 from agilerl.typing import ArrayOrTensor, KernelSizeType
-from agilerl.utils.evolvable_networks import (
-    calc_max_kernel_sizes,
-    create_cnn,
-    get_activation,
-)
+from agilerl.utils.evolvable_networks import create_cnn, get_activation
 
 BlockType = Literal["Conv2d", "Conv3d"]
 
@@ -52,6 +49,7 @@ class MutableKernelSizes:
     sizes: List[KernelSizeType]
     cnn_block_type: Literal["Conv2d", "Conv3d"]
     sample_input: Optional[torch.Tensor]
+    rng: np.random.Generator
 
     def __post_init__(self) -> None:
         tuple_sizes = False
@@ -112,9 +110,26 @@ class MutableKernelSizes:
         :rtype: List[int]
         """
         kernel_size = self.int_sizes if self.tuple_sizes else self.sizes
-        return calc_max_kernel_sizes(
-            channel_size, kernel_size, stride_size, input_shape
-        )
+        max_kernel_list = []
+        height_in, width_in = input_shape[-2:]
+        for idx, _ in enumerate(channel_size):
+            height_out = 1 + np.floor(
+                (height_in + 2 * (0) - kernel_size[idx]) / (stride_size[idx])
+            )
+            width_out = 1 + np.floor(
+                (width_in + 2 * (0) - kernel_size[idx]) / (stride_size[idx])
+            )
+            max_kernel_size = min(height_out, width_out) * 0.25
+            max_kernel_size = int(max_kernel_size)
+            if max_kernel_size <= 0:
+                max_kernel_size = 1
+            elif max_kernel_size > 9:
+                max_kernel_size = 9
+            max_kernel_list.append(max_kernel_size)
+            height_in = height_out
+            width_in = width_out
+
+        return max_kernel_list
 
     def change_kernel_size(
         self,
@@ -151,7 +166,7 @@ class MutableKernelSizes:
             max_kernels = self.calc_max_kernel_sizes(
                 channel_size, stride_size, input_shape
             )
-            new_kernel_size = np.random.randint(1, max_kernels[hidden_layer] + 1)
+            new_kernel_size = self.rng.integers(1, max_kernels[hidden_layer] + 1)
 
         if self.tuple_sizes:
             if self.cnn_block_type == "Conv2d":
@@ -205,6 +220,8 @@ class EvolvableCNN(EvolvableModule):
     :type device: str, optional
     :param name: Name of the CNN, defaults to 'cnn'
     :type name: str, optional
+    :param random_seed: Random seed to use for the network. Defaults to None.
+    :type random_seed: Optional[int]
     """
 
     def __init__(
@@ -226,8 +243,9 @@ class EvolvableCNN(EvolvableModule):
         init_layers: bool = True,
         device: str = "cpu",
         name: str = "cnn",
+        random_seed: Optional[int] = None,
     ) -> None:
-        super().__init__(device)
+        super().__init__(device, random_seed)
 
         assert len(kernel_size) == len(
             channel_size
@@ -276,7 +294,12 @@ class EvolvableCNN(EvolvableModule):
         self.init_layers = init_layers
         self.sample_input = sample_input
         self.name = name
-        self.mut_kernel_size = MutableKernelSizes(kernel_size, block_type, sample_input)
+        self.mut_kernel_size = MutableKernelSizes(
+            sizes=kernel_size,
+            cnn_block_type=block_type,
+            sample_input=sample_input,
+            rng=self.rng,
+        )
 
         self.model = self.create_cnn(
             in_channels=input_shape[0],
@@ -411,11 +434,15 @@ class EvolvableCNN(EvolvableModule):
             device=self.device,
         )
 
+        # Convert to ModuleDict in eval mode for size validation
+        net_dict = nn.ModuleDict(net_dict)
+        net_dict.eval()
+
         # Flatten image encodings and pass through a final linear layer
-        pre_flatten_output = nn.Sequential(net_dict)(sample_input)
+        pre_flatten_output = nn.Sequential(*net_dict.values())(sample_input)
         net_dict[f"{self.name}_flatten"] = nn.Flatten()
         with torch.no_grad():
-            cnn_output = nn.Sequential(net_dict)(sample_input)
+            cnn_output = nn.Sequential(*net_dict.values())(sample_input)
             flattened_size = cnn_output.shape[1]
 
         net_dict[f"{self.name}_linear_output"] = nn.Linear(
@@ -427,6 +454,8 @@ class EvolvableCNN(EvolvableModule):
 
         self.cnn_output_size = pre_flatten_output.shape
 
+        net_dict.train()
+        net_dict = OrderedDict(net_dict)
         return nn.Sequential(net_dict)
 
     def reset_noise(self) -> None:
@@ -466,10 +495,10 @@ class EvolvableCNN(EvolvableModule):
             and max_kernels[-1] > 2
         ):  # HARD LIMIT
             self.channel_size += [self.channel_size[-1]]
-            k_size = np.random.randint(2, max_kernels[-1] + 1)
+            k_size = self.rng.integers(2, max_kernels[-1] + 1)
             self.mut_kernel_size.add_layer(k_size)
             self.stride_size = self.stride_size + [
-                np.random.randint(1, self.stride_size[-1] + 1)
+                self.rng.integers(1, self.stride_size[-1] + 1)
             ]
         else:
             return self.add_channel()
@@ -500,9 +529,7 @@ class EvolvableCNN(EvolvableModule):
         """
         if len(self.channel_size) > 1:
             if hidden_layer is None:
-                hidden_layer = np.random.randint(1, min(4, len(self.channel_size)), 1)[
-                    0
-                ]
+                hidden_layer = self.rng.integers(1, min(4, len(self.channel_size)))
 
             new_kernel_size = self.mut_kernel_size.change_kernel_size(
                 hidden_layer,
@@ -532,13 +559,13 @@ class EvolvableCNN(EvolvableModule):
         :rtype: dict[str, int]
         """
         if hidden_layer is None:
-            hidden_layer = np.random.randint(0, len(self.channel_size), 1)[0]
+            hidden_layer = self.rng.integers(0, len(self.channel_size))
         else:
             hidden_layer = min(hidden_layer, len(self.channel_size) - 1)
 
         # Randomly choose number of channels to add
         if numb_new_channels is None:
-            numb_new_channels = np.random.choice([8, 16, 32], 1)[0]
+            numb_new_channels = self.rng.choice([8, 16, 32])
 
         # HARD LIMIT
         if self.channel_size[hidden_layer] + numb_new_channels <= self.max_channel_size:
@@ -562,12 +589,12 @@ class EvolvableCNN(EvolvableModule):
         :rtype: Dict[str, Union[int, None]]
         """
         if hidden_layer is None:
-            hidden_layer = np.random.randint(0, len(self.channel_size), 1)[0]
+            hidden_layer = self.rng.integers(0, len(self.channel_size))
         else:
             hidden_layer = min(hidden_layer, len(self.channel_size) - 1)
 
         if numb_new_channels is None:
-            numb_new_channels = np.random.choice([8, 16, 32], 1)[0]
+            numb_new_channels = self.rng.choice([8, 16, 32])
 
         # HARD LIMIT
         if self.channel_size[hidden_layer] - numb_new_channels >= self.min_channel_size:

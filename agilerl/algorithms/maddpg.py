@@ -567,7 +567,7 @@ class MADDPG(MultiAgentRLAlgorithm):
             for agent_id in self.agent_ids:
                 next_actions.append(self.actor_targets[agent_id](next_states[agent_id]))
 
-        # Stack states and actions
+        # Stack actions for critic
         stacked_actions = torch.cat(list(actions.values()), dim=1)
         stacked_next_actions = torch.cat(next_actions, dim=1)
 
@@ -644,6 +644,9 @@ class MADDPG(MultiAgentRLAlgorithm):
         :return: Tuple containing actor loss and critic loss
         :rtype: Tuple[float, float]
         """
+        print("critic = ", critic)
+        print("actor = ", actor)
+        print(stacked_actions.shape)
         if self.accelerator is not None:
             with critic.no_sync():
                 q_value = critic(states, stacked_actions)

@@ -35,13 +35,13 @@ from agilerl.typing import (
     ArrayOrTensor,
     ExperiencesType,
     MaybeObsList,
+    MultiAgentModule,
     NetConfigType,
     NetworkType,
     NumpyObsType,
     ObservationType,
     OptimizerType,
     SupportedObsSpaces,
-    MultiAgentModule,
     TorchObsType,
 )
 
@@ -343,9 +343,7 @@ def format_shared_critic_encoder(
             # If we have homogeneous agents, we can process the raw observations with an EvolvableMLP
             encoder_config["vector_space_mlp"] = len(encoder_configs) == 1
         else:
-            init_dicts = encoder_config.get("init_dicts", {})
-            init_dicts[encoder_key] = config
-            encoder_config["init_dicts"] = init_dicts
+            encoder_config["init_dicts"][encoder_key] = config
 
     return encoder_config
 

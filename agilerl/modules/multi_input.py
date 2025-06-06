@@ -3,7 +3,6 @@ from collections import OrderedDict
 from dataclasses import asdict
 from typing import Any, Dict, Optional, Tuple, TypeVar, Union
 
-import numpy as np
 import torch
 import torch.nn as nn
 from gymnasium import spaces
@@ -111,6 +110,8 @@ class EvolvableMultiInput(EvolvableModule):
     :type device: str, optional
     :param name: Name of the network. Default is "multi_input".
     :type name: str, optional
+    :param random_seed: Random seed to use for the network. Defaults to None.
+    :type random_seed: Optional[int]
     """
 
     feature_net: ModuleDict
@@ -132,8 +133,9 @@ class EvolvableMultiInput(EvolvableModule):
         max_latent_dim: int = 128,
         device: str = "cpu",
         name: str = "multi_input",
+        random_seed: Optional[int] = None,
     ):
-        super().__init__(device)
+        super().__init__(device, random_seed)
 
         assert num_outputs > 0, "Number of outputs must be greater than 0."
         assert latent_dim > 0, "Latent dimension must be greater than 0."
@@ -233,8 +235,7 @@ class EvolvableMultiInput(EvolvableModule):
         :type activation: str
         """
         self._activation = activation
-        for module in self.feature_net.modules().values():
-            module.change_activation(activation, output=True)
+        self.feature_net.change_activation(activation, output=True)
 
     @property
     def init_dicts(self) -> Dict[str, Dict[str, Any]]:
@@ -507,7 +508,7 @@ class EvolvableMultiInput(EvolvableModule):
         :rtype: Dict[str, Any]
         """
         if numb_new_nodes is None:
-            numb_new_nodes = np.random.choice([8, 16, 32], 1)[0]
+            numb_new_nodes = self.rng.choice([8, 16, 32])
 
         if self.latent_dim + numb_new_nodes < self.max_latent_dim:
             self.latent_dim += numb_new_nodes
@@ -527,7 +528,7 @@ class EvolvableMultiInput(EvolvableModule):
         :rtype: Dict[str, Any]
         """
         if numb_new_nodes is None:
-            numb_new_nodes = np.random.choice([8, 16, 32], 1)[0]
+            numb_new_nodes = self.rng.choice([8, 16, 32])
 
         if self.latent_dim - numb_new_nodes > self.min_latent_dim:
             self.latent_dim -= numb_new_nodes

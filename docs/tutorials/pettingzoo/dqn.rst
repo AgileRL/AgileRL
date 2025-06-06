@@ -12,11 +12,21 @@ Self-play Connect4 with DQN + curriculum learning
 
 This tutorial shows how to train a :ref:`DQN<dqn>` agent on the `connect four <https://pettingzoo.farama.org/environments/classic/connect_four/>`_ classic environment.
 
-This tutorial focuses on two techniques used in reinforcement learning - **curriculum learning** and **self-play**. Curriculum learning refers to training an agent on tasks of increasing difficulty in separate 'lessons'. Imagine you were trying to become a chess world champion. You would not decide to learn to play chess by immediately taking on a grand master - it would be too difficult. Instead, you would practice against people of the same ability as you, improve slowly, and increasingly play against harder opponents until you were ready to compete with the best. The same concept applies to reinforcement learning models. Sometimes, tasks are too difficult to learn in one go, and so we must create a curriculum to guide an agent and teach it to solve our ultimate hard environment.
+This tutorial focuses on two techniques used in reinforcement learning - **curriculum learning** and **self-play**. Curriculum learning refers to training an agent on tasks of
+increasing difficulty in separate 'lessons'. Imagine you were trying to become a chess world champion. You would not decide to learn to play chess by immediately taking on a grand
+master - it would be too difficult. Instead, you would practice against people of the same ability as you, improve slowly, and increasingly play against harder opponents until you
+were ready to compete with the best. The same concept applies to reinforcement learning models. Sometimes, tasks are too difficult to learn in one go, and so we must create a curriculum
+to guide an agent and teach it to solve our ultimate hard environment.
 
-This tutorial also uses self-play. Self-play is a technique used in competitive reinforcement learning environments. An agent trains by playing against a copy of itself - the opponent - and learns to beat this opponent. The opponent is then updated to a copy of this better version of the agent, and the agent must then learn to beat itself again. This is done repeatedly, and the agent iteratively improves by exploiting its own weaknesses and discovering new strategies.
+This tutorial also uses self-play. Self-play is a technique used in competitive reinforcement learning environments. An agent trains by playing against a copy of itself - the opponent -
+and learns to beat this opponent. The opponent is then updated to a copy of this better version of the agent, and the agent must then learn to beat itself again. This is done repeatedly,
+and the agent iteratively improves by exploiting its own weaknesses and discovering new strategies.
 
-In this tutorial, self-play is treated as the final lesson in the curriculum. However, these two techniques can be used independently of each other, and with unlimited resources, self-play can beat agents trained with human-crafted lessons through curriculum learning. `The Bitter Lesson <http://incompleteideas.net/IncIdeas/BitterLesson.html>`_ by Richard Sutton provides an interesting take on curriculum learning and is definitely worth consideration from any engineer undertaking such a task. However, unlike Sutton, we do not all have the resources available to us that Deepmind and top institutions provide, and so one must be pragmatic when deciding how they will solve their own reinforcement learning problem. If you would like to discuss this exciting area of research further, please join the AgileRL `Discord server <https://discord.com/invite/eB8HyTA2ux>`_ and let us know what you think!
+In this tutorial, self-play is treated as the final lesson in the curriculum. However, these two techniques can be used independently of each other, and with unlimited resources, self-play
+can beat agents trained with human-crafted lessons through curriculum learning. `The Bitter Lesson <http://incompleteideas.net/IncIdeas/BitterLesson.html>`_ by Richard Sutton provides an
+interesting take on curriculum learning and is definitely worth consideration from any engineer undertaking such a task. However, unlike Sutton, we do not all have the resources available
+to us that Deepmind and top institutions provide, and so one must be pragmatic when deciding how they will solve their own reinforcement learning problem. If you would like to discuss this
+exciting area of research further, please join the AgileRL `Discord server <https://discord.com/invite/eB8HyTA2ux>`_ and let us know what you think!
 
 
 What is DQN?
@@ -24,22 +34,21 @@ What is DQN?
 
 :ref:`DQN<dqn>` (Deep Q-Network) is an extension of Q-learning that makes use of a replay buffer and target network to improve learning stability. For further information on DQN, check out the AgileRL :ref:`documentation<dqn>`.
 
-Can I use it?
-^^^^^^^^^^^^^
+Compatible Action Spaces
+------------------------
 
 .. list-table::
-   :widths: 20 20 20
+   :widths: 20 20 20 20
    :header-rows: 1
 
-   * -
-     - Action
-     - Observation
-   * - Discrete
-     - ✔️
-     - ✔️
-   * - Continuous
+   * - ``Discrete``
+     - ``Box``
+     - ``MultiDiscrete``
+     - ``MultiBinary``
+   * - ✔️
      - ❌
-     - ✔️
+     - ❌
+     - ❌
 
 
 Code

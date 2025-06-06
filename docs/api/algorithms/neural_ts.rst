@@ -3,12 +3,10 @@
 Neural Contextual Bandits with Thompson Sampling (NeuralTS)
 ================================================================
 
-NeuralTS adapts deep neural networks for both exploration and exploitation by using a posterior distribution of the reward
+`NeuralTS <https://arxiv.org/abs/1911.04462>`_ adapts deep neural networks for both exploration and exploitation by using a posterior distribution of the reward
 with a neural network approximator as its mean, and neural tangent features as its variance.
 
 This is a contextual multi-armed :ref:`bandit algorithm<bandits>`, meaning it is suited to RL problems with just a single timestep.
-
-* Neural Bandits paper: https://arxiv.org/abs/1911.04462
 
 
 Example

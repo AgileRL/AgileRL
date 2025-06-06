@@ -7,11 +7,8 @@ DQN is an extension of Q-learning that makes use of a replay buffer and target n
 
 * DQN paper: https://arxiv.org/abs/1312.5602
 
-Can I use it?
---------------
-
-Action Space
-^^^^^^^^^^^^
+Compatible Action Spaces
+------------------------
 
 .. list-table::
    :widths: 20 20 20 20

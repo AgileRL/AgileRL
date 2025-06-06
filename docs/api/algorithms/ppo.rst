@@ -3,18 +3,13 @@
 Proximal Policy Optimization (PPO)
 =========================================
 
-PPO is a policy gradient method that uses a clipped objective to constrain policy updates.
+`PPO <https://arxiv.org/abs/1707.06347v2>`_ is a policy gradient method that uses a clipped objective to constrain policy updates.
 It aims to combine the stability of Trust Region Policy Optimization (TRPO) with the simplicity
 and scalability of vanilla policy gradients, effectively maintaining a balance between exploration
 and exploitation. PPO is an on-policy algorithm.
 
-* PPO paper: https://arxiv.org/abs/1707.06347v2
-
-Can I use it?
--------------
-
-Action Space
-^^^^^^^^^^^^
+Compatible Action Spaces
+------------------------
 
 .. list-table::
    :widths: 20 20 20 20

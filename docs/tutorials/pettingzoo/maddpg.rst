@@ -14,25 +14,25 @@ This tutorial shows how to train an :ref:`MADDPG<maddpg>` agent on the `space in
 What is MADDPG?
 ---------------
 
-:ref:`MADDPG<maddpg>` (Multi-Agent Deep Deterministic Policy Gradients) extends the :ref:`DDPG<ddpg>` (Deep Deterministic Policy Gradients) algorithm to enable cooperative or competitive training of multiple agents in complex environments, enhancing the stability and convergence of the learning process through decentralized actor and centralized critic architectures. For further information on MADDPG, check out the :ref:`documentation<maddpg>`.
+:ref:`MADDPG<maddpg>` (Multi-Agent Deep Deterministic Policy Gradients) extends the :ref:`DDPG<ddpg>` (Deep Deterministic Policy Gradients) algorithm to enable cooperative or
+competitive training of multiple agents in complex environments, enhancing the stability and convergence of the learning process through decentralized actor and centralized critic
+architectures. For further information on MADDPG, check out the :ref:`documentation<maddpg>`.
 
-Can I use it?
---------------
+Compatible Action Spaces
+------------------------
 
 .. list-table::
-   :widths: 20 20 20
+   :widths: 20 20 20 20
    :header-rows: 1
 
-   * -
-     - Action
-     - Observation
-   * - Discrete
+   * - ``Discrete``
+     - ``Box``
+     - ``MultiDiscrete``
+     - ``MultiBinary``
+   * - ❌
      - ✔️
-     - ✔️
-   * - Continuous
-     - ✔️
-     - ✔️
-
+     - ❌
+     - ❌
 
 Code
 -----

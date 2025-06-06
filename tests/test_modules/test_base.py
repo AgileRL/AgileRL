@@ -22,7 +22,7 @@ def test_evolvable_module_initialization():
 
     module = DummyEvolvableModule(device="cpu")
     assert module.device == "cpu"
-    assert module.get_init_dict() == {"device": "cpu"}
+    assert module.get_init_dict() == {"device": "cpu", "random_seed": None}
 
 
 def test_evolvable_module_get_mutation_methods():

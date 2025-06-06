@@ -1,7 +1,7 @@
 .. _llm_finetuning:
 
-Large Language Model Finetuning
-===============================
+LLM Finetuning
+==============
 
 Reinforcement learning (RL) has emerged as a powerful technique for improving reasoning capabilities in Large Language Models.
 Models like DeepSeek-R1 and OpenAI's o1 exemplify this approach, demonstrating how RL can be used to develop LLMs with superior
@@ -20,7 +20,7 @@ develop *agency* and can be described as **agents**.
 
 .. _rl_for_reasoning:
 
-Reinforcement learning for reasoning
+Reinforcement Learning for Reasoning
 ------------------------------------
 
 The standard approach to creating instruction-following LLMs has traditionally relied on Supervised Fine-Tuning,

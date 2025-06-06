@@ -3,12 +3,10 @@
 Neural Contextual Bandits with UCB-based Exploration (NeuralUCB)
 ================================================================
 
-NeuralUCB utilizes the representational capabilities of deep neural networks and employs a neural network-based
+`NeuralUCB <https://arxiv.org/abs/1911.04462>`_ utilizes the representational capabilities of deep neural networks and employs a neural network-based
 random feature mapping to create an upper confidence bound (UCB) for reward, enabling efficient exploration.
 
 This is a contextual multi-armed :ref:`bandit algorithm<bandits>`, meaning it is suited to RL problems with just a single timestep.
-
-* Neural Bandits paper: https://arxiv.org/abs/1911.04462
 
 
 Example

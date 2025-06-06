@@ -1409,7 +1409,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         observation_spaces = (
             self.unique_observation_spaces if grouped_agents else self.observation_space
         )
-        encoder_configs = {}
+        encoder_configs = OrderedDict()
 
         # Helper function to append unique configs to the unique_configs dictionary
         # -> Access to unique configs is relevant for algorithms with networks that process
@@ -1460,7 +1460,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
                 encoder_config = get_default_encoder_config(
                     observation_spaces[agent_id]
                 )
-                net_config[agent_id]["encoder_config"] = asdict(encoder_config)
+                net_config[agent_id]["encoder_config"] = encoder_config
                 _add_to_encoder_configs(encoder_config, agent_id)
 
             if return_encoders:
@@ -1480,11 +1480,15 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             )
 
             encoder_config = _get_encoder_config(net_config, agent_ids[0])
-            if return_encoders:
-                _add_to_encoder_configs(encoder_config)
 
-            # Create a copy of the config for each agent
-            full_config = {agent_id: net_config.copy() for agent_id in agent_ids}
+            full_config = OrderedDict()
+            for agent_id in agent_ids:
+                # Create a copy of the config for each agent
+                full_config[agent_id] = net_config.copy()
+
+                if return_encoders:
+                    _add_to_encoder_configs(encoder_config, agent_id)
+
             if return_encoders:
                 return full_config, encoder_configs
 
@@ -1504,17 +1508,11 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
                 encoder_config = _get_encoder_config(agent_config, agent_id)
                 result_config[agent_id] = agent_config
 
-                if return_encoders:
-                    _add_to_encoder_configs(encoder_config, agent_id)
-
             # 2bii. Check if group_id is present in net_config
             elif group_id in config_keys:
                 group_config = net_config[group_id]
                 encoder_config = _get_encoder_config(group_config, agent_id)
                 result_config[agent_id] = group_config
-
-                if return_encoders:
-                    _add_to_encoder_configs(encoder_config, agent_id)
 
             # 2biii. agent_id or group_id not in net_config -> Add default encoder config
             else:
@@ -1525,8 +1523,8 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
                 default_config["encoder_config"] = asdict(encoder_config)
                 result_config[agent_id] = default_config
 
-                if return_encoders:
-                    _add_to_encoder_configs(encoder_config, agent_id)
+            if return_encoders:
+                _add_to_encoder_configs(encoder_config, agent_id)
 
         if return_encoders:
             return result_config, encoder_configs

@@ -3,7 +3,7 @@
 Rainbow DQN
 ===========
 
-Rainbow DQN is an extension of DQN that integrates multiple improvements and techniques to achieve state-of-the-art performance.
+`Rainbow DQN <https://arxiv.org/abs/1710.02298>`_ is an extension of :ref:`DQN<_dqn>` that integrates multiple improvements and techniques to achieve state-of-the-art performance.
 These improvements include:
 
 * Double DQN (DDQN): Addresses the overestimation bias of Q-values by using two networks to decouple the selection and evaluation of the action in the Q-learning target.
@@ -14,13 +14,8 @@ These improvements include:
 * Noisy Nets: Adds noise directly to the weights of the network, providing a way to explore the environment without the need for epsilon-greedy exploration.
 * Categorical DQN (C51): A specific form of distributional RL where the continuous range of possible cumulative future rewards is discretized into a fixed set of categories.
 
-Rainbow DQN paper: https://arxiv.org/abs/1710.02298
-
-Can I use it?
--------------
-
-Action Space
-^^^^^^^^^^^^
+Compatible Action Spaces
+------------------------
 
 .. list-table::
    :widths: 20 20 20 20

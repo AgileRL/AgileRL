@@ -543,18 +543,10 @@ class Mutations:
         no_activation = False
         for network_group in registry.groups:
             eval_module: EvolvableNetworkType = getattr(individual, network_group.eval)
-            if isinstance(eval_module, list):
-                # TODO: Will need to modify when making multi-agent support more robust
-                # to different types of settings (i.e. different observation spaces and thus
-                # network architectures for different agents)
-                if eval_module[0].activation is None:
-                    no_activation = True
 
-                eval_module = [self._permutate_activation(mod) for mod in eval_module]
+            if eval_module.activation is None:
+                no_activation = True
             else:
-                if eval_module.activation is None:
-                    no_activation = True
-
                 eval_module = self._permutate_activation(eval_module)
 
             if no_activation:
@@ -589,17 +581,14 @@ class Mutations:
         possible_activations = copy.deepcopy(self.activation_selection)
         current_activation = network.activation
 
-        # Remove current activation from options to ensure different new
-        # activation layer
+        # Remove current activation from options to ensure different new activation layer
         if len(possible_activations) > 1 and current_activation in possible_activations:
             possible_activations.remove(current_activation)
 
-        new_activation = self.rng.choice(possible_activations, size=1)[
-            0
-        ]  # Select new activation
-        network.change_activation(
-            new_activation, output=False
-        )  # Change activation layer
+        # Select new activation and modify network
+        new_activation = self.rng.choice(possible_activations, size=1)[0]
+        network.change_activation(new_activation, output=False)
+
         return network
 
     def parameter_mutation(self, individual: IndividualType) -> IndividualType:

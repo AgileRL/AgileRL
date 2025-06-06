@@ -3,18 +3,13 @@
 Independent Proximal Policy Optimization (IPPO)
 ===============================================
 
-IPPO (Independent Proximal Policy Optimization) extends the PPO algorithm for multi-agent settings,
+`IPPO <https://arxiv.org/pdf/2011.09533>`_ (Independent Proximal Policy Optimization) extends the :ref:`PPO<_ppo>` algorithm for multi-agent settings,
 enabling cooperative or competitive training of multiple agents in complex environments.
 The algorithm employs independent learning, in which each agent simply estimates its local value function,
 and is well-suited to problems with many homogeneous agents.
 
-* IPPO paper: https://arxiv.org/pdf/2011.09533
-
-Can I use it?
--------------
-
-Action Space
-^^^^^^^^^^^^
+Compatible Action Spaces
+------------------------
 
 .. list-table::
    :widths: 20 20 20 20

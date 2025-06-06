@@ -45,6 +45,8 @@ class QNetwork(EvolvableNetwork):
     :type recurrent: bool
     :param device: Device to use for the network.
     :type device: str
+    :param random_seed: Random seed to use for the network. Defaults to None.
+    :type random_seed: Optional[int]
     """
 
     supported_spaces = (spaces.Discrete, spaces.MultiDiscrete)
@@ -62,6 +64,7 @@ class QNetwork(EvolvableNetwork):
         simba: bool = False,
         recurrent: bool = False,
         device: str = "cpu",
+        random_seed: Optional[int] = None,
     ):
         super().__init__(
             observation_space,
@@ -74,6 +77,7 @@ class QNetwork(EvolvableNetwork):
             simba=simba,
             recurrent=recurrent,
             device=device,
+            random_seed=random_seed,
         )
 
         if not isinstance(action_space, self.supported_spaces):
@@ -155,6 +159,8 @@ class RainbowQNetwork(EvolvableNetwork):
     :type latent_dim: int
     :param device: Device to use for the network.
     :type device: str
+    :param random_seed: Random seed to use for the network. Defaults to None.
+    :type random_seed: Optional[int]
     """
 
     def __init__(
@@ -170,6 +176,7 @@ class RainbowQNetwork(EvolvableNetwork):
         max_latent_dim: int = 128,
         latent_dim: int = 32,
         device: str = "cpu",
+        random_seed: Optional[int] = None,
     ):
 
         if isinstance(observation_space, spaces.Box) and not is_image_space(
@@ -196,6 +203,7 @@ class RainbowQNetwork(EvolvableNetwork):
             max_latent_dim=max_latent_dim,
             latent_dim=latent_dim,
             device=device,
+            random_seed=random_seed,
         )
 
         if not isinstance(action_space, (spaces.Discrete, spaces.MultiDiscrete)):
@@ -308,6 +316,8 @@ class ContinuousQNetwork(EvolvableNetwork):
     :type normalize_actions: bool
     :param device: Device to use for the network.
     :type device: str
+    :param random_seed: Random seed to use for the network. Defaults to None.
+    :type random_seed: Optional[int]
     """
 
     action_mean: torch.Tensor
@@ -328,6 +338,7 @@ class ContinuousQNetwork(EvolvableNetwork):
         recurrent: bool = False,
         normalize_actions: bool = False,
         device: str = "cpu",
+        random_seed: Optional[int] = None,
     ):
 
         super().__init__(
@@ -341,6 +352,7 @@ class ContinuousQNetwork(EvolvableNetwork):
             simba=simba,
             recurrent=recurrent,
             device=device,
+            random_seed=random_seed,
         )
 
         if head_config is None:

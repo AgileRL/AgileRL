@@ -975,7 +975,7 @@ def test_change_activation(
 
     new_activation = "Tanh"
     evolvable_composed.change_activation(new_activation)
-    for key, net in evolvable_composed.modules().items():
+    for key, net in evolvable_composed.feature_net.modules().items():
         assert net.activation == new_activation
 
 

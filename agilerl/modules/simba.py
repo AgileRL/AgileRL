@@ -1,6 +1,5 @@
 from typing import Any, Dict, Optional
 
-import numpy as np
 import torch
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
@@ -40,6 +39,8 @@ class EvolvableSimBa(EvolvableModule):
     :type device: str, optional
     :param name: Name of the network, defaults to 'mlp'
     :type name: str, optional
+    :param random_seed: Random seed to use for the network. Defaults to None.
+    :type random_seed: Optional[int]
     """
 
     def __init__(
@@ -56,8 +57,9 @@ class EvolvableSimBa(EvolvableModule):
         max_mlp_nodes: int = 500,
         device: str = "cpu",
         name: str = "simba",
+        random_seed: Optional[int] = None,
     ) -> None:
-        super().__init__(device=device)
+        super().__init__(device, random_seed)
 
         assert isinstance(scale_factor, int), "Scale factor must be an integer."
 
@@ -161,7 +163,7 @@ class EvolvableSimBa(EvolvableModule):
         :type numb_new_nodes: int, optional
         """
         if numb_new_nodes is None:
-            numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
+            numb_new_nodes = self.rng.choice([16, 32, 64])
 
         if self.hidden_size + numb_new_nodes <= self.max_mlp_nodes:  # HARD LIMIT
             self.hidden_size += numb_new_nodes
@@ -178,7 +180,7 @@ class EvolvableSimBa(EvolvableModule):
         :type numb_new_nodes: int, optional
         """
         if numb_new_nodes is None:
-            numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
+            numb_new_nodes = self.rng.choice([16, 32, 64])
 
         # HARD LIMIT
         if self.hidden_size - numb_new_nodes > self.min_mlp_nodes:

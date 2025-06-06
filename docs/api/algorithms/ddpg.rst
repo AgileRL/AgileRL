@@ -3,16 +3,11 @@
 Deep Deterministic Policy Gradient (DDPG)
 =========================================
 
-DDPG is an extension of DQN to work in continuous action spaces by introducing an actor
+`DDPG <https://arxiv.org/abs/1509.02971>`_ is an extension of :ref:`DQN<_dqn>` to work in continuous action spaces by introducing an actor
 network that outputs continuous actions.
 
-* DDPG paper: https://arxiv.org/abs/1509.02971
-
-Can I use it?
--------------
-
-Action Space
-^^^^^^^^^^^^
+Compatible Action Spaces
+------------------------
 
 .. list-table::
    :widths: 20 20 20 20

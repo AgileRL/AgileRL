@@ -1,7 +1,7 @@
 .. _evolvable_networks:
 
-Evolvable Neural Networks in AgileRL
-------------------------------------
+Evolvable Neural Networks
+-------------------------
 
 Other than the hyperparemeters pertaining to the specific algorithm you're using to optimize your agent, a large source of variance in
 the performance of your agent is the choice network architecture. Tuning the architecture of your network is usually a very time-consuming and tedious task,
@@ -13,7 +13,7 @@ Neural Network Building Blocks
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 In order to mutate the architecture of neural networks seamlessly, we define the :class:`~agilerl.modules.base.EvolvableModule` base class as a building block
-for all networks used in AgileRL. This is nothing but a wrapper around :class:`~torch.nn.Module` that allows us to keep track of the methods that mutate a network
+for all networks used in AgileRL. This is nothing but a wrapper around ``torch.nn.Module`` that allows us to keep track of the methods that mutate a network
 in networks with nested evolvable modules.
 
 .. figure:: ../_static/module.png
@@ -41,7 +41,7 @@ base class which inherits from :class:`~agilerl.modules.base.EvolvableModule`. T
    :alt: EvolvableNetwork Structure
    :width: 90%
 
-   Structure of an ``EvolvableNetwork``, showing the underlying encoder and head networks which are ``EvolvableModule``'s themselves.
+   Structure of an ``EvolvableNetwork``, showing the underlying encoder and head networks which are ``EvolvableModule`` objects themselves.
 
 When inheriting from this class, we must pass in the observation space of the environment to the constructor of the class. This allows the network to automatically
 build an appropriate encoder from the observation space. Off-the-shelf ``EvolvableNetwork``'s in AgileRL natively support the following observation spaces:
@@ -68,17 +68,17 @@ following networks, common in a variety of reinforcement learning algorithms, ar
     these usually solve problems that are very similar in nature and thus require similar architectures.
 
 
-Configuring the Architecture of ``EvolvableNetwork``'s
+Configuring the Architecture of an ``EvolvableNetwork``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 In order to configure the architecture of ``EvolvableNetwork``'s, we must pass in separate dictionaries that specify the architecture of the encoder and head networks through
-the ``encoder_config`` and ``head_config`` arguments of the constructor of the ``EvolvableNetwork`` class. These dictionaries should include the arguments of the corresponding
-``EvolvableModule``'s constructor.
+the ``encoder_config`` and ``head_config`` arguments of the constructor of the ``EvolvableNetwork`` class. These dictionaries should include the initialisation arguments of the
+corresponding ``EvolvableModule``.
 
 
 If your environment has a 1D ``Box`` observation space, by default the ``EvolvableNetwork`` will use a ``EvolvableMLP`` as the encoder.
 
-.. collapse:: MLP Example
+.. collapse:: Example MLP Network Configuration
 
   .. code-block:: python
 
@@ -113,7 +113,7 @@ If your environment has a 1D ``Box`` observation space, by default the ``Evolvab
 
 If your environment has a 3D ``Box`` observation space, by default the ``EvolvableNetwork`` will use a ``EvolvableCNN`` as the encoder.
 
-.. collapse:: CNN Example
+.. collapse:: Example CNN Network Configuration
 
   .. code-block:: python
 
@@ -149,14 +149,14 @@ If your environment has a 3D ``Box`` observation space, by default the ``Evolvab
       )
 
 .. note::
-    In AgileRL algorithms, pass a single ``net_config`` dictionary that includes the ``encoder_config`` and ``head_config`` dictionaries, as well as any other arguments to
-    the corresponding network used in the algorithm.
+    In AgileRL algorithms, we pass a single ``net_config`` dictionary that includes the ``encoder_config`` and ``head_config`` dictionaries, as well as
+    any other initialisation arguments to the respective network used in the algorithm.
 
 
 Using Non-Evolvable Networks in an Evolvable Setting
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-It is common that users require using either pre-trained networks or custom architectures that don't inherit from ``EvolvableModule``, but still wish
+It might be the case that users require using either pre-trained networks or custom architectures that don't inherit from ``EvolvableModule``, but still wish
 to exploit parameter optimization to automatically tune the RL hyperparameters of an algorithm. In order to do this, users can use :class:`DummyEvolvable <agilerl.modules.dummy.DummyEvolvable>`
 to wrap their non-evolvable networks in a manner compatible with our mutations framework - disabling architecture mutations but still allowing for RL hyperparameter and random weight mutations.
 
@@ -465,7 +465,7 @@ To then make these two CNNs evolvable we pass them, along with input tensors int
 .. _comparch:
 
 Compatible Architecture
-~~~~~~~~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^^^^^^^^
 
 At present, ``MakeEvolvable`` is currently compatible with PyTorch multi-layer perceptrons (MLPs) and convolutional neural networks (CNNs). The
 network architecture must also be sequential, that is, the output of one layer serves as the input to the next layer. Outlined below is a comprehensive
@@ -494,7 +494,7 @@ table of PyTorch layers that are currently supported by this wrapper:
 .. _compalgos:
 
 Compatible Algorithms
-~~~~~~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^^^^^^
 
 The following table highlights which AgileRL algorithms are currently compatible with custom architecture:
 

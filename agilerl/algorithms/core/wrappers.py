@@ -65,7 +65,7 @@ class OptimizerWrapper:
     :param optimizer_cls: The optimizer class to be initialized.
     :type optimizer_cls: Type[torch.optim.Optimizer]
     :param networks: The network/s that the optimizer will update.
-    :type networks: EvolvableModule, list[EvolvableModule], ModuleDict
+    :type networks: EvolvableModule, ModuleDict
     :param lr: The learning rate of the optimizer.
     :type lr: float
     :param optimizer_kwargs: The keyword arguments to be passed to the optimizer.

@@ -1956,12 +1956,6 @@ def test_initialize_ippo_with_evo_networks(
     action_spaces = generate_multi_agent_discrete_spaces(3, 2)
     net_config = get_default_encoder_config(observation_spaces[0])
 
-    # For image spaces we need to give a sample input tensor to build networks
-    if len(observation_spaces[0].shape) == 3:
-        net_config["sample_input"] = torch.zeros(
-            (1, *observation_spaces[0].shape), dtype=torch.float32, device=device
-        )
-
     head_config = {
         "output_activation": "Softmax" if net == "mlp" else "GumbelSoftmax",
         "activation": "ReLU",

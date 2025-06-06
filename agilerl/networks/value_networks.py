@@ -36,6 +36,8 @@ class ValueNetwork(EvolvableNetwork):
     :type recurrent: bool
     :param device: Device to run the network on.
     :type device: str
+    :param random_seed: Random seed to use for the network. Defaults to None.
+    :type random_seed: Optional[int]
     """
 
     def __init__(
@@ -50,6 +52,7 @@ class ValueNetwork(EvolvableNetwork):
         simba: bool = False,
         recurrent: bool = False,
         device: str = "cpu",
+        random_seed: Optional[int] = None,
     ):
 
         super().__init__(
@@ -63,6 +66,7 @@ class ValueNetwork(EvolvableNetwork):
             simba=simba,
             recurrent=recurrent,
             device=device,
+            random_seed=random_seed,
         )
 
         if head_config is None:

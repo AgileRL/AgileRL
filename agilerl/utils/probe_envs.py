@@ -978,6 +978,8 @@ def check_policy_q_learning_with_probe_env(
         else:
             state = torch.tensor(sample_obs).float().to(device)
 
+        agent.critic.eval()
+        agent.actor.eval()
         action = torch.tensor(sample_action).float().to(device)
         predicted_q_values = agent.critic(state, action).detach().cpu().numpy()[0]
         print("q", q_values, predicted_q_values)

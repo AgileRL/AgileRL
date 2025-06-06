@@ -185,16 +185,14 @@ class RainbowDQN(RLAlgorithm):
             )
         else:
             net_config = {} if net_config is None else net_config
-            head_config: Optional[Dict[str, Any]] = net_config.get("head_config", None)
+            head_config: Optional[Dict[str, Any]] = net_config.get("head_config", {})
 
             head_config = MlpNetConfig(
-                hidden_size=(
-                    [64]
-                    if head_config is None
-                    else head_config.get("hidden_size", [64])
-                ),
+                hidden_size=head_config.get("hidden_size", [64]),
                 noise_std=self.noise_std,
                 output_activation="ReLU",
+                min_mlp_nodes=head_config.get("min_mlp_nodes", 16),
+                max_mlp_nodes=head_config.get("max_mlp_nodes", 500),
             )
             net_config["head_config"] = head_config
 

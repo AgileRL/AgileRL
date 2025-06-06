@@ -159,6 +159,8 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     :type recurrent: bool
     :param device: Device to use for the network. Defaults to "cpu".
     :type device: DeviceType
+    :param random_seed: Random seed to use for the network. Defaults to None.
+    :type random_seed: Optional[int]
     """
 
     encoder: EvolvableModule
@@ -181,8 +183,9 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         simba: bool = False,
         recurrent: bool = False,
         device: DeviceType = "cpu",
+        random_seed: Optional[int] = None,
     ) -> None:
-        super().__init__(device)
+        super().__init__(device, random_seed)
 
         assert (
             latent_dim <= max_latent_dim
@@ -337,14 +340,6 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             **net_config,
         )
 
-    def modules(self) -> Dict[str, EvolvableModule]:
-        """Modules of the network.
-
-        :return: Modules of the network.
-        :rtype: Dict[str, EvolvableModule]
-        """
-        return super().modules()
-
     def init_weights_gaussian(
         self, std_coeff: float = 4.0, output_coeff: float = 2.0
     ) -> None:
@@ -389,7 +384,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         :rtype: Dict[str, Any]
         """
         if numb_new_nodes is None:
-            numb_new_nodes = np.random.choice([8, 16, 32], 1)[0]
+            numb_new_nodes = self.rng.choice([8, 16, 32])
 
         if self.latent_dim + numb_new_nodes < self.max_latent_dim:
             self.latent_dim += numb_new_nodes
@@ -409,7 +404,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         :rtype: Dict[str, Any]
         """
         if numb_new_nodes is None:
-            numb_new_nodes = np.random.choice([8, 16, 32], 1)[0]
+            numb_new_nodes = self.rng.choice([8, 16, 32])
 
         if self.latent_dim - numb_new_nodes > self.min_latent_dim:
             self.latent_dim -= numb_new_nodes

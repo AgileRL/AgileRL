@@ -39,6 +39,8 @@ class DeterministicActor(EvolvableNetwork):
     :type recurrent: bool
     :param device: Device to use for the network.
     :type device: str
+    :param random_seed: Random seed to use for the network. Defaults to None.
+    :type random_seed: Optional[int]
     """
 
     supported_spaces = (spaces.Box, spaces.Discrete)
@@ -57,6 +59,7 @@ class DeterministicActor(EvolvableNetwork):
         simba: bool = False,
         recurrent: bool = False,
         device: str = "cpu",
+        random_seed: Optional[int] = None,
     ):
         super().__init__(
             observation_space,
@@ -69,8 +72,10 @@ class DeterministicActor(EvolvableNetwork):
             simba=simba,
             recurrent=recurrent,
             device=device,
+            random_seed=random_seed,
         )
 
+        self.clip_actions = clip_actions
         if isinstance(action_space, spaces.Box):
             self.action_low = torch.as_tensor(action_space.low, device=self.device)
             self.action_high = torch.as_tensor(action_space.high, device=self.device)
@@ -79,7 +84,7 @@ class DeterministicActor(EvolvableNetwork):
             self.action_high = None
 
         # Set output activation based on action space
-        if isinstance(head_config, dict) and "output_activation" in head_config:
+        if head_config is not None and "output_activation" in head_config:
             output_activation = head_config["output_activation"]
         elif isinstance(action_space, spaces.Box):
             # Squash output by default if continuous action space
@@ -89,7 +94,6 @@ class DeterministicActor(EvolvableNetwork):
         else:
             output_activation = None
 
-        self.clip_actions = clip_actions
         if head_config is None:
             head_config = MlpNetConfig(
                 hidden_size=[32], output_activation=output_activation
@@ -217,6 +221,8 @@ class StochasticActor(EvolvableNetwork):
     :type recurrent: bool
     :param device: Device to use for the network.
     :type device: str
+    :param random_seed: Random seed to use for the network. Defaults to None.
+    :type random_seed: Optional[int]
     """
 
     head_net: EvolvableDistribution
@@ -242,6 +248,7 @@ class StochasticActor(EvolvableNetwork):
         simba: bool = False,
         recurrent: bool = False,
         device: str = "cpu",
+        random_seed: Optional[int] = None,
     ):
         super().__init__(
             observation_space,
@@ -254,6 +261,7 @@ class StochasticActor(EvolvableNetwork):
             simba=simba,
             recurrent=recurrent,
             device=device,
+            random_seed=random_seed,
         )
 
         # Require the head to output logits to parameterize a distribution

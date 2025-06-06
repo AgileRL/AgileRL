@@ -30,6 +30,9 @@ class NetConfig:
     def __setitem__(self, key: str, value: Any) -> None:
         setattr(self, key, value)
 
+    def __contains__(self, key: str) -> bool:
+        return hasattr(self, key)
+
     def get(self, key: str, default: Any = None) -> Any:
         return getattr(self, key, default)
 
@@ -142,7 +145,7 @@ class CnnNetConfig(NetConfig):
     max_hidden_layers: int = field(default=6)
     min_channel_size: int = field(default=32)
     max_channel_size: int = field(default=256)
-    layer_norm: bool = field(default=True)
+    layer_norm: bool = field(default=False)
     init_layers: bool = field(default=True)
 
 
