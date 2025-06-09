@@ -1725,10 +1725,13 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     def wrap_models(self):
         """Wrap the models in the accelerator"""
+        print("This is the accelerator from inside grpo", self.accelerator)
         if self.accelerator is not None:
+            print("Calling prepare")
             self.actor, self.optimizer, self.lr_scheduler = self.accelerator.prepare(
                 self.actor, self.optimizer.optimizer, self.lr_scheduler
             )
+            print("Prepare finished")
         else:
             self.actor = self.actor.to(self.device)
             self.actor.gradient_checkpointing_enable()
