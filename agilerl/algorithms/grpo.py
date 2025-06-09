@@ -216,12 +216,16 @@ class GRPO(LLMAlgorithm):
         self.local_rank = (
             "0" if self.accelerator is None else self.accelerator.local_process_index
         )
+        print("Initializing actors")
         self._initialize_actors(actor_network, not clone)
+        print("Actors initialized")
 
         # Register network groups for mutations
         self.register_network_group(NetworkGroup(eval=self.actor, policy=True))
         if self.wrap:
+            print("Wrapping models")
             self.wrap_models()
+            print("Models wrapped")
 
     def get_action(
         self, states: List[Dict[str, torch.Tensor]], training: bool = True

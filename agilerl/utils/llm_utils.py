@@ -66,6 +66,10 @@ class HuggingFaceGym(gym.Env):
             shuffle=False,
             **dataloader_kwargs,
         )
+        self.dataset_size = {
+            "train": len(train_dataset),
+            "test": len(test_dataset),
+        }
         self.accelerator = accelerator
         if self.accelerator is not None:
             self.train_dataloader = self.accelerator.prepare(self.train_dataloader)
