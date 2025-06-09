@@ -102,7 +102,7 @@ if __name__ == "__main__":
                 ).float()
                 transition = transition.unsqueeze(0)
                 transition.batch_size = [1]
-                
+
                 # Save experience to replay buffer
                 memory.add(transition)
 
