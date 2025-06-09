@@ -103,6 +103,9 @@ if __name__ == "__main__":
                 transition = transition.unsqueeze(0)
                 transition.batch_size = [1]
 
+                # Save experience to replay buffer
+                memory.add(transition)
+
                 # Learn according to learning frequency
                 if len(memory) >= agent.batch_size:
                     for _ in range(agent.learn_step):
@@ -141,7 +144,7 @@ if __name__ == "__main__":
         plt.plot(
             np.linspace(0, total_steps, len(agent_regret)),
             agent_regret,
-            label=f"NeuralTS: Agent {i}",
+            label=f"NeuralUCB: Agent {i}",
         )
     plt.xlabel("Training Step")
     plt.ylabel("Regret")
@@ -155,7 +158,7 @@ if __name__ == "__main__":
         plt.plot(
             np.linspace(0, total_steps, len(smoothed_score)),
             smoothed_score,
-            label=f"NeuralTS: Agent {i}",
+            label=f"NeuralUCB: Agent {i}",
         )
     plt.xlabel("Training Step")
     plt.ylabel("Reward")
