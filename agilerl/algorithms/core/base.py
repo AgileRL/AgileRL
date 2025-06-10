@@ -785,7 +785,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :type path: string
         """
         checkpoint: Dict[str, Any] = torch.load(
-            path, map_location=self.device, pickle_module=dill
+            path, map_location=self.device, pickle_module=dill, weights_only=False
         )
 
         # Recreate evolvable modules
@@ -901,7 +901,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :rtype: RLAlgorithm
         """
         checkpoint: Dict[str, Any] = torch.load(
-            path, map_location=device, pickle_module=dill
+            path, map_location=device, pickle_module=dill, weights_only=False
         )
 
         # Reconstruct evolvable modules in algorithm

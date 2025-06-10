@@ -7,10 +7,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import wandb
 from torch.nn import functional as F
 from tqdm import tqdm
 
+import wandb
 from agilerl.data.rl_data import DataPoint
 from agilerl.modules.gpt import EvolvableGPT
 from agilerl.modules.mlp import EvolvableMLP
@@ -1176,7 +1176,7 @@ class ILQL(nn.Module):
         :param path: Location to load checkpoint from
         :type path: string
         """
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.double_q = checkpoint["double_q"]
         self.net_config = checkpoint["net_config"]
         self.model = EvolvableGPT(**checkpoint["model_init_dict"])

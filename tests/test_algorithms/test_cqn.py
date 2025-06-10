@@ -547,7 +547,7 @@ def test_save_load_checkpoint_correct_data_and_format(
     cqn.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
-    checkpoint = torch.load(checkpoint_path, pickle_module=dill)
+    checkpoint = torch.load(checkpoint_path, pickle_module=dill, weights_only=False)
 
     # Check if the loaded checkpoint has the correct keys
     assert "actor_init_dict" in checkpoint["network_info"]["modules"]
@@ -612,7 +612,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     cqn.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
-    checkpoint = torch.load(checkpoint_path, pickle_module=dill)
+    checkpoint = torch.load(checkpoint_path, pickle_module=dill, weights_only=False)
 
     # Check if the loaded checkpoint has the correct keys
     assert "actor_init_dict" in checkpoint["network_info"]["modules"]
@@ -674,7 +674,9 @@ def test_load_from_pretrained(observation_space, encoder_cls, accelerator, tmpdi
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
     cqn.save_checkpoint(checkpoint_path)
 
-    checkpoint = torch.load(checkpoint_path, map_location=device, pickle_module=dill)
+    checkpoint = torch.load(
+        checkpoint_path, map_location=device, pickle_module=dill, weights_only=False
+    )
     assert "agilerl_version" in checkpoint
 
     # Create new agent object
