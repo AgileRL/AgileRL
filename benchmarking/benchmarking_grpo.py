@@ -235,6 +235,50 @@ def main(init_hp, mut_p):
 if __name__ == "__main__":
     import os
 
+    import torch.nn as nn
+
+    # deepspeed_plugin = DeepSpeedPlugin(hf_ds_config={
+    #     "bf16": {
+    #         "enabled": True
+    #     },
+    #     "train_micro_batch_size_per_gpu": 2,
+    #     "zero_optimization": {
+    #         "stage": 2,
+    #         "offload_optimizer": {
+    #             "device": "cpu",
+    #         }
+    #     },
+    #     # "optimizer": {
+    #     # "type": "Adam",
+    #     # "params": {
+    #     # "lr": 0.00015
+    #     # }
+    # })
+
+    accelerator = Accelerator()  # deepspeed_plugin=deepspeed_plugin)
+    model = nn.Sequential(
+        nn.Linear(10, 10),
+    )
+    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+    print("Model", model)
+
+    # import deepspeed
+
+    # model, opt = deepspeed.initialize(
+    #     model=model,
+    #     model_parameters=model.parameters(),
+    #     config=deepspeed_plugin.deepspeed_config,
+    # )
+
+    from accelerate.state import AcceleratorState
+
+    AcceleratorState().deepspeed_plugin.deepspeed_config[
+        "train_micro_batch_size_per_gpu"
+    ] = 2
+    accelerator.prepare(model, opt)
+
+    print("Prepared model")
+    assert False
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     with open("configs/training/grpo.yaml") as file:
         config = yaml.safe_load(file)
