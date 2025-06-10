@@ -520,7 +520,7 @@ def test_save_load_checkpoint(tmpdir):
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
     algo.save_checkpoint(checkpoint_path)
 
-    checkpoint = torch.load(checkpoint_path)
+    checkpoint = torch.load(checkpoint_path, weights_only=False)
 
     assert "model_init_dict" in checkpoint
     assert "model_state_dict" in checkpoint

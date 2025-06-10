@@ -143,7 +143,7 @@ class AgentWrapper(ABC):
         :param path: Location to load checkpoint from
         :type path: string
         """
-        checkpoint = torch.load(path, pickle_module=dill)
+        checkpoint = torch.load(path, pickle_module=dill, weights_only=False)
 
         # Load agent properties and network weights
         self.agent.load_checkpoint(path)
