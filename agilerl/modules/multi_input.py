@@ -178,6 +178,9 @@ class EvolvableMultiInput(EvolvableModule):
         self.name = name
         self.device = device
 
+        # Require certain parameters for encoder MLPs
+        self.mlp_config = self._reformat_mlp_config(self.mlp_config)
+
         self.vector_spaces = spaces.Dict(
             {
                 key: space
@@ -270,6 +273,17 @@ class EvolvableMultiInput(EvolvableModule):
     def lstm_init_dict(self) -> Dict[str, Any]:
         """Returns the initialization dictionary for the LSTM."""
         return copy.deepcopy(self.lstm_config)
+
+    def _reformat_mlp_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Reformats the MLP configuration."""
+        config["output_vanish"] = False  # Don't want output vanish for encoder
+        config["output_layernorm"] = config.get(
+            "layer_norm", True
+        )  # Add layer norm for output if present generally
+        config["output_activation"] = config.get(
+            "activation", "ReLU"
+        )  # Use same output activation
+        return config
 
     def init_weights_gaussian(
         self, std_coeff: float = 4, output_coeff: float = 4

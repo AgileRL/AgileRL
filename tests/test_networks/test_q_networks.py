@@ -3,10 +3,14 @@ import torch
 import torch.nn.functional as F
 from gymnasium import spaces
 
-from agilerl.modules.base import EvolvableModule
-from agilerl.modules.cnn import EvolvableCNN
-from agilerl.modules.mlp import EvolvableMLP
-from agilerl.modules.multi_input import EvolvableMultiInput
+from agilerl.modules import (
+    EvolvableCNN,
+    EvolvableLSTM,
+    EvolvableMLP,
+    EvolvableModule,
+    EvolvableMultiInput,
+    EvolvableSimBa,
+)
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.q_networks import ContinuousQNetwork, QNetwork, RainbowQNetwork
 from tests.helper_functions import (
@@ -39,6 +43,53 @@ def test_q_network_initialization(observation_space, encoder_type):
         assert isinstance(network.encoder, EvolvableMLP)
     elif encoder_type == "cnn":
         assert isinstance(network.encoder, EvolvableCNN)
+
+    evolvable_modules = network.modules()
+    assert "encoder" in evolvable_modules
+    assert "head_net" in evolvable_modules
+
+
+@pytest.mark.parametrize(
+    "observation_space, encoder_type",
+    [
+        (generate_random_box_space((8,)), "mlp"),
+        (generate_random_box_space((32, 8)), "lstm"),
+    ],
+)
+def test_q_network_initialization_recurrent(observation_space, encoder_type):
+    action_space = spaces.Discrete(4)
+    network = QNetwork(observation_space, action_space, recurrent=True)
+
+    assert network.observation_space == observation_space
+
+    if encoder_type == "mlp":
+        assert isinstance(network.encoder, EvolvableMLP)
+    elif encoder_type == "lstm":
+        assert isinstance(network.encoder, EvolvableLSTM)
+
+    evolvable_modules = network.modules()
+    assert "encoder" in evolvable_modules
+    assert "head_net" in evolvable_modules
+
+
+@pytest.mark.parametrize(
+    "observation_space, encoder_type",
+    [
+        (generate_random_box_space((8,)), "mlp"),
+        (generate_random_box_space((8,)), "simba"),
+    ],
+)
+def test_q_network_initialization_simba(observation_space, encoder_type):
+    action_space = spaces.Discrete(4)
+    simba = encoder_type == "simba"
+    network = QNetwork(observation_space, action_space, simba=simba)
+
+    assert network.observation_space == observation_space
+
+    if encoder_type == "mlp":
+        assert isinstance(network.encoder, EvolvableMLP)
+    elif encoder_type == "simba":
+        assert isinstance(network.encoder, EvolvableSimBa)
 
     evolvable_modules = network.modules()
     assert "encoder" in evolvable_modules
@@ -293,6 +344,53 @@ def test_continuous_q_network_initialization(observation_space, encoder_type):
         assert isinstance(network.encoder, EvolvableMLP)
     elif encoder_type == "cnn":
         assert isinstance(network.encoder, EvolvableCNN)
+
+    evolvable_modules = network.modules()
+    assert "encoder" in evolvable_modules
+    assert "head_net" in evolvable_modules
+
+
+@pytest.mark.parametrize(
+    "observation_space, encoder_type",
+    [
+        (generate_random_box_space((8,)), "mlp"),
+        (generate_random_box_space((32, 8)), "lstm"),
+    ],
+)
+def test_continuous_q_network_initialization_recurrent(observation_space, encoder_type):
+    action_space = spaces.Box(low=-1, high=1, shape=(4,))
+    network = ContinuousQNetwork(observation_space, action_space, recurrent=True)
+
+    assert network.observation_space == observation_space
+
+    if encoder_type == "mlp":
+        assert isinstance(network.encoder, EvolvableMLP)
+    elif encoder_type == "lstm":
+        assert isinstance(network.encoder, EvolvableLSTM)
+
+    evolvable_modules = network.modules()
+    assert "encoder" in evolvable_modules
+    assert "head_net" in evolvable_modules
+
+
+@pytest.mark.parametrize(
+    "observation_space, encoder_type",
+    [
+        (generate_random_box_space((8,)), "mlp"),
+        (generate_random_box_space((8,)), "simba"),
+    ],
+)
+def test_continuous_q_network_initialization_simba(observation_space, encoder_type):
+    action_space = spaces.Box(low=-1, high=1, shape=(4,))
+    simba = encoder_type == "simba"
+    network = ContinuousQNetwork(observation_space, action_space, simba=simba)
+
+    assert network.observation_space == observation_space
+
+    if encoder_type == "mlp":
+        assert isinstance(network.encoder, EvolvableMLP)
+    elif encoder_type == "simba":
+        assert isinstance(network.encoder, EvolvableSimBa)
 
     evolvable_modules = network.modules()
     assert "encoder" in evolvable_modules

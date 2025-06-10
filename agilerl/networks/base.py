@@ -198,7 +198,9 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         ), "Latent dimension must be greater than or equal to min latent dimension."
 
         if encoder_config is None:
-            encoder_config = get_default_encoder_config(observation_space, simba=simba)
+            encoder_config = get_default_encoder_config(
+                observation_space, simba=simba, recurrent=recurrent
+            )
 
         # For multi-agent settings with image observation spaces, we use
         # `nn.Conv3D` layers and stack the agents observations across the depth dimension.
@@ -229,9 +231,9 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         )
 
         # By default we use same activation for encoder output as for the rest of the network
-        output_activation = encoder_config.get("output_activation")
+        output_activation = encoder_config.get("output_activation", None)
         if output_activation is None:
-            activation = encoder_config.get("activation")
+            activation = encoder_config.get("activation", "ReLU")
             encoder_config["output_activation"] = activation
 
         if encoder_cls is not None:
