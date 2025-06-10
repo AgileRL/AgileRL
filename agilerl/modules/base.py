@@ -810,9 +810,10 @@ class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleType]):
             module.change_activation(activation, output)
 
     def modules(self) -> Dict[str, EvolvableModule]:
-        """Returns the attributes related to the evolvable modules in the algorithm.
-        Includes attributes that are either evolvable modules or a list of evolvable
-        modules, as well as the optimizers associated with the networks.
+        """Returns the nested evolvable modules in the network.
+
+        .. warning:: This overrides the behavior of `nn.Module.modules()` and only returns
+            the evolvable modules. If you need the torch modules, use :meth:`torch_modules()` instead.
 
         :return: A dictionary of network attributes.
         :rtype: dict[str, Any]

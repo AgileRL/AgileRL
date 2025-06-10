@@ -19,14 +19,14 @@ often results in higher potential for reuse of previously gathered experiences a
 
    * - **Algorithms**
      - **Tutorials**
-   * - :ref:`DQN<dqn>`
-     - :ref:`Curriculum learning with self-play<DQN tutorial>`
-   * - :ref:`Rainbow DQN<dqn_rainbow>`
-     - :ref:`Cartpole<rainbow_tutorial>`
-   * - :ref:`DDPG<ddpg>`
+   * - :ref:`DQN <dqn>`
+     - :ref:`Curriculum learning with self-play <DQN tutorial>`
+   * - :ref:`Rainbow DQN <dqn_rainbow>`
+     - :ref:`Cartpole <rainbow_tutorial>`
+   * - :ref:`DDPG <ddpg>`
      - --
-   * - :ref:`TD3<td3>`
-     - :ref:`Lunar Lander<td3_tutorial>`
+   * - :ref:`TD3 <td3>`
+     - :ref:`Lunar Lander <td3_tutorial>`
 
 
 .. _initpop_off_policy:
@@ -38,18 +38,14 @@ To perform evolutionary HPO, we require a population of agents. Individuals in t
 determine the efficacy of certain hyperparameters. Individual agents which learn best are more likely to survive until the next generation, and so their hyperparameters
 are more likely to remain present in the population. The sequence of evolution (tournament selection followed by mutation) is detailed further below.
 
-.. collapse:: Example
+.. collapse:: Create a Population of DQN Agents
 
     .. code-block:: python
 
         import torch
 
         from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-        from agilerl.utils.utils import (
-            create_population,
-            make_vect_envs,
-            observation_space_channels_to_first
-        )
+        from agilerl.utils.utils import create_population, make_vect_envs
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -69,18 +65,14 @@ are more likely to remain present in the population. The sequence of evolution (
             "GAMMA": 0.99,  # Discount factor
             "LEARN_STEP": 1,  # Learning frequency
             "TAU": 1e-3,  # For soft update of target network parameters
-            "CHANNELS_LAST": False,  # Swap image channels dimension last to first [H, W, C] -> [C, H, W]
             "POP_SIZE": 4,  # Population size
         }
 
         # Initialize vectorized environments
         num_envs = 16
         env = make_vect_envs("LunarLander-v3", num_envs=num_envs)  # Create environment
-
         observation_space = env.single_observation_space
         action_space = env.single_action_space
-        if INIT_HP['CHANNELS_LAST']:
-            observation_space = observation_space_channels_to_first(observation_space)
 
         # RL hyperparameter configuration for mutations
         hp_config = HyperparameterConfig(
@@ -145,7 +137,6 @@ easiest to use our training function, which returns a population of trained agen
         algo="DQN",  # Algorithm
         pop=pop,  # Population of agents
         memory=memory,  # Replay buffer
-        swap_channels=INIT_HP["CHANNELS_LAST"],  # Swap image channel from last to first
         max_steps=200000,  # Max number of training steps
         evo_steps=10000,  # Evolution frequency
         eval_steps=None,  # Number of steps in evaluation episode
@@ -160,7 +151,7 @@ easiest to use our training function, which returns a population of trained agen
 
 Alternatively, use a custom training loop. Combining all of the above:
 
-.. collapse:: Custom Training Loop Example
+.. collapse:: Custom Training Loop
 
     .. code-block:: python
 
@@ -168,7 +159,7 @@ Alternatively, use a custom training loop. Combining all of the above:
         from agilerl.components.data import Transition
         from agilerl.hpo.mutation import Mutations
         from agilerl.hpo.tournament import TournamentSelection
-        from agilerl.utils.utils import create_population, make_vect_envs, observation_space_channels_to_first
+        from agilerl.utils.utils import create_population, make_vect_envs
         import numpy as np
         import torch
         from tqdm import trange
@@ -191,18 +182,14 @@ Alternatively, use a custom training loop. Combining all of the above:
             "GAMMA": 0.99,  # Discount factor
             "LEARN_STEP": 1,  # Learning frequency
             "TAU": 1e-3,  # For soft update of target network parameters
-            "CHANNELS_LAST": False,  # Swap image channels dimension last to first [H, W, C] -> [C, H, W]
             "POP_SIZE": 4,  # Population size
         }
 
         # Initialize vectorized environments
         num_envs = 16
         env = make_vect_envs("LunarLander-v3", num_envs=num_envs)  # Create environment
-
         observation_space = env.single_observation_space
         action_space = env.single_action_space
-        if INIT_HP['CHANNELS_LAST']:
-            observation_space = observation_space_channels_to_first(observation_space)
 
         pop = create_population(
             algo="DQN",  # Algorithm
@@ -234,24 +221,21 @@ Alternatively, use a custom training loop. Combining all of the above:
             parameters=0.2,  # Network parameters mutation
             activation=0,  # Activation layer mutation
             rl_hp=0.2,  # Learning HP mutation
-            mutation_sd=0.1,  # Mutation strength  # Network architecture
+            mutation_sd=0.1,  # Mutation strength
             rand_seed=1,  # Random seed
             device=device,
         )
 
+        # Training parameters
         max_steps = 200000  # Max steps
         learning_delay = 1000  # Steps before starting learning
-
-        # Exploration params
         eps_start = 1.0  # Max exploration
         eps_end = 0.1  # Min exploration
         eps_decay = 0.995  # Decay per episode
         epsilon = eps_start
-
         evo_steps = 10000  # Evolution frequency
         eval_steps = None  # Evaluation steps per episode - go until done
         eval_loop = 1  # Number of evaluation episodes
-
         total_steps = 0
 
         # TRAINING LOOP
@@ -260,23 +244,22 @@ Alternatively, use a custom training loop. Combining all of the above:
         while np.less([agent.steps[-1] for agent in pop], max_steps).all():
             pop_episode_scores = []
             for agent in pop:  # Loop through population
-                state, info = env.reset()  # Reset environment at start of episode
+                agent.set_training_mode(True)
+
+                obs, info = env.reset()  # Reset environment at start of episode
                 scores = np.zeros(num_envs)
                 completed_episode_scores = []
                 steps = 0
                 epsilon = eps_start
 
                 for idx_step in range(evo_steps // num_envs):
-                    if INIT_HP["CHANNELS_LAST"]:
-                        state = obs_channels_to_first(state)
-
-                    action = agent.get_action(state, epsilon)  # Get next action from agent
+                    action = agent.get_action(obs, epsilon)  # Get next action from agent
                     epsilon = max(
                         eps_end, epsilon * eps_decay
                     )  # Decay epsilon for exploration
 
                     # Act in environment
-                    next_state, reward, terminated, truncated, info = env.step(action)
+                    next_obs, reward, terminated, truncated, info = env.step(action)
                     scores += np.array(reward)
                     steps += num_envs
                     total_steps += num_envs
@@ -288,14 +271,12 @@ Alternatively, use a custom training loop. Combining all of the above:
                             agent.scores.append(scores[idx])
                             scores[idx] = 0
 
-                    next_state = obs_channels_to_first(next_state) if INIT_HP["CHANNELS_LAST"] else next_state
-
                     # Wrap transition as TensorDict
                     transition = Transition(
-                        obs=state,
+                        obs=obs,
                         action=action,
                         reward=reward,
-                        next_obs=next_state,
+                        next_obs=next_obs,
                         done=terminated,
                         batch_size=[num_envs]
                     )
@@ -314,7 +295,7 @@ Alternatively, use a custom training loop. Combining all of the above:
                                 experiences
                             )  # Learn according to agent's RL algorithm
 
-                    state = next_state
+                    obs = next_obs
 
                 pbar.update(evo_steps // len(pop))
                 agent.steps[-1] += steps
@@ -327,7 +308,6 @@ Alternatively, use a custom training loop. Combining all of the above:
             fitnesses = [
                 agent.test(
                     env,
-                    swap_channels=INIT_HP["CHANNELS_LAST"],
                     max_steps=eval_steps,
                     loop=eval_loop,
                 )

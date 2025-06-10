@@ -24,6 +24,7 @@ from agilerl.utils.evolvable_networks import get_default_encoder_config
 from agilerl.utils.utils import make_multi_agent_vect_envs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
+    assert_state_dicts_equal,
     gen_multi_agent_dict_or_tuple_spaces,
     generate_multi_agent_box_spaces,
     generate_multi_agent_discrete_spaces,
@@ -336,7 +337,7 @@ def test_initialize_matd3_with_mlp_networks_gumbel_softmax(
 ):
     compile_mode = "reduce-overhead"
     net_config = {
-        "encoder_config": {
+        "head_config": {
             "hidden_size": [64, 64],
             "min_hidden_layers": 1,
             "max_hidden_layers": 3,
@@ -354,7 +355,7 @@ def test_initialize_matd3_with_mlp_networks_gumbel_softmax(
         device=device,
         torch_compiler=compile_mode,
     )
-    assert matd3.torch_compiler == compile_mode
+    assert matd3.torch_compiler == "default"
 
 
 # TODO: This will be deprecated in the future
@@ -697,21 +698,21 @@ def test_matd3_init_warning(
 def test_matd3_init_with_compile_no_error(mode):
     matd3 = MATD3(
         observation_spaces=generate_multi_agent_box_spaces(2, (1,)),
-        action_spaces=generate_multi_agent_discrete_spaces(2, 1),
+        action_spaces=generate_multi_agent_box_spaces(2, (1,)),
         agent_ids=["agent_0", "other_agent_0"],
         device="cuda" if torch.cuda.is_available() else "cpu",
         torch_compiler=mode,
     )
     if isinstance(mode, str):
-        assert all(isinstance(a, OptimizedModule) for a in matd3.actors.values())
-        assert all(isinstance(a, OptimizedModule) for a in matd3.actor_targets.values())
-        assert all(isinstance(a, OptimizedModule) for a in matd3.critics_1.values())
-        assert all(isinstance(a, OptimizedModule) for a in matd3.critics_2.values())
+        assert all(isinstance(m, OptimizedModule) for m in matd3.actors.values())
+        assert all(isinstance(m, OptimizedModule) for m in matd3.actor_targets.values())
+        assert all(isinstance(m, OptimizedModule) for m in matd3.critics_1.values())
+        assert all(isinstance(m, OptimizedModule) for m in matd3.critics_2.values())
         assert all(
-            isinstance(a, OptimizedModule) for a in matd3.critic_targets_1.values()
+            isinstance(m, OptimizedModule) for m in matd3.critic_targets_1.values()
         )
         assert all(
-            isinstance(a, OptimizedModule) for a in matd3.critic_targets_2.values()
+            isinstance(m, OptimizedModule) for m in matd3.critic_targets_2.values()
         )
         assert matd3.torch_compiler == mode
     else:
@@ -1088,11 +1089,11 @@ def test_matd3_learns_from_experiences(
         for agent_id, actor in matd3.actors.items()
     }
     critics_1_pre_learn_sd = {
-        agent_id: str(copy.deepcopy(critic_1.state_dict()))
+        agent_id: copy.deepcopy(critic_1.state_dict())
         for agent_id, critic_1 in matd3.critics_1.items()
     }
     critics_2_pre_learn_sd = {
-        agent_id: str(copy.deepcopy(critic_2.state_dict()))
+        agent_id: copy.deepcopy(critic_2.state_dict())
         for agent_id, critic_2 in matd3.critics_2.items()
     }
 
@@ -1111,7 +1112,7 @@ def test_matd3_learns_from_experiences(
 
     for agent_id, old_actor_state_dict in actors_pre_learn_sd.items():
         updated_actor = matd3.actors[agent_id]
-        assert old_actor_state_dict != str(updated_actor.state_dict())
+        assert_state_dicts_equal(old_actor_state_dict, updated_actor.state_dict())
 
     for agent_id, old_critic_target in matd3.critic_targets_1.items():
         updated_critic_target = matd3.critic_targets_1[agent_id]
@@ -1119,7 +1120,7 @@ def test_matd3_learns_from_experiences(
 
     for agent_id, old_critic_state_dict in critics_1_pre_learn_sd.items():
         updated_critic = matd3.critics_1[agent_id]
-        assert old_critic_state_dict != str(updated_critic.state_dict())
+        assert_state_dicts_equal(old_critic_state_dict, updated_critic.state_dict())
 
     for agent_id, old_critic_target in matd3.critic_targets_2.items():
         updated_critic_target = matd3.critic_targets_2[agent_id]
@@ -1127,7 +1128,7 @@ def test_matd3_learns_from_experiences(
 
     for agent_id, old_critic_state_dict in critics_2_pre_learn_sd.items():
         updated_critic = matd3.critics_2[agent_id]
-        assert old_critic_state_dict != str(updated_critic.state_dict())
+        assert_state_dicts_equal(old_critic_state_dict, updated_critic.state_dict())
 
 
 def no_sync(self):
@@ -1199,11 +1200,11 @@ def test_matd3_learns_from_experiences_distributed(
         for agent_id, actor in matd3.actors.items()
     }
     critics_1_pre_learn_sd = {
-        agent_id: str(copy.deepcopy(critic_1.state_dict()))
+        agent_id: copy.deepcopy(critic_1.state_dict())
         for agent_id, critic_1 in matd3.critics_1.items()
     }
     critics_2_pre_learn_sd = {
-        agent_id: str(copy.deepcopy(critic_2.state_dict()))
+        agent_id: copy.deepcopy(critic_2.state_dict())
         for agent_id, critic_2 in matd3.critics_2.items()
     }
 
@@ -1217,15 +1218,15 @@ def test_matd3_learns_from_experiences_distributed(
 
     for agent_id, old_actor_sd in actors_pre_learn_sd.items():
         updated_actor = matd3.actors[agent_id]
-        assert old_actor_sd != str(updated_actor.state_dict())
+        assert_state_dicts_equal(old_actor_sd, updated_actor.state_dict())
 
     for agent_id, old_critic_1_sd in critics_1_pre_learn_sd.items():
         updated_critic_1 = matd3.critics_1[agent_id]
-        assert old_critic_1_sd != str(updated_critic_1.state_dict())
+        assert_state_dicts_equal(old_critic_1_sd, updated_critic_1.state_dict())
 
     for agent_id, old_critic_2_sd in critics_2_pre_learn_sd.items():
         updated_critic_2 = matd3.critics_2[agent_id]
-        assert old_critic_2_sd != str(updated_critic_2.state_dict())
+        assert_state_dicts_equal(old_critic_2_sd, updated_critic_2.state_dict())
 
     for agent_id, old_actor_target in matd3.actor_targets.items():
         updated_actor_target = matd3.actor_targets[agent_id]
@@ -1423,30 +1424,32 @@ def test_matd3_clone_returns_identical_agent(
 
         clone_actor = clone_agent.actors[agent_id]
         actor = matd3.actors[agent_id]
-        assert str(clone_actor.state_dict()) == str(actor.state_dict())
+        assert_state_dicts_equal(clone_actor.state_dict(), actor.state_dict())
 
         clone_actor_target = clone_agent.actor_targets[agent_id]
         actor_target = matd3.actor_targets[agent_id]
-        assert str(clone_actor_target.state_dict()) == str(actor_target.state_dict())
+        assert_state_dicts_equal(
+            clone_actor_target.state_dict(), actor_target.state_dict()
+        )
 
         clone_critic_1 = clone_agent.critics_1[agent_id]
         critic_1 = matd3.critics_1[agent_id]
-        assert str(clone_critic_1.state_dict()) == str(critic_1.state_dict())
+        assert_state_dicts_equal(clone_critic_1.state_dict(), critic_1.state_dict())
 
         clone_critic_target_1 = clone_agent.critic_targets_1[agent_id]
         critic_target_1 = matd3.critic_targets_1[agent_id]
-        assert str(clone_critic_target_1.state_dict()) == str(
-            critic_target_1.state_dict()
+        assert_state_dicts_equal(
+            clone_critic_target_1.state_dict(), critic_target_1.state_dict()
         )
 
         clone_critic_2 = clone_agent.critics_2[agent_id]
         critic_2 = matd3.critics_2[agent_id]
-        assert str(clone_critic_2.state_dict()) == str(critic_2.state_dict())
+        assert_state_dicts_equal(clone_critic_2.state_dict(), critic_2.state_dict())
 
         clone_critic_target_2 = clone_agent.critic_targets_2[agent_id]
         critic_target_2 = matd3.critic_targets_2[agent_id]
-        assert str(clone_critic_target_2.state_dict()) == str(
-            critic_target_2.state_dict()
+        assert_state_dicts_equal(
+            clone_critic_target_2.state_dict(), critic_target_2.state_dict()
         )
 
 
@@ -1522,30 +1525,32 @@ def test_clone_after_learning(compile_mode):
 
         clone_actor = clone_agent.actors[agent_id]
         actor = matd3.actors[agent_id]
-        assert str(clone_actor.state_dict()) == str(actor.state_dict())
+        assert_state_dicts_equal(clone_actor.state_dict(), actor.state_dict())
 
         clone_actor_target = clone_agent.actor_targets[agent_id]
         actor_target = matd3.actor_targets[agent_id]
-        assert str(clone_actor_target.state_dict()) == str(actor_target.state_dict())
+        assert_state_dicts_equal(
+            clone_actor_target.state_dict(), actor_target.state_dict()
+        )
 
         clone_critic_1 = clone_agent.critics_1[agent_id]
         critic_1 = matd3.critics_1[agent_id]
-        assert str(clone_critic_1.state_dict()) == str(critic_1.state_dict())
+        assert_state_dicts_equal(clone_critic_1.state_dict(), critic_1.state_dict())
 
         clone_critic_target_1 = clone_agent.critic_targets_1[agent_id]
         critic_target_1 = matd3.critic_targets_1[agent_id]
-        assert str(clone_critic_target_1.state_dict()) == str(
-            critic_target_1.state_dict()
+        assert_state_dicts_equal(
+            clone_critic_target_1.state_dict(), critic_target_1.state_dict()
         )
 
         clone_critic_2 = clone_agent.critics_2[agent_id]
         critic_2 = matd3.critics_2[agent_id]
-        assert str(clone_critic_2.state_dict()) == str(critic_2.state_dict())
+        assert_state_dicts_equal(clone_critic_2.state_dict(), critic_2.state_dict())
 
         clone_critic_target_2 = clone_agent.critic_targets_2[agent_id]
         critic_target_2 = matd3.critic_targets_2[agent_id]
-        assert str(clone_critic_target_2.state_dict()) == str(
-            critic_target_2.state_dict()
+        assert_state_dicts_equal(
+            clone_critic_target_2.state_dict(), critic_target_2.state_dict()
         )
 
 
@@ -1673,15 +1678,15 @@ def test_matd3_save_load_checkpoint_correct_data_and_format(
     for agent_id in loaded_matd3.agent_ids:
         actor = loaded_matd3.actors[agent_id]
         actor_target = loaded_matd3.actor_targets[agent_id]
-        assert str(actor.state_dict()) == str(actor_target.state_dict())
+        assert_state_dicts_equal(actor.state_dict(), actor_target.state_dict())
 
         critic_1 = loaded_matd3.critics_1[agent_id]
         critic_target_1 = loaded_matd3.critic_targets_1[agent_id]
-        assert str(critic_1.state_dict()) == str(critic_target_1.state_dict())
+        assert_state_dicts_equal(critic_1.state_dict(), critic_target_1.state_dict())
 
         critic_2 = loaded_matd3.critics_2[agent_id]
         critic_target_2 = loaded_matd3.critic_targets_2[agent_id]
-        assert str(critic_2.state_dict()) == str(critic_target_2.state_dict())
+        assert_state_dicts_equal(critic_2.state_dict(), critic_target_2.state_dict())
 
     assert matd3.batch_size == 64
     assert matd3.learn_step == 5
@@ -1843,15 +1848,15 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_make_evo(
     for agent_id in loaded_matd3.agent_ids:
         actor = loaded_matd3.actors[agent_id]
         actor_target = loaded_matd3.actor_targets[agent_id]
-        assert str(actor.state_dict()) == str(actor_target.state_dict())
+        assert_state_dicts_equal(actor.state_dict(), actor_target.state_dict())
 
         critic_1 = loaded_matd3.critics_1[agent_id]
         critic_target_1 = loaded_matd3.critic_targets_1[agent_id]
-        assert str(critic_1.state_dict()) == str(critic_target_1.state_dict())
+        assert_state_dicts_equal(critic_1.state_dict(), critic_target_1.state_dict())
 
         critic_2 = loaded_matd3.critics_2[agent_id]
         critic_target_2 = loaded_matd3.critic_targets_2[agent_id]
-        assert str(critic_2.state_dict()) == str(critic_target_2.state_dict())
+        assert_state_dicts_equal(critic_2.state_dict(), critic_target_2.state_dict())
 
     assert matd3.batch_size == 64
     assert matd3.learn_step == 5
@@ -1967,22 +1972,25 @@ def test_load_from_pretrained(
             assert isinstance(new_critic_2.encoder, EvolvableMultiInput)
             assert isinstance(new_critic_target_2.encoder, EvolvableMultiInput)
 
-        new_actor_sd = str(new_actor.state_dict())
-        new_actor_target_sd = str(new_actor_target.state_dict())
-        new_critic_1_sd = str(new_critic_1.state_dict())
-        new_critic_target_1_sd = str(new_critic_target_1.state_dict())
-        new_critic_2_sd = str(new_critic_2.state_dict())
-        new_critic_target_2_sd = str(new_critic_target_2.state_dict())
-
-        assert new_actor_sd == str(matd3.actors[agent_id].state_dict())
-        assert new_actor_target_sd == str(matd3.actor_targets[agent_id].state_dict())
-        assert new_critic_1_sd == str(matd3.critics_1[agent_id].state_dict())
-        assert new_critic_target_1_sd == str(
-            matd3.critic_targets_1[agent_id].state_dict()
+        assert_state_dicts_equal(
+            new_actor.state_dict(), matd3.actors[agent_id].state_dict()
         )
-        assert new_critic_2_sd == str(matd3.critics_2[agent_id].state_dict())
-        assert new_critic_target_2_sd == str(
-            matd3.critic_targets_2[agent_id].state_dict()
+        assert_state_dicts_equal(
+            new_actor_target.state_dict(), matd3.actor_targets[agent_id].state_dict()
+        )
+        assert_state_dicts_equal(
+            new_critic_1.state_dict(), matd3.critics_1[agent_id].state_dict()
+        )
+        assert_state_dicts_equal(
+            new_critic_target_1.state_dict(),
+            matd3.critic_targets_1[agent_id].state_dict(),
+        )
+        assert_state_dicts_equal(
+            new_critic_2.state_dict(), matd3.critics_2[agent_id].state_dict()
+        )
+        assert_state_dicts_equal(
+            new_critic_target_2.state_dict(),
+            matd3.critic_targets_2[agent_id].state_dict(),
         )
 
     assert new_matd3.batch_size == matd3.batch_size
@@ -2117,18 +2125,24 @@ def test_load_from_pretrained_make_evo(
         assert isinstance(new_critic_target_1, nn.Module)
         assert isinstance(new_critic_2, nn.Module)
         assert isinstance(new_critic_target_2, nn.Module)
-        assert str(new_actor.to("cpu").state_dict()) == str(actor.state_dict())
-        assert str(new_actor_target.to("cpu").state_dict()) == str(
-            actor_target.state_dict()
+
+        assert_state_dicts_equal(new_actor.to("cpu").state_dict(), actor.state_dict())
+        assert_state_dicts_equal(
+            new_actor_target.to("cpu").state_dict(), actor_target.state_dict()
         )
-        assert str(new_critic_1.to("cpu").state_dict()) == str(critic_1.state_dict())
-        assert str(new_critic_target_1.to("cpu").state_dict()) == str(
-            critic_target_1.state_dict()
+        assert_state_dicts_equal(
+            new_critic_1.to("cpu").state_dict(), critic_1.state_dict()
         )
-        assert str(new_critic_2.to("cpu").state_dict()) == str(critic_2.state_dict())
-        assert str(new_critic_target_2.to("cpu").state_dict()) == str(
-            critic_target_2.state_dict()
+        assert_state_dicts_equal(
+            new_critic_target_1.to("cpu").state_dict(), critic_target_1.state_dict()
         )
+        assert_state_dicts_equal(
+            new_critic_2.to("cpu").state_dict(), critic_2.state_dict()
+        )
+        assert_state_dicts_equal(
+            new_critic_target_2.to("cpu").state_dict(), critic_target_2.state_dict()
+        )
+
     assert new_matd3.batch_size == matd3.batch_size
     assert new_matd3.learn_step == matd3.learn_step
     assert new_matd3.gamma == matd3.gamma

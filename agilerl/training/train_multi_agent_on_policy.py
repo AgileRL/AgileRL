@@ -186,7 +186,8 @@ def train_multi_agent_on_policy(
             dynamic_ncols=True,
         )
 
-    agent_ids = deepcopy(pop[0].shared_agent_ids)
+    sample_ind = pop[0]
+    agent_ids = deepcopy(list(sample_ind.observation_space.keys()))
     pop_loss = [{agent_id: [] for agent_id in agent_ids} for _ in pop]
     pop_fitnesses = [{agent_id: [] for agent_id in agent_ids} for _ in pop]
     entropy_hist = [{agent_id: [] for agent_id in agent_ids} for _ in pop]
@@ -251,13 +252,16 @@ def train_multi_agent_on_policy(
                     # Clip to action space
                     clipped_action = {}
                     for agent_id, agent_action in action.items():
-                        shared_id = agent.get_group_id(agent_id)
-                        actor_idx = agent.shared_agent_ids.index(shared_id)
+                        network_id = (
+                            agent_id
+                            if agent_id in agent.actors.keys()
+                            else agent.get_group_id(agent_id)
+                        )
                         agent_space = agent.action_space[agent_id]
                         if isinstance(agent_space, spaces.Box):
-                            if agent.actors[actor_idx].squash_output:
+                            if agent.actors[network_id].squash_output:
                                 clipped_agent_action = agent.actors[
-                                    actor_idx
+                                    network_id
                                 ].scale_action(agent_action)
                             else:
                                 clipped_agent_action = np.clip(

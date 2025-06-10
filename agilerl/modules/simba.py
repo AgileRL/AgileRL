@@ -11,7 +11,12 @@ class EvolvableSimBa(EvolvableModule):
     """Evolvable module that implements the architecture presented in 'SimBa: Simplicity
     Bias for Scaling Up Parameters in Deep Reinforcement Learning'. Designed to avoid
     overfitting by integrating components that induce a simplicity bias, guiding models toward
-    simple and generalizable solutions.
+    simple and generalizable solutions. Supports the following types of architecture mutations during training:
+
+    * Adding or removing residual blocks
+    * Adding or removing nodes from residual blocks
+    * Changing the activation function between layers
+    * Changing the activation function for the output layer
 
     Paper: https://arxiv.org/abs/2410.09754
 

@@ -3,10 +3,10 @@
 Proximal Policy Optimization (PPO)
 =========================================
 
-`PPO <https://arxiv.org/abs/1707.06347v2>`_ is a policy gradient method that uses a clipped objective to constrain policy updates.
-It aims to combine the stability of Trust Region Policy Optimization (TRPO) with the simplicity
+`PPO <https://arxiv.org/abs/1707.06347v2>`_ is an on-policy policy gradient algorithm that uses a clipped objective to constrain policy updates.
+It aims to combine the stability of `Trust Region Policy Optimization (TRPO) <https://arxiv.org/abs/1502.05477>`_ with the simplicity
 and scalability of vanilla policy gradients, effectively maintaining a balance between exploration
-and exploitation. PPO is an on-policy algorithm.
+and exploitation.
 
 Compatible Action Spaces
 ------------------------
@@ -42,15 +42,10 @@ Example
   observation_space = env.observation_space
   action_space = env.action_space
 
-  channels_last = False # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-
-  if channels_last:
-      observation_space = observation_space_channels_first(observation_space)
-
   agent = PPO(observation_space, action_space)   # Create PPO agent
 
   while True:
-      states = []
+      observations = []
       actions = []
       log_probs = []
       rewards = []
@@ -58,13 +53,11 @@ Example
       values = []
 
       done = np.zeros(num_envs)
-
+      obs, info = env.reset()
+      agent.set_training_mode(True)
       for step in range(agent.learn_step):
-          if channels_last:
-              state = obs_channels_to_first(state)
-
           # Get next action from agent
-          action, log_prob, _, value = agent.get_action(state)
+          action, log_prob, _, value = agent.get_action(obs)
 
           # Clip to action space
           if isinstance(agent.action_space, spaces.Box):
@@ -75,27 +68,27 @@ Example
           else:
               clipped_action = action
 
-          next_state, reward, term, trunc, _ = env.step(clipped_action)  # Act in environment
+          next_obs, reward, term, trunc, _ = env.step(clipped_action)  # Act in environment
           next_done = np.logical_or(term, trunc).astype(np.int8)
 
-          states.append(state)
+          observations.append(obs)
           actions.append(action)
           log_probs.append(log_prob)
           rewards.append(reward)
           dones.append(done)
           values.append(value)
 
-          state = next_state
+          obs = next_obs
           done = next_done
 
       experiences = (
-          states,
+          observations,
           actions,
           log_probs,
           rewards,
           dones,
           values,
-          next_state,
+          next_obs,
           next_done,
       )
       # Learn according to agent's RL algorithm

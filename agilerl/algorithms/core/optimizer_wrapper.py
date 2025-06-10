@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional, Union
 import torch.nn as nn
 from torch.optim import Optimizer
 
-from agilerl.modules.base import EvolvableModule, ModuleDict
+from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.protocols import EvolvableAlgorithm
 from agilerl.typing import OptimizerType, StateDict
 
@@ -74,8 +74,6 @@ class OptimizerWrapper:
     :type network_names: List[str]
     :param lr_name: The attribute name of the learning rate in the parent container.
     :type lr_name: str
-    :param multiagent: Flag to indicate if the optimizer is multi-agent.
-    :type multiagent: bool
     """
 
     optimizer: _Optimizer
@@ -94,14 +92,14 @@ class OptimizerWrapper:
         self.optimizer_kwargs = optimizer_kwargs if optimizer_kwargs is not None else {}
         self.lr = lr
 
-        if isinstance(networks, EvolvableModule):
+        if isinstance(networks, nn.Module):
             self.networks = [networks]
         elif isinstance(networks, list) and all(
             isinstance(net, nn.Module) for net in networks
         ):
             self.networks = networks
         else:
-            raise TypeError("Expected a list of torch.nn.Module objects.")
+            raise TypeError("Expected a single / list of torch.nn.Module objects.")
 
         # NOTE: This should be passed when reintializing the optimizer
         # when mutating an individual.
@@ -127,10 +125,6 @@ class OptimizerWrapper:
             self.optimizer = {}
             networks = self.networks[0]
             for agent_id, net in networks.items():
-                assert isinstance(net, EvolvableModule), (
-                    "AgileRL currently only supports optimizing a single network per "
-                    "optimizer in multi-agent algorithms."
-                )
                 optimizer = (
                     optimizer_cls[agent_id]
                     if isinstance(optimizer_cls, dict)

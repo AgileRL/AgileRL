@@ -71,13 +71,18 @@ def vector_space_check(space: spaces.Space, recurrent: bool = False) -> bool:
 
 
 class EvolvableMultiInput(EvolvableModule):
-    """Evolvable multi-input network for `Tuple` or `Dict` observation spaces. It inspects the
+    """Evolvable multi-input network for Tuple or Dict observation spaces. It inspects the
     observation space to determine the type of network to build for each key. It builds an
-    `EvolvableCNN` for image subspaces, an `EvolvableLSTM` for time-series subspaces if specified
-    through the `recurrent` flag, and a `nn.Flatten()` for other types. Vector observations are
-    concatenated with the extracted features before passing through an `EvolvableMLP` to produce
-    the output tensor. Optionally, users may specify an additional `EvolvableMLP` to be applied to
+    EvolvableCNN for image subspaces, an EvolvableLSTM for time-series subspaces if specified
+    through the recurrent flag, and a nn.Flatten() for other types. Vector observations are
+    concatenated with the extracted features before passing through an EvolvableMLP to produce
+    the output tensor. Optionally, users may specify an additional EvolvableMLP to be applied to
     the concatenated vector observations before concatenation with the extracted features.
+
+    Supports the following types of architecture mutations during training:
+
+    * Adding or removing latent nodes
+    * Inherits the mutation methods of any nested EvolvableModule objects used in the network
 
     :param observation_space: Dictionary or Tuple space of observations.
     :type observation_space: spaces.Dict or spaces.Tuple
@@ -99,7 +104,7 @@ class EvolvableMultiInput(EvolvableModule):
     :type init_dicts: Dict[str, Dict[str, Any]], optional
     :param output_activation: Activation function for the output layer. Default is None.
     :type output_activation: Optional[str], optional
-    :param recurrent: Whether to use an `EvolvableLSTM` for 2D Box spaces. Otherwise, the observation
+    :param recurrent: Whether to use an EvolvableLSTM for 2D Box spaces. Otherwise, the observation
         is flattened and treated as a vector space. Default is False.
     :type recurrent: bool, optional
     :param min_latent_dim: Minimum dimension of the latent space. Default is 8.
@@ -120,7 +125,7 @@ class EvolvableMultiInput(EvolvableModule):
         self,
         observation_space: TupleOrDictSpace,
         num_outputs: int,
-        latent_dim: int = 16,
+        latent_dim: int = 32,
         vector_space_mlp: bool = False,
         cnn_config: Optional[MultiInputConfigType] = None,
         mlp_config: Optional[MultiInputConfigType] = None,

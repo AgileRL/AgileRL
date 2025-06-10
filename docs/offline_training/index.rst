@@ -13,9 +13,9 @@ AgileRL's offline RL training framework enables you to leverage evolutionary HPO
 
    * - **Algorithms**
      - **Tutorials**
-   * - :ref:`CQL<cql>`
+   * - :ref:`CQL <cql>`
      - --
-   * - :ref:`ILQL<ilql>`
+   * - :ref:`ILQL <ilql>`
      - --
 
 .. _initpop_offline:
@@ -31,7 +31,7 @@ are more likely to remain present in the population. The sequence of evolution (
 
     .. code-block:: python
 
-        from agilerl.utils.utils import create_population, make_vect_envs, observation_space_channels_to_first
+        from agilerl.utils.utils import create_population, make_vect_envs
         import gymnasium as gym
         import h5py
         import torch
@@ -45,8 +45,6 @@ are more likely to remain present in the population. The sequence of evolution (
             "GAMMA": 0.99,  # Discount factor
             "LEARN_STEP": 1,  # Learning frequency
             "TAU": 1e-3,  # For soft update of target network parameters
-            # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-            "CHANNELS_LAST": False,
             "POP_SIZE": 4,  # Population size
         }
 
@@ -56,8 +54,6 @@ are more likely to remain present in the population. The sequence of evolution (
 
         observation_space = env.single_observation_space
         action_space = env.single_action_space
-        if INIT_HP['CHANNELS_LAST']:
-            observation_space = observation_space_channels_to_first(observation_space)
 
         # RL hyperparameter configuration for mutations
         hp_config = HyperparameterConfig(
@@ -111,10 +107,7 @@ We must fill the replay buffer with our offline data so that we can sample and l
     dataset_length = dataset["rewards"].shape[0]
     for i in trange(dataset_length - 1):
         state = dataset["observations"][i]
-        next_state = dataset["observations"][i + 1]
-        if INIT_HP["CHANNELS_LAST"]:
-            state = obs_channels_to_first(state)
-            next_state = obs_channels_to_first(next_state)
+        next_obs = dataset["observations"][i + 1]
         action = dataset["actions"][i]
         reward = dataset["rewards"][i]
         done = bool(dataset["terminals"][i])
@@ -123,7 +116,7 @@ We must fill the replay buffer with our offline data so that we can sample and l
             obs=state,
             action=action,
             reward=reward,
-            next_obs=next_state,
+            next_obs=next_obs,
             done=done,
         )
         transition = transition.unsqueeze(0) # Add vectorized dimension
@@ -151,7 +144,6 @@ easiest to use our training function, which returns a population of trained agen
         dataset=dataset,  # Offline dataset
         pop=pop,  # Population of agents
         memory=memory,  # Replay buffer
-        swap_channels=INIT_HP['CHANNELS_LAST'],  # Swap image channel from last to first
         max_steps=500000,  # Max number of training steps
         evo_steps=10000,  # Evolution frequency
         eval_steps=None,  # Evaluation steps
@@ -177,17 +169,13 @@ Alternatively, use a custom training loop. Combining all of the above:
         from agilerl.components.replay_buffer import ReplayBuffer
         from agilerl.hpo.mutation import Mutations
         from agilerl.hpo.tournament import TournamentSelection
-        from agilerl.utils.utils import (
-            create_population,
-            make_vect_envs,
-            observation_space_channels_to_first
-        )
+        from agilerl.utils.utils import create_population, make_vect_envs
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         NET_CONFIG = {
-            "encoder_config": {"hidden_size": [32, 32]},  # Encoder hidden size
-            "head_config": {"hidden_size": [32, 32]},  # Head hidden size
+            "encoder_config": {"hidden_size": [32, 32], "activation": "ReLU"},  # Encoder config
+            "head_config": {"hidden_size": [32]},  # Head hidden size
         }
 
         INIT_HP = {
@@ -197,8 +185,6 @@ Alternatively, use a custom training loop. Combining all of the above:
             "GAMMA": 0.99,  # Discount factor
             "LEARN_STEP": 1,  # Learning frequency
             "TAU": 1e-3,  # For soft update of target network parameters
-            # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-            "CHANNELS_LAST": False,
             "POP_SIZE": 4,  # Population size
         }
 
@@ -206,11 +192,8 @@ Alternatively, use a custom training loop. Combining all of the above:
         num_envs = 1
         env = make_vect_envs("CartPole-v1", num_envs=num_envs)  # Create environment
         dataset = h5py.File("data/cartpole/cartpole_random_v1.1.0.h5", "r")  # Load dataset
-
         observation_space = env.single_observation_space
         action_space = env.single_action_space
-        if INIT_HP['CHANNELS_LAST']:
-            observation_space = observation_space_channels_to_first(observation_space)
 
         pop = create_population(
             algo="CQN",  # Algorithm
@@ -232,21 +215,18 @@ Alternatively, use a custom training loop. Combining all of the above:
         # Save transitions to replay buffer
         dataset_length = dataset["rewards"].shape[0]
         for i in trange(dataset_length - 1):
-            state = dataset["observations"][i]
-            next_state = dataset["observations"][i + 1]
-            if INIT_HP["CHANNELS_LAST"]:
-                state = obs_channels_to_first(state)
-                next_state = obs_channels_to_first(next_state)
+            obs = dataset["observations"][i]
+            next_obs = dataset["observations"][i + 1]
             action = dataset["actions"][i]
             reward = dataset["rewards"][i]
             done = bool(dataset["terminals"][i])
 
             # Save experience to replay buffer
             transition = Transition(
-                obs=state,
+                obs=obs,
                 action=action,
                 reward=reward,
-                next_obs=next_state,
+                next_obs=next_obs,
                 done=done,
             )
             transition = transition.unsqueeze(0) # Add vectorized dimension
@@ -296,7 +276,6 @@ Alternatively, use a custom training loop. Combining all of the above:
             fitnesses = [
                 agent.test(
                     env,
-                    swap_channels=INIT_HP["CHANNELS_LAST"],
                     max_steps=eval_steps,
                     loop=eval_loop,
                 )

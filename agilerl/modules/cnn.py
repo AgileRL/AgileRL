@@ -181,10 +181,15 @@ class MutableKernelSizes:
 
 
 class EvolvableCNN(EvolvableModule):
-    """
-    The Evolvable Convolutional Neural Network class. It supports the evolution of the CNN architecture
-    by adding or removing convolutional layers, changing the number of channels in each layer, changing the
-    kernel size and stride size of each layer, and changing the number of nodes in the fully connected layer.
+    """The Evolvable Convolutional Neural Network class. Consists of a sequence of convolutional layers
+    with an optional activation function between each layer. Supports using layer normalization. Allows for
+    the following types of architecture mutations during training:
+
+    * Adding or removing convolutional layers
+    * Adding or removing channels from convolutional layers
+    * Changing the kernel size and stride size of convolutional layers
+    * Changing the activation function between layers (e.g. ReLU to GELU)
+    * Changing the activation function for the output layer (e.g. ReLU to GELU)
 
     :param input_shape: Input shape
     :type input_shape: List[int]

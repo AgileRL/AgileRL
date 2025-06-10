@@ -9,9 +9,8 @@ import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
 
-from agilerl.algorithms.core import MultiAgentRLAlgorithm
+from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.base import EvolvableModule, ModuleDict
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import DeterministicActor
@@ -213,22 +212,39 @@ class MATD3(MultiAgentRLAlgorithm):
         }
 
         if actor_networks is not None and critic_networks is not None:
-            assert isinstance(critic_networks, list), "critic_networks must be a list containing the two critics in MATD3."
+            assert isinstance(
+                critic_networks, list
+            ), "critic_networks must be a list containing the two critics in MATD3."
 
             if isinstance(actor_networks, list):
-                assert len(actor_networks) == len(self.agent_ids), "actor_networks must be a list of the same length as the number of agents"
+                assert len(actor_networks) == len(
+                    self.agent_ids
+                ), "actor_networks must be a list of the same length as the number of agents"
                 actor_networks = ModuleDict(
-                    {self.agent_ids[i]: actor_networks[i] for i in range(len(self.agent_ids))}
+                    {
+                        self.agent_ids[i]: actor_networks[i]
+                        for i in range(len(self.agent_ids))
+                    }
                 )
             if isinstance(critic_networks[0], list):
-                assert len(critic_networks[0]) == len(self.agent_ids), "critic_networks at index 0 must be a list of the same length as the number of agents"
-                assert len(critic_networks[1]) == len(self.agent_ids), "critic_networks at index 1 must be a list of the same length as the number of agents"
+                assert len(critic_networks[0]) == len(
+                    self.agent_ids
+                ), "critic_networks at index 0 must be a list of the same length as the number of agents"
+                assert len(critic_networks[1]) == len(
+                    self.agent_ids
+                ), "critic_networks at index 1 must be a list of the same length as the number of agents"
 
                 critic_networks[0] = ModuleDict(
-                    {self.agent_ids[i]: critic_networks[0][i] for i in range(len(self.agent_ids))}
+                    {
+                        self.agent_ids[i]: critic_networks[0][i]
+                        for i in range(len(self.agent_ids))
+                    }
                 )
                 critic_networks[1] = ModuleDict(
-                    {self.agent_ids[i]: critic_networks[1][i] for i in range(len(self.agent_ids))}
+                    {
+                        self.agent_ids[i]: critic_networks[1][i]
+                        for i in range(len(self.agent_ids))
+                    }
                 )
 
             actors_list = list(actor_networks.values())
@@ -295,13 +311,33 @@ class MATD3(MultiAgentRLAlgorithm):
                 agent_configs[agent_id] = agent_config
 
             # Format critic net config from actor net configs
+            latent_dim = max(
+                [
+                    agent_configs[agent_id].get("latent_dim", 32)
+                    for agent_id in self.agent_ids
+                ]
+            )
+            min_latent_dim = min(
+                [
+                    agent_configs[agent_id].get("min_latent_dim", 8)
+                    for agent_id in self.agent_ids
+                ]
+            )
+            max_latent_dim = max(
+                [
+                    agent_configs[agent_id].get("max_latent_dim", 128)
+                    for agent_id in self.agent_ids
+                ]
+            )
             critic_encoder_config = format_shared_critic_encoder(encoder_configs)
             critic_head_config = get_deepest_head_config(agent_configs, self.agent_ids)
             critic_net_config = {
                 "encoder_config": critic_encoder_config,
                 "head_config": critic_head_config,
+                "latent_dim": latent_dim,
+                "min_latent_dim": min_latent_dim,
+                "max_latent_dim": max_latent_dim,
             }
-
             clip_actions = self.torch_compiler is None
 
             def create_actor(agent_id):

@@ -26,11 +26,11 @@ Tournament Selection
 --------------------
 
 Tournament selection is used to select the agents from a population which will make up the next generation of agents. If elitism is used, the best agent from a population
-is automatically preserved and becomes a member of the next generation. Then, for each tournament, k individuals are randomly chosen, and the agent with the best evaluation
+is automatically preserved and becomes a member of the next generation. Then, for each tournament, **k** individuals are randomly chosen, and the agent with the best evaluation
 fitness is preserved. This is repeated until the population for the next generation is full.
 
-The class ``TournamentSelection()`` defines the functions required for tournament selection. ``TournamentSelection.select()`` returns the best agent, and the new generation
-of agents.
+The class :class:`TournamentSelection <agilerl.hpo.tournament.TournamentSelection>` defines the functions required for tournament selection.
+:func:`TournamentSelection.select() <agilerl.hpo.tournament.TournamentSelection.select>` returns the best agent, and the new generation of agents.
 
 .. code-block:: python
 
@@ -39,7 +39,7 @@ of agents.
     tournament = TournamentSelection(
         tournament_size=2,  # Tournament selection size
         elitism=True,  # Elitism in tournament selection
-        population_size=INIT_HP["POP_SIZE"],  # Population size
+        population_size=6,  # Population size
         eval_loop=1,  # Evaluate using last N fitness scores
     )
 
@@ -49,20 +49,21 @@ of agents.
 Mutation
 --------
 
-Mutation is periodically used to explore the hyperparameter space, allowing different hyperparameter combinations to be trialled during training. If certain hyperparameters
-prove relatively beneficial to training, then that agent is more likely to be preserved in the next generation, and so those characteristics are more likely to remain in the
-population.
+Mutations are periodically applied to our population of agents to explore the hyperparameter space, allowing different hyperparameter combinations to be trialled during training.
+If certain hyperparameters prove relatively beneficial to training, then that agent is more likely to be preserved in the next generation, and so those characteristics are more
+likely to remain in the population.
 
-The ``Mutations()`` class is used to mutate agents with pre-set probabilities. The available mutations currently implemented are:
-    * **No mutation**
-    * **Network architecture mutations**: Currently involves adding layers or nodes. Trained weights are reused and new weights are initialized randomly.
+The :class:`Mutations <agilerl.hpo.mutation.Mutations>` class is used to mutate agents with pre-set probabilities. The available mutations currently implemented are:
+
+    * **No mutation**: An "identity" mutation, whereby the agent is returned unchanged.
+    * **Network architecture mutations**: Involves adding or removing layers or nodes. Trained weights are reused and new weights are initialized randomly.
     * **Network parameters mutation**: Mutating weights with Gaussian noise.
     * **Network activation layer mutation**: Change of activation layer.
-    * **RL algorithm mutation**: Mutation of learning hyperparameter, such as learning rate or batch size.
+    * **RL algorithm mutation**: Mutation of a learning hyperparameter (e.g. learning rate or batch size).
 
-``Mutations.mutation()`` returns a mutated population.
+:func:`Mutations.mutation() <agilerl.hpo.mutation.Mutations.mutation>` returns a mutated population.
 
-Tournament selection and mutation should be applied sequentially to fully evolve a population between evaluation and learning cycles.
+Tournament selection and mutations are applied sequentially to fully evolve a population between evaluation and learning cycles.
 
 .. code-block:: python
 
@@ -79,3 +80,6 @@ Tournament selection and mutation should be applied sequentially to fully evolve
         rand_seed=1,  # Random seed
         device=device,
     )
+
+Network Architecture Mutations
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

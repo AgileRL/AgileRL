@@ -16,6 +16,7 @@ from agilerl.components.data import Transition
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
+    assert_equal_state_dict,
     generate_dict_or_tuple_space,
     generate_discrete_space,
     generate_multidiscrete_space,
@@ -700,8 +701,8 @@ def test_save_load_checkpoint_correct_data_and_format(
     assert isinstance(dqn.actor_target.encoder, encoder_cls)
     assert dqn.lr == 1e-4
     # assert str(dqn.actor.state_dict()) == str(dqn.actor_target.state_dict())
-    assert str(initial_actor_state_dict) == str(dqn.actor.state_dict())
-    assert str(init_optim_state_dict) == str(dqn.optimizer.state_dict())
+    assert_equal_state_dict(initial_actor_state_dict, dqn.actor.state_dict())
+    assert_equal_state_dict(init_optim_state_dict, dqn.optimizer.state_dict())
     assert dqn.batch_size == 64
     assert dqn.learn_step == 5
     assert dqn.gamma == 0.99
@@ -773,8 +774,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert isinstance(dqn.actor_target, nn.Module)
     assert dqn.lr == 1e-4
     # assert str(dqn.actor.state_dict()) == str(dqn.actor_target.state_dict())
-    assert str(initial_actor_state_dict) == str(dqn.actor.state_dict())
-    assert str(init_optim_state_dict) == str(dqn.optimizer.state_dict())
+    assert_equal_state_dict(initial_actor_state_dict, dqn.actor.state_dict())
+    assert_equal_state_dict(init_optim_state_dict, dqn.optimizer.state_dict())
     assert dqn.batch_size == 64
     assert dqn.learn_step == 5
     assert dqn.gamma == 0.99
@@ -822,7 +823,9 @@ def test_load_from_pretrained(
     assert isinstance(new_dqn.actor.encoder, encoder_cls)
     assert isinstance(new_dqn.actor_target.encoder, encoder_cls)
     assert new_dqn.lr == dqn.lr
-    assert str(new_dqn.actor.to("cpu").state_dict()) == str(dqn.actor.state_dict())
+    assert_equal_state_dict(
+        new_dqn.actor.to("cpu").state_dict(), dqn.actor.state_dict()
+    )
     assert new_dqn.batch_size == dqn.batch_size
     assert new_dqn.learn_step == dqn.learn_step
     assert new_dqn.gamma == dqn.gamma
@@ -874,7 +877,9 @@ def test_load_from_pretrained_networks(
     assert isinstance(new_dqn.actor, nn.Module)
     assert isinstance(new_dqn.actor_target, nn.Module)
     assert new_dqn.lr == dqn.lr
-    assert str(new_dqn.actor.to("cpu").state_dict()) == str(dqn.actor.state_dict())
+    assert_equal_state_dict(
+        new_dqn.actor.to("cpu").state_dict(), dqn.actor.state_dict()
+    )
     assert new_dqn.batch_size == dqn.batch_size
     assert new_dqn.learn_step == dqn.learn_step
     assert new_dqn.gamma == dqn.gamma

@@ -10,9 +10,8 @@ from gymnasium import spaces
 from tensordict import TensorDict, from_module
 from tensordict.nn import CudaGraphModule
 
-from agilerl.algorithms.core import RLAlgorithm
+from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.q_networks import QNetwork
 from agilerl.typing import ExperiencesType, GymEnvType, ObservationType, TorchObsType

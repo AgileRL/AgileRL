@@ -35,13 +35,13 @@ from numpy.typing import ArrayLike
 from tensordict import TensorDict
 from torch._dynamo import OptimizedModule
 
+from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
     MutationRegistry,
     NetworkGroup,
     OptimizerConfig,
 )
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.configs import (
     MlpNetConfig,
 )
@@ -1161,13 +1161,22 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         self.normalize_images = normalize_images
         self.observation_spaces = observation_spaces
         self.action_spaces = action_spaces
-        self.observation_space = spaces.Dict(
-            {agent_id: space for agent_id, space in zip(agent_ids, observation_spaces)}
+
+        # Possible observation / action spaces
+        self.possible_observation_spaces = spaces.Dict(
+            {
+                agent_id: space
+                for agent_id, space in zip(self.agent_ids, self.observation_spaces)
+            }
         )
-        self.action_space = spaces.Dict(
-            {agent_id: space for agent_id, space in zip(agent_ids, action_spaces)}
+        self.possible_action_spaces = spaces.Dict(
+            {
+                agent_id: space
+                for agent_id, space in zip(self.agent_ids, self.action_spaces)
+            }
         )
-        self.action_dims = get_action_dim_networks(self.action_space)
+
+        self.action_dims = get_action_dim_networks(self.possible_action_spaces)
 
         self.max_action = OrderedDict()
         self.min_action = OrderedDict()
@@ -1216,7 +1225,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         # Dictionary containing groups of agents for each space type
         self.grouped_spaces = defaultdict(list)
-        for agent_id, obs_space in self.observation_space.items():
+        for agent_id, obs_space in zip(self.agent_ids, self.observation_spaces):
             if is_vector_space(obs_space):
                 self.grouped_spaces[ModuleType.MLP].append(agent_id)
             elif is_image_space(obs_space):
@@ -1227,6 +1236,23 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
                 raise ValueError(f"Unknown observation space type: {type(obs_space)}")
 
         self.setup = self.get_setup()
+
+        # Build observation space based on setup
+        if self.has_grouped_agents():
+            agent_ids = self.shared_agent_ids
+            observation_spaces = list(self.unique_observation_spaces.values())
+            action_spaces = list(self.unique_action_spaces.values())
+        else:
+            agent_ids = self.agent_ids
+            observation_spaces = self.observation_spaces
+            action_spaces = self.action_spaces
+
+        self.observation_space = spaces.Dict(
+            {agent_id: space for agent_id, space in zip(agent_ids, observation_spaces)}
+        )
+        self.action_space = spaces.Dict(
+            {agent_id: space for agent_id, space in zip(agent_ids, action_spaces)}
+        )
 
     def _registry_init(self) -> None:
         super()._registry_init()
@@ -1250,8 +1276,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         :rtype: bool
         """
-        policy = self.registry.policy(return_group=True)
-        return len(policy.eval) < len(self.agent_ids)
+        return len(self.shared_agent_ids) < len(self.agent_ids)
 
     def get_setup(self) -> MultiAgentSetup:
         """Get the type of multi-agent setup, as determined by the observation spaces of the agents.
@@ -1348,32 +1373,36 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         agent_masks = None
         if env_defined_actions is not None:
             agent_masks = {}
-            for agent in env_defined_actions.keys():
+            for agent_id in env_defined_actions.keys():
                 # Handle None if environment isn't vectorized
-                if env_defined_actions[agent] is None:
-                    if not isinstance(self.action_space[agent], spaces.Discrete):
-                        nan_arr = np.empty(self.action_dims[agent])
+                if env_defined_actions[agent_id] is None:
+                    if not isinstance(
+                        self.possible_action_spaces[agent_id], spaces.Discrete
+                    ):
+                        nan_arr = np.empty(self.action_dims[agent_id])
                         nan_arr[:] = np.nan
                     else:
                         nan_arr = np.array([[np.nan]])
 
-                    env_defined_actions[agent] = nan_arr
+                    env_defined_actions[agent_id] = nan_arr
 
                 # Handle discrete actions + env not vectorized
-                if isinstance(env_defined_actions[agent], (int, float)):
-                    env_defined_actions[agent] = np.array(
-                        [[env_defined_actions[agent]]]
+                if isinstance(env_defined_actions[agent_id], (int, float)):
+                    env_defined_actions[agent_id] = np.array(
+                        [[env_defined_actions[agent_id]]]
                     )
 
                 # Ensure additional dimension is added in so shapes align for masking
-                if len(env_defined_actions[agent].shape) == 1:
-                    env_defined_actions[agent] = (
-                        env_defined_actions[agent][:, np.newaxis]
-                        if isinstance(self.action_space[agent], spaces.Discrete)
-                        else env_defined_actions[agent][np.newaxis, :]
+                if len(env_defined_actions[agent_id].shape) == 1:
+                    env_defined_actions[agent_id] = (
+                        env_defined_actions[agent_id][:, np.newaxis]
+                        if isinstance(
+                            self.possible_action_spaces[agent_id], spaces.Discrete
+                        )
+                        else env_defined_actions[agent_id][np.newaxis, :]
                     )
-                agent_masks[agent] = np.where(
-                    np.isnan(env_defined_actions[agent]), 0, 1
+                agent_masks[agent_id] = np.where(
+                    np.isnan(env_defined_actions[agent_id]), 0, 1
                 ).astype(bool)
 
         return env_defined_actions, agent_masks
@@ -1381,7 +1410,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
     def build_net_config(
         self,
         net_config: Optional[NetConfigType] = None,
-        grouped_agents: bool = False,
+        flatten: bool = True,
         return_encoders: bool = False,
     ) -> Union[NetConfigType, Tuple[NetConfigType, Dict[str, NetConfigType]]]:
         """Extract an appropriate net config for each sub-agent from the passed net config dictionary. If
@@ -1397,25 +1426,27 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         :param net_config: Net config dictionary
         :type net_config: Optional[NetConfigType]
-        :param grouped_agents: Whether the net config should be built for the grouped agents i.e.
-        through their common prefix in their agent_id, whenever the passed net config is None. Defaults to False.
-        :type grouped_agents: bool, optional
+        :param flatten: Whether to return a net config for each possible sub-agent, even in grouped settings.
+        :type flatten: bool, optional
         :param return_encoders: Whether to return the encoder configs for each sub-agent. Defaults to False.
         :type return_encoders: bool, optional
         :return: Net config dictionary for each sub-agent
         :rtype: NetConfigType
         """
-        agent_ids = self.shared_agent_ids if grouped_agents else self.agent_ids
+        grouped_config = self.has_grouped_agents() and not flatten
+        agent_ids = self.shared_agent_ids if grouped_config else self.agent_ids
         observation_spaces = (
-            self.unique_observation_spaces if grouped_agents else self.observation_space
+            self.unique_observation_spaces
+            if grouped_config
+            else self.possible_observation_spaces
         )
         encoder_configs = OrderedDict()
 
         # Helper function to append unique configs to the unique_configs dictionary
         # -> Access to unique configs is relevant for algorithms with networks that process
         # multiple agents' observations (e.g. shared critic in MADDPG)
-        def _add_to_encoder_configs(config: ConfigType, agent_id: str = "") -> None:
-            config = config_from_dict(config) if isinstance(config, dict) else config
+        def _add_to_encoder_configs(config: Dict[str, Any], agent_id: str = "") -> None:
+            config = config_from_dict(config)
             config_key = "mlp_config" if isinstance(config, MlpNetConfig) else agent_id
 
             if config_key not in encoder_configs:
@@ -1429,17 +1460,10 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         # Helper function to check if any agent ID exists in the net_config
         def _has_agent_ids(config: NetConfigType) -> bool:
-            config_keys = config.keys()
-            if grouped_agents:
-                return any(
-                    group_id in config_keys for group_id in self.shared_agent_ids
-                )
-            else:
-                return any(
-                    agent_id in config_keys
-                    or self.get_group_id(agent_id) in config_keys
-                    for agent_id in self.agent_ids
-                )
+            return any(
+                (agent_id in self.agent_ids) or (agent_id in self.shared_agent_ids)
+                for agent_id in config.keys()
+            )
 
         # Helper function to get or create encoder config for an agent
         def _get_encoder_config(config: ConfigType, agent_id: str) -> NetConfigType:
@@ -1449,7 +1473,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
                 encoder_config = get_default_encoder_config(
                     observation_spaces[agent_id], simba
                 )
-                config["encoder_config"] = asdict(encoder_config)
+                config["encoder_config"] = encoder_config
 
             return encoder_config
 
@@ -1494,13 +1518,20 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
             return full_config
 
-        # TODO: Do we need a check here for heterogeneous settings?
+        if any(
+            agent_id in self.agent_ids and grouped_config
+            for agent_id in net_config.keys()
+        ):
+            raise KeyError(
+                "Found key in net_config corresponding to an individual sub-agent in a grouped setting. "
+                "Please specify the configuration for groups instead (e.g. {'agent': {...}, ...} rather than {'agent_0': {...}, ...})"
+            )
 
         # 2b. Handle nested config with agent/group IDs
         result_config = {}
         config_keys = net_config.keys()
         for agent_id in agent_ids:
-            group_id = self.get_group_id(agent_id)
+            group_id = self.get_group_id(agent_id) if not grouped_config else agent_id
 
             # 2bi. Check if agent_id is present in net_config
             if agent_id in config_keys:
@@ -1520,7 +1551,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
                 encoder_config = get_default_encoder_config(
                     observation_spaces[agent_id]
                 )
-                default_config["encoder_config"] = asdict(encoder_config)
+                default_config["encoder_config"] = encoder_config
                 result_config[agent_id] = default_config
 
             if return_encoders:
@@ -1552,9 +1583,11 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         :return: Preprocessed inputs
         :rtype: ExperiencesType
         """
-        stacked_experience = {group_id: {} for group_id in self.shared_agent_ids}
+        stacked_experience = {group_id: {} for group_id in self.observation_space}
         for agent_id, inp in experience.items():
-            group_id = self.get_group_id(agent_id)
+            group_id = (
+                self.get_group_id(agent_id) if self.has_grouped_agents() else agent_id
+            )
             if isinstance(inp, list):
                 stacked_exp = (
                     stack_experiences(inp, to_torch=False)[0] if len(inp) > 0 else None

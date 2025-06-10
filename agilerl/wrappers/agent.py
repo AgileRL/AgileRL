@@ -403,11 +403,13 @@ class RSNorm(AgentWrapper[AgentType]):
 
 
 class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
-    """Wrapper for multi-agent algorithms that solve environments with
-    asynchronous agents (i.e. agents don't necessarily return observations
-    every timestep).
+    """Wrapper for multi-agent algorithms that solve environments with asynchronous agents (i.e. environments
+    where agents don't return observations with the same frequency).
 
-    :param agent: ``MultiAgentRLAlgorithm`` instance to be wrapped.
+    .. warning::
+        This is currently only supported for on-policy multi-agent algorithms such as IPPO.
+
+    :param agent: MultiAgentRLAlgorithm instance to be wrapped.
     :type agent: MultiAgentRLAlgorithm
     """
 
@@ -423,7 +425,7 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
     ) -> Tuple[Dict[str, np.ndarray], Dict[str, ObservationType]]:
         """Extract the inactive agents from an observation. Inspects each key in the
         observation dictionary and, if all the values are `np.nan` (as set by
-        `AsyncPettingZooVecEnv`), the agent is considered inactive and removed from
+        ``AsyncPettingZooVecEnv``), the agent is considered inactive and removed from
         the observation dictionary.
 
         :param obs: Observation dictionary
@@ -503,8 +505,9 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
     def get_action(
         self, obs: ObservationType, *args: Any, **kwargs: Any
     ) -> ActionReturnType:
-        """Returns the action from the agent after extracting the inactive agents
-        for the passed observation.
+        """Returns the action from the agent. Since the environments may not return observations for all agents
+        at the same time, we need to extract the inactive agents from the observation and fill in placeholder
+        values for their actions.
 
         :param obs: Observation from the environment
         :type obs: ObservationType

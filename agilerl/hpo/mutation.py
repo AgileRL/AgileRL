@@ -14,9 +14,9 @@ from agilerl.algorithms.core import (
     EvolvableAlgorithm,
     LLMAlgorithm,
     MultiAgentRLAlgorithm,
+    OptimizerWrapper,
     RLAlgorithm,
 )
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.algorithms.neural_ts_bandit import NeuralTS
 from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
 from agilerl.modules import EvolvableModule, ModuleDict
@@ -26,8 +26,9 @@ from agilerl.typing import (
     MutationMethod,
     MutationReturnType,
 )
+from agilerl.utils.algo_utils import remove_compile_prefix
 
-IndividualType = TypeVar("T", bound=EvolvableAlgorithm)
+IndividualType = TypeVar("IndividualType", bound=EvolvableAlgorithm)
 PopulationType = List[IndividualType]
 BanditAlgorithm = Union[NeuralUCB, NeuralTS]
 MlpMethods = ("add_node", "remove_node", "add_layer", "remove_layer")
@@ -98,7 +99,18 @@ def get_exp_layer(offspring: EvolvableModule) -> nn.Module:
 
 
 class Mutations:
-    """The Mutations class for evolutionary hyperparameter optimization.
+    """Allows performing mutations on a population of :class:`EvolvableAlgorithm <agilerl.algorithms.core.EvolvableAlgorithm>` agents. Calling
+    :func:`Mutations.mutation() <agilerl.hpo.mutation.Mutations.mutation>` on a population of agents will return a mutated population of agents.
+    The type of mutation applied to each agent is sampled randomly from the probabilities given by the user. The supported types of mutations that
+    can be applied to an agent are:
+
+    * No mutation
+    * Network architecture mutation - adding layers or nodes. Trained weights are reused and new weights are initialized randomly.
+    * Network parameters mutation - mutating weights with Gaussian noise.
+    * Network activation layer mutation - change of activation layer.
+    * RL algorithm mutation - mutation of learning hyperparameter, (e.g. learning rate or batch size).
+
+    See :ref:`evo_hyperparam_opt` for more details.
 
     :param no_mutation: Relative probability of no mutation
     :type no_mutation: float
@@ -257,7 +269,7 @@ class Mutations:
         """Returns individual from population without mutation.
 
         :param individual: Individual agent from population
-        :type individual: object
+        :type individual:
         """
         individual.mut = "None"  # No mutation
         return individual
@@ -300,40 +312,70 @@ class Mutations:
         return module_cls(**init_dict)
 
     def reinit_from_mutated(
-        self, offspring: EvolvableNetworkType
+        self, offspring: EvolvableNetworkType, remove_compile_prefix: bool = False
     ) -> EvolvableNetworkType:
         """Reinitialize the mutated offspring with their state dictionary.
 
         :param offspring: The offspring to reinitialize
         :type offspring: NetworkType
+        :param remove_compile_prefix: Boolean flag indicating if the compile prefix should be removed, defaults to False
+        :type remove_prefix: bool, optional
 
         :return: The reinitialized offspring
         :rtype: EvolvableNetworkType
         """
         if isinstance(offspring, ModuleDict):
-            reinit_modules = OrderedDict()
+            reinit_modules: Dict[str, EvolvableModule] = OrderedDict()
             for agent_id in offspring:
-                nested_offspring = offspring[agent_id]
-                if isinstance(nested_offspring, EvolvableModule):
-                    reinit_modules[agent_id] = self.reinit_module(
-                        nested_offspring, nested_offspring.init_dict
-                    )
+                nested_offspring: EvolvableModule = offspring[agent_id]
+                reinit_modules[agent_id] = self.reinit_module(
+                    nested_offspring, nested_offspring.init_dict
+                )
+
+            state_dicts = {
+                agent_id: nested_offspring.state_dict()
+                for agent_id, nested_offspring in offspring.items()
+            }
+            self.load_state_dicts(
+                reinit_modules, state_dicts, remove_prefix=remove_compile_prefix
+            )
+
             ind_shared = ModuleDict(reinit_modules)
         else:
             ind_shared = self.reinit_module(offspring, offspring.init_dict)
-
-        # Load eval state dicts into shared networks
-        ind_shared.load_state_dict(offspring.state_dict(), strict=False)
+            ind_shared.load_state_dict(offspring.state_dict(), strict=False)
 
         return ind_shared
+
+    def load_state_dicts(
+        self,
+        modules: ModuleDict[EvolvableModule],
+        state_dicts: Dict[str, Dict[str, Any]],
+        remove_prefix: bool = False,
+    ) -> None:
+        """Load the state dictionaries for a multi-agent ModuleDict.
+
+        :param modules: The modules to load the state dictionary into
+        :type modules: ModuleDict[EvolvableModule]
+        :param state_dicts: The state dictionary to load
+        :type state_dicts: Dict[str, Dict[str, Any]]
+        :param remove_prefix: Boolean flag indicating if the compile prefix should be removed, defaults to False
+        :type remove_prefix: bool, optional
+        """
+        for agent_id, module in modules.items():
+            state_dict = state_dicts[agent_id]
+            state_dict = (
+                remove_compile_prefix(state_dict) if remove_prefix else state_dict
+            )
+            module.load_state_dict(state_dict, strict=False)
 
     def compile_modules(
         self, module: EvolvableNetworkType, compiler: str
     ) -> EvolvableNetworkType:
         """Compile the modules using the given compiler.
 
-        :param modules: The modules to compile
-        :type modules: EvolvableNetworkType
+        :param module: The module to compile
+        :type module: EvolvableNetworkType
         :param compiler: The compiler to use
         :type compiler: Optional[str]
 
@@ -354,13 +396,15 @@ class Mutations:
                 )
         elif not isinstance(module, torch._dynamo.eval_frame.OptimizedModule):
             compiled_modules = torch.compile(module, mode=compiler)
+        else:
+            compiled_modules = module
 
         return compiled_modules
 
     def mutation(
         self, population: PopulationType, pre_training_mut: bool = False
     ) -> PopulationType:
-        """Returns mutated population.
+        """Returns a mutated population of agents. See :ref:`evo_hyperparam_opt` for more details.
 
         :param population: Population of agents
         :type population: list[EvolvableAlgorithm]
@@ -397,6 +441,11 @@ class Mutations:
             # Call sampled mutation for individual
             individual = mutation(individual)
 
+            # Recompile modules if applicable
+            compiled_individual = individual.torch_compiler is not None
+            if compiled_individual:
+                individual.recompile()
+
             # Reinitiliaze shared networks to mutated evaluation networks
             for net_group in registry.groups:
                 if net_group.shared is not None:
@@ -407,16 +456,20 @@ class Mutations:
 
                         # Reinitialize shared with frozen weights due to
                         # potential mutation in architecture
-                        ind_shared = self.reinit_from_mutated(eval_offspring)
+                        ind_shared = self.reinit_from_mutated(
+                            eval_offspring, remove_compile_prefix=compiled_individual
+                        )
 
                         if self.accelerator is None:
                             ind_shared = ind_shared.to(self.device)
 
-                        setattr(individual, shared_name, ind_shared)
+                        # Compile modules if necessary
+                        if compiled_individual:
+                            ind_shared = self.compile_modules(
+                                ind_shared, individual.torch_compiler
+                            )
 
-            # Recompile modules if applicable
-            if individual.torch_compiler is not None:
-                individual.recompile()
+                        setattr(individual, shared_name, ind_shared)
 
             # Call hooks specified by user
             individual.mutation_hook()
@@ -458,6 +511,8 @@ class Mutations:
                     opt_nets = [getattr(individual, net) for net in opt.network_names]
 
                 # Reinitialize optimizer with mutated nets
+                # NOTE: We need to do this since there is a chance the network parameters have changed
+                # due to architecture mutations
                 offspring_opt = OptimizerWrapper(
                     optimizer_cls=config.get_optimizer_cls(),
                     networks=opt_nets,
@@ -477,7 +532,10 @@ class Mutations:
                 _reinit_individual(opt_config)
 
     def rl_hyperparam_mutation(self, individual: IndividualType) -> IndividualType:
-        """Returns individual from population with RL hyperparameter mutation.
+        """Performs a random mutation of a learning hyperparameter of an agent. To do this, sample a hyperparameter from those
+        specified through the :class:`HyperparameterConfig <agilerl.algorithms.core.registry.HyperparameterConfig>`
+        passed during initialization of the agent. The hyperparameter is then mutated and the optimizer is reinitialized if the
+        learning rate is mutated.
 
         :param individual: Individual agent from population
         :type individual: EvolvableAlgorithm
@@ -519,13 +577,16 @@ class Mutations:
 
     # TODO: Activation mutations should really be integrated as architecture mutations
     def activation_mutation(self, individual: IndividualType) -> IndividualType:
-        """Returns individual from population with activation layer mutation.
+        """Performs a random mutation of the activation layer of the evaluation networks of an agent.
+
+        .. note::
+            This is currently not supported for :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` agents.
 
         :param individual: Individual agent from population
-        :type individual: EvolvableAlgorithm
+        :type individual: RLAlgorithm or MultiAgentRLAlgorithm
 
         :return: Individual from population with activation layer mutation
-        :rtype: EvolvableAlgorithm
+        :rtype: RLAlgorithm or MultiAgentRLAlgorithm
         """
         # Needs to stay constant for policy gradient methods
         # NOTE: Could set up an algorithm registry to make algo checks more robust
@@ -592,13 +653,17 @@ class Mutations:
         return network
 
     def parameter_mutation(self, individual: IndividualType) -> IndividualType:
-        """Returns individual from population with network parameters mutation.
+        """Performs a random mutation to the weights of the policy network of an agent through
+        the addition of Gaussian noise.
+
+        .. note::
+            This is currently not supported for :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` agents.
 
         :param individual: Individual agent from population
-        :type individual: EvolvableAlgorithm
+        :type individual: RLAlgorithm or MultiAgentRLAlgorithm
 
         :return: Individual from population with network parameters mutation
-        :rtype: EvolvableAlgorithm
+        :rtype: RLAlgorithm or MultiAgentRLAlgorithm
         """
         if isinstance(individual, LLMAlgorithm):
             warnings.warn("Parameter mutations are not supported for LLM algorithms.")
@@ -612,10 +677,10 @@ class Mutations:
         offspring_policy: EvolvableNetworkType = getattr(individual, registry.policy())
         if isinstance(offspring_policy, list):
             offspring_policy = [
-                self.classic_parameter_mutation(mod) for mod in offspring_policy
+                self._gaussian_parameter_mutation(mod) for mod in offspring_policy
             ]
         else:
-            offspring_policy = self.classic_parameter_mutation(offspring_policy)
+            offspring_policy = self._gaussian_parameter_mutation(offspring_policy)
 
         if self.accelerator is None:
             offspring_policy = offspring_policy.to(self.device)
@@ -626,9 +691,9 @@ class Mutations:
         individual.mut = "param"
         return individual
 
-    def classic_parameter_mutation(self, network: EvolvableModule) -> EvolvableModule:
+    def _gaussian_parameter_mutation(self, network: EvolvableModule) -> EvolvableModule:
         """
-        Returns network with mutated weights, with a vectorized inner loop for efficiency.
+        Returns network with mutated weights using a Gaussian distribution.
 
         :param network: Neural network to mutate.
         :type network: EvolvableModule
@@ -720,8 +785,20 @@ class Mutations:
         return network
 
     def architecture_mutate(self, individual: IndividualType) -> IndividualType:
-        """Returns individual from population with network architecture mutation, which
-        adds either layers or nodes to different types of network architectures.
+        """Performs a random mutation to the architecture of the policy network of an agent. The way in
+        which we apply an architecture mutation to single and multi-agent RL algorithms inherently differs
+        given the nested nature of the networks in the latter.
+
+        * **Single-agent:** A mutation method is sampled from the policy network and then applied to the rest of the evaluation modules (e.g. critics). This can be done generally
+        because all of the networks in a single-agent algorithm share the same architecture (given there is only one observation space).
+
+        * **Multi-agent:** A sub-agent is sampled to perform the mutation on for the policy. We then iterate over the rest of the sub-agent policies and perform the same mutation
+        if they share the same observation space. For the rest of the evaluation networks (e.g. critics) there is a possibility they are shared by multiple agents, in which
+        case their underlying architecture will differ from the policy and therefore the mutation methods won't exactly match. In this case, we try to find an analogous
+        mutation method to apply.
+
+        .. note::
+            This is currently not supported for :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` agents.
 
         :param individual: Individual agent from population
         :type individual: RLAlgorithm or MultiAgentRLAlgorithm
@@ -806,8 +883,8 @@ class Mutations:
         the rest of the sub-agent policies and perform the same mutation if they share the same observation
         space. For the rest of the evaluation networks (e.g. critics) there is a possibility they are
         shared by multiple agents, in which case their underlying architecture will differ from the policy and
-        therefore the mutation methods won't exactly match, even though there might be an analogous method we
-        can apply.
+        therefore the mutation methods won't exactly match. In this case, we try to find an analogous
+        mutation method to apply.
 
         .. note::
             Since we use `agilerl.modules.ModuleDict` to store multi-agent networks, the available mutation
@@ -858,15 +935,9 @@ class Mutations:
             if agent_id == sampled_agent_id:
                 continue
 
-            obs_spaces = (
-                individual.observation_space
-                if agent_id in individual.agent_ids
-                else individual.unique_observation_spaces
-            )
-
-            # Apply mutation only if observation space is the same as that of the sampled agent
+            # Apply the sampled mutation only if it is available for the current sub-agent
             applied_agent = None
-            if obs_spaces[agent_id] == obs_spaces[sampled_agent_id]:
+            if sampled_mutation in policy.mutation_methods:
                 applied_agent, _ = self.apply_arch_mutation(
                     policy, sampled_mutation, mut_dict
                 )

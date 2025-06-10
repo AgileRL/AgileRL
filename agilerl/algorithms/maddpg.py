@@ -9,13 +9,11 @@ import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
 
-from agilerl.algorithms.core import MultiAgentRLAlgorithm
+from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.modules.base import EvolvableModule, ModuleDict
+from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.modules.configs import MlpNetConfig
-from agilerl.networks.actors import DeterministicActor
-from agilerl.networks.q_networks import ContinuousQNetwork
+from agilerl.networks import ContinuousQNetwork, DeterministicActor
 from agilerl.typing import (
     ArrayDict,
     ExperiencesType,
@@ -280,20 +278,41 @@ class MADDPG(MultiAgentRLAlgorithm):
                 agent_config["head_config"] = head_config
                 agent_configs[agent_id] = agent_config
 
-            # Format critic net config from actor net configs
+            # Compose critic architecture from actor net configs
+            latent_dim = max(
+                [
+                    agent_configs[agent_id].get("latent_dim", 32)
+                    for agent_id in self.agent_ids
+                ]
+            )
+            min_latent_dim = min(
+                [
+                    agent_configs[agent_id].get("min_latent_dim", 8)
+                    for agent_id in self.agent_ids
+                ]
+            )
+            max_latent_dim = max(
+                [
+                    agent_configs[agent_id].get("max_latent_dim", 128)
+                    for agent_id in self.agent_ids
+                ]
+            )
             critic_encoder_config = format_shared_critic_encoder(encoder_configs)
             critic_head_config = get_deepest_head_config(agent_configs, self.agent_ids)
-            critic_config = {
+            critic_net_config = {
                 "encoder_config": critic_encoder_config,
                 "head_config": critic_head_config,
+                "latent_dim": latent_dim,
+                "min_latent_dim": min_latent_dim,
+                "max_latent_dim": max_latent_dim,
             }
 
             clip_actions = self.torch_compiler is None
 
             def create_actor(agent_id):
                 return DeterministicActor(
-                    self.observation_space[agent_id],
-                    self.action_space[agent_id],
+                    self.possible_observation_spaces[agent_id],
+                    self.possible_action_spaces[agent_id],
                     device=self.device,
                     clip_actions=clip_actions,
                     **copy.deepcopy(agent_configs[agent_id]),
@@ -302,10 +321,10 @@ class MADDPG(MultiAgentRLAlgorithm):
             # Critic uses observations + actions of all agents to predict Q-value
             def create_critic():
                 return ContinuousQNetwork(
-                    observation_space=self.observation_space,
+                    observation_space=self.possible_observation_spaces,
                     action_space=concatenate_spaces(self.action_spaces),
                     device=self.device,
-                    **copy.deepcopy(critic_config),
+                    **copy.deepcopy(critic_net_config),
                 )
 
             self.actors = ModuleDict(
@@ -644,9 +663,6 @@ class MADDPG(MultiAgentRLAlgorithm):
         :return: Tuple containing actor loss and critic loss
         :rtype: Tuple[float, float]
         """
-        print("critic = ", critic)
-        print("actor = ", actor)
-        print(stacked_actions.shape)
         if self.accelerator is not None:
             with critic.no_sync():
                 q_value = critic(states, stacked_actions)

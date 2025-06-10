@@ -342,6 +342,7 @@ def format_shared_critic_encoder(
 
             # If we have homogeneous agents, we can process the raw observations with an EvolvableMLP
             encoder_config["vector_space_mlp"] = len(encoder_configs) == 1
+            encoder_config["latent_dim"] = config.get("hidden_size", [32])[-1]
         else:
             encoder_config["init_dicts"][encoder_key] = config
 

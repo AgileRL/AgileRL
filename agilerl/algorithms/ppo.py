@@ -8,13 +8,11 @@ import torch.optim as optim
 from gymnasium import spaces
 from torch.nn.utils import clip_grad_norm_
 
-from agilerl.algorithms.core import RLAlgorithm
+from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
-from agilerl.networks.actors import StochasticActor
-from agilerl.networks.base import EvolvableNetwork
+from agilerl.networks import EvolvableNetwork, StochasticActor
 from agilerl.networks.value_networks import ValueNetwork
 from agilerl.typing import ArrayOrTensor, ExperiencesType, GymEnvType
 from agilerl.utils.algo_utils import (

@@ -1,6 +1,6 @@
 import random
 from numbers import Number
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -11,6 +11,70 @@ from tensordict import TensorDict
 from agilerl.components.data import Transition
 from agilerl.protocols import EvolvableAlgorithm, EvolvableModule
 from agilerl.typing import NumpyObsType, TorchObsType
+
+
+def assert_state_dicts_equal(
+    state_dict1: Dict[str, torch.Tensor],
+    state_dict2: Dict[str, torch.Tensor],
+    rtol: float = 1e-5,
+    atol: float = 1e-8,
+) -> None:
+    """
+    Compare two PyTorch state dictionaries using torch.allclose for efficient comparison.
+
+    :param state_dict1: First state dictionary
+    :type state_dict1: Dict[str, torch.Tensor]
+    :param state_dict2: Second state dictionary
+    :type state_dict2: Dict[str, torch.Tensor]
+    :param rtol: Relative tolerance for torch.allclose
+    :type rtol: float
+    :param atol: Absolute tolerance for torch.allclose
+    :type atol: float
+    """
+    # First check that they have the same keys
+    assert set(state_dict1.keys()) == set(
+        state_dict2.keys()
+    ), f"State dict keys don't match: {set(state_dict1.keys())} vs {set(state_dict2.keys())}"
+
+    # Then check each tensor
+    for key in state_dict1:
+        tensor1 = state_dict1[key]
+        tensor2 = state_dict2[key]
+
+        # Handle different devices by moving to CPU if needed
+        if tensor1.device != tensor2.device:
+            tensor1 = tensor1.cpu()
+            tensor2 = tensor2.cpu()
+
+        assert torch.allclose(
+            tensor1, tensor2, rtol=rtol, atol=atol
+        ), f"Tensors for key '{key}' are not close enough"
+
+
+def assert_not_equal_state_dict(
+    state_dict1: Dict[str, torch.Tensor],
+    state_dict2: Dict[str, torch.Tensor],
+    rtol: float = 1e-5,
+    atol: float = 1e-8,
+) -> None:
+    """
+    Compare two PyTorch state dictionaries using torch.allclose for efficient comparison.
+
+    :param state_dict1: First state dictionary
+    :type state_dict1: Dict[str, torch.Tensor]
+    :param state_dict2: Second state dictionary
+    :type state_dict2: Dict[str, torch.Tensor]
+    :param rtol: Relative tolerance for torch.allclose
+    :type rtol: float
+    :param atol: Absolute tolerance for torch.allclose
+    :type atol: float
+    """
+    try:
+        assert_state_dicts_equal(state_dict1, state_dict2, rtol, atol)
+    except AssertionError:
+        return
+
+    raise AssertionError(f"State dicts are equal: {state_dict1} == {state_dict2}")
 
 
 def unpack_network(model: nn.Sequential) -> List[nn.Module]:

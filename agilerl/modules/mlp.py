@@ -8,7 +8,15 @@ from agilerl.utils.evolvable_networks import create_mlp
 
 
 class EvolvableMLP(EvolvableModule):
-    """The Evolvable Multi-layer Perceptron class.
+    """The Evolvable Multi-layer Perceptron class. Consists of a sequence of fully connected linear layers
+    with an optional activation function between each layer. Supports using layer normalization, using noisy
+    linear layers, and vanishing the values of the weights in the output layer. Allows for the following types
+    of architecture mutations during training:
+
+    * Adding or removing hidden layers
+    * Adding or removing nodes from hidden layers
+    * Changing the activation function between layers (e.g. ReLU to GELU)
+    * Changing the activation function for the output layer (e.g. ReLU to GELU)
 
     :param num_inputs: Input layer dimension
     :type num_inputs: int

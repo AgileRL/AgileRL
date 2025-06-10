@@ -9,9 +9,8 @@ from gymnasium import spaces
 from numpy.typing import ArrayLike
 from torch.nn.utils import clip_grad_norm_
 
-from agilerl.algorithms.core import RLAlgorithm
+from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.q_networks import QNetwork
 from agilerl.typing import GymEnvType, ObservationType

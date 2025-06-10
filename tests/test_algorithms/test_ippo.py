@@ -25,6 +25,8 @@ from agilerl.utils.evolvable_networks import get_default_encoder_config
 from agilerl.utils.utils import make_multi_agent_vect_envs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
+    assert_not_equal_state_dict,
+    assert_state_dicts_equal,
     gen_multi_agent_dict_or_tuple_spaces,
     generate_multi_agent_box_spaces,
     generate_multi_agent_discrete_spaces,
@@ -493,11 +495,11 @@ def test_ippo_clone_returns_identical_agent(
     for shared_id in ippo.shared_agent_ids:
         actor = ippo.actors[shared_id]
         clone_actor = clone_agent.actors[shared_id]
-        assert str(clone_actor.state_dict()) == str(actor.state_dict())
+        assert_state_dicts_equal(clone_actor.state_dict(), actor.state_dict())
 
         critic = ippo.critics[shared_id]
         clone_critic = clone_agent.critics[shared_id]
-        assert str(clone_critic.state_dict()) == str(critic.state_dict())
+        assert_state_dicts_equal(clone_critic.state_dict(), critic.state_dict())
 
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
@@ -581,11 +583,11 @@ def test_clone_after_learning(compile_mode):
     for shared_id in ippo.shared_agent_ids:
         actor = ippo.actors[shared_id]
         clone_actor = clone_agent.actors[shared_id]
-        assert str(clone_actor.state_dict()) == str(actor.state_dict())
+        assert_state_dicts_equal(clone_actor.state_dict(), actor.state_dict())
 
         critic = ippo.critics[shared_id]
         clone_critic = clone_agent.critics[shared_id]
-        assert str(clone_critic.state_dict()) == str(critic.state_dict())
+        assert_state_dicts_equal(clone_critic.state_dict(), critic.state_dict())
 
         actor_opt = ippo.actor_optimizers[shared_id]
         clone_actor_opt = clone_agent.actor_optimizers[shared_id]
@@ -666,11 +668,11 @@ def test_save_load_checkpoint_correct_data_and_format(
     loaded_ippo.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    for shared_id in ippo.shared_agent_ids:
-        loaded_actor = loaded_ippo.actors[shared_id]
-        loaded_critic = loaded_ippo.critics[shared_id]
-        actor = ippo.actors[shared_id]
-        critic = ippo.critics[shared_id]
+    for agent_id in ippo.observation_space.keys():
+        loaded_actor = loaded_ippo.actors[agent_id]
+        loaded_critic = loaded_ippo.critics[agent_id]
+        actor = ippo.actors[agent_id]
+        critic = ippo.critics[agent_id]
         if compile_mode is not None and accelerator is None:
             assert isinstance(loaded_actor, OptimizedModule)
             assert isinstance(loaded_critic, OptimizedModule)
@@ -678,8 +680,8 @@ def test_save_load_checkpoint_correct_data_and_format(
             assert isinstance(loaded_actor.encoder, encoder_cls)
             assert isinstance(loaded_critic.encoder, encoder_cls)
 
-        assert str(loaded_actor.state_dict()) == str(actor.state_dict())
-        assert str(loaded_critic.state_dict()) == str(critic.state_dict())
+        assert_state_dicts_equal(loaded_actor.state_dict(), actor.state_dict())
+        assert_state_dicts_equal(loaded_critic.state_dict(), critic.state_dict())
 
     assert ippo.batch_size == 64
     assert ippo.lr == 1e-4
@@ -720,14 +722,14 @@ def test_ippo_save_load_checkpoint_correct_data_and_format_make_evo(
 ):
     evo_actors = ModuleDict(
         {
-            "agent": MakeEvolvable(
+            "agent_0": MakeEvolvable(
                 network=mlp_actor, input_tensor=torch.randn(1, 6), device=device
             )
         }
     )
     evo_critics = ModuleDict(
         {
-            "agent": MakeEvolvable(
+            "agent_0": MakeEvolvable(
                 network=mlp_critic, input_tensor=torch.randn(1, 6), device=device
             )
         }
@@ -790,14 +792,14 @@ def test_ippo_save_load_checkpoint_correct_data_and_format_make_evo(
     loaded_ippo.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    for shared_id in ippo.shared_agent_ids:
-        actor = ippo.actors[shared_id]
-        loaded_actor = loaded_ippo.actors[shared_id]
-        assert str(loaded_actor.state_dict()) == str(actor.state_dict())
+    for agent_id in ippo.observation_space.keys():
+        actor = ippo.actors[agent_id]
+        loaded_actor = loaded_ippo.actors[agent_id]
+        assert_state_dicts_equal(loaded_actor.state_dict(), actor.state_dict())
 
-        critic = ippo.critics[shared_id]
-        loaded_critic = loaded_ippo.critics[shared_id]
-        assert str(loaded_critic.state_dict()) == str(critic.state_dict())
+        critic = ippo.critics[agent_id]
+        loaded_critic = loaded_ippo.critics[agent_id]
+        assert_state_dicts_equal(loaded_critic.state_dict(), critic.state_dict())
 
         if compile_mode is not None and accelerator is None:
             assert isinstance(loaded_actor, OptimizedModule)
@@ -893,11 +895,11 @@ def test_load_from_pretrained(
     for shared_id in ippo.shared_agent_ids:
         actor = ippo.actors[shared_id]
         new_actor = new_ippo.actors[shared_id]
-        assert str(new_actor.state_dict()) == str(actor.state_dict())
+        assert_state_dicts_equal(new_actor.state_dict(), actor.state_dict())
 
         critic = ippo.critics[shared_id]
         new_critic = new_ippo.critics[shared_id]
-        assert str(new_critic.state_dict()) == str(critic.state_dict())
+        assert_state_dicts_equal(new_critic.state_dict(), critic.state_dict())
 
         if compile_mode is not None and accelerator is None:
             assert isinstance(new_actor, OptimizedModule)
@@ -1027,11 +1029,11 @@ def test_load_from_pretrained_networks(
     for shared_id in ippo.shared_agent_ids:
         actor = ippo.actors[shared_id]
         new_actor = new_ippo.actors[shared_id]
-        assert str(new_actor.to("cpu").state_dict()) == str(actor.state_dict())
+        assert_state_dicts_equal(new_actor.state_dict(), actor.state_dict())
 
         critic = ippo.critics[shared_id]
         new_critic = new_ippo.critics[shared_id]
-        assert str(new_critic.to("cpu").state_dict()) == str(critic.state_dict())
+        assert_state_dicts_equal(new_critic.state_dict(), critic.state_dict())
 
     assert new_ippo.batch_size == ippo.batch_size
     assert new_ippo.learn_step == ippo.learn_step
@@ -1079,12 +1081,12 @@ def test_ippo_learns_from_experiences_distributed(
 
     actors = ippo.actors
     actors_pre_learn_sd = {
-        shared_id: str(copy.deepcopy(actor.state_dict()))
+        shared_id: copy.deepcopy(actor.state_dict())
         for shared_id, actor in ippo.actors.items()
     }
     critics = ippo.critics
     critics_pre_learn_sd = {
-        shared_id: str(copy.deepcopy(critic.state_dict()))
+        shared_id: copy.deepcopy(critic.state_dict())
         for shared_id, critic in ippo.critics.items()
     }
 
@@ -1106,10 +1108,10 @@ def test_ippo_learns_from_experiences_distributed(
         assert old_critic == updated_critic
 
         old_critic_state_dict = critics_pre_learn_sd[shared_id]
-        assert old_critic_state_dict != str(updated_critic.state_dict())
+        assert_not_equal_state_dict(old_critic_state_dict, updated_critic.state_dict())
 
         old_actor_state_dict = actors_pre_learn_sd[shared_id]
-        assert old_actor_state_dict != str(updated_actor.state_dict())
+        assert_not_equal_state_dict(old_actor_state_dict, updated_actor.state_dict())
 
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
@@ -1165,14 +1167,14 @@ def test_ippo_learns_from_experiences(
         assert old_actor == updated_actor
 
         old_actor_state_dict = actors_pre_learn_sd[shared_id]
-        assert old_actor_state_dict != str(updated_actor.state_dict())
+        assert_not_equal_state_dict(old_actor_state_dict, updated_actor.state_dict())
 
         old_critic = critics[shared_id]
         updated_critic = ippo.critics[shared_id]
         assert old_critic == updated_critic
 
         old_critic_state_dict = critics_pre_learn_sd[shared_id]
-        assert old_critic_state_dict != str(updated_critic.state_dict())
+        assert_not_equal_state_dict(old_critic_state_dict, updated_critic.state_dict())
 
 
 @pytest.mark.parametrize("agent_ids", [["agent_0", "agent_1", "other_agent_0"]])
@@ -1215,12 +1217,12 @@ def test_ippo_learns_from_vectorized_experiences(
 
     actors = ippo.actors
     actors_pre_learn_sd = {
-        shared_id: str(copy.deepcopy(actor.state_dict()))
+        shared_id: copy.deepcopy(actor.state_dict())
         for shared_id, actor in ippo.actors.items()
     }
     critics = ippo.critics
     critics_pre_learn_sd = {
-        shared_id: str(copy.deepcopy(critic.state_dict()))
+        shared_id: copy.deepcopy(critic.state_dict())
         for shared_id, critic in ippo.critics.items()
     }
 
@@ -1238,14 +1240,14 @@ def test_ippo_learns_from_vectorized_experiences(
         assert old_actor == updated_actor
 
         old_actor_state_dict = actors_pre_learn_sd[shared_id]
-        assert old_actor_state_dict != str(updated_actor.state_dict())
+        assert_not_equal_state_dict(old_actor_state_dict, updated_actor.state_dict())
 
         old_critic = critics[shared_id]
         updated_critic = ippo.critics[shared_id]
         assert old_critic == updated_critic
 
         old_critic_state_dict = critics_pre_learn_sd[shared_id]
-        assert old_critic_state_dict != str(updated_critic.state_dict())
+        assert_not_equal_state_dict(old_critic_state_dict, updated_critic.state_dict())
 
 
 @pytest.mark.parametrize(
@@ -1337,12 +1339,12 @@ def test_ippo_learns_from_hardcoded_vectorized_experiences_mlp(
 
     actors = ippo.actors
     actors_pre_learn_sd = {
-        shared_id: str(copy.deepcopy(actor.state_dict()))
+        shared_id: copy.deepcopy(actor.state_dict())
         for shared_id, actor in ippo.actors.items()
     }
     critics = ippo.critics
     critics_pre_learn_sd = {
-        shared_id: str(copy.deepcopy(critic.state_dict()))
+        shared_id: copy.deepcopy(critic.state_dict())
         for shared_id, critic in ippo.critics.items()
     }
 
@@ -1360,14 +1362,14 @@ def test_ippo_learns_from_hardcoded_vectorized_experiences_mlp(
         assert old_actor == updated_actor
 
         old_actor_state_dict = actors_pre_learn_sd[shared_id]
-        assert old_actor_state_dict != str(updated_actor.state_dict())
+        assert_not_equal_state_dict(old_actor_state_dict, updated_actor.state_dict())
 
         old_critic = critics[shared_id]
         updated_critic = ippo.critics[shared_id]
         assert old_critic == updated_critic
 
         old_critic_state_dict = critics_pre_learn_sd[shared_id]
-        assert old_critic_state_dict != str(updated_critic.state_dict())
+        assert_not_equal_state_dict(old_critic_state_dict, updated_critic.state_dict())
 
 
 def no_sync(self):

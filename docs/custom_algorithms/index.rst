@@ -44,7 +44,7 @@ method of the algorithm:
 OptimizerWrapper
 ----------------
 
-The last thing users should do when creating a custom algorithm is wrap their optimizers in an :class:`OptimizerWrapper <agilerl.algorithms.core.wrappers.OptimizerWrapper>`,
+The last thing users should do when creating a custom algorithm is wrap their optimizers in an :class:`OptimizerWrapper <agilerl.algorithms.core.optimizer_wrapper.OptimizerWrapper>`,
 specifying the networks that the optimizer is responsible for. Since we are mutating network architectures during training, we need to have knowledge of
 this in order to reinitiliaze the optimizers correctly when we do so. In the example below, we have a single optimizer that optimizes the parameters of both the actor and critic networks,
 so we can wrap it as follows:

@@ -194,7 +194,8 @@ Or install in development mode:
 
    <h3 id="tutorials">Tutorials</h3>
 
-We are constantly updating our tutorials to showcase the latest features of AgileRL and how users can leverage our evolutionary HPO to achieve 10x faster hyperparameter optimization. Please see the available tutorials below.
+We are constantly updating our tutorials to showcase the latest features of AgileRL and how users can leverage our evolutionary HPO to achieve 10x
+faster hyperparameter optimization. Please see the available tutorials below.
 
 .. list-table::
    :header-rows: 1
@@ -236,9 +237,10 @@ We are constantly updating our tutorials to showcase the latest features of Agil
 
    <h3 id="train-an-agent">Train an Agent</h3>
 
-Train an agent to beat a Gym environment
+Train an agent to beat a Gym environment.
 
-Before starting training, there are some meta-hyperparameters and settings that must be set. These are defined in ``INIT_HP``, for general parameters, and ``MUTATION_PARAMS``, which define the evolutionary probabilities, and ``NET_CONFIG``, which defines the network architecture. For example:
+Before starting training, there are some meta-hyperparameters and settings that must be set. These are defined in ``INIT_HP``, for general
+parameters, and ``MUTATION_PARAMS``, which define the evolutionary probabilities, and ``NET_CONFIG``, which defines the network architecture. For example:
 
 .. collapse:: Basic Hyperparameters
 

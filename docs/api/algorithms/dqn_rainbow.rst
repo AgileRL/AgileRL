@@ -3,7 +3,7 @@
 Rainbow DQN
 ===========
 
-`Rainbow DQN <https://arxiv.org/abs/1710.02298>`_ is an extension of :ref:`DQN<_dqn>` that integrates multiple improvements and techniques to achieve state-of-the-art performance.
+`Rainbow DQN <https://arxiv.org/abs/1710.02298>`_ is an extension of :ref:`DQN <dqn>` that integrates multiple improvements and techniques to achieve state-of-the-art performance.
 These improvements include:
 
 * Double DQN (DDQN): Addresses the overestimation bias of Q-values by using two networks to decouple the selection and evaluation of the action in the Q-learning target.

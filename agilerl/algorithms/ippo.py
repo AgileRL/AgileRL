@@ -228,23 +228,23 @@ class IPPO(MultiAgentRLAlgorithm):
         if actor_networks is not None and critic_networks is not None:
             if isinstance(actor_networks, list):
                 assert len(actor_networks) == len(
-                    self.shared_agent_ids
+                    self.observation_space
                 ), "actor_networks must be a list of the same length as the number of homogeneous agents"
                 actor_networks = ModuleDict(
                     {
-                        self.shared_agent_ids[i]: actor_networks[i]
-                        for i in range(len(self.shared_agent_ids))
+                        agent_id: actor_networks[idx]
+                        for idx, agent_id in enumerate(self.observation_space)
                     }
                 )
             if isinstance(critic_networks, list):
                 assert len(critic_networks) == len(
-                    self.shared_agent_ids
+                    self.observation_space
                 ), "critic_networks must be a list of the same length as the number of homogeneous agents"
 
                 critic_networks = ModuleDict(
                     {
-                        self.shared_agent_ids[i]: critic_networks[i]
-                        for i in range(len(self.shared_agent_ids))
+                        agent_id: critic_networks[idx]
+                        for idx, agent_id in enumerate(self.observation_space)
                     }
                 )
 
@@ -261,26 +261,24 @@ class IPPO(MultiAgentRLAlgorithm):
 
             assert len(actor_networks) == self.n_unique_agents, (
                 f"Length of actor_networks ({len(actor_networks)}) does not match number of unique "
-                f"agents defined in environment ({self.n_unique_agents}: {self.shared_agent_ids})"
+                f"agents defined in environment ({self.n_unique_agents}: {list(self.observation_space.keys())})"
             )
             assert len(critic_networks) == self.n_unique_agents, (
                 f"Length of critic_networks ({len(critic_networks)}) does not match number of unique "
-                f"agents defined in environment ({self.n_unique_agents}: {self.shared_agent_ids})"
+                f"agents defined in environment ({self.n_unique_agents}: {list(self.observation_space.keys())})"
             )
 
             self.actors, self.critics = make_safe_deepcopies(
                 actor_networks, critic_networks
             )
         else:
-            net_config: NetConfigType = self.build_net_config(
-                net_config, grouped_agents=True
-            )
+            net_config: NetConfigType = self.build_net_config(net_config, flatten=False)
 
             self.actors = ModuleDict()
             self.critics = ModuleDict()
-            for agent_id in self.shared_agent_ids:
-                obs_space = self.unique_observation_spaces[agent_id]
-                action_space = self.unique_action_spaces[agent_id]
+            for agent_id in self.observation_space:
+                obs_space = self.observation_space[agent_id]
+                action_space = self.action_space[agent_id]
 
                 agent_config = net_config[agent_id]
                 critic_net_config = copy.deepcopy(agent_config)
@@ -366,7 +364,7 @@ class IPPO(MultiAgentRLAlgorithm):
         """
         if infos is None:
             infos = {agent: {} for agent in self.agent_ids}
-            action_masks = {agent: None for agent in self.shared_agent_ids}
+            action_masks = {agent: None for agent in self.observation_space}
         else:
             action_masks = self.extract_action_masks(infos)
 
@@ -384,16 +382,20 @@ class IPPO(MultiAgentRLAlgorithm):
         :rtype: Dict[str, np.ndarray]
         """
         # Get dict of form {"agent_id" : [1, 0, 0, 0]...} etc
-        action_masks = {group_id: [] for group_id in self.shared_agent_ids}
+        action_masks = {group_id: [] for group_id in self.observation_space}
         for agent_id, info in infos.items():
             if isinstance(info, dict):
-                group_id = self.get_group_id(agent_id)
-                action_masks[group_id].append(
+                agent_id = (
+                    self.get_group_id(agent_id)
+                    if self.has_grouped_agents()
+                    else agent_id
+                )
+                action_masks[agent_id].append(
                     info.get("action_mask", None) if isinstance(info, dict) else None
                 )
 
         # Check and stack masks
-        for group_id in self.shared_agent_ids:
+        for group_id in self.observation_space:
             if None in action_masks[group_id] or not action_masks[group_id]:
                 assert all(mask is None for mask in action_masks[group_id]), (
                     f"If action masks are provided for any agents, they must be provided for all agents. "
@@ -422,10 +424,12 @@ class IPPO(MultiAgentRLAlgorithm):
         """
         preprocessed = {group_id: [] for group_id in group_ids}
         for agent_id, agent_obs in observation.items():
-            group_id = self.get_group_id(agent_id)
+            group_id = (
+                self.get_group_id(agent_id) if self.has_grouped_agents() else agent_id
+            )
             preprocessed[group_id].append(
                 preprocess_observation(
-                    self.unique_observation_spaces.get(group_id),
+                    self.observation_space.get(group_id),
                     observation=agent_obs,
                     device=self.device,
                     normalize_images=self.normalize_images,
@@ -523,13 +527,16 @@ class IPPO(MultiAgentRLAlgorithm):
         ), "AgileRL requires action masks to be defined in the information dictionary."
 
         action_masks, env_defined_actions, agent_masks = self.process_infos(infos)
-        vect_dim = get_vect_dim(obs, self.observation_space)
+        vect_dim = get_vect_dim(obs, self.possible_observation_spaces)
 
         # Groups to extract actions from in observation
         unique_agents_ids = list(obs.keys())
         grouped_agents = defaultdict(list)
         for agent_id in unique_agents_ids:
-            grouped_agents[self.get_group_id(agent_id)].append(agent_id)
+            group_id = (
+                self.get_group_id(agent_id) if self.has_grouped_agents() else agent_id
+            )
+            grouped_agents[group_id].append(agent_id)
 
         # Preprocess observations
         preprocessed = self.preprocess_observation(obs, list(grouped_agents.keys()))
@@ -538,10 +545,10 @@ class IPPO(MultiAgentRLAlgorithm):
         action_logprob_dict = {}
         dist_entropy_dict = {}
         state_values_dict = {}
-        for shared_id, obs in preprocessed.items():
-            action_mask = action_masks[shared_id]
-            actor = self.actors[shared_id]
-            critic = self.critics[shared_id]
+        for agent_id, obs in preprocessed.items():
+            action_mask = action_masks[agent_id]
+            actor = self.actors[agent_id]
+            critic = self.critics[agent_id]
 
             with torch.no_grad():
                 action, log_prob, entropy, values = self._get_action_and_values(
@@ -553,7 +560,6 @@ class IPPO(MultiAgentRLAlgorithm):
                 )
 
             # Clip to action space during inference
-            agent_id = self.grouped_agents[shared_id][0]
             agent_space = self.action_space[agent_id]
             action = action.cpu().data.numpy()
             if not self.training and isinstance(agent_space, spaces.Box):
@@ -562,10 +568,10 @@ class IPPO(MultiAgentRLAlgorithm):
                 else:
                     action = np.clip(action, agent_space.low, agent_space.high)
 
-            action_dict[shared_id] = action
-            action_logprob_dict[shared_id] = log_prob.cpu().data.numpy()
-            dist_entropy_dict[shared_id] = entropy.cpu().data.numpy()
-            state_values_dict[shared_id] = values.cpu().data.numpy()
+            action_dict[agent_id] = action
+            action_logprob_dict[agent_id] = log_prob.cpu().data.numpy()
+            dist_entropy_dict[agent_id] = entropy.cpu().data.numpy()
+            state_values_dict[agent_id] = values.cpu().data.numpy()
 
         action_dict = self.disassemble_grouped_outputs(
             action_dict, vect_dim, grouped_agents
@@ -573,10 +579,10 @@ class IPPO(MultiAgentRLAlgorithm):
 
         # If using env_defined_actions replace actions
         if env_defined_actions is not None:
-            for agent in unique_agents_ids:
-                action_dict[agent][agent_masks[agent]] = env_defined_actions[agent][
-                    agent_masks[agent]
-                ]
+            for agent_id in unique_agents_ids:
+                action_dict[agent_id][agent_masks[agent_id]] = env_defined_actions[
+                    agent_id
+                ][agent_masks[agent_id]]
 
         return (
             action_dict,
@@ -607,24 +613,24 @@ class IPPO(MultiAgentRLAlgorithm):
         )
 
         loss_dict = {}
-        for shared_id, state in states.items():
-            actor = self.actors[shared_id]
-            critic = self.critics[shared_id]
-            actor_optimizer = self.actor_optimizers[shared_id]
-            critic_optimizer = self.critic_optimizers[shared_id]
-            obs_space = self.unique_observation_spaces[shared_id]
-            action_space = self.unique_action_spaces[shared_id]
+        for agent_id, state in states.items():
+            actor = self.actors[agent_id]
+            critic = self.critics[agent_id]
+            actor_optimizer = self.actor_optimizers[agent_id]
+            critic_optimizer = self.critic_optimizers[agent_id]
+            obs_space = self.observation_space[agent_id]
+            action_space = self.action_space[agent_id]
 
-            loss_dict[f"{shared_id}"] = self._learn_individual(
+            loss_dict[f"{agent_id}"] = self._learn_individual(
                 experiences=(
                     state,
-                    actions[shared_id],
-                    log_probs[shared_id],
-                    rewards[shared_id],
-                    dones[shared_id],
-                    values[shared_id],
-                    next_states[shared_id],
-                    next_dones[shared_id],
+                    actions[agent_id],
+                    log_probs[agent_id],
+                    rewards[agent_id],
+                    dones[agent_id],
+                    values[agent_id],
+                    next_states[agent_id],
+                    next_dones[agent_id],
                 ),
                 actor=actor,
                 critic=critic,
@@ -858,12 +864,12 @@ class IPPO(MultiAgentRLAlgorithm):
                 scores = (
                     np.zeros((num_envs, 1))
                     if sum_scores
-                    else np.zeros((num_envs, len(self.shared_agent_ids)))
+                    else np.zeros((num_envs, len(self.observation_space)))
                 )
                 completed_episode_scores = (
                     np.zeros((num_envs, 1))
                     if sum_scores
-                    else np.zeros((num_envs, len(self.shared_agent_ids)))
+                    else np.zeros((num_envs, len(self.observation_space)))
                 )
                 finished = np.zeros(num_envs)
                 step = 0

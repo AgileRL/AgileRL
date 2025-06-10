@@ -25,7 +25,7 @@ select actions), signalled by the ``policy`` attribute in the group.
 OptimizerWrapper
 ----------------
 
-The last thing users should do when creating a custom algorithm is wrap their optimizers in an :class:`OptimizerWrapper <agilerl.algorithms.core.wrappers.OptimizerWrapper>`,
+The last thing users should do when creating a custom algorithm is wrap their optimizers in an :class:`OptimizerWrapper <agilerl.algorithms.core.optimizer_wrapper.OptimizerWrapper>`,
 specifying the networks that the optimizer is responsible for optimizing. Since we are mutating network architectures during training, we need to have knowledge of
 this in order to reinitiliaze the optimizers correctly when we do so.
 
@@ -38,7 +38,7 @@ Example
 Below is a simple example of how this is can be done for the DDPG algorithm, which contains a combination of actors and critics. Here we have two network groups,
 one for the actor and one for the critic (the actor being flagged as the policy since it is used to select actions), and each with their respective target networks
 being flagged as having shared parameters. We also have two separate optimizers (one for each network groups evaluation network) that are wrapped in an
-:class:`OptimizerWrapper <agilerl.algorithms.core.wrappers.OptimizerWrapper>`.
+:class:`OptimizerWrapper <agilerl.algorithms.core.optimizer_wrapper.OptimizerWrapper>`.
 
 .. collapse:: DDPG Example
 

@@ -69,9 +69,7 @@ def homogeneous_agent_net_config(request):
     mlp_config = request.getfixturevalue("mlp_config")
     yield {
         "agent_0": {"encoder_config": mlp_config},
-        "agent_1": {"encoder_config": mlp_config},
         "other_agent_0": {"encoder_config": mlp_config},
-        "other_agent_1": {"encoder_config": mlp_config},
     }
 
 
@@ -119,16 +117,12 @@ def homogeneous_agent():
     obs_spaces = [
         spaces.Box(low=-1, high=1, shape=(4,), dtype=np.float32),
         spaces.Box(low=-1, high=1, shape=(4,), dtype=np.float32),
-        spaces.Box(low=-1, high=1, shape=(4,), dtype=np.float32),
-        spaces.Box(low=-1, high=1, shape=(4,), dtype=np.float32),
     ]
     action_spaces = [
         spaces.Discrete(2),
         spaces.Discrete(2),
-        spaces.Discrete(2),
-        spaces.Discrete(2),
     ]
-    agent_ids = ["agent_0", "agent_1", "other_agent_0", "other_agent_1"]
+    agent_ids = ["agent_0", "other_agent_0"]
     return DummyMARLAlgorithm(obs_spaces, action_spaces, agent_ids=agent_ids, index=0)
 
 
@@ -274,7 +268,10 @@ class DummyMARLAlgorithm(MultiAgentRLAlgorithm):
                 return EvolvableMultiInput(obs_space, num_outputs, **config)
 
         self.dummy_actors = ModuleDict(
-            {agent_id: create_actor(idx) for idx, agent_id in enumerate(self.agent_ids)}
+            {
+                agent_id: create_actor(idx)
+                for idx, agent_id in enumerate(self.observation_space.keys())
+            }
         )
         self.lr = 0.1
         self.dummy_optimizer = OptimizerWrapper(optim.Adam, self.dummy_actors, self.lr)
@@ -711,11 +708,14 @@ def test_missing_attribute_warning(tmpdir, observation_space):
     assert new_agent.dummy_attribute == "test_value"
 
 
+@pytest.mark.parametrize("flatten", [True, False])
 def test_build_net_config_homogeneous_single_level(
-    homogeneous_agent, single_level_net_config
+    homogeneous_agent, single_level_net_config, flatten
 ):
     """Test build_net_config with homogeneous setup and single-level config."""
-    result = homogeneous_agent.build_net_config(single_level_net_config)
+    result = homogeneous_agent.build_net_config(
+        single_level_net_config, flatten=flatten
+    )
 
     # Should have entries for all agents
     assert set(result.keys()) == set(homogeneous_agent.agent_ids)
@@ -728,11 +728,14 @@ def test_build_net_config_homogeneous_single_level(
         assert result[agent_id]["encoder_config"]["max_mlp_nodes"] == 80
 
 
+@pytest.mark.parametrize("flatten", [True, False])
 def test_build_net_config_homogeneous_group_level(
-    homogeneous_agent, homogeneous_group_net_config
+    homogeneous_agent, homogeneous_group_net_config, flatten
 ):
     """Test build_net_config with homogeneous setup and group-level config."""
-    result = homogeneous_agent.build_net_config(homogeneous_group_net_config)
+    result = homogeneous_agent.build_net_config(
+        homogeneous_group_net_config, flatten=flatten
+    )
 
     # Should have entries for all agents
     assert set(result.keys()) == set(homogeneous_agent.agent_ids)
@@ -744,11 +747,14 @@ def test_build_net_config_homogeneous_group_level(
         assert "hidden_size" in result[agent_id]["encoder_config"]
 
 
+@pytest.mark.parametrize("flatten", [True, False])
 def test_build_net_config_homogeneous_agent_level(
-    homogeneous_agent, homogeneous_agent_net_config
+    homogeneous_agent, homogeneous_agent_net_config, flatten
 ):
     """Test build_net_config with homogeneous setup and agent-level config."""
-    result = homogeneous_agent.build_net_config(homogeneous_agent_net_config)
+    result = homogeneous_agent.build_net_config(
+        homogeneous_agent_net_config, flatten=flatten
+    )
 
     # Should have entries for all agents
     assert set(result.keys()) == set(homogeneous_agent.agent_ids)
@@ -769,16 +775,20 @@ def test_build_net_config_mixed_single_level(mixed_agent, single_level_net_confi
         mixed_agent.build_net_config(single_level_net_config)
 
 
-def test_build_net_config_mixed_group_level(mixed_agent, mixed_group_net_config):
+@pytest.mark.parametrize("flatten", [True, False])
+def test_build_net_config_mixed_group_level(
+    mixed_agent, mixed_group_net_config, flatten
+):
     """Test build_net_config with mixed setup and group-level config."""
-    result = mixed_agent.build_net_config(mixed_group_net_config)
+    result = mixed_agent.build_net_config(mixed_group_net_config, flatten=flatten)
 
     # Should have entries for all agents
-    assert set(result.keys()) == set(mixed_agent.agent_ids)
+    agent_ids = mixed_agent.shared_agent_ids if not flatten else mixed_agent.agent_ids
+    assert set(result.keys()) == set(agent_ids)
 
     # Check if each agent has a config based on its group
-    for agent_id in mixed_agent.agent_ids:
-        group_id = mixed_agent.get_group_id(agent_id)
+    for agent_id in agent_ids:
+        group_id = mixed_agent.get_group_id(agent_id) if flatten else agent_id
         assert "encoder_config" in result[agent_id]
         assert (
             result[agent_id]["encoder_config"]
@@ -786,20 +796,27 @@ def test_build_net_config_mixed_group_level(mixed_agent, mixed_group_net_config)
         )
 
 
-def test_build_net_config_mixed_agent_level(mixed_agent, mixed_agent_net_config):
+@pytest.mark.parametrize("flatten", [True, False])
+def test_build_net_config_mixed_agent_level(
+    mixed_agent, mixed_agent_net_config, flatten
+):
     """Test build_net_config with mixed setup and agent-level config."""
-    result = mixed_agent.build_net_config(mixed_agent_net_config)
+    if not flatten:
+        with pytest.raises(KeyError):
+            mixed_agent.build_net_config(mixed_agent_net_config, flatten=flatten)
+    else:
+        result = mixed_agent.build_net_config(mixed_agent_net_config, flatten=flatten)
 
-    # Should have entries for all agents
-    assert set(result.keys()) == set(mixed_agent.agent_ids)
+        # Should have entries for all agents
+        assert set(result.keys()) == set(mixed_agent.agent_ids)
 
-    # Each agent should have configs as specified, or defaults if not specified
-    for agent_id in mixed_agent.agent_ids:
-        assert "encoder_config" in result[agent_id]
-        assert (
-            result[agent_id]["encoder_config"]
-            == mixed_agent_net_config[agent_id]["encoder_config"]
-        )
+        # Each agent should have configs as specified, or defaults if not specified
+        for agent_id in mixed_agent.agent_ids:
+            assert "encoder_config" in result[agent_id]
+            assert (
+                result[agent_id]["encoder_config"]
+                == mixed_agent_net_config[agent_id]["encoder_config"]
+            )
 
 
 def test_build_net_config_heterogeneous_single_level(
@@ -864,25 +881,30 @@ def test_build_net_config_return_encoders(request, setup):
         assert "other_agent_0" in unique_configs
 
 
-def test_build_net_config_grouped_agents(mixed_agent, mixed_group_net_config):
+@pytest.mark.parametrize("flatten", [True, False])
+def test_build_net_config_grouped_agents(mixed_agent, mixed_group_net_config, flatten):
     """Test build_net_config with grouped_agents=True."""
-    result = mixed_agent.build_net_config(mixed_group_net_config, grouped_agents=True)
+    result = mixed_agent.build_net_config(mixed_group_net_config, flatten=flatten)
 
     # Should have entries for shared agent IDs only, not individual agents
-    assert set(result.keys()) == set(mixed_agent.shared_agent_ids)
+    agent_ids = mixed_agent.shared_agent_ids if not flatten else mixed_agent.agent_ids
+    assert set(result.keys()) == set(agent_ids)
 
     # Each group should have its specified config or default
-    for group_id in mixed_agent.shared_agent_ids:
-        assert "encoder_config" in result[group_id]
+    for agent_id in agent_ids:
+        print(agent_id)
+        group_id = mixed_agent.get_group_id(agent_id) if flatten else agent_id
+        assert "encoder_config" in result[agent_id]
         assert (
-            result[group_id]["encoder_config"]
+            result[agent_id]["encoder_config"]
             == mixed_group_net_config[group_id]["encoder_config"]
         )
 
 
-def test_build_net_config_none(homogeneous_agent):
+@pytest.mark.parametrize("flatten", [True, False])
+def test_build_net_config_none(homogeneous_agent, flatten):
     """Test build_net_config with None input."""
-    result = homogeneous_agent.build_net_config(None)
+    result = homogeneous_agent.build_net_config(None, flatten=flatten)
 
     # Should have entries for all agents with default configs
     assert set(result.keys()) == set(homogeneous_agent.agent_ids)

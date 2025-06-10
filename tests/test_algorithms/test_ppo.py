@@ -15,6 +15,8 @@ from agilerl.algorithms.ppo import PPO
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
+    assert_equal_state_dict,
+    assert_not_equal_state_dict,
     generate_dict_or_tuple_space,
     generate_discrete_space,
     generate_multidiscrete_space,
@@ -445,7 +447,7 @@ def test_learns_from_experiences(observation_space, accelerator):
 
     # Copy state dict before learning - should be different to after updating weights
     actor = ppo.actor
-    actor_pre_learn_sd = str(copy.deepcopy(ppo.actor.state_dict()))
+    actor_pre_learn_sd = copy.deepcopy(ppo.actor.state_dict())
 
     # Create batch size + 1 samples to ensure we can handle this
     num_steps = batch_size + 1
@@ -504,7 +506,7 @@ def test_learns_from_experiences(observation_space, accelerator):
     assert isinstance(loss, float)
     assert loss >= 0.0
     assert actor == ppo.actor
-    assert actor_pre_learn_sd != str(ppo.actor.state_dict())
+    assert_not_equal_state_dict(actor_pre_learn_sd, ppo.actor.state_dict())
 
 
 # Runs algorithm test loop
@@ -563,9 +565,11 @@ def test_clone_returns_identical_agent(observation_space):
     assert clone_agent.update_epochs == ppo.update_epochs
     assert clone_agent.device == ppo.device
     assert clone_agent.accelerator == ppo.accelerator
-    assert str(clone_agent.actor.state_dict()) == str(ppo.actor.state_dict())
-    assert str(clone_agent.critic.state_dict()) == str(ppo.critic.state_dict())
-    assert str(clone_agent.optimizer.state_dict()) == str(ppo.optimizer.state_dict())
+    assert_equal_state_dict(clone_agent.actor.state_dict(), ppo.actor.state_dict())
+    assert_equal_state_dict(clone_agent.critic.state_dict(), ppo.critic.state_dict())
+    assert_equal_state_dict(
+        clone_agent.optimizer.state_dict(), ppo.optimizer.state_dict()
+    )
     assert clone_agent.fitness == ppo.fitness
     assert clone_agent.steps == ppo.steps
     assert clone_agent.scores == ppo.scores
@@ -592,9 +596,11 @@ def test_clone_returns_identical_agent(observation_space):
     assert clone_agent.update_epochs == ppo.update_epochs
     assert clone_agent.device == ppo.device
     assert clone_agent.accelerator == ppo.accelerator
-    assert str(clone_agent.actor.state_dict()) == str(ppo.actor.state_dict())
-    assert str(clone_agent.critic.state_dict()) == str(ppo.critic.state_dict())
-    assert str(clone_agent.optimizer.state_dict()) == str(ppo.optimizer.state_dict())
+    assert_equal_state_dict(clone_agent.actor.state_dict(), ppo.actor.state_dict())
+    assert_equal_state_dict(clone_agent.critic.state_dict(), ppo.critic.state_dict())
+    assert_equal_state_dict(
+        clone_agent.optimizer.state_dict(), ppo.optimizer.state_dict()
+    )
     assert clone_agent.fitness == ppo.fitness
     assert clone_agent.steps == ppo.steps
     assert clone_agent.scores == ppo.scores
@@ -624,9 +630,11 @@ def test_clone_returns_identical_agent(observation_space):
     assert clone_agent.update_epochs == ppo.update_epochs
     assert clone_agent.device == ppo.device
     assert clone_agent.accelerator == ppo.accelerator
-    assert str(clone_agent.actor.state_dict()) == str(ppo.actor.state_dict())
-    assert str(clone_agent.critic.state_dict()) == str(ppo.critic.state_dict())
-    assert str(clone_agent.optimizer.state_dict()) == str(ppo.optimizer.state_dict())
+    assert_equal_state_dict(clone_agent.actor.state_dict(), ppo.actor.state_dict())
+    assert_equal_state_dict(clone_agent.critic.state_dict(), ppo.critic.state_dict())
+    assert_equal_state_dict(
+        clone_agent.optimizer.state_dict(), ppo.optimizer.state_dict()
+    )
     assert clone_agent.fitness == ppo.fitness
     assert clone_agent.steps == ppo.steps
     assert clone_agent.scores == ppo.scores
@@ -685,9 +693,11 @@ def test_clone_after_learning():
     assert clone_agent.update_epochs == ppo.update_epochs
     assert clone_agent.device == ppo.device
     assert clone_agent.accelerator == ppo.accelerator
-    assert str(clone_agent.actor.state_dict()) == str(ppo.actor.state_dict())
-    assert str(clone_agent.critic.state_dict()) == str(ppo.critic.state_dict())
-    assert str(clone_agent.optimizer.state_dict()) == str(ppo.optimizer.state_dict())
+    assert_equal_state_dict(clone_agent.actor.state_dict(), ppo.actor.state_dict())
+    assert_equal_state_dict(clone_agent.critic.state_dict(), ppo.critic.state_dict())
+    assert_equal_state_dict(
+        clone_agent.optimizer.state_dict(), ppo.optimizer.state_dict()
+    )
     assert clone_agent.fitness == ppo.fitness
     assert clone_agent.steps == ppo.steps
     assert clone_agent.scores == ppo.scores
@@ -895,8 +905,8 @@ def test_load_from_pretrained(observation_space, encoder_cls, accelerator, tmpdi
     assert isinstance(new_ppo.actor.encoder, encoder_cls)
     assert isinstance(new_ppo.critic.encoder, encoder_cls)
     assert new_ppo.lr == ppo.lr
-    assert str(new_ppo.actor.state_dict()) == str(ppo.actor.state_dict())
-    assert str(new_ppo.critic.state_dict()) == str(ppo.critic.state_dict())
+    assert_equal_state_dict(new_ppo.actor.state_dict(), ppo.actor.state_dict())
+    assert_equal_state_dict(new_ppo.critic.state_dict(), ppo.critic.state_dict())
     assert new_ppo.batch_size == ppo.batch_size
     assert new_ppo.gamma == ppo.gamma
     assert new_ppo.mut == ppo.mut
@@ -951,8 +961,12 @@ def test_load_from_pretrained_networks(
     assert isinstance(new_ppo.actor, nn.Module)
     assert isinstance(new_ppo.critic, nn.Module)
     assert new_ppo.lr == ppo.lr
-    assert str(new_ppo.actor.to("cpu").state_dict()) == str(ppo.actor.state_dict())
-    assert str(new_ppo.critic.to("cpu").state_dict()) == str(ppo.critic.state_dict())
+    assert_equal_state_dict(
+        new_ppo.actor.to("cpu").state_dict(), ppo.actor.state_dict()
+    )
+    assert_equal_state_dict(
+        new_ppo.critic.to("cpu").state_dict(), ppo.critic.state_dict()
+    )
     assert new_ppo.batch_size == ppo.batch_size
     assert new_ppo.gamma == ppo.gamma
     assert new_ppo.mut == ppo.mut

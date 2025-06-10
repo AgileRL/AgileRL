@@ -20,6 +20,13 @@ using our implementation of several multi-agent algorithms alongside Evolutionar
    * - :ref:`IPPO<ippo>`
      -
 
+Formulation
+-----------
+AgileRL builds on the `PettingZoo <https://pettingzoo.farama.org/>`_ framework for multi-agent environments. In this framework, each agent is
+identified by a unique ID, and the environment is defined by a set of agents. Multi-agent algorithms in AgileRL have an ``agent_ids`` argument
+which should be passed in from the possible agents in the environment, alongside the lists of ``observation_spaces`` and ``action_spaces``, whereby
+the space at index ``i`` is the observation/action space for the agent with ID ``agent_ids[i]``.
+
 
 .. _initpop_ma:
 
@@ -57,7 +64,14 @@ In the snippet below, we show an example of how to create a population of MADDPG
 
         # Define the network configuration
         NET_CONFIG = {
-            "head_config": {"hidden_size": [32, 32]}  # Actor head hidden size
+            "speaker_0": {
+                "encoder_config": {"hidden_size": [32, 32], "activation": "ReLU"},
+                "head_config": {"hidden_size": [32]},
+            },
+            "listener_0": {
+                "encoder_config": {"hidden_size": [32, 32], "activation": "ReLU"},
+                "head_config": {"hidden_size": [32]},
+            },
         }
 
         # Define the initial hyperparameters
@@ -157,8 +171,6 @@ for multi-agent environments) it is easiest to use our training function, which 
 .. code-block:: python
 
     from agilerl.training.train_multi_agent_off_policy import train_multi_agent_off_policy
-    import gymnasium as gym
-    import torch
 
     trained_pop, pop_fitnesses = train_multi_agent_off_policy(
         env=env,  # Pettingzoo-style environment
@@ -203,7 +215,14 @@ Alternatively, use a custom training loop. Combining all of the above:
 
         # Define the network configuration
         NET_CONFIG = {
-            "head_config": {"hidden_size": [32, 32]}  # Actor head hidden size
+            "speaker_0": {
+                "encoder_config": {"hidden_size": [32, 32], "activation": "ReLU"},
+                "head_config": {"hidden_size": [32]},
+            },
+            "listener_0": {
+                "encoder_config": {"hidden_size": [32, 32], "activation": "ReLU"},
+                "head_config": {"hidden_size": [32]},
+            },
         }
 
         # Define the initial hyperparameters
@@ -239,8 +258,6 @@ Alternatively, use a custom training loop. Combining all of the above:
         # Configure the multi-agent algo input arguments
         observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
         action_spaces = [env.single_action_space(agent) for agent in env.agents]
-        if INIT_HP["CHANNELS_LAST"]:
-            observation_spaces = [observation_space_channels_to_first(obs) for obs in observation_spaces]
 
         # Append number of agents and agent IDs to the initial hyperparameter dictionary
         INIT_HP["AGENT_IDS"] = env.agents
@@ -290,11 +307,9 @@ Alternatively, use a custom training loop. Combining all of the above:
         # Define training loop parameters
         max_steps = 1000000  # Max steps
         learning_delay = 0  # Steps before starting learning
-
         evo_steps = 10000  # Evolution frequency
         eval_steps = None  # Evaluation steps per episode - go until done
         eval_loop = 1  # Number of evaluation episodes
-
         total_steps = 0
 
         # TRAINING LOOP
@@ -303,45 +318,42 @@ Alternatively, use a custom training loop. Combining all of the above:
         while np.less([agent.steps[-1] for agent in pop], max_steps).all():
             pop_episode_scores = []
             for agent in pop:  # Loop through population
-                state, info = env.reset()  # Reset environment at start of episode
+                agent.set_training_mode(True)
+
+                obs, info = env.reset()  # Reset environment at start of episode
                 scores = np.zeros(num_envs)
                 completed_episode_scores = []
                 steps = 0
-                if INIT_HP["CHANNELS_LAST"]:
-                    state = {
-                        agent_id: obs_channels_to_first(s)
-                        for agent_id, s in state.items()
-                    }
-
                 for idx_step in range(evo_steps // num_envs):
-
                     # Get next action from agent
                     action, raw_action = agent.get_action(
-                        states=state,
-                        training=True,
+                        obs=obs,
                         infos=info
                     )
 
                     # Act in environment
-                    next_state, reward, termination, truncation, info = env.step(action)
-
-                    scores += np.sum(np.array(list(reward.values())).transpose(), axis=-1)
+                    next_obs, reward, termination, truncation, info = env.step(action)
                     total_steps += num_envs
                     steps += num_envs
 
-                    # Image processing if necessary for the environment
-                    if INIT_HP["CHANNELS_LAST"]:
-                        next_state = {
-                            agent_id: obs_channels_to_first(ns)
-                            for agent_id, ns in next_state.items()
-                        }
+                    agent_rewards = np.array(list(reward.values())).transpose()
+                    agent_rewards = np.where(np.isnan(agent_rewards), 0, agent_rewards)
+                    score_increment = (
+                        (
+                            np.sum(agent_rewards, axis=-1)[:, np.newaxis]
+                            if is_vectorised
+                            else np.sum(agent_rewards, axis=-1)
+                        )
+                        if sum_scores
+                        else agent_rewards
+                    )
 
                     # Save experiences to replay buffer
                     memory.save_to_memory(
-                        state,
+                        obs,
                         raw_action,
                         reward,
-                        next_state,
+                        next_obs,
                         termination,
                         is_vectorised=True,
                     )
@@ -359,6 +371,7 @@ Alternatively, use a custom training loop. Combining all of the above:
                             experiences = memory.sample(agent.batch_size)
                             # Learn according to agent's RL algorithm
                             agent.learn(experiences)
+
                     # Handle num_envs > learn step; learn multiple times per step in env
                     elif (
                         len(memory) >= agent.batch_size and memory.counter > learning_delay
@@ -369,18 +382,36 @@ Alternatively, use a custom training loop. Combining all of the above:
                             # Learn according to agent's RL algorithm
                             agent.learn(experiences)
 
-                    state = next_state
+                    obs = next_obs
+
+                    # Find which agents are "done" - i.e. terminated or truncated
+                    dones = {}
+                    for agent_id in agent.agent_ids:
+                        terminated = termination.get(agent_id, True)
+                        truncated = truncation.get(agent_id, False)
+
+                        # Replace NaNs with True (indicate killed agent)
+                        terminated = np.where(
+                            np.isnan(terminated), True, terminated
+                        ).astype(bool)
+                        truncated = np.where(np.isnan(truncated), False, truncated).astype(
+                            bool
+                        )
+
+                        dones[agent_id] = terminated | truncated
 
                     # Calculate scores and reset noise for finished episodes
                     reset_noise_indices = []
-                    term_array = np.array(list(termination.values())).transpose()
-                    trunc_array = np.array(list(truncation.values())).transpose()
-                    for idx, (d, t) in enumerate(zip(term_array, trunc_array)):
-                        if np.any(d) or np.any(t):
-                            completed_episode_scores.append(scores[idx])
-                            agent.scores.append(scores[idx])
-                            scores[idx] = 0
+                    for idx, agent_dones in enumerate(zip(*dones.values())):
+                        if all(agent_dones):
+                            completed_score = (
+                                float(scores[idx]) if sum_scores else list(scores[idx])
+                            )
+                            completed_episode_scores.append(completed_score)
+                            agent.scores.append(completed_score)
+                            scores[idx].fill(0)
                             reset_noise_indices.append(idx)
+
                     agent.reset_action_noise(reset_noise_indices)
 
                 pbar.update(evo_steps // len(pop))
@@ -428,3 +459,10 @@ Alternatively, use a custom training loop. Combining all of the above:
 
 On-Policy Training
 ------------------
+Similaryly to off-policy training, we've adapted our single-agent on-policy training loop for multi-agent settings in :file:`train_multi_agent_on_policy.py`. Currently, only
+:class:`Independent Proximal Policy Optimisation (IPPO) <agilerl.algorithms.ippo.IPPO>` has been implemented to be used with this training function.
+
+
+
+Grouped Agents
+---------------

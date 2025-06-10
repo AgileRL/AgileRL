@@ -9,7 +9,9 @@ PopulationType = List[EvolvableAlgorithm]
 
 
 class TournamentSelection:
-    """The tournament selection class.
+    """The tournament selection class. Calling :func:`TournamentSelection.select() <agilerl.hpo.tournament.TournamentSelection.select>`
+    on a population of agents will return a cloned population containing the best performing agent as well as the new generation of agents
+    based on their fitness scores.
 
     :param tournament_size: Tournament selection size
     :type tournament_size: int
@@ -40,7 +42,7 @@ class TournamentSelection:
 
     def _tournament(self, fitness_values: List[float]) -> int:
         """
-        Perform a tournament selection.
+        Perform tournament selection given a list of fitness values.
 
         :param fitness_values: List of fitness values
         :type fitness_values: list[float]
@@ -56,7 +58,7 @@ class TournamentSelection:
         self, population: PopulationType
     ) -> Tuple[EvolvableAlgorithm, np.ndarray, int]:
         """
-        Perform elitism selection.
+        Perform elitism selection given a population of agents.
 
         :param population: Population of agents
         :type population: PopulationType
@@ -73,8 +75,17 @@ class TournamentSelection:
     def select(
         self, population: PopulationType
     ) -> Tuple[EvolvableAlgorithm, PopulationType]:
+        """
+        Select the best agent and new population of agents following tournament selection.
+
+        :param population: Population of agents
+        :type population: PopulationType
+        :return: Elite agent and new population
+        :rtype: tuple[EvolvableAlgorithm, PopulationType]
+        """
         if self.language_model is None:
             self.language_model = population[0].algo == "GRPO"
+
         return (
             self._select_llm_agents(population)
             if self.language_model
@@ -85,7 +96,9 @@ class TournamentSelection:
         self, population: PopulationType
     ) -> Tuple[EvolvableAlgorithm, PopulationType]:
         """
-        Returns best agent and new population of agents following tournament selection.
+        Returns best agent and new population of agents following tournament selection. Used for
+        a population of :class:`EvolvableAlgorithm <agilerl.algorithms.core.RLAlgorithm>` or
+        :class:`MultiAgentRLAlgorithm <agilerl.algorithms.core.MultiAgentRLAlgorithm>` agents.
 
         :param population: Population of agents
         :type population: PopulationType
@@ -99,19 +112,22 @@ class TournamentSelection:
             selection_size = self.population_size - 1
         else:
             selection_size = self.population_size
-        # select parents of next gen using tournament selection
+
+        # Select parents of next gen using tournament selection
         for idx in range(selection_size):
             max_id += 1
             actor_parent = population[self._tournament(rank)]
             new_individual = actor_parent.clone(max_id, wrap=False)
             new_population.append(new_individual)
+
         return elite, new_population
 
     def _select_llm_agents(
         self, population: PopulationType
     ) -> Tuple[EvolvableAlgorithm, PopulationType]:
         """
-        Returns best agent and new population of agents following tournament selection.
+        Returns best agent and new population of agents following tournament selection. Used for
+        a population of :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` agents.
 
         :param population: Population of agents
         :type population: PopulationType
@@ -140,6 +156,7 @@ class TournamentSelection:
                 new_population_idxs.append(
                     (actor_parent_idx, max_id, False)
                 )  # (old_idx_to_clone, new_labelled_idx, is_elite)
+
             # Isolate any agents that are not in the new population to be deleted
             unwanted_agents = set(old_population_idxs) - {
                 idx for idx, *_ in new_population_idxs

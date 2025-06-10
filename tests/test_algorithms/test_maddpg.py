@@ -26,6 +26,8 @@ from agilerl.utils.evolvable_networks import get_default_encoder_config
 from agilerl.utils.utils import make_multi_agent_vect_envs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
+    assert_not_equal_state_dict,
+    assert_state_dicts_equal,
     gen_multi_agent_dict_or_tuple_spaces,
     generate_multi_agent_box_spaces,
     generate_multi_agent_discrete_spaces,
@@ -471,7 +473,7 @@ def test_initialize_maddpg_with_mlp_networks_gumbel_softmax(
         device=device,
         torch_compiler=compile_mode,
     )
-    assert maddpg.torch_compiler == compile_mode
+    assert maddpg.torch_compiler == "default"
 
 
 # TODO: This will be deprecated in the future
@@ -708,7 +710,7 @@ def test_maddpg_init_torch_compiler_no_error(mode):
             isinstance(critic_target, OptimizedModule)
             for critic_target in maddpg.critic_targets.values()
         )
-        assert maddpg.torch_compiler == mode
+        assert maddpg.torch_compiler == "default"
     else:
         assert isinstance(maddpg, MADDPG)
 
@@ -1098,7 +1100,7 @@ def test_maddpg_learns_from_experiences(
         for agent_id, actor in maddpg.actors.items()
     }
     critics_pre_learn_sd = {
-        agent_id: str(copy.deepcopy(critic.state_dict()))
+        agent_id: copy.deepcopy(critic.state_dict())
         for agent_id, critic in maddpg.critics.items()
     }
 
@@ -1116,7 +1118,7 @@ def test_maddpg_learns_from_experiences(
 
     for agent_id, old_actor_state_dict in actors_pre_learn_sd.items():
         updated_actor = maddpg.actors[agent_id]
-        assert old_actor_state_dict != str(updated_actor.state_dict())
+        assert_not_equal_state_dict(old_actor_state_dict, updated_actor.state_dict())
 
     for agent_id, old_critic_target in maddpg.critic_targets.items():
         updated_critic_target = maddpg.critic_targets[agent_id]
@@ -1124,7 +1126,7 @@ def test_maddpg_learns_from_experiences(
 
     for agent_id, old_critic_state_dict in critics_pre_learn_sd.items():
         updated_critic = maddpg.critics[agent_id]
-        assert old_critic_state_dict != str(updated_critic.state_dict())
+        assert_not_equal_state_dict(old_critic_state_dict, updated_critic.state_dict())
 
 
 def no_sync(self):
@@ -1305,19 +1307,23 @@ def test_maddpg_clone_returns_identical_agent(
 
     for agent_id, clone_actor in clone_agent.actors.items():
         actor = maddpg.actors[agent_id]
-        assert str(clone_actor.state_dict()) == str(actor.state_dict())
+        assert_state_dicts_equal(clone_actor.state_dict(), actor.state_dict())
 
     for agent_id, clone_critic in clone_agent.critics.items():
         critic = maddpg.critics[agent_id]
-        assert str(clone_critic.state_dict()) == str(critic.state_dict())
+        assert_state_dicts_equal(clone_critic.state_dict(), critic.state_dict())
 
     for agent_id, clone_actor_target in clone_agent.actor_targets.items():
         actor_target = maddpg.actor_targets[agent_id]
-        assert str(clone_actor_target.state_dict()) == str(actor_target.state_dict())
+        assert_state_dicts_equal(
+            clone_actor_target.state_dict(), actor_target.state_dict()
+        )
 
     for agent_id, clone_critic_target in clone_agent.critic_targets.items():
         critic_target = maddpg.critic_targets[agent_id]
-        assert str(clone_critic_target.state_dict()) == str(critic_target.state_dict())
+        assert_state_dicts_equal(
+            clone_critic_target.state_dict(), critic_target.state_dict()
+        )
 
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
@@ -1393,19 +1399,23 @@ def test_clone_after_learning(compile_mode):
 
     for agent_id, clone_actor in clone_agent.actors.items():
         actor = maddpg.actors[agent_id]
-        assert str(clone_actor.state_dict()) == str(actor.state_dict())
+        assert_state_dicts_equal(clone_actor.state_dict(), actor.state_dict())
 
     for agent_id, clone_critic in clone_agent.critics.items():
         critic = maddpg.critics[agent_id]
-        assert str(clone_critic.state_dict()) == str(critic.state_dict())
+        assert_state_dicts_equal(clone_critic.state_dict(), critic.state_dict())
 
     for agent_id, clone_actor_target in clone_agent.actor_targets.items():
         actor_target = maddpg.actor_targets[agent_id]
-        assert str(clone_actor_target.state_dict()) == str(actor_target.state_dict())
+        assert_state_dicts_equal(
+            clone_actor_target.state_dict(), actor_target.state_dict()
+        )
 
     for agent_id, clone_critic_target in clone_agent.critic_targets.items():
         critic_target = maddpg.critic_targets[agent_id]
-        assert str(clone_critic_target.state_dict()) == str(critic_target.state_dict())
+        assert_state_dicts_equal(
+            clone_critic_target.state_dict(), critic_target.state_dict()
+        )
 
     for agent_id, clone_actor_opt in clone_agent.actor_optimizers.optimizer.items():
         actor_opt = maddpg.actor_optimizers.optimizer[agent_id]
@@ -1533,11 +1543,11 @@ def test_save_load_checkpoint_correct_data_and_format(
     assert maddpg.lr_critic == 0.01
     for agent_id, actor in maddpg.actors.items():
         actor_target = loaded_maddpg.actor_targets[agent_id]
-        assert str(actor.state_dict()) == str(actor_target.state_dict())
+        assert_state_dicts_equal(actor.state_dict(), actor_target.state_dict())
 
     for agent_id, critic in maddpg.critics.items():
         critic_target = loaded_maddpg.critic_targets[agent_id]
-        assert str(critic.state_dict()) == str(critic_target.state_dict())
+        assert_state_dicts_equal(critic.state_dict(), critic_target.state_dict())
 
     assert maddpg.batch_size == 64
     assert maddpg.learn_step == 5
@@ -1671,11 +1681,11 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_make_evo(
 
     for agent_id, actor in loaded_maddpg.actors.items():
         actor_target = loaded_maddpg.actor_targets[agent_id]
-        assert str(actor.state_dict()) == str(actor_target.state_dict())
+        assert_state_dicts_equal(actor.state_dict(), actor_target.state_dict())
 
     for agent_id, critic in loaded_maddpg.critics.items():
         critic_target = loaded_maddpg.critic_targets[agent_id]
-        assert str(critic.state_dict()) == str(critic_target.state_dict())
+        assert_state_dicts_equal(critic.state_dict(), critic_target.state_dict())
 
     assert maddpg.batch_size == 64
     assert maddpg.learn_step == 5
@@ -1795,8 +1805,8 @@ def test_load_from_pretrained(
         actor_target = new_maddpg.actor_targets[agent_id]
         critic = new_maddpg.critics[agent_id]
         critic_target = new_maddpg.critic_targets[agent_id]
-        assert str(actor.state_dict()) == str(actor_target.state_dict())
-        assert str(critic.state_dict()) == str(critic_target.state_dict())
+        assert_state_dicts_equal(actor.state_dict(), actor_target.state_dict())
+        assert_state_dicts_equal(critic.state_dict(), critic_target.state_dict())
 
     assert new_maddpg.batch_size == maddpg.batch_size
     assert new_maddpg.learn_step == maddpg.learn_step
@@ -1928,14 +1938,15 @@ def test_load_from_pretrained_make_evo(
         assert isinstance(new_actor_target, nn.Module)
         assert isinstance(new_critic, nn.Module)
         assert isinstance(new_critic_target, nn.Module)
-        assert str(new_actor.to("cpu").state_dict()) == str(actor.state_dict())
-        assert str(new_actor_target.to("cpu").state_dict()) == str(
-            actor_target.state_dict()
+        assert_state_dicts_equal(new_actor.state_dict(), actor.state_dict())
+        assert_state_dicts_equal(
+            new_actor_target.state_dict(), actor_target.state_dict()
         )
-        assert str(new_critic.to("cpu").state_dict()) == str(critic.state_dict())
-        assert str(new_critic_target.to("cpu").state_dict()) == str(
-            critic_target.state_dict()
+        assert_state_dicts_equal(new_critic.state_dict(), critic.state_dict())
+        assert_state_dicts_equal(
+            new_critic_target.state_dict(), critic_target.state_dict()
         )
+
     assert new_maddpg.batch_size == maddpg.batch_size
     assert new_maddpg.learn_step == maddpg.learn_step
     assert new_maddpg.gamma == maddpg.gamma

@@ -274,7 +274,7 @@ class DummyMultiAgent(DummyAgentOffPolicy):
         self.action_space = Dict(
             {
                 "agent_0": Discrete(2),
-                "other_agent_0": Discrete(2),
+                "other_agent_0": Box(0, 1, (2,)),
             }
         )
 

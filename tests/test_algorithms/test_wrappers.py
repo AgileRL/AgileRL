@@ -204,7 +204,11 @@ class TestOptimizerWrapper:
     def test_init_with_multiagent(self):
         """Test initializing with multiagent=True like in MADDPG."""
         networks = ModuleDict(
-            {f"net_{i}": MockEvolvableNetwork(name=f"net_{i}") for i in range(3)}
+            {
+                "agent_0": MockEvolvableNetwork(name="agent_0"),
+                "agent_1": MockEvolvableNetwork(name="agent_1"),
+                "other_agent_0": MockEvolvableNetwork(name="other_agent_0"),
+            }
         )
         lr = 0.001
 
