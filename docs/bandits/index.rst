@@ -118,8 +118,8 @@ buffer, call ``ReplayBuffer.sample()``.
     )
 
 
-Bandit Training Loop
------------------------
+Training Loop
+-------------
 
 The easiest way to train a population of bandits is to use our training function:
 

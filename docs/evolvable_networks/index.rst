@@ -12,9 +12,10 @@ a single training run through :ref:`evolutionary hyperparameter optimization <ev
 Neural Network Building Blocks
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-In order to mutate the architecture of neural networks seamlessly, we define the :class:`~agilerl.modules.base.EvolvableModule` base class as a building block
-for all networks used in AgileRL. This is nothing but a wrapper around ``torch.nn.Module`` that allows us to keep track of the methods that mutate a network
-in networks with nested evolvable modules.
+We address the above issue by introducing a framework for performing architecture mutations through the :class:`EvolvableModule <agilerl.modules.base.EvolvableModule>`
+abstraction (which is a wrapper around ``torch.nn.Module``). It allows us to seamlessly track and apply architecture mutations for networks with nested evolvable modules.
+This is particularly useful for RL algorithms, where we define default architectures suitable for a variety of tasks (i.e. combinations of observation and action spaces),
+which require very different network architectures.
 
 .. figure:: ../_static/module.png
    :alt: EvolvableModule Structure
@@ -43,8 +44,9 @@ base class which inherits from :class:`~agilerl.modules.base.EvolvableModule`. T
 
    Structure of an ``EvolvableNetwork``, showing the underlying encoder and head networks which are ``EvolvableModule`` objects themselves.
 
-When inheriting from this class, we must pass in the observation space of the environment to the constructor of the class. This allows the network to automatically
-build an appropriate encoder from the observation space. Off-the-shelf ``EvolvableNetwork``'s in AgileRL natively support the following observation spaces:
+This abstraction allows us to define common networks used in RL algorithms very simply, since it automatically creates an appropriate encoder for the passed observation space. After,
+we just create a head to the the network that processed the encoded observations into an apprioriate number of outputs (for e.g. policies or critics). Off-the-shelf ``EvolvableNetwork``'s
+in AgileRL natively support the following observation spaces:
 
 - :class:`~gymnasium.spaces.Box`: Use an ``EvolvableMLP``, ``EvolvableCNN``, or ``EvolvableLSTM`` as the encoder, depending on the dimensionality of the observation space.
 - :class:`~gymnasium.spaces.Dict`: Use an ``EvolvableMultiInput`` as the encoder.
@@ -53,7 +55,7 @@ build an appropriate encoder from the observation space. Off-the-shelf ``Evolvab
 - :class:`~gymnasium.spaces.MultiDiscrete`: Use an ``EvolvableMLP`` as the encoder.
 
 The encoder processes observations into a latent space, which is then processed by the head network (usually a ``EvolvableMLP``) to form the final output of the network. The
-following networks, common in a variety of reinforcement learning algorithms, are supported out of the box:
+following networks, common in a variety of reinforcement learning algorithms, are available in AgileRL:
 
 - :class:`~agilerl.networks.q_networks.QNetwork`: Outputs a state-action value given an observation and action (used in e.g. DQN).
 - :class:`~agilerl.networks.q_networks.RainbowQNetwork`: Uses a distributional dueling architecture to output a distribution of state-action values given an observation and action (used in e.g. Rainbow DQN).
@@ -148,9 +150,12 @@ If your environment has a 3D ``Box`` observation space, by default the ``Evolvab
           max_latent_dim=128, # Maximum dimension of the latent space representation
       )
 
+
+
 .. note::
     In AgileRL algorithms, we pass a single ``net_config`` dictionary that includes the ``encoder_config`` and ``head_config`` dictionaries, as well as
-    any other initialisation arguments to the respective network used in the algorithm.
+    any other initialisation arguments to the respective network used in the algorithm. This becomes more complex in multi-agent settings, where there are
+    multiple networks that can be configured (see :ref:`here <multiagenttraining>` for more details).
 
 
 Using Non-Evolvable Networks in an Evolvable Setting

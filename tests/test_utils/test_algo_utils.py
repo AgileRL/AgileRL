@@ -873,3 +873,5 @@ def test_remove_nested_files():
     assert not os.path.exists("test_dir/file1.txt")
     assert not os.path.exists("test_dir/nested_dir/file2.txt")
     assert not os.path.exists("test_dir/nested_dir")
+
+    os.rmdir("test_dir/")

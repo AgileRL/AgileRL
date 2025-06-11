@@ -1144,12 +1144,12 @@ def test_ippo_learns_from_experiences(
 
     actors = ippo.actors
     actors_pre_learn_sd = {
-        shared_id: str(copy.deepcopy(actor.state_dict()))
+        shared_id: copy.deepcopy(actor.state_dict())
         for shared_id, actor in ippo.actors.items()
     }
     critics = ippo.critics
     critics_pre_learn_sd = {
-        shared_id: str(copy.deepcopy(critic.state_dict()))
+        shared_id: copy.deepcopy(critic.state_dict())
         for shared_id, critic in ippo.critics.items()
     }
 

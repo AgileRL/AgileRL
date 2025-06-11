@@ -16,8 +16,8 @@ from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
 from agilerl.networks.q_networks import RainbowQNetwork
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
-    assert_equal_state_dict,
     assert_not_equal_state_dict,
+    assert_state_dicts_equal,
     generate_dict_or_tuple_space,
     generate_discrete_space,
     generate_multidiscrete_space,
@@ -650,11 +650,11 @@ def test_clone_returns_identical_agent(observation_space):
     assert clone_agent.mut == dqn.mut
     assert clone_agent.device == dqn.device
     assert clone_agent.accelerator == dqn.accelerator
-    assert_equal_state_dict(clone_agent.actor.state_dict(), dqn.actor.state_dict())
-    assert_equal_state_dict(
+    assert_state_dicts_equal(clone_agent.actor.state_dict(), dqn.actor.state_dict())
+    assert_state_dicts_equal(
         clone_agent.actor_target.state_dict(), dqn.actor_target.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.optimizer.state_dict(), dqn.optimizer.state_dict()
     )
     assert clone_agent.fitness == dqn.fitness
@@ -677,11 +677,11 @@ def test_clone_returns_identical_agent(observation_space):
     assert clone_agent.mut == dqn.mut
     assert clone_agent.device == dqn.device
     assert clone_agent.accelerator == dqn.accelerator
-    assert_equal_state_dict(clone_agent.actor.state_dict(), dqn.actor.state_dict())
-    assert_equal_state_dict(
+    assert_state_dicts_equal(clone_agent.actor.state_dict(), dqn.actor.state_dict())
+    assert_state_dicts_equal(
         clone_agent.actor_target.state_dict(), dqn.actor_target.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.optimizer.state_dict(), dqn.optimizer.state_dict()
     )
     assert clone_agent.fitness == dqn.fitness
@@ -705,11 +705,11 @@ def test_clone_returns_identical_agent(observation_space):
     assert clone_agent.mut == dqn.mut
     assert clone_agent.device == dqn.device
     assert clone_agent.accelerator == dqn.accelerator
-    assert_equal_state_dict(clone_agent.actor.state_dict(), dqn.actor.state_dict())
-    assert_equal_state_dict(
+    assert_state_dicts_equal(clone_agent.actor.state_dict(), dqn.actor.state_dict())
+    assert_state_dicts_equal(
         clone_agent.actor_target.state_dict(), dqn.actor_target.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.optimizer.state_dict(), dqn.optimizer.state_dict()
     )
     assert clone_agent.fitness == dqn.fitness
@@ -748,13 +748,13 @@ def test_clone_after_learning():
     assert clone_agent.mut == rainbow_dqn.mut
     assert clone_agent.device == rainbow_dqn.device
     assert clone_agent.accelerator == rainbow_dqn.accelerator
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.actor.state_dict(), rainbow_dqn.actor.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.actor_target.state_dict(), rainbow_dqn.actor_target.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.optimizer.state_dict(), rainbow_dqn.optimizer.state_dict()
     )
     assert clone_agent.fitness == rainbow_dqn.fitness
@@ -826,9 +826,9 @@ def test_save_load_checkpoint_correct_data_and_format(
     assert isinstance(dqn.actor.encoder, encoder_cls)
     assert isinstance(dqn.actor_target.encoder, encoder_cls)
     assert dqn.lr == 1e-4
-    assert_equal_state_dict(dqn.actor.state_dict(), dqn.actor_target.state_dict())
-    assert_equal_state_dict(initial_actor_state_dict, dqn.actor.state_dict())
-    assert_equal_state_dict(init_optim_state_dict, dqn.optimizer.state_dict())
+    assert_state_dicts_equal(dqn.actor.state_dict(), dqn.actor_target.state_dict())
+    assert_state_dicts_equal(initial_actor_state_dict, dqn.actor.state_dict())
+    assert_state_dicts_equal(init_optim_state_dict, dqn.optimizer.state_dict())
     assert dqn.batch_size == 64
     assert dqn.learn_step == 5
     assert dqn.gamma == 0.99
@@ -895,9 +895,9 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert isinstance(dqn.actor, nn.Module)
     assert isinstance(dqn.actor_target, nn.Module)
     assert dqn.lr == 1e-4
-    assert_equal_state_dict(dqn.actor.state_dict(), dqn.actor_target.state_dict())
-    assert_equal_state_dict(initial_actor_state_dict, dqn.actor.state_dict())
-    assert_equal_state_dict(init_optim_state_dict, dqn.optimizer.state_dict())
+    assert_state_dicts_equal(dqn.actor.state_dict(), dqn.actor_target.state_dict())
+    assert_state_dicts_equal(initial_actor_state_dict, dqn.actor.state_dict())
+    assert_state_dicts_equal(init_optim_state_dict, dqn.optimizer.state_dict())
     assert dqn.batch_size == 64
     assert dqn.learn_step == 5
     assert dqn.gamma == 0.99
@@ -940,10 +940,10 @@ def test_load_from_pretrained(observation_space, encoder_cls, accelerator, tmpdi
     assert isinstance(new_dqn.actor.encoder, encoder_cls)
     assert isinstance(new_dqn.actor_target.encoder, encoder_cls)
     assert new_dqn.lr == dqn.lr
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         new_dqn.actor.to("cpu").state_dict(), dqn.actor.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         new_dqn.actor_target.to("cpu").state_dict(), dqn.actor_target.state_dict()
     )
     assert new_dqn.batch_size == dqn.batch_size
@@ -997,10 +997,10 @@ def test_load_from_pretrained_networks(
     assert isinstance(new_dqn.actor, nn.Module)
     assert isinstance(new_dqn.actor_target, nn.Module)
     assert new_dqn.lr == dqn.lr
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         new_dqn.actor.to("cpu").state_dict(), dqn.actor.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         new_dqn.actor_target.to("cpu").state_dict(), dqn.actor_target.state_dict()
     )
     assert new_dqn.batch_size == dqn.batch_size

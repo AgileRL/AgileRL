@@ -65,7 +65,7 @@ multi-agent training function, but can be implemented in a custom loop as follow
       import numpy as np
       import torch
       from pettingzoo.mpe import simple_speaker_listener_v4
-      from tqdm import trange
+      from tqdm import tqdm
 
       from agilerl.algorithms import MATD3
       from agilerl.utils.algo_utils import obs_channels_to_first
@@ -108,36 +108,29 @@ multi-agent training function, but can be implemented in a custom loop as follow
       # Define training loop parameters
       max_steps = 100000  # Max steps
       total_steps = 0
+      pbar = tqdm(total=max_steps)
 
       while agent.steps[-1] < max_steps:
-          state, info  = env.reset() # Reset environment at start of episode
+          obs, info  = env.reset() # Reset environment at start of episode
           scores = np.zeros(num_envs)
           completed_episode_scores = []
-          if channels_last:
-              state = {agent_id: obs_channels_to_first(s) for agent_id, s in state.items()}
 
           for _ in range(1000):
               # Get next action from agent
               action, raw_action = agent.get_action(
-                  states=state,
-                  training=True,
+                  obs=obs,
                   infos=info,
               )
 
               # Act in environment
-              next_state, reward, termination, truncation, info = env.step(action)
+              next_obs, reward, termination, truncation, info = env.step(action)
 
               scores += np.sum(np.array(list(reward.values())).transpose(), axis=-1)
               total_steps += num_envs
               steps += num_envs
 
               # Save experiences to replay buffer
-              if channels_last:
-                  next_state = {
-                      agent_id: obs_channels_to_first(ns)
-                      for agent_id, ns in next_state.items()
-                  }
-              memory.save_to_memory(state, raw_action, reward, next_state, done, is_vectorised=True)
+              memory.save_to_memory(obs, raw_action, reward, next_obs, done, is_vectorised=True)
 
               # Learn according to learning frequency
               if len(memory) >= agent.batch_size:
@@ -145,8 +138,8 @@ multi-agent training function, but can be implemented in a custom loop as follow
                       experiences = memory.sample(agent.batch_size) # Sample replay buffer
                       agent.learn(experiences) # Learn according to agent's RL algorithm
 
-              # Update the state
-              state = next_state
+              # Update the observation
+              obs = next_obs
 
               # Calculate scores and reset noise for finished episodes
               reset_noise_indices = []
@@ -159,6 +152,9 @@ multi-agent training function, but can be implemented in a custom loop as follow
                       scores[idx] = 0
                       reset_noise_indices.append(idx)
               agent.reset_action_noise(reset_noise_indices)
+
+          pbar.update(1000)
+          pbar.set_description(f"Score: {np.mean(completed_episode_scores[-10:])}")
 
           agent.steps[-1] += steps
 

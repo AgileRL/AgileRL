@@ -459,8 +459,9 @@ Alternatively, use a custom training loop. Combining all of the above:
 
 On-Policy Training
 ------------------
-Similaryly to off-policy training, we've adapted our single-agent on-policy training loop for multi-agent settings in :file:`train_multi_agent_on_policy.py`. Currently, only
-:class:`Independent Proximal Policy Optimisation (IPPO) <agilerl.algorithms.ippo.IPPO>` has been implemented to be used with this training function.
+Similarly to off-policy training, we've adapted our single-agent on-policy training loop for multi-agent settings in :file:`train_multi_agent_on_policy.py`. Currently, only
+:class:`Independent Proximal Policy Optimisation (IPPO) <agilerl.algorithms.ippo.IPPO>` has been implemented to be used with this training function, but we are looking to add
+more algorithms in the future!
 
 
 

@@ -24,26 +24,35 @@ Compatible Action Spaces
      - ✔️
      - ✔️
 
-Example
-------------
+LunarLanderContinuous-v3 Example
+---------------------------------
 
 .. code-block:: python
 
-  import gymnasium as gym
   import numpy as np
+  from gymnasium import spaces
+  from tqdm import tqdm
 
-  from agilerl.utils.algo_utils import obs_channels_to_first
-  from agilerl.utils.utils import make_vect_envs, observation_space_channels_first
+  from agilerl.utils.utils import make_vect_envs
   from agilerl.algorithms.ppo import PPO
 
   # Create environment
-  num_envs = 1
+  num_envs = 16
+  max_steps = 100000
   env = make_vect_envs('LunarLanderContinuous-v3', num_envs=num_envs)
-  observation_space = env.observation_space
-  action_space = env.action_space
+  observation_space = env.single_observation_space
+  action_space = env.single_action_space
 
-  agent = PPO(observation_space, action_space)   # Create PPO agent
+  # Create PPO agent
+  agent = PPO(
+      observation_space,
+      action_space,
+      lr=1e-3,
+      batch_size=128,
+      learn_step=2048
+  )
 
+  pbar = tqdm(total=max_steps)
   while True:
       observations = []
       actions = []
@@ -55,7 +64,7 @@ Example
       done = np.zeros(num_envs)
       obs, info = env.reset()
       agent.set_training_mode(True)
-      for step in range(agent.learn_step):
+      for _ in range(-(agent.learn_step // -num_envs)):
           # Get next action from agent
           action, log_prob, _, value = agent.get_action(obs)
 
@@ -91,8 +100,10 @@ Example
           next_obs,
           next_done,
       )
-      # Learn according to agent's RL algorithm
-      agent.learn(experiences)
+      agent.learn(experiences)    # Learn according to agent's RL algorithm
+
+      pbar.update(agent.learn_step)
+      pbar.set_description(f"Score: {np.mean(np.sum(rewards, axis=0))}")
 
 Neural Network Configuration
 ----------------------------

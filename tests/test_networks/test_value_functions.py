@@ -1,3 +1,5 @@
+from dataclasses import asdict
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -11,15 +13,22 @@ from agilerl.modules import (
     EvolvableMultiInput,
     EvolvableSimBa,
 )
+from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.value_networks import ValueNetwork
 from tests.helper_functions import (
     assert_close_dict,
-    check_equal_params_ind,
+    assert_not_equal_state_dict,
+    assert_state_dicts_equal,
     generate_dict_or_tuple_space,
     generate_discrete_space,
     generate_random_box_space,
 )
+
+
+@pytest.fixture
+def head_config():
+    return asdict(MlpNetConfig(hidden_size=[64, 64]))
 
 
 @pytest.mark.parametrize(
@@ -81,8 +90,8 @@ def test_value_function_initialization_simba():
         (generate_random_box_space((3, 32, 32))),
     ],
 )
-def test_value_function_mutation_methods(observation_space):
-    network = ValueNetwork(observation_space)
+def test_value_function_mutation_methods(observation_space, head_config):
+    network = ValueNetwork(observation_space, head_config=head_config)
 
     for method in network.mutation_methods:
         new_network = network.clone()
@@ -100,7 +109,7 @@ def test_value_function_mutation_methods(observation_space):
 
             assert mutated_attr == exec_method
 
-        check_equal_params_ind(network, new_network)
+        assert_not_equal_state_dict(network.state_dict(), new_network.state_dict())
 
 
 @pytest.mark.parametrize(
@@ -162,6 +171,6 @@ def test_value_function_clone(observation_space: spaces.Space):
 
     assert_close_dict(network.init_dict, clone.init_dict)
 
-    assert str(clone.state_dict()) == str(network.state_dict())
+    assert_state_dicts_equal(clone.state_dict(), network.state_dict())
     for key, param in clone.named_parameters():
         torch.testing.assert_close(param, original_net_dict[key])

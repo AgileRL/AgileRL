@@ -37,7 +37,6 @@ Example
   from agilerl.components.replay_buffer import ReplayBuffer
   from agilerl.components.data import Transition
   from agilerl.algorithms.cqn import CQN
-  from agilerl.utils.algo_utils import obs_channels_to_first
 
   # Create environment and Experience Replay Buffer, and load dataset
   env = gym.make('CartPole-v1')
@@ -50,20 +49,17 @@ Example
   # Save transitions to replay buffer
   dataset_length = dataset['rewards'].shape[0]
   for i in range(dataset_length-1):
-      state = dataset['observations'][i]
-      next_state = dataset['observations'][i+1]
-      if channels_last:
-          state = obs_channels_to_first(state)
-          next_state = obs_channels_to_first(next_state)
+      obs = dataset['observations'][i]
+      next_obs = dataset['observations'][i+1]
 
       action = dataset['actions'][i]
       reward = dataset['rewards'][i]
       done = bool(dataset['terminals'][i])
       transition = Transition(
-          obs=state,
+          obs=obs,
           action=action,
           reward=reward,
-          next_obs=next_state,
+          next_obs=next_obs,
           done=done,
       )
       transition = transition.unsqueeze(0)
@@ -71,13 +67,11 @@ Example
       transition = transition.to_tensordict()
       memory.add(transition)
 
-  agent = CQN(observation_space=observation_space, action_space=action_space)   # Create DQN agent
-
-  state = env.reset()[0]  # Reset environment at start of episode
+  # Create CQN agent
+  agent = CQN(observation_space=observation_space, action_space=action_space)
   while True:
       experiences = memory.sample(agent.batch_size)   # Sample replay buffer
-      # Learn according to agent's RL algorithm
-      agent.learn(experiences)
+      agent.learn(experiences)    # Learn according to agent's RL algorithm
 
 Neural Network Configuration
 ----------------------------

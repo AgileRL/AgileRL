@@ -16,8 +16,8 @@ from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
-    assert_equal_state_dict,
     assert_not_equal_state_dict,
+    assert_state_dicts_equal,
     generate_dict_or_tuple_space,
     generate_discrete_space,
     generate_multidiscrete_space,
@@ -670,29 +670,29 @@ def test_clone_returns_identical_agent(observation_space):
     assert clone_agent.mut == td3.mut
     assert clone_agent.device == td3.device
     assert clone_agent.accelerator == td3.accelerator
-    assert_equal_state_dict(clone_agent.actor.state_dict(), td3.actor.state_dict())
-    assert_equal_state_dict(
+    assert_state_dicts_equal(clone_agent.actor.state_dict(), td3.actor.state_dict())
+    assert_state_dicts_equal(
         clone_agent.actor_target.state_dict(), td3.actor_target.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.critic_1.state_dict(), td3.critic_1.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.critic_target_1.state_dict(), td3.critic_target_1.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.critic_2.state_dict(), td3.critic_2.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.critic_target_2.state_dict(), td3.critic_target_2.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.actor_optimizer.state_dict(), td3.actor_optimizer.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.critic_1_optimizer.state_dict(), td3.critic_1_optimizer.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.critic_2_optimizer.state_dict(), td3.critic_2_optimizer.state_dict()
     )
     assert clone_agent.fitness == td3.fitness
@@ -716,29 +716,29 @@ def test_clone_returns_identical_agent(observation_space):
     assert clone_agent.mut == td3.mut
     assert clone_agent.device == td3.device
     assert clone_agent.accelerator == td3.accelerator
-    assert_equal_state_dict(clone_agent.actor.state_dict(), td3.actor.state_dict())
-    assert_equal_state_dict(
+    assert_state_dicts_equal(clone_agent.actor.state_dict(), td3.actor.state_dict())
+    assert_state_dicts_equal(
         clone_agent.actor_target.state_dict(), td3.actor_target.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.critic_1.state_dict(), td3.critic_1.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.critic_target_1.state_dict(), td3.critic_target_1.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.critic_2.state_dict(), td3.critic_2.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.critic_target_2.state_dict(), td3.critic_target_2.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.actor_optimizer.state_dict(), td3.actor_optimizer.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.critic_1_optimizer.state_dict(), td3.critic_1_optimizer.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.critic_2_optimizer.state_dict(), td3.critic_2_optimizer.state_dict()
     )
     assert clone_agent.fitness == td3.fitness
@@ -760,29 +760,29 @@ def test_clone_returns_identical_agent(observation_space):
     assert clone_agent.mut == td3.mut
     assert clone_agent.device == td3.device
     assert clone_agent.accelerator == td3.accelerator
-    assert_equal_state_dict(clone_agent.actor.state_dict(), td3.actor.state_dict())
-    assert_equal_state_dict(
+    assert_state_dicts_equal(clone_agent.actor.state_dict(), td3.actor.state_dict())
+    assert_state_dicts_equal(
         clone_agent.actor_target.state_dict(), td3.actor_target.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.critic_1.state_dict(), td3.critic_1.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.critic_target_1.state_dict(), td3.critic_target_1.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.critic_2.state_dict(), td3.critic_2.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.critic_target_2.state_dict(), td3.critic_target_2.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.actor_optimizer.state_dict(), td3.actor_optimizer.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.critic_1_optimizer.state_dict(), td3.critic_1_optimizer.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.critic_2_optimizer.state_dict(), td3.critic_2_optimizer.state_dict()
     )
     assert clone_agent.fitness == td3.fitness
@@ -826,29 +826,29 @@ def test_clone_after_learning():
     assert clone_agent.mut == td3.mut
     assert clone_agent.device == td3.device
     assert clone_agent.accelerator == td3.accelerator
-    assert_equal_state_dict(clone_agent.actor.state_dict(), td3.actor.state_dict())
-    assert_equal_state_dict(
+    assert_state_dicts_equal(clone_agent.actor.state_dict(), td3.actor.state_dict())
+    assert_state_dicts_equal(
         clone_agent.actor_target.state_dict(), td3.actor_target.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.critic_1.state_dict(), td3.critic_1.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.critic_target_1.state_dict(), td3.critic_target_1.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.critic_2.state_dict(), td3.critic_2.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.critic_target_2.state_dict(), td3.critic_target_2.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.actor_optimizer.state_dict(), td3.actor_optimizer.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.critic_1_optimizer.state_dict(), td3.critic_1_optimizer.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.critic_2_optimizer.state_dict(), td3.critic_2_optimizer.state_dict()
     )
     assert clone_agent.fitness == td3.fitness
@@ -942,9 +942,13 @@ def test_save_load_checkpoint_correct_data_and_format(
     assert isinstance(td3.critic_target_2.encoder, encoder_cls)
     assert td3.lr_actor == 1e-4
     assert td3.lr_critic == 1e-3
-    assert_equal_state_dict(td3.actor.state_dict(), td3.actor_target.state_dict())
-    assert_equal_state_dict(td3.critic_1.state_dict(), td3.critic_target_1.state_dict())
-    assert_equal_state_dict(td3.critic_2.state_dict(), td3.critic_target_2.state_dict())
+    assert_state_dicts_equal(td3.actor.state_dict(), td3.actor_target.state_dict())
+    assert_state_dicts_equal(
+        td3.critic_1.state_dict(), td3.critic_target_1.state_dict()
+    )
+    assert_state_dicts_equal(
+        td3.critic_2.state_dict(), td3.critic_target_2.state_dict()
+    )
     assert td3.batch_size == 64
     assert td3.learn_step == 5
     assert td3.gamma == 0.99
@@ -1047,9 +1051,13 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert isinstance(td3.critic_target_2, nn.Module)
     assert td3.lr_actor == 1e-4
     assert td3.lr_critic == 1e-3
-    assert_equal_state_dict(td3.actor.state_dict(), td3.actor_target.state_dict())
-    assert_equal_state_dict(td3.critic_1.state_dict(), td3.critic_target_1.state_dict())
-    assert_equal_state_dict(td3.critic_2.state_dict(), td3.critic_target_2.state_dict())
+    assert_state_dicts_equal(td3.actor.state_dict(), td3.actor_target.state_dict())
+    assert_state_dicts_equal(
+        td3.critic_1.state_dict(), td3.critic_target_1.state_dict()
+    )
+    assert_state_dicts_equal(
+        td3.critic_2.state_dict(), td3.critic_target_2.state_dict()
+    )
     assert td3.batch_size == 64
     assert td3.learn_step == 5
     assert td3.gamma == 0.99
@@ -1196,22 +1204,22 @@ def test_load_from_pretrained(observation_space, encoder_cls, accelerator, tmpdi
     assert isinstance(new_td3.critic_target_2.encoder, encoder_cls)
     assert new_td3.lr_actor == td3.lr_actor
     assert new_td3.lr_critic == td3.lr_critic
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         new_td3.actor.to("cpu").state_dict(), td3.actor.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         new_td3.actor_target.to("cpu").state_dict(), td3.actor_target.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         new_td3.critic_1.to("cpu").state_dict(), td3.critic_1.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         new_td3.critic_target_1.to("cpu").state_dict(), td3.critic_target_1.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         new_td3.critic_2.to("cpu").state_dict(), td3.critic_2.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         new_td3.critic_target_2.to("cpu").state_dict(), td3.critic_target_2.state_dict()
     )
     assert new_td3.batch_size == td3.batch_size
@@ -1276,22 +1284,22 @@ def test_load_from_pretrained_networks(
     assert isinstance(new_td3.critic_target_2, nn.Module)
     assert new_td3.lr_actor == td3.lr_actor
     assert new_td3.lr_critic == td3.lr_critic
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         new_td3.actor.to("cpu").state_dict(), td3.actor.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         new_td3.actor_target.to("cpu").state_dict(), td3.actor_target.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         new_td3.critic_1.to("cpu").state_dict(), td3.critic_1.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         new_td3.critic_target_1.to("cpu").state_dict(), td3.critic_target_1.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         new_td3.critic_2.to("cpu").state_dict(), td3.critic_2.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         new_td3.critic_target_2.to("cpu").state_dict(), td3.critic_target_2.state_dict()
     )
     assert new_td3.batch_size == td3.batch_size

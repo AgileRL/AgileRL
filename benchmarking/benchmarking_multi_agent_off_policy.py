@@ -52,9 +52,9 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Tru
 
         if INIT_HP["CHANNELS_LAST"]:
             # Environment processing for image based observations
-            # env = ss.frame_skip_v0(env, 4)
-            # env = ss.clip_reward_v0(env, lower_bound=-1, upper_bound=1)
-            # env = ss.color_reduction_v0(env, mode="B")
+            env = ss.frame_skip_v0(env, 4)
+            env = ss.clip_reward_v0(env, lower_bound=-1, upper_bound=1)
+            env = ss.color_reduction_v0(env, mode="B")
             env = ss.resize_v1(env, x_size=84, y_size=84)
             env = ss.frame_stack_v1(env, 4)
 

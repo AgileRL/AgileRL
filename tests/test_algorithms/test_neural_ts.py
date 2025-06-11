@@ -16,8 +16,8 @@ from agilerl.algorithms.neural_ts_bandit import NeuralTS
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
-    assert_equal_state_dict,
     assert_not_equal_state_dict,
+    assert_state_dicts_equal,
     generate_dict_or_tuple_space,
     generate_random_box_space,
 )
@@ -335,8 +335,8 @@ def test_clone_returns_identical_agent(observation_space):
     assert clone_agent.mut == bandit.mut
     assert clone_agent.device == bandit.device
     assert clone_agent.accelerator == bandit.accelerator
-    assert_equal_state_dict(clone_agent.actor.state_dict(), bandit.actor.state_dict())
-    assert_equal_state_dict(
+    assert_state_dicts_equal(clone_agent.actor.state_dict(), bandit.actor.state_dict())
+    assert_state_dicts_equal(
         clone_agent.optimizer.state_dict(), bandit.optimizer.state_dict()
     )
     assert clone_agent.fitness == bandit.fitness
@@ -360,8 +360,8 @@ def test_clone_returns_identical_agent(observation_space):
     assert clone_agent.mut == bandit.mut
     assert clone_agent.device == bandit.device
     assert clone_agent.accelerator == bandit.accelerator
-    assert_equal_state_dict(clone_agent.actor.state_dict(), bandit.actor.state_dict())
-    assert_equal_state_dict(
+    assert_state_dicts_equal(clone_agent.actor.state_dict(), bandit.actor.state_dict())
+    assert_state_dicts_equal(
         clone_agent.optimizer.state_dict(), bandit.optimizer.state_dict()
     )
     assert clone_agent.fitness == bandit.fitness
@@ -383,8 +383,8 @@ def test_clone_returns_identical_agent(observation_space):
     assert clone_agent.mut == bandit.mut
     assert clone_agent.device == bandit.device
     assert clone_agent.accelerator == bandit.accelerator
-    assert_equal_state_dict(clone_agent.actor.state_dict(), bandit.actor.state_dict())
-    assert_equal_state_dict(
+    assert_state_dicts_equal(clone_agent.actor.state_dict(), bandit.actor.state_dict())
+    assert_state_dicts_equal(
         clone_agent.optimizer.state_dict(), bandit.optimizer.state_dict()
     )
     assert clone_agent.fitness == bandit.fitness
@@ -417,8 +417,8 @@ def test_clone_with_make_evo(observation_space, actor_network, input_tensor, req
     assert clone_agent.mut == bandit.mut
     assert clone_agent.device == bandit.device
     assert clone_agent.accelerator == bandit.accelerator
-    assert_equal_state_dict(clone_agent.actor.state_dict(), bandit.actor.state_dict())
-    assert_equal_state_dict(
+    assert_state_dicts_equal(clone_agent.actor.state_dict(), bandit.actor.state_dict())
+    assert_state_dicts_equal(
         clone_agent.optimizer.state_dict(), bandit.optimizer.state_dict()
     )
     assert clone_agent.fitness == bandit.fitness
@@ -459,8 +459,8 @@ def test_clone_after_learning():
     assert clone_agent.mut == bandit.mut
     assert clone_agent.device == bandit.device
     assert clone_agent.accelerator == bandit.accelerator
-    assert_equal_state_dict(clone_agent.actor.state_dict(), bandit.actor.state_dict())
-    assert_equal_state_dict(
+    assert_state_dicts_equal(clone_agent.actor.state_dict(), bandit.actor.state_dict())
+    assert_state_dicts_equal(
         clone_agent.optimizer.state_dict(), bandit.optimizer.state_dict()
     )
     assert clone_agent.fitness == bandit.fitness
@@ -651,7 +651,7 @@ def test_load_from_pretrained(observation_space, encoder_cls, accelerator, tmpdi
     assert new_bandit.action_space == bandit.action_space
     assert isinstance(new_bandit.actor.encoder, encoder_cls)
     assert new_bandit.lr == bandit.lr
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         copy.deepcopy(new_bandit.actor).to("cpu").state_dict(),
         bandit.actor.state_dict(),
     )
@@ -712,7 +712,7 @@ def test_load_from_pretrained_networks(
     assert new_bandit.action_space == bandit.action_space
     assert isinstance(new_bandit.actor, nn.Module)
     assert new_bandit.lr == bandit.lr
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         new_bandit.actor.to("cpu").state_dict(), bandit.actor.state_dict()
     )
     assert new_bandit.batch_size == bandit.batch_size

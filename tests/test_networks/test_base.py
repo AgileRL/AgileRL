@@ -10,7 +10,8 @@ from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.networks.base import EvolvableNetwork
 from tests.helper_functions import (
     assert_close_dict,
-    check_equal_params_ind,
+    assert_not_equal_state_dict,
+    assert_state_dicts_equal,
     generate_dict_or_tuple_space,
     generate_discrete_space,
     generate_random_box_space,
@@ -150,7 +151,7 @@ def test_network_mutation_methods(observation_space):
 
             assert mutated_attr == exec_method
 
-        check_equal_params_ind(network, new_network)
+        assert_not_equal_state_dict(network.state_dict(), new_network.state_dict())
 
 
 @pytest.mark.parametrize(
@@ -210,6 +211,6 @@ def test_network_clone(observation_space: spaces.Space):
 
     assert_close_dict(network.init_dict, clone.init_dict)
 
-    assert str(clone.state_dict()) == str(network.state_dict())
+    assert_state_dicts_equal(clone.state_dict(), network.state_dict())
     for key, param in clone.named_parameters():
         torch.testing.assert_close(param, original_net_dict[key])

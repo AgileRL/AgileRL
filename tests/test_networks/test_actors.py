@@ -1,3 +1,5 @@
+from dataclasses import asdict
+
 import numpy as np
 import pytest
 import torch
@@ -12,15 +14,22 @@ from agilerl.modules import (
     EvolvableMultiInput,
     EvolvableSimBa,
 )
+from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import DeterministicActor, StochasticActor
 from agilerl.networks.base import EvolvableNetwork
 from tests.helper_functions import (
     assert_close_dict,
-    check_equal_params_ind,
+    assert_not_equal_state_dict,
+    assert_state_dicts_equal,
     generate_dict_or_tuple_space,
     generate_discrete_space,
     generate_random_box_space,
 )
+
+
+@pytest.fixture
+def head_config():
+    return asdict(MlpNetConfig(hidden_size=[64, 64]))
 
 
 @pytest.mark.parametrize("action_space", [generate_random_box_space((4,))])
@@ -88,8 +97,12 @@ def test_deterministic_actor_initialization_simba():
         generate_random_box_space((3, 32, 32)),
     ],
 )
-def test_deterministic_actor_mutation_methods(observation_space, action_space):
-    network = DeterministicActor(observation_space, action_space)
+def test_deterministic_actor_mutation_methods(
+    observation_space, action_space, head_config
+):
+    network = DeterministicActor(
+        observation_space, action_space, head_config=head_config
+    )
 
     for method in network.mutation_methods:
         new_network = network.clone()
@@ -107,7 +120,7 @@ def test_deterministic_actor_mutation_methods(observation_space, action_space):
 
             assert mutated_attr == exec_method
 
-        check_equal_params_ind(network, new_network)
+        assert_not_equal_state_dict(network.state_dict(), new_network.state_dict())
 
 
 @pytest.mark.parametrize("action_space", [generate_random_box_space((4,))])
@@ -175,7 +188,7 @@ def test_deterministic_actor_clone(
 
     assert_close_dict(network.init_dict, clone.init_dict)
 
-    assert str(clone.state_dict()) == str(network.state_dict())
+    assert_state_dicts_equal(clone.state_dict(), network.state_dict())
     for key, param in clone.named_parameters():
         torch.testing.assert_close(param, original_net_dict[key])
 
@@ -367,8 +380,10 @@ def test_stochastic_actor_initialization_simba():
         generate_random_box_space((3, 32, 32)),
     ],
 )
-def test_stochastic_actor_mutation_methods(observation_space, action_space):
-    network = StochasticActor(observation_space, action_space)
+def test_stochastic_actor_mutation_methods(
+    observation_space, action_space, head_config
+):
+    network = StochasticActor(observation_space, action_space, head_config=head_config)
 
     for method in network.mutation_methods:
         new_network = network.clone()
@@ -387,7 +402,9 @@ def test_stochastic_actor_mutation_methods(observation_space, action_space):
 
             assert mutated_attr == exec_method
 
-        check_equal_params_ind(network, new_network)
+        print("Method: ", method)
+        print("Applied: ", new_network.last_mutation_attr)
+        assert_not_equal_state_dict(network.state_dict(), new_network.state_dict())
 
 
 @pytest.mark.parametrize(

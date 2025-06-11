@@ -121,8 +121,8 @@ buffer, call ``ReplayBuffer.sample()``.
 
 .. _trainloop_off_policy:
 
-Off-Policy Training Loop
-------------------------
+Training Loop
+-------------
 
 Now it is time to insert the evolutionary HPO components into our training loop. If you are using a Gym-style environment, it is
 easiest to use our training function, which returns a population of trained agents and logged training metrics.

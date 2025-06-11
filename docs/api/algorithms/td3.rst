@@ -37,31 +37,26 @@ Example
   # Create environment and Experience Replay Buffer
   num_envs = 1
   env = make_vect_envs('LunarLanderContinuous-v3', num_envs=num_envs)
-  observation_space = env.observation_space
-  action_space = env.action_space
-
-  channels_last = False # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-
-  if channels_last:
-      observation_space = observation_space_channels_first(observation_space)
+  observation_space = env.single_observation_space
+  action_space = env.single_action_space
 
   memory = ReplayBuffer(max_size=10000)
 
-  agent = TD3(observation_space, action_space)   # Create TD3 agent
+  # Create TD3 agent
+  agent = TD3(observation_space, action_space)
+  agent.set_training_mode(True)
 
-  state = env.reset()[0]  # Reset environment at start of episode
+  obs, info = env.reset()  # Reset environment at start of episode
   while True:
-      if channels_last:
-          state = obs_channels_to_first(state)
-      action = agent.get_action(state, training=True)    # Get next action from agent
-      next_state, reward, done, _, _ = env.step(action)   # Act in environment
+      action = agent.get_action(obs)    # Get next action from agent
+      next_obs, reward, done, _, _ = env.step(action)   # Act in environment
 
       # Save experience to replay buffer
       transition = Transition(
-          obs=state,
+          obs=obs,
           action=action,
           reward=reward,
-          next_obs=next_state,
+          next_obs=next_obs,
           done=done,
           batch_size=[num_envs]
       )

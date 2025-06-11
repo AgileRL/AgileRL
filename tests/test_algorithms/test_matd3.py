@@ -24,6 +24,7 @@ from agilerl.utils.evolvable_networks import get_default_encoder_config
 from agilerl.utils.utils import make_multi_agent_vect_envs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
+    assert_not_equal_state_dict,
     assert_state_dicts_equal,
     gen_multi_agent_dict_or_tuple_spaces,
     generate_multi_agent_box_spaces,
@@ -1112,7 +1113,7 @@ def test_matd3_learns_from_experiences(
 
     for agent_id, old_actor_state_dict in actors_pre_learn_sd.items():
         updated_actor = matd3.actors[agent_id]
-        assert_state_dicts_equal(old_actor_state_dict, updated_actor.state_dict())
+        assert_not_equal_state_dict(old_actor_state_dict, updated_actor.state_dict())
 
     for agent_id, old_critic_target in matd3.critic_targets_1.items():
         updated_critic_target = matd3.critic_targets_1[agent_id]
@@ -1120,7 +1121,7 @@ def test_matd3_learns_from_experiences(
 
     for agent_id, old_critic_state_dict in critics_1_pre_learn_sd.items():
         updated_critic = matd3.critics_1[agent_id]
-        assert_state_dicts_equal(old_critic_state_dict, updated_critic.state_dict())
+        assert_not_equal_state_dict(old_critic_state_dict, updated_critic.state_dict())
 
     for agent_id, old_critic_target in matd3.critic_targets_2.items():
         updated_critic_target = matd3.critic_targets_2[agent_id]
@@ -1128,7 +1129,7 @@ def test_matd3_learns_from_experiences(
 
     for agent_id, old_critic_state_dict in critics_2_pre_learn_sd.items():
         updated_critic = matd3.critics_2[agent_id]
-        assert_state_dicts_equal(old_critic_state_dict, updated_critic.state_dict())
+        assert_not_equal_state_dict(old_critic_state_dict, updated_critic.state_dict())
 
 
 def no_sync(self):
@@ -1218,15 +1219,15 @@ def test_matd3_learns_from_experiences_distributed(
 
     for agent_id, old_actor_sd in actors_pre_learn_sd.items():
         updated_actor = matd3.actors[agent_id]
-        assert_state_dicts_equal(old_actor_sd, updated_actor.state_dict())
+        assert_not_equal_state_dict(old_actor_sd, updated_actor.state_dict())
 
     for agent_id, old_critic_1_sd in critics_1_pre_learn_sd.items():
         updated_critic_1 = matd3.critics_1[agent_id]
-        assert_state_dicts_equal(old_critic_1_sd, updated_critic_1.state_dict())
+        assert_not_equal_state_dict(old_critic_1_sd, updated_critic_1.state_dict())
 
     for agent_id, old_critic_2_sd in critics_2_pre_learn_sd.items():
         updated_critic_2 = matd3.critics_2[agent_id]
-        assert_state_dicts_equal(old_critic_2_sd, updated_critic_2.state_dict())
+        assert_not_equal_state_dict(old_critic_2_sd, updated_critic_2.state_dict())
 
     for agent_id, old_actor_target in matd3.actor_targets.items():
         updated_actor_target = matd3.actor_targets[agent_id]

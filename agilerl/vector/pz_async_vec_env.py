@@ -81,8 +81,8 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
     :type env_fns: list[Callable]
     :param copy: Boolean flag to copy the observation data when it is returned with either .step() or .reset(), recommended, defaults to True
     :type copy: bool, optional
-    :param context: Context for multiprocessing
-
+    :param context: Context for multiprocessing. Choose between "spawn", "fork", or "forkserver".
+    :type context: str, optional
     """
 
     processes: List[mp.Process]

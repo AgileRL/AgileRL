@@ -83,3 +83,38 @@ Tournament selection and mutations are applied sequentially to fully evolve a po
 
 Network Architecture Mutations
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Overview
+^^^^^^^^
+
+In machine learning it is often difficult to identify the optimal architecture of a neural network and the capacity required for a given task. In RL,
+this is particularly challenging due to the large number of transitions required to learn a policy. We address this by introducing a framework for performing
+architecture mutations through the :class:`EvolvableModule <agilerl.modules.base.EvolvableModule>` abstraction (see :ref:`here <evolvable_networks>`). Specifically,
+it allows us to seamlessly track and apply architecture mutations for networks with nested evolvable modules (see below the simplest example of an evolvable
+multi-layer perceptron). This is particularly useful for RL algorithms, where we define default architectures suitable for a variety of tasks (i.e. combinations of
+observation and action spaces), which require very different network architectures.
+
+.. collapse:: EvolvableMLP
+
+    .. literalinclude:: ../../agilerl/modules/mlp.py
+        :language: python
+
+For the above reason, we define the :class:`EvolvableNetwork <agilerl.modules.base.EvolvableNetwork>` base class, which inherits from :class:`EvolvableModule <agilerl.modules.base.EvolvableModule>`.
+This abstraction allows us to define common networks used in RL algorithms very simply, since it automatically creates an appropriate encoder for the passed observation space. After,
+we just create a head to the the network that processes the encoded observations into an appropriate number of outputs (for e.g. policies or critics).
+
+
+Single-Agent
+^^^^^^^^^^^^
+
+Multi-Agent
+^^^^^^^^^^^
+
+
+.. note::
+    AgileRL currently doesn't support architecture mutations for :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` objects.
+
+
+
+RL Hyperparameter Mutations
+~~~~~~~~~~~~~~~~~~~~~~~~~~~

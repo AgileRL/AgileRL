@@ -258,7 +258,7 @@ class MADDPG(MultiAgentRLAlgorithm):
             )
 
             # Iterate over actor configs and modify accordingly
-            for agent_id, space in self.action_space.items():
+            for agent_id, space in self.possible_action_spaces.items():
                 agent_config = agent_configs[agent_id]
                 head_config = agent_config.get("head_config", None)
 
@@ -447,7 +447,7 @@ class MADDPG(MultiAgentRLAlgorithm):
 
             # Need to rescale actions outside of forward pass if using torch.compile
             if self.torch_compiler is not None and isinstance(
-                self.action_space[agent_id], spaces.Box
+                self.possible_action_spaces[agent_id], spaces.Box
             ):
                 actions = DeterministicActor.rescale_action(
                     action=actions,
@@ -458,7 +458,7 @@ class MADDPG(MultiAgentRLAlgorithm):
 
             actor.train()
             if self.training:
-                if isinstance(self.action_space[agent_id], spaces.Discrete):
+                if isinstance(self.possible_action_spaces[agent_id], spaces.Discrete):
                     min_action, max_action = 0, 1
                 else:
                     min_action, max_action = (
@@ -477,7 +477,7 @@ class MADDPG(MultiAgentRLAlgorithm):
 
         # Process agents with discrete actions
         processed_action_dict: ArrayDict = OrderedDict()
-        for agent_id, space in self.action_space.items():
+        for agent_id, space in self.possible_action_spaces.items():
             if isinstance(space, spaces.Discrete):
                 action = action_dict[agent_id]
                 mask = (

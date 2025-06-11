@@ -203,7 +203,11 @@ class EvolvableMLP(EvolvableModule):
     @mutation(MutationType.LAYER)
     def add_layer(self) -> Optional[Dict[str, int]]:
         """Adds a hidden layer to neural network. Falls back on ``add_node()`` if
-        max hidden layers reached."""
+        max hidden layers reached.
+
+        :return: Dictionary containing the hidden layer and number of new nodes.
+        :rtype: Dict[str, int]
+        """
         # add layer to hyper params
         if len(self.hidden_size) < self.max_hidden_layers:  # HARD LIMIT
             self.hidden_size += [self.hidden_size[-1]]
@@ -212,8 +216,11 @@ class EvolvableMLP(EvolvableModule):
 
     @mutation(MutationType.LAYER)
     def remove_layer(self) -> Optional[Dict[str, int]]:
-        """Removes a hidden layer from neural network. Falls back on ``add_node()`` if
-        min hidden layers reached."""
+        """Removes a hidden layer from neural network. Falls back on ``add_node()`` if min hidden layers reached.
+
+        :return: Dictionary containing the hidden layer and number of new nodes.
+        :rtype: Dict[str, int]
+        """
         if len(self.hidden_size) > self.min_hidden_layers:  # HARD LIMIT
             self.hidden_size = self.hidden_size[:-1]
         else:

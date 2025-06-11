@@ -87,8 +87,8 @@ are more likely to remain present in the population. The sequence of evolution (
             device=device,
         )
 
-On-Policy Training Loop
------------------------
+Training Loop
+-------------
 
 While off-policy RL algorithms can be considered more sample-efficient than on-policy algorithms, due to their ability to learn from experiences
 collected using a different or previous policy, on-policy algorithms often do better in practice due to the improved stability during training.

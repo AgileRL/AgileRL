@@ -257,7 +257,7 @@ def train_multi_agent_on_policy(
                             if agent_id in agent.actors.keys()
                             else agent.get_group_id(agent_id)
                         )
-                        agent_space = agent.action_space[agent_id]
+                        agent_space = agent.possible_action_spaces[agent_id]
                         if isinstance(agent_space, spaces.Box):
                             if agent.actors[network_id].squash_output:
                                 clipped_agent_action = agent.actors[

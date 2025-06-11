@@ -15,8 +15,8 @@ from agilerl.algorithms.ppo import PPO
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
-    assert_equal_state_dict,
     assert_not_equal_state_dict,
+    assert_state_dicts_equal,
     generate_dict_or_tuple_space,
     generate_discrete_space,
     generate_multidiscrete_space,
@@ -565,9 +565,9 @@ def test_clone_returns_identical_agent(observation_space):
     assert clone_agent.update_epochs == ppo.update_epochs
     assert clone_agent.device == ppo.device
     assert clone_agent.accelerator == ppo.accelerator
-    assert_equal_state_dict(clone_agent.actor.state_dict(), ppo.actor.state_dict())
-    assert_equal_state_dict(clone_agent.critic.state_dict(), ppo.critic.state_dict())
-    assert_equal_state_dict(
+    assert_state_dicts_equal(clone_agent.actor.state_dict(), ppo.actor.state_dict())
+    assert_state_dicts_equal(clone_agent.critic.state_dict(), ppo.critic.state_dict())
+    assert_state_dicts_equal(
         clone_agent.optimizer.state_dict(), ppo.optimizer.state_dict()
     )
     assert clone_agent.fitness == ppo.fitness
@@ -596,9 +596,9 @@ def test_clone_returns_identical_agent(observation_space):
     assert clone_agent.update_epochs == ppo.update_epochs
     assert clone_agent.device == ppo.device
     assert clone_agent.accelerator == ppo.accelerator
-    assert_equal_state_dict(clone_agent.actor.state_dict(), ppo.actor.state_dict())
-    assert_equal_state_dict(clone_agent.critic.state_dict(), ppo.critic.state_dict())
-    assert_equal_state_dict(
+    assert_state_dicts_equal(clone_agent.actor.state_dict(), ppo.actor.state_dict())
+    assert_state_dicts_equal(clone_agent.critic.state_dict(), ppo.critic.state_dict())
+    assert_state_dicts_equal(
         clone_agent.optimizer.state_dict(), ppo.optimizer.state_dict()
     )
     assert clone_agent.fitness == ppo.fitness
@@ -630,9 +630,9 @@ def test_clone_returns_identical_agent(observation_space):
     assert clone_agent.update_epochs == ppo.update_epochs
     assert clone_agent.device == ppo.device
     assert clone_agent.accelerator == ppo.accelerator
-    assert_equal_state_dict(clone_agent.actor.state_dict(), ppo.actor.state_dict())
-    assert_equal_state_dict(clone_agent.critic.state_dict(), ppo.critic.state_dict())
-    assert_equal_state_dict(
+    assert_state_dicts_equal(clone_agent.actor.state_dict(), ppo.actor.state_dict())
+    assert_state_dicts_equal(clone_agent.critic.state_dict(), ppo.critic.state_dict())
+    assert_state_dicts_equal(
         clone_agent.optimizer.state_dict(), ppo.optimizer.state_dict()
     )
     assert clone_agent.fitness == ppo.fitness
@@ -693,9 +693,9 @@ def test_clone_after_learning():
     assert clone_agent.update_epochs == ppo.update_epochs
     assert clone_agent.device == ppo.device
     assert clone_agent.accelerator == ppo.accelerator
-    assert_equal_state_dict(clone_agent.actor.state_dict(), ppo.actor.state_dict())
-    assert_equal_state_dict(clone_agent.critic.state_dict(), ppo.critic.state_dict())
-    assert_equal_state_dict(
+    assert_state_dicts_equal(clone_agent.actor.state_dict(), ppo.actor.state_dict())
+    assert_state_dicts_equal(clone_agent.critic.state_dict(), ppo.critic.state_dict())
+    assert_state_dicts_equal(
         clone_agent.optimizer.state_dict(), ppo.optimizer.state_dict()
     )
     assert clone_agent.fitness == ppo.fitness
@@ -905,8 +905,8 @@ def test_load_from_pretrained(observation_space, encoder_cls, accelerator, tmpdi
     assert isinstance(new_ppo.actor.encoder, encoder_cls)
     assert isinstance(new_ppo.critic.encoder, encoder_cls)
     assert new_ppo.lr == ppo.lr
-    assert_equal_state_dict(new_ppo.actor.state_dict(), ppo.actor.state_dict())
-    assert_equal_state_dict(new_ppo.critic.state_dict(), ppo.critic.state_dict())
+    assert_state_dicts_equal(new_ppo.actor.state_dict(), ppo.actor.state_dict())
+    assert_state_dicts_equal(new_ppo.critic.state_dict(), ppo.critic.state_dict())
     assert new_ppo.batch_size == ppo.batch_size
     assert new_ppo.gamma == ppo.gamma
     assert new_ppo.mut == ppo.mut
@@ -961,10 +961,10 @@ def test_load_from_pretrained_networks(
     assert isinstance(new_ppo.actor, nn.Module)
     assert isinstance(new_ppo.critic, nn.Module)
     assert new_ppo.lr == ppo.lr
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         new_ppo.actor.to("cpu").state_dict(), ppo.actor.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         new_ppo.critic.to("cpu").state_dict(), ppo.critic.state_dict()
     )
     assert new_ppo.batch_size == ppo.batch_size

@@ -290,7 +290,7 @@ class MATD3(MultiAgentRLAlgorithm):
             )
 
             # Iterate over actor configs and modify accordingly
-            for agent_id, space in self.action_space.items():
+            for agent_id, space in self.possible_action_spaces.items():
                 agent_config = agent_configs[agent_id]
                 head_config = agent_config.get("head_config", None)
 
@@ -342,8 +342,8 @@ class MATD3(MultiAgentRLAlgorithm):
 
             def create_actor(agent_id):
                 return DeterministicActor(
-                    self.observation_space[agent_id],
-                    self.action_space[agent_id],
+                    self.possible_observation_spaces[agent_id],
+                    self.possible_action_spaces[agent_id],
                     device=self.device,
                     clip_actions=clip_actions,
                     **copy.deepcopy(agent_configs[agent_id]),
@@ -352,7 +352,7 @@ class MATD3(MultiAgentRLAlgorithm):
             # Critic uses observations + actions of all agents to predict Q-value
             def create_critic():
                 return ContinuousQNetwork(
-                    observation_space=self.observation_space,
+                    observation_space=self.possible_observation_spaces,
                     action_space=concatenate_spaces(self.action_spaces),
                     device=self.device,
                     **copy.deepcopy(critic_net_config),
@@ -504,7 +504,7 @@ class MATD3(MultiAgentRLAlgorithm):
 
             # Need to rescale actions outside of forward pass if using torch.compile
             if self.torch_compiler is not None and isinstance(
-                self.action_space[agent_id], spaces.Box
+                self.possible_action_spaces[agent_id], spaces.Box
             ):
                 actions = DeterministicActor.rescale_action(
                     action=actions,
@@ -515,7 +515,7 @@ class MATD3(MultiAgentRLAlgorithm):
 
             actor.train()
             if self.training:
-                if isinstance(self.action_space[agent_id], spaces.Discrete):
+                if isinstance(self.possible_action_spaces[agent_id], spaces.Discrete):
                     min_action, max_action = 0, 1
                 else:
                     min_action, max_action = (
@@ -534,7 +534,7 @@ class MATD3(MultiAgentRLAlgorithm):
 
         # Process agents with discrete actions
         processed_action_dict: ArrayDict = OrderedDict()
-        for agent_id, action_space in self.action_space.items():
+        for agent_id, action_space in self.possible_action_spaces.items():
             if isinstance(action_space, spaces.Discrete):
                 action = action_dict[agent_id]
                 mask = (

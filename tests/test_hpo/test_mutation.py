@@ -1053,7 +1053,7 @@ def test_mutation_applies_random_mutations_multi_agent(
         if policy.last_mutation_attr is not None:
             sampled_mutation = ".".join(policy.last_mutation_attr.split(".")[1:])
         else:
-            sampled_mutation = "None"
+            sampled_mutation = None
 
         assert individual.mut in [
             "None",

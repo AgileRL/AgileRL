@@ -17,8 +17,8 @@ from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
-    assert_equal_state_dict,
     assert_not_equal_state_dict,
+    assert_state_dicts_equal,
     generate_dict_or_tuple_space,
     generate_discrete_space,
     generate_multidiscrete_space,
@@ -565,18 +565,18 @@ def test_clone_returns_identical_agent(observation_space):
     assert clone_agent.mut == ddpg.mut
     assert clone_agent.device == ddpg.device
     assert clone_agent.accelerator == ddpg.accelerator
-    assert_equal_state_dict(clone_agent.actor.state_dict(), ddpg.actor.state_dict())
-    assert_equal_state_dict(
+    assert_state_dicts_equal(clone_agent.actor.state_dict(), ddpg.actor.state_dict())
+    assert_state_dicts_equal(
         clone_agent.actor_target.state_dict(), ddpg.actor_target.state_dict()
     )
-    assert_equal_state_dict(clone_agent.critic.state_dict(), ddpg.critic.state_dict())
-    assert_equal_state_dict(
+    assert_state_dicts_equal(clone_agent.critic.state_dict(), ddpg.critic.state_dict())
+    assert_state_dicts_equal(
         clone_agent.critic_target.state_dict(), ddpg.critic_target.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.actor_optimizer.state_dict(), ddpg.actor_optimizer.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.critic_optimizer.state_dict(), ddpg.critic_optimizer.state_dict()
     )
     assert clone_agent.fitness == ddpg.fitness
@@ -632,18 +632,18 @@ def test_clone_returns_identical_agent(observation_space):
     assert clone_agent.mut == ddpg.mut
     assert clone_agent.device == ddpg.device
     assert clone_agent.accelerator == ddpg.accelerator
-    assert_equal_state_dict(clone_agent.actor.state_dict(), ddpg.actor.state_dict())
-    assert_equal_state_dict(
+    assert_state_dicts_equal(clone_agent.actor.state_dict(), ddpg.actor.state_dict())
+    assert_state_dicts_equal(
         clone_agent.actor_target.state_dict(), ddpg.actor_target.state_dict()
     )
-    assert_equal_state_dict(clone_agent.critic.state_dict(), ddpg.critic.state_dict())
-    assert_equal_state_dict(
+    assert_state_dicts_equal(clone_agent.critic.state_dict(), ddpg.critic.state_dict())
+    assert_state_dicts_equal(
         clone_agent.critic_target.state_dict(), ddpg.critic_target.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.actor_optimizer.state_dict(), ddpg.actor_optimizer.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.critic_optimizer.state_dict(), ddpg.critic_optimizer.state_dict()
     )
     assert clone_agent.fitness == ddpg.fitness
@@ -684,18 +684,18 @@ def test_clone_after_learning():
     assert clone_agent.mut == ddpg.mut
     assert clone_agent.device == ddpg.device
     assert clone_agent.accelerator == ddpg.accelerator
-    assert_equal_state_dict(clone_agent.actor.state_dict(), ddpg.actor.state_dict())
-    assert_equal_state_dict(
+    assert_state_dicts_equal(clone_agent.actor.state_dict(), ddpg.actor.state_dict())
+    assert_state_dicts_equal(
         clone_agent.actor_target.state_dict(), ddpg.actor_target.state_dict()
     )
-    assert_equal_state_dict(clone_agent.critic.state_dict(), ddpg.critic.state_dict())
-    assert_equal_state_dict(
+    assert_state_dicts_equal(clone_agent.critic.state_dict(), ddpg.critic.state_dict())
+    assert_state_dicts_equal(
         clone_agent.critic_target.state_dict(), ddpg.critic_target.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.actor_optimizer.state_dict(), ddpg.actor_optimizer.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         clone_agent.critic_optimizer.state_dict(), ddpg.critic_optimizer.state_dict()
     )
     assert clone_agent.fitness == ddpg.fitness
@@ -779,8 +779,8 @@ def test_save_load_checkpoint_correct_data_and_format(
     assert isinstance(ddpg.critic_target.encoder, encoder_cls)
     assert ddpg.lr_actor == 1e-4
     assert ddpg.lr_critic == 1e-3
-    assert_equal_state_dict(ddpg.actor.state_dict(), ddpg.actor_target.state_dict())
-    assert_equal_state_dict(ddpg.critic.state_dict(), ddpg.critic_target.state_dict())
+    assert_state_dicts_equal(ddpg.actor.state_dict(), ddpg.actor_target.state_dict())
+    assert_state_dicts_equal(ddpg.critic.state_dict(), ddpg.critic_target.state_dict())
     assert ddpg.batch_size == 64
     assert ddpg.learn_step == 5
     assert ddpg.gamma == 0.99
@@ -869,8 +869,8 @@ def test_save_load_checkpoint_correct_data_and_format_make_evo_cnn(
     assert isinstance(ddpg.critic_target, nn.Module)
     assert ddpg.lr_actor == 1e-4
     assert ddpg.lr_critic == 1e-3
-    assert_equal_state_dict(ddpg.actor.state_dict(), ddpg.actor_target.state_dict())
-    assert_equal_state_dict(ddpg.critic.state_dict(), ddpg.critic_target.state_dict())
+    assert_state_dicts_equal(ddpg.actor.state_dict(), ddpg.actor_target.state_dict())
+    assert_state_dicts_equal(ddpg.critic.state_dict(), ddpg.critic_target.state_dict())
     assert ddpg.batch_size == 64
     assert ddpg.learn_step == 5
     assert ddpg.gamma == 0.99
@@ -960,16 +960,16 @@ def test_load_from_pretrained(observation_space, encoder_cls, accelerator, tmpdi
     assert isinstance(new_ddpg.critic_target.encoder, encoder_cls)
     assert new_ddpg.lr_actor == ddpg.lr_actor
     assert new_ddpg.lr_critic == ddpg.lr_critic
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         new_ddpg.actor.to("cpu").state_dict(), ddpg.actor.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         new_ddpg.actor_target.to("cpu").state_dict(), ddpg.actor_target.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         new_ddpg.critic.to("cpu").state_dict(), ddpg.critic.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         new_ddpg.critic_target.to("cpu").state_dict(), ddpg.critic_target.state_dict()
     )
     assert new_ddpg.batch_size == ddpg.batch_size
@@ -1024,16 +1024,16 @@ def test_load_from_pretrained_networks(
     assert isinstance(new_ddpg.critic_target, nn.Module)
     assert new_ddpg.lr_actor == ddpg.lr_actor
     assert new_ddpg.lr_critic == ddpg.lr_critic
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         new_ddpg.actor.to("cpu").state_dict(), ddpg.actor.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         new_ddpg.actor_target.to("cpu").state_dict(), ddpg.actor_target.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         new_ddpg.critic.to("cpu").state_dict(), ddpg.critic.state_dict()
     )
-    assert_equal_state_dict(
+    assert_state_dicts_equal(
         new_ddpg.critic_target.to("cpu").state_dict(), ddpg.critic_target.state_dict()
     )
     assert new_ddpg.batch_size == ddpg.batch_size

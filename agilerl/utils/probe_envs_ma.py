@@ -1835,10 +1835,9 @@ def check_on_policy_learning_with_probe_env(
         #     print("Loss = ", _loss)
 
     with torch.no_grad():
-        for agent_id in agent.agent_ids:
-            group_id = agent.get_group_id(agent_id)
-            actor = agent.actors[group_id]
-            critic = agent.critics[group_id]
+        for agent_id in agent.observation_space.keys():
+            actor = agent.actors[agent_id]
+            critic = agent.critics[agent_id]
             for sample_obs, v_values, policy_values in zip(
                 env.sample_obs, env.v_values, env.policy_values
             ):

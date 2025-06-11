@@ -15,16 +15,15 @@ and is registered through a :class:`NetworkGroup <agilerl.algorithms.core.regist
 **evaluation** network (i.e. a network that is optimized during training e.g. the Q-network in DQN) and, optionally, "shared" networks that share
 parameters with the evaluation network in the group but aren't optimized during training directly (e.g. the target network in DQN). An RL algorithm
 must also contain one :class:`NetworkGroup <agilerl.algorithms.core.registry.NetworkGroup>` corresponding to the policy (i.e. the network used to
-select actions), signalled by the ``policy`` attribute in the group.
+select actions), signalled by setting ``policy=True`` in the :class:`NetworkGroup <agilerl.algorithms.core.registry.NetworkGroup>` object.
 
-Example
-~~~~~~~
+PPO Example
+~~~~~~~~~~~
 
 In PPO, we would need to define two network groups, since there are two different networks that are optimized during training. The first network group
-corresponds to the actor network and the second to the critic network. The actor network is responsible for selecting actions, and should therefore be signalled
-as the policy through the ``policy`` argument of :class:`NetworkGroup <agilerl.algorithms.core.registry.NetworkGroup>`. In this case, there are no networks that
-share parameters with the actor or the critic so we can bypass the ``shared`` argument. We can register these groups as follows through the ``register_network_group``
-method of the algorithm:
+corresponds to the actor network and the second to the critic network. The actor network is responsible for selecting actions, and is therefore signalled
+as the policy. In this case, there are no networks that share parameters with the actor or the critic so we can bypass the ``shared`` argument. We can
+register these groups as follows through the ``register_network_group`` method of the algorithm:
 
 .. code-block:: python
 

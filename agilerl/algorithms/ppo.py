@@ -362,19 +362,26 @@ class PPO(RLAlgorithm):
     def learn(self, experiences: ExperiencesType) -> float:
         """Updates agent network parameters to learn from experiences.
 
-        :param experience: List of batched states, actions, log_probs, rewards, dones, values, next_state, next_done in that order.
+        :param experience: List of batched observations, actions, log_probs, rewards, dones, values, next_obs, next_done in that order.
         :type experience: Tuple[Union[numpy.ndarray, Dict[str, numpy.ndarray]], ...]
         """
-        (states, actions, log_probs, rewards, dones, values, next_state, next_done) = (
-            stack_experiences(*experiences)
-        )
+        (
+            observations,
+            actions,
+            log_probs,
+            rewards,
+            dones,
+            values,
+            next_obs,
+            next_done,
+        ) = stack_experiences(*experiences)
 
         # Bootstrapping returns using GAE advantage estimation
         dones = dones.long()
         with torch.no_grad():
             num_steps = rewards.size(0)
-            next_state = self.preprocess_observation(next_state)
-            next_value = self.critic(next_state).reshape(1, -1).cpu()
+            next_obs = self.preprocess_observation(next_obs)
+            next_value = self.critic(next_obs).reshape(1, -1).cpu()
             advantages = torch.zeros_like(rewards).float()
             last_gae_lambda = 0
             for t in reversed(range(num_steps)):
@@ -400,7 +407,7 @@ class PPO(RLAlgorithm):
 
         # Flatten experiences from (batch_size, num_envs, ...) to (batch_size*num_envs, ...)
         # after checking if experiences are vectorized
-        experiences = (states, actions, log_probs, advantages, returns, values)
+        experiences = (observations, actions, log_probs, advantages, returns, values)
         if is_vectorized_experiences(*experiences):
             experiences = flatten_experiences(*experiences)
 
@@ -416,7 +423,7 @@ class PPO(RLAlgorithm):
             for start in range(0, num_samples, self.batch_size):
                 minibatch_idxs = batch_idxs[start : start + self.batch_size]
                 (
-                    batch_states,
+                    batch_observations,
                     batch_actions,
                     batch_log_probs,
                     batch_advantages,
@@ -432,7 +439,7 @@ class PPO(RLAlgorithm):
 
                 if len(minibatch_idxs) > 1:
                     log_prob, entropy, value = self.evaluate_actions(
-                        obs=batch_states, actions=batch_actions
+                        obs=batch_observations, actions=batch_actions
                     )
 
                     logratio = log_prob - batch_log_probs
