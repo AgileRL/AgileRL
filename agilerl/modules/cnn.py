@@ -166,7 +166,23 @@ class MutableKernelSizes:
             max_kernels = self.calc_max_kernel_sizes(
                 channel_size, stride_size, input_shape
             )
-            new_kernel_size = self.rng.integers(1, max_kernels[hidden_layer] + 1)
+
+            # Get current kernel size to avoid generating the same value
+            current_kernel_size = self.sizes[hidden_layer]
+            if self.tuple_sizes:
+                current_kernel_size = current_kernel_size[-1]
+
+            max_kernel = max_kernels[hidden_layer]
+            if max_kernel == 1:
+                new_kernel_size = 1
+            else:
+                candidates = [
+                    k for k in range(1, max_kernel + 1) if k != current_kernel_size
+                ]
+                if candidates:
+                    new_kernel_size = self.rng.choice(candidates)
+                else:
+                    new_kernel_size = self.rng.integers(1, max_kernel + 1)
 
         if self.tuple_sizes:
             if self.cnn_block_type == "Conv2d":
@@ -242,7 +258,7 @@ class EvolvableCNN(EvolvableModule):
         output_activation: Optional[str] = None,
         min_hidden_layers: int = 1,
         max_hidden_layers: int = 6,
-        min_channel_size: int = 32,
+        min_channel_size: int = 16,
         max_channel_size: int = 256,
         layer_norm: bool = False,
         init_layers: bool = True,

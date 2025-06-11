@@ -67,7 +67,7 @@ class EvolvableMLP(EvolvableModule):
         output_activation: str = None,
         min_hidden_layers: int = 1,
         max_hidden_layers: int = 3,
-        min_mlp_nodes: int = 64,
+        min_mlp_nodes: int = 32,
         max_mlp_nodes: int = 500,
         layer_norm: bool = True,
         output_layernorm: bool = False,
@@ -221,6 +221,8 @@ class EvolvableMLP(EvolvableModule):
         :return: Dictionary containing the hidden layer and number of new nodes.
         :rtype: Dict[str, int]
         """
+        print("HEREEE")
+        print(self.hidden_size, self.min_hidden_layers)
         if len(self.hidden_size) > self.min_hidden_layers:  # HARD LIMIT
             self.hidden_size = self.hidden_size[:-1]
         else:

@@ -143,7 +143,7 @@ class CnnNetConfig(NetConfig):
     block_type: Literal["Conv2d", "Conv3d"] = field(default="Conv2d")
     min_hidden_layers: int = field(default=1)
     max_hidden_layers: int = field(default=6)
-    min_channel_size: int = field(default=32)
+    min_channel_size: int = field(default=16)
     max_channel_size: int = field(default=256)
     layer_norm: bool = field(default=False)
     init_layers: bool = field(default=True)
@@ -188,7 +188,7 @@ class MultiInputNetConfig(NetConfig):
             ), "CNN config must be an instance of CnnNetConfig"
         else:
             self.cnn_config = CnnNetConfig(
-                channel_size=[16, 16],
+                channel_size=[32, 32],
                 kernel_size=[3, 3],
                 stride_size=[1, 1],
                 output_activation="ReLU",

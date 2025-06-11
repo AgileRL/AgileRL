@@ -1,5 +1,6 @@
 from dataclasses import asdict
 
+import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
@@ -20,15 +21,31 @@ from tests.helper_functions import (
     assert_close_dict,
     assert_not_equal_state_dict,
     assert_state_dicts_equal,
+    check_equal_params_ind,
     generate_dict_or_tuple_space,
     generate_discrete_space,
     generate_random_box_space,
 )
 
 
+class EvoDummyRNG:
+    rng = np.random.default_rng(seed=42)
+
+    def choice(self, a, size=None, replace=True, p=None):
+        return 1
+
+    def integers(self, low=0, high=None):
+        return self.rng.integers(low, high)
+
+
 @pytest.fixture
 def head_config():
-    return asdict(MlpNetConfig(hidden_size=[64, 64]))
+    yield asdict(MlpNetConfig(hidden_size=[64, 64]))
+
+
+@pytest.fixture
+def dummy_rng():
+    yield EvoDummyRNG()
 
 
 @pytest.mark.parametrize(
@@ -114,9 +131,10 @@ def test_q_network_initialization_simba(observation_space, encoder_type):
         (generate_random_box_space((3, 32, 32))),
     ],
 )
-def test_q_network_mutation_methods(observation_space, head_config):
+def test_q_network_mutation_methods(observation_space, head_config, dummy_rng):
     action_space = spaces.Discrete(4)
     network = QNetwork(observation_space, action_space, head_config=head_config)
+    network.rng = dummy_rng
 
     for method in network.mutation_methods:
         new_network = network.clone()
@@ -134,7 +152,16 @@ def test_q_network_mutation_methods(observation_space, head_config):
 
             assert mutated_attr == exec_method
 
-        assert_not_equal_state_dict(network.state_dict(), new_network.state_dict())
+        if new_network.last_mutation_attr is not None:
+            # Check that architecture has changed
+            assert_not_equal_state_dict(network.state_dict(), new_network.state_dict())
+
+            # Checks that parameters that are not mutated are the same
+            check_equal_params_ind(network, new_network)
+        else:
+            raise ValueError(
+                f"Last mutation attribute is None. Expected {method} to be applied."
+            )
 
 
 @pytest.mark.parametrize(
@@ -240,11 +267,13 @@ def test_rainbow_q_network_initialization(observation_space, encoder_type):
         (generate_random_box_space((3, 32, 32))),
     ],
 )
-def test_rainbow_q_network_mutation_methods(observation_space):
+def test_rainbow_q_network_mutation_methods(observation_space, head_config, dummy_rng):
     action_space = spaces.Discrete(4)
     support = torch.linspace(-10, 10, 51)
-    network = RainbowQNetwork(observation_space, action_space, support)
-
+    network = RainbowQNetwork(
+        observation_space, action_space, support, head_config=head_config
+    )
+    network.rng = dummy_rng
     for method in network.mutation_methods:
         new_network = network.clone()
         getattr(new_network, method)()
@@ -261,7 +290,16 @@ def test_rainbow_q_network_mutation_methods(observation_space):
 
             assert mutated_attr == exec_method
 
-        assert_not_equal_state_dict(network.state_dict(), new_network.state_dict())
+        if new_network.last_mutation_attr is not None:
+            # Check that architecture has changed
+            assert_not_equal_state_dict(network.state_dict(), new_network.state_dict())
+
+            # Checks that parameters that are not mutated are the same
+            check_equal_params_ind(network, new_network)
+        else:
+            raise ValueError(
+                f"Last mutation attribute is None. Expected {method} to be applied."
+            )
 
 
 @pytest.mark.parametrize(
@@ -415,12 +453,14 @@ def test_continuous_q_network_initialization_simba(observation_space, encoder_ty
         (generate_random_box_space((3, 32, 32))),
     ],
 )
-def test_continuous_q_network_mutation_methods(observation_space, head_config):
+def test_continuous_q_network_mutation_methods(
+    observation_space, head_config, dummy_rng
+):
     action_space = spaces.Box(low=-1, high=1, shape=(4,))
     network = ContinuousQNetwork(
         observation_space, action_space, head_config=head_config
     )
-
+    network.rng = dummy_rng
     for method in network.mutation_methods:
         new_network = network.clone()
         getattr(new_network, method)()
@@ -437,7 +477,16 @@ def test_continuous_q_network_mutation_methods(observation_space, head_config):
 
             assert mutated_attr == exec_method
 
-        assert_not_equal_state_dict(network.state_dict(), new_network.state_dict())
+        if new_network.last_mutation_attr is not None:
+            # Check that architecture has changed
+            assert_not_equal_state_dict(network.state_dict(), new_network.state_dict())
+
+            # Checks that parameters that are not mutated are the same
+            check_equal_params_ind(network, new_network)
+        else:
+            raise ValueError(
+                f"Last mutation attribute is None. Expected {method} to be applied."
+            )
 
 
 @pytest.mark.parametrize(

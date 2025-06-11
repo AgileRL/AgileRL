@@ -9,6 +9,7 @@ from gymnasium import spaces
 from tensordict import TensorDict
 
 from agilerl.components.data import Transition
+from agilerl.modules import EvolvableModule
 from agilerl.typing import NumpyObsType, TorchObsType
 
 
@@ -45,6 +46,9 @@ def assert_state_dicts_equal(
                 tensor1 = tensor1.cpu()
                 tensor2 = tensor2.cpu()
 
+            assert (
+                tensor1.shape == tensor2.shape
+            ), f"Tensors for key '{key}' have different shapes: {tensor1.shape} != {tensor2.shape}"
             assert torch.allclose(
                 tensor1, tensor2, rtol=rtol, atol=atol
             ), f"Tensors for key '{key}' are not close enough"
@@ -74,6 +78,30 @@ def assert_not_equal_state_dict(
         return
 
     raise AssertionError(f"State dicts are equal: {state_dict1} == {state_dict2}")
+
+
+def check_equal_params_ind(
+    before_ind: Union[nn.Module, EvolvableModule],
+    mutated_ind: Union[nn.Module, EvolvableModule],
+) -> None:
+    before_dict = dict(before_ind.named_parameters())
+    after_dict = mutated_ind.named_parameters()
+    for key, param in after_dict:
+        if key in before_dict:
+            old_param = before_dict[key]
+            old_size = old_param.data.size()
+            new_size = param.data.size()
+            if old_size == new_size:
+                # If the sizes are the same, just copy the parameter
+                param.data = old_param.data
+            elif "norm" not in key:
+                # Create a slicing index to handle tensors with varying sizes
+                slice_index = tuple(
+                    slice(0, min(o, n)) for o, n in zip(old_size, new_size)
+                )
+                assert torch.all(
+                    torch.eq(param.data[slice_index], old_param.data[slice_index])
+                ), f"Parameter {key} not equal after mutation {mutated_ind.last_mutation_attr}:\n{param.data[slice_index]}\n{old_param.data[slice_index]}"
 
 
 def unpack_network(model: nn.Sequential) -> List[nn.Module]:

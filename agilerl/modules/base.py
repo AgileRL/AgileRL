@@ -701,8 +701,8 @@ class EvolvableWrapper(EvolvableModule):
         self._init_wrapped_methods(module, MutationType.NODE)
 
         # Disable mutations in the wrapped module since these are now assigned to the wrapper
-        module.disable_mutations()
         self._wrapped = module
+        self.filter_mutation_methods("_wrapped")
 
     @property
     def wrapped(self) -> EvolvableModule:

@@ -21,15 +21,31 @@ from tests.helper_functions import (
     assert_close_dict,
     assert_not_equal_state_dict,
     assert_state_dicts_equal,
+    check_equal_params_ind,
     generate_dict_or_tuple_space,
     generate_discrete_space,
     generate_random_box_space,
 )
 
 
+class EvoDummyRNG:
+    rng = np.random.default_rng(seed=42)
+
+    def choice(self, a, size=None, replace=True, p=None):
+        return 1
+
+    def integers(self, low=0, high=None):
+        return self.rng.integers(low, high)
+
+
 @pytest.fixture
 def head_config():
-    return asdict(MlpNetConfig(hidden_size=[64, 64]))
+    yield asdict(MlpNetConfig(hidden_size=[64, 64]))
+
+
+@pytest.fixture
+def dummy_rng():
+    yield EvoDummyRNG()
 
 
 @pytest.mark.parametrize("action_space", [generate_random_box_space((4,))])
@@ -98,11 +114,12 @@ def test_deterministic_actor_initialization_simba():
     ],
 )
 def test_deterministic_actor_mutation_methods(
-    observation_space, action_space, head_config
+    observation_space, action_space, head_config, dummy_rng
 ):
     network = DeterministicActor(
         observation_space, action_space, head_config=head_config
     )
+    network.rng = dummy_rng
 
     for method in network.mutation_methods:
         new_network = network.clone()
@@ -120,7 +137,16 @@ def test_deterministic_actor_mutation_methods(
 
             assert mutated_attr == exec_method
 
-        assert_not_equal_state_dict(network.state_dict(), new_network.state_dict())
+        if new_network.last_mutation_attr is not None:
+            # Check that architecture has changed
+            assert_not_equal_state_dict(network.state_dict(), new_network.state_dict())
+
+            # Checks that parameters that are not mutated are the same
+            check_equal_params_ind(network, new_network)
+        else:
+            raise ValueError(
+                f"Last mutation attribute is None. Expected {method} to be applied."
+            )
 
 
 @pytest.mark.parametrize("action_space", [generate_random_box_space((4,))])
@@ -301,6 +327,47 @@ def test_deterministic_actor_forward_rescaling():
             actor.head_net.forward = original_head_forward
 
 
+def test_distribution_mutation_methods(dummy_rng, head_config):
+    observation_space = spaces.Box(low=-1, high=1, shape=(2,))
+    action_space = spaces.Box(low=-1, high=1, shape=(2,))
+    network = StochasticActor(observation_space, action_space, head_config=head_config)
+
+    evolvable_dist = network.head_net
+    evolvable_dist.rng = dummy_rng
+
+    for method in evolvable_dist.mutation_methods:
+        new_dist = evolvable_dist.clone()
+        print(getattr(new_dist, method))
+        getattr(new_dist, method)()
+
+        if "." in method and new_dist.last_mutation_attr is not None:
+            net_name = method.split(".")[0]
+            mutated_module: EvolvableModule = getattr(new_dist, net_name)
+
+            exec_method = new_dist.last_mutation_attr.split(".")[-1]
+            mutated_attr = mutated_module.last_mutation_attr.split(".")[-1]
+
+            assert mutated_attr == exec_method
+
+        if new_dist.last_mutation_attr is not None:
+            # Check that architecture has changed
+            assert_not_equal_state_dict(
+                evolvable_dist.state_dict(), new_dist.state_dict()
+            )
+
+            # Checks that parameters that are not mutated are the same
+            check_equal_params_ind(evolvable_dist, new_dist)
+        else:
+            print(method)
+            print(new_dist.last_mutation_attr)
+            print(new_dist.wrapped.last_mutation_attr)
+            print(evolvable_dist)
+            print(new_dist)
+            raise ValueError(
+                f"Last mutation attribute is None. Expected {method} to be applied."
+            )
+
+
 @pytest.mark.parametrize(
     "action_space",
     [
@@ -381,9 +448,10 @@ def test_stochastic_actor_initialization_simba():
     ],
 )
 def test_stochastic_actor_mutation_methods(
-    observation_space, action_space, head_config
+    observation_space, action_space, head_config, dummy_rng
 ):
     network = StochasticActor(observation_space, action_space, head_config=head_config)
+    network.rng = dummy_rng
 
     for method in network.mutation_methods:
         new_network = network.clone()
@@ -402,9 +470,16 @@ def test_stochastic_actor_mutation_methods(
 
             assert mutated_attr == exec_method
 
-        print("Method: ", method)
-        print("Applied: ", new_network.last_mutation_attr)
-        assert_not_equal_state_dict(network.state_dict(), new_network.state_dict())
+        if new_network.last_mutation_attr is not None:
+            # Check that architecture has changed
+            assert_not_equal_state_dict(network.state_dict(), new_network.state_dict())
+
+            # Checks that parameters that are not mutated are the same
+            check_equal_params_ind(network, new_network)
+        else:
+            raise ValueError(
+                f"Last mutation attribute is None. Expected {method} to be applied."
+            )
 
 
 @pytest.mark.parametrize(

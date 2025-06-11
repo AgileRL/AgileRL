@@ -233,7 +233,7 @@ def get_default_encoder_config(
         config = MultiInputNetConfig(output_activation=None)
     elif is_image_space(observation_space):
         config = CnnNetConfig(
-            channel_size=[16, 16],
+            channel_size=[32, 32],
             kernel_size=[3, 3],
             stride_size=[1, 1],
             output_activation=None,
@@ -249,7 +249,7 @@ def get_default_encoder_config(
             )
         else:
             config = MlpNetConfig(
-                hidden_size=[16, 16], output_activation=None, output_vanish=False
+                hidden_size=[64, 64], output_activation=None, output_vanish=False
             )
 
     return asdict(config)

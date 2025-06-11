@@ -497,5 +497,6 @@ class EvolvableDistribution(EvolvableWrapper):
             action_space=self.action_space,
             network=self.wrapped.clone(),
             action_std_init=self.action_std_init,
+            squash_output=self.squash_output,
             device=self.device,
         )
