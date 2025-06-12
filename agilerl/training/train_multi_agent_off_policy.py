@@ -143,7 +143,6 @@ def train_multi_agent_off_policy(
         )
 
     start_time = time.time()
-
     if wb:
         init_wandb(
             algo=algo,

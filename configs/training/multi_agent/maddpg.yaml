@@ -11,7 +11,7 @@ INIT_HP:
     MEAN_NOISE: 0.             # Mean action noise
     THETA: 0.15                # Rate of mean reversion in OU noise
     DT: 0.01                   # Timestep for OU noise
-    BATCH_SIZE: 64             # Batch size
+    BATCH_SIZE: 128             # Batch size
     LR_ACTOR: 0.0001           # Actor learning rate
     LR_CRITIC: 0.001           # Critic earning rate
     MAX_STEPS: 2_000_000       # Max no. steps
@@ -22,12 +22,12 @@ INIT_HP:
     TAU: 0.001                 # For soft update of target parameters
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
-    POP_SIZE: 4                # Population size
+    POP_SIZE: 1                # Population size
     EVO_STEPS: 10_000           # Evolution frequency
     EVAL_STEPS:                # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
     LEARNING_DELAY: 0          # Steps before learning
-    WANDB: false                # Log with Weights and Biases
+    WANDB: true                # Log with Weights and Biases
     TORCH_COMPILE: default
 
 MUTATION_PARAMS:
@@ -35,7 +35,7 @@ MUTATION_PARAMS:
     ARCH_MUT: 0.2                          # Architecture mutation
     NEW_LAYER: 0.2                         # New layer mutation
     PARAMS_MUT: 0.2                        # Network parameters mutation
-    ACT_MUT: 0.2                           # Activation layer mutation
+    ACT_MUT: 0.0                           # Activation layer mutation
     RL_HP_MUT: 0.35                         # Learning HP mutation
     # Learning HPs to choose from
     RL_HP_SELECTION: [lr, batch_size, learn_step]

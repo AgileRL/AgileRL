@@ -26,22 +26,13 @@ Rainbow-DQN Overview
 Rainbow DQN is an extension of DQN that integrates multiple improvements and techniques to achieve
 state-of-the-art performance. These improvements include:
 
-* **Double DQN (DDQN)**: Addresses the overestimation bias of Q-values by using two networks to decouple
-  the selection and evaluation of the action in the Q-learning target.
-* **Prioritized Experience Replay**: Instead of uniformly sampling from the replay buffer, it samples more
-  important transitions more frequently based on the magnitude of their temporal difference (TD) error.
-* **Dueling Networks**: Splits the Q-network into two separate streams — one for estimating the state value
-  function and another for estimating the advantages for each action. They are then combined to produce
-  Q-values.
-* **Multi-step Learning (n-step returns)**: Instead of using just the immediate reward for learning, it uses
-  multi-step returns which consider a sequence of future rewards.
-* **Distributional RL**: Instead of estimating the expected value of the cumulative future reward, it predicts
-  the entire distribution of the cumulative future reward.
-* **Noisy Nets**: Adds noise directly to the weights of the network, providing a way to explore the environment
-  without the need for epsilon-greedy exploration.
-* **Categorical DQN (C51)**: A specific form of distributional RL where the continuous range of possible
-  cumulative future rewards is discretized into a fixed set of categories.
-
+    * **Double DQN (DDQN)**: Addresses the overestimation bias of Q-values by using two networks to decouple the selection and evaluation of the action in the Q-learning target.
+    * **Prioritized Experience Replay**: Instead of uniformly sampling from the replay buffer, it samples more important transitions more frequently based on the magnitude of their temporal difference (TD) error.
+    * **Dueling Networks**: Splits the Q-network into two separate streams — one for estimating the state value function and another for estimating the advantages for each action. They are then combined to produce Q-values.
+    * **Multi-step Learning (n-step returns)**: Instead of using just the immediate reward for learning, it uses multi-step returns which consider a sequence of future rewards.
+    * **Distributional RL**: Instead of estimating the expected value of the cumulative future reward, it predicts the entire distribution of the cumulative future reward.
+    * **Noisy Nets**: Adds noise directly to the weights of the network, providing a way to explore the environment without the need for epsilon-greedy exploration.
+    * **Categorical DQN (C51)**: A specific form of distributional RL where the continuous range of possible cumulative future rewards is discretized into a fixed set of categories.
 
 
 Dependencies
@@ -94,9 +85,7 @@ is the case, we do not need to define a dictionary for the mutation hyperparamet
             "V_MIN": -200.0,  # Minimum value of support
             "V_MAX": 200.0,  # Maximum value of support
             "NOISY": True,  # Add noise directly to the weights of the network
-            # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
             "LEARNING_DELAY": 1000,  # Steps before starting learning
-            "CHANNELS_LAST": False,  # Use with RGB states
             "TARGET_SCORE": 200.0,  # Target score that will beat the environment
             "MAX_STEPS": 200000,  # Maximum number of steps an agent takes in an environment
             "EVO_STEPS": 10000,  # Evolution frequency
@@ -117,9 +106,6 @@ initialises the population of agents from the corresponding observation and acti
 
     observation_space = env.single_observation_space
     action_space = env.single_action_space
-    if INIT_HP["CHANNELS_LAST"]:
-        # Adjust dimensions for PyTorch API (C, H, W), for envs with RGB image states
-        observation_space = observation_space_channels_to_first(observation_space)
 
 Instantiate an Agent
 --------------------
@@ -197,7 +183,6 @@ for both the tournament and mutation arguments.
         memory=memory,
         n_step_memory=n_step_memory,
         INIT_HP=INIT_HP,
-        swap_channels=INIT_HP["CHANNELS_LAST"],
         max_steps=INIT_HP["MAX_STEPS"],
         evo_steps=INIT_HP["EVO_STEPS"],
         eval_steps=INIT_HP["EVAL_STEPS"],
@@ -242,18 +227,16 @@ function and is an example of how we might choose to train an AgileRL agent.
         # TRAINING LOOP
         print("Training...")
         pbar = trange(INIT_HP["MAX_STEPS"], unit="step")
+        rainbow_dqn.set_training_mode(True)
         while rainbow_dqn.steps[-1] < INIT_HP["MAX_STEPS"]:
-            state = env.reset()[0]  # Reset environment at start of episode
+            obs = env.reset()[0]  # Reset environment at start of episode
             scores = np.zeros(num_envs)
             completed_episode_scores = []
             steps = 0
             for idx_step in range(INIT_HP["EVO_STEPS"] // num_envs):
-                # Swap channels if channels last is True
-                state = obs_channels_to_first(state) if INIT_HP["CHANNELS_LAST"] else state
-
                 # Get next action from agent
-                action = rainbow_dqn.get_action(state)
-                next_state, reward, terminated, truncated, info = env.step(action)  # Act in environment
+                action = rainbow_dqn.get_action(obs)
+                next_obs, reward, terminated, truncated, info = env.step(action)  # Act in environment
                 scores += np.array(reward)
                 steps += num_envs
                 total_steps += num_envs
@@ -265,14 +248,13 @@ function and is an example of how we might choose to train an AgileRL agent.
                         rainbow_dqn.scores.append(scores[idx])
                         scores[idx] = 0
 
-                next_state = obs_channels_to_first(next_state) if INIT_HP["CHANNELS_LAST"] else next_state
                 done = terminated or truncated
 
                 transition = Transition(
-                    obs=state,
+                    obs=obs,
                     action=action,
                     reward=reward,
-                    next_obs=next_state,
+                    next_obs=next_obs,
                     done=done,
                     batch_size=[num_envs]
                 )
@@ -300,14 +282,13 @@ function and is an example of how we might choose to train an AgileRL agent.
                         loss, idxs, priorities = rainbow_dqn.learn(experiences, n_step=n_step, per=per)
                         memory.update_priorities(idxs, priorities)
 
-                state = next_state
+                obs = next_obs
                 total_steps += num_envs
                 steps += num_envs
 
             # Evaluate population
             fitness = rainbow_dqn.test(
                 env,
-                swap_channels=INIT_HP["CHANNELS_LAST"],
                 max_steps=INIT_HP["EVAL_STEPS"],
                 loop=INIT_HP["EVO_LOOP"],
             )
@@ -369,23 +350,19 @@ Test loop for inference
     test_env = gym.make("CartPole-v1", render_mode="rgb_array")
     with torch.no_grad():
         for ep in range(testing_eps):
-            state = test_env.reset()[0]  # Reset environment at start of episode
+            obs = test_env.reset()[0]  # Reset environment at start of episode
             score = 0
 
             for step in range(max_testing_steps):
-                # If your state is an RGB image
-                if INIT_HP["CHANNELS_LAST"]:
-                    state = obs_channels_to_first(state)
-
                 # Get next action from agent
-                action, *_ = rainbow_dqn.get_action(state, training=False)
+                action, *_ = rainbow_dqn.get_action(obs, training=False)
 
                 # Save the frame for this step and append to frames list
                 frame = test_env.render()
                 frames.append(frame)
 
                 # Take the action in the environment
-                state, reward, terminated, truncated, _ = test_env.step(action)
+                obs, reward, terminated, truncated, _ = test_env.step(action)
 
                 # Collect the score of environment 0
                 score += reward

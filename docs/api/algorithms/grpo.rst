@@ -41,7 +41,7 @@ For more details on how to set up GRPO and use it for training, check out the :r
     reduce_memory_peak=True,
   )
 
-Saving and loading agents
+Saving and Loading Agents
 -------------------------
 
 To save an agent, use the :ref:`save_llm_checkpoint<save_llm_checkpoint>` function:

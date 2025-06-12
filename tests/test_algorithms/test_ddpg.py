@@ -599,19 +599,19 @@ def test_clone_returns_identical_agent(observation_space):
     assert clone_agent.mut == ddpg.mut
     assert clone_agent.device == ddpg.device
     assert clone_agent.accelerator == ddpg.accelerator
-    assert str(clone_agent.actor.state_dict()) == str(ddpg.actor.state_dict())
-    assert str(clone_agent.actor_target.state_dict()) == str(
-        ddpg.actor_target.state_dict()
+    assert_state_dicts_equal(clone_agent.actor.state_dict(), ddpg.actor.state_dict())
+    assert_state_dicts_equal(
+        clone_agent.actor_target.state_dict(), ddpg.actor_target.state_dict()
     )
-    assert str(clone_agent.critic.state_dict()) == str(ddpg.critic.state_dict())
-    assert str(clone_agent.critic_target.state_dict()) == str(
-        ddpg.critic_target.state_dict()
+    assert_state_dicts_equal(clone_agent.critic.state_dict(), ddpg.critic.state_dict())
+    assert_state_dicts_equal(
+        clone_agent.critic_target.state_dict(), ddpg.critic_target.state_dict()
     )
-    assert str(clone_agent.actor_optimizer.state_dict()) == str(
-        ddpg.actor_optimizer.state_dict()
+    assert_state_dicts_equal(
+        clone_agent.actor_optimizer.state_dict(), ddpg.actor_optimizer.state_dict()
     )
-    assert str(clone_agent.critic_optimizer.state_dict()) == str(
-        ddpg.critic_optimizer.state_dict()
+    assert_state_dicts_equal(
+        clone_agent.critic_optimizer.state_dict(), ddpg.critic_optimizer.state_dict()
     )
     assert clone_agent.fitness == ddpg.fitness
     assert clone_agent.steps == ddpg.steps

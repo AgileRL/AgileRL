@@ -594,11 +594,6 @@ class MADDPG(MultiAgentRLAlgorithm):
         for agent_id in self.agent_ids:
             loss_dict[f"{agent_id}"] = self._learn_individual(
                 agent_id,
-                self.actors[agent_id],
-                self.critics[agent_id],
-                self.critic_targets[agent_id],
-                self.actor_optimizers[agent_id],
-                self.critic_optimizers[agent_id],
                 stacked_actions,
                 stacked_next_actions,
                 states,
@@ -617,11 +612,6 @@ class MADDPG(MultiAgentRLAlgorithm):
     def _learn_individual(
         self,
         agent_id: str,
-        actor: nn.Module,
-        critic: nn.Module,
-        critic_target: nn.Module,
-        actor_optimizer: optim.Optimizer,
-        critic_optimizer: optim.Optimizer,
         stacked_actions: torch.Tensor,
         stacked_next_actions: torch.Tensor,
         states: StandardTensorDict,
@@ -636,16 +626,6 @@ class MADDPG(MultiAgentRLAlgorithm):
 
         :param agent_id: ID of the agent
         :type agent_id: str
-        :param actor: Actor network of the agent
-        :type actor: nn.Module
-        :param critic: Critic network of the agent
-        :type critic: nn.Module
-        :param critic_target: Target critic network of the agent
-        :type critic_target: nn.Module
-        :param actor_optimizer: Optimizer for the actor network
-        :type actor_optimizer: optim.Optimizer
-        :param critic_optimizer: Optimizer for the critic network
-        :type critic_optimizer: optim.Optimizer
         :param stacked_actions: Stacked actions tensor
         :type stacked_actions: torch.Tensor
         :param stacked_next_actions: Stacked next actions tensor
@@ -663,6 +643,12 @@ class MADDPG(MultiAgentRLAlgorithm):
         :return: Tuple containing actor loss and critic loss
         :rtype: Tuple[float, float]
         """
+        actor = self.actors[agent_id]
+        critic = self.critics[agent_id]
+        critic_target = self.critic_targets[agent_id]
+        actor_optimizer = self.actor_optimizers[agent_id]
+        critic_optimizer = self.critic_optimizers[agent_id]
+
         if self.accelerator is not None:
             with critic.no_sync():
                 q_value = critic(states, stacked_actions)

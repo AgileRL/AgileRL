@@ -650,14 +650,6 @@ class MATD3(MultiAgentRLAlgorithm):
         for agent_id in self.agent_ids:
             loss_dict[f"{agent_id}"] = self.learn_individual(
                 agent_id,
-                self.actors[agent_id],
-                self.critics_1[agent_id],
-                self.critic_targets_1[agent_id],
-                self.critics_2[agent_id],
-                self.critic_targets_2[agent_id],
-                self.actor_optimizers[agent_id],
-                self.critic_1_optimizers[agent_id],
-                self.critic_2_optimizers[agent_id],
                 stacked_actions=stacked_actions,
                 stacked_next_actions=stacked_next_actions,
                 states=states,
@@ -682,14 +674,6 @@ class MATD3(MultiAgentRLAlgorithm):
     def learn_individual(
         self,
         agent_id: str,
-        actor: nn.Module,
-        critic_1: nn.Module,
-        critic_target_1: nn.Module,
-        critic_2: nn.Module,
-        critic_target_2: nn.Module,
-        actor_optimizer: optim.Optimizer,
-        critic_1_optimizer: optim.Optimizer,
-        critic_2_optimizer: optim.Optimizer,
         stacked_actions: torch.Tensor,
         stacked_next_actions: torch.Tensor,
         states: StandardTensorDict,
@@ -704,22 +688,7 @@ class MATD3(MultiAgentRLAlgorithm):
 
         :param agent_id: ID of the agent
         :type agent_id: str
-        :param actor: Actor network of the agent
-        :type actor: nn.Module
-        :param critic_1: First critic network of the agent
-        :type critic_1: nn.Module
-        :param critic_target_1: Target network for the first critic
-        :type critic_target_1: nn.Module
-        :param critic_2: Second critic network of the agent
-        :type critic_2: nn.Module
-        :param critic_target_2: Target network for the second critic
-        :type critic_target_2: nn.Module
-        :param actor_optimizer: Optimizer for the actor network
-        :type actor_optimizer: optim.Optimizer
-        :param critic_1_optimizer: Optimizer for the first critic network
-        :type critic_1_optimizer: optim.Optimizer
-        :param critic_2_optimizer: Optimizer for the second critic network
-        :type critic_2_optimizer: optim.Optimizer
+
         :param stacked_actions: Stacked actions tensor for CNN architecture
         :type stacked_actions: Optional[torch.Tensor]
         :param stacked_next_actions: Stacked next actions tensor for CNN architecture
@@ -736,6 +705,15 @@ class MATD3(MultiAgentRLAlgorithm):
         :return: Tuple containing actor loss (if applicable) and critic loss
         :rtype: Tuple[Optional[float], float]
         """
+        actor = self.actors[agent_id]
+        critic_1 = self.critics_1[agent_id]
+        critic_target_1 = self.critic_targets_1[agent_id]
+        critic_2 = self.critics_2[agent_id]
+        critic_target_2 = self.critic_targets_2[agent_id]
+        actor_optimizer = self.actor_optimizers[agent_id]
+        critic_1_optimizer = self.critic_1_optimizers[agent_id]
+        critic_2_optimizer = self.critic_2_optimizers[agent_id]
+
         if self.accelerator is not None:
             with critic_1.no_sync():
                 q_value_1 = critic_1(states, stacked_actions)

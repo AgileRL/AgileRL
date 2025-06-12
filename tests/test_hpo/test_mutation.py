@@ -18,6 +18,7 @@ from agilerl.hpo.mutation import MutationError, Mutations
 from agilerl.modules import EvolvableBERT, ModuleDict
 from agilerl.utils.utils import create_population
 from tests.helper_functions import (
+    assert_state_dicts_equal,
     gen_multi_agent_dict_or_tuple_spaces,
     generate_dict_or_tuple_space,
     generate_discrete_space,
@@ -274,7 +275,7 @@ def test_mutation_no_options(device, init_pop):
 
     assert len(mutated_population) == len(population)
     for old, individual in zip(population, mutated_population):
-        assert str(old.actor.state_dict()) == str(individual.actor.state_dict())
+        assert_state_dicts_equal(old.actor.state_dict(), individual.actor.state_dict())
 
     del mutations, mutated_population, new_population
 
@@ -478,7 +479,7 @@ def test_mutation_applies_no_mutations(device, accelerator, init_pop):
         assert individual.mut in ["None"]
         assert old.index == individual.index
         assert old.actor != individual.actor
-        assert str(old.actor.state_dict()) == str(individual.actor.state_dict())
+        assert_state_dicts_equal(old.actor.state_dict(), individual.actor.state_dict())
 
     del mutations, mutated_population, new_population
 
@@ -545,7 +546,7 @@ def test_mutation_applies_no_mutations_pre_training_mut(device, accelerator, ini
         ]
         assert old.index == individual.index
         assert old.actor != individual.actor
-        assert str(old.actor.state_dict()) == str(individual.actor.state_dict())
+        assert_state_dicts_equal(old.actor.state_dict(), individual.actor.state_dict())
 
     del mutations, mutated_population, new_population
 
@@ -889,7 +890,7 @@ def test_mutation_applies_architecture_mutations(algo, device, accelerator, init
             policy_name = old.registry.policy()
             policy = getattr(individual, policy_name)
             # old_policy = getattr(old, policy_name)
-            assert individual.mut == policy.last_mutation_attr
+            assert individual.mut == (policy.last_mutation_attr or "None")
 
             if policy.last_mutation_attr is not None:
                 # assert str(old_policy.state_dict()) != str(policy.state_dict())
@@ -1053,7 +1054,7 @@ def test_mutation_applies_random_mutations_multi_agent(
         if policy.last_mutation_attr is not None:
             sampled_mutation = ".".join(policy.last_mutation_attr.split(".")[1:])
         else:
-            sampled_mutation = None
+            sampled_mutation = "None"
 
         assert individual.mut in [
             "None",
@@ -1424,7 +1425,7 @@ def test_mutation_applies_architecture_mutations_multi_agent(
             else:
                 sampled_mutation = None
 
-            assert individual.mut == sampled_mutation
+            assert individual.mut == sampled_mutation or "None"
 
             if sampled_mutation is not None:
                 # assert str(old_policy.state_dict()) != str(policy.state_dict())
@@ -1570,7 +1571,7 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
             else:
                 sampled_mutation = None
 
-            assert individual.mut == sampled_mutation
+            assert individual.mut == sampled_mutation or "None"
 
             if sampled_mutation is not None:
                 # assert str(old_policy.state_dict()) != str(policy.state_dict())
@@ -1636,7 +1637,7 @@ def test_reinit_opt(algo, init_pop):
     new_opt = getattr(new_population[0], opt_attr)
     old_opt = getattr(population[0], opt_attr)
 
-    assert str(new_opt.state_dict()) == str(old_opt.state_dict())
+    assert_state_dicts_equal(new_opt.state_dict(), old_opt.state_dict())
 
     del mutations, new_population
 

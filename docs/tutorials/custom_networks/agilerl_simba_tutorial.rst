@@ -11,9 +11,9 @@ The paper `SimBa: Simplicity Bias for Scaling Up Parameters in Deep Reinforcemen
 designed to scale up parameters in deep RL by injecting a simplicity bias. It consists of three components that allow for better generalization in
 overparameterized networks:
 
-1. **Observation Normalization**: Standardize inputs with running statistics. In AgileRL this is achieved by wrapping agents with the :class:`RSNorm <agilerl.wrappers.agent.RSNorm>` wrapper.
-2. **Skip Connections**: Residual feedforward blocks that provide skip connections between inputs and outputs.
-3. **Layer Normalization**: Use of ``nn.LayerNorm`` to control feature magnitudes between residual blocks.
+    - **Observation Normalization**: Standardize inputs with running statistics. In AgileRL this is achieved by wrapping agents with the :class:`RSNorm <agilerl.wrappers.agent.RSNorm>` wrapper.
+    - **Skip Connections**: Residual feedforward blocks that provide skip connections between inputs and outputs.
+    - **Layer Normalization**: Use of ``nn.LayerNorm`` to control feature magnitudes between residual blocks.
 
 Combining these components has shown to improve performance in RL tasks proportionally with task complexity. In this tutorial, we will implement this architecture as an evolvable module that
 allows us to mutate its hyperparameters during training, and show its integration into the :class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>` objects used across the AgileRL library.

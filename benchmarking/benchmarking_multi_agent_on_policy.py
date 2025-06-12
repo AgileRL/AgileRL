@@ -156,7 +156,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
 
 
 if __name__ == "__main__":
-    config = "configs/training/multi_agent/ippo_pong.yaml"
+    config = "configs/training/multi_agent/ippo.yaml"
     with open(config) as file:
         config = yaml.safe_load(file)
     INIT_HP = config["INIT_HP"]

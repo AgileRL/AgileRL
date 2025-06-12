@@ -51,18 +51,15 @@ Compatible Action Spaces
      - ❌
 
 
-Code
-----
-
-Curriculum learning and self-play using DQN on Connect Four
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Curriculum learning and Self-play Using DQN on Connect Four
+---------------------------------------------------------
 
 The following code should run without any issues. The comments are designed to help you understand how to use PettingZoo with AgileRL. If you have any questions, please feel free to ask in the `Discord server <https://discord.com/invite/eB8HyTA2ux>`_.
 
 This is a complicated tutorial, and so we will go through it in stages. The :ref:`full code<full-training-code>` can be found at the end of this section. Although much of this tutorial contains content specific to the Connect Four environment, it serves to demonstrate how techniques can be applied more generally to other problems.
 
 Imports
-^^^^^^^
+~~~~~~~
 
 Importing the following packages, functions and classes will enable us to run the tutorial.
 
@@ -81,13 +78,13 @@ Importing the following packages, functions and classes will enable us to run th
       import torch
       import wandb
       import yaml
+      from tqdm import tqdm
+      from pettingzoo.classic import connect_four_v3
+
       from agilerl.components.replay_buffer import ReplayBuffer
       from agilerl.hpo.mutation import Mutations
       from agilerl.hpo.tournament import TournamentSelection
       from agilerl.utils.utils import create_population
-      from tqdm import tqdm, trange
-
-      from pettingzoo.classic import connect_four_v3
 
 Curriculum Learning
 ^^^^^^^^^^^^^^^^^^^
@@ -120,20 +117,17 @@ It is best to use YAML config files to define the lessons in our curriculum and 
 curriculum can be defined as follows:
 
 .. collapse:: Lesson 1
-   :open:
 
    .. literalinclude:: ../../../tutorials/PettingZoo/curriculums/connect_four/lesson1.yaml
       :language: yaml
 
 
 .. collapse:: Lesson 2
-   :open:
 
    .. literalinclude:: ../../../tutorials/PettingZoo/curriculums/connect_four/lesson2.yaml
       :language: yaml
 
 .. collapse:: Lesson 3
-   :open:
 
    .. literalinclude:: ../../../tutorials/PettingZoo/curriculums/connect_four/lesson3.yaml
       :language: yaml
@@ -142,7 +136,6 @@ To implement our curriculum, we create a ``CurriculumEnv`` class that acts as a 
 to alter the reward to guide the training of our agent. This uses the configs that we set up to define the lesson.
 
 .. collapse:: CurriculumEnv
-   :open:
 
    .. code-block:: python
 
@@ -468,7 +461,6 @@ random agent and now wish to train against a harder opponent. In this tutorial, 
 levels of difficulty for training our agent.
 
 .. collapse:: Opponent
-   :open:
 
    .. code-block:: python
 
@@ -652,13 +644,12 @@ levels of difficulty for training our agent.
             return (True, reward, ended) + ((lengths,) if return_length else ())
 
 
-General setup
+General Setup
 ^^^^^^^^^^^^^
 
 Before we go any further in this tutorial, it would be helpful to define and set up everything remaining we need for training.
 
 .. collapse:: Setup code
-   :open:
 
    .. code-block:: python
 
@@ -786,8 +777,7 @@ Before we go any further in this tutorial, it would be helpful to define and set
 
 As part of the curriculum, we may also choose to fill the replay buffer with random experiences, and also train on these offline.
 
-.. collapse:: Fill replay buffer
-   :open:
+.. collapse:: Fill Replay Buffer
 
    .. code-block:: python
 
@@ -814,8 +804,7 @@ The observation space of Connect Four is (6, 7, 2), where the first two dimensio
 As PyTorch uses channels-first by default, we need to preprocess the observation. Moreover, we need to flip and swap the planes of the observation to
 account for the fact that the agent will play as both player 0 and player 1. We can define a function to do this as follows:
 
-.. collapse:: Transform and flip
-   :open:
+.. collapse:: Transform and Flip
 
    .. code-block:: python
 
@@ -845,8 +834,7 @@ In this tutorial, we use self-play as the final lesson in our curriculum. By ite
 itself, we can allow it to discover new strategies and achieve higher performance. The weights of our pretrained agent from an earlier lesson
 can be loaded to the population as follows:
 
-.. collapse:: Load pretrained weights
-   :open:
+.. collapse:: Load Pretrained Weights
 
    .. code-block:: python
 
@@ -871,8 +859,7 @@ To train against an old version of our agent, we create a pool of opponents. At 
 regular intervals, we update the opponent pool by removing the oldest opponent and adding a copy of the latest version of our agent. This provides
 a balance between training against an increasingly difficult opponent and providing variety in the moves an opponent might make.
 
-.. collapse:: Create opponent pool
-   :open:
+.. collapse:: Create Opponent Pool
 
    .. code-block:: python
 
@@ -889,7 +876,6 @@ a balance between training against an increasingly difficult opponent and provid
 A sample lesson config for self-play training could be defined as follows:
 
 .. collapse:: Lesson 4
-   :open:
 
    .. literalinclude:: ../../../tutorials/PettingZoo/curriculums/connect_four/lesson4.yaml
       :language: yaml
@@ -898,8 +884,8 @@ It could also be possible to train an agent through self-play only, without usin
 training time, but could ultimately result in better performance than other methods, and could avoid some of the mistakes discussed in
 `The Bitter Lesson <http://incompleteideas.net/IncIdeas/BitterLesson.html>`_.
 
-Training loop
-^^^^^^^^^^^^^^
+Training Loop
+^^^^^^^^^^^^^
 
 The Connect Four training loop must take into account that the agent only takes an action every other interaction with the environment (the opponent takes
 alternating turns). This must be considered when saving transitions to the replay buffer. Equally, we must wait for the outcome of the next player's turn
@@ -910,8 +896,7 @@ At regular intervals, we evaluate the performance, or 'fitness',  of the agents 
 likely to become members of the next generation, and the hyperparameters and neural architectures of agents in the population are mutated. This evolution allows us
 to optimize hyperparameters and maximise the performance of our agents in a single training run.
 
-.. collapse:: Training loop
-   :open:
+.. collapse:: Training Loop
 
    .. code-block:: python
 
@@ -1297,19 +1282,18 @@ to optimize hyperparameters and maximise the performance of our agents in a sing
 
       pbar.close()
 
-Trained model weights
+Trained Model Weights
 ^^^^^^^^^^^^^^^^^^^^^
 
 Trained model weights are provided at ``AgileRL/tutorials/PettingZoo/models``. Take a look, train against these models, and see if you can beat them!
 
 
-Watch the trained agents play
+Watch the Trained Agents Play
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The following code allows you to load your saved DQN agent from the previous training block, test the agent's performance, and then visualise a number of episodes as a gif.
 
-.. collapse:: Render trained agents
-   :open:
+.. collapse:: Render Trained Agents
 
    .. literalinclude:: ../../../tutorials/PettingZoo/render_agilerl_dqn.py
       :language: python
@@ -1317,7 +1301,7 @@ The following code allows you to load your saved DQN agent from the previous tra
 
 .. _full-training-code:
 
-Full training code
+Full Training Code
 ^^^^^^^^^^^^^^^^^^
 
 .. collapse:: Full code

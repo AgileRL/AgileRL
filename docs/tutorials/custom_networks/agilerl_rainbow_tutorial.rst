@@ -12,8 +12,8 @@ Building a Dueling Distributional Q Network
 
 `Rainbow DQN <https://arxiv.org/abs/1710.02298>`_ is an extension of DQN that integrates multiple improvements and techniques to achieve state-of-the-art performance. The improvements pertaining to the Q network that is optimized during training are the following:
 
-* **Dueling Networks**: Splits the Q-network into two separate streams — one for estimating the state value function and another for estimating the advantages for each action. They are then combined to produce Q-values.
-* **Categorical DQN (C51)**: A specific form of distributional RL where the continuous range of possible cumulative future rewards is discretized into a fixed set of categories.
+    * **Dueling Networks**: Splits the Q-network into two separate streams — one for estimating the state value function and another for estimating the advantages for each action. They are then combined to produce Q-values.
+    * **Categorical DQN (C51)**: A specific form of distributional RL where the continuous range of possible cumulative future rewards is discretized into a fixed set of categories.
 
 In order to extend our implementation of :class:`QNetwork <agilerl.networks.q_networks.QNetwork>` to a Dueling Distributional Q Network, we need to make the following changes:
 
@@ -29,12 +29,9 @@ same way).
 
 Approaches:
 
-1. **Adding Head Directly in EvolvableNetwork**: We can copy our simple :class:`QNetwork <agilerl.networks.q_networks.QNetwork>` and add an additional head for our advantage
-network as an :class:`EvolvableMLP <agilerl.modules.mlp.EvolvableMLP>`. When we do this, its mutation methods will be added automatically so we need to disable them manually through the
-:meth:`EvolvableMLP.disable_mutations() <agilerl.modules.base.EvolvableModule.disable_mutations>` method.
+- **Adding Head Directly in EvolvableNetwork**: We can copy our simple :class:`QNetwork <agilerl.networks.q_networks.QNetwork>` and add an additional head for our advantage network as an :class:`EvolvableMLP <agilerl.modules.mlp.EvolvableMLP>`. When we do this, its mutation methods will be added automatically so we need to disable them manually through the :meth:`EvolvableMLP.disable_mutations() <agilerl.modules.base.EvolvableModule.disable_mutations>` method.
 
-2. **Creating a Custom MLP**: We can create a custom MLP that inherits from :class:`EvolvableMLP <agilerl.modules.mlp.EvolvableMLP>` and add the advantage head without having to
-disable the mutations on it.
+- **Creating a Custom MLP**: We can create a custom MLP that inherits from :class:`EvolvableMLP <agilerl.modules.mlp.EvolvableMLP>` and add the advantage head without having to disable the mutations on it.
 
 For either of the above solutions, we need to be able to recreate the network after an architecture mutation such that the same mutation is applied to both the
 value and advantage heads. We can do this by overwriting the :meth:`recreate_network() <agilerl.modules.base.EvolvableModule.recreate_network>` method in our custom MLP.

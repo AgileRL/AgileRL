@@ -10,6 +10,7 @@ from agilerl.networks import (
     StochasticActor,
     ValueNetwork,
 )
+from tests.helper_functions import assert_state_dicts_equal
 
 
 def test_correct_initialization():
@@ -97,7 +98,7 @@ def test_clone():
     assert clone.num_outputs == model.num_outputs
     assert clone.hidden_size == model.hidden_size
     assert clone.num_blocks == model.num_blocks
-    assert str(clone.state_dict()) == str(model.state_dict())
+    assert_state_dicts_equal(clone.state_dict(), model.state_dict())
 
 
 @pytest.fixture

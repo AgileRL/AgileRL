@@ -80,8 +80,6 @@ Additionally, we also define our upper and lower limits for these hyperparameter
             "MAX_GRAD_NORM": 0.5,  # Maximum norm for gradient clipping
             "TARGET_KL": None,  # Target KL divergence threshold
             "UPDATE_EPOCHS": 4,  # Number of policy update epochs
-            # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-            "CHANNELS_LAST": False,  # Use with RGB states
             "TARGET_SCORE": 200.0,  # Target score that will beat the environment
             "MAX_STEPS": 150000,  # Maximum number of steps an agent takes in an environment
             "EVO_STEPS": 10000,  # Evolution frequency
@@ -117,9 +115,6 @@ initialises the population of agents from the corresponding observation and acti
 
     observation_space = env.single_observation_space
     action_space = env.single_action_space
-    if INIT_HP["CHANNELS_LAST"]:
-        # Adjust dimensions for PyTorch API (C, H, W), for envs with RGB image states
-        observation_space = observation_space_channels_to_first(observation_space)
 
 Create a Population of Agents
 -----------------------------
@@ -159,7 +154,7 @@ followed by mutations) is detailed further below.
         device=device,
     )
 
-Creating Mutations and Tournament objects
+Creating Mutations and Tournament Objects
 -----------------------------------------
 Tournament selection is used to select the agents from a population which will make up the next generation of agents. If
 elitism is used, the best agent from a population is automatically preserved and becomes a member of the next generation.
@@ -190,7 +185,8 @@ The ``Mutations()`` class is used to mutate agents with pre-set probabilities. T
 * Network activation layer mutation - change of activation layer.
 * RL algorithm mutation - mutation of learning hyperparameter, such as learning rate or batch size.
 
-``Mutations.mutation()`` returns a mutated population.
+``Mutations.mutation(population)`` returns a mutated population.
+
 Tournament selection and mutation should be applied sequentially to fully evolve a population between evaluation and learning cycles.
 
 .. code-block:: python
@@ -230,7 +226,6 @@ fitnesses (fitness is each agents test scores on the environment).
         pop=pop,
         INIT_HP=INIT_HP,
         MUT_P=MUT_P,
-        swap_channels=INIT_HP["CHANNELS_LAST"],
         max_steps=INIT_HP["MAX_STEPS"],
         evo_steps=INIT_HP["EVO_STEPS"],
         eval_steps=INIT_HP["EVAL_STEPS"],
@@ -272,14 +267,15 @@ function and is an example of how we might choose to make use of a population of
         while np.less([agent.steps[-1] for agent in pop], INIT_HP["MAX_STEPS"]).all():
             pop_episode_scores = []
             for agent in pop:  # Loop through population
-                state, info = env.reset()  # Reset environment at start of episode
+                agent.set_training_mode(True)
+                obs, info = env.reset()  # Reset environment at start of episode
                 scores = np.zeros(num_envs)
                 completed_episode_scores = []
                 steps = 0
 
                 for _ in range(-(INIT_HP["EVO_STEPS"] // -agent.learn_step)):
 
-                    states = []
+                    observations = []
                     actions = []
                     log_probs = []
                     rewards = []
@@ -291,11 +287,8 @@ function and is an example of how we might choose to make use of a population of
                     learn_steps = 0
 
                     for idx_step in range(-(agent.learn_step // -num_envs)):
-                        if INIT_HP["CHANNELS_LAST"]:
-                            state = obs_channels_to_first(state)
-
                         # Get next action from agent
-                        action, log_prob, _, value = agent.get_action(state)
+                        action, log_prob, _, value = agent.get_action(obs)
 
                         # Clip to action space
                         if isinstance(agent.action_space, spaces.Box):
@@ -307,21 +300,21 @@ function and is an example of how we might choose to make use of a population of
                             clipped_action = action
 
                         # Act in environment
-                        next_state, reward, terminated, truncated, info = env.step(action)
+                        next_obs, reward, terminated, truncated, info = env.step(action)
                         next_done = np.logical_or(terminated, truncated).astype(np.int8)
 
                         total_steps += num_envs
                         steps += num_envs
                         learn_steps += num_envs
 
-                        states.append(state)
+                        observations.append(obs)
                         actions.append(action)
                         log_probs.append(log_prob)
                         rewards.append(reward)
                         dones.append(done)
                         values.append(value)
 
-                        state = next_state
+                        obs = next_obs
                         done = next_done
                         scores += np.array(reward)
 
@@ -333,17 +326,14 @@ function and is an example of how we might choose to make use of a population of
 
                     pbar.update(learn_steps // len(pop))
 
-                    if INIT_HP["CHANNELS_LAST"]:
-                        next_state = obs_channels_to_first(next_state)
-
                     experiences = (
-                        states,
+                        observations,
                         actions,
                         log_probs,
                         rewards,
                         dones,
                         values,
-                        next_state,
+                        next_obs,
                         next_done,
                     )
                     # Learn according to agent's RL algorithm
@@ -356,7 +346,6 @@ function and is an example of how we might choose to make use of a population of
             fitnesses = [
                 agent.test(
                     env,
-                    swap_channels=INIT_HP["CHANNELS_LAST"],
                     max_steps=INIT_HP["EVAL_STEPS"],
                     loop=INIT_HP["EVAL_LOOP"],
                 )
@@ -417,16 +406,12 @@ Test loop for inference
     max_testing_steps = 1000
     with torch.no_grad():
         for ep in range(testing_eps):
-            state = test_env.reset()[0]  # Reset environment at start of episode
+            obs = test_env.reset()[0]  # Reset environment at start of episode
             score = 0
 
             for step in range(max_testing_steps):
-                # If your state is an RGB image
-                if INIT_HP["CHANNELS_LAST"]:
-                    state = obs_channels_to_first(state)
-
                 # Get next action from agent
-                action, *_ = ppo.get_action(state)
+                action, *_ = ppo.get_action(obs)
                 action = action.squeeze()
 
                 # Save the frame for this step and append to frames list
@@ -434,7 +419,7 @@ Test loop for inference
                 frames.append(frame)
 
                 # Take the action in the environment
-                state, reward, terminated, truncated, _ = test_env.step(action)
+                obs, reward, terminated, truncated, _ = test_env.step(action)
 
                 # Collect the score
                 score += reward

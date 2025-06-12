@@ -14,7 +14,7 @@ Neural Network Building Blocks
 
 We address the above issue by introducing a framework for performing architecture mutations through the :class:`EvolvableModule <agilerl.modules.base.EvolvableModule>`
 abstraction (which is a wrapper around ``torch.nn.Module``). It allows us to seamlessly track and apply architecture mutations for networks with nested evolvable modules.
-This is particularly useful for RL algorithms, where we define default architectures suitable for a variety of tasks (i.e. combinations of observation and action spaces),
+This is particularly useful for RL algorithms, where we define default configurations suitable for a variety of problems (i.e. combinations of observation and action spaces),
 which require very different network architectures.
 
 .. figure:: ../_static/module.png
@@ -35,7 +35,7 @@ Policies, Value Functions, and More Complex Networks
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 In Reinforcement Learning, we often require processing very different types of observations into either actions or values / state-action values.
-In order to make the implementation of evolvable policies, value functions, and more complex networks as seamless as possible, we define the :class:`~agilerl.modules.base.EvolvableNetwork`
+In order to make the implementation of evolvable policies, value functions, and more complex networks as seamless as possible, we define the :class:`~agilerl.networks.base.EvolvableNetwork`
 base class which inherits from :class:`~agilerl.modules.base.EvolvableModule`. The diagram below shows the expected structure of a neural network inheriting from this class.
 
 .. figure:: ../_static/network.png
@@ -48,21 +48,19 @@ This abstraction allows us to define common networks used in RL algorithms very 
 we just create a head to the the network that processed the encoded observations into an apprioriate number of outputs (for e.g. policies or critics). Off-the-shelf ``EvolvableNetwork``'s
 in AgileRL natively support the following observation spaces:
 
-- :class:`~gymnasium.spaces.Box`: Use an ``EvolvableMLP``, ``EvolvableCNN``, or ``EvolvableLSTM`` as the encoder, depending on the dimensionality of the observation space.
-- :class:`~gymnasium.spaces.Dict`: Use an ``EvolvableMultiInput`` as the encoder.
-- :class:`~gymnasium.spaces.Tuple`: Use an ``EvolvableMultiInput`` as the encoder.
-- :class:`~gymnasium.spaces.MultiBinary`: Use an ``EvolvableMLP`` as the encoder.
-- :class:`~gymnasium.spaces.MultiDiscrete`: Use an ``EvolvableMLP`` as the encoder.
+  - :class:`~gymnasium.spaces.Box`: Use an ``EvolvableMLP``, ``EvolvableCNN``, or ``EvolvableLSTM`` as the encoder, depending on the dimensionality of the observation space.
+  - :class:`~gymnasium.spaces.Dict` / :class:`~gymnasium.spaces.Tuple`: Use an ``EvolvableMultiInput`` as the encoder.
+  - :class:`~gymnasium.spaces.MultiBinary` / :class:`~gymnasium.spaces.MultiDiscrete`: Use an ``EvolvableMLP`` as the encoder.
 
 The encoder processes observations into a latent space, which is then processed by the head network (usually a ``EvolvableMLP``) to form the final output of the network. The
 following networks, common in a variety of reinforcement learning algorithms, are available in AgileRL:
 
-- :class:`~agilerl.networks.q_networks.QNetwork`: Outputs a state-action value given an observation and action (used in e.g. DQN).
-- :class:`~agilerl.networks.q_networks.RainbowQNetwork`: Uses a distributional dueling architecture to output a distribution of state-action values given an observation and action (used in e.g. Rainbow DQN).
-- :class:`~agilerl.networks.q_networks.ContinuousQNetwork`: Outputs a continuous state-action value given an observation and action (used in e.g. DDPG, TD3).
-- :class:`~agilerl.networks.value_networks.ValueNetwork`: Outputs a single value given an observation (used in e.g. PPO, bandit algorithms).
-- :class:`~agilerl.networks.actors.DeterministicActor`: Outputs deterministic actions given an observation (used in e.g. DDPG, TD3).
-- :class:`~agilerl.networks.actors.StochasticActor`: Outputs stochastic actions given an observation (used in e.g. PPO).
+  - :class:`~agilerl.networks.q_networks.QNetwork`: Outputs a state-action value given an observation and action (used in e.g. DQN).
+  - :class:`~agilerl.networks.q_networks.RainbowQNetwork`: Uses a distributional dueling architecture to output a distribution of state-action values given an observation and action (used in e.g. Rainbow DQN).
+  - :class:`~agilerl.networks.q_networks.ContinuousQNetwork`: Outputs a continuous state-action value given an observation and action (used in e.g. DDPG, TD3).
+  - :class:`~agilerl.networks.value_networks.ValueNetwork`: Outputs a single value given an observation (used in e.g. PPO, bandit algorithms).
+  - :class:`~agilerl.networks.actors.DeterministicActor`: Outputs deterministic actions given an observation (used in e.g. DDPG, TD3).
+  - :class:`~agilerl.networks.actors.StochasticActor`: Outputs stochastic actions given an observation (used in e.g. PPO).
 
 .. note::
     All ``EvolvableNetwork`` objects expect that the only modules that contribute towards its mutation method are the encoder and head networks. This is
@@ -121,7 +119,7 @@ If your environment has a 3D ``Box`` observation space, by default the ``Evolvab
 
       from gymnasium.spaces import Box, Discrete
 
-      from agilerl.networks.q_networks import StochasticActor
+      from agilerl.networks.actors import StochasticActor
 
       encoder_config = {
           "channel_size": [32, 64, 128], # Three convolutional layers with 32, 64, and 128 channels respectively
@@ -150,12 +148,67 @@ If your environment has a 3D ``Box`` observation space, by default the ``Evolvab
           max_latent_dim=128, # Maximum dimension of the latent space representation
       )
 
+If your environment has a dictionary or tuple observation space, by default the ``EvolvableNetwork`` will use an ``EvolvableMultiInput`` as the encoder.
 
+.. collapse:: Example Multi-Input Network Configuration
+
+  .. code-block:: python
+
+      from gymnasium.spaces import Dict, Discrete, Box
+
+      from agilerl.networks.actors import StochasticActor
+
+      # Encoder configuration
+      encoder_config = {
+        "latent_dim": 32, # Latent dimension outputted by underlying feature extractors
+        "min_latent_dim": 8, # Minimum latent dimension when mutating
+        "max_latent_dim": 128, # Maximum latent dimension when mutating
+        "mlp_config": {
+            "hidden_size": [32, 32],
+            "activation": "ReLU",
+        },
+        "cnn_config": {
+            "channel_size": [32, 64, 64], # Three convolutional layers with 32, 64, and 64 channels respectively
+            "kernel_size": [8, 4, 3], # The kernel sizes of the convolutional layers
+            "stride_size": [4, 2, 1], # The stride sizes of the convolutional layers
+            "min_channel_size": 16, # minimum number of channels in the CNN when mutating
+            "max_channel_size": 256, # maximum number of channels in the CNN when mutating
+            "activation": "ReLU",
+        },
+        "lstm_config": None, # No LSTM required for this observation space
+        "vector_space_mlp": True # Process vector observations with an MLP
+      }
+
+      # MLP head configuration
+      head_config = {
+        "hidden_size": [64, 64] # Two layers of 64 nodes each
+        "min_mlp_nodes": 16, # minimum number of nodes in the MLP when mutating
+        "max_mlp_nodes": 128, # maximum number of nodes in the MLP when mutating
+      }
+
+      observation_space = Dict(
+        {
+          "vector": Box(low=-100, high=100, shape=(65,)),
+          "discrete": Discrete(111),
+          "image": Box(low=0, high=255, shape=(3, 84, 84)),
+        }
+      )
+      action_space = Discrete(2)
+
+      network = StochasticActor(
+          observation_space,
+          action_space,
+          encoder_config=encoder_config,
+          head_config=head_config,
+          latent_dim=32, # Dimension of the latent space representation
+          min_latent_dim=8, # Minimum dimension of the latent space representation
+          max_latent_dim=128, # Maximum dimension of the latent space representation
+      )
 
 .. note::
     In AgileRL algorithms, we pass a single ``net_config`` dictionary that includes the ``encoder_config`` and ``head_config`` dictionaries, as well as
     any other initialisation arguments to the respective network used in the algorithm. This becomes more complex in multi-agent settings, where there are
-    multiple networks that can be configured (see :ref:`here <multiagenttraining>` for more details).
+    multiple networks that can be configured (see :ref:`here <multi_agent_networks>` for more details).
 
 
 Using Non-Evolvable Networks in an Evolvable Setting

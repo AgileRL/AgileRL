@@ -5,6 +5,7 @@ import pytest
 import torch
 import torch.optim as optim
 from gymnasium import spaces
+from torch._dynamo.eval_frame import OptimizedModule
 
 from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import (
@@ -16,6 +17,7 @@ from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
 from agilerl.modules.base import ModuleDict
 from agilerl.utils.evolvable_networks import is_image_space
 from tests.helper_functions import (
+    assert_state_dicts_equal,
     gen_multi_agent_dict_or_tuple_spaces,
     generate_dict_or_tuple_space,
     generate_discrete_space,
@@ -385,6 +387,20 @@ def test_incorrect_hp_config():
         )
 
 
+def test_recompile():
+    agent = DummyMARLAlgorithm(
+        generate_multi_agent_box_spaces(2, (4,)),
+        generate_multi_agent_discrete_spaces(2, 4),
+        agent_ids=["agent1", "agent2"],
+        index=0,
+        torch_compiler="default",
+    )
+    agent.recompile()
+    assert all(
+        isinstance(mod, OptimizedModule) for mod in agent.dummy_actors.values()
+    ), agent.dummy_actors.values()
+
+
 @pytest.mark.parametrize(
     "with_hp_config",
     [
@@ -447,8 +463,8 @@ def test_save_load_checkpoint_single_agent(tmpdir, with_hp_config, observation_s
         new_agent.dummy_actor, (EvolvableMLP, EvolvableCNN, EvolvableMultiInput)
     )
     assert new_agent.lr == agent.lr
-    assert str(new_agent.dummy_actor.state_dict()) == str(
-        agent.dummy_actor.state_dict()
+    assert_state_dicts_equal(
+        new_agent.dummy_actor.state_dict(), agent.dummy_actor.state_dict()
     )
     assert new_agent.index == agent.index
     assert new_agent.scores == agent.scores
@@ -528,8 +544,9 @@ def test_save_load_checkpoint_multi_agent(tmpdir, with_hp_config, observation_sp
             new_agent.dummy_actors[agent_id],
             (EvolvableMLP, EvolvableCNN, EvolvableMultiInput),
         )
-        assert str(new_agent.dummy_actors[agent_id].state_dict()) == str(
-            agent.dummy_actors[agent_id].state_dict()
+        assert_state_dicts_equal(
+            new_agent.dummy_actors[agent_id].state_dict(),
+            agent.dummy_actors[agent_id].state_dict(),
         )
 
     assert new_agent.lr == agent.lr
@@ -591,8 +608,8 @@ def test_load_from_pretrained_single_agent(
         new_agent.dummy_actor, (EvolvableMLP, EvolvableCNN, EvolvableMultiInput)
     )
     assert new_agent.lr == agent.lr
-    assert str(new_agent.dummy_actor.to("cpu").state_dict()) == str(
-        agent.dummy_actor.state_dict()
+    assert_state_dicts_equal(
+        new_agent.dummy_actor.to("cpu").state_dict(), agent.dummy_actor.state_dict()
     )
     assert new_agent.index == agent.index
     assert new_agent.scores == agent.scores
@@ -663,8 +680,9 @@ def test_load_from_pretrained_multi_agent(
             new_agent.dummy_actors[agent_id],
             (EvolvableMLP, EvolvableCNN, EvolvableMultiInput),
         )
-        assert str(new_agent.dummy_actors[agent_id].to("cpu").state_dict()) == str(
-            agent.dummy_actors[agent_id].state_dict()
+        assert_state_dicts_equal(
+            new_agent.dummy_actors[agent_id].to("cpu").state_dict(),
+            agent.dummy_actors[agent_id].state_dict(),
         )
 
     assert new_agent.lr == agent.lr

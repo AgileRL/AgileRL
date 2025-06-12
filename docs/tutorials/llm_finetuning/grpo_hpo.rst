@@ -9,7 +9,7 @@ as referenced in the :ref:`evo_hyperparam_opt` section, we can select GRPO hyper
 
 
 Dependencies
---------------
+------------
 
 .. code-block:: python
 
@@ -75,7 +75,7 @@ unlike the rest of the AgileRL framework, we can only tune the RL hyperparameter
             "EVAL_LOOP": 1
         }
 
-Defining our base model and dataset
+Defining our Base Model and Dataset
 -----------------------------------
 
 In this tutorial, we use the open-source transformers and datasets libraries from
@@ -295,7 +295,7 @@ Combining all these components, we can now initialise the HuggingFaceGym object.
 
 
 Create a population of GRPO Agents
--------------------
+----------------------------------
 To allow our model to become an agent and learn through reinforcement learning, we can use the
 :class:`GRPO <agilerl.algorithms.GRPO>` class. This class follows the same structure as the other
 reinforcement learning algorithms in the AgileRL library. We also define a initialisation dictionaries
@@ -329,7 +329,7 @@ training in this tutorial, we use deepspeed and accelerate.
         accelerator=accelerator,
     )
 
-Creating Mutations and Tournament objects
+Creating Mutations and Tournament Objects
 -----------------------------------------
 Tournament selection is used to select the agents from a population which will make up the next generation of agents. If
 elitism is used, the best agent from a population is automatically preserved and becomes a member of the next generation.
@@ -445,7 +445,7 @@ Example config file:
     use_cpu: false
 
 
-Using a custom training loop
+Using a Custom Training Loop
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 If we wanted to have more control over the training process, it is also possible to write our own custom
 training loops to train our agents. The training loop below can be used alternatively to the above ``finetune_llm``
@@ -608,7 +608,7 @@ Once we have finetuned our LLM, we may want to use it for inference. Below outli
 in this tutorial, this `forum <https://discuss.huggingface.co/t/save-load-and-do-inference-with-fine-tuned-model/76291/2>`_
 provides more info for loading finetuned models.
 
-Load fine-tuned LLM
+Load Fine-tuned LLM
 ~~~~~~~~~~~~~~~~~~~
 .. code-block:: python
 

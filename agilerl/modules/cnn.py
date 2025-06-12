@@ -340,17 +340,29 @@ class EvolvableCNN(EvolvableModule):
 
     @property
     def kernel_size(self) -> List[KernelSizeType]:
-        """Returns the kernel size of the network."""
+        """Returns the kernel size of the network.
+
+        :return: Kernel size
+        :rtype: List[KernelSizeType]
+        """
         return self.mut_kernel_size.int_sizes
 
     @property
     def activation(self) -> str:
-        """Returns the activation function of the network."""
+        """Returns the activation function of the network.
+
+        :return: Activation function
+        :rtype: str
+        """
         return self._activation
 
     @activation.setter
     def activation(self, activation: str) -> None:
-        """Sets the activation function of the network."""
+        """Sets the activation function of the network.
+
+        :param activation: Activation function to use.
+        :type activation: str
+        """
         self._activation = activation
 
     @staticmethod
@@ -391,13 +403,21 @@ class EvolvableCNN(EvolvableModule):
         return new_net
 
     def init_weights_gaussian(self, std_coeff: float = 4) -> None:
-        """Initialise weights of linear layer using Gaussian distribution."""
+        """Initialise weights of linear layer using Gaussian distribution.
+
+        :param std_coeff: Standard deviation coefficient, defaults to 4
+        :type std_coeff: float, optional
+        """
         # Output layer is initialised with std_coeff=2
         output_layer = self.get_output_dense()
         EvolvableModule.init_weights_gaussian(output_layer, std_coeff=std_coeff)
 
     def get_output_dense(self) -> torch.nn.Module:
-        """Returns output layer of neural network."""
+        """Returns output layer of neural network.
+
+        :return: Output layer of neural network
+        :rtype: torch.nn.Module
+        """
         return getattr(self.model, f"{self.name}_linear_output")
 
     def change_activation(self, activation: str, output: bool = False) -> None:
@@ -487,7 +507,7 @@ class EvolvableCNN(EvolvableModule):
         """Returns output of neural network.
 
         :param x: Neural network input
-        :type x: torch.Tensor()
+        :type x: torch.Tensor or np.ndarray
 
         :return: Output of the neural network
         :rtype: torch.Tensor
@@ -505,8 +525,13 @@ class EvolvableCNN(EvolvableModule):
         return self.model(x)
 
     @mutation(MutationType.LAYER)
-    def add_layer(self) -> None:
-        """Adds a hidden layer to convolutional neural network."""
+    def add_layer(self) -> Optional[Dict[str, int]]:
+        """Adds a hidden layer to convolutional neural network.
+
+        :return: If maximum number of hidden layers is reached, returns a dictionary containing
+        the hidden layer and number of new channels.
+        :rtype: Optional[Dict[str, int]]
+        """
         max_kernels = self.mut_kernel_size.calc_max_kernel_sizes(
             self.channel_size, self.stride_size, self.input_shape
         )
@@ -525,8 +550,13 @@ class EvolvableCNN(EvolvableModule):
             return self.add_channel()
 
     @mutation(MutationType.LAYER, shrink_params=True)
-    def remove_layer(self) -> None:
-        """Removes a hidden layer from convolutional neural network."""
+    def remove_layer(self) -> Optional[Dict[str, int]]:
+        """Removes a hidden layer from convolutional neural network.
+
+        :return: If minimum number of hidden layers is reached, returns a dictionary containing
+        the hidden layer and number of new channels.
+        :rtype: Optional[Dict[str, int]]
+        """
         if len(self.channel_size) > self.min_hidden_layers:
             self.channel_size = self.channel_size[:-1]
             self.mut_kernel_size.remove_layer()
@@ -626,7 +656,7 @@ class EvolvableCNN(EvolvableModule):
         return {"hidden_layer": hidden_layer, "numb_new_channels": numb_new_channels}
 
     def recreate_network(self, shrink_params: bool = False) -> None:
-        """Recreates neural networks.
+        """Recreates the neural network while preserving the parameters of the old network.
 
         :param shrink_params: Flag indicating whether to shrink the parameters, defaults to False
         :type shrink_params: bool, optional

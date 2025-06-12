@@ -91,8 +91,6 @@ Additionally, we also define our upper and lower limits for these hyperparameter
             "POLICY_FREQ": 2,  # Policy network update frequency
             "LEARN_STEP": 1,  # Learning frequency
             "TAU": 0.005,  # For soft update of target parameters
-            # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-            "CHANNELS_LAST": False,  # Use with RGB states
             "EPISODES": 1000,  # Number of episodes to train for
             "EVO_EPOCHS": 20,  # Evolution frequency, i.e. evolve after every 20 episodes
             "TARGET_SCORE": 200.0,  # Target score that will beat the environment
@@ -139,9 +137,6 @@ used with continuous action environments.
 
     observation_space = env.single_observation_space
     action_space = env.single_action_space
-    if INIT_HP["CHANNELS_LAST"]:
-        # Adjust dimensions for PyTorch API (C, H, W), for envs with RGB image states
-        observation_space = observation_space_channels_to_first(observation_space)
 
 
 Create a Population of Agents
@@ -278,7 +273,6 @@ fitnesses (fitness is each agents test scores on the environment).
         memory=memory,
         INIT_HP=INIT_HP,
         MUT_P=MUT_P,
-        swap_channels=INIT_HP["CHANNELS_LAST"],
         max_steps=INIT_HP["MAX_STEPS"],
         evo_steps=INIT_HP["EVO_STEPS"],
         eval_steps=INIT_HP["EVAL_STEPS"],
@@ -323,19 +317,16 @@ function and is an example of how we might choose to make use of a population of
         while np.less([agent.steps[-1] for agent in pop], INIT_HP["MAX_STEPS"]).all():
             pop_episode_scores = []
             for agent in pop:  # Loop through population
-                state, info = env.reset()  # Reset environment at start of episode
+                obs, info = env.reset()  # Reset environment at start of episode
                 scores = np.zeros(num_envs)
                 completed_episode_scores = []
                 steps = 0
 
                 for idx_step in range(INIT_HP["EVO_STEPS"] // num_envs):
-                    # Swap channels if channels last is True
-                    state = obs_channels_to_first(state) if INIT_HP["CHANNELS_LAST"] else state
-
-                    action = agent.get_action(state)  # Get next action from agent
+                    action = agent.get_action(obs)  # Get next action from agent
 
                     # Act in environment
-                    next_state, reward, terminated, truncated, info = env.step(action)
+                    next_obs, reward, terminated, truncated, info = env.step(action)
                     scores += np.array(reward)
                     steps += num_envs
                     total_steps += num_envs
@@ -354,12 +345,11 @@ function and is an example of how we might choose to make use of a population of
 
                     # Save experience to replay buffer
                     done = terminated or truncated
-                    next_state = obs_channels_to_first(next_state) if INIT_HP["CHANNELS_LAST"] else next_state
                     transition = Transition(
-                        obs=state,
+                        obs=obs,
                         action=action,
                         reward=reward,
-                        next_obs=next_state,
+                        next_obs=next_obs,
                         done=done,
                         batch_size=[num_envs]
                     )
@@ -374,7 +364,7 @@ function and is an example of how we might choose to make use of a population of
                             # Learn according to agent's RL algorithm
                             agent.learn(experiences)
 
-                    state = next_state
+                    obs = next_obs
 
                 pbar.update(INIT_HP["EVO_STEPS"] // len(pop))
                 agent.steps[-1] += steps
@@ -384,7 +374,6 @@ function and is an example of how we might choose to make use of a population of
             fitnesses = [
                 agent.test(
                     env,
-                    swap_channels=INIT_HP["CHANNELS_LAST"],
                     INIT_HP["MAX_STEPS"]=INIT_HP["EVAL_STEPS"],
                     loop=INIT_HP["EVAL_LOOP"],
                 )
@@ -445,24 +434,22 @@ Test loop for inference
     frames = []
     testing_eps = 7
     max_testing_steps = 1000
+    td3.set_training_mode(False)
     with torch.no_grad():
         for ep in range(testing_eps):
-            state = test_env.reset()[0]  # Reset environment at start of episode
+            obs = test_env.reset()[0]  # Reset environment at start of episode
             score = 0
 
             for step in range(max_testing_steps):
-                # If your state is an RGB image
-                state = obs_channels_to_first(state) if INIT_HP["CHANNELS_LAST"] else state
-
                 # Get next action from agent
-                action, *_ = td3.get_action(state, training=False)
+                action, *_ = td3.get_action(obs)
 
                 # Save the frame for this step and append to frames list
                 frame = test_env.render()
                 frames.append(frame)
 
                 # Take the action in the environment
-                state, reward, terminated, truncated, _ = test_env.step(action)
+                obs, reward, terminated, truncated, _ = test_env.step(action)
 
                 # Collect the score
                 score += reward

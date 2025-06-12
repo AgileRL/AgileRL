@@ -50,11 +50,16 @@ so we can wrap it as follows:
 
 .. code-block:: python
 
+    from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
+    from torch.optim import Adam
+
+    # NOTE: We must pass the attributes containing the mutable networks to the OptimizerWrapper
     self.optimizer = OptimizerWrapper(
         optim.Adam,
         networks=[self.actor, self.critic],
         lr=self.lr
     )
+
 
 .. note::
     All of the network groups and optimizers of an algorithm should by convention all be defined in the ``__init__`` method of the algorithm. When initializing

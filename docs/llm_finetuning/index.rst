@@ -27,9 +27,9 @@ The standard approach to creating instruction-following LLMs has traditionally r
 where models are trained on high-quality human-generated examples. However, this method has limitations when it comes to complex
 reasoning tasks. What makes reinforcement learning particularly effective for enhancing reasoning is that it:
 
-#. **Rewards the process, not just the outcome:** By designing reward mechanisms that value step-by-step thinking and self-correction
-#. **Allows for exploration:** Models can try different reasoning approaches and learn which ones lead to better outcomes
-#. **Enables self-improvement cycles:** Creating a virtuous loop where better reasoning leads to better rewards
+  #. **Rewards the process, not just the outcome:** By designing reward mechanisms that value step-by-step thinking and self-correction
+  #. **Allows for exploration:** Models can try different reasoning approaches and learn which ones lead to better outcomes
+  #. **Enables self-improvement cycles:** Creating a virtuous loop where better reasoning leads to better rewards
 
 What makes this approach powerful is that the model discovers effective reasoning strategies on its own. It might learn to:
 
@@ -41,10 +41,9 @@ What makes this approach powerful is that the model discovers effective reasonin
 
 These are called *emergent behaviours*.
 
-The agent receives no explicit instructions on which specific reasoning techniques to employ.
-It learns through trial and error which approaches tend to produce correct answers.
-This allows the emergence of sophisticated reasoning patterns that weren't necessarily anticipated
-by the model's creators, similar to how AlphaGo discovered novel chess strategies through self-play.
+The agent receives no explicit instructions on which specific reasoning techniques to employ. It learns through trial and error which approaches
+tend to produce correct answers. This allows the emergence of sophisticated reasoning patterns that weren't necessarily anticipated
+by the model's creators, similar to how `AlphaGo <https://deepmind.google/research/projects/alphago/>`_ discovered novel chess strategies through self-play.
 
 This example demonstrates how to use the GRPO algorithm to finetune a LLM on a reasoning task.
 

@@ -16,6 +16,7 @@ from agilerl.modules import EvolvableMLP
 from agilerl.utils.utils import make_multi_agent_vect_envs
 from agilerl.wrappers.agent import AsyncAgentsWrapper, RSNorm
 from tests.helper_functions import (
+    assert_state_dicts_equal,
     generate_dict_or_tuple_space,
     generate_discrete_space,
     generate_multi_agent_box_spaces,
@@ -459,19 +460,19 @@ def test_rsnorm_clone_returns_identical_agent():
     assert clone_agent.mut == ddpg.mut
     assert clone_agent.device == ddpg.device
     assert clone_agent.accelerator == ddpg.accelerator
-    assert str(clone_agent.actor.state_dict()) == str(ddpg.actor.state_dict())
-    assert str(clone_agent.actor_target.state_dict()) == str(
-        ddpg.actor_target.state_dict()
+    assert_state_dicts_equal(clone_agent.actor.state_dict(), ddpg.actor.state_dict())
+    assert_state_dicts_equal(
+        clone_agent.actor_target.state_dict(), ddpg.actor_target.state_dict()
     )
-    assert str(clone_agent.critic.state_dict()) == str(ddpg.critic.state_dict())
-    assert str(clone_agent.critic_target.state_dict()) == str(
-        ddpg.critic_target.state_dict()
+    assert_state_dicts_equal(clone_agent.critic.state_dict(), ddpg.critic.state_dict())
+    assert_state_dicts_equal(
+        clone_agent.critic_target.state_dict(), ddpg.critic_target.state_dict()
     )
-    assert str(clone_agent.actor_optimizer.state_dict()) == str(
-        ddpg.actor_optimizer.state_dict()
+    assert_state_dicts_equal(
+        clone_agent.actor_optimizer.state_dict(), ddpg.actor_optimizer.state_dict()
     )
-    assert str(clone_agent.critic_optimizer.state_dict()) == str(
-        ddpg.critic_optimizer.state_dict()
+    assert_state_dicts_equal(
+        clone_agent.critic_optimizer.state_dict(), ddpg.critic_optimizer.state_dict()
     )
     assert clone_agent.fitness == ddpg.fitness
     assert clone_agent.steps == ddpg.steps
@@ -495,19 +496,19 @@ def test_rsnorm_clone_returns_identical_agent():
     assert clone_agent.mut == ddpg.mut
     assert clone_agent.device == ddpg.device
     assert clone_agent.accelerator == ddpg.accelerator
-    assert str(clone_agent.actor.state_dict()) == str(ddpg.actor.state_dict())
-    assert str(clone_agent.actor_target.state_dict()) == str(
-        ddpg.actor_target.state_dict()
+    assert_state_dicts_equal(clone_agent.actor.state_dict(), ddpg.actor.state_dict())
+    assert_state_dicts_equal(
+        clone_agent.actor_target.state_dict(), ddpg.actor_target.state_dict()
     )
-    assert str(clone_agent.critic.state_dict()) == str(ddpg.critic.state_dict())
-    assert str(clone_agent.critic_target.state_dict()) == str(
-        ddpg.critic_target.state_dict()
+    assert_state_dicts_equal(clone_agent.critic.state_dict(), ddpg.critic.state_dict())
+    assert_state_dicts_equal(
+        clone_agent.critic_target.state_dict(), ddpg.critic_target.state_dict()
     )
-    assert str(clone_agent.actor_optimizer.state_dict()) == str(
-        ddpg.actor_optimizer.state_dict()
+    assert_state_dicts_equal(
+        clone_agent.actor_optimizer.state_dict(), ddpg.actor_optimizer.state_dict()
     )
-    assert str(clone_agent.critic_optimizer.state_dict()) == str(
-        ddpg.critic_optimizer.state_dict()
+    assert_state_dicts_equal(
+        clone_agent.critic_optimizer.state_dict(), ddpg.critic_optimizer.state_dict()
     )
     assert clone_agent.fitness == ddpg.fitness
     assert clone_agent.steps == ddpg.steps
@@ -532,19 +533,19 @@ def test_rsnorm_clone_returns_identical_agent():
     assert clone_agent.mut == ddpg.mut
     assert clone_agent.device == ddpg.device
     assert clone_agent.accelerator == ddpg.accelerator
-    assert str(clone_agent.actor.state_dict()) == str(ddpg.actor.state_dict())
-    assert str(clone_agent.actor_target.state_dict()) == str(
-        ddpg.actor_target.state_dict()
+    assert_state_dicts_equal(clone_agent.actor.state_dict(), ddpg.actor.state_dict())
+    assert_state_dicts_equal(
+        clone_agent.actor_target.state_dict(), ddpg.actor_target.state_dict()
     )
-    assert str(clone_agent.critic.state_dict()) == str(ddpg.critic.state_dict())
-    assert str(clone_agent.critic_target.state_dict()) == str(
-        ddpg.critic_target.state_dict()
+    assert_state_dicts_equal(clone_agent.critic.state_dict(), ddpg.critic.state_dict())
+    assert_state_dicts_equal(
+        clone_agent.critic_target.state_dict(), ddpg.critic_target.state_dict()
     )
-    assert str(clone_agent.actor_optimizer.state_dict()) == str(
-        ddpg.actor_optimizer.state_dict()
+    assert_state_dicts_equal(
+        clone_agent.actor_optimizer.state_dict(), ddpg.actor_optimizer.state_dict()
     )
-    assert str(clone_agent.critic_optimizer.state_dict()) == str(
-        ddpg.critic_optimizer.state_dict()
+    assert_state_dicts_equal(
+        clone_agent.critic_optimizer.state_dict(), ddpg.critic_optimizer.state_dict()
     )
     assert clone_agent.fitness == ddpg.fitness
     assert clone_agent.steps == ddpg.steps
@@ -601,8 +602,8 @@ def test_rsnorm_save_load_checkpoint(tmp_path):
     assert isinstance(ddpg.critic_target.encoder, EvolvableMLP)
     assert ddpg.lr_actor == 1e-4
     assert ddpg.lr_critic == 1e-3
-    assert str(ddpg.actor.state_dict()) == str(ddpg.actor_target.state_dict())
-    assert str(ddpg.critic.state_dict()) == str(ddpg.critic_target.state_dict())
+    assert_state_dicts_equal(ddpg.actor.state_dict(), ddpg.actor_target.state_dict())
+    assert_state_dicts_equal(ddpg.critic.state_dict(), ddpg.critic_target.state_dict())
     assert ddpg.batch_size == 64
     assert ddpg.learn_step == 5
     assert ddpg.gamma == 0.99
@@ -624,8 +625,8 @@ def test_rsnorm_save_load_checkpoint(tmp_path):
     assert isinstance(ddpg.critic_target.encoder, EvolvableMLP)
     assert ddpg.lr_actor == 1e-4
     assert ddpg.lr_critic == 1e-3
-    assert str(ddpg.actor.state_dict()) == str(ddpg.actor_target.state_dict())
-    assert str(ddpg.critic.state_dict()) == str(ddpg.critic_target.state_dict())
+    assert_state_dicts_equal(ddpg.actor.state_dict(), ddpg.actor_target.state_dict())
+    assert_state_dicts_equal(ddpg.critic.state_dict(), ddpg.critic_target.state_dict())
     assert ddpg.batch_size == 64
     assert ddpg.learn_step == 5
     assert ddpg.gamma == 0.99

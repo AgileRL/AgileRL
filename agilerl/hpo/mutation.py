@@ -1,6 +1,7 @@
 import copy
 import warnings
 from collections import OrderedDict
+from functools import wraps
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union
 
 import fastrand
@@ -29,6 +30,7 @@ from agilerl.typing import (
 from agilerl.utils.algo_utils import remove_compile_prefix
 
 IndividualType = TypeVar("IndividualType", bound=EvolvableAlgorithm)
+MutationsType = TypeVar("MutationsType", bound="Mutations")
 PopulationType = List[IndividualType]
 BanditAlgorithm = Union[NeuralUCB, NeuralTS]
 MlpMethods = ("add_node", "remove_node", "add_layer", "remove_layer")
@@ -96,6 +98,59 @@ def get_exp_layer(offspring: EvolvableModule) -> nn.Module:
         )
 
     return exp_layer
+
+
+def reinit_shared_networks(mutation_func: MutationMethod) -> Callable:
+    """Decorator to reinitialize shared networks after architecture and parameter mutations.
+
+    :param mutation_func: The mutation function to decorate
+    :type mutation_func: Callable[[IndividualType], IndividualType]
+    :return: The decorated mutation function
+    :rtype: Callable
+    """
+
+    @wraps(mutation_func)
+    def wrapper(self: MutationsType, individual: IndividualType) -> IndividualType:
+        # Call the original mutation function
+        individual = mutation_func(self, individual)
+
+        # Only proceed if mutation was actually applied (not "None")
+        if individual.mut == "None":
+            return individual
+
+        # Recompile individual if necessary
+        compiled_model = individual.torch_compiler is not None
+        if compiled_model:
+            individual.recompile()
+
+        # Reinitialize shared networks to mutated evaluation networks
+        for net_group in individual.registry.groups:
+            if net_group.shared is not None:
+                for shared_name in net_group.shared:
+                    eval_offspring: EvolvableNetworkType = getattr(
+                        individual, net_group.eval
+                    )
+
+                    # Reinitialize shared with frozen weights due to
+                    # potential mutation in architecture
+                    ind_shared = self.reinit_from_mutated(
+                        eval_offspring,
+                        remove_prefix=compiled_model,
+                    )
+                    if self.accelerator is None:
+                        ind_shared = ind_shared.to(self.device)
+
+                    # Compile modules if necessary
+                    if compiled_model:
+                        ind_shared = self.compile_modules(
+                            ind_shared, individual.torch_compiler
+                        )
+
+                    setattr(individual, shared_name, ind_shared)
+
+        return individual
+
+    return wrapper
 
 
 class Mutations:
@@ -304,22 +359,22 @@ class Mutations:
         :return: The reinitialized module
         :rtype: EvolvableModule
         """
-        if isinstance(module, torch._dynamo.eval_frame.OptimizedModule):
-            module_cls = type(module._orig_mod)
-        else:
-            module_cls = type(module)
-
-        return module_cls(**init_dict)
+        module_orig = (
+            module._orig_mod
+            if isinstance(module, torch._dynamo.eval_frame.OptimizedModule)
+            else module
+        )
+        return type(module_orig)(**init_dict)
 
     def reinit_from_mutated(
-        self, offspring: EvolvableNetworkType, remove_compile_prefix: bool = False
+        self, offspring: EvolvableNetworkType, remove_prefix: bool = False
     ) -> EvolvableNetworkType:
         """Reinitialize the mutated offspring with their state dictionary.
 
         :param offspring: The offspring to reinitialize
         :type offspring: NetworkType
-        :param remove_compile_prefix: Boolean flag indicating if the compile prefix should be removed, defaults to False
-        :type remove_prefix: bool, optional
+        :param remove_prefix: Whether to remove the prefix from the offspring
+        :type remove_prefix: bool
 
         :return: The reinitialized offspring
         :rtype: EvolvableNetworkType
@@ -336,9 +391,7 @@ class Mutations:
                 agent_id: nested_offspring.state_dict()
                 for agent_id, nested_offspring in offspring.items()
             }
-            self.load_state_dicts(
-                reinit_modules, state_dicts, remove_prefix=remove_compile_prefix
-            )
+            self.load_state_dicts(reinit_modules, state_dicts, remove_prefix)
 
             ind_shared = ModuleDict(reinit_modules)
         else:
@@ -359,13 +412,14 @@ class Mutations:
         :type modules: ModuleDict[EvolvableModule]
         :param state_dicts: The state dictionary to load
         :type state_dicts: Dict[str, Dict[str, Any]]
-        :param remove_prefix: Boolean flag indicating if the compile prefix should be removed, defaults to False
-        :type remove_prefix: bool, optional
+        :param remove_prefix: Whether to remove the prefix from the state dictionary
+        :type remove_prefix: bool
         """
         for agent_id, module in modules.items():
-            state_dict = state_dicts[agent_id]
             state_dict = (
-                remove_compile_prefix(state_dict) if remove_prefix else state_dict
+                remove_compile_prefix(state_dicts[agent_id])
+                if remove_prefix
+                else state_dicts[agent_id]
             )
             module.load_state_dict(state_dict, strict=False)
 
@@ -435,44 +489,8 @@ class Mutations:
 
         mutated_population = []
         for mutation, individual in zip(mutation_choice, population):
-            individual: IndividualType = individual
-            registry = individual.registry
-
-            # Call sampled mutation for individual
-            individual = mutation(individual)
-
-            # Recompile modules if applicable
-            compiled_individual = individual.torch_compiler is not None
-            if compiled_individual:
-                individual.recompile()
-
-            # Reinitiliaze shared networks to mutated evaluation networks
-            for net_group in registry.groups:
-                if net_group.shared is not None:
-                    for shared_name in net_group.shared:
-                        eval_offspring: EvolvableNetworkType = getattr(
-                            individual, net_group.eval
-                        )
-
-                        # Reinitialize shared with frozen weights due to
-                        # potential mutation in architecture
-                        ind_shared = self.reinit_from_mutated(
-                            eval_offspring, remove_compile_prefix=compiled_individual
-                        )
-
-                        if self.accelerator is None:
-                            ind_shared = ind_shared.to(self.device)
-
-                        # Compile modules if necessary
-                        if compiled_individual:
-                            ind_shared = self.compile_modules(
-                                ind_shared, individual.torch_compiler
-                            )
-
-                        setattr(individual, shared_name, ind_shared)
-
-            # Call hooks specified by user
-            individual.mutation_hook()
+            individual = mutation(individual)  # Call sampled mutation for individual
+            individual.mutation_hook()  # Call hooks specified by user
 
             mutated_population.append(individual)
 
@@ -535,7 +553,7 @@ class Mutations:
         """Performs a random mutation of a learning hyperparameter of an agent. To do this, sample a hyperparameter from those
         specified through the :class:`HyperparameterConfig <agilerl.algorithms.core.registry.HyperparameterConfig>`
         passed during initialization of the agent. The hyperparameter is then mutated and the optimizer is reinitialized if the
-        learning rate is mutated.
+        learning rate has been mutated.
 
         :param individual: Individual agent from population
         :type individual: EvolvableAlgorithm
@@ -572,10 +590,10 @@ class Mutations:
             )  # Reinitialise optimizer if new learning rate
 
         individual.mut = mutate_attr
-
         return individual
 
     # TODO: Activation mutations should really be integrated as architecture mutations
+    @reinit_shared_networks
     def activation_mutation(self, individual: IndividualType) -> IndividualType:
         """Performs a random mutation of the activation layer of the evaluation networks of an agent.
 
@@ -652,6 +670,7 @@ class Mutations:
 
         return network
 
+    @reinit_shared_networks
     def parameter_mutation(self, individual: IndividualType) -> IndividualType:
         """Performs a random mutation to the weights of the policy network of an agent through
         the addition of Gaussian noise.
@@ -675,10 +694,9 @@ class Mutations:
         # We only apply parameter mutations to the evaluation policy network
         # (i.e. the network used to select actions)
         offspring_policy: EvolvableNetworkType = getattr(individual, registry.policy())
-        if isinstance(offspring_policy, list):
-            offspring_policy = [
-                self._gaussian_parameter_mutation(mod) for mod in offspring_policy
-            ]
+        if isinstance(offspring_policy, ModuleDict):
+            for agent_id, module in offspring_policy.items():
+                offspring_policy[agent_id] = self._gaussian_parameter_mutation(module)
         else:
             offspring_policy = self._gaussian_parameter_mutation(offspring_policy)
 
@@ -784,17 +802,20 @@ class Mutations:
 
         return network
 
+    @reinit_shared_networks
     def architecture_mutate(self, individual: IndividualType) -> IndividualType:
         """Performs a random mutation to the architecture of the policy network of an agent. The way in
         which we apply an architecture mutation to single and multi-agent RL algorithms inherently differs
         given the nested nature of the networks in the latter.
 
-        * **Single-agent:** A mutation method is sampled from the policy network and then applied to the rest of the evaluation modules (e.g. critics). This can be done generally
-        because all of the networks in a single-agent algorithm share the same architecture (given there is only one observation space).
+        * **Single-agent:** A mutation method is sampled from the policy network and then applied to the rest of the evaluation
+        modules (e.g. critics). This can be done generally because all of the networks in a single-agent algorithm share the same
+        architecture (given there is only one observation space).
 
-        * **Multi-agent:** A sub-agent is sampled to perform the mutation on for the policy. We then iterate over the rest of the sub-agent policies and perform the same mutation
-        if they share the same observation space. For the rest of the evaluation networks (e.g. critics) there is a possibility they are shared by multiple agents, in which
-        case their underlying architecture will differ from the policy and therefore the mutation methods won't exactly match. In this case, we try to find an analogous
+        * **Multi-agent:** A sub-agent is sampled to perform the mutation on for the policy. We then iterate over the rest of the
+        sub-agent policies and perform the same mutation if they share the same observation space. For the rest of the evaluation
+        networks (e.g. critics) there is a possibility they are centralized, in which case their underlying architecture
+        will differ from the policy and therefore the mutation methods won't exactly match. In such cases, we try to find an analogous
         mutation method to apply.
 
         .. note::
@@ -870,7 +891,7 @@ class Mutations:
         individual.mutation_hook()  # Apply mutation hook
 
         self.reinit_opt(individual)  # Reinitialise optimizer
-        individual.mut = applied_mutation
+        individual.mut = applied_mutation or "None"
         return individual
 
     def _architecture_mutate_multi(
@@ -973,7 +994,7 @@ class Mutations:
         individual.mutation_hook()  # Apply mutation hook
 
         self.reinit_opt(individual)  # Reinitialise optimizer
-        individual.mut = sampled_mutation
+        individual.mut = sampled_mutation or "None"
         return individual
 
     def apply_arch_mutation(

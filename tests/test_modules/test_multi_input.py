@@ -9,7 +9,10 @@ from gymnasium.spaces import Dict, Tuple
 
 from agilerl.modules.configs import CnnNetConfig, LstmNetConfig, MlpNetConfig
 from agilerl.modules.multi_input import EvolvableMultiInput
-from tests.helper_functions import generate_dict_or_tuple_space
+from tests.helper_functions import (
+    assert_state_dicts_equal,
+    generate_dict_or_tuple_space,
+)
 
 DictOrTupleSpace = Union[Dict, Tuple]
 
@@ -877,7 +880,7 @@ def test_clone_instance(
     }
     clone = evolvable_composed.clone()
     assert isinstance(clone, EvolvableMultiInput)
-    assert str(clone.state_dict()) == str(evolvable_composed.state_dict())
+    assert_state_dicts_equal(clone.state_dict(), evolvable_composed.state_dict())
 
     for key, cloned_net in clone.feature_net.items():
         original_net = original_nets[key]

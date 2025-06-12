@@ -242,7 +242,7 @@ Train an agent to beat a Gym environment.
 Before starting training, there are some meta-hyperparameters and settings that must be set. These are defined in ``INIT_HP``, for general
 parameters, and ``MUTATION_PARAMS``, which define the evolutionary probabilities, and ``NET_CONFIG``, which defines the network architecture. For example:
 
-.. collapse:: Basic Hyperparameters
+.. collapse:: Algorithm Hyperparameters
 
    .. code-block:: python
 
@@ -285,7 +285,7 @@ parameters, and ``MUTATION_PARAMS``, which define the evolutionary probabilities
           'RAND_SEED': 1,                             # Random seed
       }
 
-.. collapse:: Basic Network Configuration
+.. collapse:: Network Configuration
 
    .. code-block:: python
 
@@ -381,9 +381,10 @@ Next, create the tournament, mutations and experience replay buffer objects that
 
 .. raw:: html
 
-   <h3>Train A Population of Agents</h3>
+   <h3>Train a Population of Agents</h3>
 
-The easiest training loop implementation is to use our ``train_off_policy()`` function. It requires the ``agent`` have methods ``get_action()`` and ``learn().``
+The easiest training loop implementation is to use our :func:`train_off_policy() <agilerl.training.train_off_policy.train_off_policy>` function.
+It requires the ``agent`` have methods ``get_action()`` and ``learn()``.
 
 .. collapse:: Training Example
    :open:

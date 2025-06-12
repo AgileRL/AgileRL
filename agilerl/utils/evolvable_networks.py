@@ -10,7 +10,7 @@ from gymnasium import spaces
 from torch._dynamo.eval_frame import OptimizedModule
 from torch.optim import Optimizer
 
-from agilerl.modules.base import ModuleDict
+from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.modules.configs import (
     CnnNetConfig,
     LstmNetConfig,
@@ -96,27 +96,27 @@ def get_action_dim_networks(
 
 
 def compile_model(
-    model: nn.Module, mode: Optional[str] = "default"
-) -> Union[OptimizedModule, nn.Module]:
+    model: Union[nn.Module, ModuleDict[EvolvableModule]],
+    mode: Optional[str] = "default",
+) -> Union[OptimizedModule, ModuleDict[EvolvableModule]]:
     """Compiles torch model if not already compiled
 
     :param model: torch model
-    :type model: nn.Module
+    :type model: nn.Module | ModuleDict[EvolvableModule]
     :param mode: torch compile mode, defaults to "default"
     :type mode: str, optional
     :return: compiled model
-    :rtype: OptimizedModule | Module
+    :rtype: OptimizedModule | ModuleDict[OptimizedModule]
     """
     if isinstance(model, ModuleDict):
-        return ModuleDict(
-            {agent_id: compile_model(m, mode) for agent_id, m in model.items()}
-        )
+        for agent_id, module in model.items():
+            if not isinstance(module, OptimizedModule) and mode is not None:
+                model[agent_id] = torch.compile(module, mode=mode)
 
-    return (
-        torch.compile(model, mode=mode)
-        if not isinstance(model, OptimizedModule) and mode is not None
-        else model
-    )
+    elif not isinstance(model, OptimizedModule) and mode is not None:
+        model = torch.compile(model, mode=mode)
+
+    return model
 
 
 def is_image_space(space: spaces.Space) -> bool:

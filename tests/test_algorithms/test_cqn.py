@@ -505,11 +505,13 @@ def test_clone_returns_identical_agent(observation_space):
     assert clone_agent.mut == cqn.mut
     assert clone_agent.device == cqn.device
     assert clone_agent.accelerator == cqn.accelerator
-    assert str(clone_agent.actor.state_dict()) == str(cqn.actor.state_dict())
-    assert str(clone_agent.actor_target.state_dict()) == str(
-        cqn.actor_target.state_dict()
+    assert_state_dicts_equal(clone_agent.actor.state_dict(), cqn.actor.state_dict())
+    assert_state_dicts_equal(
+        clone_agent.actor_target.state_dict(), cqn.actor_target.state_dict()
     )
-    assert str(clone_agent.optimizer.state_dict()) == str(cqn.optimizer.state_dict())
+    assert_state_dicts_equal(
+        clone_agent.optimizer.state_dict(), cqn.optimizer.state_dict()
+    )
     assert clone_agent.fitness == cqn.fitness
     assert clone_agent.steps == cqn.steps
     assert clone_agent.scores == cqn.scores

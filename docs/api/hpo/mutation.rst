@@ -13,7 +13,7 @@ The :class:`Mutations <agilerl.hpo.mutation.Mutations>` class is used to mutate 
   * **Network activation layer mutation**: Change of activation layer.
   * **RL hyperparameter mutation**: Mutation of a learning hyperparameter (e.g. learning rate or batch size).
 
-:func:`Mutations.mutation() <agilerl.hpo.mutation.Mutations.mutation>` returns a mutated population.
+:func:`Mutations.mutation(population) <agilerl.hpo.mutation.Mutations.mutation>` returns a mutated population.
 
 Tournament selection and mutation should be applied sequentially to fully evolve a population between evaluation and learning cycles.
 

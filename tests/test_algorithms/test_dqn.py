@@ -1,4 +1,5 @@
 import copy
+from copy import deepcopy
 from pathlib import Path
 
 import dill
@@ -529,8 +530,10 @@ def test_clone_returns_identical_agent():
     assert clone_agent.mut == dqn.mut
     assert clone_agent.device == dqn.device
     assert clone_agent.accelerator == dqn.accelerator
-    assert str(clone_agent.actor.state_dict()) == str(dqn.actor.state_dict())
-    assert str(clone_agent.optimizer.state_dict()) == str(dqn.optimizer.state_dict())
+    assert_state_dicts_equal(clone_agent.actor.state_dict(), dqn.actor.state_dict())
+    assert_state_dicts_equal(
+        clone_agent.optimizer.state_dict(), dqn.optimizer.state_dict()
+    )
     assert clone_agent.fitness == dqn.fitness
     assert clone_agent.steps == dqn.steps
     assert clone_agent.scores == dqn.scores
@@ -552,8 +555,10 @@ def test_clone_returns_identical_agent():
     assert clone_agent.mut == dqn.mut
     assert clone_agent.device == dqn.device
     assert clone_agent.accelerator == dqn.accelerator
-    assert str(clone_agent.actor.state_dict()) == str(dqn.actor.state_dict())
-    assert str(clone_agent.optimizer.state_dict()) == str(dqn.optimizer.state_dict())
+    assert_state_dicts_equal(clone_agent.actor.state_dict(), dqn.actor.state_dict())
+    assert_state_dicts_equal(
+        clone_agent.optimizer.state_dict(), dqn.optimizer.state_dict()
+    )
     assert clone_agent.fitness == dqn.fitness
     assert clone_agent.steps == dqn.steps
     assert clone_agent.scores == dqn.scores
@@ -573,9 +578,10 @@ def test_clone_returns_identical_agent():
     assert clone_agent.mut == dqn.mut
     assert clone_agent.device == dqn.device
     assert clone_agent.accelerator == dqn.accelerator
-    assert str(clone_agent.actor.state_dict()) == str(dqn.actor.state_dict())
-
-    assert str(clone_agent.optimizer.state_dict()) == str(dqn.optimizer.state_dict())
+    assert_state_dicts_equal(clone_agent.actor.state_dict(), dqn.actor.state_dict())
+    assert_state_dicts_equal(
+        clone_agent.optimizer.state_dict(), dqn.optimizer.state_dict()
+    )
     assert clone_agent.fitness == dqn.fitness
     assert clone_agent.steps == dqn.steps
     assert clone_agent.scores == dqn.scores
@@ -623,9 +629,10 @@ def test_clone_after_learning():
     assert clone_agent.mut == dqn.mut
     assert clone_agent.device == dqn.device
     assert clone_agent.accelerator == dqn.accelerator
-    assert str(clone_agent.actor.state_dict()) == str(dqn.actor.state_dict())
-
-    assert str(clone_agent.optimizer.state_dict()) == str(dqn.optimizer.state_dict())
+    assert_state_dicts_equal(clone_agent.actor.state_dict(), dqn.actor.state_dict())
+    assert_state_dicts_equal(
+        clone_agent.optimizer.state_dict(), dqn.optimizer.state_dict()
+    )
     assert clone_agent.fitness == dqn.fitness
     assert clone_agent.steps == dqn.steps
     assert clone_agent.scores == dqn.scores
@@ -662,8 +669,8 @@ def test_save_load_checkpoint_correct_data_and_format(
         action_space=generate_discrete_space(2),
     )
 
-    initial_actor_state_dict = dqn.actor.state_dict()
-    init_optim_state_dict = dqn.optimizer.state_dict()
+    initial_actor_state_dict = deepcopy(dqn.actor.state_dict())
+    init_optim_state_dict = deepcopy(dqn.optimizer.state_dict())
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -700,7 +707,6 @@ def test_save_load_checkpoint_correct_data_and_format(
     assert isinstance(dqn.actor.encoder, encoder_cls)
     assert isinstance(dqn.actor_target.encoder, encoder_cls)
     assert dqn.lr == 1e-4
-    # assert str(dqn.actor.state_dict()) == str(dqn.actor_target.state_dict())
     assert_state_dicts_equal(initial_actor_state_dict, dqn.actor.state_dict())
     assert_state_dicts_equal(init_optim_state_dict, dqn.optimizer.state_dict())
     assert dqn.batch_size == 64
@@ -735,8 +741,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
         actor_network=actor_network,
     )
 
-    initial_actor_state_dict = dqn.actor.state_dict()
-    init_optim_state_dict = dqn.optimizer.state_dict()
+    initial_actor_state_dict = deepcopy(dqn.actor.state_dict())
+    init_optim_state_dict = deepcopy(dqn.optimizer.state_dict())
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -773,7 +779,6 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert isinstance(dqn.actor, nn.Module)
     assert isinstance(dqn.actor_target, nn.Module)
     assert dqn.lr == 1e-4
-    # assert str(dqn.actor.state_dict()) == str(dqn.actor_target.state_dict())
     assert_state_dicts_equal(initial_actor_state_dict, dqn.actor.state_dict())
     assert_state_dicts_equal(init_optim_state_dict, dqn.optimizer.state_dict())
     assert dqn.batch_size == 64
