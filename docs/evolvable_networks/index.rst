@@ -23,13 +23,22 @@ which require very different network architectures.
 
    Structure of an ``EvolvableModule`` showing the relationship with ``torch.nn.Module`` and mutation capabilities
 
-Examples of some very basic modules included in AgileRL are:
+Examples of the basic modules included in AgileRL are:
 
 - :class:`~agilerl.modules.mlp.EvolvableMLP`: Multi-layer perceptron (MLP) network that maps vector observations to a desired number of outputs, including mutation methods that allow for the random addition or removal of layers and nodes.
 
 - :class:`~agilerl.modules.cnn.EvolvableCNN`: Convolutional neural network (CNN) that maps image observations to a desired number of outputs, including mutation methods that allow for the random addition or removal of convolutional layers and neurons, as well as changing the kernel sizes.
 
 - :class:`~agilerl.modules.multi_input.EvolvableMultiInput`: Network that maps dictionary or tuple observations to a desired number of outputs. This module includes nested ``EvolvableModule``'s to process each element of the dictionary or tuple observation separately into a latent space, which are then concatenated and processed by a final dense layer to form a number of outputs. Includes the mutation methods of all nested ``EvolvableModule``'s.
+
+Below is an example of the simplest evolvable module included in AgileRL, the ``EvolvableMLP``.
+
+**Example: EvolvableMLP**
+
+.. collapse:: EvolvableMLP
+
+    .. literalinclude:: ../../agilerl/modules/mlp.py
+        :language: python
 
 Policies, Value Functions, and More Complex Networks
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -45,7 +54,7 @@ base class which inherits from :class:`~agilerl.modules.base.EvolvableModule`. T
    Structure of an ``EvolvableNetwork``, showing the underlying encoder and head networks which are ``EvolvableModule`` objects themselves.
 
 This abstraction allows us to define common networks used in RL algorithms very simply, since it automatically creates an appropriate encoder for the passed observation space. After,
-we just create a head to the the network that processed the encoded observations into an apprioriate number of outputs (for e.g. policies or critics). Off-the-shelf ``EvolvableNetwork``'s
+we just create a head to the the network that processes the encoded observations into an appropriate number of outputs (for e.g. policies or critics). Off-the-shelf ``EvolvableNetwork``'s
 in AgileRL natively support the following observation spaces:
 
   - :class:`~gymnasium.spaces.Box`: Use an ``EvolvableMLP``, ``EvolvableCNN``, or ``EvolvableLSTM`` as the encoder, depending on the dimensionality of the observation space.

@@ -117,12 +117,12 @@ Action Spaces
      - ✅
      - ✅
    * - :ref:`MADDPG <maddpg>`
-     - ❌
+     - ✅
      - ✅
      - ❌
      - ❌
    * - :ref:`MATD3 <matd3>`
-     - ❌
+     - ✅
      - ✅
      - ❌
      - ❌

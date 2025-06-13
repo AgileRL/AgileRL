@@ -128,8 +128,8 @@ class MockMultiAgentAlgorithm(MultiAgentRLAlgorithm):
 
     def make_network(self, agent_id: str):
         return MockEvolvableNetwork(
-            input_dim=self.observation_space[agent_id].shape[0],
-            output_dim=self.action_space[agent_id].shape[0],
+            input_dim=self.possible_observation_spaces[agent_id].shape[0],
+            output_dim=self.possible_action_spaces[agent_id].shape[0],
             name=f"{agent_id}",
             device=self.device,
         )

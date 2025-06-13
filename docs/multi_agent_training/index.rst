@@ -26,6 +26,12 @@ AgileRL builds on the `PettingZoo <https://pettingzoo.farama.org/>`_ framework f
 is defined by a set of agents. Multi-agent algorithms in AgileRL have an ``agent_ids`` argument which should be passed in from the possible agents in the environment, alongside the lists of
 ``observation_spaces`` and ``action_spaces``, whereby the space at index ``i`` is the observation/action space for the agent with ID ``agent_ids[i]``.
 
+Agent Definitions
+~~~~~~~~~~~~~~~~~
+In AgileRL we also follow the convention that agent IDs should be formatted by their homogeneity as ``<group_id>_<agent_idx>``. For example, if we have a multi-agent setting with agents
+``[bob_0, bob_1, fred_0, fred_1]``, the assumption is that the agents with the same prefix (or ``group_id``) as separated by ``_`` are homogeneous (i.e. have the same observation space and are
+interchangeable). This allows us to automatically create centralized policies where suitable (please refer to :ref:`IPPO <ippo>` for more details).
+
 Vectorised Environments
 ~~~~~~~~~~~~~~~~~~~~~~~
 We implement our own wrapper to vectorise multi-agent environments through the :class:`AsyncPettingZooVecEnv <agilerl.vector.pz_async_vec_env.AsyncPettingZooVecEnv>` class, which
@@ -45,22 +51,125 @@ function.
     # Vectorise the environment
     env = make_multi_agent_vect_envs(make_env, num_envs=8)
 
-Agent Definitions
-~~~~~~~~~~~~~~~~~
-In AgileRL we also follow the convention that agent IDs should be formatted by their homogeneity as ``<group_id>_<agent_idx>``. For example, if we have a multi-agent setting with agents
-``[bob_0, bob_1, fred_0, fred_1]``, the assumption is that the agents with the same prefix (or ``group_id``) as separated by ``_`` are homogeneous (i.e. have the same observation space and are
-interchangeable). This allows us to automatically create centralized policies where suitable (please refer to :ref:`IPPO <ippo>` for more details).
-
 .. _multi_agent_networks:
 
 Configuring Network Architectures
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Network architectures in multi-agent settings are configured in the same way as single-agent settings through the ``net_config`` argument of an algorithm. The main
+difference lies in the ability to pass this in as a nested dictionary including the configurations for individual sub-agents or groups of agents that are homogeneous.
+In other words, instead of passing in ``net_config`` as the arguments to an individual ``EvolvableNetwork``, users can choose to pass the configurations to the different
+sub-agent networks in an algorithm.
+
+If we have a setting with the following possible agents with their respective observation and action spaces:
+
+.. collapse:: Environment definition
+    :open:
+
+    .. code-block:: python
+
+        from gymnasium.spaces import Box, Discrete
+
+        agent_ids = ["bob_0", "bob_1", "fred_0", "fred_1"]
+        observation_spaces = [
+            Box(low=-1, high=1, shape=(16,)), # bob_0
+            Box(low=-1, high=1, shape=(16,)), # bob_1
+            Box(low=-1, high=1, shape=(32,)), # fred_0
+            Box(low=-1, high=1, shape=(32,)), # fred_1
+        ]
+        action_spaces = [
+            Discrete(2), # bob_0
+            Discrete(2), # bob_1
+            Discrete(2), # fred_0
+            Discrete(2), # fred_1
+        ]
+
+We could specify the architecture for individual agents as follows in a yaml file:
+
+.. collapse:: Configuring architectures for individual agents
+
+    .. code-block:: yaml
+
+        bob_0:
+            latent_dim: 32
+            encoder_config:
+                hidden_size: [32]
+                activation: ReLU
+            head_config:
+                hidden_size: [32]
+        bob_1:
+            latent_dim: 32
+            encoder_config:
+                hidden_size: [64, 64]
+                activation: ReLU
+            head_config:
+                hidden_size: [32]
+        fred_0:
+            latent_dim: 32
+            encoder_config:
+                hidden_size: [64, 64]
+                activation: ReLU
+            head_config:
+                hidden_size: [32]
+        fred_1:
+            latent_dim: 32
+            encoder_config:
+                hidden_size: [64, 64]
+                activation: ReLU
+            head_config:
+                hidden_size: [32]
+
+Alternatively, we could specify the architectures for homogeneous agents as a group:
+
+.. collapse:: Configuring architectures for homogeneous agents
+
+    .. code-block:: yaml
+
+        bob:
+            latent_dim: 32
+            encoder_config:
+                hidden_size: [32]
+                activation: ReLU
+            head_config:
+                hidden_size: [32]
+        fred:
+            latent_dim: 32
+            encoder_config:
+                hidden_size: [64, 64]
+                activation: ReLU
+            head_config:
+                hidden_size: [32]
+
+In simple situations where all agents can use the same architecture (i.e. require the same encoder type to process observations), we can also pass a single-level
+``net_config`` like in single-agent settings. In the above example, since all observations can be processed using an ``EvolvableMLP`` network, we could pass the
+following which would assign the same network architecture to all agents:
+
+.. collapse:: Configuring a single network architecture for all agents
+
+    .. code-block:: yaml
+
+        latent_dim: 32
+        encoder_config:
+            hidden_size: [32]
+            activation: ReLU
+        head_config:
+            hidden_size: [32]
 
 Grouping Agents
----------------
+~~~~~~~~~~~~~~~
+It is common in multi-agent settings to require a centralized policies for groups of homogeneous agents during training. Currently, AgileRL only includes the
+:class:`IPPO <agilerl.algorithms.ippo.IPPO>` algorithm which supports this. In such cases, we restrict users to pass in network configurations to the groups
+directly. For the setting described above, we could only use the latter configuration.
 
 Asynchronous Agents
--------------------
+~~~~~~~~~~~~~~~~~~~
+We often encounter settings where the sub-agents don't act simultaneously, but rather do so asynchronously in turns or with different frequencies. AgileRL follows
+the convention that such environments only return observations for agents that should act in the following timestep. To handle these scenarios, we've implemented the
+:class:`AsyncAgentsWrapper <agilerl.wrappers.agent.AsyncAgentsWrapper>` class, which automatically processes observations and actions to be compatible with
+``AsyncPettingZooVecEnv``.
+
+.. warning::
+    The :class:`AsyncAgentsWrapper <agilerl.wrappers.agents.AsyncAgentsWrapper>` class is currently only compatible with the
+    :class:`IPPO <agilerl.algorithms.ippo.IPPO>` algorithm.
 
 .. _initpop_ma:
 
