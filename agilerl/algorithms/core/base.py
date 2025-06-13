@@ -1727,11 +1727,15 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """Wrap the models in the accelerator"""
         print("This is the accelerator from inside grpo", self.accelerator)
         if self.accelerator is not None:
-            print("Calling prepare")
-            self.actor, self.optimizer, self.lr_scheduler = self.accelerator.prepare(
-                self.actor, self.optimizer.optimizer, self.lr_scheduler
+            opt = (
+                self.optimizer.optimizer
+                if self.optimizer.optimizer_cls == torch.optim.AdamW
+                else self.optimizer
             )
-            print("Prepare finished")
+            self.actor, self.optimizer, self.lr_scheduler = self.accelerator.prepare(
+                self.actor, opt, self.lr_scheduler
+            )
+            # opt -> Dummy
         else:
             self.actor = self.actor.to(self.device)
             self.actor.gradient_checkpointing_enable()
@@ -1809,8 +1813,13 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 Accelerator() if self.accelerator is not None else None
             )
 
+            print("NEW DEEPSPEED CONFIG")
+            # print(input_args['accelerator'].state.deepspeed_plugin.deepspeed_config)
+
             clone = type(self)(**input_args)
             clone.mutation_hook()
+
+            # print("Type of clone optimizer", type(clone.optimizer), "self optimizer", self.optimizer)
 
             # Clone attributes
             accelerator = clone.accelerator
@@ -1824,6 +1833,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             clone.lr_scheduler = lr_scheduler
             clone.lr_scheduler = cloned_lr_scheduler
             self.lr_scheduler = original_lr_scheduler
+
+            print(
+                "Type of clone optimizer after copy attributes", type(clone.optimizer)
+            )
+            # assert False
 
             if self.accelerator is None:
                 clone.optimizer.optimizer.load_state_dict(
@@ -1849,11 +1863,26 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         return clone
 
     @staticmethod
-    def update_lr(optimizer: DeepSpeedOptimizerWrapper, lr: float) -> None:
+    def update_lr(
+        optimizer: DeepSpeedOptimizerWrapper, lr: float, accelerator: Accelerator
+    ) -> None:
         """Update the learning rate of the optimizer
 
         :param optimizer: Optimizer
         :type optimizer: Optimizer
         """
+
+        print("THIS IS THE NEW LEARING RATE", lr)
+
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
+
+        if (
+            accelerator.state.deepspeed_plugin.deepspeed_config.get("optimizer", None)
+            is not None
+        ):
+            accelerator.deepspeed_plugin.deepspeed_config["optimizer"]["params"][
+                "lr"
+            ] = lr
+
+        return accelerator

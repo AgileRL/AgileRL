@@ -19,16 +19,14 @@ from transformers.modeling_utils import PreTrainedModel
 from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.typing import ExperiencesType
+from agilerl.typing import ExperiencesType, OptimizerType
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     create_warmup_cosine_scheduler,
     get_experiences_samples,
     stack_and_pad_experiences,
 )
-from agilerl.utils.llm_utils import (
-    HuggingFaceGym,
-)
+from agilerl.utils.llm_utils import HuggingFaceGym, _DummyOptimizer
 
 DeepSpeedOptimizerType = Union[
     DeepSpeedZeroOptimizer,  # ZeRO Stage 1 & 2 optimizer
@@ -51,6 +49,8 @@ class GRPO(LLMAlgorithm):
     :type index: int, optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
+    :param beta: Beta coefficient, controls the strength of the KL divergence penalty, defaults to 0.001
+    :type beta: float, optional
     :param lr: Learning rate for optimizer, defaults to 1e-4
     :type lr: float, optional
     :param clip_coef: Surrogate clipping coefficient, defaults to 0.2
@@ -145,7 +145,20 @@ class GRPO(LLMAlgorithm):
         assert isinstance(
             actor_network, (PeftModel, PreTrainedModel)
         ), "Actor network must be a PeftModel or PreTrainedModel"
-
+        if (
+            accelerator is not None
+            and accelerator.state.deepspeed_plugin.deepspeed_config.get(
+                "optimizer", None
+            )
+            is not None
+            and cosine_lr_schedule_config is not None
+            and accelerator.is_main_process
+        ):
+            warnings.warn(
+                "Cannot specify the optimizer in the deepspeed config and use AgileRL's LR scheduler. If you want to use LR scheduling, \
+            please specify in the deepspeed config. Setting LR scheduler to None."
+            )
+            cosine_lr_schedule_config = None
         if self.accelerator is not None and not clone:
             self.batch_size = 1
             if (
@@ -183,6 +196,7 @@ class GRPO(LLMAlgorithm):
             min_new_tokens=min_output_tokens,
             pad_token_id=pad_token_id,
         )
+        self.optimizer = None  # Initialize optimizer to None, will be set in _initialize_actors if not defined in deepspeed config
         if lora_config is None:
             warnings.warn(
                 "No LoRA config provided. Using default LoRA configuration for RL finetuning."
@@ -216,16 +230,12 @@ class GRPO(LLMAlgorithm):
         self.local_rank = (
             "0" if self.accelerator is None else self.accelerator.local_process_index
         )
-        print("Initializing actors")
         self._initialize_actors(actor_network, not clone)
-        print("Actors initialized")
 
         # Register network groups for mutations
         self.register_network_group(NetworkGroup(eval=self.actor, policy=True))
         if self.wrap:
-            print("Wrapping models")
             self.wrap_models()
-            print("Models wrapped")
 
     def get_action(
         self, states: List[Dict[str, torch.Tensor]], training: bool = True
@@ -381,12 +391,22 @@ class GRPO(LLMAlgorithm):
         )
         self.actor.set_adapter("actor")
 
+        optim_class = self._select_optim_class()
+        print("Here is the optimizer class", optim_class)
         self.optimizer = OptimizerWrapper(
-            optim.AdamW, networks=[self.actor], lr=self.lr
+            optim_class, networks=[self.actor], lr=self.lr
         )
+        print("Here is the optimizer", self.optimizer)
         self.lr_scheduler = (
             create_warmup_cosine_scheduler(
-                self.optimizer.optimizer, self.cosine_lr_schedule_config, 1e-8, self.lr
+                (
+                    self.optimizer.optimizer
+                    if self.optimizer.optimizer_cls != _DummyOptimizer
+                    else self.actor.optimizer
+                ),
+                self.cosine_lr_schedule_config,
+                1e-8,
+                self.lr,
             )
             if self.cosine_lr_schedule_config is not None
             else None
@@ -535,9 +555,14 @@ class GRPO(LLMAlgorithm):
         :type loss: float
         """
         if self.accelerator is not None:
+            print("LOSSS", loss)
             self.accelerator.backward(loss)
-            self.optimizer.step()
-            self.optimizer.zero_grad()
+            print("Optimizer in backward pass", self.optimizer)
+            if not isinstance(self.optimizer.optimizer, _DummyOptimizer):
+                # Accelerate handles optimizer step and zero grad if optimizer is defined in deepspeed config
+                print("ENTERING HERE")
+                self.optimizer.step()
+                self.optimizer.zero_grad()
         else:
             loss.backward()
             clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
@@ -546,3 +571,20 @@ class GRPO(LLMAlgorithm):
         if self.lr_scheduler is not None:
             self.lr_scheduler.step()
             self.lr = self.lr_scheduler.get_last_lr()[0]
+
+    def _select_optim_class(self) -> Union[OptimizerType, _DummyOptimizer]:
+        """Select the optimizer class based on the accelerator and deepspeed config.
+
+        :return: Optimizer class
+        :rtype: Union[torch.optim.Optimizer, _DummyOptimizer]
+        """
+        if self.accelerator is None:
+            return optim.AdamW
+        if (
+            self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
+                "optimizer", None
+            )
+            is not None
+        ):
+            return _DummyOptimizer
+        return optim.AdamW

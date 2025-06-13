@@ -24,7 +24,7 @@ def create_model(pretrained_model_name_or_path):
     model = AutoModelForCausalLM.from_pretrained(
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
+        # attn_implementation="flash_attention_2",
         device_map="cpu",
     )
 
@@ -152,9 +152,38 @@ def main(init_hp, mut_p):
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
+    # deepspeed_plugin = DeepSpeedPlugin( hf_ds_config={
+    #         "bf16": {
+    #             "enabled": True  # from mixed_precision: bf16
+    #         },
+    #         "zero_optimization": {
+    #             "stage": 2,  # from zero_stage: 2
+    #             "offload_optimizer": {
+    #                 "device": "cpu"  # from offload_optimizer_device: cpu
+    #             },
+    #             "offload_param": {
+    #                 "device": "cpu"  # from offload_param_device: cpu
+    #             }
+    #         },
+    #         "optimizer": {
+    #             "type": "Adam",
+    #             "params": {
+    #                 "lr": init_hp["LR"]
+    #             }
+    #         },
+    #         "gradient_accumulation_steps": 4,  # from gradient_accumulation_steps: 4
+    #         "gradient_clipping": 1.5,  # from gradient_clipping: 1.5
+    #         "train_batch_size": "auto",
+    #         "train_micro_batch_size_per_gpu": "auto",
+    #         "wall_clock_breakdown": False
+    #     },
+    #     zero3_init_flag=False,  # from zero3_init_flag: false
+    #     gradient_accumulation_steps=4,  # from gradient_accumulation_steps: 4
+    #     gradient_clipping=1.5  # from gradient_clipping: 1.5
+    # )
 
     # Convert the HuggingFace dataset into a Gymnasium environment
-    accelerator = Accelerator()
+    accelerator = Accelerator()  # deepspeed_plugin=deepspeed_plugin)
     accelerator.state.deepspeed_plugin.deepspeed_config["activation_checkpointing"] = {
         "partition_activations": True,
         "cpu_checkpointing": True,
@@ -175,11 +204,11 @@ def main(init_hp, mut_p):
     init_hp["PAD_TOKEN_ID"] = tokenizer.eos_token_id
 
     hp_config = HyperparameterConfig(
-        beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),
+        # beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),
         lr=RLParameter(min=mut_p["MIN_LR"], max=mut_p["MAX_LR"]),
-        group_size=RLParameter(
-            min=mut_p["MIN_GROUP_SIZE"], max=mut_p["MAX_GROUP_SIZE"], dtype=int
-        ),
+        # group_size=RLParameter(
+        #     min=mut_p["MIN_GROUP_SIZE"], max=mut_p["MAX_GROUP_SIZE"], dtype=int
+        # ),
     )
     pop = create_population(
         algo=init_hp["ALGO"],
@@ -223,7 +252,7 @@ def main(init_hp, mut_p):
         save_elite=True,
         elite_path="saved_llms",
         max_reward=2.0,
-        evo_steps=10,
+        evo_steps=1,
         mutation=mutations,
         tournament=tournament,
         accelerator=accelerator,
@@ -234,8 +263,6 @@ def main(init_hp, mut_p):
 
 if __name__ == "__main__":
     import os
-
-    import torch.nn as nn
 
     # deepspeed_plugin = DeepSpeedPlugin(hf_ds_config={
     #     "bf16": {
@@ -254,31 +281,25 @@ if __name__ == "__main__":
     #     # "lr": 0.00015
     #     # }
     # })
-
-    accelerator = Accelerator()  # deepspeed_plugin=deepspeed_plugin)
-    model = nn.Sequential(
-        nn.Linear(10, 10),
-    )
-    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-    print("Model", model)
-
-    # import deepspeed
-
-    # model, opt = deepspeed.initialize(
-    #     model=model,
-    #     model_parameters=model.parameters(),
-    #     config=deepspeed_plugin.deepspeed_config,
+    # accelerator = Accelerator()  # deepspeed_plugin=deepspeed_plugin)
+    # model = nn.Sequential(
+    #     nn.Linear(10, 10),
     # )
-
-    from accelerate.state import AcceleratorState
-
-    AcceleratorState().deepspeed_plugin.deepspeed_config[
-        "train_micro_batch_size_per_gpu"
-    ] = 2
-    accelerator.prepare(model, opt)
-
-    print("Prepared model")
-    assert False
+    # opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+    # print("Model", model)
+    # # import deepspeed
+    # # model, opt = deepspeed.initialize(
+    # #     model=model,
+    # #     model_parameters=model.parameters(),
+    # #     config=deepspeed_plugin.deepspeed_config,
+    # # )
+    # from accelerate.state import AcceleratorState
+    # AcceleratorState().deepspeed_plugin.deepspeed_config[
+    #     "train_micro_batch_size_per_gpu"
+    # ] = 2
+    # accelerator.prepare(model, opt)
+    # print("Prepared model")
+    # assert False
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     with open("configs/training/grpo.yaml") as file:
         config = yaml.safe_load(file)

@@ -1,6 +1,6 @@
 ---
 compute_environment: LOCAL_MACHINE
-deepspeed_config: {}
+# deepspeed_config: {}
 distributed_type: MULTI_GPU
 fsdp_config: {}
 machine_rank: 0

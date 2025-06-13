@@ -203,3 +203,12 @@ class HuggingFaceGym(gym.Env):
             }
 
         return collate_fn
+
+
+class _DummyOptimizer:
+    """
+    Sentinel class to use for the optimizer when the optimizer is defined in the deepspeed config.
+    """
+
+    def __init__(self, params: List[torch.Tensor], lr: float, **kwargs):
+        pass
