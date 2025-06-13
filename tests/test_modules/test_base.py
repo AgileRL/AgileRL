@@ -22,7 +22,7 @@ def test_evolvable_module_initialization():
 
     module = DummyEvolvableModule(device="cpu")
     assert module.device == "cpu"
-    assert module.get_init_dict() == {"device": "cpu"}
+    assert module.get_init_dict() == {"device": "cpu", "random_seed": None}
 
 
 def test_evolvable_module_get_mutation_methods():
@@ -440,7 +440,7 @@ def test_evolvable_wrapper_mutation_methods():
     assert wrapper_methods["dummy_layer_mutation"]._mutation_type == MutationType.LAYER
 
     # Check that the wrapped module's mutations are disabled
-    assert len(module.mutation_methods) == 0
+    assert not any("_wrapped" in method for method in wrapper.mutation_methods)
 
 
 class MockMethod:

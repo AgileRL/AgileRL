@@ -1,6 +1,6 @@
 import random
 from numbers import Number
-from typing import List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -9,8 +9,99 @@ from gymnasium import spaces
 from tensordict import TensorDict
 
 from agilerl.components.data import Transition
-from agilerl.protocols import EvolvableAlgorithm, EvolvableModule
+from agilerl.modules import EvolvableModule
 from agilerl.typing import NumpyObsType, TorchObsType
+
+
+def assert_state_dicts_equal(
+    state_dict1: Dict[str, torch.Tensor],
+    state_dict2: Dict[str, torch.Tensor],
+    rtol: float = 1e-5,
+    atol: float = 1e-8,
+) -> None:
+    """
+    Compare two PyTorch state dictionaries using torch.allclose for efficient comparison.
+
+    :param state_dict1: First state dictionary
+    :type state_dict1: Dict[str, torch.Tensor]
+    :param state_dict2: Second state dictionary
+    :type state_dict2: Dict[str, torch.Tensor]
+    :param rtol: Relative tolerance for torch.allclose
+    :type rtol: float
+    :param atol: Absolute tolerance for torch.allclose
+    :type atol: float
+    """
+    # First check that they have the same keys
+    assert set(state_dict1.keys()) == set(
+        state_dict2.keys()
+    ), f"State dict keys don't match: {set(state_dict1.keys())} vs {set(state_dict2.keys())}"
+
+    # Then check each tensor
+    for key in state_dict1:
+        tensor1 = state_dict1[key]
+        tensor2 = state_dict2[key]
+
+        if isinstance(tensor1, torch.Tensor) and isinstance(tensor2, torch.Tensor):
+            if tensor1.device != tensor2.device:
+                tensor1 = tensor1.cpu()
+                tensor2 = tensor2.cpu()
+
+            assert (
+                tensor1.shape == tensor2.shape
+            ), f"Tensors for key '{key}' have different shapes: {tensor1.shape} != {tensor2.shape}"
+            assert torch.allclose(
+                tensor1, tensor2, rtol=rtol, atol=atol
+            ), f"Tensors for key '{key}' are not close enough"
+
+
+def assert_not_equal_state_dict(
+    state_dict1: Dict[str, torch.Tensor],
+    state_dict2: Dict[str, torch.Tensor],
+    rtol: float = 1e-5,
+    atol: float = 1e-8,
+) -> None:
+    """
+    Compare two PyTorch state dictionaries using torch.allclose for efficient comparison.
+
+    :param state_dict1: First state dictionary
+    :type state_dict1: Dict[str, torch.Tensor]
+    :param state_dict2: Second state dictionary
+    :type state_dict2: Dict[str, torch.Tensor]
+    :param rtol: Relative tolerance for torch.allclose
+    :type rtol: float
+    :param atol: Absolute tolerance for torch.allclose
+    :type atol: float
+    """
+    try:
+        assert_state_dicts_equal(state_dict1, state_dict2, rtol, atol)
+    except AssertionError:
+        return
+
+    raise AssertionError(f"State dicts are equal: {state_dict1} == {state_dict2}")
+
+
+def check_equal_params_ind(
+    before_ind: Union[nn.Module, EvolvableModule],
+    mutated_ind: Union[nn.Module, EvolvableModule],
+) -> None:
+    before_dict = dict(before_ind.named_parameters())
+    after_dict = mutated_ind.named_parameters()
+    for key, param in after_dict:
+        if key in before_dict:
+            old_param = before_dict[key]
+            old_size = old_param.data.size()
+            new_size = param.data.size()
+            if old_size == new_size:
+                # If the sizes are the same, just copy the parameter
+                param.data = old_param.data
+            elif "norm" not in key:
+                # Create a slicing index to handle tensors with varying sizes
+                slice_index = tuple(
+                    slice(0, min(o, n)) for o, n in zip(old_size, new_size)
+                )
+                assert torch.all(
+                    torch.eq(param.data[slice_index], old_param.data[slice_index])
+                ), f"Parameter {key} not equal after mutation {mutated_ind.last_mutation_attr}:\n{param.data[slice_index]}\n{old_param.data[slice_index]}"
 
 
 def unpack_network(model: nn.Sequential) -> List[nn.Module]:
@@ -243,49 +334,7 @@ def get_experiences_batch(
     ).to_tensordict()
 
 
-def check_equal_params_ind(
-    before_ind: Union[nn.Module, EvolvableModule],
-    mutated_ind: Union[nn.Module, EvolvableModule],
-) -> None:
-    before_dict = dict(before_ind.named_parameters())
-    after_dict = mutated_ind.named_parameters()
-    for key, param in after_dict:
-        if key in before_dict:
-            old_param = before_dict[key]
-            old_size = old_param.data.size()
-            new_size = param.data.size()
-            if old_size == new_size:
-                # If the sizes are the same, just copy the parameter
-                param.data = old_param.data
-            elif "norm" not in key:
-                # Create a slicing index to handle tensors with varying sizes
-                slice_index = tuple(
-                    slice(0, min(o, n)) for o, n in zip(old_size, new_size)
-                )
-                print(mutated_ind.last_mutation_attr)
-                assert torch.all(
-                    torch.eq(param.data[slice_index], old_param.data[slice_index])
-                ), f"Parameter {key} not equal after mutation {mutated_ind.last_mutation_attr}:\n{param.data[slice_index]}\n{old_param.data[slice_index]}"
-
-
-def assert_equal_state_dict(
-    before_pop: List[EvolvableAlgorithm], mutated_pop: List[EvolvableAlgorithm]
-) -> None:
-    not_eq = []
-    for before_ind, mutated in zip(before_pop, mutated_pop):
-        before_modules = before_ind.evolvable_attributes(networks_only=True).values()
-        mutated_modules = mutated.evolvable_attributes(networks_only=True).values()
-        for before_mod, mutated_mod in zip(before_modules, mutated_modules):
-            if isinstance(before_mod, list):
-                for before, mutated in zip(before_mod, mutated_mod):
-                    check_equal_params_ind(before, mutated)
-            else:
-                check_equal_params_ind(before_mod, mutated_mod)
-
-    assert not not_eq, f"Parameters not equal: {not_eq}"
-
-
-def assert_close_dict(before: dict, after: dict) -> None:
+def assert_close_dict(before: Dict[str, Any], after: Dict[str, Any]) -> None:
     for key, value in before.items():
         if isinstance(value, dict):
             assert_close_dict(value, after[key])

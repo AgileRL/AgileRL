@@ -638,13 +638,13 @@ def test_policy_q_learning_with_probe_env_cnn():
         "agent_ids": env.possible_agents,
         "net_config": {
             "encoder_config": {
-                "channel_size": [16],  # Increased channel size
+                "channel_size": [16],
                 "kernel_size": [3],
                 "stride_size": [1],
-                "init_layers": True,  # Control weight initialization
+                "init_layers": True,
             },
             "head_config": {
-                "hidden_size": [32],  # Add head config
+                "hidden_size": [32],
                 "init_layers": True,
             },
         },

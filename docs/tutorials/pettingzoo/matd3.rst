@@ -14,24 +14,25 @@ This tutorial shows how to train an :ref:`MATD3<matd3>` agent on the `simple spe
 What is MATD3?
 --------------
 
-:ref:`MATD3<matd3>` (Multi-Agent Twin Delayed Deep Deterministic Policy Gradients) extends the :ref:`MADDPG<maddpg>` (Multi-Agent Deep Deterministic Policy Gradients) algorithm to reduce overestimation bias in multi-agent domains through the use of a second set of critic networks and delayed updates of the policy networks. This enables superior performance when compared to MADDPG. For further information on MATD3, check out the :ref:`documentation<matd3>`.
+:ref:`MATD3<matd3>` (Multi-Agent Twin Delayed Deep Deterministic Policy Gradients) extends the :ref:`MADDPG<maddpg>` (Multi-Agent Deep Deterministic Policy Gradients) algorithm to reduce
+overestimation bias in multi-agent domains through the use of a second set of critic networks and delayed updates of the policy networks. This enables superior performance when compared to
+MADDPG. For further information on MATD3, check out the :ref:`documentation<matd3>`.
 
-Can I use it?
--------------
+Compatible Action Spaces
+------------------------
 
 .. list-table::
-   :widths: 20 20 20
+   :widths: 20 20 20 20
    :header-rows: 1
 
-   * -
-     - Action
-     - Observation
-   * - Discrete
+   * - ``Discrete``
+     - ``Box``
+     - ``MultiDiscrete``
+     - ``MultiBinary``
+   * - ❌
      - ✔️
-     - ✔️
-   * - Continuous
-     - ✔️
-     - ✔️
+     - ❌
+     - ❌
 
 Code
 -----
@@ -39,7 +40,8 @@ Code
 Train multiple agents using MADDPG
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The following code should run without any issues. The comments are designed to help you understand how to use PettingZoo with AgileRL. If you have any questions, please feel free to ask in the `Discord server <https://discord.com/invite/eB8HyTA2ux>`_.
+The following code should run without any issues. The comments are designed to help you understand how to use PettingZoo with AgileRL. If you have any questions, please feel free to ask in the
+`Discord server <https://discord.com/invite/eB8HyTA2ux>`_.
 
 .. literalinclude:: ../../../tutorials/PettingZoo/agilerl_matd3.py
    :language: python

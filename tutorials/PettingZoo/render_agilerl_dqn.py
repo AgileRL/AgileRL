@@ -59,7 +59,6 @@ if __name__ == "__main__":
     state_dim = [
         env.observation_space(agent)["observation"].shape for agent in env.agents
     ]
-    one_hot = False
     action_dim = [env.action_space(agent).n for agent in env.agents]
 
     # Pre-process dimensions for pytorch layers

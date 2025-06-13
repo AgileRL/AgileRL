@@ -11,7 +11,13 @@ from agilerl.modules.base import EvolvableModule, MutationType, mutation
 
 
 class EvolvableBERT(EvolvableModule):
-    """The Evolvable BERT class.
+    """The Evolvable BERT class. Consists of a sequence of encoder and decoder layers with an optional
+    activation function between each layer. Supports using layer normalization. Allows for the following types
+    of architecture mutations during training:
+
+    * Adding or removing encoder or decoder layers
+    * Adding or removing nodes from encoder or decoder layers
+    * Changing the activation function between layers (e.g. ReLU to GELU)
 
     :param encoder_layers: Encoder layer(s) hidden size
     :type encoder_layers: list[int]

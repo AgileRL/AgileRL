@@ -150,11 +150,6 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     :type min_latent_dim: int
     :param max_latent_dim: Maximum dimension of the latent space representation. Defaults to 128.
     :type max_latent_dim: int
-    :param n_agents: Number of agents in the environment. Defaults to None, which corresponds to
-        single-agent environments.
-    :type n_agents: Optional[int]
-    :param encoder_mutations: If True, allow mutations to the encoder. Defaults to False.
-    :type encoder_mutations: bool
     :param latent_dim: Dimension of the latent space representation. Defaults to 32.
     :type latent_dim: int
     :param simba: If True, use a SimBa network for the encoder for vector spaces. Defaults to False.
@@ -164,6 +159,8 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     :type recurrent: bool
     :param device: Device to use for the network. Defaults to "cpu".
     :type device: DeviceType
+    :param random_seed: Random seed to use for the network. Defaults to None.
+    :type random_seed: Optional[int]
     """
 
     encoder: EvolvableModule
@@ -182,13 +179,13 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         action_space: Optional[spaces.Space] = None,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
-        n_agents: Optional[int] = None,
         latent_dim: int = 32,
         simba: bool = False,
         recurrent: bool = False,
         device: DeviceType = "cpu",
+        random_seed: Optional[int] = None,
     ) -> None:
-        super().__init__(device)
+        super().__init__(device, random_seed)
 
         assert (
             latent_dim <= max_latent_dim
@@ -198,21 +195,12 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         ), "Latent dimension must be greater than or equal to min latent dimension."
 
         if encoder_config is None:
-            encoder_config = get_default_encoder_config(observation_space, simba=simba)
-
-        # For multi-agent settings with image observation spaces, we use
-        # `nn.Conv3D` layers and stack the agents observations across the depth dimension.
-        cnn_keys = ["cnn_config", "kernel_size"]
-        if n_agents is not None and any(
-            key in encoder_config.keys() for key in cnn_keys
-        ):
-            encoder_config = EvolvableNetwork.modify_multi_agent_config(
-                net_config=encoder_config, observation_space=observation_space
+            encoder_config = get_default_encoder_config(
+                observation_space, simba=simba, recurrent=recurrent
             )
 
         self.observation_space = observation_space
         self.action_space = action_space
-        self.n_agents = n_agents
         self.latent_dim = latent_dim
         self.min_latent_dim = min_latent_dim
         self.max_latent_dim = max_latent_dim
@@ -222,16 +210,10 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         self.recurrent = recurrent
         self.flatten_obs = False
 
-        encoder_config = (
-            encoder_config
-            if isinstance(encoder_config, dict)
-            else asdict(encoder_config)
-        )
-
         # By default we use same activation for encoder output as for the rest of the network
-        output_activation = encoder_config.get("output_activation")
+        output_activation = encoder_config.get("output_activation", None)
         if output_activation is None:
-            activation = encoder_config.get("activation")
+            activation = encoder_config.get("activation", "ReLU")
             encoder_config["output_activation"] = activation
 
         if encoder_cls is not None:
@@ -245,9 +227,9 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             input_args = inspect.getfullargspec(self.encoder_cls.__init__).args
             if "num_outputs" not in input_args:
                 warnings.warn(
-                    f"{self.encoder_cls.__name__} does not contain `num_outputs` as an input argument. "
-                    "Disabling latent space mutations. Make sure to set the number of outputs to the "
-                    "latent dimension in the encoder configuration."
+                    f"Custom encoder {self.encoder_cls.__name__} does not contain `num_outputs` as an "
+                    "input argument. Disabling latent space mutations. Make sure to set the number of "
+                    "outputs to the latent dimension in the encoder configuration."
                 )
                 self.filter_mutation_methods("latent")
             else:
@@ -333,24 +315,6 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             "Method build_network_head must be implemented in EvolvableNetwork objects."
         )
 
-    @staticmethod
-    def modify_multi_agent_config(
-        net_config: Dict[str, Any],
-        observation_space: spaces.Space,
-    ) -> Dict[str, Any]:
-        """In multi-agent settings, it is not clear what the shape of the input to the
-        encoder is based on the passed observation space. If kernel sizes are passed as
-        integers, we add a depth dimension of 1 for all layers. Note that for e.g. value
-        functions the first layer should have a depth corresponding to the number of agents
-        to receive a single output rather than `self.n_agents`
-        """
-        if isinstance(observation_space, (spaces.Dict, spaces.Tuple)):
-            net_config["cnn_config"]["block_type"] = "Conv3d"
-        else:
-            net_config["block_type"] = "Conv3d"
-
-        return net_config
-
     def create_mlp(
         self, num_inputs: int, num_outputs: int, name: str, net_config: Dict[str, Any]
     ) -> EvolvableMLP:
@@ -375,14 +339,6 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             name=name,
             **net_config,
         )
-
-    def modules(self) -> Dict[str, EvolvableModule]:
-        """Modules of the network.
-
-        :return: Modules of the network.
-        :rtype: Dict[str, EvolvableModule]
-        """
-        return super().modules()
 
     def init_weights_gaussian(
         self, std_coeff: float = 4.0, output_coeff: float = 2.0
@@ -428,7 +384,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         :rtype: Dict[str, Any]
         """
         if numb_new_nodes is None:
-            numb_new_nodes = np.random.choice([8, 16, 32], 1)[0]
+            numb_new_nodes = self.rng.choice([8, 16, 32])
 
         if self.latent_dim + numb_new_nodes < self.max_latent_dim:
             self.latent_dim += numb_new_nodes
@@ -448,7 +404,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         :rtype: Dict[str, Any]
         """
         if numb_new_nodes is None:
-            numb_new_nodes = np.random.choice([8, 16, 32], 1)[0]
+            numb_new_nodes = self.rng.choice([8, 16, 32])
 
         if self.latent_dim - numb_new_nodes > self.min_latent_dim:
             self.latent_dim -= numb_new_nodes
@@ -473,6 +429,8 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         :return: Encoder module.
         :rtype: EvolvableModule
         """
+        net_config = net_config if isinstance(net_config, dict) else asdict(net_config)
+
         if isinstance(self.observation_space, (spaces.Dict, spaces.Tuple)):
             encoder = EvolvableMultiInput(
                 observation_space=self.observation_space,

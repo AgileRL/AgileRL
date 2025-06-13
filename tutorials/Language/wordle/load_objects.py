@@ -74,7 +74,9 @@ def load_model(config, model, device, verbose=True):
                 % (config["name"], convert_path(config["checkpoint_path"]))
             )
         chkpt_state_dict = torch.load(
-            convert_path(config["checkpoint_path"]), map_location="cpu"
+            convert_path(config["checkpoint_path"]),
+            map_location="cpu",
+            weights_only=False,
         )
         model.load_state_dict(chkpt_state_dict, strict=config["strict_load"])
         if verbose:

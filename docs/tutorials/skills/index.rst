@@ -78,7 +78,7 @@ Importing the following packages, functions and classes will enable us to run th
       )
 
 
-Defining skills
+Defining Skills
 ^^^^^^^^^^^^^^^
 
 To define the skills to be learned by our agent, we modify the reward from our environment. This is a form of :ref:`curriculum learning<DQN tutorial>`.
@@ -211,13 +211,12 @@ we define three skills: ``StabilizeSkill``, ``CenterSkill`` and ``LandingSkill``
 
             return observation, reward, terminated, truncated, info
 
-Training skills
+Training Skills
 ^^^^^^^^^^^^^^^
 
 Once the skills have been defined, training agents to solve them is very straightforward using AgileRL. In this tutorial we will train ``PPO`` agents, but this is equally possible with any on- or off-policy single-agent algorithm.
 
-.. collapse:: Training skills individually
-   :open:
+.. collapse:: Training Skills Individually
 
    First define the initial hyperparameters and skill objects:
 
@@ -311,7 +310,7 @@ Once the skills have been defined, training agents to solve them is very straigh
 
          env.close()
 
-The selector agent
+The Selector Agent
 ^^^^^^^^^^^^^^^^^^
 
 Now the skills have been learned, we can train a hierarchical selector agent to decide which skill to execute. This meta-policy should optimise the original "meta-reward" of the environment, and so we no longer need to use a skill wrapper.
@@ -337,8 +336,7 @@ These skill-agents and skill durations can be defined in a dictionary.
 
 Next we can define the variables we will need in our training loop.
 
-.. collapse:: Setting up training
-   :open:
+.. collapse:: Setting Up Training
 
    .. code-block:: python
 
@@ -393,18 +391,17 @@ Next we can define the variables we will need in our training loop.
 
 Finally, we can run the training loop for the selector agent. Each skill agent's policy is executed in the environment for the number of timesteps defined in the ``trained_skills`` dictionary.
 
-.. collapse:: Training the selector agent
-   :open:
+.. collapse:: Training the Selector Agent
 
    .. code-block:: python
 
       # RL training loop
       while np.less([agent.steps[-1] for agent in pop], INIT_HP["MAX_STEPS"]).all():
          for agent in pop:  # Loop through population
-               state = env.reset()[0]  # Reset environment at start of episode
+               obs = env.reset()[0]  # Reset environment at start of episode
                score = 0
 
-               states = []
+               observations = []
                actions = []
                log_probs = []
                rewards = []
@@ -415,7 +412,7 @@ Finally, we can run the training loop for the selector agent. Each skill agent's
 
                for idx_step in range(500):
                   # Get next action from agent
-                  action, log_prob, _, value = agent.get_action(state)
+                  action, log_prob, _, value = agent.get_action(obs)
 
                   # Clip to action space
                   if isinstance(agent.action_space, spaces.Box):
@@ -432,24 +429,24 @@ Finally, we can run the training loop for the selector agent. Each skill agent's
                   reward = 0
                   for skill_step in range(skill_duration):
                      # If landed, do nothing
-                     if state[0][6] or state[0][7]:
-                           next_state, skill_reward, termination, truncation, _ = env.step(
+                     if obs[0][6] or obs[0][7]:
+                           next_obs, skill_reward, termination, truncation, _ = env.step(
                               [0]
                            )
                      else:
-                           skill_action, _, _, _ = skill_agent.get_action(state)
-                           next_state, skill_reward, termination, truncation, _ = env.step(
+                           skill_action, _, _, _ = skill_agent.get_action(obs)
+                           next_obs, skill_reward, termination, truncation, _ = env.step(
                               skill_action
                            )  # Act in environment
                      next_done = np.logical_or(termination, truncation).astype(np.int8)
                      reward += skill_reward
                      if np.any(termination) or np.any(truncation):
                            break
-                     state = next_state
+                     obs = next_obs
                      done = next_done
                   score += reward
 
-                  states.append(state)
+                  observations.append(obs)
                   actions.append(action)
                   log_probs.append(log_prob)
                   rewards.append(reward)
@@ -461,13 +458,13 @@ Finally, we can run the training loop for the selector agent. Each skill agent's
                # Learn according to agent's RL algorithm
                agent.learn(
                   (
-                     states,
+                     observations,
                      actions,
                      log_probs,
                      rewards,
                      dones,
                      values,
-                     next_state,
+                     next_obs,
                      next_done,
                   )
                )
@@ -502,33 +499,31 @@ Finally, we can run the training loop for the selector agent. Each skill agent's
       pop[0].save_checkpoint(save_path)
 
 
-Trained model weights
+Trained Model Weights
 ^^^^^^^^^^^^^^^^^^^^^
 
 Trained model weights are provided in our GitHub repository at ``AgileRL/tutorials/Skills/models``. Take a look and see if you can achieve better performance!
 
 
-Rendering agents
+Rendering Agents
 ^^^^^^^^^^^^^^^^
 
 We can visualise the performance of the skills agents individually, or when combined by the selector agent, as a gif.
 
-.. collapse:: Rendering individual skills
-   :open:
+.. collapse:: Rendering Individual Skills
 
    .. literalinclude:: ../../../tutorials/Skills/render_agilerl_skills.py
       :language: python
 
-.. collapse:: Rendering the hierarchical policy
-   :open:
+.. collapse:: Rendering the Hierarchical Policy
 
    .. literalinclude:: ../../../tutorials/Skills/render_agilerl_selector.py
       :language: python
 
-Full training code
+Full Training Code
 ^^^^^^^^^^^^^^^^^^
 
-.. collapse:: Full code
+.. collapse:: Full Code
 
    .. literalinclude:: ../../../tutorials/Skills/agilerl_skills_curriculum.py
       :language: python

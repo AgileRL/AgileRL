@@ -1,13 +1,16 @@
 import torch
 import yaml
 
-from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.training.train_off_policy import train_off_policy
+from agilerl.utils.evolvable_networks import (
+    get_action_dim_networks,
+    get_state_dim_networks,
+)
 from agilerl.utils.utils import (
     create_population,
     make_vect_envs,
@@ -56,8 +59,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
         device=device,
     )
 
-    state_dim = RLAlgorithm.get_state_dim(observation_space)
-    action_dim = RLAlgorithm.get_action_dim(action_space)
+    state_dim = get_state_dim_networks(observation_space)
+    action_dim = get_action_dim_networks(action_space)
     if use_net:
         # Currently set up for DQN
         actor_kwargs = dict(

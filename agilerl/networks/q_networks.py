@@ -5,12 +5,12 @@ import torch
 import torch.nn as nn
 from gymnasium import spaces
 
-from agilerl.modules import EvolvableMLP, EvolvableModule
+from agilerl.modules import EvolvableMLP, EvolvableModule, EvolvableMultiInput
 from agilerl.modules.configs import MlpNetConfig, NetConfig
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.custom_modules import DuelingDistributionalMLP
 from agilerl.typing import ArrayOrTensor, ConfigType, TorchObsType
-from agilerl.utils.evolvable_networks import is_image_space
+from agilerl.utils.evolvable_networks import get_default_encoder_config, is_image_space
 
 
 class QNetwork(EvolvableNetwork):
@@ -35,19 +35,18 @@ class QNetwork(EvolvableNetwork):
     :type min_latent_dim: int
     :param max_latent_dim: Maximum dimension of the latent space representation. Defaults to 128.
     :type max_latent_dim: int
-    :param n_agents: Number of agents in the environment. Defaults to None, which corresponds to
-        single-agent environments.
-    :type n_agents: Optional[int]
     :param latent_dim: Dimension of the latent space representation.
     :type latent_dim: int
     :param simba: If True, use a SimBa network for the encoder for vector spaces. Defaults to False.
     :type simba: bool
     :param recurrent: If True, use a recurrent network. Defaults to False. If False and the observation
-    space is a 2D Box space, an `EvolvableMLP` is used as an encoder whereby observations are flattened.
+        space is a 2D Box space, an `EvolvableMLP` is used as an encoder whereby observations are flattened.
     Otherwise, an `EvolvableLSTM` is used as an encoder.
     :type recurrent: bool
     :param device: Device to use for the network.
     :type device: str
+    :param random_seed: Random seed to use for the network. Defaults to None.
+    :type random_seed: Optional[int]
     """
 
     supported_spaces = (spaces.Discrete, spaces.MultiDiscrete)
@@ -61,11 +60,11 @@ class QNetwork(EvolvableNetwork):
         head_config: Optional[ConfigType] = None,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
-        n_agents: Optional[int] = None,
         latent_dim: int = 32,
         simba: bool = False,
         recurrent: bool = False,
         device: str = "cpu",
+        random_seed: Optional[int] = None,
     ):
         super().__init__(
             observation_space,
@@ -74,11 +73,11 @@ class QNetwork(EvolvableNetwork):
             encoder_config=encoder_config,
             min_latent_dim=min_latent_dim,
             max_latent_dim=max_latent_dim,
-            n_agents=n_agents,
             latent_dim=latent_dim,
             simba=simba,
             recurrent=recurrent,
             device=device,
+            random_seed=random_seed,
         )
 
         if not isinstance(action_space, self.supported_spaces):
@@ -156,13 +155,12 @@ class RainbowQNetwork(EvolvableNetwork):
     :type min_latent_dim: int
     :param max_latent_dim: Maximum dimension of the latent space representation. Defaults to 128.
     :type max_latent_dim: int
-    :param n_agents: Number of agents in the environment. Defaults to None, which corresponds to
-        single-agent environments.
-    :type n_agents: Optional[int]
     :param latent_dim: Dimension of the latent space representation.
     :type latent_dim: int
     :param device: Device to use for the network.
     :type device: str
+    :param random_seed: Random seed to use for the network. Defaults to None.
+    :type random_seed: Optional[int]
     """
 
     def __init__(
@@ -176,16 +174,18 @@ class RainbowQNetwork(EvolvableNetwork):
         head_config: Optional[ConfigType] = None,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
-        n_agents: Optional[int] = None,
         latent_dim: int = 32,
         device: str = "cpu",
+        random_seed: Optional[int] = None,
     ):
 
         if isinstance(observation_space, spaces.Box) and not is_image_space(
             observation_space
         ):
             if encoder_config is None:
-                encoder_config = asdict(MlpNetConfig(hidden_size=[16]))
+                encoder_config = get_default_encoder_config(
+                    observation_space, simba=False, recurrent=False
+                )
 
             encoder_config["noise_std"] = noise_std
             encoder_config["output_activation"] = encoder_config.get(
@@ -201,9 +201,9 @@ class RainbowQNetwork(EvolvableNetwork):
             action_space=action_space,
             min_latent_dim=min_latent_dim,
             max_latent_dim=max_latent_dim,
-            n_agents=n_agents,
             latent_dim=latent_dim,
             device=device,
+            random_seed=random_seed,
         )
 
         if not isinstance(action_space, (spaces.Discrete, spaces.MultiDiscrete)):
@@ -305,18 +305,19 @@ class ContinuousQNetwork(EvolvableNetwork):
     :type min_latent_dim: int
     :param max_latent_dim: Maximum dimension of the latent space representation. Defaults to 128.
     :type max_latent_dim: int
-    :param n_agents: Number of agents in the environment. Defaults to None, which corresponds to
-        single-agent environments.
-    :type n_agents: Optional[int]
     :param latent_dim: Dimension of the latent space representation.
     :type latent_dim: int
     :param simba: Whether to use SimBA for the network. Defaults to False.
     :type simba: bool
+    :param recurrent: Whether to use a recurrent network. Defaults to False.
+    :type recurrent: bool
     :param normalize_actions: Whether to normalize the actions. Defaults to False. This is set to True if
         the encoder has nn.LayerNorm layers.
     :type normalize_actions: bool
     :param device: Device to use for the network.
     :type device: str
+    :param random_seed: Random seed to use for the network. Defaults to None.
+    :type random_seed: Optional[int]
     """
 
     action_mean: torch.Tensor
@@ -332,11 +333,12 @@ class ContinuousQNetwork(EvolvableNetwork):
         head_config: Optional[ConfigType] = None,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
-        n_agents: Optional[int] = None,
         latent_dim: int = 32,
         simba: bool = False,
+        recurrent: bool = False,
         normalize_actions: bool = False,
         device: str = "cpu",
+        random_seed: Optional[int] = None,
     ):
 
         super().__init__(
@@ -346,10 +348,11 @@ class ContinuousQNetwork(EvolvableNetwork):
             action_space=action_space,
             min_latent_dim=min_latent_dim,
             max_latent_dim=max_latent_dim,
-            n_agents=n_agents,
             latent_dim=latent_dim,
             simba=simba,
+            recurrent=recurrent,
             device=device,
+            random_seed=random_seed,
         )
 
         if head_config is None:
@@ -362,12 +365,29 @@ class ContinuousQNetwork(EvolvableNetwork):
         # If the encoder has nn.LayerNorm layers, we normalize the actions for
         # better training stability
         # see https://github.com/AgileRL/AgileRL/issues/337
-        self.normalize_actions = (
-            isinstance(self.encoder, EvolvableMLP) and self.encoder.layer_norm
-        ) or normalize_actions
+        self.normalize_actions = normalize_actions or self._check_normalize_actions()
 
         # Build value network
         self.build_network_head(head_config)
+
+    def _check_normalize_actions(self) -> bool:
+        """Checks if the actions should be normalized.
+
+        :return: Whether to normalize the actions.
+        :rtype: bool
+        """
+        if isinstance(self.encoder, EvolvableMLP):
+            return self.encoder.layer_norm
+
+        # NOTE: In multi-input encoders, normalizing actions is only relevant if
+        # we specify `vector_space_mlp=True` in the encoder config.
+        elif (
+            isinstance(self.encoder, EvolvableMultiInput)
+            and "vector_mlp" in self.encoder.feature_net
+        ):
+            return self.encoder.feature_net["vector_mlp"].layer_norm
+
+        return False
 
     def build_network_head(self, net_config: Optional[ConfigType] = None) -> None:
         """Builds the head of the network.

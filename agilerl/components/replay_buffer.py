@@ -218,18 +218,21 @@ class MultiStepReplayBuffer(ReplayBuffer):
         if not self.initialized:
             assert (
                 self.reward_key in self.n_step_buffer[0]
-            ), "Reward key not found in transition"
+            ), f"Reward key not found in transition. Expected key: {self.reward_key}"
             assert (
                 self.ns_key in self.n_step_buffer[0]
-            ), "Next observation key not found in transition"
+            ), f"Next observation key not found in transition. Expected key: {self.ns_key}"
 
             done_key = None
-            for key in ["done", "termination", "terminated"]:
+            expected_keys = ["done", "termination", "terminated"]
+            for key in expected_keys:
                 if key in self.n_step_buffer[0]:
                     done_key = key
                     break
 
-            assert done_key is not None, "No done/termination key found in transition"
+            assert (
+                done_key is not None
+            ), f"No done/termination key found in transition. Expected keys: {expected_keys}"
             self.done_key = done_key
 
         # Start with reward from first transition

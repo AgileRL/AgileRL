@@ -364,7 +364,7 @@ class EvolvableGPT(EvolvableModule):
                 print(f"overriding vocab_size to {override_args['vocab_size']}")
                 config_args["vocab_size"] = override_args["vocab_size"]
             model = EvolvableGPT(**config_args)
-            sd_hf = torch.load(custom_sd)
+            sd_hf = torch.load(custom_sd, weights_only=False)
             config = GPT2Config(**config_args)
             model_hf = GPT2LMHeadModel(config)
             sd_hf = {k.split("model.")[-1]: v for k, v in sd_hf.items()}

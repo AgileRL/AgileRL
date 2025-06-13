@@ -21,7 +21,7 @@ from gymnasium.error import (
 from gymnasium.vector.utils import CloudpickleWrapper, clear_mpi_env_vars
 from pettingzoo import ParallelEnv
 
-from agilerl.typing import ActionType, GymSpaceType, MultiAgentStepType, NumpyObsType
+from agilerl.typing import ActionType, GymSpaceType, NumpyObsType, PzStepReturn
 from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
 AgentID = TypeVar("AgentID")
@@ -81,8 +81,8 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
     :type env_fns: list[Callable]
     :param copy: Boolean flag to copy the observation data when it is returned with either .step() or .reset(), recommended, defaults to True
     :type copy: bool, optional
-    :param context: Context for multiprocessing
-
+    :param context: Context for multiprocessing. Choose between "spawn", "fork", or "forkserver".
+    :type context: str, optional
     """
 
     processes: List[mp.Process]
@@ -297,7 +297,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
 
         self._state = AsyncState.WAITING_STEP
 
-    def step_wait(self, timeout: Optional[float] = None) -> MultiAgentStepType:
+    def step_wait(self, timeout: Optional[float] = None) -> PzStepReturn:
         """
         Wait for the calls to :obj:`step` in each sub-environment to finish.
 
@@ -920,13 +920,11 @@ def _async_worker(
     parent_pipe.close()
 
     # Need to keep track of the active agents in the environment
-    current_active = None
     try:
         while True:
             command, data = pipe.recv()
             if command == "reset":
                 obs, info = env.reset(**data)
-                current_active = list(obs.keys())
                 transition = obs, info
                 observation, info = process_transition(
                     transition,
@@ -940,12 +938,12 @@ def _async_worker(
                 pipe.send((info, True))
             elif command == "step":
                 data = {
-                    possible_agent: (
-                        np.array(data[idx]).squeeze()
-                        if not isinstance(data[idx], int)
-                        else data[idx]
+                    active_agent: (
+                        np.array(data[active_agent]).squeeze()
+                        if not isinstance(data[active_agent], int)
+                        else data[active_agent]
                     )
-                    for idx, possible_agent in enumerate(current_active)
+                    for active_agent in data
                 }
                 observation, reward, terminated, truncated, info = env.step(data)
                 if all(
@@ -956,7 +954,6 @@ def _async_worker(
                 ):
                     observation, info = env.reset()
 
-                current_active = list(observation.keys())
                 transition = observation, reward, terminated, truncated, info
                 observation, reward, terminated, truncated, info = process_transition(
                     transition,

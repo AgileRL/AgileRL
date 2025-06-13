@@ -186,7 +186,8 @@ def train_multi_agent_on_policy(
             dynamic_ncols=True,
         )
 
-    agent_ids = deepcopy(pop[0].shared_agent_ids)
+    sample_ind = pop[0]
+    agent_ids = deepcopy(list(sample_ind.observation_space.keys()))
     pop_loss = [{agent_id: [] for agent_id in agent_ids} for _ in pop]
     pop_fitnesses = [{agent_id: [] for agent_id in agent_ids} for _ in pop]
     entropy_hist = [{agent_id: [] for agent_id in agent_ids} for _ in pop]
@@ -197,10 +198,12 @@ def train_multi_agent_on_policy(
     # Pre-training mutation
     if accelerator is None and mutation is not None:
         pop = mutation.mutation(pop, pre_training_mut=True)
+
     # RL training loop
     while np.sum([agent.steps[-1] for agent in pop]) < max_steps:
         if accelerator is not None:
             accelerator.wait_for_everyone()
+
         pop_episode_scores = []
         pop_fps = []
         for agent_idx, agent in enumerate(pop):  # Loop through population
@@ -235,33 +238,10 @@ def train_multi_agent_on_policy(
                 done = {agent_id: np.zeros(num_envs) for agent_id in agent.agent_ids}
 
                 for _ in range(-(agent.learn_step // -num_envs)):
-                    # Need to extract inactive agents from observation
-                    # NOTE: We currently assume the termination condition is deterministic
-                    # (i.e. any given agent will always terminate at the same timestep in
-                    # different vectorized environments). `inactive_agents` is therefore not used.
-                    # TODO: This would be so much cleaner if it was implemented as an `AgentWrapper``
-                    _, obs = agent.extract_inactive_agents(obs)
-
                     # Get next action from agent
                     action, log_prob, entropy, value = agent.get_action(
                         obs=obs, infos=info
                     )
-
-                    # Need to fill in placeholder values for inactive agents
-                    # NOTE: This will only happen in environments where the termination
-                    # condition is based on the agents actions where the same agent in
-                    # different environments may terminate at different times.
-                    # for agent_id, inactive_array in inactive_agents.items():
-                    #     placeholder = (
-                    #         int(np.nan)
-                    #         if np.issubdtype(action[agent_id].dtype, np.integer)
-                    #         else np.nan
-                    #     )
-
-                    #     # Insert placeholder values for inactive agents
-                    #     action[agent_id] = np.insert(
-                    #         action[agent_id], inactive_array, placeholder, axis=0
-                    #     )
 
                     if not is_vectorised:
                         action = {agent: act[0] for agent, act in action.items()}
@@ -272,13 +252,16 @@ def train_multi_agent_on_policy(
                     # Clip to action space
                     clipped_action = {}
                     for agent_id, agent_action in action.items():
-                        shared_id = agent.get_homo_id(agent_id)
-                        actor_idx = agent.shared_agent_ids.index(shared_id)
-                        agent_space = agent.action_space[agent_id]
+                        network_id = (
+                            agent_id
+                            if agent_id in agent.actors.keys()
+                            else agent.get_group_id(agent_id)
+                        )
+                        agent_space = agent.possible_action_spaces[agent_id]
                         if isinstance(agent_space, spaces.Box):
-                            if agent.actors[actor_idx].squash_output:
+                            if agent.actors[network_id].squash_output:
                                 clipped_agent_action = agent.actors[
-                                    actor_idx
+                                    network_id
                                 ].scale_action(agent_action)
                             else:
                                 clipped_agent_action = np.clip(
@@ -352,7 +335,9 @@ def train_multi_agent_on_policy(
                     for idx, agent_dones in enumerate(zip(*next_done.values())):
                         if all(agent_dones):
                             completed_score = (
-                                float(scores[idx]) if sum_scores else list(scores[idx])
+                                float(scores[idx].item())
+                                if sum_scores
+                                else list(scores[idx])
                             )
                             completed_episode_scores.append(completed_score)
                             agent.scores.append(completed_score)
@@ -370,7 +355,6 @@ def train_multi_agent_on_policy(
                     actions,
                     log_probs,
                     rewards,
-                    # terms,
                     dones,
                     values,
                     next_obs,
@@ -379,7 +363,10 @@ def train_multi_agent_on_policy(
 
                 # Learn according to agent's RL algorithm
                 loss = agent.learn(experiences)
-                entropies = agent.assemble_homogeneous_outputs(entropies, num_envs)
+
+                if agent.has_grouped_agents():
+                    entropies = agent.assemble_grouped_outputs(entropies, num_envs)
+
                 for agent_id in agent_ids:
                     losses[agent_id].append(loss[agent_id])
                     entropy_hist[agent_idx][agent_id].append(

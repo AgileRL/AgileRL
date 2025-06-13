@@ -10,9 +10,8 @@ from gymnasium import spaces
 from tensordict import TensorDict, from_module
 from tensordict.nn import CudaGraphModule
 
-from agilerl.algorithms.core import RLAlgorithm
+from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.q_networks import QNetwork
 from agilerl.typing import ExperiencesType, GymEnvType, ObservationType, TorchObsType
@@ -209,10 +208,12 @@ class DQN(RLAlgorithm):
 
         :param obs: The current observation from the environment
         :type obs: np.ndarray, dict[str, np.ndarray], tuple[np.ndarray]
-        :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
+        :param epsilon: Probability of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: numpy.ndarray, optional
+        :return: Selected action(s) for the given observation(s)
+        :rtype: numpy.ndarray
         """
         # Preprocess observations and convert inputs to torch tensors
         torch_obs = self.preprocess_observation(obs)
@@ -248,10 +249,12 @@ class DQN(RLAlgorithm):
 
         :param obs: The current observation from the environment
         :type obs: torch.Tensor, dict[str, torch.Tensor], tuple[torch.Tensor]
-        :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
+        :param epsilon: Probability of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: numpy.ndarray, optional
+        :return: Selected action(s) as tensor
+        :rtype: torch.Tensor
         """
         with torch.no_grad():
             q_values = self.actor(obs)
@@ -296,6 +299,8 @@ class DQN(RLAlgorithm):
         :type next_obs: torch.Tensor[float], dict[str, torch.Tensor[float]], tuple[torch.Tensor[float]]
         :param dones: List of batched dones
         :type dones: torch.Tensor[int]
+        :return: Loss value from the update step
+        :rtype: torch.Tensor
         """
         with torch.no_grad():
             if self.double:  # Double Q-learning
@@ -331,6 +336,8 @@ class DQN(RLAlgorithm):
 
         :param experiences: TensorDict of batched observations, actions, rewards, next_observations, dones in that order.
         :type experiences: tensordict.TensorDict
+        :return: Loss value from the learning step
+        :rtype: float
         """
         obs = experiences["obs"]
         actions = experiences["action"]

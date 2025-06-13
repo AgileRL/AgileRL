@@ -6,10 +6,9 @@ import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
 
-from agilerl.algorithms.core import RLAlgorithm
+from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.modules.base import EvolvableModule
+from agilerl.modules import EvolvableModule
 from agilerl.networks.value_networks import ValueNetwork
 from agilerl.typing import ArrayLike, ExperiencesType, GymEnvType, ObservationType
 from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first

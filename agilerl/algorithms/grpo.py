@@ -20,9 +20,8 @@ from torch.optim import Optimizer
 from transformers import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
 
-from agilerl.algorithms.core import LLMAlgorithm
+from agilerl.algorithms.core import LLMAlgorithm, OptimizerWrapper
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.typing import ExperiencesType
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,

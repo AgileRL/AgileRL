@@ -118,11 +118,25 @@ class SumSegmentTree(SegmentTree):
         super().__init__(capacity=capacity, operation=operator.add, init_value=0.0)
 
     def sum(self, start: int = 0, end: int = 0) -> float:
-        """Returns arr[start] + ... + arr[end]."""
+        """Returns sum of elements from start to end index.
+
+        :param start: Start index of range, defaults to 0
+        :type start: int, optional
+        :param end: End index of range, defaults to 0 (meaning capacity)
+        :type end: int, optional
+        :return: Sum of elements in range [start, end)
+        :rtype: float
+        """
         return super().operate(start, end)
 
     def retrieve(self, upperbound: float) -> int:
-        """Find the highest index `i` about upper bound in the tree"""
+        """Find the highest index `i` about `upperbound` in the tree
+
+        :param upperbound: Upper bound for cumulative sum
+        :type upperbound: float
+        :return: Index where cumulative sum is <= upperbound
+        :rtype: int
+        """
         # TODO: Check assert case and fix bug
         assert 0 <= upperbound <= self.sum() + 1e-5, f"upperbound: {upperbound}"
 
@@ -152,5 +166,13 @@ class MinSegmentTree(SegmentTree):
         super().__init__(capacity=capacity, operation=min, init_value=float("inf"))
 
     def min(self, start: int = 0, end: int = 0) -> float:
-        """Returns min(arr[start], ...,  arr[end])."""
+        """Returns minimum element from start to end index.
+
+        :param start: Start index of range, defaults to 0
+        :type start: int, optional
+        :param end: End index of range, defaults to 0 (meaning capacity)
+        :type end: int, optional
+        :return: Minimum element in range [start, end)
+        :rtype: float
+        """
         return super().operate(start, end)

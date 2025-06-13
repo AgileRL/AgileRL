@@ -945,9 +945,9 @@ def check_policy_q_learning_with_probe_env(
     state, _ = env.reset()
     for _ in range(5000):
         action = (
-            (agent.max_action - agent.min_action)
+            (agent.action_space.high - agent.action_space.low)
             * np.random.rand(1, agent.action_dim).astype("float32")
-        ) + agent.min_action
+        ) + agent.action_space.low
         action = action[0]
         next_state, reward, done, _, _ = env.step(action)
         transition = Transition(
@@ -978,6 +978,8 @@ def check_policy_q_learning_with_probe_env(
         else:
             state = torch.tensor(sample_obs).float().to(device)
 
+        agent.critic.eval()
+        agent.actor.eval()
         action = torch.tensor(sample_action).float().to(device)
         predicted_q_values = agent.critic(state, action).detach().cpu().numpy()[0]
         print("q", q_values, predicted_q_values)
@@ -1086,137 +1088,3 @@ def check_policy_on_policy_with_probe_env(
             # assert np.allclose(
             #     policy_values, predicted_policy_values, atol=0.2
             # ), f"{policy_values} != {predicted_policy_values}"
-
-
-# if __name__ == "__main__":
-#     from agilerl.algorithms.ddpg import DDPG
-#     from agilerl.algorithms.dqn import DQN
-#     from agilerl.components.replay_buffer import ReplayBuffer
-
-#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-#     vector_envs = [
-#         (ConstantRewardEnv(), 1000),
-#         (ObsDependentRewardEnv(), 1000),
-#         (DiscountedRewardEnv(), 3000),
-#         (FixedObsPolicyEnv(), 1000),
-#         (PolicyEnv(), 1000),
-#     ]
-
-#     for env, learn_steps in vector_envs:
-#         algo_args = {
-#             "state_dim": (env.observation_space.n,),
-#             "action_dim": env.action_space.n,
-#             "one_hot": True if env.observation_space.n > 1 else False,
-#             "lr": 1e-2,
-#         }
-
-#         field_names = ["state", "action", "reward", "next_state", "done"]
-#         memory = ReplayBuffer(
-#             memory_size=1000,  # Max replay buffer size
-#             field_names=field_names,  # Field names to store in memory
-#             device=device,
-#         )
-
-#         check_q_learning_with_probe_env(env, DQN, algo_args, memory, learn_steps, device)
-
-#     image_envs = [
-#         (ConstantRewardImageEnv(), 1000),
-#         (ObsDependentRewardImageEnv(), 1000),
-#         (DiscountedRewardImageEnv(), 5000),
-#         (FixedObsPolicyImageEnv(), 1000),
-#         (PolicyImageEnv(), 1000),
-#     ]
-
-#     for env, learn_steps in image_envs:
-#         algo_args = {
-#             "state_dim": (env.observation_space.shape),
-#             "action_dim": env.action_space.n,
-#             "one_hot": False,
-#             "net_config": {
-#                 "arch": "cnn",  # Network architecture
-#                 "hidden_size": [32],  # Network hidden size
-#                 "channel_size": [32, 32],  # CNN channel size
-#                 "kernel_size": [8, 4],  # CNN kernel size
-#                 "stride_size": [4, 2],  # CNN stride size
-#                 "normalize": False,  # Normalize image from range [0,255] to [0,1]
-#             },
-#             "lr": 1e-2,
-#         }
-
-#         field_names = ["state", "action", "reward", "next_state", "done"]
-#         memory = ReplayBuffer(
-#             memory_size=1000,  # Max replay buffer size
-#             field_names=field_names,  # Field names to store in memory
-#             device=device,
-#         )
-
-#         check_q_learning_with_probe_env(env, DQN, algo_args, memory, learn_steps, device)
-
-#     cont_vector_envs = [
-#         (ConstantRewardContActionsEnv(), 1000),
-#         (ObsDependentRewardContActionsEnv(), 1000),
-#         (DiscountedRewardContActionsEnv(), 5000),
-#         (FixedObsPolicyContActionsEnv(), 3000),
-#         (PolicyContActionsEnv(), 3000),
-#     ]
-
-#     for env, learn_steps in cont_vector_envs:
-#         algo_args = {
-#             "state_dim": (env.observation_space.n,),
-#             "action_dim": env.action_space.shape[0],
-#             "one_hot": True if env.observation_space.n > 1 else False,
-#             "max_action": 1.0,
-#             "min_action": 0.0,
-#             "lr_actor": 1e-2,
-#             "lr_critic": 1e-2,
-#         }
-
-#         field_names = ["state", "action", "reward", "next_state", "done"]
-#         memory = ReplayBuffer(
-#             memory_size=1000,  # Max replay buffer size
-#             field_names=field_names,  # Field names to store in memory
-#             device=device,
-#         )
-
-#         check_policy_q_learning_with_probe_env(
-#             env, DDPG, algo_args, memory, learn_steps, device
-#         )
-
-#     image_envs = [
-#         (ConstantRewardContActionsImageEnv(), 1000),
-#         (ObsDependentRewardContActionsImageEnv(), 3000),
-#         (DiscountedRewardContActionsImageEnv(), 7000),
-#         (FixedObsPolicyContActionsImageEnv(), 3000),
-#         (PolicyContActionsImageEnvSimple(), 4000),
-#         (PolicyContActionsImageEnv(), 5000),
-#     ]
-
-#     for env, learn_steps in image_envs:
-#         algo_args = {
-#             "state_dim": (env.observation_space.shape),
-#             "action_dim": env.action_space.shape[0],
-#             "one_hot": False,
-#             "net_config": {
-#                 "arch": "cnn",  # Network architecture
-#                 "hidden_size": [64],  # Network hidden size
-#                 "channel_size": [32, 32],  # CNN channel size
-#                 "kernel_size": [8, 4],  # CNN kernel size
-#                 "stride_size": [4, 2],  # CNN stride size
-#                 "normalize": False,  # Normalize image from range [0,255] to [0,1]
-#             },
-#             "max_action": 1.0,
-#             "min_action": 0.0,
-#             "policy_freq": 2,
-#         }
-
-#         field_names = ["state", "action", "reward", "next_state", "done"]
-#         memory = ReplayBuffer(
-#             memory_size=1000,  # Max replay buffer size
-#             field_names=field_names,  # Field names to store in memory
-#             device=device,
-#         )
-
-#         check_policy_q_learning_with_probe_env(
-#             env, DDPG, algo_args, memory, learn_steps, device
-#         )
