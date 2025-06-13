@@ -20,7 +20,6 @@ from typing import (
     Union,
 )
 
-import deepspeed
 import dill
 import numpy as np
 import torch
@@ -28,7 +27,6 @@ from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
-from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
 from gymnasium import spaces
 from numpy.typing import ArrayLike
 from tensordict import TensorDict
@@ -1593,7 +1591,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             ]["stage"]
         if (
             self.zero_stage is not None
-            and self.zero_stage >= 2
+            and self.zero_stage > 2
             and self.accelerator.is_main_process
         ):
             warnings.warn(
@@ -1662,6 +1660,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """
         if self.accelerator is not None:
             os.makedirs(path, exist_ok=True)
+            self.actor.set_adapter("actor")
             self.actor.save_checkpoint(path, tag="checkpoint")
         else:
             warnings.warn(
@@ -1679,6 +1678,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             deepspeed_dirs = sorted(glob.glob(f"{path}/checkpoint"))
             try:
                 assert len(deepspeed_dirs) > 0
+                self.actor.set_adapter("actor")
                 load_path, _ = self.actor.load_checkpoint(
                     path,
                     tag="checkpoint",
@@ -1725,29 +1725,20 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     def wrap_models(self):
         """Wrap the models in the accelerator"""
+        print("This is the accelerator from inside grpo", self.accelerator)
         if self.accelerator is not None:
+            opt = (
+                self.optimizer.optimizer
+                if self.optimizer.optimizer_cls == torch.optim.AdamW
+                else self.optimizer
+            )
             self.actor, self.optimizer, self.lr_scheduler = self.accelerator.prepare(
-                self.actor, self.optimizer.optimizer, self.lr_scheduler
+                self.actor, opt, self.lr_scheduler
             )
-            deepspeed_plugin = self.accelerator.state.deepspeed_plugin
-            config_kwargs = copy.deepcopy(deepspeed_plugin.deepspeed_config)
-            self.reference_actor = deepspeed.init_inference(
-                self.reference_actor,
-                tensor_parallel={"tp_size": self.accelerator.num_processes},
-                dtype=(
-                    torch.bfloat16
-                    if config_kwargs.get("bf16", {}).get("enabled", False)
-                    else (
-                        torch.float16
-                        if config_kwargs.get("fp16", {}).get("enabled", False)
-                        else torch.float32
-                    )
-                ),
-                checkpoint=None,
-                replace_with_kernel_inject=True,
-                zero=DeepSpeedZeroConfig(**config_kwargs["zero_optimization"]),
-            )
-            self.reference_actor.eval()
+            # opt -> Dummy
+        else:
+            self.actor = self.actor.to(self.device)
+            self.actor.gradient_checkpointing_enable()
 
     def clean_up(self) -> None:
         """Clean up the algorithm."""
@@ -1755,28 +1746,20 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if self.accelerator is not None:
             (
                 self.actor,
-                self.reference_actor,
                 self.optimizer,
                 self.lr_scheduler,
-                self.reference_actor_state_dict,
             ) = self.accelerator.free_memory(
                 self.actor,
-                self.reference_actor,
                 self.optimizer,
                 self.lr_scheduler,
-                self.reference_actor_state_dict,
             )
             self.accelerator.wait_for_everyone()
         else:
             (
                 self.actor,
-                self.reference_actor,
                 self.optimizer,
                 self.lr_scheduler,
-                self.reference_actor_state_dict,
             ) = (
-                None,
-                None,
                 None,
                 None,
                 None,
@@ -1809,10 +1792,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             input_args = EvolvableAlgorithm.inspect_attributes(
                 self, input_args_only=True
             )
-            input_args["clone"] = True
             input_args["wrap"] = False
+            input_args["clone"] = True
 
-            # extract base model and peft config
             actor = (
                 self.accelerator.unwrap_model(self.actor)
                 if self.accelerator is not None
@@ -1823,20 +1805,21 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if self.zero_stage is None or self.zero_stage < 2:
                 actor_state_dict = clone_tensors_for_torch_save(actor.state_dict())
 
-            cloned_actor = clone_llm(actor, state_dict=actor_state_dict)
+            cloned_model = clone_llm(actor, state_dict=actor_state_dict)
 
             actor = None  # De-reference the actor
-            input_args["actor_network"] = cloned_actor
+            input_args["actor_network"] = cloned_model
             input_args["accelerator"] = (
                 Accelerator() if self.accelerator is not None else None
             )
 
-            clone = type(self)(**input_args)
+            print("NEW DEEPSPEED CONFIG")
+            # print(input_args['accelerator'].state.deepspeed_plugin.deepspeed_config)
 
-            # Maybe this needs to change -> should really init deepspeed engine after state dict is loaded
-            clone.reference_actor.load_state_dict(self.reference_actor_state_dict)
-            clone.reference_actor.eval()
+            clone = type(self)(**input_args)
             clone.mutation_hook()
+
+            # print("Type of clone optimizer", type(clone.optimizer), "self optimizer", self.optimizer)
 
             # Clone attributes
             accelerator = clone.accelerator
@@ -1850,6 +1833,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             clone.lr_scheduler = lr_scheduler
             clone.lr_scheduler = cloned_lr_scheduler
             self.lr_scheduler = original_lr_scheduler
+
+            print(
+                "Type of clone optimizer after copy attributes", type(clone.optimizer)
+            )
+            # assert False
 
             if self.accelerator is None:
                 clone.optimizer.optimizer.load_state_dict(
@@ -1875,11 +1863,26 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         return clone
 
     @staticmethod
-    def update_lr(optimizer: DeepSpeedOptimizerWrapper, lr: float) -> None:
+    def update_lr(
+        optimizer: DeepSpeedOptimizerWrapper, lr: float, accelerator: Accelerator
+    ) -> None:
         """Update the learning rate of the optimizer
 
         :param optimizer: Optimizer
         :type optimizer: Optimizer
         """
+
+        print("THIS IS THE NEW LEARING RATE", lr)
+
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
+
+        if (
+            accelerator.state.deepspeed_plugin.deepspeed_config.get("optimizer", None)
+            is not None
+        ):
+            accelerator.deepspeed_plugin.deepspeed_config["optimizer"]["params"][
+                "lr"
+            ] = lr
+
+        return accelerator

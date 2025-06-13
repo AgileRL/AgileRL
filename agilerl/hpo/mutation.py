@@ -18,6 +18,7 @@ from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
 from agilerl.modules.base import EvolvableModule
 from agilerl.protocols import OptimizerConfig
 from agilerl.utils.algo_utils import remove_compile_prefix
+from agilerl.utils.llm_utils import _DummyOptimizer
 
 NetworkConfig = Dict[str, str]
 NetworkList = List[NetworkConfig]
@@ -500,15 +501,21 @@ class Mutations:
         """
 
         def _reinit_individual(config: OptimizerConfig) -> None:
-            opt: Union[OptimizerWrapper, DeepSpeedOptimizerWrapper] = getattr(
+            opt: Optional[Union[OptimizerWrapper, DeepSpeedOptimizerWrapper]] = getattr(
                 individual, config.name
             )
-            optimizer = opt.optimizer
+            optimizer = opt.optimizer if hasattr(opt, "optimizer") else None
 
             # Multiple optimizers in a single attribute (i.e. multi-agent)
             # or one module optimized by a single optimizer
             if isinstance(opt, DeepSpeedOptimizerWrapper):
-                LLMAlgorithm.update_lr(opt, individual.lr)
+                if isinstance(opt.optimizer, _DummyOptimizer):
+                    opt = getattr(
+                        getattr(individual, "actor"), "optimizer"
+                    )  # If the optimizer is defined in the deepspeed config, we do this
+                individual.accelerator = LLMAlgorithm.update_lr(
+                    opt, individual.lr, individual.accelerator
+                )
             else:
                 if isinstance(optimizer, list) or len(opt.network_names) == 1:
                     opt_nets = getattr(individual, opt.network_names[0])

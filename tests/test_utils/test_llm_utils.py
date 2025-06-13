@@ -1,3 +1,5 @@
+from unittest.mock import MagicMock
+
 import gymnasium as gym
 import numpy as np
 import pytest
@@ -199,3 +201,44 @@ def test_hugging_face_gym_len(dataset, num_samples):
     assert len(env) == 200 * 0.8  # Length returns the training length
     with env.eval():
         assert len(env) == 200 * 0.2
+
+
+def test_create_chat_collate_fn():
+    """Test the create_chat_collate_fn method."""
+    # Create a mock tokenizer
+    mock_tokenizer = MagicMock()
+
+    # Create a mock chat template function
+    def mock_chat_template(question, answer, tokenizer):
+        return {"input_ids": [1, 2, 3], "attention_mask": [1, 1, 1]}
+
+    # Create the collate function
+    collate_fn = HuggingFaceGym.create_collate_fn(mock_tokenizer, mock_chat_template)
+
+    # Create a sample batch
+    batch = [
+        {"question": "What is 2+2?", "answer": "4"},
+        {"question": "What is 3+3?", "answer": "6"},
+    ]
+
+    # Apply the collate function
+    result = collate_fn(batch)
+
+    # Verify the result structure
+    assert isinstance(result, dict)
+    assert "question" in result
+    assert "answer" in result
+    assert "tokenized_prompts" in result
+
+    # Verify the content
+    assert result["question"] == ["What is 2+2?", "What is 3+3?"]
+    assert result["answer"] == ["4", "6"]
+    assert len(result["tokenized_prompts"]) == 2
+
+    # Verify each tokenized prompt
+    for prompt in result["tokenized_prompts"]:
+        assert isinstance(prompt, dict)
+        assert "input_ids" in prompt
+        assert "attention_mask" in prompt
+        assert prompt["input_ids"] == [1, 2, 3]
+        assert prompt["attention_mask"] == [1, 1, 1]
