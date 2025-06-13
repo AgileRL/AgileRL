@@ -435,7 +435,7 @@ def test_save_load_checkpoint_single_agent(tmpdir, with_hp_config, observation_s
     agent.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
-    checkpoint = torch.load(checkpoint_path)
+    checkpoint = torch.load(checkpoint_path, weights_only=False)
 
     # Check if the loaded checkpoint has the correct keys
     assert "dummy_actor_init_dict" in checkpoint["network_info"]["modules"]
@@ -513,7 +513,7 @@ def test_save_load_checkpoint_multi_agent(tmpdir, with_hp_config, observation_sp
     agent.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
-    checkpoint = torch.load(checkpoint_path)
+    checkpoint = torch.load(checkpoint_path, weights_only=False)
 
     # Check if the loaded checkpoint has the correct keys
     assert "dummy_actors_init_dict" in checkpoint["network_info"]["modules"]
@@ -709,7 +709,7 @@ def test_missing_attribute_warning(tmpdir, observation_space):
     agent.save_checkpoint(checkpoint_path)
 
     # Load and modify the checkpoint to remove an attribute
-    checkpoint = torch.load(checkpoint_path)
+    checkpoint = torch.load(checkpoint_path, weights_only=False)
     checkpoint.pop("dummy_attribute")
 
     # Save the modified checkpoint
