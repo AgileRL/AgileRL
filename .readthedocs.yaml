@@ -17,7 +17,6 @@ build:
         # Install main requirements with PEP 517 flag
         - pip install --use-pep517 -r requirements.txt
         # Install docs requirements first
-        - pip install -r docs/requirements.txt
 
 # Build documentation in the docs/ directory with Sphinx
 sphinx:
