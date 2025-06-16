@@ -11,6 +11,8 @@ build:
     os: ubuntu-22.04
     tools:
         python: '3.10'
+    commands:
+        - pip install --upgrade pip setuptools wheel
 
 # Build documentation in the docs/ directory with Sphinx
 sphinx:
@@ -19,9 +21,6 @@ sphinx:
 # If using Sphinx, optionally build your docs in additional formats such as PDF
 # formats:
 #    - pdf
-
-commands:
-    - pip install --upgrade pip setuptools wheel
 
 # Optionally declare the Python requirements required to build your docs
 python:
