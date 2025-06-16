@@ -20,6 +20,9 @@ sphinx:
 # formats:
 #    - pdf
 
+commands:
+    - pip install --upgrade pip setuptools wheel
+
 # Optionally declare the Python requirements required to build your docs
 python:
     install:
