@@ -14,8 +14,8 @@ from agilerl.training.train_multi_agent_off_policy import train_multi_agent_off_
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_on_policy import train_on_policy
 from agilerl.utils.evolvable_networks import (
-    get_action_dim_networks,
-    get_state_dim_networks,
+    get_input_size_from_space,
+    get_output_size_from_space,
 )
 from agilerl.utils.utils import (
     create_population,
@@ -58,8 +58,8 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
         else:
             NET_CONFIG = None
 
-            action_dims = get_action_dim_networks(action_space)
-            state_dims = get_state_dim_networks(observation_space)
+            action_dims = get_output_size_from_space(action_space)
+            state_dims = get_input_size_from_space(observation_space)
             if atari:
                 # DQN
                 network_actor = SimpleCNNActor(action_dims)
@@ -205,8 +205,8 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
         INIT_HP["AGENT_IDS"] = [agent_id for agent_id in env.agents]
         if not atari:
             # MLPs
-            state_dims = get_state_dim_networks(observation_space)
-            action_dims = get_action_dim_networks(action_space)
+            state_dims = get_input_size_from_space(observation_space)
+            action_dims = get_output_size_from_space(action_space)
             total_state_dims = sum(state_dim[0] for state_dim in state_dims)
             total_actions = sum(action_dims)
             actor = [

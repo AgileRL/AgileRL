@@ -81,9 +81,9 @@ from agilerl.utils.algo_utils import (
 from agilerl.utils.evolvable_networks import (
     compile_model,
     config_from_dict,
-    get_action_dim_networks,
     get_default_encoder_config,
-    get_state_dim_networks,
+    get_input_size_from_space,
+    get_output_size_from_space,
     is_image_space,
     is_vector_space,
 )
@@ -300,10 +300,10 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :rtype: Tuple[int, ...].
         """
         warnings.warn(
-            "This method is deprecated. Use get_state_dim_networks instead.",
+            "This method is deprecated. Use get_input_size_from_space instead.",
             category=DeprecationWarning,
         )
-        return get_state_dim_networks(observation_space)
+        return get_input_size_from_space(observation_space)
 
     @staticmethod
     def get_action_dim(action_space: GymSpaceType) -> Tuple[int, ...]:
@@ -317,10 +317,10 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :rtype: int.
         """
         warnings.warn(
-            "This method is deprecated. Use get_action_dim_networks instead.",
+            "This method is deprecated. Use get_output_size_from_space instead.",
             category=DeprecationWarning,
         )
-        return get_action_dim_networks(action_space)
+        return get_output_size_from_space(action_space)
 
     @staticmethod
     def inspect_attributes(
@@ -1066,7 +1066,7 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         self.observation_space = observation_space
         self.action_space = action_space
         self.normalize_images = normalize_images
-        self.action_dim = get_action_dim_networks(self.action_space)
+        self.action_dim = get_output_size_from_space(self.action_space)
 
     def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
         """Preprocesses observations for forward pass through neural network.
@@ -1177,7 +1177,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             }
         )
 
-        self.action_dims = get_action_dim_networks(self.possible_action_spaces)
+        self.action_dims = get_output_size_from_space(self.possible_action_spaces)
 
         self.max_action = OrderedDict()
         self.min_action = OrderedDict()

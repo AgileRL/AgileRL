@@ -8,8 +8,8 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.utils.evolvable_networks import (
-    get_action_dim_networks,
-    get_state_dim_networks,
+    get_input_size_from_space,
+    get_output_size_from_space,
 )
 from agilerl.utils.utils import (
     create_population,
@@ -59,8 +59,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
         device=device,
     )
 
-    state_dim = get_state_dim_networks(observation_space)
-    action_dim = get_action_dim_networks(action_space)
+    state_dim = get_input_size_from_space(observation_space)
+    action_dim = get_output_size_from_space(action_space)
     if use_net:
         # Currently set up for DQN
         actor_kwargs = dict(

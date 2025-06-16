@@ -31,7 +31,7 @@ from agilerl.typing import ConfigType, DeviceType, GymSpaceType, NetConfigType
 TupleorInt = Union[Tuple[int, ...], int]
 
 
-def get_state_dim_networks(observation_space: GymSpaceType) -> Tuple[int, ...]:
+def get_input_size_from_space(observation_space: GymSpaceType) -> Tuple[int, ...]:
     """Returns the dimension of the state space as it pertains to the underlying
     networks (i.e. the input size of the networks).
 
@@ -41,10 +41,10 @@ def get_state_dim_networks(observation_space: GymSpaceType) -> Tuple[int, ...]:
     :return: The dimension of the state space.
     :rtype: Tuple[int, ...]."""
     if isinstance(observation_space, (list, tuple, spaces.Tuple)):
-        return tuple(get_state_dim_networks(space) for space in observation_space)
+        return tuple(get_input_size_from_space(space) for space in observation_space)
     elif isinstance(observation_space, spaces.Dict):
         return {
-            key: get_state_dim_networks(subspace)
+            key: get_input_size_from_space(subspace)
             for key, subspace in observation_space.spaces.items()
         }
     elif isinstance(observation_space, spaces.Discrete):
@@ -61,7 +61,7 @@ def get_state_dim_networks(observation_space: GymSpaceType) -> Tuple[int, ...]:
         )
 
 
-def get_action_dim_networks(
+def get_output_size_from_space(
     action_space: GymSpaceType,
 ) -> Union[int, Dict[str, int], Tuple[int, ...]]:
     """Returns the dimension of the action space as it pertains to the underlying
@@ -74,10 +74,10 @@ def get_action_dim_networks(
     :rtype: Union[int, Dict[str, int], Tuple[int, ...]]
     """
     if isinstance(action_space, (list, tuple)):
-        return tuple(get_action_dim_networks(space) for space in action_space)
+        return tuple(get_output_size_from_space(space) for space in action_space)
     elif isinstance(action_space, spaces.Dict):
         return {
-            key: get_action_dim_networks(subspace)
+            key: get_output_size_from_space(subspace)
             for key, subspace in action_space.spaces.items()
         }
     elif isinstance(action_space, spaces.MultiBinary):

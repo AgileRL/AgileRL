@@ -13,8 +13,8 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules import EvolvableMLP
 from agilerl.training.train_multi_agent_off_policy import train_multi_agent_off_policy
 from agilerl.utils.evolvable_networks import (
-    get_action_dim_networks,
-    get_state_dim_networks,
+    get_input_size_from_space,
+    get_output_size_from_space,
 )
 from agilerl.utils.utils import (
     create_population,
@@ -125,8 +125,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Tru
         ),
     )
 
-    state_dims = get_state_dim_networks(observation_spaces)
-    action_dims = get_action_dim_networks(action_spaces)
+    state_dims = get_input_size_from_space(observation_spaces)
+    action_dims = get_output_size_from_space(action_spaces)
     total_state_dims = sum(state_dim[0] for state_dim in state_dims)
     total_action_dims = sum(action_dims)
     if use_net:
