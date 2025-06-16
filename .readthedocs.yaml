@@ -11,8 +11,13 @@ build:
     os: ubuntu-22.04
     tools:
         python: '3.10'
-    # commands:
-    #     - pip install --upgrade pip setuptools wheel
+    commands:
+        # Install docs requirements first
+        - pip install -r docs/requirements.txt
+        # Install main requirements with PEP 517 flag
+        - pip install --use-pep517 -r requirements.txt
+        # Install docs requirements first
+        - pip install -r docs/requirements.txt
 
 # Build documentation in the docs/ directory with Sphinx
 sphinx:
@@ -22,11 +27,8 @@ sphinx:
 # formats:
 #    - pdf
 
-# Optionally declare the Python requirements required to build your docs
-python:
-    install:
-        - method: pip
-          path: .
-          extra_requirements:
-              - docs/requirements.txt
-              - requirements.txt
+# Python installation handled by build commands above
+# python:
+#     install:
+#         - requirements: docs/requirements.txt
+#         - requirements: requirements.txt
