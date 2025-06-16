@@ -513,8 +513,13 @@ class Mutations:
                     opt = getattr(
                         getattr(individual, "actor"), "optimizer"
                     )  # If the optimizer is defined in the deepspeed config, we do this
-                individual.accelerator = LLMAlgorithm.update_lr(
-                    opt, individual.lr, individual.accelerator
+                individual.accelerator, individual.lr_scheduler = (
+                    LLMAlgorithm.update_lr(
+                        opt,
+                        individual.lr,
+                        individual.accelerator,
+                        individual.cosine_lr_schedule_config,
+                    )
                 )
             else:
                 if isinstance(optimizer, list) or len(opt.network_names) == 1:

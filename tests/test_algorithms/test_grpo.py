@@ -28,7 +28,7 @@ from torch.optim.lr_scheduler import SequentialLR
 from transformers import GenerationConfig, PretrainedConfig, PreTrainedModel
 
 from agilerl.algorithms import GRPO
-from agilerl.algorithms.core.base import OptimizerWrapper
+from agilerl.algorithms.core.base import LLMAlgorithm, OptimizerWrapper
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, clone_llm
 from agilerl.utils.utils import _DummyOptimizer
 
@@ -65,6 +65,19 @@ deepspeed_config_stage_2 = deepspeed_base_config | {
 deepspeed_config_stage_3 = deepspeed_base_config | {
     "zero_optimization": {
         "stage": 3,
+    },
+}
+
+deepspeed_config_stage_1_with_scheduler = deepspeed_base_config | {
+    "zero_optimization": {
+        "stage": 1,
+    },
+    "scheduler": {
+        "params": {
+            "warmup_max_lr": 0.001,
+            "num_epochs": 10,
+            "warmup_proportion": 0.05,
+        }
     },
 }
 
@@ -265,14 +278,14 @@ def grpo(request, accelerator, monkeypatch):
                 vocab_size=vocab_size,
                 device="cuda" if torch.cuda.is_available() else "cpu",
             ),
-            lr=0.1,
+            lr=0.001,
             pad_token_id=vocab_size - 1,
             device="cuda" if torch.cuda.is_available() else "cpu",
             group_size=group_size,
             lora_config=lora_config,
             cosine_lr_schedule_config=(
                 None
-                if use_deepspeed_optimizer
+                if accelerator is not None
                 else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
             ),
             accelerator=accelerator,
@@ -305,7 +318,7 @@ def test_init_grpo_with_accelerator(
     assert isinstance(grpo.action_space, gym.spaces.Box)
     assert grpo.batch_size == 1
     assert grpo.beta == 0.001
-    assert grpo.lr == 0.1
+    assert grpo.lr == 0.001
     assert grpo.clip_coef == 0.2
     assert grpo.max_grad_norm is None
     assert grpo.update_epochs == 1
@@ -321,10 +334,13 @@ def test_init_grpo_with_accelerator(
     assert isinstance(grpo.generation_config, GenerationConfig)
     assert isinstance(grpo.actor, DeepSpeedEngine)
     if not use_deepspeed_optimizer:
-        assert isinstance(grpo.lr_scheduler, AcceleratedScheduler), grpo.lr_scheduler
-        assert isinstance(grpo.cosine_lr_schedule_config, CosineLRScheduleConfig), type(
-            grpo.cosine_lr_schedule_config
-        )
+        if accelerator is None:
+            assert isinstance(
+                grpo.lr_scheduler, AcceleratedScheduler
+            ), grpo.lr_scheduler
+            assert isinstance(
+                grpo.cosine_lr_schedule_config, CosineLRScheduleConfig
+            ), type(grpo.cosine_lr_schedule_config)
         assert isinstance(grpo.optimizer, DeepSpeedOptimizerWrapper)
     else:
         assert isinstance(grpo.optimizer, OptimizerWrapper)
@@ -356,7 +372,7 @@ def test_init_grpo_with_no_accelerator(
     assert isinstance(grpo.action_space, gym.spaces.Box)
     assert grpo.batch_size == 1
     assert grpo.beta == 0.001
-    assert grpo.lr == 0.1
+    assert grpo.lr == 0.001
     assert grpo.clip_coef == 0.2
     assert grpo.max_grad_norm == 0.1
     assert grpo.update_epochs == 1
@@ -389,16 +405,6 @@ def test_init_grpo_with_no_accelerator(
 def test_init_grpo_zero3_warning(monkeypatch, accelerator, request):
     accelerator, use_deepspeed_optimizer = accelerator
     with pytest.warns(UserWarning), patch_environment(**dist_env):
-        # env_vars = {
-        #     "ACCELERATE_USE_DEEPSPEED": "true",
-        #     "MASTER_ADDR": "localhost",
-        #     "MASTER_PORT": "10999",
-        #     "RANK": "0",
-        #     "LOCAL_RANK": "0",
-        #     "WORLD_SIZE": "1",
-        # }
-        # for key, value in env_vars.items():
-        #     monkeypatch.setenv(key, value)
         gc.collect()
         vocab_size = 1000
         input_size = 10
@@ -430,8 +436,10 @@ def test_init_grpo_zero3_warning(monkeypatch, accelerator, request):
                 task_type="CAUSAL_LM",
                 lora_dropout=0.05,
             ),
-            cosine_lr_schedule_config=CosineLRScheduleConfig(
-                num_epochs=10, warmup_proportion=0.05
+            cosine_lr_schedule_config=(
+                None
+                if accelerator is not None
+                else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
             ),
             accelerator=accelerator,
         )
@@ -451,16 +459,64 @@ def test_init_grpo_zero3_warning(monkeypatch, accelerator, request):
 def test_init_grpo_max_grad_norm_warning(monkeypatch, accelerator, request):
     accelerator, use_deepspeed_optimizer = accelerator
     with pytest.warns(UserWarning), patch_environment(**dist_env):
-        # env_vars = {
-        #     "ACCELERATE_USE_DEEPSPEED": "true",
-        #     "MASTER_ADDR": "localhost",
-        #     "MASTER_PORT": "10999",
-        #     "RANK": "0",
-        #     "LOCAL_RANK": "0",
-        #     "WORLD_SIZE": "1",
-        # }
-        # for key, value in env_vars.items():
-        #     monkeypatch.setenv(key, value)
+        gc.collect()
+        vocab_size = 1000
+        input_size = 10
+        max_tokens = 20
+        group_size = 5
+        observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
+        action_space = gym.spaces.Box(
+            low=0,
+            high=vocab_size - 1,
+            shape=(20,),
+        )
+        lora_config = LoraConfig(
+            r=16,
+            lora_alpha=64,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+        )
+        GRPO(
+            observation_space,
+            action_space,
+            actor_network=create_module(
+                input_size=input_size,
+                max_tokens=max_tokens,
+                vocab_size=vocab_size,
+                device="cuda" if torch.cuda.is_available() else "cpu",
+            ),
+            lr=0.1,
+            pad_token_id=vocab_size - 1,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            group_size=group_size,
+            lora_config=lora_config,
+            cosine_lr_schedule_config=(
+                None
+                if accelerator is not None
+                else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+            ),
+            max_grad_norm=0.1,
+            accelerator=accelerator,
+        )
+        gc.collect()
+        torch.cuda.empty_cache()
+    AcceleratorState._reset_state(True)
+
+
+@pytest.mark.parametrize(
+    "accelerator",
+    [
+        {
+            "config": deepspeed_config_stage_1_with_scheduler,
+            "use_deepspeed_optimizer": True,
+        },
+    ],
+    indirect=["accelerator"],
+)
+def test_init_grpo_scheduler_warning(monkeypatch, accelerator, request):
+    accelerator, use_deepspeed_optimizer = accelerator
+    with pytest.warns(UserWarning), patch_environment(**dist_env):
         gc.collect()
         vocab_size = 1000
         input_size = 10
@@ -987,8 +1043,10 @@ def test_grpo_save_load_checkpoint(grpo, accelerator, request, tmpdir):
             task_type="CAUSAL_LM",
             lora_dropout=0.05,
         ),
-        cosine_lr_schedule_config=CosineLRScheduleConfig(
-            num_epochs=10, warmup_proportion=0.05
+        cosine_lr_schedule_config=(
+            None
+            if accelerator is not None
+            else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
         ),
         accelerator=accelerator,
     )
@@ -1339,8 +1397,10 @@ def test_init_grpo_lora_config_warning(monkeypatch, accelerator, request):
                 pad_token_id=vocab_size - 1,
                 device="cuda" if torch.cuda.is_available() else "cpu",
                 group_size=group_size,
-                cosine_lr_schedule_config=CosineLRScheduleConfig(
-                    num_epochs=10, warmup_proportion=0.05
+                cosine_lr_schedule_config=(
+                    None
+                    if accelerator is not None
+                    else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
                 ),
                 accelerator=accelerator,
             )
@@ -1429,8 +1489,10 @@ def test_init_grpo_multiple_adapters(monkeypatch, accelerator, request):
             pad_token_id=vocab_size - 1,
             device="cuda" if torch.cuda.is_available() else "cpu",
             group_size=group_size,
-            cosine_lr_schedule_config=CosineLRScheduleConfig(
-                num_epochs=10, warmup_proportion=0.05
+            cosine_lr_schedule_config=(
+                None
+                if accelerator is not None
+                else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
             ),
             accelerator=accelerator,
             clone=False,
@@ -1459,3 +1521,74 @@ def test_init_grpo_multiple_adapters(monkeypatch, accelerator, request):
         gc.collect()
         torch.cuda.empty_cache()
         AcceleratorState._reset_state(True)
+
+
+@pytest.mark.parametrize(
+    "accelerator, grpo",
+    [
+        (
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": False},
+            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": False},
+            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+        ),
+        (
+            {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": False},
+            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+        ),
+        (
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": True},
+            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": True},
+            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+        ),
+        (
+            {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": True},
+            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+        ),
+        (
+            {
+                "config": deepspeed_config_stage_1_with_scheduler,
+                "use_deepspeed_optimizer": True,
+            },
+            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+        ),
+    ],
+    indirect=["accelerator", "grpo"],
+)
+def test_update_lr(grpo, accelerator, request):
+    accelerator, use_deepspeed_optimizer = accelerator
+    opt = (
+        grpo.optimizer.optimizer
+        if not use_deepspeed_optimizer
+        else grpo.actor.optimizer
+    )
+    grpo.accelerator, grpo.lr_scheduler = LLMAlgorithm.update_lr(
+        opt, 0.5, grpo.accelerator, grpo.cosine_lr_schedule_config
+    )
+    for param_group in opt.param_groups:
+        print(param_group, param_group["lr"])
+        assert param_group["lr"] == 0.5
+
+    if use_deepspeed_optimizer:
+        grpo.accelerator.deepspeed_plugin.deepspeed_config["optimizer"]["params"][
+            "lr"
+        ] = 0.5
+
+        if (
+            grpo.accelerator.deepspeed_plugin.deepspeed_config.get("scheduler", None)
+            is not None
+        ):
+            grpo.accelerator.deepspeed_plugin.deepspeed_config["scheduler"]["params"][
+                "warmup_max_lr"
+            ] = 0.5
+            grpo.accelerator.deepspeed_plugin.deepspeed_config["scheduler"]["params"][
+                "num_epochs"
+            ] = 10
+            grpo.accelerator.deepspeed_plugin.deepspeed_config["scheduler"]["params"][
+                "warmup_proportion"
+            ] = 0.05

@@ -31,6 +31,7 @@ from gymnasium import spaces
 from numpy.typing import ArrayLike
 from tensordict import TensorDict
 from torch._dynamo import OptimizedModule
+from torch.optim.lr_scheduler import SequentialLR
 
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
@@ -56,10 +57,12 @@ from agilerl.typing import (
     TorchObsType,
 )
 from agilerl.utils.algo_utils import (
+    CosineLRScheduleConfig,
     assert_supported_space,
     chkpt_attribute_to_device,
     clone_llm,
     compile_model,
+    create_warmup_cosine_scheduler,
     is_module_list,
     isroutine,
     key_in_nested_dict,
@@ -1735,7 +1738,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self.actor, self.optimizer, self.lr_scheduler = self.accelerator.prepare(
                 self.actor, opt, self.lr_scheduler
             )
-            # opt -> Dummy
+            print("This is the lr scheduler from inside grpo", self.lr_scheduler)
         else:
             self.actor = self.actor.to(self.device)
             self.actor.gradient_checkpointing_enable()
@@ -1864,18 +1867,42 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     @staticmethod
     def update_lr(
-        optimizer: DeepSpeedOptimizerWrapper, lr: float, accelerator: Accelerator
-    ) -> None:
+        optimizer: DeepSpeedOptimizerWrapper,
+        lr: float,
+        accelerator: Optional[Accelerator],
+        scheduler_config: Optional[CosineLRScheduleConfig],
+    ) -> Tuple[Optional[Accelerator], Optional[SequentialLR]]:
         """Update the learning rate of the optimizer
 
         :param optimizer: Optimizer
         :type optimizer: Optimizer
+        :param lr: Learning rate
+        :type lr: float
+        :param accelerator: Accelerator
+        :type accelerator: Optional[Accelerator]
+
+        :return: Accelerator
         """
 
-        print("THIS IS THE NEW LEARING RATE", lr)
-
         for param_group in optimizer.param_groups:
+            print("Param group lr", param_group, "learning rate", lr)
             param_group["lr"] = lr
+
+        if accelerator is None:
+            scheduler = (
+                create_warmup_cosine_scheduler(optimizer, scheduler_config, 1e-8, lr)
+                if scheduler_config is not None
+                else None
+            )
+            return accelerator, scheduler
+
+        if (
+            accelerator.state.deepspeed_plugin.deepspeed_config.get("scheduler", None)
+            is not None
+        ):
+            accelerator.state.deepspeed_plugin.deepspeed_config["scheduler"]["params"][
+                "warmup_max_lr"
+            ] = lr
 
         if (
             accelerator.state.deepspeed_plugin.deepspeed_config.get("optimizer", None)
@@ -1885,4 +1912,4 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 "lr"
             ] = lr
 
-        return accelerator
+        return accelerator, None

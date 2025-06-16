@@ -147,10 +147,6 @@ class GRPO(LLMAlgorithm):
         ), "Actor network must be a PeftModel or PreTrainedModel"
         if (
             accelerator is not None
-            and accelerator.state.deepspeed_plugin.deepspeed_config.get(
-                "optimizer", None
-            )
-            is not None
             and cosine_lr_schedule_config is not None
             and accelerator.is_main_process
         ):
