@@ -14,7 +14,7 @@ import torch.nn as nn
 from accelerate import Accelerator
 from accelerate.scheduler import AcceleratedScheduler
 from accelerate.state import AcceleratorState
-from accelerate.utils import DeepSpeedPlugin
+from accelerate.utils import DeepSpeedPlugin, patch_environment
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
@@ -204,9 +204,7 @@ def accelerator(request):
     AcceleratorState._reset_state(True)
     config = request.param.get("config", None)
     use_deepspeed_optimizer = request.param.get("use_deepspeed_optimizer", False)
-    print("Use deepspeed optimizer", use_deepspeed_optimizer)
     if use_deepspeed_optimizer and config is not None:
-        print("APPLYING DEEPSPEED OPTIMIZER")
         config["optimizer"] = {
             "type": "AdamW",
             "params": {
@@ -221,10 +219,8 @@ def accelerator(request):
     else:
         accelerator = Accelerator(deepspeed_plugin=DeepSpeedPlugin(hf_ds_config=config))
         yield accelerator, use_deepspeed_optimizer
+        config.pop("optimizer", None)
         accelerator.free_memory()
-
-
-from accelerate.utils import patch_environment
 
 
 @pytest.fixture
@@ -355,6 +351,7 @@ def test_init_grpo_with_no_accelerator(
     accelerator,
     request,
 ):
+    accelerator, _ = accelerator
     assert isinstance(grpo.observation_space, gym.spaces.Box)
     assert isinstance(grpo.action_space, gym.spaces.Box)
     assert grpo.batch_size == 1
@@ -390,6 +387,7 @@ def test_init_grpo_with_no_accelerator(
     indirect=["accelerator"],
 )
 def test_init_grpo_zero3_warning(monkeypatch, accelerator, request):
+    accelerator, use_deepspeed_optimizer = accelerator
     with pytest.warns(UserWarning), patch_environment(**dist_env):
         # env_vars = {
         #     "ACCELERATE_USE_DEEPSPEED": "true",
@@ -451,6 +449,7 @@ def test_init_grpo_zero3_warning(monkeypatch, accelerator, request):
     indirect=["accelerator"],
 )
 def test_init_grpo_max_grad_norm_warning(monkeypatch, accelerator, request):
+    accelerator, use_deepspeed_optimizer = accelerator
     with pytest.warns(UserWarning), patch_environment(**dist_env):
         # env_vars = {
         #     "ACCELERATE_USE_DEEPSPEED": "true",
@@ -534,6 +533,7 @@ def test_get_action_grpo(grpo, accelerator, request, training, data_batch_size):
     input_size = request.node.callspec.params["grpo"]["input_size"]
     max_tokens = request.node.callspec.params["grpo"]["max_tokens"]
     group_size = request.node.callspec.params["grpo"]["group_size"]
+    accelerator, use_deepspeed_optimizer = accelerator
     states = [
         {
             "input_ids": torch.randint(0, vocab_size, (input_size,)),
@@ -699,6 +699,7 @@ def test_grpo_loss(grpo, accelerator, request):
 )
 @pytest.mark.parametrize("batch_size", [2])
 def test_grpo_learn(grpo, accelerator, request, batch_size):
+    accelerator, use_deepspeed_optimizer = accelerator
     vocab_size = request.node.callspec.params["grpo"]["vocab_size"]
     input_size = request.node.callspec.params["grpo"]["input_size"]
     max_tokens = request.node.callspec.params["grpo"]["max_tokens"]
@@ -958,9 +959,7 @@ def test_grpo_save_load_checkpoint(grpo, accelerator, request, tmpdir):
     input_size = request.node.callspec.params["grpo"]["input_size"]
     max_tokens = request.node.callspec.params["grpo"]["max_tokens"]
     group_size = request.node.callspec.params["grpo"]["group_size"]
-    use_deepspeed_optimizer = request.node.callspec.params["accelerator"].get(
-        "use_deepspeed_optimizer", False
-    )
+    accelerator, use_deepspeed_optimizer = accelerator
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
     grpo._save_distributed_actor(checkpoint_path)
     grpo_optim_state_dict = (
@@ -1021,7 +1020,7 @@ def test_grpo_save_load_checkpoint(grpo, accelerator, request, tmpdir):
         assert str(new_opt.state_dict()[key]) == str(grpo_optim_state_dict[key])
     AcceleratorState._reset_state(True)
 
-@pytest.mark.skip
+
 @pytest.mark.parametrize(
     "accelerator, grpo",
     [
@@ -1057,9 +1056,7 @@ def test_grpo_save_load_checkpoint(grpo, accelerator, request, tmpdir):
     indirect=["accelerator", "grpo"],
 )
 def test_grpo_clone_with_accelerator(grpo, accelerator, request, tmpdir):
-    use_deepspeed_optimizer = request.node.callspec.params["accelerator"].get(
-        "use_deepspeed_optimizer", False
-    )
+    accelerator, use_deepspeed_optimizer = accelerator
     grpo_accelerator = grpo.accelerator
     grpo_lr_scheduler = grpo.lr_scheduler
     grpo.fitness = [1, 2, 3]
@@ -1077,7 +1074,6 @@ def test_grpo_clone_with_accelerator(grpo, accelerator, request, tmpdir):
         assert new_grpo.accelerator != grpo_accelerator
     if grpo.lr_scheduler is not None:
         assert new_grpo.lr_scheduler != grpo_lr_scheduler
-
 
     if use_deepspeed_optimizer:
         opt = grpo.actor.optimizer
@@ -1306,6 +1302,7 @@ def test_load_distributed_actor_warning(grpo, accelerator, request, batch_size):
     indirect=["accelerator"],
 )
 def test_init_grpo_lora_config_warning(monkeypatch, accelerator, request):
+    accelerator, use_deepspeed_optimizer = accelerator
     with pytest.warns(UserWarning), mock.patch.dict(os.environ, clear=True):
         env_vars = {
             "ACCELERATE_USE_DEEPSPEED": "true",
@@ -1361,6 +1358,7 @@ def test_init_grpo_lora_config_warning(monkeypatch, accelerator, request):
 )
 def test_init_grpo_multiple_adapters(monkeypatch, accelerator, request):
     """Test GRPO initialization with a PEFT model containing multiple adapters."""
+    accelerator, use_deepspeed_optimizer = accelerator
     with pytest.warns(
         UserWarning, match="AgileRL RL finetuning is only compatible with one adapter."
     ), mock.patch.dict(os.environ, clear=True):
