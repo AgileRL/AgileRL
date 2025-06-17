@@ -1233,21 +1233,11 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         # Build observation space based on setup
         if self.has_grouped_agents():
-            agent_ids = self.shared_agent_ids
-            observation_spaces = list(self.unique_observation_spaces.values())
-            action_spaces = list(self.unique_action_spaces.values())
+            self.observation_space = self.unique_observation_spaces
+            self.action_space = self.unique_action_spaces
         else:
-            agent_ids = self.agent_ids
-            observation_spaces = list(self.possible_observation_spaces.values())
-            action_spaces = list(self.possible_action_spaces.values())
-
-        # Build grouped / individual observation and action spaces
-        self.observation_space = spaces.Dict(
-            {agent_id: space for agent_id, space in zip(agent_ids, observation_spaces)}
-        )
-        self.action_space = spaces.Dict(
-            {agent_id: space for agent_id, space in zip(agent_ids, action_spaces)}
-        )
+            self.observation_space = self.possible_observation_spaces
+            self.action_space = self.possible_action_spaces
 
     def _registry_init(self) -> None:
         super()._registry_init()
