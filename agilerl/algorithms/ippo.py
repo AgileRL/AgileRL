@@ -46,11 +46,11 @@ class IPPO(MultiAgentRLAlgorithm):
     Paper: https://arxiv.org/pdf/2011.09533
 
     :param observation_spaces: Observation space for each agent
-    :type observation_spaces: list[spaces.Space]
+    :type observation_spaces: Union[list[spaces.Space], spaces.Dict]
     :param action_spaces: Action space for each agent
-    :type action_spaces: list[spaces.Space]
+    :type action_spaces: Union[list[spaces.Space], spaces.Dict]
     :param agent_ids: Agent ID for each agent
-    :type agent_ids: list[str]
+    :type agent_ids: Optional[list[str]], optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
     :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
@@ -107,9 +107,9 @@ class IPPO(MultiAgentRLAlgorithm):
 
     def __init__(
         self,
-        observation_spaces: List[spaces.Space],
-        action_spaces: List[spaces.Space],
-        agent_ids: List[str],
+        observation_spaces: Union[List[spaces.Space], spaces.Dict],
+        action_spaces: Union[List[spaces.Space], spaces.Dict],
+        agent_ids: Optional[List[str]] = None,
         index: int = 0,
         hp_config: Optional[HyperparameterConfig] = None,
         net_config: Optional[Dict[str, Any]] = None,
@@ -138,8 +138,8 @@ class IPPO(MultiAgentRLAlgorithm):
         super().__init__(
             observation_spaces,
             action_spaces,
-            agent_ids,
             index=index,
+            agent_ids=agent_ids,
             hp_config=hp_config,
             device=device,
             accelerator=accelerator,
@@ -341,13 +341,13 @@ class IPPO(MultiAgentRLAlgorithm):
         # Register network groups for mutations
         self.register_network_group(
             NetworkGroup(
-                eval=self.actors,
+                eval_network=self.actors,
                 policy=True,
             )
         )
         self.register_network_group(
             NetworkGroup(
-                eval=self.critics,
+                eval_network=self.critics,
             )
         )
 

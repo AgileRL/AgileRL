@@ -67,12 +67,15 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Tru
 
     env.reset(seed=42)
     # Configure the multi-agent algo input arguments
-    observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
-    action_spaces = [env.single_action_space(agent) for agent in env.agents]
+    observation_spaces = {
+        agent: env.single_observation_space(agent) for agent in env.agents
+    }
+    action_spaces = {agent: env.single_action_space(agent) for agent in env.agents}
     if INIT_HP["CHANNELS_LAST"]:
-        observation_spaces = [
-            observation_space_channels_to_first(obs) for obs in observation_spaces
-        ]
+        observation_spaces = {
+            agent: observation_space_channels_to_first(obs)
+            for agent, obs in observation_spaces.items()
+        }
 
     INIT_HP["AGENT_IDS"] = [agent_id for agent_id in env.agents]
 
@@ -127,8 +130,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Tru
 
     state_dims = get_input_size_from_space(observation_spaces)
     action_dims = get_output_size_from_space(action_spaces)
-    total_state_dims = sum(state_dim[0] for state_dim in state_dims)
-    total_action_dims = sum(action_dims)
+    total_state_dims = sum(state_dim[0] for state_dim in state_dims.values())
+    total_action_dims = sum(action_dims.values())
     if use_net:
         ## Critic nets currently set-up for MADDPG
         actor = [

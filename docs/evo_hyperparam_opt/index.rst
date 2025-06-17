@@ -179,15 +179,15 @@ Multi-Agent
 ^^^^^^^^^^^
 In :ref:`multi-agent settings <multiagenttraining>`, we can't make the previous assumption and follow the same procedure for various reasons.
 
-- Different sub-agents don't necessarily share the same observation space and thus their policies will have different architectures (i.e. we can't apply a single mutation generally to all sub-agents,
-  and probably wouldn't want to do so in the first place since they solve different tasks!). We therefore want to sample a mutation method from the policy of a single sub-agent and apply it
-  to the policies of sub-agents that share the same mutation method.
+- Different agents don't necessarily share the same observation space and thus their policies will have different architectures (i.e. we can't apply a single mutation generally to all agents,
+  and probably wouldn't want to do so in the first place since they solve different tasks!). We therefore want to sample a mutation method from the policy of a single agent and apply it
+  to the policies of agents that share the same mutation method.
 
 - We often have situations with a combination of both centralized (i.e. process information from all agents) and decentralized (i.e. process information from a single agent) networks. For instance,
   the policies in ``MADDPG`` and ``MATD3`` are decentralized, while the critics are centralized. In these cases, we can't necessarily apply the same mutation to different networks corresponding to the
-  same sub-agent. What we can do, however, is try to apply an analogous mutation across the board. For centralized networks in the aforementioned algorithms we employ
+  same agent. What we can do, however, is try to apply an analogous mutation across the board. For centralized networks in the aforementioned algorithms we employ
   :class:`EvolvableMultiInput <agilerl.modules.multi_input.EvolvableMultiInput>` as an encoder, which allows us to process observations from all agents into a single output. What we do then is look at
-  the executed mutations for the policies and try to apply an equivalent mutation to the feature extractor of the mutated sub-agents in the multi-input encoder.
+  the executed mutations for the policies and try to apply an equivalent mutation to the feature extractor of the mutated agents in the multi-input encoder.
 
 Summarising the above considerations, the procedure to perform an architecture mutation in multi-agent settings is as follows:
 
@@ -195,7 +195,7 @@ Summarising the above considerations, the procedure to perform an architecture m
 
     2. Apply the sampled mutation to other sub-agents that share the same mutation method.
 
-    3. Iterate over the rest of evaluation networks found in the ``MutationRegistry`` and apply an analogous mutation to the mutated sub-agents.
+    3. Iterate over the rest of evaluation networks found in the ``MutationRegistry`` and apply an analogous mutation to the mutated agents.
 
     4. Reinitialize the networks that share parameters with the evaluation networks but aren't optimized directly during training (e.g. target networks) with the mutated architecture.
 

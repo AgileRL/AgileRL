@@ -68,9 +68,11 @@ class MockAlgorithm(RLAlgorithm):
                 self.optimizer_cls, [self.actor, self.critic], self.learning_rate
             )
 
-        self.register_network_group(NetworkGroup(eval=self.actor, policy=True))
+        self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
         if critic is not None:
-            self.register_network_group(NetworkGroup(eval=self.critic, policy=False))
+            self.register_network_group(
+                NetworkGroup(eval_network=self.critic, policy=False)
+            )
 
     def get_action(self, obs):
         return
@@ -123,8 +125,10 @@ class MockMultiAgentAlgorithm(MultiAgentRLAlgorithm):
         self.critic_optimizers = OptimizerWrapper(
             self.optimizer_cls, self.critics, self.lr_critic
         )
-        self.register_network_group(NetworkGroup(eval=self.actors, policy=True))
-        self.register_network_group(NetworkGroup(eval=self.critics, policy=False))
+        self.register_network_group(NetworkGroup(eval_network=self.actors, policy=True))
+        self.register_network_group(
+            NetworkGroup(eval_network=self.critics, policy=False)
+        )
 
     def make_network(self, agent_id: str):
         return MockEvolvableNetwork(

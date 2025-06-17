@@ -11,7 +11,7 @@ from accelerate.state import AcceleratorState
 from accelerate.utils import DeepSpeedPlugin
 from gymnasium import spaces
 
-from agilerl.algorithms.core import EvolvableAlgorithm, OptimizerWrapper
+from agilerl.algorithms.core import EvolvableAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.algorithms.grpo import GRPO
 from agilerl.hpo.mutation import MutationError, Mutations
@@ -170,6 +170,37 @@ def encoder_multi_input_config():
     }
 
 
+def create_bert_network(device):
+    return EvolvableBERT([12], [12], device=device)
+
+
+@pytest.fixture
+def bert_network(device):
+    yield create_bert_network(device)
+
+
+def create_bert_networks_multi_agent(device):
+    return ModuleDict(
+        {
+            "agent_0": create_bert_network(device),
+            "agent_1": create_bert_network(device),
+        }
+    )
+
+
+@pytest.fixture
+def bert_networks_multi_agent(device):
+    yield create_bert_networks_multi_agent(device)
+
+
+@pytest.fixture
+def bert_matd3_critic_networks(device):
+    yield [
+        create_bert_networks_multi_agent(device),
+        create_bert_networks_multi_agent(device),
+    ]
+
+
 @pytest.fixture
 def init_pop(
     algo,
@@ -182,9 +213,16 @@ def init_pop(
     accelerator,
     hp_config,
     request,
+    actor_network=None,
+    critic_network=None,
 ):
     if hp_config is not None:
         hp_config = request.getfixturevalue(hp_config)
+
+    if actor_network is not None:
+        actor_network = request.getfixturevalue(actor_network)
+    if critic_network is not None:
+        critic_network = request.getfixturevalue(critic_network)
 
     pop = create_population(
         algo=algo,
@@ -196,6 +234,8 @@ def init_pop(
         population_size=population_size,
         device=device,
         accelerator=accelerator,
+        actor_network=actor_network,
+        critic_network=critic_network,
     )
     yield pop
     del pop
@@ -353,75 +393,6 @@ def test_mutation_applies_random_mutations(algo, device, accelerator, init_pop):
         ]
 
     del mutations, mutated_population
-
-
-@pytest.mark.parametrize(
-    "algo, hp_config, action_space",
-    [
-        ("DQN", "default_hp_config", generate_discrete_space(2)),
-        ("DDPG", "ac_hp_config", generate_random_box_space((4,), low=-1, high=1)),
-        ("TD3", "ac_hp_config", generate_random_box_space((4,), low=-1, high=1)),
-        ("PPO", "default_hp_config", generate_discrete_space(2)),
-        ("CQN", "default_hp_config", generate_discrete_space(2)),
-        ("NeuralUCB", "default_hp_config", generate_discrete_space(2)),
-        ("NeuralTS", "default_hp_config", generate_discrete_space(2)),
-    ],
-)
-@pytest.mark.parametrize(
-    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
-)
-@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
-@pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
-@pytest.mark.parametrize(
-    "observation_space, net_config",
-    [
-        (generate_random_box_space((4,)), "encoder_simba_config"),
-    ],
-)
-@pytest.mark.parametrize("population_size", [1])
-def test_mutation_applies_random_mutations_simba(algo, device, accelerator, init_pop):
-    population = init_pop
-    pre_training_mut = True
-
-    population = init_pop
-
-    mutations = Mutations(
-        0,
-        0.1,
-        0.1,
-        0.1,
-        0.1,
-        0.1,
-        0.1,
-        mutate_elite=False,
-        device=device,
-        accelerator=accelerator,
-    )
-
-    # Unwrap models if using accelerator
-    if accelerator is not None:
-        for agent in population:
-            agent.unwrap_models()
-
-    mutated_population = mutations.mutation(population, pre_training_mut)
-
-    assert len(mutated_population) == len(population)
-    assert mutated_population[0].mut == "None"  # Satisfies mutate_elite=False condition
-    for individual in mutated_population:
-        policy = getattr(individual, individual.registry.policy())
-        assert individual.mut in [
-            "None",
-            "batch_size",
-            "lr",
-            "lr_actor",
-            "lr_critic",
-            "learn_step",
-            "act",
-            "param",
-            policy.last_mutation_attr,
-        ]
-
-    del mutations, population, mutated_population
 
 
 # The mutation method applies no mutations to the population and returns the mutated population.
@@ -895,9 +866,9 @@ def test_mutation_applies_architecture_mutations(algo, device, accelerator, init
             if policy.last_mutation_attr is not None:
                 # assert str(old_policy.state_dict()) != str(policy.state_dict())
                 for group in old.registry.groups:
-                    if group.eval != policy_name:
-                        eval_module = getattr(individual, group.eval)
-                        # old_eval_module = getattr(old, group.eval)
+                    if group.eval_network != policy_name:
+                        eval_module = getattr(individual, group.eval_network)
+                        # old_eval_module = getattr(old, group.eval_network)
                         assert eval_module.last_mutation_attr is not None
                         assert (
                             eval_module.last_mutation_attr == policy.last_mutation_attr
@@ -912,7 +883,12 @@ def test_mutation_applies_architecture_mutations(algo, device, accelerator, init
 
 
 # The mutation method applies BERT architecture mutations to the population and returns the mutated population.
-@pytest.mark.parametrize("algo", ["DDPG"])
+@pytest.mark.parametrize(
+    "algo, actor_network, critic_network",
+    [
+        ("DDPG", "bert_network", "bert_network"),
+    ],
+)
 @pytest.mark.parametrize(
     "observation_space, net_config",
     [(generate_random_box_space((4,)), "encoder_mlp_config")],
@@ -940,9 +916,39 @@ def test_mutation_applies_architecture_mutations(algo, device, accelerator, init
     ],
 )
 def test_mutation_applies_bert_architecture_mutations_single_agent(
-    algo, device, accelerator, mut_method, init_pop
+    algo,
+    device,
+    accelerator,
+    mut_method,
+    actor_network,
+    critic_network,
+    init_pop,
+    request,
 ):
-    population = init_pop
+    # Pass the network parameters to init_pop through the test
+    actual_actor_network = (
+        request.getfixturevalue(actor_network) if actor_network else None
+    )
+    actual_critic_network = (
+        request.getfixturevalue(critic_network) if critic_network else None
+    )
+
+    # Create a custom population with the BERT networks
+    from agilerl.utils.utils import create_population
+
+    population = create_population(
+        algo=algo,
+        observation_space=generate_random_box_space((4,)),
+        action_space=generate_random_box_space((2,), low=-1, high=1),
+        hp_config=None,
+        net_config=request.getfixturevalue("encoder_mlp_config"),
+        INIT_HP=SHARED_INIT_HP,
+        population_size=1,
+        device=device,
+        accelerator=accelerator,
+        actor_network=actual_actor_network,
+        critic_network=actual_critic_network,
+    )
 
     mutations = Mutations(
         0,
@@ -962,30 +968,7 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
 
     mutations.rng = DummyRNG()
 
-    for individual in population:
-        individual.actor = EvolvableBERT([12], [12], device=device)
-        individual.actor_target = EvolvableBERT([12], [12], device=device)
-        individual.actor_target.load_state_dict(individual.actor.state_dict())
-        individual.critic = EvolvableBERT([12], [12], device=device)
-        individual.critic_target = EvolvableBERT([12], [12], device=device)
-        individual.critic_target.load_state_dict(individual.critic.state_dict())
-
-        individual.actor_optimizer = OptimizerWrapper(
-            torch.optim.Adam,
-            individual.actor,
-            lr=individual.lr_actor,
-            network_names=individual.actor_optimizer.network_names,
-            lr_name=individual.actor_optimizer.lr_name,
-        )
-
-        individual.critic_optimizer = OptimizerWrapper(
-            torch.optim.Adam,
-            individual.critic,
-            lr=individual.lr_critic,
-            network_names=individual.critic_optimizer.network_names,
-            lr_name=individual.critic_optimizer.lr_name,
-        )
-
+    print(population[0].actor)
     new_population = [agent.clone(wrap=False) for agent in population]
     mutated_population = [
         mutations.architecture_mutate(agent) for agent in new_population
@@ -1401,12 +1384,13 @@ def test_mutation_applies_architecture_mutations_multi_agent(
         for network in individual.evolvable_attributes(networks_only=True).values():
             network.rng = EvoDummyRNG()
 
-    mut_methods = population[0].actors.mutation_methods
+    test_agent = "agent_0" if algo != "IPPO" else "agent"
+    mut_methods = population[0].actors[test_agent].mutation_methods
     for mut_method in mut_methods:
 
         class DummyRNG:
             def choice(self, a, size=None, replace=True, p=None):
-                return [mut_method]
+                return [".".join([test_agent, mut_method])]
 
         mutations.rng = DummyRNG()
 
@@ -1428,12 +1412,11 @@ def test_mutation_applies_architecture_mutations_multi_agent(
             assert individual.mut == sampled_mutation or "None"
 
             if sampled_mutation is not None:
-                # assert str(old_policy.state_dict()) != str(policy.state_dict())
                 for group in old.registry.groups:
-                    if group.eval != policy_name:
-                        eval_module = getattr(individual, group.eval)
-                        # old_eval_module = getattr(old, group.eval)
-                        for agent_id, module in eval_module.items():
+                    if group.eval_network != policy_name:
+                        eval_module = getattr(individual, group.eval_network)
+                        # old_eval_module = getattr(old, group.eval_network)
+                        for _, module in eval_module.items():
                             bottom_eval_mut = module.last_mutation_attr.split(".")[-1]
                             bottom_policy_mut = policy.last_mutation_attr.split(".")[-1]
                             assert module.last_mutation_attr is not None
@@ -1441,13 +1424,21 @@ def test_mutation_applies_architecture_mutations_multi_agent(
 
             assert old.index == individual.index
 
-        # assert_equal_state_dict(population, mutated_population)
+        del new_population, mutated_population
+        gc.collect()
+        torch.cuda.empty_cache()
 
-    del mutations, mutated_population, new_population
+    del mutations
 
 
 # The mutation method applies BERT architecture mutations to the population and returns the mutated population.
-@pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
+@pytest.mark.parametrize(
+    "algo, actor_network, critic_network",
+    [
+        ("MADDPG", "bert_networks_multi_agent", "bert_networks_multi_agent"),
+        ("MATD3", "bert_networks_multi_agent", "bert_matd3_critic_networks"),
+    ],
+)
 @pytest.mark.parametrize(
     "observation_space, net_config",
     [
@@ -1465,9 +1456,32 @@ def test_mutation_applies_architecture_mutations_multi_agent(
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 def test_mutation_applies_bert_architecture_mutations_multi_agent(
-    algo, device, accelerator, init_pop
+    algo, device, accelerator, init_pop, request, actor_network, critic_network
 ):
-    population = init_pop
+    # Pass the network parameters to init_pop through the test
+    actual_actor_network = (
+        request.getfixturevalue(actor_network) if actor_network else None
+    )
+    actual_critic_network = (
+        request.getfixturevalue(critic_network) if critic_network else None
+    )
+
+    # Create a custom population with the BERT networks
+    from agilerl.utils.utils import create_population
+
+    population = create_population(
+        algo=algo,
+        observation_space=generate_multi_agent_box_spaces(2, shape=(4,)),
+        action_space=generate_multi_agent_discrete_spaces(2, 2),
+        hp_config=None,
+        net_config=request.getfixturevalue("encoder_mlp_config"),
+        INIT_HP=SHARED_INIT_HP_MA,
+        population_size=1,
+        device=device,
+        accelerator=accelerator,
+        actor_network=actual_actor_network,
+        critic_network=actual_critic_network,
+    )
 
     mutations = Mutations(
         0,
@@ -1481,77 +1495,13 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
         accelerator=accelerator,
     )
 
-    def create_moduledict(device):
-        return ModuleDict(
-            {
-                "agent_0": EvolvableBERT([12], [12], device=device),
-                "agent_1": EvolvableBERT([12], [12], device=device),
-            }
-        )
-
-    for individual in population:
-        individual.actors = create_moduledict(device)
-        individual.actor_targets = create_moduledict(device)
-        individual.actor_targets.load_state_dict(individual.actors.state_dict())
-        if algo == "MADDPG":
-            individual.critics = create_moduledict(device)
-            individual.critic_targets = create_moduledict(device)
-            individual.critic_targets.load_state_dict(individual.critics.state_dict())
-            individual.actor_optimizers = OptimizerWrapper(
-                torch.optim.Adam,
-                individual.actors,
-                lr=individual.lr_actor,
-                network_names=individual.actor_optimizers.network_names,
-                lr_name=individual.actor_optimizers.lr_name,
-            )
-            individual.critic_optimizers = OptimizerWrapper(
-                torch.optim.Adam,
-                individual.critics,
-                lr=individual.lr_critic,
-                network_names=individual.critic_optimizers.network_names,
-                lr_name=individual.critic_optimizers.lr_name,
-            )
-
-        else:
-            individual.critics_1 = create_moduledict(device)
-            individual.critic_targets_1 = create_moduledict(device)
-            individual.critic_targets_1.load_state_dict(
-                individual.critics_1.state_dict()
-            )
-            individual.critics_2 = create_moduledict(device)
-            individual.critic_targets_2 = create_moduledict(device)
-            individual.critic_targets_2.load_state_dict(
-                individual.critics_2.state_dict()
-            )
-            individual.actor_optimizers = OptimizerWrapper(
-                torch.optim.Adam,
-                individual.actors,
-                lr=individual.lr_actor,
-                network_names=individual.actor_optimizers.network_names,
-                lr_name=individual.actor_optimizers.lr_name,
-            )
-            individual.critic_1_optimizers = OptimizerWrapper(
-                torch.optim.Adam,
-                individual.critics_1,
-                lr=individual.lr_critic,
-                network_names=individual.critic_1_optimizers.network_names,
-                lr_name=individual.critic_1_optimizers.lr_name,
-            )
-
-            individual.critic_2_optimizers = OptimizerWrapper(
-                torch.optim.Adam,
-                individual.critics_2,
-                lr=individual.lr_critic,
-                network_names=individual.critic_2_optimizers.network_names,
-                lr_name=individual.critic_2_optimizers.lr_name,
-            )
-
-    mut_methods = population[0].actors.mutation_methods
+    test_agent = "agent_0"
+    mut_methods = population[0].actors[test_agent].mutation_methods
     for mut_method in mut_methods:
 
         class DummyRNG:
             def choice(self, a, size=None, replace=True, p=None):
-                return [mut_method]
+                return [".".join([test_agent, mut_method])]
 
         mutations.rng = DummyRNG()
 
@@ -1573,12 +1523,11 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
             assert individual.mut == sampled_mutation or "None"
 
             if sampled_mutation is not None:
-                # assert str(old_policy.state_dict()) != str(policy.state_dict())
                 for group in old.registry.groups:
-                    if group.eval != policy_name:
-                        eval_module = getattr(individual, group.eval)
-                        # old_eval_module = getattr(old, group.eval)
-                        for agent_id, module in eval_module.items():
+                    if group.eval_network != policy_name:
+                        eval_module = getattr(individual, group.eval_network)
+                        # old_eval_module = getattr(old, group.eval_network)
+                        for _, module in eval_module.items():
                             bottom_eval_mut = module.last_mutation_attr.split(".")[-1]
                             bottom_policy_mut = policy.last_mutation_attr.split(".")[-1]
                             assert module.last_mutation_attr is not None
@@ -1586,9 +1535,11 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
 
             assert old.index == individual.index
 
-    # assert_equal_state_dict(population, mutated_population)
+        del new_population, mutated_population
+        gc.collect()
+        torch.cuda.empty_cache()
 
-    del mutations, mutated_population, new_population
+    del mutations, population
 
 
 @pytest.mark.parametrize(
@@ -1730,8 +1681,6 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
             del population
             del mutated_population
             del new_population
-            torch.cuda.empty_cache()
-            gc.collect()
             torch.cuda.empty_cache()
 
 

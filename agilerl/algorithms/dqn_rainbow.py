@@ -224,7 +224,11 @@ class RainbowDQN(RLAlgorithm):
 
         # Register network groups for mutations
         self.register_network_group(
-            NetworkGroup(eval=self.actor, shared=self.actor_target, policy=True)
+            NetworkGroup(
+                eval_network=self.actor,
+                shared_networks=self.actor_target,
+                policy=True,
+            )
         )
 
     def get_action(

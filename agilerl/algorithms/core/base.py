@@ -578,7 +578,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         """Returns the policy network of the algorithm."""
         for group in self.registry.groups:
             if group.policy:
-                return getattr(self, group.eval)
+                return getattr(self, group.eval_network)
 
         raise AttributeError(
             "No policy network has been registered with the algorithm."
@@ -1089,13 +1089,13 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
     """Base object for all multi-agent algorithms in the AgileRL framework.
 
     :param observation_spaces: The observation spaces of the agent environments.
-    :type observation_spaces: List[spaces.Space]
+    :type observation_spaces: Union[List[spaces.Space], spaces.Dict]
     :param action_spaces: The action spaces of the agent environments.
-    :type action_spaces: List[spaces.Space]
-    :param agent_ids: The agent IDs of the agents in the environment.
-    :type agent_ids: List[int]
+    :type action_spaces: Union[List[spaces.Space], spaces.Dict]
     :param index: The index of the individual in the population.
     :type index: int.
+    :param agent_ids: The agent IDs of the agents in the environment.
+    :type agent_ids: Optional[List[int]], optional
     :param learn_step: Learning frequency, defaults to 2048
     :type learn_step: int, optional
     :param device: Device to run the algorithm on, defaults to "cpu"
@@ -1112,8 +1112,8 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
     :type name: Optional[str], optional
     """
 
-    observation_space: Dict[str, spaces.Space]
-    action_space: Dict[str, spaces.Space]
+    possible_observation_spaces: Dict[str, spaces.Space]
+    possible_action_spaces: Dict[str, spaces.Space]
 
     shared_agent_ids: List[str]
     grouped_agents: Dict[str, List[str]]
@@ -1122,10 +1122,10 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
     def __init__(
         self,
-        observation_spaces: Iterable[spaces.Space],
-        action_spaces: Iterable[spaces.Space],
-        agent_ids: Iterable[int],
+        observation_spaces: Union[Iterable[spaces.Space], spaces.Dict],
+        action_spaces: Union[Iterable[spaces.Space], spaces.Dict],
         index: int,
+        agent_ids: Optional[Iterable[int]] = None,
         hp_config: Optional[HyperparameterConfig] = None,
         device: Union[str, torch.device] = "cpu",
         accelerator: Optional[Accelerator] = None,
@@ -1137,72 +1137,64 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         super().__init__(index, hp_config, device, accelerator, torch_compiler, name)
 
-        assert isinstance(
-            agent_ids, (tuple, list)
-        ), "Agent IDs must be stores in a tuple or list."
-        assert len(agent_ids) == len(
-            observation_spaces
-        ), "Number of agent IDs must match number of observation spaces."
-        assert isinstance(
-            observation_spaces, (list, tuple)
-        ), "Observation spaces must be a list or tuple."
-        assert all(
-            isinstance(_space, spaces.Space) for _space in observation_spaces
-        ), "Observation spaces must be instances of gymnasium.spaces.Space."
-        assert isinstance(
-            action_spaces, (list, tuple)
-        ), "Action spaces must be a list or tuple."
-        assert all(
-            isinstance(_space, spaces.Space) for _space in action_spaces
-        ), "Action spaces must be instances of gymnasium.spaces.Space."
+        assert type(observation_spaces) is type(action_spaces), (
+            "Observation spaces and action spaces must be the same type. "
+            f"Got {type(observation_spaces)} and {type(action_spaces)}."
+        )
 
-        self.agent_ids = agent_ids
-        self.n_agents = len(agent_ids)
+        if isinstance(observation_spaces, (list, tuple)):
+            assert isinstance(
+                agent_ids, (tuple, list)
+            ), "Agent IDs must be specified if observation spaces are passed as a list."
+            assert len(agent_ids) == len(
+                observation_spaces
+            ), "Number of agent IDs must match number of observation spaces."
+            assert all(
+                isinstance(_space, spaces.Space) for _space in observation_spaces
+            ), "Observation spaces must be instances of gymnasium.spaces.Space."
+            assert all(
+                isinstance(_space, spaces.Space) for _space in action_spaces
+            ), "Action spaces must be instances of gymnasium.spaces.Space."
+            self.possible_observation_spaces = spaces.Dict(
+                {
+                    agent_id: space
+                    for agent_id, space in zip(agent_ids, observation_spaces)
+                }
+            )
+            self.possible_action_spaces = spaces.Dict(
+                {agent_id: space for agent_id, space in zip(agent_ids, action_spaces)}
+            )
+        elif isinstance(observation_spaces, (spaces.Dict, dict)):
+            if isinstance(observation_spaces, dict):
+                observation_spaces = spaces.Dict(observation_spaces)
+                action_spaces = spaces.Dict(action_spaces)
+
+            self.possible_observation_spaces = observation_spaces
+            self.possible_action_spaces = action_spaces
+        else:
+            raise ValueError(
+                f"Observation spaces must be a list or dictionary of spaces.Space objects. Got {type(observation_spaces)}."
+            )
+
+        self.agent_ids = agent_ids or list(self.possible_observation_spaces.keys())
+        self.n_agents = len(self.agent_ids)
         self.placeholder_value = placeholder_value
         self.normalize_images = normalize_images
-        self.observation_spaces = observation_spaces
-        self.action_spaces = action_spaces
 
-        # Possible observation / action spaces
-        self.possible_observation_spaces = spaces.Dict(
-            {
-                agent_id: space
-                for agent_id, space in zip(self.agent_ids, self.observation_spaces)
-            }
-        )
-        self.possible_action_spaces = spaces.Dict(
-            {
-                agent_id: space
-                for agent_id, space in zip(self.agent_ids, self.action_spaces)
-            }
-        )
+        # These attributes are deprecated and will be removed in the future
+        self.observation_spaces = list(self.possible_observation_spaces.values())
+        self.action_spaces = list(self.possible_action_spaces.values())
 
         self.action_dims = get_output_size_from_space(self.possible_action_spaces)
-
-        self.max_action = OrderedDict()
-        self.min_action = OrderedDict()
-        for agent_id, action_space in zip(self.agent_ids, self.action_spaces):
-            if isinstance(action_space, spaces.Box):
-                _max = action_space.high
-                _min = action_space.low
-                assert np.all(
-                    _max > _min
-                ), "Max action must be greater than min action."
-            else:
-                _max = None
-                _min = None
-
-            self.max_action[agent_id] = _max
-            self.min_action[agent_id] = _min
 
         # Determine groups of agents from their IDs
         self.shared_agent_ids = []
         self.grouped_agents = defaultdict(list)
         self.unique_observation_spaces = OrderedDict()
         self.unique_action_spaces = OrderedDict()
-        for agent_id, obs_space, action_space in zip(
-            self.agent_ids, self.observation_spaces, self.action_spaces
-        ):
+        for agent_id in self.agent_ids:
+            obs_space = self.possible_observation_spaces[agent_id]
+            action_space = self.possible_action_spaces[agent_id]
             # Split agent names on expected pattern of e.g. speaker_0, speaker_1,
             # listener_0, listener_1, to determine which agents are homogeneous
             group_id = self.get_group_id(agent_id)
@@ -1212,11 +1204,11 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
                 self.unique_action_spaces[group_id] = action_space
 
             assert obs_space == self.unique_observation_spaces[group_id], (
-                f"Grouped agents, i.e. agents that share the prefix {group_id}, "
+                f"Homogeneous agents, i.e. agents that share the prefix {group_id}, "
                 f"must have the same observation space. Found {self.unique_observation_spaces[group_id]} and {obs_space}."
             )
             assert action_space == self.unique_action_spaces[group_id], (
-                f"Grouped agents, i.e. agents that share the prefix {group_id}, "
+                f"Homogeneous agents, i.e. agents that share the prefix {group_id}, "
                 f"must have the same action space. Found {self.unique_action_spaces[group_id]} and {action_space}."
             )
 
@@ -1226,7 +1218,8 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         # Dictionary containing groups of agents for each space type
         self.grouped_spaces = defaultdict(list)
-        for agent_id, obs_space in zip(self.agent_ids, self.observation_spaces):
+        for agent_id in self.agent_ids:
+            obs_space = self.possible_observation_spaces[agent_id]
             if is_vector_space(obs_space):
                 self.grouped_spaces[ModuleType.MLP].append(agent_id)
             elif is_image_space(obs_space):
@@ -1245,9 +1238,10 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             action_spaces = list(self.unique_action_spaces.values())
         else:
             agent_ids = self.agent_ids
-            observation_spaces = self.observation_spaces
-            action_spaces = self.action_spaces
+            observation_spaces = list(self.possible_observation_spaces.values())
+            action_spaces = list(self.possible_action_spaces.values())
 
+        # Build grouped / individual observation and action spaces
         self.observation_space = spaces.Dict(
             {agent_id: space for agent_id, space in zip(agent_ids, observation_spaces)}
         )

@@ -273,15 +273,15 @@ class DDPG(RLAlgorithm):
         # Register network groups for actor and critic
         self.register_network_group(
             NetworkGroup(
-                eval=self.actor,
-                shared=self.actor_target,
+                eval_network=self.actor,
+                shared_networks=self.actor_target,
                 policy=True,
             )
         )
         self.register_network_group(
             NetworkGroup(
-                eval=self.critic,
-                shared=self.critic_target,
+                eval_network=self.critic,
+                shared_networks=self.critic_target,
                 policy=False,
             )
         )

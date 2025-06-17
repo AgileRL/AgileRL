@@ -161,7 +161,7 @@ class NeuralUCB(RLAlgorithm):
         # Register network groups for mutations
         self.register_mutation_hook(self.init_params)
         self.register_network_group(
-            NetworkGroup(eval=self.actor, shared=None, policy=True)
+            NetworkGroup(eval_network=self.actor, shared_networks=None, policy=True)
         )
 
     def init_params(self) -> None:

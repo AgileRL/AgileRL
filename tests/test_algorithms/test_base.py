@@ -219,7 +219,9 @@ class DummyRLAlgorithm(RLAlgorithm):
         self.dummy_optimizer = OptimizerWrapper(optim.Adam, self.dummy_actor, self.lr)
         self.dummy_attribute = "test_value"
 
-        self.register_network_group(NetworkGroup(eval=self.dummy_actor, policy=True))
+        self.register_network_group(
+            NetworkGroup(eval_network=self.dummy_actor, policy=True)
+        )
 
     def get_action(self, *args, **kwargs):
         return
@@ -233,11 +235,11 @@ class DummyRLAlgorithm(RLAlgorithm):
 
 class DummyMARLAlgorithm(MultiAgentRLAlgorithm):
     def __init__(self, observation_spaces, action_spaces, agent_ids, index, **kwargs):
-        super().__init__(observation_spaces, action_spaces, agent_ids, index, **kwargs)
+        super().__init__(observation_spaces, action_spaces, index, agent_ids, **kwargs)
 
         def create_actor(idx):
-            obs_space = self.observation_spaces[idx]
-            action_space = self.action_spaces[idx]
+            obs_space = self.possible_observation_spaces[self.agent_ids[idx]]
+            action_space = self.possible_action_spaces[self.agent_ids[idx]]
             num_outputs = (
                 action_space.n
                 if isinstance(action_space, spaces.Discrete)
@@ -272,13 +274,15 @@ class DummyMARLAlgorithm(MultiAgentRLAlgorithm):
         self.dummy_actors = ModuleDict(
             {
                 agent_id: create_actor(idx)
-                for idx, agent_id in enumerate(self.observation_space.keys())
+                for idx, agent_id in enumerate(self.possible_observation_spaces.keys())
             }
         )
         self.lr = 0.1
         self.dummy_optimizer = OptimizerWrapper(optim.Adam, self.dummy_actors, self.lr)
 
-        self.register_network_group(NetworkGroup(eval=self.dummy_actors, policy=True))
+        self.register_network_group(
+            NetworkGroup(eval_network=self.dummy_actors, policy=True)
+        )
 
     def get_action(self, *args, **kwargs):
         return

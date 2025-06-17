@@ -795,7 +795,7 @@ def process_transition(
     transition_names: List[str],
     agents: List[str],
 ) -> List[Dict[str, NumpyObsType]]:
-    """Process transition, adds in placeholder values for killed sub-agents.
+    """Process transition, adds in placeholder values for killed agents.
 
     :param transitions: Tuple of environment transition
     :type transitions: Tuple[Dict[str, NumpyObsType], ...]
@@ -803,7 +803,7 @@ def process_transition(
     :type obs_spaces: Dict[str, gymnasium.spaces.Space]
     :param transition_names: Names associated to transitions
     :type transition_names: List[str]
-    :param agents: List of sub-agent names
+    :param agents: List of agent names
     :type agents: List[str]
     """
     transition_list = []
@@ -911,7 +911,7 @@ def _async_worker(
     :type observation_widths: Dict[str, int]
     :param observation_dtypes: Observation dtypes
     :type observation_dtypes: Dict[str, np.dtype]
-    :param agents: Sub-agent names
+    :param agents: Agent names
     :type agents: str
 
     """

@@ -56,9 +56,9 @@ function.
 Configuring Network Architectures
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Network architectures in multi-agent settings are configured in the same way as single-agent settings through the ``net_config`` argument of an algorithm. The main
-difference lies in the ability to pass this in as a nested dictionary including the configurations for individual sub-agents or groups of agents that are homogeneous.
-In other words, instead of passing in ``net_config`` as the arguments to an individual ``EvolvableNetwork``, users can choose to pass the configurations to the different
-sub-agent networks in an algorithm.
+difference lies in the ability to pass this in as a nested dictionary including the configurations for individual agents or groups of agents that are homogeneous.
+In other words, instead of passing in ``net_config`` as the arguments to an individual ``EvolvableNetwork``, users can choose to pass the configurations to the networks
+of different agents / agent groups in an algorithm.
 
 If we have a setting with the following possible agents with their respective observation and action spaces:
 
@@ -154,15 +154,16 @@ following which would assign the same network architecture to all agents:
         head_config:
             hidden_size: [32]
 
-Grouping Agents
-~~~~~~~~~~~~~~~
-It is common in multi-agent settings to require a centralized policies for groups of homogeneous agents during training. Currently, AgileRL only includes the
-:class:`IPPO <agilerl.algorithms.ippo.IPPO>` algorithm which supports this. In such cases, we restrict users to pass in network configurations to the groups
-directly. For the setting described above, we could only use the latter configuration.
+Parameter Sharing
+~~~~~~~~~~~~~~~~~
+It is common in multi-agent settings to require centralized policies for groups of homogeneous agents during training for scalability, since the number of trainable parameters
+can increase significantly with the number of agents. In this manner, we obtain a more sample efficient training process. Currently, AgileRL only includes the
+:class:`IPPO <agilerl.algorithms.ippo.IPPO>` algorithm which supports this. In such cases, we restrict users to pass in network configurations to the groups directly. For the
+setting described above, we could only use the latter configuration.
 
 Asynchronous Agents
 ~~~~~~~~~~~~~~~~~~~
-We often encounter settings where the sub-agents don't act simultaneously, but rather do so asynchronously in turns or with different frequencies. AgileRL follows
+We often encounter settings where agents don't act simultaneously, but rather do so asynchronously in turns or with different frequencies. AgileRL follows
 the convention that such environments only return observations for agents that should act in the following timestep. To handle these scenarios, we've implemented the
 :class:`AsyncAgentsWrapper <agilerl.wrappers.agent.AsyncAgentsWrapper>` class, which automatically processes observations and actions to be compatible with
 ``AsyncPettingZooVecEnv``.

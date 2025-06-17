@@ -254,8 +254,8 @@ class PPO(RLAlgorithm):
             self.wrap_models()
 
         # Register network groups for mutations
-        self.register_network_group(NetworkGroup(eval=self.actor, policy=True))
-        self.register_network_group(NetworkGroup(eval=self.critic))
+        self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
+        self.register_network_group(NetworkGroup(eval_network=self.critic))
 
     def share_encoder_parameters(self) -> None:
         """Shares the encoder parameters between the actor and critic."""

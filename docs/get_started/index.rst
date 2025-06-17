@@ -20,6 +20,11 @@ Or install in development mode:
    git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
    pip install -e .
 
+To install the ``nightly`` version of AgileRL with the latest features, use:
+
+.. code-block:: bash
+
+   pip install git+https://github.com/AgileRL/AgileRL.git@nightly
 
 .. raw:: html
 

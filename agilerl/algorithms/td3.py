@@ -292,13 +292,23 @@ class TD3(RLAlgorithm):
 
         # Register network groups for actor and critics
         self.register_network_group(
-            NetworkGroup(eval=self.actor, shared=self.actor_target, policy=True)
+            NetworkGroup(
+                eval_network=self.actor,
+                shared_networks=self.actor_target,
+                policy=True,
+            )
         )
         self.register_network_group(
-            NetworkGroup(eval=self.critic_1, shared=self.critic_target_1, policy=False)
+            NetworkGroup(
+                eval_network=self.critic_1,
+                shared_networks=self.critic_target_1,
+            )
         )
         self.register_network_group(
-            NetworkGroup(eval=self.critic_2, shared=self.critic_target_2, policy=False)
+            NetworkGroup(
+                eval_network=self.critic_2,
+                shared_networks=self.critic_target_2,
+            )
         )
 
     def share_encoder_parameters(self) -> None:

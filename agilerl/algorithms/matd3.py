@@ -1,7 +1,7 @@
 import copy
 import warnings
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -39,11 +39,11 @@ class MATD3(MultiAgentRLAlgorithm):
     Paper: https://arxiv.org/abs/1910.01465
 
     :param observation_spaces: Observation space for each agent
-    :type observation_spaces: List[spaces.Space]
+    :type observation_spaces: Union[List[spaces.Space], spaces.Dict]
     :param action_spaces: Action space for each agent
-    :type action_spaces: List[spaces.Space]
+    :type action_spaces: Union[List[spaces.Space], spaces.Dict]
     :param agent_ids: Agent ID for each agent
-    :type agent_ids: List[str]
+    :type agent_ids: Optional[List[str]], optional
     :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
     :type O_U_noise: bool, optional
     :param expl_noise: Scale for Ornstein Uhlenbeck action noise, or standard deviation for Gaussian exploration noise
@@ -94,6 +94,8 @@ class MATD3(MultiAgentRLAlgorithm):
     :type wrap: bool, optional
     """
 
+    possible_action_spaces: Dict[str, Union[spaces.Box, spaces.Discrete]]
+
     actors: MultiAgentModule[DeterministicActor]
     actor_targets: MultiAgentModule[DeterministicActor]
     critics_1: MultiAgentModule[ContinuousQNetwork]
@@ -103,9 +105,9 @@ class MATD3(MultiAgentRLAlgorithm):
 
     def __init__(
         self,
-        observation_spaces: List[spaces.Space],
-        action_spaces: List[spaces.Space],
-        agent_ids: List[str],
+        observation_spaces: Union[List[spaces.Space], spaces.Dict],
+        action_spaces: Union[List[spaces.Space], spaces.Dict],
+        agent_ids: Optional[List[str]] = None,
         O_U_noise: bool = True,
         expl_noise: float = 0.1,
         vect_noise_dim: int = 1,
@@ -134,8 +136,8 @@ class MATD3(MultiAgentRLAlgorithm):
         super().__init__(
             observation_spaces,
             action_spaces,
-            agent_ids,
             index=index,
+            agent_ids=agent_ids,
             hp_config=hp_config,
             device=device,
             accelerator=accelerator,
@@ -353,7 +355,9 @@ class MATD3(MultiAgentRLAlgorithm):
             def create_critic():
                 return ContinuousQNetwork(
                     observation_space=self.possible_observation_spaces,
-                    action_space=concatenate_spaces(self.action_spaces),
+                    action_space=concatenate_spaces(
+                        list(self.possible_action_spaces.values())
+                    ),
                     device=self.device,
                     **copy.deepcopy(critic_net_config),
                 )
@@ -431,21 +435,21 @@ class MATD3(MultiAgentRLAlgorithm):
         # Register network groups for mutations
         self.register_network_group(
             NetworkGroup(
-                eval=self.actors,
-                shared=self.actor_targets,
+                eval_network=self.actors,
+                shared_networks=self.actor_targets,
                 policy=True,
             )
         )
         self.register_network_group(
             NetworkGroup(
-                eval=self.critics_1,
-                shared=self.critic_targets_1,
+                eval_network=self.critics_1,
+                shared_networks=self.critic_targets_1,
             )
         )
         self.register_network_group(
             NetworkGroup(
-                eval=self.critics_2,
-                shared=self.critic_targets_2,
+                eval_network=self.critics_2,
+                shared_networks=self.critic_targets_2,
             )
         )
 
@@ -518,10 +522,8 @@ class MATD3(MultiAgentRLAlgorithm):
                 if isinstance(self.possible_action_spaces[agent_id], spaces.Discrete):
                     min_action, max_action = 0, 1
                 else:
-                    min_action, max_action = (
-                        self.min_action[agent_id][0],
-                        self.max_action[agent_id][0],
-                    )
+                    min_action = self.possible_action_spaces[agent_id].low
+                    max_action = self.possible_action_spaces[agent_id].high
 
                 # Add noise to actions for exploration
                 actions = torch.clamp(

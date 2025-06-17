@@ -31,21 +31,24 @@ from agilerl.typing import ConfigType, DeviceType, GymSpaceType, NetConfigType
 TupleorInt = Union[Tuple[int, ...], int]
 
 
-def get_input_size_from_space(observation_space: GymSpaceType) -> Tuple[int, ...]:
+def get_input_size_from_space(
+    observation_space: GymSpaceType,
+) -> Union[int, Dict[str, int], Tuple[int, ...]]:
     """Returns the dimension of the state space as it pertains to the underlying
     networks (i.e. the input size of the networks).
 
     :param observation_space: The observation space of the environment.
-    :type observation_space: spaces.Space or List[spaces.Space].
+    :type observation_space: spaces.Space or List[spaces.Space] or Dict[str, spaces.Space].
 
     :return: The dimension of the state space.
-    :rtype: Tuple[int, ...]."""
+    :rtype: Union[int, Dict[str, int], Tuple[int, ...]]
+    """
     if isinstance(observation_space, (list, tuple, spaces.Tuple)):
         return tuple(get_input_size_from_space(space) for space in observation_space)
-    elif isinstance(observation_space, spaces.Dict):
+    elif isinstance(observation_space, (spaces.Dict, dict)):
         return {
             key: get_input_size_from_space(subspace)
-            for key, subspace in observation_space.spaces.items()
+            for key, subspace in observation_space.items()
         }
     elif isinstance(observation_space, spaces.Discrete):
         return (observation_space.n,)
@@ -68,17 +71,17 @@ def get_output_size_from_space(
     networks (i.e. the output size of the networks).
 
     :param action_space: The action space of the environment.
-    :type action_space: spaces.Space or list[spaces.Space]
+    :type action_space: spaces.Space or list[spaces.Space] or Dict[str, spaces.Space].
 
     :return: The dimension of the action space.
     :rtype: Union[int, Dict[str, int], Tuple[int, ...]]
     """
     if isinstance(action_space, (list, tuple)):
         return tuple(get_output_size_from_space(space) for space in action_space)
-    elif isinstance(action_space, spaces.Dict):
+    elif isinstance(action_space, (spaces.Dict, dict)):
         return {
             key: get_output_size_from_space(subspace)
-            for key, subspace in action_space.spaces.items()
+            for key, subspace in action_space.items()
         }
     elif isinstance(action_space, spaces.MultiBinary):
         return action_space.n
@@ -109,14 +112,19 @@ def compile_model(
     :rtype: OptimizedModule | ModuleDict[OptimizedModule]
     """
     if isinstance(model, ModuleDict):
-        for agent_id, module in model.items():
-            if not isinstance(module, OptimizedModule) and mode is not None:
-                model[agent_id] = torch.compile(module, mode=mode)
+        return ModuleDict(
+            {
+                agent_id: compile_model(module, mode)
+                for agent_id, module in model.items()
+            }
+        )
 
-    elif not isinstance(model, OptimizedModule) and mode is not None:
-        model = torch.compile(model, mode=mode)
+    if not isinstance(model, OptimizedModule) and mode is not None:
+        compiled_model = torch.compile(model, mode=mode)
+    else:
+        compiled_model = model
 
-    return model
+    return compiled_model
 
 
 def is_image_space(space: spaces.Space) -> bool:
