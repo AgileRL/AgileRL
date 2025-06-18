@@ -1,7 +1,7 @@
 import gc
 import os
 import warnings
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Type, Union
 
 import numpy as np
 import torch
@@ -345,8 +345,8 @@ class GRPO(LLMAlgorithm):
         :return: Mean test score of the agent
         :rtype: float
         """
-        with env.eval():
-            prompts = env.reset(reset_dataloaders=False)
+        with env.eval_mode():
+            prompts = env.reset()
             rewards = []
             for _ in range(loop):
                 completion_ids, _ = self.get_action(prompts, training=False)
@@ -388,11 +388,9 @@ class GRPO(LLMAlgorithm):
         self.actor.set_adapter("actor")
 
         optim_class = self._select_optim_class()
-        print("Here is the optimizer class", optim_class)
         self.optimizer = OptimizerWrapper(
             optim_class, networks=[self.actor], lr=self.lr
         )
-        print("Here is the optimizer", self.optimizer)
         self.lr_scheduler = (
             create_warmup_cosine_scheduler(
                 (
@@ -551,12 +549,9 @@ class GRPO(LLMAlgorithm):
         :type loss: float
         """
         if self.accelerator is not None:
-            print("LOSSS", loss)
             self.accelerator.backward(loss)
-            print("Optimizer in backward pass", self.optimizer)
             if not isinstance(self.optimizer.optimizer, _DummyOptimizer):
                 # Accelerate handles optimizer step and zero grad if optimizer is defined in deepspeed config
-                print("ENTERING HERE")
                 self.optimizer.step()
                 self.optimizer.zero_grad()
         else:
@@ -568,11 +563,11 @@ class GRPO(LLMAlgorithm):
             self.lr_scheduler.step()
             self.lr = self.lr_scheduler.get_last_lr()[0]
 
-    def _select_optim_class(self) -> Union[OptimizerType, _DummyOptimizer]:
+    def _select_optim_class(self) -> Union[Type[OptimizerType], Type[_DummyOptimizer]]:
         """Select the optimizer class based on the accelerator and deepspeed config.
 
         :return: Optimizer class
-        :rtype: Union[torch.optim.Optimizer, _DummyOptimizer]
+        :rtype: Union[Type[torch.optim.Optimizer], Type[_DummyOptimizer]]
         """
         if self.accelerator is None:
             return optim.AdamW
@@ -584,3 +579,38 @@ class GRPO(LLMAlgorithm):
         ):
             return _DummyOptimizer
         return optim.AdamW
+
+    def set_reference_policy(self, reference_update_tracker: int) -> None:
+        """Update the reference policy when the reference policy update tracker is greater than the current reference policy update tracker.
+
+        :param reference_update_tracker: The reference policy update tracker
+        :type reference_update_tracker: int
+        """
+        assert (
+            reference_update_tracker >= self.reference_update_tracker
+        ), "Reference policy update tracker should be greater than or equal to the current reference policy update tracker."
+        if reference_update_tracker > self.reference_update_tracker:
+            # Merge adapter into base model
+            # Update the reference update tracker
+            if self.accelerator is not None:
+                self.accelerator.wait_for_everyone()
+                merged_base_model = self.accelerator.unwrap_model(
+                    self.actor
+                ).merge_and_unload()
+            else:
+                merged_base_model = self.actor.merge_and_unload()
+            self.actor = None  # De-reference the old actor base model
+            self.actor = get_peft_model(
+                merged_base_model, self.lora_config, adapter_name="actor"
+            )
+            if self.accelerator is not None:
+                self.accelerator.wait_for_everyone()
+            self.actor.set_adapter("actor")
+
+            # Reinit optimizer
+            optim_class = self._select_optim_class()
+            self.optimizer = OptimizerWrapper(
+                optim_class, networks=[self.actor], lr=self.lr
+            )
+            self.wrap_models()
+            self.reference_update_tracker += 1

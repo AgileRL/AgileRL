@@ -85,6 +85,7 @@ class HuggingFaceGym(gym.Env):
             high=tokenizer.vocab_size - 1,
         )
         self.eval_mode = False
+        self.train_passes = 0
 
     def step(
         self, completions: torch.Tensor
@@ -140,14 +141,22 @@ class HuggingFaceGym(gym.Env):
 
     def _get_next_batch(self) -> List[BatchEncoding]:
         """Get the next batch of tokenized prompts."""
-        batch = next(self.dataloader)
-        self.questions = batch["question"]
-        self.answers = batch["answer"]
-        tokenized_prompts = batch["tokenized_prompts"]
+        try:
+            batch = next(self.dataloader)
+            self.questions = batch["question"]
+            self.answers = batch["answer"]
+            tokenized_prompts = batch["tokenized_prompts"]
+        except StopIteration:
+            self._reset_dataloaders(
+                reset_train=not self.eval_mode,
+                reset_test=self.eval_mode,
+            )
+            self.train_passes += 1
+            return self._get_next_batch()
         return tokenized_prompts
 
     @contextmanager
-    def eval(self) -> Generator[None, None, None]:
+    def eval_mode(self) -> Generator[None, None, None]:
         """Context manager to switch to evaluation mode."""
         self.dataloader = self.test_dataloader_iter
         self.eval_mode = True
@@ -165,10 +174,15 @@ class HuggingFaceGym(gym.Env):
             return len(self.test_dataloader.dataset)
         return len(self.train_dataloader.dataset)
 
-    def _reset_dataloaders(self):
+    def _reset_dataloaders(self, reset_train: bool = True, reset_test: bool = True):
         """Reset the dataloaders to the beginning of the dataset."""
-        self.train_dataloader_iter = iter(self.train_dataloader)
-        self.test_dataloader_iter = iter(self.test_dataloader)
+        if reset_train:
+            self.train_dataloader_iter = iter(self.train_dataloader)
+        if reset_test:
+            self.test_dataloader_iter = iter(self.test_dataloader)
+        self.dataloader = (
+            self.test_dataloader_iter if self.eval_mode else self.train_dataloader_iter
+        )
 
     @staticmethod
     def create_collate_fn(

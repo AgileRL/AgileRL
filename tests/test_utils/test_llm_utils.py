@@ -199,7 +199,7 @@ def test_hugging_face_gym_len(dataset, num_samples):
     )
     env.reset()
     assert len(env) == 200 * 0.8  # Length returns the training length
-    with env.eval():
+    with env.eval_mode():
         assert len(env) == 200 * 0.2
 
 
@@ -242,3 +242,26 @@ def test_create_chat_collate_fn():
         assert "attention_mask" in prompt
         assert prompt["input_ids"] == [1, 2, 3]
         assert prompt["attention_mask"] == [1, 1, 1]
+
+
+@pytest.mark.parametrize("num_samples", [20])
+@pytest.mark.parametrize("data_batch_size", [8, 10])
+def test_reset_dataloaders_when_dataloader_exhausted(
+    dataset, num_samples, data_batch_size
+):
+    train_dataset, test_dataset = dataset
+    tokenizer = DummyTokenizer()
+    env = HuggingFaceGym(
+        train_dataset=train_dataset,
+        test_dataset=test_dataset,
+        tokenizer=tokenizer,
+        reward_fn=dummy_reward_fn,
+        apply_chat_template_fn=dummy_chat_template_fn,
+        data_batch_size_per_gpu=data_batch_size,
+    )
+    total_sampled = 0
+    for _ in range(num_samples * 2):
+        env._get_next_batch()
+        total_sampled += data_batch_size
+
+    assert total_sampled == num_samples * 2 * data_batch_size

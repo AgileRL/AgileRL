@@ -1588,6 +1588,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.observation_space = observation_space
         self.action_space = action_space
         self.zero_stage = None
+        self.reference_update_tracker = 0  # Updated every time the reference policy is updated which is updated each time we pass through the train dataset
+
         if self.accelerator is not None:
             self.zero_stage = self.accelerator.state.deepspeed_plugin.deepspeed_config[
                 "zero_optimization"
@@ -1728,7 +1730,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     def wrap_models(self):
         """Wrap the models in the accelerator"""
-        print("This is the accelerator from inside grpo", self.accelerator)
         if self.accelerator is not None:
             opt = (
                 self.optimizer.optimizer
@@ -1738,7 +1739,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self.actor, self.optimizer, self.lr_scheduler = self.accelerator.prepare(
                 self.actor, opt, self.lr_scheduler
             )
-            print("This is the lr scheduler from inside grpo", self.lr_scheduler)
         else:
             self.actor = self.actor.to(self.device)
             self.actor.gradient_checkpointing_enable()
@@ -1816,13 +1816,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 Accelerator() if self.accelerator is not None else None
             )
 
-            print("NEW DEEPSPEED CONFIG")
-            # print(input_args['accelerator'].state.deepspeed_plugin.deepspeed_config)
-
             clone = type(self)(**input_args)
             clone.mutation_hook()
-
-            # print("Type of clone optimizer", type(clone.optimizer), "self optimizer", self.optimizer)
 
             # Clone attributes
             accelerator = clone.accelerator
@@ -1836,11 +1831,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             clone.lr_scheduler = lr_scheduler
             clone.lr_scheduler = cloned_lr_scheduler
             self.lr_scheduler = original_lr_scheduler
-
-            print(
-                "Type of clone optimizer after copy attributes", type(clone.optimizer)
-            )
-            # assert False
 
             if self.accelerator is None:
                 clone.optimizer.optimizer.load_state_dict(
@@ -1885,7 +1875,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """
 
         for param_group in optimizer.param_groups:
-            print("Param group lr", param_group, "learning rate", lr)
             param_group["lr"] = lr
 
         if accelerator is None:

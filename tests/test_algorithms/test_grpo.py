@@ -1592,3 +1592,68 @@ def test_update_lr(grpo, accelerator, request):
             grpo.accelerator.deepspeed_plugin.deepspeed_config["scheduler"]["params"][
                 "warmup_proportion"
             ] = 0.05
+
+
+@pytest.mark.parametrize(
+    "accelerator, grpo",
+    [
+        (
+            {"config": None},
+            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+        ),
+        (
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": False},
+            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": False},
+            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+        ),
+        (
+            {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": False},
+            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+        ),
+        (
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": True},
+            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": True},
+            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+        ),
+        (
+            {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": True},
+            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+        ),
+    ],
+    indirect=["accelerator", "grpo"],
+)
+def test_set_reference_policy(grpo, accelerator, request):
+    input_size = request.node.callspec.params["grpo"]["input_size"]
+    max_tokens = request.node.callspec.params["grpo"]["max_tokens"]
+    reference_update_tracker = 0
+    grpo.set_reference_policy(reference_update_tracker)
+    input_ids = torch.tensor([[i + 1 for i in range(input_size + max_tokens)]]).to(
+        grpo.device
+    )
+    action_masks = torch.tensor([[1 for _ in range(input_size + max_tokens)]]).to(
+        grpo.device
+    )
+    output_before = grpo.actor(
+        **{
+            "input_ids": input_ids,
+            "attention_mask": action_masks,
+        }
+    ).logits
+    assert grpo.reference_update_tracker == reference_update_tracker
+    reference_update_tracker += 1
+    grpo.set_reference_policy(reference_update_tracker)
+
+    output_after = grpo.actor(
+        **{
+            "input_ids": input_ids,
+            "attention_mask": action_masks,
+        }
+    ).logits
+    assert torch.allclose(output_before, output_after)
+    assert grpo.reference_update_tracker == reference_update_tracker
