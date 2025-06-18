@@ -101,23 +101,11 @@ def get_exp_layer(offspring: EvolvableModule) -> nn.Module:
     return exp_layer
 
 
-def reinit_shared_networks(mutation_func=None, *, recompile: bool = True):
+def reinit_shared_networks(mutation_func=None):
     """Decorator to reinitialize shared networks after architecture and parameter mutations.
-
-    Can be used as:
-    @reinit_shared_networks
-    def my_mutation(...):
-        ...
-
-    Or:
-    @reinit_shared_networks(recompile=False)
-    def my_mutation(...):
-        ...
 
     :param mutation_func: The mutation function to decorate
     :type mutation_func: Optional[Callable[[IndividualType], IndividualType]]
-    :param recompile: Whether to recompile modules if torch_compiler is present, defaults to True
-    :type recompile: bool
     :return: The decorated mutation function or decorator
     :rtype: Callable
     """
@@ -128,13 +116,12 @@ def reinit_shared_networks(mutation_func=None, *, recompile: bool = True):
             # Call the original mutation function
             individual = func(self, individual)
 
-            if (
-                individual.mut == "None"
-            ):  # Only proceed if mutation was actually applied
+            # Only proceed if mutation was actually applied
+            if individual.mut == "None":
                 return individual
 
             # Recompile individual if necessary
-            compiled_model = individual.torch_compiler is not None and recompile
+            compiled_model = individual.torch_compiler is not None
             if compiled_model:
                 individual.recompile()
 
@@ -432,6 +419,12 @@ class Mutations:
             )  # Reinitialise optimizer if new learning rate
 
         individual.mut = mutate_attr
+
+        # Recompile if torch_compiler is present and batch size is mutated
+        # TODO: This is a bit hacky, might be best to integrate into
+        if individual.torch_compiler is not None and "batch_size" in mutate_attr:
+            individual.recompile()
+
         return individual
 
     # TODO: Activation mutations should really be integrated as architecture mutations
@@ -491,7 +484,6 @@ class Mutations:
         individual.mut = "act" if not no_activation else "None"
         return individual
 
-    @reinit_shared_networks(recompile=False)
     def parameter_mutation(self, individual: IndividualType) -> IndividualType:
         """Performs a random mutation to the weights of the policy network of an agent through
         the addition of Gaussian noise.
@@ -514,17 +506,27 @@ class Mutations:
 
         # We only apply parameter mutations to the evaluation policy network
         # (i.e. the network used to select actions)
-        offspring_policy: EvolvableNetworkType = getattr(individual, registry.policy())
+        policy_group = registry.policy(return_group=True)
+        offspring_policy: EvolvableNetworkType = getattr(
+            individual, policy_group.eval_network
+        )
         if isinstance(offspring_policy, ModuleDict):
             for agent_id, module in offspring_policy.items():
                 offspring_policy[agent_id] = self._gaussian_parameter_mutation(module)
         else:
             offspring_policy = self._gaussian_parameter_mutation(offspring_policy)
 
-        if self.accelerator is None:
-            offspring_policy = offspring_policy.to(self.device)
+        self._to_device_and_set_individual(
+            individual, policy_group.eval_network, offspring_policy
+        )
 
-        setattr(individual, registry.policy(), offspring_policy)
+        # Load state dicts for shared networks
+        for shared in policy_group.shared_networks:
+            offspring_shared: EvolvableNetworkType = getattr(individual, shared)
+            offspring_shared.load_state_dict(
+                offspring_policy.state_dict(), strict=False
+            )
+            self._to_device_and_set_individual(individual, shared, offspring_shared)
 
         self._reinit_opt(individual)  # Reinitialise optimizer
         individual.mut = "param"
@@ -959,24 +961,27 @@ class Mutations:
 
         # Try to apply an analogous mutation to the rest of the evaluation modules
         for name, offspring_eval in offspring_evals.items():
-            # Iterate over the the agents whose policies were mutated
-            for policy_agent in applied_mutations:
-                agent_eval = offspring_eval[policy_agent]
-                available_methods = agent_eval.mutation_methods
+            # Iterate over the agents in the offspring evaluation modules
+            for agent_id, agent_eval in offspring_eval.items():
+                # Iterate over the the agents whose policies were mutated
+                for mutated_agent in applied_mutations:
+                    available_methods = agent_eval.mutation_methods
 
-                # Try to find an analogous mutation method
-                analogous_method = self._find_analogous_mutation(
-                    sampled_mutation, available_methods, policy_agent
-                )
-
-                if analogous_method is not None:
-                    self._apply_arch_mutation(agent_eval, analogous_method, mut_dict)
-                else:
-                    raise MutationError(
-                        f"Mutation method '{sampled_mutation}' not found in '{agent_eval.__class__.__name__}'. "
-                        f"No analogous method found for agent '{policy_agent}'. "
-                        f"Available methods: {agent_eval.mutation_methods}."
+                    # Try to find an analogous mutation method
+                    analogous_method = self._find_analogous_mutation(
+                        sampled_mutation, available_methods, mutated_agent
                     )
+
+                    if analogous_method is not None:
+                        self._apply_arch_mutation(
+                            agent_eval, analogous_method, mut_dict
+                        )
+                    else:
+                        raise MutationError(
+                            f"Mutation method '{sampled_mutation}' not found in '{agent_eval.__class__.__name__}'. "
+                            f"No analogous method found for agent '{agent_id}'. "
+                            f"Available methods: {agent_eval.mutation_methods}."
+                        )
 
             self._to_device_and_set_individual(individual, name, offspring_eval)
 
@@ -1139,6 +1144,7 @@ class Mutations:
         """
         if not sampled_mutation:
             return None
+
         elif sampled_mutation in available_methods:
             return sampled_mutation
 

@@ -528,8 +528,8 @@ class MATD3(MultiAgentRLAlgorithm):
                 # Add noise to actions for exploration
                 actions = torch.clamp(
                     actions + self.action_noise(agent_id),
-                    min_action,
-                    max_action,
+                    torch.as_tensor(min_action, device=actions.device),
+                    torch.as_tensor(max_action, device=actions.device),
                 )
 
             action_dict[agent_id] = actions.cpu().numpy()

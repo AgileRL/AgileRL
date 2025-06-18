@@ -40,6 +40,7 @@ def cleanup():
     yield  # Run the test first
     gc.collect()
     torch.cuda.empty_cache()  # Free up GPU memory
+    torch._dynamo.reset()
 
 
 class DummyMultiEnv(ParallelEnv):
@@ -175,8 +176,6 @@ def mlp_actor(observation_spaces, action_spaces):
     )
     yield net
     del net
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 @pytest.fixture
@@ -188,8 +187,6 @@ def mlp_critic(action_spaces, observation_spaces):
     )
     yield net
     del net
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 @pytest.fixture
@@ -197,8 +194,6 @@ def cnn_actor():
     net = MultiAgentCNNActor()
     yield net
     del net
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 @pytest.fixture
@@ -206,8 +201,6 @@ def cnn_critic():
     net = MultiAgentCNNCritic()
     yield net
     del net
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 @pytest.fixture

@@ -77,6 +77,8 @@ def cleanup_memory():
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
 
+    torch._dynamo.reset()
+
 
 @pytest.fixture
 def ac_hp_config():

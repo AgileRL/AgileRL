@@ -34,6 +34,14 @@ from tests.helper_functions import (
 from tests.test_algorithms.test_maddpg import DummyMultiEnv
 
 
+@pytest.fixture(autouse=True)
+def cleanup():
+    yield  # Run the test first
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch._dynamo.reset()
+
+
 class MultiAgentCNNActor(nn.Module):
     def __init__(self):
         super().__init__()
@@ -130,8 +138,6 @@ def mlp_actor(observation_spaces, action_spaces):
     )
     yield net
     del net
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 @pytest.fixture
@@ -143,8 +149,6 @@ def mlp_critic(action_spaces, observation_spaces):
     )
     yield net
     del net
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 @pytest.fixture
@@ -152,8 +156,6 @@ def cnn_actor():
     net = MultiAgentCNNActor()
     yield net
     del net
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 @pytest.fixture
@@ -161,8 +163,6 @@ def cnn_critic():
     net = MultiAgentCNNCritic()
     yield net
     del net
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 @pytest.fixture

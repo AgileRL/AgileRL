@@ -171,12 +171,17 @@ class EvolvableMultiInput(EvolvableModule):
         self.vector_space_mlp = vector_space_mlp
         self.latent_dim = latent_dim
         self.output_activation = output_activation
-        self.output_layernorm = output_layernorm
         self.min_latent_dim = min_latent_dim
         self.max_latent_dim = max_latent_dim
         self.recurrent = recurrent
         self.name = name
         self.device = device
+
+        # We use an output nn.LayerNorm whenever specified, or if there is an MLP
+        # feature extractor that uses layer_norm=True
+        self.output_layernorm = output_layernorm or (
+            self.vector_space_mlp and self.mlp_config["layer_norm"]
+        )
 
         # Modifications for MLP encoders
         if self.vector_space_mlp:

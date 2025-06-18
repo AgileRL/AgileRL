@@ -132,6 +132,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Tru
     action_dims = get_output_size_from_space(action_spaces)
     total_state_dims = sum(state_dim[0] for state_dim in state_dims.values())
     total_action_dims = sum(action_dims.values())
+
     if use_net:
         ## Critic nets currently set-up for MADDPG
         actor = [
@@ -140,10 +141,10 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Tru
                 num_outputs=action_dim,
                 hidden_size=[64, 64],
                 activation="ReLU",
-                output_activation="Sigmoid",
+                output_activation="GumbelSoftmax",
                 device=device,
             )
-            for state_dim, action_dim in zip(state_dims, action_dims)
+            for state_dim, action_dim in zip(state_dims.values(), action_dims.values())
         ]
         NET_CONFIG = None
         critic = [
