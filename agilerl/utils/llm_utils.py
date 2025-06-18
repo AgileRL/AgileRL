@@ -142,9 +142,7 @@ class HuggingFaceGym(gym.Env):
     def _get_next_batch(self) -> List[BatchEncoding]:
         """Get the next batch of tokenized prompts."""
         try:
-            print(f"Dataset length: {len(self.dataloader)}")
             batch = next(self.dataloader)
-            print("BATCH", batch["question"])
             self.questions = batch["question"]
             self.answers = batch["answer"]
             tokenized_prompts = batch["tokenized_prompts"]
