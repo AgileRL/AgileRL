@@ -344,6 +344,9 @@ class MADDPG(MultiAgentRLAlgorithm):
                 {agent_id: create_critic() for agent_id in self.agent_ids}
             )
 
+            # Need to filter encoder mutations to match ContinuousQNetwork
+            self.actors.filter_mutation_methods("encoder")
+
         # Initialise target network parameters
         for agent_id in self.agent_ids:
             self.actor_targets[agent_id].load_state_dict(
@@ -515,8 +518,7 @@ class MADDPG(MultiAgentRLAlgorithm):
         return processed_action_dict, action_dict
 
     def action_noise(self, agent_id: str) -> torch.Tensor:
-        """Create action noise for exploration, either Ornstein Uhlenbeck or
-            from a normal distribution.
+        """Create action noise for exploration, either Ornstein Uhlenbeck or from a normal distribution.
 
         :param agent_id: Agent ID for action dims
         :type agent_id: str

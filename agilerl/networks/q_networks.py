@@ -367,6 +367,8 @@ class ContinuousQNetwork(EvolvableNetwork):
         # see https://github.com/AgileRL/AgileRL/issues/337
         self.normalize_actions = normalize_actions or self._check_normalize_actions()
 
+        self.encoder.disable_mutations()  # Disable mutations by default for stability
+
         # Build value network
         self.build_network_head(head_config)
 

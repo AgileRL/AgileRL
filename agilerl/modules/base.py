@@ -767,7 +767,6 @@ class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleType]):
 
     @property
     def layer_mutation_methods(self) -> List[str]:
-
         return [
             f"{name}.{method}"
             for name, module in self.modules().items()
@@ -808,6 +807,15 @@ class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleType]):
         """
         for module in self.modules().values():
             module.change_activation(activation, output)
+
+    def filter_mutation_methods(self, remove: str) -> None:
+        """Filter out mutation methods that contain the specified string in their name.
+
+        param remove: The string to remove.
+        type remove: str
+        """
+        for module in self.modules().values():
+            module.filter_mutation_methods(remove)
 
     def modules(self) -> Dict[str, EvolvableModule]:
         """Returns the nested evolvable modules in the network.

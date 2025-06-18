@@ -257,6 +257,9 @@ class TD3(RLAlgorithm):
             self.critic_2 = create_critic()
             self.critic_target_2 = create_critic()
 
+            # Need to filter encoder mutations to match ContinuousQNetwork
+            self.actor.filter_mutation_methods("encoder")
+
         # Share encoders between actor and critic
         if self.share_encoders and all(
             isinstance(net, EvolvableNetwork)

@@ -139,7 +139,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Tru
             EvolvableMLP(
                 num_inputs=state_dim[0],
                 num_outputs=action_dim,
-                hidden_size=[64, 64],
+                hidden_size=[64, 64, 64],
                 activation="ReLU",
                 output_activation="GumbelSoftmax",
                 device=device,
@@ -152,7 +152,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Tru
                 num_inputs=total_state_dims + total_action_dims,
                 num_outputs=1,
                 device=device,
-                hidden_size=[64, 64],
+                hidden_size=[64, 64, 64, 64],
                 activation="ReLU",
                 output_activation=None,
             )

@@ -244,6 +244,9 @@ class DDPG(RLAlgorithm):
             self.critic = create_critic()
             self.critic_target = create_critic()
 
+            # Need to filter encoder mutations to match ContinuousQNetwork
+            self.actor.filter_mutation_methods("encoder")
+
         # Share encoders between actor and critic
         if self.share_encoders and all(
             isinstance(net, EvolvableNetwork) for net in [self.actor, self.critic]

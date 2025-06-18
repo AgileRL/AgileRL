@@ -225,7 +225,7 @@ class NetworkGroup:
     """
 
     eval_network: NetworkType
-    shared_networks: NetworkType = field(default=None)
+    shared_networks: Optional[NetworkType] = field(default=None)
     policy: bool = field(default=False)
 
     def __post_init__(self):

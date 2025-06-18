@@ -34,7 +34,8 @@ IndividualType = TypeVar("IndividualType", bound=EvolvableAlgorithm)
 MutationsType = TypeVar("MutationsType", bound="Mutations")
 PopulationType = List[IndividualType]
 BanditAlgorithm = Union[NeuralUCB, NeuralTS]
-MlpMethods = ("add_node", "remove_node", "add_layer", "remove_layer")
+
+torch._dynamo.config.cache_size_limit = 64
 
 
 def set_global_seed(seed: Optional[int]) -> None:
@@ -123,6 +124,8 @@ def reinit_shared_networks(mutation_func=None):
             # Recompile individual if necessary
             compiled_model = individual.torch_compiler is not None
             if compiled_model:
+                # Set dynamo config before recompilation to avoid guard failures
+                torch._dynamo.config.force_parameter_static_shapes = False
                 individual.recompile()
 
             # Reinitialize shared networks to mutated evaluation networks
@@ -132,7 +135,6 @@ def reinit_shared_networks(mutation_func=None):
                         eval_offspring: EvolvableNetworkType = getattr(
                             individual, net_group.eval_network
                         )
-
                         # Reinitialize shared with frozen weights due to
                         # potential mutation in architecture
                         ind_shared = self._reinit_from_mutated(
@@ -142,7 +144,8 @@ def reinit_shared_networks(mutation_func=None):
                         if self.accelerator is None:
                             ind_shared = ind_shared.to(self.device)
 
-                        if individual.torch_compiler is not None:
+                        if compiled_model:
+                            torch._dynamo.config.force_parameter_static_shapes = False
                             ind_shared = compile_model(
                                 ind_shared, individual.torch_compiler
                             )
@@ -423,6 +426,7 @@ class Mutations:
         # Recompile if torch_compiler is present and batch size is mutated
         # TODO: This is a bit hacky, might be best to integrate into
         if individual.torch_compiler is not None and "batch_size" in mutate_attr:
+            torch._dynamo.reset()
             individual.recompile()
 
         return individual
@@ -521,12 +525,13 @@ class Mutations:
         )
 
         # Load state dicts for shared networks
-        for shared in policy_group.shared_networks:
-            offspring_shared: EvolvableNetworkType = getattr(individual, shared)
-            offspring_shared.load_state_dict(
-                offspring_policy.state_dict(), strict=False
-            )
-            self._to_device_and_set_individual(individual, shared, offspring_shared)
+        if policy_group.shared_networks is not None:
+            for shared in policy_group.shared_networks:
+                offspring_shared: EvolvableNetworkType = getattr(individual, shared)
+                offspring_shared.load_state_dict(
+                    offspring_policy.state_dict(), strict=False
+                )
+                self._to_device_and_set_individual(individual, shared, offspring_shared)
 
         self._reinit_opt(individual)  # Reinitialise optimizer
         individual.mut = "param"
@@ -923,6 +928,7 @@ class Mutations:
             return individual
 
         # Sample mutation method from policy network
+        print("Policy methods: ", policy_offspring.mutation_methods)
         mut_method = policy_offspring.sample_mutation_method(
             self.new_layer_prob, self.rng
         )
@@ -961,10 +967,15 @@ class Mutations:
 
         # Try to apply an analogous mutation to the rest of the evaluation modules
         for name, offspring_eval in offspring_evals.items():
-            # Iterate over the agents in the offspring evaluation modules
+            # Iterate over the agents in the offspring evaluation module
             for agent_id, agent_eval in offspring_eval.items():
                 # Iterate over the the agents whose policies were mutated
-                for mutated_agent in applied_mutations:
+                analogous_method = ""
+                for i, mutated_agent in enumerate(applied_mutations):
+                    # Don't want to reapply the same method redundantly
+                    if i > 0 and agent_eval.last_mutation_attr == analogous_method:
+                        continue
+
                     available_methods = agent_eval.mutation_methods
 
                     # Try to find an analogous mutation method

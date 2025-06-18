@@ -120,7 +120,7 @@ def compile_model(
         )
 
     if not isinstance(model, OptimizedModule) and mode is not None:
-        compiled_model = torch.compile(model, mode=mode)
+        compiled_model = torch.compile(model, mode=mode, dynamic=True)
     else:
         compiled_model = model
 
