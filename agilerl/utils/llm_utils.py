@@ -84,7 +84,7 @@ class HuggingFaceGym(gym.Env):
             low=0,
             high=tokenizer.vocab_size - 1,
         )
-        self.eval_mode = False
+        self.evaluation_mode = False
         self.num_dataset_passes = 0
 
     def step(
@@ -148,8 +148,8 @@ class HuggingFaceGym(gym.Env):
             tokenized_prompts = batch["tokenized_prompts"]
         except StopIteration:
             self._reset_dataloaders(
-                reset_train=not self.eval_mode,
-                reset_test=self.eval_mode,
+                reset_train=not self.evaluation_mode,
+                reset_test=self.evaluation_mode,
             )
             self.num_dataset_passes += 1
             return self._get_next_batch()
@@ -159,18 +159,18 @@ class HuggingFaceGym(gym.Env):
     def eval_mode(self) -> Generator[None, None, None]:
         """Context manager to switch to evaluation mode."""
         self.dataloader = self.test_dataloader_iter
-        self.eval_mode = True
+        self.evaluation_mode = True
         last_tokenized_prompts = copy.deepcopy(self.last_tokenized_prompts)
         try:
             yield
         finally:
             self.dataloader = self.train_dataloader_iter
-            self.eval_mode = False
+            self.evaluation_mode = False
             self.last_tokenized_prompts = last_tokenized_prompts
 
     def __len__(self):
         """Return the length of the dataset."""
-        if self.eval_mode:
+        if self.evaluation_mode:
             return len(self.test_dataloader.dataset)
         return len(self.train_dataloader.dataset)
 
@@ -181,7 +181,9 @@ class HuggingFaceGym(gym.Env):
         if reset_test:
             self.test_dataloader_iter = iter(self.test_dataloader)
         self.dataloader = (
-            self.test_dataloader_iter if self.eval_mode else self.train_dataloader_iter
+            self.test_dataloader_iter
+            if self.evaluation_mode
+            else self.train_dataloader_iter
         )
 
     @staticmethod

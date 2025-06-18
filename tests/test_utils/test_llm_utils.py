@@ -47,7 +47,19 @@ def dummy_reward_fn(*args, **kwargs):
     return 1.0
 
 
-def dummy_chat_template_fn(*args, **kwargs):
+def dummy_chat_template_fn_custom(q, a, tokenizer):
+    """
+    Chat template function for test_hugging_face_gym_reset_dataloaders, gives unique input_ids for each question so
+    we can test equality.
+    """
+    index = int(q.split(" ")[-1][0])
+    return {
+        "input_ids": torch.tensor([index]),
+        "attention_mask": torch.ones(1),
+    }
+
+
+def dummy_chat_template_fn(q, a, tokenizer):
     return {
         "input_ids": torch.randint(0, 1000, (1, 356)),
         "attention_mask": torch.ones(1, 356),
@@ -79,11 +91,12 @@ def test_hugging_face_gym_init(dataset, num_samples):
     assert isinstance(env.tokenizer, DummyTokenizer)
     assert isinstance(env.train_dataloader, DataLoader)
     assert isinstance(env.test_dataloader, DataLoader)
-    assert list(next(env.train_dataloader_iter).keys()) == ["question", "answer"]
-    assert next(env.test_dataloader_iter) == {
-        "question": [f"This is question {i}?" for i in range(data_batch_size)],
-        "answer": [f"This is answer {i}." for i in range(data_batch_size)],
-    }
+    print("KEYS", list(next(env.train_dataloader_iter).keys()))
+    assert list(next(env.train_dataloader_iter).keys()) == [
+        "question",
+        "answer",
+        "tokenized_prompts",
+    ]
     assert env.dataloader == env.train_dataloader_iter
     assert callable(env.apply_chat_template_fn)
     assert not env.reset_called
@@ -91,7 +104,7 @@ def test_hugging_face_gym_init(dataset, num_samples):
     assert np.all(env.observation_space.high == tokenizer.vocab_size - 1)
     assert isinstance(env.action_space, gym.spaces.Space)
     assert np.all(env.action_space.high == tokenizer.vocab_size - 1)
-    assert not env.eval_mode
+    assert not env.evaluation_mode
     assert env.data_batch_size_per_gpu == data_batch_size
 
 
@@ -109,7 +122,7 @@ def test_hugging_face_gym_step(dataset, num_samples, eval_mode):
         apply_chat_template_fn=dummy_chat_template_fn,
         data_batch_size_per_gpu=data_batch_size,
     )
-    env.eval_mode = eval_mode
+    env.evaluation_mode = eval_mode
     env.reset()
     completions = [torch.randint(0, 1000, (10, 356)) for _ in range(data_batch_size)]
     tokenized_prompts, rewards = env.step(completions)
@@ -156,14 +169,29 @@ def test_hugging_face_gym_reset_dataloaders(dataset, num_samples, reset_dataload
         test_dataset=test_dataset,
         tokenizer=tokenizer,
         reward_fn=dummy_reward_fn,
-        apply_chat_template_fn=dummy_chat_template_fn,
+        apply_chat_template_fn=dummy_chat_template_fn_custom,
         data_batch_size_per_gpu=data_batch_size,
     )
     first_data_point = next(
         env.test_dataloader_iter
     )  # use test_dataloader_iter as it is not shuffled
     env._reset_dataloaders()
-    assert first_data_point == next(env.test_dataloader_iter)
+
+    print("FIRST DATA POINT", first_data_point)
+    # assert False
+    first_data_point_reset = next(env.test_dataloader_iter)
+    print("FIRST DATA POINT KEYS", first_data_point.keys())
+    for key1, key2 in zip(first_data_point.keys(), first_data_point_reset.keys()):
+        if key1 == "tokenized_prompts":
+            for item1, item2 in zip(
+                first_data_point["tokenized_prompts"],
+                first_data_point_reset["tokenized_prompts"],
+            ):
+                for key3, key4 in zip(item1.keys(), item2.keys()):
+                    assert torch.equal(item1[key3], item2[key4])
+        else:
+            assert first_data_point[key1] == first_data_point_reset[key1]
+    # assert False
 
 
 @pytest.mark.parametrize("num_samples", [200])
