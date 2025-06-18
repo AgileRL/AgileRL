@@ -158,7 +158,7 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE_PER_GPU"]
     for i in range(training_steps):
         agent_metrics_dict = {}
         for agent_idx, agent in enumerate(pop):
-            agent.set_reference_policy(env.train_passes)
+            agent.set_reference_policy(env.num_dataset_passes)
             completion_ids, action_masks = agent.get_action(prompts)
             completion_lengths = np.mean([x.shape[1] for x in completion_ids])
 

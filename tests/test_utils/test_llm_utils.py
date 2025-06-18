@@ -260,8 +260,8 @@ def test_reset_dataloaders_when_dataloader_exhausted(
         data_batch_size_per_gpu=data_batch_size,
     )
     total_sampled = 0
-    for _ in range(num_samples * 2):
+    for _ in range(3):
         env._get_next_batch()
         total_sampled += data_batch_size
 
-    assert total_sampled == num_samples * 2 * data_batch_size
+    assert env.num_dataset_passes == 1

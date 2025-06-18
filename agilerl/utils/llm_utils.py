@@ -85,7 +85,7 @@ class HuggingFaceGym(gym.Env):
             high=tokenizer.vocab_size - 1,
         )
         self.eval_mode = False
-        self.train_passes = 0
+        self.num_dataset_passes = 0
 
     def step(
         self, completions: torch.Tensor
@@ -142,7 +142,9 @@ class HuggingFaceGym(gym.Env):
     def _get_next_batch(self) -> List[BatchEncoding]:
         """Get the next batch of tokenized prompts."""
         try:
+            print(f"Dataset length: {len(self.dataloader)}")
             batch = next(self.dataloader)
+            print("BATCH", batch["question"])
             self.questions = batch["question"]
             self.answers = batch["answer"]
             tokenized_prompts = batch["tokenized_prompts"]
@@ -151,7 +153,7 @@ class HuggingFaceGym(gym.Env):
                 reset_train=not self.eval_mode,
                 reset_test=self.eval_mode,
             )
-            self.train_passes += 1
+            self.num_dataset_passes += 1
             return self._get_next_batch()
         return tokenized_prompts
 
