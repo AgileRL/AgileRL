@@ -189,13 +189,13 @@ def get_conv_layer(
     :return: Convolutional layer
     :rtype: nn.Module
     """
-    if conv_layer_name not in ["Conv2d", "Conv3d"]:
+    if conv_layer_name not in ["Conv1d", "Conv2d", "Conv3d"]:
         raise ValueError(
-            f"Invalid convolutional layer {conv_layer_name}. Must be one of 'Conv2d', 'Conv3d'."
+            f"Invalid convolutional layer {conv_layer_name}. Must be one of 'Conv1d', 'Conv2d', 'Conv3d'."
         )
 
     convolutional_layers = {
-        # "1d": nn.Conv1d,
+        "1d": nn.Conv1d,
         "2d": nn.Conv2d,
         "3d": nn.Conv3d,
     }
