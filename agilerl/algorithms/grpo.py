@@ -26,7 +26,7 @@ from agilerl.utils.algo_utils import (
     get_experiences_samples,
     stack_and_pad_experiences,
 )
-from agilerl.utils.llm_utils import HuggingFaceGym, _DummyOptimizer
+from agilerl.utils.llm_utils import HuggingFaceGym, _DummyOptimizer, zip_adapters
 
 DeepSpeedOptimizerType = Union[
     DeepSpeedZeroOptimizer,  # ZeRO Stage 1 & 2 optimizer
@@ -83,6 +83,8 @@ class GRPO(LLMAlgorithm):
     :type wrap: bool, optional
     :param clone: Flag to indicate if the instantiation is a cloning, defaults to False
     :type clone: bool, optional
+    :param use_separate_reference_adapter: Flag to indicate if the reference policy should have a separate adapter, defaults to False
+    :type use_separate_reference_adapter: bool, optional
     """
 
     def __init__(
@@ -111,6 +113,7 @@ class GRPO(LLMAlgorithm):
         device: str = "cpu",
         wrap: bool = True,
         clone: bool = False,
+        use_separate_reference_adapter: bool = False,
     ) -> None:
         device = (
             f"cuda:{os.getenv('LOCAL_RANK', '0')}"
@@ -215,6 +218,7 @@ class GRPO(LLMAlgorithm):
         self.lora_config = lora_config
         self.cosine_lr_schedule_config = cosine_lr_schedule_config
         self.wrap = wrap
+        self.use_separate_reference_adapter = use_separate_reference_adapter
         if max_grad_norm and (accelerator is not None) and accelerator.is_main_process:
             warnings.warn(
                 "Argument 'max_grad_norm' will be overwritten by the 'gradient_clipping' value set in the deepspeed config."
@@ -386,6 +390,10 @@ class GRPO(LLMAlgorithm):
             else base_model
         )
         self.actor.set_adapter("actor")
+        if self.use_separate_reference_adapter:
+            self.actor.add_adapter(
+                adapter_name="reference", peft_config=self.lora_config
+            )
 
         optim_class = self._select_optim_class()
         self.optimizer = OptimizerWrapper(
@@ -502,7 +510,8 @@ class GRPO(LLMAlgorithm):
         :rtype: torch.Tensor
         """
         if use_reference:
-            self.actor.base_model.disable_adapter_layers()
+            self._use_reference_policy()
+
         self.actor.train(mode=not eval_mode)
         attention_mask = ids != self.pad_token_id
         model_kwargs = {
@@ -539,7 +548,7 @@ class GRPO(LLMAlgorithm):
                 .gather(dim=-1, index=ids[:, 1:].unsqueeze(-1))
                 .squeeze(-1)
             )
-        self.actor.base_model.enable_adapter_layers()
+        self._use_policy()
         return log_probs
 
     def _backward_pass(self, loss: float) -> None:
@@ -590,27 +599,56 @@ class GRPO(LLMAlgorithm):
             reference_update_tracker >= self.reference_update_tracker
         ), "Reference policy update tracker should be greater than or equal to the current reference policy update tracker."
         if reference_update_tracker > self.reference_update_tracker:
+
+            if self.accelerator is not None:
+                self.accelerator.wait_for_everyone()
             # Merge adapter into base model
             # Update the reference update tracker
-            if self.accelerator is not None:
-                self.accelerator.wait_for_everyone()
-                merged_base_model = self.accelerator.unwrap_model(
-                    self.actor
-                ).merge_and_unload()
-            else:
-                merged_base_model = self.actor.merge_and_unload()
-            self.actor = None  # De-reference the old actor base model
-            self.actor = get_peft_model(
-                merged_base_model, self.lora_config, adapter_name="actor"
-            )
-            if self.accelerator is not None:
-                self.accelerator.wait_for_everyone()
-            self.actor.set_adapter("actor")
+            if self.use_separate_reference_adapter:
+                # Activate both adapters
+                # Iterate over the parame
+                for (_, param1), (_, param2) in zip_adapters(
+                    self.actor, "actor", "reference"
+                ):
+                    param1.data.copy_(param2.data)
+                self._use_policy()
 
-            # Reinit optimizer
-            optim_class = self._select_optim_class()
-            self.optimizer = OptimizerWrapper(
-                optim_class, networks=[self.actor], lr=self.lr
-            )
-            self.wrap_models()
+            else:
+                if self.accelerator is not None:
+                    merged_base_model = self.accelerator.unwrap_model(
+                        self.actor
+                    ).merge_and_unload()
+                else:
+                    merged_base_model = self.actor.merge_and_unload()
+                self.actor = None  # De-reference the old actor base model
+                self.actor = get_peft_model(
+                    merged_base_model, self.lora_config, adapter_name="actor"
+                )
+                if self.accelerator is not None:
+                    self.accelerator.wait_for_everyone()
+                self.actor.set_adapter("actor")
+
+                # Reinit optimizer
+                optim_class = self._select_optim_class()
+                self.optimizer = OptimizerWrapper(
+                    optim_class, networks=[self.actor], lr=self.lr
+                )
+                self.wrap_models()
             self.reference_update_tracker += 1
+
+    def _use_reference_policy(self) -> None:
+        """Use the reference policy."""
+        if self.use_separate_reference_adapter:
+            self.actor.set_adapter("reference")
+            for param in self.actor.parameters():
+                if "reference" in param.name and param is not None:
+                    param.requires_grad = False
+        else:
+            self.actor.base_model.disable_adapter_layers()
+
+    def _use_policy(self) -> None:
+        """Use the policy."""
+        if self.use_separate_reference_adapter:
+            self.actor.set_adapter("actor")
+        else:
+            self.actor.base_model.enable_adapter_layers()

@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 import gymnasium as gym
 import torch
 from accelerate import Accelerator
+from peft import PeftModel
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 from transformers.tokenization_utils_base import BatchEncoding
@@ -219,6 +220,45 @@ class HuggingFaceGym(gym.Env):
             }
 
         return collate_fn
+
+
+def zip_adapters(
+    peft_model: PeftModel, adapter1: str, adapter2: str
+) -> Generator[Tuple[Tuple[str, torch.Tensor], Tuple[str, torch.Tensor]]]:
+    """Memory efficient way to zip two adapters together.
+
+    :param peft_model: PeftModel to zip adapters from
+    :type peft_model: PeftModel
+    :param adapter1: First adapter to zip
+    :type adapter1: str
+    :param adapter2: Second adapter to zip
+    :type adapter2: str
+    :return: Tuple of (adapter1, adapter2)
+    """
+
+    def get_adapter_params(adapter_name):
+        peft_model.set_adapter(adapter_name)
+        yield from peft_model.named_parameters()
+
+    # Get iterators
+    iter1 = get_adapter_params(adapter1)
+    iter2 = get_adapter_params(adapter2)
+
+    try:
+        while True:
+            name1, param1 = next(iter1)
+            name2, param2 = next(iter2)
+
+            # Verify matching
+            base_name1 = name1.replace(adapter1, "ADAPTER")
+            base_name2 = name2.replace(adapter2, "ADAPTER")
+
+            if base_name1 == base_name2:
+                yield (name1, param1), (name2, param2)
+            else:
+                raise ValueError(f"Parameter mismatch: {name1} vs {name2}")
+    except StopIteration:
+        pass
 
 
 class _DummyOptimizer:

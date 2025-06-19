@@ -1657,3 +1657,6 @@ def test_set_reference_policy(grpo, accelerator, request):
     ).logits
     assert torch.allclose(output_before, output_after)
     assert grpo.reference_update_tracker == reference_update_tracker
+
+
+# Test that ref actor is the same as actor after learning - i.e. its frozen
