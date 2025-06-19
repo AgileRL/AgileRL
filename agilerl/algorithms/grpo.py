@@ -641,8 +641,8 @@ class GRPO(LLMAlgorithm):
         """Use the reference policy."""
         if self.use_separate_reference_adapter:
             self.actor.set_adapter("reference")
-            for param in self.actor.parameters():
-                if param is not None and "reference" in param.name:
+            for name, param in self.actor.named_parameters():
+                if param is not None and "reference" in name:
                     param.requires_grad = False
         else:
             self.actor.base_model.disable_adapter_layers()
