@@ -275,7 +275,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
     def get_action(
         self, obs: Union[ObservationType, MARLObservationType], *args, **kwargs
     ) -> ActionType:
-        """Abstract method for getting an action from the algorithm."""
+        """Abstract method for getting an action fr om the algorithm."""
         raise NotImplementedError
 
     @abstractmethod
@@ -1736,9 +1736,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 if self.optimizer.optimizer_cls == torch.optim.AdamW
                 else self.optimizer
             )
+            print("Calling prepare")
             self.actor, self.optimizer, self.lr_scheduler = self.accelerator.prepare(
                 self.actor, opt, self.lr_scheduler
             )
+            print("Prepare done")
         else:
             self.actor = self.actor.to(self.device)
             self.actor.gradient_checkpointing_enable()

@@ -389,11 +389,12 @@ class GRPO(LLMAlgorithm):
             if add_adapters
             else base_model
         )
-        self.actor.set_adapter("actor")
+
         if self.use_separate_reference_adapter:
             self.actor.add_adapter(
                 adapter_name="reference", peft_config=self.lora_config
             )
+        self.actor.set_adapter("actor")
 
         optim_class = self._select_optim_class()
         self.optimizer = OptimizerWrapper(
@@ -641,7 +642,7 @@ class GRPO(LLMAlgorithm):
         if self.use_separate_reference_adapter:
             self.actor.set_adapter("reference")
             for param in self.actor.parameters():
-                if "reference" in param.name and param is not None:
+                if param is not None and "reference" in param.name:
                     param.requires_grad = False
         else:
             self.actor.base_model.disable_adapter_layers()

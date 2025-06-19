@@ -236,29 +236,23 @@ def zip_adapters(
     :return: Tuple of (adapter1, adapter2)
     """
 
-    def get_adapter_params(adapter_name):
-        peft_model.set_adapter(adapter_name)
-        yield from peft_model.named_parameters()
+    # Get parameters for both adapters
+    peft_model.set_adapter(adapter1)
+    params1 = list(peft_model.named_parameters())
 
-    # Get iterators
-    iter1 = get_adapter_params(adapter1)
-    iter2 = get_adapter_params(adapter2)
+    peft_model.set_adapter(adapter2)
+    params2 = list(peft_model.named_parameters())
 
-    try:
-        while True:
-            name1, param1 = next(iter1)
-            name2, param2 = next(iter2)
+    # Zip them together
+    for (name1, param1), (name2, param2) in zip(params1, params2):
+        # Verify matching
+        base_name1 = name1.replace(adapter1, "ADAPTER")
+        base_name2 = name2.replace(adapter2, "ADAPTER")
 
-            # Verify matching
-            base_name1 = name1.replace(adapter1, "ADAPTER")
-            base_name2 = name2.replace(adapter2, "ADAPTER")
-
-            if base_name1 == base_name2:
-                yield (name1, param1), (name2, param2)
-            else:
-                raise ValueError(f"Parameter mismatch: {name1} vs {name2}")
-    except StopIteration:
-        pass
+        if base_name1 == base_name2:
+            yield (name1, param1), (name2, param2)
+        else:
+            raise ValueError(f"Parameter mismatch: {name1} vs {name2}")
 
 
 class _DummyOptimizer:

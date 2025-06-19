@@ -545,6 +545,7 @@ def create_population(
                 ),
                 accelerator=Accelerator() if accelerator else None,
                 device=device,
+                # use_separate_reference_adapter=True # FIXME DELETE!!!
             )
             population.append(agent)
     return population
