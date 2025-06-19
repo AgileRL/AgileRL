@@ -692,7 +692,9 @@ def create_mlp(
     net_dict[f"{name}_linear_layer_output"] = output_layer
 
     if output_layernorm:
-        net_dict[f"{name}_layer_norm_output"] = nn.LayerNorm(output_size, device=device)
+        net_dict[f"{name}_layer_norm_output"] = nn.LayerNorm(
+            output_size, device=device, elementwise_affine=False
+        )
 
     net_dict[f"{name}_activation_output"] = get_activation(
         activation_name=output_activation, new_gelu=new_gelu

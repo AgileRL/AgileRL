@@ -212,7 +212,9 @@ class EvolvableMultiInput(EvolvableModule):
         # Final dense layer to convert feature encodings to desired num_outputs
         self.final_dense = nn.Linear(features_dim, num_outputs, device=device)
         self.final_layernorm = (
-            nn.LayerNorm(num_outputs, device=device) if self.output_layernorm else None
+            nn.LayerNorm(num_outputs, device=device, elementwise_affine=False)
+            if self.output_layernorm
+            else None
         )
         self.output = get_activation(output_activation)
 

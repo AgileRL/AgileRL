@@ -381,9 +381,6 @@ class MATD3(MultiAgentRLAlgorithm):
                 {agent_id: create_critic() for agent_id in self.agent_ids}
             )
 
-            # Need to filter encoder mutations to match ContinuousQNetwork
-            self.actors.filter_mutation_methods("encoder")
-
         # Initialise target network parameters
         for agent_id in self.agent_ids:
             self.actor_targets[agent_id].load_state_dict(

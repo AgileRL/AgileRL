@@ -1,5 +1,6 @@
 import copy
 import inspect
+from collections import OrderedDict
 from functools import wraps
 from typing import (
     Any,
@@ -20,6 +21,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from numpy.random import Generator
+from torch._dynamo import OptimizedModule
 
 from agilerl.modules.custom_components import NoisyLinear
 from agilerl.protocols import MutationMethod, MutationType
@@ -117,8 +119,8 @@ class MutationContext:
                     self.module.recreate_network(**rec_kwargs)
 
             # Apply mutation hook if specified
-            if self.module._mutation_hook is not None:
-                self.module._mutation_hook()
+            for hook in self.module._mutation_hooks:
+                hook()
 
     def _resolve_final_mutation_attr(self) -> Optional[str]:
         """Resolve the mutation method that was applied last. This is necessary during
@@ -254,6 +256,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
     """
 
     _evolvable_modules: Dict[str, Optional["EvolvableModule"]]
+    _mutation_hooks: List[Callable]
 
     def __init__(self, device: str, random_seed: Optional[int] = None) -> None:
         nn.Module.__init__(self)
@@ -264,10 +267,10 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         self._rng = np.random.default_rng(seed=random_seed)
         self._last_mutation = None
         self._last_mutation_attr = None
-        self._mutation_hook = None
         self._mutation_depth = 0
 
         super().__setattr__("_evolvable_modules", {})
+        super().__setattr__("_mutation_hooks", [])
 
     @property
     def init_dict(self) -> Dict[str, Any]:
@@ -382,23 +385,29 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         """
         # Add mutation methods to the network
         if isinstance(value, EvolvableModule):
-            if name in self.__dict__["_modules"]:
-                self.filter_mutation_methods(name)
+            if name not in self._evolvable_modules:
+                layer_fns = []
+                node_fns = []
+                for mut_name, method in value.get_mutation_methods().items():
+                    method_name = ".".join([name, mut_name])
+                    method_type = method._mutation_type
+                    if method_type == MutationType.LAYER:
+                        layer_fns.append(method_name)
+                    elif method_type == MutationType.NODE:
+                        node_fns.append(method_name)
+                    else:
+                        raise ValueError(f"Invalid mutation type: {method_type}")
 
-            layer_fns = []
-            node_fns = []
-            for mut_name, method in value.get_mutation_methods().items():
-                method_name = ".".join([name, mut_name])
-                method_type = method._mutation_type
-                if method_type == MutationType.LAYER:
-                    layer_fns.append(method_name)
-                elif method_type == MutationType.NODE:
-                    node_fns.append(method_name)
-                else:
-                    raise ValueError(f"Invalid mutation type: {method_type}")
+                self._layer_mutation_methods += layer_fns
+                self._node_mutation_methods += node_fns
+            else:
+                value._layer_mutation_methods = self._evolvable_modules[
+                    name
+                ]._layer_mutation_methods
+                value._node_mutation_methods = self._evolvable_modules[
+                    name
+                ]._node_mutation_methods
 
-            self._layer_mutation_methods += layer_fns
-            self._node_mutation_methods += node_fns
             self._evolvable_modules[name] = value
 
         super().__setattr__(name, value)
@@ -542,7 +551,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         :param hook: The hook function.
         :type hook: Callable
         """
-        self._mutation_hook = hook
+        self._mutation_hooks.append(hook)
 
     def disable_mutations(self, mut_type: Optional[MutationType] = None) -> None:
         """Disable all or some mutation methods from the evolvable module. It recursively
@@ -672,9 +681,17 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         :rtype: SelfEvolvableModule
         """
         clone = self.__class__(**copy.deepcopy(self.get_init_dict()))
+        clone.rng = self.rng
+
         clone._layer_mutation_methods = self._layer_mutation_methods
         clone._node_mutation_methods = self._node_mutation_methods
-        clone.rng = self.rng
+        for name, module in clone._evolvable_modules.items():
+            module._layer_mutation_methods = self._evolvable_modules[
+                name
+            ]._layer_mutation_methods
+            module._node_mutation_methods = self._evolvable_modules[
+                name
+            ]._node_mutation_methods
 
         # Load state dict if the network has been trained
         try:
@@ -826,11 +843,15 @@ class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleType]):
         :return: A dictionary of network attributes.
         :rtype: dict[str, Any]
         """
-        return {
-            name: module
-            for name, module in self.items()
-            if isinstance(module, EvolvableModule)
-        }
+        evo_modules = OrderedDict()
+        for name, module in self.items():
+            orig_mod = (
+                module._orig_mod if isinstance(module, OptimizedModule) else module
+            )
+            if isinstance(orig_mod, EvolvableModule):
+                evo_modules[name] = module
+
+        return evo_modules
 
     def get_mutation_methods(self) -> Dict[str, MutationMethod]:
         """Get all mutation methods for the network.

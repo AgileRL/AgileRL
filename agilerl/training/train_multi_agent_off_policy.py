@@ -5,12 +5,12 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from pettingzoo import ParallelEnv
 from torch.utils.data import DataLoader
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import MADDPG, MATD3
 from agilerl.components.data import ReplayDataset
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
@@ -445,6 +445,7 @@ def train_multi_agent_off_policy(
                     "train/mean_score/" + agent: np.nan
                     for idx, agent in enumerate(agent_ids)
                 }
+
             mean_fitnesses = np.mean(fitnesses, axis=0)
             max_fitnesses = np.max(fitnesses, axis=0)
             fitness_dict = {
@@ -541,6 +542,7 @@ def train_multi_agent_off_policy(
                 fitness = ["%.2f" % fitness for fitness in fitnesses]
                 avg_fitness = ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
                 avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
+                mean_scores = ["%.2f" % mean_score for mean_score in mean_scores]
             else:
                 fitness_arr = np.array([fitness for fitness in fitnesses])
                 avg_fitness_arr = np.array(
@@ -560,8 +562,10 @@ def train_multi_agent_off_policy(
                     agent: avg_score_arr[:, idx] for idx, agent in enumerate(agent_ids)
                 }
                 mean_scores = {
-                    agent: mean_scores[:, idx] for idx, agent in enumerate(agent_ids)
+                    agent: "%.2f" % mean_scores[:, idx]
+                    for idx, agent in enumerate(agent_ids)
                 }
+
             agents = [agent.index for agent in pop]
             num_steps = [agent.steps[-1] for agent in pop]
             muts = [agent.mut for agent in pop]

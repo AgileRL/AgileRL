@@ -1,4 +1,5 @@
 import copy
+import logging
 import warnings
 from collections import OrderedDict
 from functools import wraps
@@ -36,6 +37,7 @@ PopulationType = List[IndividualType]
 BanditAlgorithm = Union[NeuralUCB, NeuralTS]
 
 torch._dynamo.config.cache_size_limit = 64
+torch._logging.set_logs(dynamo=logging.FATAL)
 
 
 def set_global_seed(seed: Optional[int]) -> None:
@@ -116,6 +118,8 @@ def reinit_shared_networks(mutation_func=None):
         def wrapper(self: MutationsType, individual: IndividualType) -> IndividualType:
             # Call the original mutation function
             individual = func(self, individual)
+
+            torch._dynamo.reset()  # NOTE: Should we do this?
 
             # Only proceed if mutation was actually applied
             if individual.mut == "None":
@@ -422,13 +426,6 @@ class Mutations:
             )  # Reinitialise optimizer if new learning rate
 
         individual.mut = mutate_attr
-
-        # Recompile if torch_compiler is present and batch size is mutated
-        # TODO: This is a bit hacky, might be best to integrate into
-        if individual.torch_compiler is not None and "batch_size" in mutate_attr:
-            torch._dynamo.reset()
-            individual.recompile()
-
         return individual
 
     # TODO: Activation mutations should really be integrated as architecture mutations
@@ -928,7 +925,6 @@ class Mutations:
             return individual
 
         # Sample mutation method from policy network
-        print("Policy methods: ", policy_offspring.mutation_methods)
         mut_method = policy_offspring.sample_mutation_method(
             self.new_layer_prob, self.rng
         )
@@ -970,10 +966,13 @@ class Mutations:
             # Iterate over the agents in the offspring evaluation module
             for agent_id, agent_eval in offspring_eval.items():
                 # Iterate over the the agents whose policies were mutated
-                analogous_method = ""
-                for i, mutated_agent in enumerate(applied_mutations):
+                analogous_method = False
+                for mutated_agent in applied_mutations:
                     # Don't want to reapply the same method redundantly
-                    if i > 0 and agent_eval.last_mutation_attr == analogous_method:
+                    if (
+                        analogous_method
+                        and agent_eval.last_mutation_attr == analogous_method
+                    ):
                         continue
 
                     available_methods = agent_eval.mutation_methods
