@@ -477,7 +477,7 @@ class RolloutBuffer:
 
         # Reshape to flatten the num_envs dimension into the first batch dimension
         # New batch_size will be [buffer_size * num_envs]
-        flattened_td = valid_buffer_data.reshape(-1)  # or .view(-1) if we want a view
+        flattened_td = valid_buffer_data.view(-1)
 
         if batch_size is not None:
             if batch_size > total_samples:
@@ -486,64 +486,14 @@ class RolloutBuffer:
                 )
                 # Convert the flattened TensorDict to the old dictionary format
                 # For hidden_states, we need to handle the nested TensorDict structure
-                np_dict = {}
-                for key, value in flattened_td.items():
-                    if key == "hidden_states" and isinstance(value, TensorDict):
-                        np_dict[key] = {
-                            k_hid: v_hid.cpu().numpy() for k_hid, v_hid in value.items()
-                        }
-                    elif key in ["observations", "next_observations"] and isinstance(value, dict):
-                        # Handle Dict observation spaces
-                        np_dict[key] = {
-                            k_obs: v_obs.cpu().numpy() for k_obs, v_obs in value.items()
-                        }
-                    else:
-                        np_dict[key] = value.cpu().numpy()
-                return np_dict
+                return self._convert_td_to_np_dict(flattened_td)
 
             indices = np.random.choice(total_samples, size=batch_size, replace=False)
             sampled_td = flattened_td[indices]
             # Convert the sampled TensorDict to the old dictionary format
-            np_dict = {}
-            for key, value in sampled_td.items():
-                if key == "hidden_states" and isinstance(value, TensorDict):
-                    np_dict[key] = {
-                        k_hid: v_hid.cpu().numpy() for k_hid, v_hid in value.items()
-                    }
-                elif key in ["observations", "next_observations"] and isinstance(value, dict):
-                    # Handle Dict observation spaces
-                    np_dict[key] = {
-                        k_obs: v_obs.cpu().numpy() for k_obs, v_obs in value.items()
-                    }
-                else:
-                    np_dict[key] = value.cpu().numpy()
-            return np_dict
+            return self._convert_td_to_np_dict(sampled_td)
         else:
-            # Convert the entire flattened TensorDict to the old dictionary format
-            np_dict = {}
-            for key, value in flattened_td.items():
-                if key == "hidden_states" and isinstance(value, TensorDict):
-                    # The hidden states in flattened_td might still be (total_samples, layers, size)
-                    # if the hidden_states TD was not reshaped along with the main TD.
-                    # This needs careful handling of how hidden_states are stored and flattened.
-
-                    # Let's assume hidden_states inside self.buffer[key] are (capacity, num_envs, layers, size)
-                    # valid_buffer_data[key] would be (buffer_size, num_envs, layers, size)
-                    # flattened_td[key] would be (total_samples, layers, size)
-
-                    np_dict[key] = {
-                        # k_hid: v_hid.reshape(total_samples, *v_hid.shape[1:]).cpu().numpy() # if v_hid was (buffer_size, num_envs, ...)
-                        k_hid: v_hid.cpu().numpy()  # if v_hid is already (total_samples, ...)
-                        for k_hid, v_hid in value.items()  # `value` is the TensorDict for hidden_states
-                    }
-                elif key in ["observations", "next_observations"] and isinstance(value, dict):
-                    # Handle Dict observation spaces
-                    np_dict[key] = {
-                        k_obs: v_obs.cpu().numpy() for k_obs, v_obs in value.items()
-                    }
-                else:
-                    np_dict[key] = value.cpu().numpy()
-            return np_dict
+            return self._convert_td_to_np_dict(flattened_td)
 
     def get_tensor_batch(
         self, batch_size: Optional[int] = None, device: Optional[str] = None
@@ -574,7 +524,7 @@ class RolloutBuffer:
         # Reshape to flatten the num_envs dimension into the first batch dimension
         # New batch_size will be [buffer_size * num_envs]
         # .view(-1) is crucial for not creating a copy if possible
-        flattened_td = valid_buffer_data_view.reshape(-1)
+        flattened_td = valid_buffer_data_view.view(-1)
 
         if batch_size is not None:
             if batch_size > total_samples:
@@ -690,32 +640,7 @@ class RolloutBuffer:
         # torch.stack will create a new TD with batch_size [actual_batch_size, seq_len]
         sequences_td = torch.stack(list_of_sequence_tds, dim=0)
 
-        # Convert the TensorDict to the old dictionary of numpy arrays format
-        np_dict = {}
-        for key, value in sequences_td.items():
-            if key == "hidden_states" and isinstance(value, TensorDict):
-                # For hidden states, we want the *initial* hidden state for each sequence.
-                # The `value` here would be a TensorDict where each key (e.g., "h_actor")
-                # has a tensor of shape (actual_batch_size, seq_len, layers, hidden_size)
-                # We need to take the first time step [:, 0]
-                # This block will be superseded by the explicit addition of "initial_hidden_states" below
-                # but kept for structural reference or if full hidden sequences were needed in np_dict form.
-                np_dict[key] = {
-                    k_hid: v_hid.cpu().numpy() for k_hid, v_hid in value.items()
-                }
-            elif key in ["observations", "next_observations"] and isinstance(value, dict):
-                # Handle Dict observation spaces
-                np_dict[key] = {
-                    k_obs: v_obs.cpu().numpy() for k_obs, v_obs in value.items()
-                }
-            elif isinstance(
-                value, TensorDict
-            ):  # For nested like observations if it's a Dict space
-                np_dict[key] = {
-                    k_sub: v_sub.cpu().numpy() for k_sub, v_sub in value.items()
-                }
-            else:
-                np_dict[key] = value.cpu().numpy()
+        np_dict = self._convert_td_to_np_dict(sequences_td)
 
         # Explicitly add initial_hidden_states if recurrent
         if self.recurrent and self.buffer.get("hidden_states", None) is not None:
@@ -877,6 +802,38 @@ class RolloutBuffer:
         # The "initial_hidden_states" (if present) is a non-tensor item containing tensors
         # already on output_device, so they won't be re-moved by this .to() call.
         return sequences_td_cpu.to(output_device)
+
+    def _convert_td_to_np_dict(self, td: TensorDict) -> Dict[str, Union[np.ndarray, Dict[str, np.ndarray]]]:
+        """
+        Convert a TensorDict to a dictionary of numpy arrays.
+        """
+        # Convert the TensorDict to the old dictionary of numpy arrays format
+        np_dict = {}
+        for key, value in td.items():
+            if key == "hidden_states" and isinstance(value, TensorDict):
+                # For hidden states, we want the *initial* hidden state for each sequence.
+                # The `value` here would be a TensorDict where each key (e.g., "h_actor")
+                # has a tensor of shape (actual_batch_size, seq_len, layers, hidden_size)
+                # We need to take the first time step [:, 0]
+                # This block will be superseded by the explicit addition of "initial_hidden_states" below
+                # but kept for structural reference or if full hidden sequences were needed in np_dict form.
+                np_dict[key] = {
+                    k_hid: v_hid.cpu().numpy() for k_hid, v_hid in value.items()
+                }
+            elif key in ["observations", "next_observations"] and isinstance(value, dict):
+                # Handle Dict observation spaces
+                np_dict[key] = {
+                    k_obs: v_obs.cpu().numpy() for k_obs, v_obs in value.items()
+                }
+            elif isinstance(
+                value, TensorDict
+            ):  # For nested like observations if it's a Dict space
+                np_dict[key] = {
+                    k_sub: v_sub.cpu().numpy() for k_sub, v_sub in value.items()
+                }
+            else:
+                np_dict[key] = value.cpu().numpy()
+        return np_dict
 
     def __getstate__(self) -> Dict[str, Any]:
         """Gets the state dictionary for pickling, ensuring arrays are copied."""
