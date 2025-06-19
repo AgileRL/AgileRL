@@ -3,6 +3,7 @@ import warnings
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Union
 
+from agilerl.algorithms.core.base import RLAlgorithm
 import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
@@ -22,6 +23,8 @@ from agilerl.algorithms import (
     MADDPG,
     MATD3,
     PPO,
+    CPPO,
+    ICM_PPO,
     TD3,
     NeuralTS,
     NeuralUCB,
@@ -32,13 +35,158 @@ from agilerl.algorithms.core.registry import HyperparameterConfig
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules.base import EvolvableModule
-from agilerl.typing import GymSpaceType, PopulationType
+from agilerl.typing import GymEnvType, GymSpaceType, PopulationType
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, clone_llm
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 SupportedObservationSpace = Union[
     spaces.Box, spaces.Discrete, spaces.Dict, spaces.Tuple
 ]
+
+def collect_rollouts(
+    agent: RLAlgorithm,
+    env: GymEnvType,
+    n_steps: Optional[int] = None,
+    reset_on_collect: bool = True,
+) -> None:
+    """Collect rollouts from the environment and store them in the rollout buffer.
+
+    :param env: The environment to collect rollouts from
+    :type env: GymEnvType
+    :param n_steps: Number of steps to collect, defaults to self.learn_step
+    :type n_steps: int, optional
+    :param reset_on_collect: Whether to reset the buffer before collecting, defaults to True (unused when use_rollout_buffer=False)
+    :type reset_on_collect: bool, optional
+    :rtype: None
+    """
+    if agent.rollout_buffer is None:
+        raise RuntimeError("agent.rollout_buffer must be set when using collect_rollouts")
+    return _collect_rollouts_with_rollout_buffer(agent, env, n_steps, reset_on_collect)
+
+def _collect_rollouts_with_rollout_buffer(
+    agent: RLAlgorithm,
+    env: GymEnvType,
+    n_steps: Optional[int] = None,
+    reset_on_collect: bool = True,
+) -> None:
+    """Collect rollouts from the environment and store them in the rollout buffer.
+
+    :param env: The environment to collect rollouts from
+    :type env: GymEnvType
+    :param n_steps: Number of steps to collect, defaults to self.learn_step
+    :type n_steps: int, optional
+    :param reset_on_collect: Whether to reset the buffer before collecting, defaults to True
+    :type reset_on_collect: bool, optional
+    :rtype: None
+    """
+    n_steps = n_steps or agent.learn_step
+    
+    if reset_on_collect:
+        # Initial reset
+        obs, info = env.reset()
+    
+        # agent.hidden_state stores the current hidden state for the actor across steps
+        agent.hidden_state = agent.get_initial_hidden_state(agent.num_envs) if agent.recurrent else None
+    else: 
+        obs, info = agent.last_obs
+
+    agent.rollout_buffer.reset()
+    current_hidden_state_for_actor = agent.hidden_state
+
+    for _ in range(n_steps):
+        # current_hidden_state_for_buffer is the hidden state *before* the current step, used for storage
+        current_hidden_state_for_buffer = current_hidden_state_for_actor
+        
+        # Get action
+        if agent.recurrent:
+            # agent.get_action expects hidden_state like {key: (layers, batch_num_envs, size)}
+            action, log_prob, _, value, next_hidden_for_actor = agent.get_action(
+                obs,
+                action_mask=info.get("action_mask", None),
+                hidden_state=current_hidden_state_for_actor,
+            )
+            agent.hidden_state = next_hidden_for_actor # Update main hidden_state cache for actor
+        else:
+            action, log_prob, _, value = agent.get_action(
+                obs, action_mask=info.get("action_mask", None)
+            )
+            # No hidden state to store or update if not recurrent
+
+        # Execute action
+        next_obs, reward, done, truncated, next_info = env.step(action)
+
+        if isinstance(done, list) or isinstance(done, np.ndarray):
+            is_terminal = (
+                np.logical_or(done, truncated)
+                if isinstance(truncated, (list, np.ndarray))
+                else done
+            )
+        else:
+            is_terminal = done or truncated
+
+        # Ensure shapes are correct for rollout buffer
+        reward_np = np.atleast_1d(reward)
+        is_terminal_np = np.atleast_1d(is_terminal)
+        value_np = np.atleast_1d(value)
+        log_prob_np = np.atleast_1d(log_prob)
+
+        agent.rollout_buffer.add(
+            obs=obs,
+            action=action,
+            reward=reward_np,
+            done=is_terminal_np,
+            value=value_np,
+            log_prob=log_prob_np,
+            next_obs=next_obs,
+            hidden_state=current_hidden_state_for_buffer, # Store hidden state from *before* this step
+        )
+
+        if agent.recurrent and np.any(is_terminal_np):
+            finished_mask = is_terminal_np.astype(bool)
+            initial_hidden_states_for_reset = agent.get_initial_hidden_state(agent.num_envs)
+
+            if isinstance(agent.hidden_state, dict):
+                for key in agent.hidden_state:
+                    reset_states_for_key = initial_hidden_states_for_reset[key][:, finished_mask, :]
+                    if reset_states_for_key.shape[1] > 0:
+                        agent.hidden_state[key][:, finished_mask, :] = reset_states_for_key
+        
+        if agent.recurrent:
+            current_hidden_state_for_actor = agent.hidden_state # Update for next actor call
+
+        
+        obs = next_obs
+        info = next_info
+
+    if reset_on_collect:
+        agent.last_obs = (next_obs, info) # Store the last observation for the next step
+
+    with torch.no_grad():
+        if agent.recurrent:
+            _, _, _, last_value, _ = agent._get_action_and_values(
+                agent.preprocess_observation(obs),
+                hidden_state=agent.hidden_state,  # Use the latest hidden state for last_value
+            )
+        else:
+            _, _, _, last_value, _ = agent._get_action_and_values(
+                agent.preprocess_observation(obs)
+            )
+
+        last_value = last_value.cpu().numpy()  # Shape: (num_envs,)
+        last_done = np.atleast_1d(done)      # Shape: (num_envs,)
+
+    agent.rollout_buffer.compute_returns_and_advantages(
+        last_value=last_value, last_done=last_done
+    )
+
+def _collect_rollouts_legacy(
+    agent: RLAlgorithm,
+    env: GymEnvType,
+    n_steps: Optional[int] = None,
+) -> None:
+    """Collect rollouts from the environment.
+    """
+    pass
 
 
 def make_vect_envs(
@@ -291,6 +439,66 @@ def create_population(
     elif algo == "PPO":
         for idx in range(population_size):
             agent = PPO(
+                observation_space=observation_space,
+                action_space=action_space,
+                index=idx,
+                hp_config=hp_config,
+                net_config=net_config,
+                batch_size=INIT_HP.get("BATCH_SIZE", 64),
+                lr=INIT_HP.get("LR", 0.0001),
+                learn_step=INIT_HP.get("LEARN_STEP", 2048),
+                gamma=INIT_HP.get("GAMMA", 0.99),
+                gae_lambda=INIT_HP.get("GAE_LAMBDA", 0.95),
+                action_std_init=INIT_HP.get("ACTION_STD_INIT", 0.6),
+                clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
+                ent_coef=INIT_HP.get("ENT_COEF", 0.01),
+                vf_coef=INIT_HP.get("VF_COEF", 0.5),
+                max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 0.5),
+                target_kl=INIT_HP.get("TARGET_KL"),
+                update_epochs=INIT_HP.get("UPDATE_EPOCHS", 4),
+                share_encoders=INIT_HP.get("SHARE_ENCODERS", True),
+                actor_network=actor_network,
+                critic_network=critic_network,
+                device=device,
+                accelerator=accelerator,
+                num_envs=num_envs,
+                **algo_kwargs,
+            )
+            population.append(agent)
+
+    elif algo == "CPPO":
+        for idx in range(population_size):
+            agent = CPPO(
+                observation_space=observation_space,
+                action_space=action_space,
+                index=idx,
+                hp_config=hp_config,
+                net_config=net_config,
+                batch_size=INIT_HP.get("BATCH_SIZE", 64),
+                lr=INIT_HP.get("LR", 0.0001),
+                learn_step=INIT_HP.get("LEARN_STEP", 2048),
+                gamma=INIT_HP.get("GAMMA", 0.99),
+                gae_lambda=INIT_HP.get("GAE_LAMBDA", 0.95),
+                action_std_init=INIT_HP.get("ACTION_STD_INIT", 0.6),
+                clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
+                ent_coef=INIT_HP.get("ENT_COEF", 0.01),
+                vf_coef=INIT_HP.get("VF_COEF", 0.5),
+                max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 0.5),
+                target_kl=INIT_HP.get("TARGET_KL"),
+                update_epochs=INIT_HP.get("UPDATE_EPOCHS", 4),
+                share_encoders=INIT_HP.get("SHARE_ENCODERS", True),
+                actor_network=actor_network,
+                critic_network=critic_network,
+                device=device,
+                accelerator=accelerator,
+                num_envs=num_envs,
+                **algo_kwargs,
+            )
+            population.append(agent)
+
+    elif algo == "ICM_PPO":
+        for idx in range(population_size):
+            agent = ICM_PPO(
                 observation_space=observation_space,
                 action_space=action_space,
                 index=idx,
