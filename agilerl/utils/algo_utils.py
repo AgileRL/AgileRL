@@ -44,7 +44,9 @@ from agilerl.typing import (
 PreTrainedModelType = Union[PeftModel, PreTrainedModel]
 
 
-def share_encoder_parameters(policy: EvolvableNetwork, *others: EvolvableNetwork) -> None:
+def share_encoder_parameters(
+    policy: EvolvableNetwork, *others: EvolvableNetwork
+) -> None:
     """Shares the encoder parameters between the policy and any number of other networks.
 
     :param policy: The policy network whose encoder parameters will be used.
@@ -52,10 +54,8 @@ def share_encoder_parameters(policy: EvolvableNetwork, *others: EvolvableNetwork
     :param others: The other networks whose encoder parameters will be pinned to the policy.
     :type others: EvolvableNetwork
     """
-    assert isinstance(policy, EvolvableNetwork), "Policy must be an EvolvableNetwork"
-    assert all(
-        isinstance(other, EvolvableNetwork) for other in others
-    ), "All others must be EvolvableNetwork"
+    if not (hasattr(policy, "encoder") and all(hasattr(o, "encoder") for o in others)):
+        raise TypeError("Networks must have an 'encoder' attribute to share parameters")
 
     # detaching encoder parameters from computation graph reduces
     # memory overhead and speeds up training
