@@ -224,7 +224,7 @@ class HuggingFaceGym(gym.Env):
 
 def zip_adapters(
     peft_model: PeftModel, adapter1: str, adapter2: str
-) -> Generator[Tuple[Tuple[str, torch.Tensor], Tuple[str, torch.Tensor]]]:
+) -> Generator[Tuple[Tuple[str, torch.Tensor], Tuple[str, torch.Tensor]], None, None]:
     """Memory efficient way to zip two adapters together.
 
     :param peft_model: PeftModel to zip adapters from
