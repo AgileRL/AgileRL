@@ -178,6 +178,22 @@ class GRPO(LLMAlgorithm):
                 ] = batch_size
         else:
             self.batch_size = batch_size
+        if self.accelerator is not None:
+            if (
+                self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
+                    "optimizer", None
+                )
+                is not None
+            ):
+                optim_lr = self.accelerator.state.deepspeed_plugin.deepspeed_config[
+                    "optimizer"
+                ]["params"]["lr"]
+                if optim_lr is not None and optim_lr != lr:
+                    warnings.warn(
+                        "Argument 'lr' will be overwritten by the 'lr' value set in the deepspeed config."
+                    )
+                    lr = optim_lr
+
         self.lr = lr
         self.clip_coef = clip_coef
         self.update_epochs = update_epochs
@@ -290,7 +306,9 @@ class GRPO(LLMAlgorithm):
                 completion_ids, use_reference=True, eval_mode=True
             )
             old_log_probs = self._get_logprobs(
-                completion_ids, use_reference=False, eval_mode=False
+                completion_ids,
+                use_reference=False,
+                eval_mode=True,  # Should this be true or false, it was recently changed from True to false??
             )
         experiences = (
             completion_ids,
@@ -383,7 +401,6 @@ class GRPO(LLMAlgorithm):
             for adapter in adapter_name:
                 base_model.delete_adapter(adapter)
             base_model = base_model.model
-            assert False
 
         self.actor = (
             get_peft_model(base_model, self.lora_config, adapter_name="actor")
@@ -391,7 +408,7 @@ class GRPO(LLMAlgorithm):
             else base_model
         )
 
-        if self.use_separate_reference_adapter:
+        if self.use_separate_reference_adapter and add_adapters:
             self.actor.add_adapter(
                 adapter_name="reference", peft_config=self.lora_config
             )
@@ -600,20 +617,12 @@ class GRPO(LLMAlgorithm):
         assert (
             reference_update_tracker >= self.reference_update_tracker
         ), "Reference policy update tracker should be greater than or equal to the current reference policy update tracker."
-        print("SETTING REFERENCE POLICY")
         if reference_update_tracker > self.reference_update_tracker:
 
             if self.accelerator is not None:
                 self.accelerator.wait_for_everyone()
             # Merge adapter into base model
             # Update the reference update tracker
-            self.actor.disable_adapter()
-            self.actor.set_adapter("actor")
-            print(self.actor)
-            self.actor.disable_adapter()
-            self.actor.set_adapter("reference")
-            print(self.actor)
-            # assert False
             if self.use_separate_reference_adapter:
                 # Activate both adapters
                 # Iterate over the parame
@@ -626,7 +635,9 @@ class GRPO(LLMAlgorithm):
                         elif "actor" in name:
                             actor_param = param
                         else:
-                            pass
+                            raise ValueError(
+                                f"Only adapter names 'actor' and 'reference' are allowed, nether was found in {name}"
+                            )
                     if ref_param is not None and actor_param is not None:
                         ref_param.data.copy_(actor_param.data)
                         ref_param = None

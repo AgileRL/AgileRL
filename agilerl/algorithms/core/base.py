@@ -26,7 +26,6 @@ import torch
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
-from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 from gymnasium import spaces
 from numpy.typing import ArrayLike
 from tensordict import TensorDict
@@ -1665,8 +1664,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """
         if self.accelerator is not None:
             os.makedirs(path, exist_ok=True)
-            self.actor.set_adapter("actor")
             self.actor.save_checkpoint(path, tag="checkpoint")
+            self.actor.set_adapter("actor")
         else:
             warnings.warn(
                 "Distributed actor save not supported for non-distributed training."
@@ -1683,7 +1682,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             deepspeed_dirs = sorted(glob.glob(f"{path}/checkpoint"))
             try:
                 assert len(deepspeed_dirs) > 0
-                self.actor.set_adapter("actor")
                 load_path, _ = self.actor.load_checkpoint(
                     path,
                     tag="checkpoint",
@@ -1695,6 +1693,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     raise ValueError(
                         f"Deepspeed failed to resume from checkpoint {path}"
                     )
+                self.actor.set_adapter("actor")
 
             except Exception as e:
                 raise ValueError(
@@ -1736,11 +1735,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 if self.optimizer.optimizer_cls == torch.optim.AdamW
                 else self.optimizer
             )
-            print("Calling prepare")
             self.actor, self.optimizer, self.lr_scheduler = self.accelerator.prepare(
                 self.actor, opt, self.lr_scheduler
             )
-            print("Prepare done")
         else:
             self.actor = self.actor.to(self.device)
             self.actor.gradient_checkpointing_enable()
@@ -1808,7 +1805,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
             actor_state_dict = None
             if self.zero_stage is None or self.zero_stage < 2:
-                actor_state_dict = clone_tensors_for_torch_save(actor.state_dict())
+                actor_state_dict = (
+                    actor.state_dict()
+                )  # FIXME clone_tensors_for_torch_save(actor.state_dict())
 
             cloned_model = clone_llm(actor, state_dict=actor_state_dict)
 
