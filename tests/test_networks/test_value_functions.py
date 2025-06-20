@@ -1,21 +1,51 @@
+from dataclasses import asdict
+
+import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
 from gymnasium import spaces
 
-from agilerl.modules.base import EvolvableModule
-from agilerl.modules.cnn import EvolvableCNN
-from agilerl.modules.mlp import EvolvableMLP
-from agilerl.modules.multi_input import EvolvableMultiInput
+from agilerl.modules import (
+    EvolvableCNN,
+    EvolvableLSTM,
+    EvolvableMLP,
+    EvolvableModule,
+    EvolvableMultiInput,
+    EvolvableSimBa,
+)
+from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.value_networks import ValueNetwork
 from tests.helper_functions import (
     assert_close_dict,
+    assert_not_equal_state_dict,
+    assert_state_dicts_equal,
     check_equal_params_ind,
     generate_dict_or_tuple_space,
     generate_discrete_space,
     generate_random_box_space,
 )
+
+
+class EvoDummyRNG:
+    rng = np.random.default_rng(seed=42)
+
+    def choice(self, a, size=None, replace=True, p=None):
+        return 1
+
+    def integers(self, low=0, high=None):
+        return self.rng.integers(low, high)
+
+
+@pytest.fixture
+def head_config():
+    yield asdict(MlpNetConfig(hidden_size=[64, 64]))
+
+
+@pytest.fixture
+def dummy_rng():
+    yield EvoDummyRNG()
 
 
 @pytest.mark.parametrize(
@@ -44,6 +74,30 @@ def test_value_function_initialization(observation_space, encoder_type):
     assert "head_net" in evolvable_modules
 
 
+def test_value_function_initialization_recurrent():
+    observation_space = generate_random_box_space((32, 8))
+    network = ValueNetwork(observation_space, recurrent=True)
+
+    assert network.observation_space == observation_space
+    assert isinstance(network.encoder, EvolvableLSTM)
+
+    evolvable_modules = network.modules()
+    assert "encoder" in evolvable_modules
+    assert "head_net" in evolvable_modules
+
+
+def test_value_function_initialization_simba():
+    observation_space = generate_random_box_space((8,))
+    network = ValueNetwork(observation_space, simba=True)
+
+    assert network.observation_space == observation_space
+    assert isinstance(network.encoder, EvolvableSimBa)
+
+    evolvable_modules = network.modules()
+    assert "encoder" in evolvable_modules
+    assert "head_net" in evolvable_modules
+
+
 @pytest.mark.parametrize(
     "observation_space",
     [
@@ -53,8 +107,9 @@ def test_value_function_initialization(observation_space, encoder_type):
         (generate_random_box_space((3, 32, 32))),
     ],
 )
-def test_value_function_mutation_methods(observation_space):
-    network = ValueNetwork(observation_space)
+def test_value_function_mutation_methods(observation_space, head_config, dummy_rng):
+    network = ValueNetwork(observation_space, head_config=head_config)
+    network.rng = dummy_rng
 
     for method in network.mutation_methods:
         new_network = network.clone()
@@ -72,7 +127,16 @@ def test_value_function_mutation_methods(observation_space):
 
             assert mutated_attr == exec_method
 
-        check_equal_params_ind(network, new_network)
+        if new_network.last_mutation_attr is not None:
+            # Check that architecture has changed
+            assert_not_equal_state_dict(network.state_dict(), new_network.state_dict())
+
+            # Checks that parameters that are not mutated are the same
+            check_equal_params_ind(network, new_network)
+        else:
+            raise ValueError(
+                f"Last mutation attribute is None. Expected {method} to be applied."
+            )
 
 
 @pytest.mark.parametrize(
@@ -134,6 +198,6 @@ def test_value_function_clone(observation_space: spaces.Space):
 
     assert_close_dict(network.init_dict, clone.init_dict)
 
-    assert str(clone.state_dict()) == str(network.state_dict())
+    assert_state_dicts_equal(clone.state_dict(), network.state_dict())
     for key, param in clone.named_parameters():
         torch.testing.assert_close(param, original_net_dict[key])

@@ -26,3 +26,8 @@ Parameters
 
 .. autoclass:: agilerl.modules.base.ModuleDict
   :members:
+
+Mutation Decorator
+------------------
+
+.. autofunction:: agilerl.modules.base.mutation

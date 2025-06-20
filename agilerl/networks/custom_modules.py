@@ -25,6 +25,8 @@ class DuelingDistributionalMLP(EvolvableMLP):
     :type support: torch.Tensor
     :param layer_norm: Normalization between layers, defaults to True
     :type layer_norm: bool, optional
+    :param output_layernorm: Normalization after the last layer, defaults to False
+    :type output_layernorm: bool, optional
     :param output_vanish: Vanish output by multiplying by 0.1, defaults to True
     :type output_vanish: bool, optional
     :param init_layers: Initialise network layers, defaults to True
@@ -59,6 +61,7 @@ class DuelingDistributionalMLP(EvolvableMLP):
         num_atoms: int,
         support: torch.Tensor,
         layer_norm: bool = True,
+        output_layernorm: bool = False,
         output_vanish: bool = True,
         init_layers: bool = False,
         noisy: bool = True,
@@ -84,6 +87,7 @@ class DuelingDistributionalMLP(EvolvableMLP):
             min_mlp_nodes,
             max_mlp_nodes,
             layer_norm=layer_norm,
+            output_layernorm=output_layernorm,
             output_vanish=output_vanish,
             init_layers=init_layers,
             noisy=noisy,

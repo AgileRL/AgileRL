@@ -143,7 +143,6 @@ def train_multi_agent_off_policy(
         )
 
     start_time = time.time()
-
     if wb:
         init_wandb(
             algo=algo,
@@ -224,7 +223,10 @@ def train_multi_agent_off_policy(
         pop_episode_scores = []
         pop_fps = []
         for agent_idx, agent in enumerate(pop):  # Loop through population
-            obs, info = env.reset()  # Reset environment at start of episode
+            agent.set_training_mode(True)
+
+            # Reset environment at start of episode
+            obs, info = env.reset()
             scores = (
                 np.zeros((num_envs, 1))
                 if sum_scores
@@ -244,19 +246,10 @@ def train_multi_agent_off_policy(
             start_time = time.time()
             for idx_step in range(evo_steps // num_envs):
                 # Get next action from agent
-                cont_actions, discrete_action = agent.get_action(
-                    obs=obs, training=True, infos=info
-                )
-                if agent.discrete_actions:
-                    action = discrete_action
-                else:
-                    action = cont_actions
+                action, raw_action = agent.get_action(obs=obs, infos=info)
 
                 if not is_vectorised:
                     action = {agent: act[0] for agent, act in action.items()}
-                    cont_actions = {
-                        agent: act[0] for agent, act in cont_actions.items()
-                    }
 
                 # Act in environment
                 next_obs, reward, termination, truncation, info = env.step(action)
@@ -284,13 +277,13 @@ def train_multi_agent_off_policy(
                         obs = {agent_id: np.squeeze(s) for agent_id, s in obs.items()}
 
                     next_obs = {
-                        agent_id: np.moveaxis(ns, [-1], [-3])
+                        agent_id: obs_channels_to_first(ns)
                         for agent_id, ns in next_obs.items()
                     }
 
                 memory.save_to_memory(
                     obs,
-                    cont_actions,
+                    raw_action,
                     reward,
                     next_obs,
                     termination,
@@ -369,6 +362,15 @@ def train_multi_agent_off_policy(
                         if not is_vectorised:
                             obs, info = env.reset()
 
+                            if swap_channels:
+                                expand_dims = not is_vectorised
+                                obs = {
+                                    agent_id: obs_channels_to_first(
+                                        s, expand_dims=expand_dims
+                                    )
+                                    for agent_id, s in obs.items()
+                                }
+
                 agent.reset_action_noise(reset_noise_indices)
 
             pbar.update(evo_steps // len(pop))
@@ -391,6 +393,7 @@ def train_multi_agent_off_policy(
                         pop_critic_loss[agent_idx][agent_id].append(
                             np.mean(critic_losses)
                         )
+
         # Evaluate population
         fitnesses = [
             agent.test(
@@ -442,6 +445,7 @@ def train_multi_agent_off_policy(
                     "train/mean_score/" + agent: np.nan
                     for idx, agent in enumerate(agent_ids)
                 }
+
             mean_fitnesses = np.mean(fitnesses, axis=0)
             max_fitnesses = np.max(fitnesses, axis=0)
             fitness_dict = {
@@ -556,9 +560,7 @@ def train_multi_agent_off_policy(
                 avg_score = {
                     agent: avg_score_arr[:, idx] for idx, agent in enumerate(agent_ids)
                 }
-                mean_scores = {
-                    agent: mean_scores[:, idx] for idx, agent in enumerate(agent_ids)
-                }
+
             agents = [agent.index for agent in pop]
             num_steps = [agent.steps[-1] for agent in pop]
             muts = [agent.mut for agent in pop]

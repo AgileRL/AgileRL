@@ -154,8 +154,6 @@ class ResidualBlock(nn.Module):
     :type in_channels: int
     :param kernel_size: Size of the convolutional kernel.
     :type kernel_size: int
-    :param stride: Stride of the convolution. If >1, applies downsampling.
-    :type stride: int
     :param scale_factor: Expansion factor for the hidden layer.
     :type scale_factor: int, optional (default=4)
     :param device: Device for computation.

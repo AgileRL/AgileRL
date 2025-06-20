@@ -17,3 +17,12 @@ Parameters
 
 .. autoclass:: agilerl.wrappers.agent.RSNorm
   :members:
+
+AsyncAgentsWrapper
+==================
+
+Parameters
+----------
+
+.. autoclass:: agilerl.wrappers.agent.AsyncAgentsWrapper
+  :members:

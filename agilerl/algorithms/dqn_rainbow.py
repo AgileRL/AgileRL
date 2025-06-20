@@ -6,9 +6,8 @@ import torch.optim as optim
 from gymnasium import spaces
 from torch.nn.utils import clip_grad_norm_
 
-from agilerl.algorithms.core import RLAlgorithm
+from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.q_networks import RainbowQNetwork
@@ -185,16 +184,14 @@ class RainbowDQN(RLAlgorithm):
             )
         else:
             net_config = {} if net_config is None else net_config
-            head_config: Optional[Dict[str, Any]] = net_config.get("head_config", None)
+            head_config: Optional[Dict[str, Any]] = net_config.get("head_config", {})
 
             head_config = MlpNetConfig(
-                hidden_size=(
-                    [64]
-                    if head_config is None
-                    else head_config.get("hidden_size", [64])
-                ),
+                hidden_size=head_config.get("hidden_size", [64]),
                 noise_std=self.noise_std,
                 output_activation="ReLU",
+                min_mlp_nodes=head_config.get("min_mlp_nodes", 16),
+                max_mlp_nodes=head_config.get("max_mlp_nodes", 500),
             )
             net_config["head_config"] = head_config
 
@@ -227,7 +224,11 @@ class RainbowDQN(RLAlgorithm):
 
         # Register network groups for mutations
         self.register_network_group(
-            NetworkGroup(eval=self.actor, shared=self.actor_target, policy=True)
+            NetworkGroup(
+                eval_network=self.actor,
+                shared_networks=self.actor_target,
+                policy=True,
+            )
         )
 
     def get_action(

@@ -3,16 +3,11 @@
 Deep Deterministic Policy Gradient (DDPG)
 =========================================
 
-DDPG is an extension of DQN to work in continuous action spaces by introducing an actor
+`DDPG <https://arxiv.org/abs/1509.02971>`_ is an extension of :ref:`DQN <dqn>` to work in continuous action spaces by introducing an actor
 network that outputs continuous actions.
 
-* DDPG paper: https://arxiv.org/abs/1509.02971
-
-Can I use it?
--------------
-
-Action Space
-^^^^^^^^^^^^
+Compatible Action Spaces
+------------------------
 
 .. list-table::
    :widths: 20 20 20 20
@@ -33,41 +28,33 @@ Example
 .. code-block:: python
 
   import gymnasium as gym
-  from agilerl.utils.algo_utils import obs_channels_to_first
-  from agilerl.utils.utils import make_vect_envs, observation_space_channels_to_first
+  from agilerl.utils.utils import make_vect_envs
   from agilerl.components.replay_buffer import ReplayBuffer
   from agilerl.algorithms.ddpg import DDPG
 
   # Create environment and Experience Replay Buffer
   num_envs = 1
   env = make_vect_envs('LunarLanderContinuous-v3', num_envs=num_envs)
-  observation_space = env.observation_space
-  action_space = env.action_space
-
-  channels_last = False # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-
-  if channels_last:
-      observation_space = observation_space_channels_to_first(observation_space)
+  observation_space = env.single_observation_space
+  action_space = env.single_action_space
 
   memory = ReplayBuffer(max_size=10000)
 
-  agent = DDPG(observation_space, action_space)   # Create DDPG agent
+  # Create DDPG agent
+  agent = DDPG(observation_space, action_space)
+  agent.set_training_mode(True)
 
-  state = env.reset()[0]  # Reset environment at start of episode
+  obs, info = env.reset()  # Reset environment at start of episode
   while True:
-      if channels_last:
-          state = obs_channels_to_first(state)
-
-      action = agent.get_action(state, training=True)    # Get next action from agent
-      next_state, reward, done, _, _ = env.step(action)   # Act in environment
+      action = agent.get_action(obs, training=True)    # Get next action from agent
+      next_obs, reward, done, _, _ = env.step(action)   # Act in environment
 
       # Save experience to replay buffer
-      next_state = obs_channels_to_first(next_state) if channels_last else next_state
       transition = Transition(
-          obs=state,
+          obs=obs,
           action=action,
           reward=reward,
-          next_obs=next_state,
+          next_obs=next_obs,
           done=done,
           batch_size=[num_envs]
       )
@@ -151,7 +138,7 @@ Evolutionary Hyperparameter Optimization
 AgileRL allows for efficient hyperparameter optimization during training to provide state-of-the-art results in a fraction of the time.
 For more information on how this is done, please refer to the :ref:`Evolutionary Hyperparameter Optimization <evo_hyperparam_opt>` documentation.
 
-Saving and loading agents
+Saving and Loading Agents
 -------------------------
 
 To save an agent, use the ``save_checkpoint`` method:

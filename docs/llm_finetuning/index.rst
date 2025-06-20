@@ -1,7 +1,7 @@
 .. _llm_finetuning:
 
-Large Language Model Finetuning
-===============================
+LLM Finetuning
+==============
 
 Reinforcement learning (RL) has emerged as a powerful technique for improving reasoning capabilities in Large Language Models.
 Models like DeepSeek-R1 and OpenAI's o1 exemplify this approach, demonstrating how RL can be used to develop LLMs with superior
@@ -20,16 +20,16 @@ develop *agency* and can be described as **agents**.
 
 .. _rl_for_reasoning:
 
-Reinforcement learning for reasoning
+Reinforcement Learning for Reasoning
 ------------------------------------
 
 The standard approach to creating instruction-following LLMs has traditionally relied on Supervised Fine-Tuning,
 where models are trained on high-quality human-generated examples. However, this method has limitations when it comes to complex
 reasoning tasks. What makes reinforcement learning particularly effective for enhancing reasoning is that it:
 
-#. **Rewards the process, not just the outcome:** By designing reward mechanisms that value step-by-step thinking and self-correction
-#. **Allows for exploration:** Models can try different reasoning approaches and learn which ones lead to better outcomes
-#. **Enables self-improvement cycles:** Creating a virtuous loop where better reasoning leads to better rewards
+  #. **Rewards the process, not just the outcome:** By designing reward mechanisms that value step-by-step thinking and self-correction
+  #. **Allows for exploration:** Models can try different reasoning approaches and learn which ones lead to better outcomes
+  #. **Enables self-improvement cycles:** Creating a virtuous loop where better reasoning leads to better rewards
 
 What makes this approach powerful is that the model discovers effective reasoning strategies on its own. It might learn to:
 
@@ -41,11 +41,13 @@ What makes this approach powerful is that the model discovers effective reasonin
 
 These are called *emergent behaviours*.
 
-The agent receives no explicit instructions on which specific reasoning techniques to employ.
-It learns through trial and error which approaches tend to produce correct answers.
-This allows the emergence of sophisticated reasoning patterns that weren't necessarily anticipated
-by the model's creators, similar to how AlphaGo discovered novel chess strategies through self-play.
+The agent receives no explicit instructions on which specific reasoning techniques to employ. It learns through trial and error which approaches
+tend to produce correct answers. This allows the emergence of sophisticated reasoning patterns that weren't necessarily anticipated
+by the model's creators, similar to how `AlphaGo <https://deepmind.google/research/projects/alphago/>`_ discovered novel chess strategies through self-play.
 
+This example demonstrates how to use the GRPO algorithm to finetune a LLM on a reasoning task.
 
-.. literalinclude:: ../../tutorials/LLM_Finetuning/grpo_reasoning.py
-    :language: python
+.. collapse:: Example
+
+  .. literalinclude:: ../../tutorials/LLM_Finetuning/grpo_reasoning.py
+      :language: python

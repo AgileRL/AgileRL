@@ -3,12 +3,10 @@
 Neural Contextual Bandits with UCB-based Exploration (NeuralUCB)
 ================================================================
 
-NeuralUCB utilizes the representational capabilities of deep neural networks and employs a neural network-based
+`NeuralUCB <https://arxiv.org/abs/1911.04462>`_ utilizes the representational capabilities of deep neural networks and employs a neural network-based
 random feature mapping to create an upper confidence bound (UCB) for reward, enabling efficient exploration.
 
 This is a contextual multi-armed :ref:`bandit algorithm<bandits>`, meaning it is suited to RL problems with just a single timestep.
-
-* Neural Bandits paper: https://arxiv.org/abs/1911.04462
 
 
 Example
@@ -126,7 +124,7 @@ Evolutionary Hyperparameter Optimization
 AgileRL allows for efficient hyperparameter optimization during training to provide state-of-the-art results in a fraction of the time.
 For more information on how this is done, please refer to the :ref:`Evolutionary Hyperparameter Optimization <evo_hyperparam_opt>` documentation.
 
-Saving and loading agents
+Saving and Loading Agents
 -------------------------
 
 To save an agent, use the ``save_checkpoint`` method:

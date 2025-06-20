@@ -9,9 +9,8 @@ from gymnasium import spaces
 from numpy.typing import ArrayLike
 from torch.nn.utils import clip_grad_norm_
 
-from agilerl.algorithms.core import RLAlgorithm
+from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.q_networks import QNetwork
 from agilerl.typing import GymEnvType, ObservationType
@@ -156,7 +155,11 @@ class CQN(RLAlgorithm):
 
         # Register policy for mutations
         self.register_network_group(
-            NetworkGroup(eval=self.actor, shared=self.actor_target, policy=True)
+            NetworkGroup(
+                eval_network=self.actor,
+                shared_networks=self.actor_target,
+                policy=True,
+            )
         )
 
     def get_action(
@@ -171,7 +174,7 @@ class CQN(RLAlgorithm):
 
         :param obs: State observation, or multiple observations in a batch
         :type obs: numpy.ndarray[float]
-        :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
+        :param epsilon: Probability of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: numpy.ndarray, optional

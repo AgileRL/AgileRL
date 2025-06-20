@@ -34,22 +34,6 @@ if __name__ == "__main__":
         continuous_actions=True, render_mode="rgb_array"
     )
     env.reset()
-    try:
-        state_dim = [env.observation_space(agent).n for agent in env.agents]
-        one_hot = True
-    except Exception:
-        state_dim = [env.observation_space(agent).shape for agent in env.agents]
-        one_hot = False
-    try:
-        action_dim = [env.action_space(agent).n for agent in env.agents]
-        discrete_actions = True
-        max_action = None
-        min_action = None
-    except Exception:
-        action_dim = [env.action_space(agent).shape[0] for agent in env.agents]
-        discrete_actions = False
-        max_action = [env.action_space(agent).high for agent in env.agents]
-        min_action = [env.action_space(agent).low for agent in env.agents]
 
     # Append number of agents and agent IDs to the initial hyperparameter dictionary
     n_agents = env.num_agents
@@ -82,13 +66,7 @@ if __name__ == "__main__":
         score = 0
         for _ in range(max_steps):
             # Get next action from agent
-            cont_actions, discrete_action = matd3.get_action(
-                state, training=False, infos=info
-            )
-            if matd3.discrete_actions:
-                action = discrete_action
-            else:
-                action = cont_actions
+            action, _ = matd3.get_action(state, training=False, infos=info)
 
             # Save the frame for this step and append to frames list
             frame = env.render()

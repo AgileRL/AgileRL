@@ -3,7 +3,7 @@
 Rainbow DQN
 ===========
 
-Rainbow DQN is an extension of DQN that integrates multiple improvements and techniques to achieve state-of-the-art performance.
+`Rainbow DQN <https://arxiv.org/abs/1710.02298>`_ is an extension of :ref:`DQN <dqn>` that integrates multiple improvements and techniques to achieve state-of-the-art performance.
 These improvements include:
 
 * Double DQN (DDQN): Addresses the overestimation bias of Q-values by using two networks to decouple the selection and evaluation of the action in the Q-learning target.
@@ -14,13 +14,8 @@ These improvements include:
 * Noisy Nets: Adds noise directly to the weights of the network, providing a way to explore the environment without the need for epsilon-greedy exploration.
 * Categorical DQN (C51): A specific form of distributional RL where the continuous range of possible cumulative future rewards is discretized into a fixed set of categories.
 
-Rainbow DQN paper: https://arxiv.org/abs/1710.02298
-
-Can I use it?
--------------
-
-Action Space
-^^^^^^^^^^^^
+Compatible Action Spaces
+------------------------
 
 .. list-table::
    :widths: 20 20 20 20
@@ -41,39 +36,33 @@ Example
 .. code-block:: python
 
   import gymnasium as gym
-  from agilerl.utils.algo_utils import obs_channels_to_first
-  from agilerl.utils.utils import make_vect_envs, observation_space_channels_to_first
+  from agilerl.utils.utils import make_vect_envs
   from agilerl.components.replay_buffer import ReplayBuffer
   from agilerl.algorithms.dqn_rainbow import RainbowDQN
 
   # Create environment and Experience Replay Buffer
   num_envs = 8
   env = make_vect_envs('LunarLander-v3', num_envs=num_envs)
-  observation_space = env.observation_space
-  action_space = env.action_space
-
-  channels_last = False # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-
-  if channels_last:
-      observation_space = observation_space_channels_to_first(observation_space)
+  observation_space = env.single_observation_space
+  action_space = env.single_action_space
 
   memory = ReplayBuffer(max_size=10000)
 
-  agent = RainbowDQN(observation_space, action_space)   # Create agent
+  # Create agent
+  agent = RainbowDQN(observation_space, action_space)
+  agent.set_training_mode(True)
 
-  state = env.reset()[0]  # Reset environment at start of episode
+  obs, info = env.reset()  # Reset environment at start of episode
   while True:
-      if channels_last:
-          state = obs_channels_to_first(state)
-      action = agent.get_action(state, epsilon)    # Get next action from agent
-      next_state, reward, done, _, _ = env.step(action)   # Act in environment
+      action = agent.get_action(obs, epsilon)    # Get next action from agent
+      next_obs, reward, done, _, _ = env.step(action)   # Act in environment
 
       # Save experience to replay buffer
       transition = Transition(
-          obs=state,
+          obs=obs,
           action=action,
           reward=reward,
-          next_obs=next_state,
+          next_obs=next_obs,
           done=done,
           batch_size=[num_envs]
       )
@@ -155,7 +144,7 @@ Evolutionary Hyperparameter Optimization
 AgileRL allows for efficient hyperparameter optimization during training to provide state-of-the-art results in a fraction of the time.
 For more information on how this is done, please refer to the :ref:`Evolutionary Hyperparameter Optimization <evo_hyperparam_opt>` documentation.
 
-Saving and loading agents
+Saving and Loading Agents
 -------------------------
 
 To save an agent, use the ``save_checkpoint`` method:

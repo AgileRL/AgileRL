@@ -3,7 +3,7 @@
 Group Relative Policy Optimization (GRPO)
 =========================================
 
-GRPO (Group Relative Policy Optimization) GRPO is an elegant simplification of :ref:`PPO<ppo>` (Proximal Policy Optimization)
+`GRPO <https://arxiv.org/pdf/2402.03300>`_ (Group Relative Policy Optimization) is an elegant simplification of :ref:`PPO<_ppo>` (Proximal Policy Optimization)
 that makes reinforcement learning more computationally efficient, especially for large language models.
 
 The two key innovations are:
@@ -14,8 +14,6 @@ The two key innovations are:
 These changes are particularly valuable for LLM training because they reduce computational overhead by removing the
 need for a separate critic model, provide more stable gradient updates in environments with sparse or noisy rewards,
 and they simplify implementation while maintaining or improving performance.
-
-* GRPO paper: https://arxiv.org/pdf/2402.03300
 
 
 Example
@@ -43,7 +41,7 @@ For more details on how to set up GRPO and use it for training, check out the :r
     reduce_memory_peak=True,
   )
 
-Saving and loading agents
+Saving and Loading Agents
 -------------------------
 
 To save an agent, use the :ref:`save_llm_checkpoint<save_llm_checkpoint>` function:

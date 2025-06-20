@@ -1,6 +1,5 @@
 from typing import Any, Dict, List, Optional
 
-import numpy as np
 import torch
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
@@ -9,7 +8,15 @@ from agilerl.utils.evolvable_networks import create_mlp
 
 
 class EvolvableMLP(EvolvableModule):
-    """The Evolvable Multi-layer Perceptron class.
+    """The Evolvable Multi-layer Perceptron class. Consists of a sequence of fully connected linear layers
+    with an optional activation function between each layer. Supports using layer normalization, using noisy
+    linear layers, and vanishing the values of the weights in the output layer. Allows for the following types
+    of architecture mutations during training:
+
+    * Adding or removing hidden layers
+    * Adding or removing nodes from hidden layers
+    * Changing the activation function between layers (e.g. ReLU to GELU)
+    * Changing the activation function for the output layer (e.g. ReLU to GELU)
 
     :param num_inputs: Input layer dimension
     :type num_inputs: int
@@ -47,6 +54,8 @@ class EvolvableMLP(EvolvableModule):
     :type device: str, optional
     :param name: Name of the network, defaults to 'mlp'
     :type name: str, optional
+    :param random_seed: Random seed to use for the network. Defaults to None.
+    :type random_seed: Optional[int]
     """
 
     def __init__(
@@ -58,7 +67,7 @@ class EvolvableMLP(EvolvableModule):
         output_activation: str = None,
         min_hidden_layers: int = 1,
         max_hidden_layers: int = 3,
-        min_mlp_nodes: int = 64,
+        min_mlp_nodes: int = 32,
         max_mlp_nodes: int = 500,
         layer_norm: bool = True,
         output_layernorm: bool = False,
@@ -69,8 +78,9 @@ class EvolvableMLP(EvolvableModule):
         new_gelu: bool = False,
         device: str = "cpu",
         name: str = "mlp",
+        random_seed: Optional[int] = None,
     ):
-        super().__init__(device)
+        super().__init__(device, random_seed)
 
         assert (
             num_inputs > 0
@@ -127,7 +137,11 @@ class EvolvableMLP(EvolvableModule):
 
     @property
     def net_config(self) -> Dict[str, Any]:
-        """Returns model configuration in dictionary."""
+        """Returns model configuration in dictionary.
+
+        :return: Model configuration
+        :rtype: Dict[str, Any]
+        """
         net_config = self.init_dict.copy()
         for attr in ["num_inputs", "num_outputs", "device", "name"]:
             if attr in net_config:
@@ -137,18 +151,32 @@ class EvolvableMLP(EvolvableModule):
 
     @property
     def activation(self) -> str:
-        """Returns activation function."""
+        """Returns activation function.
+
+        :return: Activation function
+        :rtype: str
+        """
         return self._activation
 
     @activation.setter
     def activation(self, activation: str) -> None:
-        """Set activation function."""
+        """Set activation function.
+
+        :param activation: Activation function to use.
+        :type activation: str
+        """
         self._activation = activation
 
     def init_weights_gaussian(
         self, std_coeff: float = 4, output_coeff: float = 4
     ) -> None:
-        """Initialise weights of neural network using Gaussian distribution."""
+        """Initialise weights of neural network using Gaussian distribution.
+
+        :param std_coeff: Standard deviation coefficient, defaults to 4
+        :type std_coeff: float, optional
+        :param output_coeff: Output layer standard deviation coefficient, defaults to 4
+        :type output_coeff: float, optional
+        """
         EvolvableModule.init_weights_gaussian(self.model, std_coeff=std_coeff)
 
         # Output layer is initialised with std_coeff=2
@@ -173,7 +201,11 @@ class EvolvableMLP(EvolvableModule):
         return self.model(x)
 
     def get_output_dense(self) -> torch.nn.Module:
-        """Returns output layer of neural network."""
+        """Returns output layer of neural network.
+
+        :return: Output layer of neural network
+        :rtype: torch.nn.Module
+        """
         return getattr(self.model, f"{self.name}_linear_layer_output")
 
     def change_activation(self, activation: str, output: bool = False) -> None:
@@ -191,9 +223,12 @@ class EvolvableMLP(EvolvableModule):
         self.recreate_network()
 
     @mutation(MutationType.LAYER)
-    def add_layer(self) -> None:
-        """Adds a hidden layer to neural network. Falls back on ``add_node()`` if
-        max hidden layers reached."""
+    def add_layer(self) -> Optional[Dict[str, int]]:
+        """Adds a hidden layer to neural network. Falls back on ``add_node()`` if ``max_hidden_layers`` reached.
+
+        :return: Dictionary containing the hidden layer and number of new nodes.
+        :rtype: Dict[str, int]
+        """
         # add layer to hyper params
         if len(self.hidden_size) < self.max_hidden_layers:  # HARD LIMIT
             self.hidden_size += [self.hidden_size[-1]]
@@ -201,9 +236,12 @@ class EvolvableMLP(EvolvableModule):
             return self.add_node()
 
     @mutation(MutationType.LAYER)
-    def remove_layer(self) -> None:
-        """Removes a hidden layer from neural network. Falls back on ``add_node()`` if
-        min hidden layers reached."""
+    def remove_layer(self) -> Optional[Dict[str, int]]:
+        """Removes a hidden layer from neural network. Falls back on ``add_node()`` if ``min_hidden_layers`` reached.
+
+        :return: Dictionary containing the hidden layer and number of new nodes.
+        :rtype: Dict[str, int]
+        """
         if len(self.hidden_size) > self.min_hidden_layers:  # HARD LIMIT
             self.hidden_size = self.hidden_size[:-1]
         else:
@@ -219,18 +257,20 @@ class EvolvableMLP(EvolvableModule):
         :type hidden_layer: int, optional
         :param numb_new_nodes: Number of nodes to add to hidden layer, defaults to None
         :type numb_new_nodes: int, optional
+
+        :return: Dictionary containing the hidden layer and number of new nodes.
+        :rtype: Dict[str, int]
         """
         if hidden_layer is None:
-            hidden_layer = np.random.randint(0, len(self.hidden_size), 1)[0]
+            hidden_layer = self.rng.integers(0, len(self.hidden_size))
         else:
             hidden_layer = min(hidden_layer, len(self.hidden_size) - 1)
 
         if numb_new_nodes is None:
-            numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
+            numb_new_nodes = self.rng.choice([16, 32, 64])
 
-        if (
-            self.hidden_size[hidden_layer] + numb_new_nodes <= self.max_mlp_nodes
-        ):  # HARD LIMIT
+        # HARD LIMIT
+        if self.hidden_size[hidden_layer] + numb_new_nodes <= self.max_mlp_nodes:
             self.hidden_size[hidden_layer] += numb_new_nodes
 
         return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
@@ -245,14 +285,17 @@ class EvolvableMLP(EvolvableModule):
         :type hidden_layer: int, optional
         :param numb_new_nodes: Number of nodes to remove from hidden layer, defaults to None
         :type numb_new_nodes: int, optional
+
+        :return: Dictionary containing the hidden layer and number of new nodes.
+        :rtype: Dict[str, int]
         """
         if hidden_layer is None:
-            hidden_layer = np.random.randint(0, len(self.hidden_size), 1)[0]
+            hidden_layer = self.rng.integers(0, len(self.hidden_size))
         else:
             hidden_layer = min(hidden_layer, len(self.hidden_size) - 1)
 
         if numb_new_nodes is None:
-            numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
+            numb_new_nodes = self.rng.choice([16, 32, 64])
 
         # HARD LIMIT
         if self.hidden_size[hidden_layer] - numb_new_nodes > self.min_mlp_nodes:
@@ -261,11 +304,7 @@ class EvolvableMLP(EvolvableModule):
         return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
 
     def recreate_network(self) -> None:
-        """Recreates neural networks.
-
-        :param shrink_params: Shrink parameters of neural networks, defaults to False
-        :type shrink_params: bool, optional
-        """
+        """Recreates the neural network while preserving the parameters of the old network."""
         model = create_mlp(
             input_size=self.num_inputs,
             output_size=self.num_outputs,

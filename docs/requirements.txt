@@ -2,3 +2,4 @@ furo
 sphinx-toolbox
 sphinx-notfound-page
 sphinxcontrib-googleanalytics
+sphinx-github-changelog

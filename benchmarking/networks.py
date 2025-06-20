@@ -394,7 +394,9 @@ class SimpleCritic(EvolvableModule):
         output_layer = self.get_output_dense()
         EvolvableModule.init_weights_gaussian(output_layer, std_coeff=output_coeff)
 
-    def forward(self, obs: ArrayOrTensor, actions: ArrayOrTensor) -> torch.Tensor:
+    def forward(
+        self, obs: Dict[str, ArrayOrTensor], actions: ArrayOrTensor
+    ) -> torch.Tensor:
         """Returns output of neural network.
 
         :param x: Neural network input
@@ -403,19 +405,22 @@ class SimpleCritic(EvolvableModule):
         :return: Neural network output
         :rtype: torch.Tensor
         """
-        if not isinstance(obs, torch.Tensor):
-            obs = torch.tensor(obs, dtype=torch.float32, device=self.device)
+        if not isinstance(obs, dict):
+            obs = {
+                k: torch.tensor(v, dtype=torch.float32, device=self.device)
+                for k, v in obs.items()
+            }
 
         if not isinstance(actions, torch.Tensor):
             actions = torch.tensor(actions, dtype=torch.float32, device=self.device)
 
-        if len(obs.shape) == 1:
-            obs = obs.unsqueeze(0)
+        if len(next(iter(obs.values())).shape) == 1:
+            obs = {k: v.unsqueeze(0) for k, v in obs.items()}
 
         if len(actions.shape) == 1:
             actions = actions.unsqueeze(0)
 
-        x = torch.cat([obs, actions], dim=1)
+        x = torch.cat([torch.cat(list(obs.values()), dim=1), actions], dim=1)
         return self.model(x)
 
     def get_output_dense(self) -> torch.nn.Module:

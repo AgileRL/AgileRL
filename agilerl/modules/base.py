@@ -1,11 +1,14 @@
 import copy
 import inspect
+from collections import OrderedDict
 from functools import wraps
 from typing import (
     Any,
     Callable,
     Dict,
+    Generic,
     Iterable,
+    Iterator,
     List,
     Optional,
     Tuple,
@@ -18,38 +21,19 @@ import numpy as np
 import torch
 import torch.nn as nn
 from numpy.random import Generator
+from torch._dynamo import OptimizedModule
 
 from agilerl.modules.custom_components import NoisyLinear
 from agilerl.protocols import MutationMethod, MutationType
-from agilerl.utils.algo_utils import recursive_check_module_attrs
 
 SelfEvolvableModule = TypeVar("SelfEvolvableModule", bound="EvolvableModule")
-
-
-def is_evolvable(attr: str, obj: Any) -> bool:
-    """Check if an attribute of a module is evolvable.
-
-    :param attr: The attribute name.
-    :type attr: str
-    :param obj: The attribute object.
-    :type obj: Any
-    :return: True if the attribute is evolvable, False otherwise.
-    :rtype: bool
-    """
-    if isinstance(obj, EvolvableModule):
-        return True
-
-    return (
-        recursive_check_module_attrs(obj, networks_only=True)
-        and not attr.startswith("_")
-        and not attr.endswith("_")
-    )
 
 
 def mutation(
     mutation_type: MutationType, **recreate_kwargs
 ) -> Callable[[Callable], MutationMethod]:
-    """Decorator to register a method as a mutation function of a specific type.
+    """Decorator to register a method as a mutation function of a specific type. This signals
+    that the module should be recreated after the function has been called on the module.
 
     :param mutation_type: The type of mutation function.
     :type mutation_type: MutationType
@@ -74,10 +58,10 @@ def mutation(
 
 class MutationContext:
     """Tracks nested mutation method calls. This allows us to automatically call a modules
-    `recreate_network` method after the outermost mutation method has been called. It handles
+    ``recreate_network()`` method after the outermost mutation method has been called. It handles
     cases where we fall back on another mutation method when a limit has been reached e.g. in
-    the EvolvableMLP `add_layer` method, after the maximum number of layers has been reached we
-    instead call `add_node`. In cases like this, we want to avoid redundant recreations of the
+    the EvolvableMLP ``add_layer()`` method, after the maximum number of layers has been reached we
+    instead call ``add_node()``. In cases like this, we want to avoid redundant recreations of the
     network.
 
     :param module: The evolvable module.
@@ -102,8 +86,12 @@ class MutationContext:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """
+        Exit the context manager. If the mutation depth is 0, then we have exited the outermost
+        mutation method and need to recreate the network. Otherwise, we have exited a nested
+        mutation method and do not need to do anything.
+        """
         self.module._mutation_depth -= 1
-
         if self.module._mutation_depth == 0:
             # Identify the mutation method that was actually applied
             final_mutation_attr = self._resolve_final_mutation_attr()
@@ -131,8 +119,8 @@ class MutationContext:
                     self.module.recreate_network(**rec_kwargs)
 
             # Apply mutation hook if specified
-            if self.module._mutation_hook is not None:
-                self.module._mutation_hook()
+            for hook in self.module._mutation_hooks:
+                hook()
 
     def _resolve_final_mutation_attr(self) -> Optional[str]:
         """Resolve the mutation method that was applied last. This is necessary during
@@ -228,7 +216,6 @@ def _get_filtered_methods(
     return _filtered
 
 
-# TODO: Think of a way that doesn't require the use of a metaclass
 class ModuleMeta(type):
     """Metaclass to parse the mutation methods of an EvolvableModule instance
     and its superclasses. Allows us to dynamically keep track of the last mutation
@@ -252,6 +239,10 @@ class ModuleMeta(type):
         for name, method in instance.get_mutation_methods().items():
             setattr(instance, name, _mutation_wrapper(instance, method, name))
 
+        # Use the same random number generator for all of the evolvable modules
+        for module in instance._evolvable_modules.values():
+            module._rng = instance._rng
+
         return instance
 
 
@@ -260,17 +251,26 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
 
     :param device: The device to run the network on.
     :type device: str
+    :param random_seed: The random seed to use for the network.
+    :type random_seed: Optional[int]
     """
 
-    def __init__(self, device: str) -> None:
+    _evolvable_modules: Dict[str, Optional["EvolvableModule"]]
+    _mutation_hooks: List[Callable]
+
+    def __init__(self, device: str, random_seed: Optional[int] = None) -> None:
         nn.Module.__init__(self)
         self._init_surface_methods()
         self.device = device
+        self.random_seed = random_seed
 
+        self._rng = np.random.default_rng(seed=random_seed)
         self._last_mutation = None
         self._last_mutation_attr = None
-        self._mutation_hook = None
         self._mutation_depth = 0
+
+        super().__setattr__("_evolvable_modules", {})
+        super().__setattr__("_mutation_hooks", [])
 
     @property
     def init_dict(self) -> Dict[str, Any]:
@@ -312,6 +312,16 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
     def last_mutation_attr(self, value: str) -> None:
         self._last_mutation_attr = value
 
+    @property
+    def rng(self) -> np.random.Generator:
+        return self._rng
+
+    @rng.setter
+    def rng(self, value: np.random.Generator) -> None:
+        self._rng = value
+        for module in self.modules().values():
+            module.rng = value
+
     def recreate_network(self, **kwargs) -> None:
         """Recreate the network after a mutation has been applied. If the mutation methods of
         an `EvolvableModule` are only attributed to its nested modules, then the `recreate_network`
@@ -345,10 +355,11 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
 
         try:
             return {k: getattr(self, k) for k in constructor_args.keys()}
-        except AttributeError:
+        except AttributeError as e:
             raise AttributeError(
                 "Custom EvolvableModule objects must be explicit about their "
-                "constructor arguments (i.e. don't use *args and **kwargs)"
+                "constructor arguments (i.e. don't use *args and **kwargs). Error: "
+                + str(e)
             )
 
     def change_activation(self, activation: str, output: bool) -> None:
@@ -374,23 +385,30 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         """
         # Add mutation methods to the network
         if isinstance(value, EvolvableModule):
-            if name in self.__dict__["_modules"]:
-                self.filter_mutation_methods(name)
+            if name not in self._evolvable_modules:
+                layer_fns = []
+                node_fns = []
+                for mut_name, method in value.get_mutation_methods().items():
+                    method_name = ".".join([name, mut_name])
+                    method_type = method._mutation_type
+                    if method_type == MutationType.LAYER:
+                        layer_fns.append(method_name)
+                    elif method_type == MutationType.NODE:
+                        node_fns.append(method_name)
+                    else:
+                        raise ValueError(f"Invalid mutation type: {method_type}")
 
-            layer_fns = []
-            node_fns = []
-            for mut_name, method in value.get_mutation_methods().items():
-                method_name = ".".join([name, mut_name])
-                method_type = method._mutation_type
-                if method_type == MutationType.LAYER:
-                    layer_fns.append(method_name)
-                elif method_type == MutationType.NODE:
-                    node_fns.append(method_name)
-                else:
-                    raise ValueError(f"Invalid mutation type: {method_type}")
+                self._layer_mutation_methods += layer_fns
+                self._node_mutation_methods += node_fns
+            else:
+                value._layer_mutation_methods = self._evolvable_modules[
+                    name
+                ]._layer_mutation_methods
+                value._node_mutation_methods = self._evolvable_modules[
+                    name
+                ]._node_mutation_methods
 
-            self._layer_mutation_methods += layer_fns
-            self._node_mutation_methods += node_fns
+            self._evolvable_modules[name] = value
 
         super().__setattr__(name, value)
 
@@ -522,7 +540,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
 
     def reset_noise(self) -> None:
         """Reset noise for all NoisyLinear layers in the network."""
-        for layer in super().modules():
+        for layer in self.torch_modules():
             if isinstance(layer, NoisyLinear):
                 layer.reset_noise()
 
@@ -533,7 +551,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         :param hook: The hook function.
         :type hook: Callable
         """
-        self._mutation_hook = hook
+        self._mutation_hooks.append(hook)
 
     def disable_mutations(self, mut_type: Optional[MutationType] = None) -> None:
         """Disable all or some mutation methods from the evolvable module. It recursively
@@ -557,34 +575,21 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
             module.disable_mutations(mut_type)
 
     def modules(self) -> Dict[str, "EvolvableModule"]:
-        """Returns the attributes related to the evolvable modules in the algorithm.
-        Includes attributes that are either evolvable modules or a list of evolvable
-        modules, as well as the optimizers associated with the networks.
+        """Returns the nested evolvable modules in the network.
 
         .. warning:: This overrides the behavior of `nn.Module.modules()` and only returns
-        the evolvable modules. If you need the torch modules, use `torch_modules()` instead.
+            the evolvable modules. If you need the torch modules, use :meth:`torch_modules()` instead.
 
         :return: A dictionary of network attributes.
         :rtype: dict[str, Any]
         """
-        # Inspect evolvable
-        evolvable_attrs = {}
-        for attr in dir(self):
-            obj = getattr(self, attr)
-            if is_evolvable(attr, obj):
-                if isinstance(obj, ModuleDict):
-                    evolvable_attrs.update(obj.modules())
-                else:
-                    evolvable_attrs[attr] = obj
+        return self._evolvable_modules
 
-        return evolvable_attrs
+    def torch_modules(self) -> Iterator[nn.Module]:
+        """Returns an iterator over the `nn.Module`s in the network.
 
-    def torch_modules(self) -> Dict[str, nn.Module]:
-        """Returns the attributes related to the torch modules in the algorithm.
-        Includes attributes that are either torch modules or a list of torch modules.
-
-        :return: A dictionary of network attributes.
-        :rtype: dict[str, Any]
+        :return: An iterator over the `nn.Module`s in the network.
+        :rtype: Iterator[nn.Module]
         """
         return super().modules()
 
@@ -676,8 +681,17 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         :rtype: SelfEvolvableModule
         """
         clone = self.__class__(**copy.deepcopy(self.get_init_dict()))
+        clone.rng = self.rng
+
         clone._layer_mutation_methods = self._layer_mutation_methods
         clone._node_mutation_methods = self._node_mutation_methods
+        for name, module in clone._evolvable_modules.items():
+            module._layer_mutation_methods = self._evolvable_modules[
+                name
+            ]._layer_mutation_methods
+            module._node_mutation_methods = self._evolvable_modules[
+                name
+            ]._node_mutation_methods
 
         # Load state dict if the network has been trained
         try:
@@ -693,24 +707,33 @@ class EvolvableWrapper(EvolvableModule):
     additional functionality to an `EvolvableModule` while maintaining its mutation methods
     at the top-level.
 
-    :param module: The evolvable module.
+    :param module: The evolvable module to wrap.
     :type module: EvolvableModule
     """
 
     def __init__(self, module: EvolvableModule) -> None:
-        super().__init__(module.device)
+        super().__init__(module.device, module.random_seed)
 
         self._init_wrapped_methods(module, MutationType.LAYER)
         self._init_wrapped_methods(module, MutationType.NODE)
 
-        # Disable mutations in the wrapped module since these are
-        # now handled by the wrapper
-        module.disable_mutations()
+        # Disable mutations in the wrapped module since these are now assigned to the wrapper
         self._wrapped = module
+        self.filter_mutation_methods("_wrapped")
 
     @property
     def wrapped(self) -> EvolvableModule:
         return self._wrapped
+
+    def change_activation(self, activation: str, output: bool) -> None:
+        """Change the activation function for the network.
+
+        :param activation: The activation function to use.
+        :type activation: str
+        :param output: Whether to set the activation function for the output layer.
+        :type output: bool
+        """
+        self._wrapped.change_activation(activation, output)
 
     def _init_wrapped_methods(
         self, module: EvolvableModule, mut_type: MutationType
@@ -737,32 +760,30 @@ class EvolvableWrapper(EvolvableModule):
             else:
                 raise AttributeError(f"Duplicate mutation method: {method}")
 
-    def modules(self) -> Dict[str, "EvolvableModule"]:
-        """Returns the attributes related to the evolvable modules in the algorithm.
-
-        :return: A dictionary of network attributes.
-        :rtype: dict[str, Any]
-        """
-        # Inspect evolvable
-        evolvable_attrs = {}
-        for attr in dir(self):
-            obj = getattr(self, attr)
-            if is_evolvable(attr, obj) and attr != "wrapped":
-                evolvable_attrs[attr] = obj
-
-        return evolvable_attrs
-
 
 ModuleType = TypeVar("ModuleType", bound=Union[EvolvableModule, nn.Module])
 
 
-class ModuleDict(EvolvableModule, nn.ModuleDict):
+class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleType]):
     """Analogous to ``nn.ModuleDict``, but allows for the inheritance of the
-    mutation methods of nested evolvable modules."""
+    mutation methods of nested evolvable modules.
+
+    :param modules: The modules to add to the dictionary.
+    :type modules: Optional[Dict[str, EvolvableModule]]
+    :param device: The device to use for the modules.
+    :type device: str
+    """
+
+    def __init__(
+        self, modules: Optional[Dict[str, EvolvableModule]] = None, device: str = "cpu"
+    ) -> None:
+        super().__init__(device)
+        if modules is not None:
+            for name, module in modules.items():
+                self.add_module(name, module)
 
     @property
     def layer_mutation_methods(self) -> List[str]:
-
         return [
             f"{name}.{method}"
             for name, module in self.modules().items()
@@ -777,6 +798,13 @@ class ModuleDict(EvolvableModule, nn.ModuleDict):
             for method in module.node_mutation_methods
         ]
 
+    @property
+    def activation(self) -> Optional[str]:
+        nested_activations = [module.activation for module in self.modules().values()]
+        if len(set(nested_activations)) == 1:
+            return nested_activations[0]
+        return None
+
     def __getitem__(self, key: str) -> ModuleType:
         return super().__getitem__(key)
 
@@ -786,19 +814,44 @@ class ModuleDict(EvolvableModule, nn.ModuleDict):
     def items(self) -> Iterable[Tuple[str, ModuleType]]:
         return super().items()
 
+    def change_activation(self, activation: str, output: bool) -> None:
+        """Change the activation function for the network.
+
+        :param activation: The activation function to use.
+        :type activation: str
+        :param output: Whether to set the activation function for the output layer.
+        :type output: bool
+        """
+        for module in self.modules().values():
+            module.change_activation(activation, output)
+
+    def filter_mutation_methods(self, remove: str) -> None:
+        """Filter out mutation methods that contain the specified string in their name.
+
+        param remove: The string to remove.
+        type remove: str
+        """
+        for module in self.modules().values():
+            module.filter_mutation_methods(remove)
+
     def modules(self) -> Dict[str, EvolvableModule]:
-        """Returns the attributes related to the evolvable modules in the algorithm.
-        Includes attributes that are either evolvable modules or a list of evolvable
-        modules, as well as the optimizers associated with the networks.
+        """Returns the nested evolvable modules in the network.
+
+        .. warning:: This overrides the behavior of `nn.Module.modules()` and only returns
+            the evolvable modules. If you need the torch modules, use :meth:`torch_modules()` instead.
 
         :return: A dictionary of network attributes.
         :rtype: dict[str, Any]
         """
-        return {
-            name: module
-            for name, module in self.items()
-            if isinstance(module, EvolvableModule)
-        }
+        evo_modules = OrderedDict()
+        for name, module in self.items():
+            orig_mod = (
+                module._orig_mod if isinstance(module, OptimizedModule) else module
+            )
+            if isinstance(orig_mod, EvolvableModule):
+                evo_modules[name] = module
+
+        return evo_modules
 
     def get_mutation_methods(self) -> Dict[str, MutationMethod]:
         """Get all mutation methods for the network.
@@ -816,3 +869,11 @@ class ModuleDict(EvolvableModule, nn.ModuleDict):
             return getattr(self[key], method)
 
         return {name: get_method_from_name(name) for name in self.mutation_methods}
+
+    def clone(self) -> "ModuleDict":
+        """Returns clone of an `ModuleDict` with identical parameters.
+
+        :return: A clone of the `ModuleDict`.
+        :rtype: ModuleDict
+        """
+        return ModuleDict({key: module.clone() for key, module in self.items()})

@@ -7,7 +7,7 @@ import torch.nn as nn
 
 from agilerl.modules.custom_components import NoisyLinear
 from agilerl.wrappers.make_evolvable import MakeEvolvable
-from tests.helper_functions import unpack_network
+from tests.helper_functions import assert_state_dicts_equal, unpack_network
 
 
 @pytest.fixture(autouse=True)
@@ -1051,4 +1051,4 @@ def test_clone_method_with_equal_state_dicts(
         )
     clone_network = evolvable_network.clone()
     assert isinstance(clone_network, MakeEvolvable)
-    assert str(evolvable_network.state_dict()) == str(clone_network.state_dict())
+    assert_state_dicts_equal(evolvable_network.state_dict(), clone_network.state_dict())

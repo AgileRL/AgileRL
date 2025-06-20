@@ -3,11 +3,14 @@ import torch
 import torch.nn as nn
 import yaml
 
-from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_offline import train_offline
+from agilerl.utils.evolvable_networks import (
+    get_input_size_from_space,
+    get_output_size_from_space,
+)
 from agilerl.utils.utils import (
     create_population,
     make_vect_envs,
@@ -60,8 +63,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     if INIT_HP["CHANNELS_LAST"]:
         observation_space = observation_space_channels_to_first(observation_space)
 
-    state_dim = RLAlgorithm.get_state_dim(observation_space)
-    action_dim = RLAlgorithm.get_action_dim(action_space)
+    state_dim = get_input_size_from_space(observation_space)
+    action_dim = get_output_size_from_space(action_space)
 
     actor = BasicNetActor(state_dim[0], [32, 32], action_dim)
     actor_network = MakeEvolvable(

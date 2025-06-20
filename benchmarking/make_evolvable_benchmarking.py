@@ -6,7 +6,6 @@ from gymnasium.wrappers.atari_preprocessing import AtariPreprocessing
 from pettingzoo.atari import pong_v3
 from pettingzoo.mpe import simple_speaker_listener_v4
 
-from agilerl.algorithms.core.base import MultiAgentRLAlgorithm, RLAlgorithm
 from agilerl.components import MultiAgentReplayBuffer, ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -14,6 +13,10 @@ from agilerl.modules.mlp import EvolvableMLP
 from agilerl.training.train_multi_agent_off_policy import train_multi_agent_off_policy
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_on_policy import train_on_policy
+from agilerl.utils.evolvable_networks import (
+    get_input_size_from_space,
+    get_output_size_from_space,
+)
 from agilerl.utils.utils import (
     create_population,
     make_vect_envs,
@@ -55,8 +58,8 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
         else:
             NET_CONFIG = None
 
-            action_dims = RLAlgorithm.get_action_dim(action_space)
-            state_dims = RLAlgorithm.get_state_dim(observation_space)
+            action_dims = get_output_size_from_space(action_space)
+            state_dims = get_input_size_from_space(observation_space)
             if atari:
                 # DQN
                 network_actor = SimpleCNNActor(action_dims)
@@ -202,8 +205,8 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
         INIT_HP["AGENT_IDS"] = [agent_id for agent_id in env.agents]
         if not atari:
             # MLPs
-            state_dims = MultiAgentRLAlgorithm.get_state_dim(observation_space)
-            action_dims = MultiAgentRLAlgorithm.get_action_dim(action_space)
+            state_dims = get_input_size_from_space(observation_space)
+            action_dims = get_output_size_from_space(action_space)
             total_state_dims = sum(state_dim[0] for state_dim in state_dims)
             total_actions = sum(action_dims)
             actor = [

@@ -10,33 +10,32 @@ import torch.optim as optim
 from gymnasium import spaces
 from torch.nn.utils import clip_grad_norm_
 
-from agilerl.algorithms.core import MultiAgentRLAlgorithm
+from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.modules.base import EvolvableModule
+from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import StochasticActor
 from agilerl.networks.value_networks import ValueNetwork
 from agilerl.typing import (
     ArrayDict,
     ExperiencesType,
-    GymEnvType,
     InfosDict,
+    MultiAgentModule,
+    NetConfigType,
     ObservationType,
-    TensorDict,
+    PzEnvType,
+    StandardTensorDict,
     TorchObsType,
 )
 from agilerl.utils.algo_utils import (
     concatenate_experiences_into_batches,
     concatenate_tensors,
-    contains_image_space,
     get_experiences_samples,
     get_vect_dim,
     key_in_nested_dict,
     make_safe_deepcopies,
     obs_channels_to_first,
     preprocess_observation,
-    stack_experiences,
     vectorize_experiences_by_agent,
 )
 
@@ -47,11 +46,11 @@ class IPPO(MultiAgentRLAlgorithm):
     Paper: https://arxiv.org/pdf/2011.09533
 
     :param observation_spaces: Observation space for each agent
-    :type observation_spaces: list[spaces.Space]
+    :type observation_spaces: Union[list[spaces.Space], spaces.Dict]
     :param action_spaces: Action space for each agent
-    :type action_spaces: list[spaces.Space]
+    :type action_spaces: Union[list[spaces.Space], spaces.Dict]
     :param agent_ids: Agent ID for each agent
-    :type agent_ids: list[str]
+    :type agent_ids: Optional[list[str]], optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
     :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
@@ -87,9 +86,9 @@ class IPPO(MultiAgentRLAlgorithm):
     :param update_epochs: Number of policy update epochs, defaults to 4
     :type update_epochs: int, optional
     :param actor_networks: List of custom actor networks, defaults to None
-    :type actor_networks: list[nn.Module], optional
+    :type actor_networks: agilerl.modules.ModuleDict, optional
     :param critic_networks: List of custom critic networks, defaults to None
-    :type critic_networks: list[nn.Module], optional
+    :type critic_networks: agilerl.modules.ModuleDict, optional
     :param action_batch_size: Size of batches to use when getting an action for stepping in the environment.
         Defaults to None, whereby the entire observation is used at once.
     :type action_batch_size: int, optional
@@ -103,14 +102,14 @@ class IPPO(MultiAgentRLAlgorithm):
     :type wrap: bool, optional
     """
 
-    actors: List[Union[nn.Module, StochasticActor]]
-    critics: List[Union[nn.Module, ValueNetwork]]
+    actors: MultiAgentModule[StochasticActor]
+    critics: MultiAgentModule[ValueNetwork]
 
     def __init__(
         self,
-        observation_spaces: List[spaces.Space],
-        action_spaces: List[spaces.Space],
-        agent_ids: List[str],
+        observation_spaces: Union[List[spaces.Space], spaces.Dict],
+        action_spaces: Union[List[spaces.Space], spaces.Dict],
+        agent_ids: Optional[List[str]] = None,
         index: int = 0,
         hp_config: Optional[HyperparameterConfig] = None,
         net_config: Optional[Dict[str, Any]] = None,
@@ -128,8 +127,8 @@ class IPPO(MultiAgentRLAlgorithm):
         target_kl: Optional[float] = None,
         normalize_images: bool = True,
         update_epochs: int = 4,
-        actor_networks: Optional[list[EvolvableModule]] = None,
-        critic_networks: Optional[list[EvolvableModule]] = None,
+        actor_networks: Optional[ModuleDict] = None,
+        critic_networks: Optional[ModuleDict] = None,
         action_batch_size: Optional[int] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
@@ -139,8 +138,8 @@ class IPPO(MultiAgentRLAlgorithm):
         super().__init__(
             observation_spaces,
             action_spaces,
-            agent_ids,
             index=index,
+            agent_ids=agent_ids,
             hp_config=hp_config,
             device=device,
             accelerator=accelerator,
@@ -210,14 +209,6 @@ class IPPO(MultiAgentRLAlgorithm):
                 "Actor and critic network lists must both be supplied to use custom networks. Defaulting to net config."
             )
 
-        if self.max_action is not None and self.min_action is not None:
-            for x, n in zip(self.max_action, self.min_action):
-                x, n = x[0], n[0]
-                assert x > n, "Max action must be greater than min action."
-                assert x > 0, "Max action must be greater than zero."
-                assert n <= 0, "Min action must be less than or equal to zero."
-
-        self.is_image_space = contains_image_space(self.single_space)
         self.batch_size = batch_size
         self.lr = lr
         self.gamma = gamma
@@ -235,42 +226,63 @@ class IPPO(MultiAgentRLAlgorithm):
         self.action_batch_size = action_batch_size
 
         if actor_networks is not None and critic_networks is not None:
-            assert (
-                len({type(net) for net in actor_networks}) == 1
-            ), "'actor_networks' must all be the same type"
-            assert (
-                len({type(net) for net in critic_networks}) == 1
-            ), "'critic_networks' must all be the same type"
+            if isinstance(actor_networks, list):
+                assert len(actor_networks) == len(
+                    self.observation_space
+                ), "actor_networks must be a list of the same length as the number of homogeneous agents"
+                actor_networks = ModuleDict(
+                    {
+                        agent_id: actor_networks[idx]
+                        for idx, agent_id in enumerate(self.observation_space)
+                    }
+                )
+            if isinstance(critic_networks, list):
+                assert len(critic_networks) == len(
+                    self.observation_space
+                ), "critic_networks must be a list of the same length as the number of homogeneous agents"
 
-            if not all(isinstance(net, EvolvableModule) for net in actor_networks):
+                critic_networks = ModuleDict(
+                    {
+                        agent_id: critic_networks[idx]
+                        for idx, agent_id in enumerate(self.observation_space)
+                    }
+                )
+
+            actors_list = list(actor_networks.values())
+            critics_list = list(critic_networks.values())
+            if not all(isinstance(net, EvolvableModule) for net in actors_list):
                 raise TypeError(
                     "All actor networks must be instances of EvolvableModule"
                 )
-            if not all(isinstance(net, EvolvableModule) for net in critic_networks):
+            if not all(isinstance(net, EvolvableModule) for net in critics_list):
                 raise TypeError(
                     "All critic networks must be instances of EvolvableModule"
                 )
-            assert (
-                len(actor_networks) == self.n_unique_agents
-            ), f"Length of actor_networks ({len(actor_networks)}) does not match number of unique agents defined in environment ({self.n_unique_agents}: {self.shared_agent_ids})"
-            assert (
-                len(actor_networks) == self.n_unique_agents
-            ), f"Length of critic_networks ({len(actor_networks)}) does not match number of unique agents defined in environment ({self.n_unique_agents}: {self.shared_agent_ids})"
+
+            assert len(actor_networks) == self.n_unique_agents, (
+                f"Length of actor_networks ({len(actor_networks)}) does not match number of unique "
+                f"agents defined in environment ({self.n_unique_agents}: {list(self.observation_space.keys())})"
+            )
+            assert len(critic_networks) == self.n_unique_agents, (
+                f"Length of critic_networks ({len(critic_networks)}) does not match number of unique "
+                f"agents defined in environment ({self.n_unique_agents}: {list(self.observation_space.keys())})"
+            )
+
             self.actors, self.critics = make_safe_deepcopies(
                 actor_networks, critic_networks
             )
         else:
-            self.actors = []
-            self.critics = []
-            for obs_space, action_space in zip(
-                self.unique_observation_spaces.values(),
-                self.unique_action_spaces.values(),
-            ):
-                net_config = {} if net_config is None else net_config
-                critic_net_config = copy.deepcopy(net_config)
+            net_config: NetConfigType = self.build_net_config(net_config, flatten=False)
 
-                head_config = net_config.get("head_config", None)
+            self.actors = ModuleDict()
+            self.critics = ModuleDict()
+            for agent_id in self.observation_space:
+                obs_space = self.observation_space[agent_id]
+                action_space = self.action_space[agent_id]
 
+                agent_config = net_config[agent_id]
+                critic_net_config = copy.deepcopy(agent_config)
+                head_config = agent_config.get("head_config", None)
                 if head_config is not None:
                     critic_head_config = copy.deepcopy(head_config)
                     critic_head_config["output_activation"] = None
@@ -279,40 +291,41 @@ class IPPO(MultiAgentRLAlgorithm):
 
                 critic_net_config["head_config"] = critic_head_config
 
-                # Create one actor and critic per inhomogeneous (unique) type of agent,
-                # which will be used by all homogeneous (identical) agents of that type
+                # Create one actor and critic per group of homogeneous agents,
+                # which will be used by all homogeneous (identical) agents of that group
                 actor = StochasticActor(
                     obs_space,
                     action_space,
                     action_std_init=self.action_std_init,
                     device=self.device,
-                    **copy.deepcopy(net_config),
+                    **copy.deepcopy(agent_config),
                 )
 
-                # IPPO does not use a shared critic, so we don't
-                # need to pass n_agents to the ValueNetwork.
                 critic = ValueNetwork(
                     observation_space=obs_space,
                     device=self.device,
                     **copy.deepcopy(critic_net_config),
                 )
 
-                self.actors.append(actor)
-                self.critics.append(critic)
+                self.actors[agent_id] = actor
+                self.critics[agent_id] = critic
 
         # Optimizers
         self.actor_optimizers = OptimizerWrapper(
-            optim.Adam, networks=self.actors, lr=self.lr, multiagent=True
+            optim.Adam, networks=self.actors, lr=self.lr
         )
         self.critic_optimizers = OptimizerWrapper(
-            optim.Adam, networks=self.critics, lr=self.lr, multiagent=True
+            optim.Adam, networks=self.critics, lr=self.lr
         )
 
         if self.accelerator is not None and wrap:
             self.wrap_models()
         elif self.torch_compiler:
             if (
-                any(actor.output_activation == "GumbelSoftmax" for actor in self.actors)
+                any(
+                    actor.output_activation == "GumbelSoftmax"
+                    for actor in self.actors.values()
+                )
                 and self.torch_compiler != "default"
             ):
                 warnings.warn(
@@ -328,77 +341,15 @@ class IPPO(MultiAgentRLAlgorithm):
         # Register network groups for mutations
         self.register_network_group(
             NetworkGroup(
-                eval=self.actors,
+                eval_network=self.actors,
                 policy=True,
-                multiagent=True,
             )
         )
-        self.register_network_group(NetworkGroup(eval=self.critics, multiagent=True))
-
-    def extract_action_masks(self, infos: InfosDict) -> ArrayDict:
-        """Extract action masks from info dictionary
-
-        :param infos: Info dict
-        :type infos: Dict[str, Dict[...]]
-
-        :return: Action masks
-        :rtype: Dict[str, np.ndarray]
-        """
-        # Get dict of form {"agent_id" : [1, 0, 0, 0]...} etc
-        action_masks = {homo_id: [] for homo_id in self.shared_agent_ids}
-        for agent_id, info in infos.items():
-            if isinstance(info, dict):
-                homo_id = self.get_homo_id(agent_id)
-                action_masks[homo_id].append(
-                    info.get("action_mask", None) if isinstance(info, dict) else None
-                )
-
-        # Check and stack masks
-        for homo_id in self.shared_agent_ids:
-            if None in action_masks[homo_id] or not action_masks[homo_id]:
-                assert all(mask is None for mask in action_masks[homo_id]), (
-                    f"If action masks are provided for any agents, they must be provided for all agents. "
-                    "Action masks can be defined as an array with the shape of the action space "
-                    f"({self.action_space}), where 1=legal and 0=illegal."
-                )
-
-                action_masks[homo_id] = None
-            else:
-                action_masks[homo_id] = torch.Tensor(action_masks[homo_id])
-
-        return action_masks
-
-    def preprocess_observation(
-        self, observation: ObservationType, homo_ids: List[str]
-    ) -> Dict[str, TorchObsType]:
-        """Preprocesses observations for forward pass through neural network.
-
-        :param observation: Observations of environment
-        :type observation: numpy.ndarray[float] or dict[str, numpy.ndarray[float]]
-
-        :return: Preprocessed observations
-        :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
-        """
-        preprocessed = {homo_id: [] for homo_id in homo_ids}
-        for agent_id, agent_obs in observation.items():
-            homo_id = self.get_homo_id(agent_id)
-            preprocessed[homo_id].append(
-                preprocess_observation(
-                    self.observation_space.get(agent_id),
-                    observation=agent_obs,
-                    device=self.device,
-                    normalize_images=self.normalize_images,
-                )
+        self.register_network_group(
+            NetworkGroup(
+                eval_network=self.critics,
             )
-
-        for homo_id in homo_ids:
-            # Case where we have asynchronous agents
-            if not preprocessed[homo_id]:
-                continue
-
-            preprocessed[homo_id] = concatenate_tensors(preprocessed[homo_id])
-
-        return preprocessed
+        )
 
     def process_infos(
         self, infos: Optional[InfosDict]
@@ -413,7 +364,7 @@ class IPPO(MultiAgentRLAlgorithm):
         """
         if infos is None:
             infos = {agent: {} for agent in self.agent_ids}
-            action_masks = {agent: None for agent in self.shared_agent_ids}
+            action_masks = {agent: None for agent in self.observation_space}
         else:
             action_masks = self.extract_action_masks(infos)
 
@@ -421,95 +372,194 @@ class IPPO(MultiAgentRLAlgorithm):
 
         return action_masks, env_defined_actions, agent_masks
 
+    def extract_action_masks(self, infos: InfosDict) -> ArrayDict:
+        """Extract action masks from info dictionary
+
+        :param infos: Info dict
+        :type infos: Dict[str, Dict[...]]
+
+        :return: Action masks
+        :rtype: Dict[str, np.ndarray]
+        """
+        # Get dict of form {"agent_id" : [1, 0, 0, 0]...} etc
+        action_masks = {group_id: [] for group_id in self.observation_space}
+        for agent_id, info in infos.items():
+            if isinstance(info, dict):
+                agent_id = (
+                    self.get_group_id(agent_id)
+                    if self.has_grouped_agents()
+                    else agent_id
+                )
+                action_masks[agent_id].append(
+                    info.get("action_mask", None) if isinstance(info, dict) else None
+                )
+
+        # Check and stack masks
+        for group_id in self.observation_space:
+            if None in action_masks[group_id] or not action_masks[group_id]:
+                assert all(mask is None for mask in action_masks[group_id]), (
+                    f"If action masks are provided for any agents, they must be provided for all agents. "
+                    "Action masks can be defined as an array with the shape of the action space "
+                    f"({self.action_space}), where 1=legal and 0=illegal."
+                )
+
+                action_masks[group_id] = None
+            else:
+                action_masks[group_id] = torch.Tensor(action_masks[group_id])
+
+        return action_masks
+
+    def preprocess_observation(
+        self, observation: ObservationType, group_ids: List[str]
+    ) -> Dict[str, TorchObsType]:
+        """Preprocesses observations for forward pass through neural network.
+
+        :param observation: Observations of environment
+        :type observation: numpy.ndarray[float] or dict[str, numpy.ndarray[float]]
+        :param group_ids: List of group IDs
+        :type group_ids: List[str]
+
+        :return: Preprocessed observations
+        :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
+        """
+        preprocessed = {group_id: [] for group_id in group_ids}
+        for agent_id, agent_obs in observation.items():
+            group_id = (
+                self.get_group_id(agent_id) if self.has_grouped_agents() else agent_id
+            )
+            preprocessed[group_id].append(
+                preprocess_observation(
+                    self.observation_space.get(group_id),
+                    observation=agent_obs,
+                    device=self.device,
+                    normalize_images=self.normalize_images,
+                )
+            )
+
+        # Need to concatenate / stack observations for each group of homogeneous agents
+        for group_id in group_ids:
+            if not preprocessed[group_id]:
+                continue
+
+            preprocessed[group_id] = concatenate_tensors(preprocessed[group_id])
+
+        return preprocessed
+
+    def _get_action_and_values(
+        self,
+        obs: TorchObsType,
+        actor: StochasticActor,
+        critic: ValueNetwork,
+        action_mask: Optional[torch.Tensor] = None,
+        batch_size: Optional[int] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Get actions and values for a batch of grouped observations.
+
+        :param obs: Observations of environment
+        :type obs: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
+        :param actor: Actor network
+        :type actor: StochasticActor
+        :param critic: Critic network
+        :type critic: ValueNetwork
+        :param action_mask: Action mask
+        :type action_mask: torch.Tensor, optional
+        :param batch_size: Batch size
+        :type batch_size: int, optional
+        :return: Tuple of actions, log probabilities, entropies, values
+        :rtype: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        """
+        # Process in batches
+        if batch_size is not None and obs.shape[0] > batch_size:
+            actions = []
+            log_probs = []
+            entropies = []
+            values = []
+
+            num_batches = int(np.ceil(obs.shape[0] / batch_size))
+            for batch_idx in range(num_batches):
+                start_idx = batch_idx * batch_size
+                end_idx = min((batch_idx + 1) * batch_size, obs.shape[0])
+
+                minibatch_indices = np.arange(start_idx, end_idx)
+                batch_obs = get_experiences_samples(minibatch_indices, obs)[0]
+                batch_mask = None
+                if action_mask is not None:
+                    batch_mask = action_mask[minibatch_indices]
+
+                batch_action, batch_log_prob, batch_entropy = actor(
+                    batch_obs, action_mask=batch_mask
+                )
+                batch_state_values = critic(batch_obs).squeeze(-1)
+
+                actions.append(batch_action)
+                log_probs.append(batch_log_prob)
+                entropies.append(batch_entropy)
+                values.append(batch_state_values)
+
+            # Concatenate results
+            action = torch.cat(actions)
+            log_prob = torch.cat(log_probs)
+            entropy = torch.cat(entropies)
+            values = torch.cat(values)
+        else:
+            with torch.no_grad():
+                action, log_prob, entropy = actor(obs, action_mask=action_mask)
+                values = critic(obs).squeeze(-1)
+
+        return action, log_prob, entropy, values
+
     def get_action(
         self,
         obs: Dict[str, ObservationType],
         infos: Optional[InfosDict] = None,
-    ) -> Tuple[ArrayDict, ArrayDict]:
+    ) -> Tuple[ArrayDict, ArrayDict, ArrayDict, ArrayDict]:
         """Returns the next action to take in the environment.
 
         :param obs: Environment observations: {'agent_0': state_dim_0, ..., 'agent_n': state_dim_n}
         :type obs: Dict[str, numpy.Array | Dict[str, numpy.Array] | Tuple[numpy.Array, ...]]
         :param infos: Information dictionary returned by env.step(actions)
         :type infos: Dict[str, Dict[str, ...]]
-        :return: Tuple of actions for each agent
-        :rtype: Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]
+        :return: Tuple of actions, log probabilities, entropies, values
+        :rtype: Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray], Dict[str, np.ndarray], Dict[str, np.ndarray]]
         """
         assert not key_in_nested_dict(
             obs, "action_mask"
         ), "AgileRL requires action masks to be defined in the information dictionary."
 
         action_masks, env_defined_actions, agent_masks = self.process_infos(infos)
-        vect_dim = get_vect_dim(obs, self.observation_space)
+        vect_dim = get_vect_dim(obs, self.possible_observation_spaces)
 
-        # Extract currently active agents
+        # Groups to extract actions from in observation
         unique_agents_ids = list(obs.keys())
-        homogenous_agents = defaultdict(list)
+        grouped_agents = defaultdict(list)
         for agent_id in unique_agents_ids:
-            homogenous_agents[self.get_homo_id(agent_id)].append(agent_id)
+            group_id = (
+                self.get_group_id(agent_id) if self.has_grouped_agents() else agent_id
+            )
+            grouped_agents[group_id].append(agent_id)
 
         # Preprocess observations
-        preprocessed = self.preprocess_observation(obs, list(homogenous_agents.keys()))
-
-        # Set all models to eval mode once before processing
-        for actor in self.actors:
-            actor.eval()
-        for critic in self.critics:
-            critic.eval()
+        preprocessed = self.preprocess_observation(obs, list(grouped_agents.keys()))
 
         action_dict = {}
         action_logprob_dict = {}
         dist_entropy_dict = {}
         state_values_dict = {}
+        for agent_id, obs in preprocessed.items():
+            action_mask = action_masks[agent_id]
+            actor = self.actors[agent_id]
+            critic = self.critics[agent_id]
 
-        batch_size = self.action_batch_size
-        for shared_id, obs in preprocessed.items():
-            agent_idx = self.shared_agent_ids.index(shared_id)
-            actor = self.actors[agent_idx]
-            critic = self.critics[agent_idx]
-            action_mask = action_masks[shared_id]
-
-            # Process in batches
-            if batch_size is not None and obs.shape[0] > batch_size:
-                actions = []
-                log_probs = []
-                entropies = []
-                values = []
-
-                num_batches = int(np.ceil(obs.shape[0] / batch_size))
-                for batch_idx in range(num_batches):
-                    start_idx = batch_idx * batch_size
-                    end_idx = min((batch_idx + 1) * batch_size, obs.shape[0])
-
-                    minibatch_indices = np.arange(start_idx, end_idx)
-                    batch_obs = get_experiences_samples(minibatch_indices, obs)[0]
-                    batch_mask = None
-                    if action_mask is not None:
-                        batch_mask = action_mask[minibatch_indices]
-
-                    with torch.no_grad():
-                        batch_action, batch_log_prob, batch_entropy = actor(
-                            batch_obs, action_mask=batch_mask
-                        )
-                        batch_state_values = critic(batch_obs).squeeze(-1)
-
-                    actions.append(batch_action)
-                    log_probs.append(batch_log_prob)
-                    entropies.append(batch_entropy)
-                    values.append(batch_state_values)
-
-                # Concatenate results
-                action = torch.cat(actions)
-                log_prob = torch.cat(log_probs)
-                entropy = torch.cat(entropies)
-                state_values = torch.cat(values)
-            else:
-                with torch.no_grad():
-                    action, log_prob, entropy = actor(obs, action_mask=action_mask)
-                    state_values = critic(obs).squeeze(-1)
+            with torch.no_grad():
+                action, log_prob, entropy, values = self._get_action_and_values(
+                    obs=obs,
+                    actor=actor,
+                    critic=critic,
+                    action_mask=action_mask,
+                    batch_size=self.action_batch_size,
+                )
 
             # Clip to action space during inference
-            agent_id = self.homogeneous_agents[shared_id][0]
             agent_space = self.action_space[agent_id]
             action = action.cpu().data.numpy()
             if not self.training and isinstance(agent_space, spaces.Box):
@@ -518,54 +568,36 @@ class IPPO(MultiAgentRLAlgorithm):
                 else:
                     action = np.clip(action, agent_space.low, agent_space.high)
 
-            action_dict[shared_id] = action
-            action_logprob_dict[shared_id] = log_prob.cpu().data.numpy()
-            dist_entropy_dict[shared_id] = entropy.cpu().data.numpy()
-            state_values_dict[shared_id] = state_values.cpu().data.numpy()
+            action_dict[agent_id] = action
+            action_logprob_dict[agent_id] = log_prob.cpu().data.numpy()
+            dist_entropy_dict[agent_id] = entropy.cpu().data.numpy()
+            state_values_dict[agent_id] = values.cpu().data.numpy()
 
-        action_dict = self.disassemble_homogeneous_outputs(
-            action_dict, vect_dim, homogenous_agents
+        action_dict = self.disassemble_grouped_outputs(
+            action_dict, vect_dim, grouped_agents
         )
 
         # If using env_defined_actions replace actions
         if env_defined_actions is not None:
-            for agent in unique_agents_ids:
-                action_dict[agent][agent_masks[agent]] = env_defined_actions[agent][
-                    agent_masks[agent]
-                ]
+            for agent_id in unique_agents_ids:
+                action_dict[agent_id][agent_masks[agent_id]] = env_defined_actions[
+                    agent_id
+                ][agent_masks[agent_id]]
 
         return (
             action_dict,
-            self.disassemble_homogeneous_outputs(
-                action_logprob_dict, vect_dim, homogenous_agents
+            self.disassemble_grouped_outputs(
+                action_logprob_dict, vect_dim, grouped_agents
             ),
-            self.disassemble_homogeneous_outputs(
-                dist_entropy_dict, vect_dim, homogenous_agents
+            self.disassemble_grouped_outputs(
+                dist_entropy_dict, vect_dim, grouped_agents
             ),
-            self.disassemble_homogeneous_outputs(
-                state_values_dict, vect_dim, homogenous_agents
+            self.disassemble_grouped_outputs(
+                state_values_dict, vect_dim, grouped_agents
             ),
         )
 
-    def assemble_shared_inputs(self, experience: ExperiencesType) -> ExperiencesType:
-        """Preprocesses inputs by constructing dictionaries by shared agents
-
-        :param experience: experience to reshape from environment
-        :type experience: ExperiencesType
-
-        :return: Preprocessed inputs
-        :rtype: ExperiencesType
-        """
-        shared = {homo_id: {} for homo_id in self.shared_agent_ids}
-        for agent_id, inp in experience.items():
-            homo_id = self.get_homo_id(agent_id)
-            shared[homo_id][agent_id] = (
-                stack_experiences(inp, to_torch=False)[0] if len(inp) > 0 else None
-            )
-
-        return shared
-
-    def learn(self, experiences: ExperiencesType) -> TensorDict:
+    def learn(self, experiences: ExperiencesType) -> StandardTensorDict:
         """Updates agent network parameters to learn from experiences.
 
         :param experiences: Tuple of dictionaries containing batched states, actions,
@@ -575,32 +607,30 @@ class IPPO(MultiAgentRLAlgorithm):
         :return: Loss dictionary
         :rtype: Dict[str, torch.Tensor]
         """
-
-        # process experiences
+        # Process experiences
         states, actions, log_probs, rewards, dones, values, next_states, next_dones = (
             map(self.assemble_shared_inputs, experiences)
         )
 
         loss_dict = {}
-        for shared_id, state in states.items():
-            agent_idx = self.shared_agent_ids.index(shared_id)
-            actor = self.actors[agent_idx]
-            critic = self.critics[agent_idx]
-            actor_optimizer = self.actor_optimizers[agent_idx]
-            critic_optimizer = self.critic_optimizers[agent_idx]
-            obs_space = self.unique_observation_spaces[shared_id]
-            action_space = self.unique_action_spaces[shared_id]
+        for agent_id, state in states.items():
+            actor = self.actors[agent_id]
+            critic = self.critics[agent_id]
+            actor_optimizer = self.actor_optimizers[agent_id]
+            critic_optimizer = self.critic_optimizers[agent_id]
+            obs_space = self.observation_space[agent_id]
+            action_space = self.action_space[agent_id]
 
-            loss_dict[f"{shared_id}"] = self._learn_individual(
+            loss_dict[f"{agent_id}"] = self._learn_individual(
                 experiences=(
                     state,
-                    actions[shared_id],
-                    log_probs[shared_id],
-                    rewards[shared_id],
-                    dones[shared_id],
-                    values[shared_id],
-                    next_states[shared_id],
-                    next_dones[shared_id],
+                    actions[agent_id],
+                    log_probs[agent_id],
+                    rewards[agent_id],
+                    dones[agent_id],
+                    values[agent_id],
+                    next_states[agent_id],
+                    next_dones[agent_id],
                 ),
                 actor=actor,
                 critic=critic,
@@ -644,30 +674,6 @@ class IPPO(MultiAgentRLAlgorithm):
         (states, actions, log_probs, rewards, dones, values, next_state, next_done) = (
             experiences
         )
-
-        # Handle case where we haven't collected a next state for this set
-        # of homogeneous agents yet.
-        if not next_state:
-            next_state = {agent_id: None for agent_id in states.keys()}
-
-        for agent_id in next_state.keys():
-            agent_next_state = next_state[agent_id]
-            if agent_next_state is None or np.isnan(agent_next_state).all():
-                agent_states = states[agent_id]
-                agent_dones = dones[agent_id]
-                agent_rewards = rewards[agent_id]
-                last_active_index = np.where(~np.isnan(agent_states))[0][-1]
-
-                # Filter out NaNs
-                next_state[agent_id] = agent_states[last_active_index]
-                next_done[agent_id] = agent_dones[last_active_index]
-                states[agent_id] = agent_states[:last_active_index]
-                dones[agent_id] = agent_dones[:last_active_index]
-                rewards[agent_id] = agent_rewards[:last_active_index]
-
-                actions[agent_id] = actions[agent_id][:-1]
-                log_probs[agent_id] = log_probs[agent_id][:-1]
-                values[agent_id] = values[agent_id][:-1]
 
         log_probs, rewards, dones, values = map(
             vectorize_experiences_by_agent, (log_probs, rewards, dones, values)
@@ -746,8 +752,6 @@ class IPPO(MultiAgentRLAlgorithm):
                 batch_values = batch_values.squeeze()
 
                 if len(minibatch_idxs) > 1:
-                    actor.train()
-                    critic.train()
                     batch_states = preprocess_observation(
                         obs_space, batch_states, self.device, self.normalize_images
                     )
@@ -824,7 +828,7 @@ class IPPO(MultiAgentRLAlgorithm):
 
     def test(
         self,
-        env: GymEnvType,
+        env: PzEnvType,
         swap_channels: bool = False,
         max_steps: Optional[int] = None,
         loop: int = 3,
@@ -833,7 +837,7 @@ class IPPO(MultiAgentRLAlgorithm):
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
-        :type env: Gym-style environment
+        :type env: PettingZoo environment
         :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
         :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to None
@@ -860,12 +864,12 @@ class IPPO(MultiAgentRLAlgorithm):
                 scores = (
                     np.zeros((num_envs, 1))
                     if sum_scores
-                    else np.zeros((num_envs, len(self.shared_agent_ids)))
+                    else np.zeros((num_envs, len(self.observation_space)))
                 )
                 completed_episode_scores = (
                     np.zeros((num_envs, 1))
                     if sum_scores
-                    else np.zeros((num_envs, len(self.shared_agent_ids)))
+                    else np.zeros((num_envs, len(self.observation_space)))
                 )
                 finished = np.zeros(num_envs)
                 step = 0
@@ -876,9 +880,6 @@ class IPPO(MultiAgentRLAlgorithm):
                             agent_id: obs_channels_to_first(s)
                             for agent_id, s in obs.items()
                         }
-
-                    # Need to extract inactive agents from observation
-                    _, obs = self.extract_inactive_agents(obs)
 
                     # Get next action from agent
                     action, _, _, _ = self.get_action(obs=obs, infos=info)
