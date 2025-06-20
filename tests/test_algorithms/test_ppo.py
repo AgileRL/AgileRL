@@ -580,7 +580,7 @@ def test_clone_returns_identical_agent(observation_space):
     assert clone_agent.num_envs == ppo.num_envs
     assert clone_agent.index == ppo.index
 
-    accelerator = Accelerator()
+    accelerator = Accelerator(cpu=True) if torch.backends.mps.is_available() else Accelerator()
     ppo = PPO(observation_space, action_space, accelerator=accelerator)
     clone_agent = ppo.clone()
 
@@ -609,7 +609,7 @@ def test_clone_returns_identical_agent(observation_space):
     assert clone_agent.num_envs == ppo.num_envs
     assert clone_agent.index == ppo.index
 
-    accelerator = Accelerator()
+    accelerator = Accelerator(cpu=True) if torch.backends.mps.is_available() else Accelerator()
     ppo = PPO(
         observation_space,
         action_space,
@@ -992,7 +992,7 @@ def test_load_from_pretrained(observation_space, encoder_cls, accelerator, tmpdi
     "observation_space, actor_network, input_tensor",
     [
         (
-            generate_random_box_space(shape=(4,), low=0, high=1),
+        generate_random_box_space(shape=(4,), low=0, high=1),
             "simple_mlp",
             torch.randn(1, 4),
         ),
@@ -1190,7 +1190,9 @@ def test_rollout_buffer_add():
     assert np.array_equal(
         buffer.buffer.get("observations")[current_pos_idx, 0].cpu().numpy(), obs
     )
-    print(buffer.buffer.get("actions")[current_pos_idx, 0].cpu().numpy(), action)
+    print(
+        buffer.buffer.get("actions")[current_pos_idx, 0].cpu().numpy(), action
+    )
     assert np.array_equal(
         buffer.buffer.get("actions")[current_pos_idx, 0].cpu().numpy(), action[0]
     )
@@ -1332,10 +1334,21 @@ def test_rollout_buffer_get_batch():
 
 
 # Test PPO initialization with rollout buffer
-def test_ppo_with_rollout_buffer():
-    observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
-    action_space = generate_discrete_space(2)
-
+@pytest.mark.parametrize(
+    "observation_space",
+    [
+        generate_random_box_space(shape=(4,), low=0, high=1),
+        generate_random_box_space(shape=(3, 32, 32), low=0, high=1),
+    ],
+)
+@pytest.mark.parametrize(
+    "action_space",
+    [
+        generate_discrete_space(2),
+        generate_random_box_space(shape=(2,), low=-1, high=1),
+    ],
+)
+def test_ppo_with_rollout_buffer(observation_space, action_space):
     ppo = PPO(
         observation_space=observation_space,
         action_space=action_space,
@@ -1350,17 +1363,28 @@ def test_ppo_with_rollout_buffer():
     assert not ppo.rollout_buffer.recurrent
 
     # Test with hidden states
+    # Define net_config depending on observation space type
+    if len(getattr(observation_space, "shape", ())) == 3:
+        # Image input – supply the mandatory CNN parameters
+        base_net_config = {
+            "channel_size": [16, 32],
+            "kernel_size": [3, 3],
+            "stride_size": [1, 1],
+        }
+    else:
+        base_net_config = {}
+
+    base_net_config["encoder_config"] = {
+        "hidden_state_size": 64,
+        "max_seq_len": 10,
+    }
+
     ppo = PPO(
         observation_space=observation_space,
         action_space=action_space,
         recurrent=True,
         use_rollout_buffer=True,
-        net_config={
-            "encoder_config": {
-                "hidden_state_size": 64,
-                "max_seq_len": 10,
-            }
-        },
+        net_config=base_net_config,
     )
 
     assert ppo.recurrent
@@ -1371,18 +1395,14 @@ def test_ppo_with_rollout_buffer():
     assert ppo.rollout_buffer.recurrent
 
     # Test with hidden states
+    base_net_config_share = base_net_config.copy()
     ppo = PPO(
         observation_space=observation_space,
         action_space=action_space,
         recurrent=True,
         use_rollout_buffer=True,
         share_encoders=False,
-        net_config={
-            "encoder_config": {
-                "hidden_state_size": 64,
-                "max_seq_len": 10,
-            }
-        },
+        net_config=base_net_config_share,
     )
 
     assert ppo.recurrent
@@ -1397,9 +1417,21 @@ def test_ppo_with_rollout_buffer():
 
 
 # Test PPO learning with rollout buffer
-def test_ppo_learn_with_rollout_buffer():
-    observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
-    action_space = generate_discrete_space(2)
+@pytest.mark.parametrize(
+    "observation_space",
+    [
+        generate_random_box_space(shape=(4,), low=0, high=1),
+        generate_random_box_space(shape=(3, 32, 32), low=0, high=1),
+    ],
+)
+@pytest.mark.parametrize(
+    "action_space",
+    [
+        generate_discrete_space(2),
+        generate_random_box_space(shape=(2,), low=-1, high=1),
+    ],
+)
+def test_ppo_learn_with_rollout_buffer(observation_space, action_space):
     batch_size = 32
     learn_step = 64
 
