@@ -23,8 +23,6 @@ from agilerl.algorithms import (
     MADDPG,
     MATD3,
     PPO,
-    CPPO,
-    ICM_PPO,
     TD3,
     NeuralTS,
     NeuralUCB,
