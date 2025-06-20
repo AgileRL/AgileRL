@@ -1,0 +1,1605 @@
+import copy
+import warnings
+from typing import Any, Callable, Dict, Optional, Tuple, Union
+
+import numpy as np
+from regex import P
+import torch
+import torch.optim as optim
+from gymnasium import spaces
+from torch.nn.utils import clip_grad_norm_
+
+from agilerl.algorithms.core import RLAlgorithm
+from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.algorithms.core.wrappers import OptimizerWrapper
+from agilerl.components.rollout_buffer import RolloutBuffer
+from agilerl.modules.base import EvolvableModule
+from agilerl.modules.configs import MlpNetConfig
+from agilerl.networks.actors import StochasticActor
+from agilerl.networks.base import EvolvableNetwork
+from agilerl.networks.value_networks import ValueNetwork
+from agilerl.typing import ArrayOrTensor, ExperiencesType, GymEnvType
+from agilerl.utils.algo_utils import (
+    flatten_experiences,
+    get_experiences_samples,
+    is_vectorized_experiences,
+    make_safe_deepcopies,
+    obs_channels_to_first,
+    share_encoder_parameters,
+    stack_experiences,
+)
+
+
+# === Custom Rollout Buffer for Author's CPPO Logic ===
+class CPPORolloutBuffer(RolloutBuffer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Add buffer for the 'updates' term (valupdate_buf in original code)
+        self.updates = np.zeros((self.capacity, self.num_envs), dtype=np.float32)
+
+    def add(
+        self,
+        *, # force keyword arguments
+        obs: ArrayOrTensor,
+        action: ArrayOrTensor,
+        reward: ArrayOrTensor,
+        done: ArrayOrTensor,
+        value: ArrayOrTensor,
+        log_prob: ArrayOrTensor,
+        update: ArrayOrTensor, # New argument for CPPO
+        next_obs: Optional[ArrayOrTensor] = None,
+        hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
+    ) -> None:
+        """Add experience, including the CPPO 'update' term, to the buffer."""
+        # Call original add method first
+        super().add(
+            obs=obs,
+            action=action,
+            reward=reward,
+            done=done,
+            value=value,
+            log_prob=log_prob,
+            next_obs=next_obs,
+            hidden_state=hidden_state,
+        )
+        # Store the update term (adjust index logic if super().add changes self.pos)
+        if self.updates is not None:
+            pos_to_add = (self.pos - 1) % self.capacity # Position where last data was added
+            update = np.asarray(update)
+            self.updates[pos_to_add] = update
+
+    def compute_returns_and_advantages(
+        self, last_value: torch.Tensor, last_done: np.ndarray
+    ) -> None:
+        """Compute returns and advantages, modifying advantages using the stored updates."""
+        # Compute standard GAE advantages first
+        super().compute_returns_and_advantages(last_value, last_done)
+
+        # Modify advantages: advantage = gae_advantage - update
+        if self.advantages is not None and self.updates is not None:
+            # Ensure updates are available for the filled portion of the buffer
+            if self.full:
+                updates_to_use = self.updates
+            else:
+                updates_to_use = self.updates[:self.pos]
+
+            if self.advantages.shape == updates_to_use.shape:
+                self.advantages -= updates_to_use
+            else:
+                warnings.warn(
+                    f"Shape mismatch between advantages ({self.advantages.shape}) and updates ({updates_to_use.shape}). Skipping advantage modification.",
+                    stacklevel=2
+                )
+# =====================================================
+
+class CPPO(RLAlgorithm):
+    """Proximal Policy Optimization (PPO) algorithm.
+
+    Paper: https://arxiv.org/abs/1707.06347v2
+
+    :param observation_space: Observation space of the environment
+    :type observation_space: gym.spaces.Space
+    :param action_space: Action space of the environment
+    :type action_space: gym.spaces.Space
+    :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
+    :type index: int, optional
+    :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
+    :type hp_config: HyperparameterConfig, optional
+    :param net_config: Network configuration, defaults to None
+    :type net_config: dict, optional
+    :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
+    :type batch_size: int, optional
+    :param lr: Learning rate for optimizer, defaults to 1e-4
+    :type lr: float, optional
+    :param learn_step: Learning frequency, defaults to 2048
+    :type learn_step: int, optional
+    :param gamma: Discount factor, defaults to 0.99
+    :type gamma: float, optional
+    :param gae_lambda: Lambda for general advantage estimation, defaults to 0.95
+    :type gae_lambda: float, optional
+    :param mut: Most recent mutation to agent, defaults to None
+    :type mut: str, optional
+    :param action_std_init: Initial action standard deviation, defaults to 0.0
+    :type action_std_init: float, optional
+    :param clip_coef: Surrogate clipping coefficient, defaults to 0.2
+    :type clip_coef: float, optional
+    :param ent_coef: Entropy coefficient, defaults to 0.01
+    :type ent_coef: float, optional
+    :param vf_coef: Value function coefficient, defaults to 0.5
+    :type vf_coef: float, optional
+    :param max_grad_norm: Maximum norm for gradient clipping, defaults to 0.5
+    :type max_grad_norm: float, optional
+    :param target_kl: Target KL divergence threshold, defaults to None
+    :type target_kl: float, optional
+    :param normalize_images: Flag to normalize images, defaults to True
+    :type normalize_images: bool, optional
+    :param update_epochs: Number of policy update epochs, defaults to 4
+    :type update_epochs: int, optional
+    :param actor_network: Custom actor network, defaults to None
+    :type actor_network: nn.Module, optional
+    :param critic_network: Custom critic network, defaults to None
+    :type critic_network: nn.Module, optional
+    :param share_encoders: Flag to share encoder parameters between actor and critic, defaults to False
+    :type share_encoders: bool, optional
+    :param num_envs: Number of parallel environments, defaults to 1
+    :type num_envs: int, optional
+    :param use_rollout_buffer: Flag to use the rollout buffer instead of tuple experiences, defaults to False
+    :type use_rollout_buffer: bool, optional
+    :param recurrent: Flag to use hidden states for recurrent policies, defaults to False
+    :type recurrent: bool, optional
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
+    :type device: str, optional
+    :param accelerator: Accelerator for distributed computing, defaults to None
+    :type accelerator: accelerate.Accelerator(), optional
+    :param wrap: Wrap models for distributed training upon creation, defaults to True
+    :type wrap: bool, optional
+    :param load_bptt_full_buffer: Flag to load full buffer for BPTT learning, defaults to False. This could possibly lead to faster training if the buffer is large enough and the memory is not an issue. In most cases this should be False.
+    :type load_bptt_full_buffer: bool, optional
+    """
+
+    def __init__(
+        self,
+        observation_space: spaces.Space,
+        action_space: spaces.Space,
+        index: int = 0,
+        hp_config: Optional[HyperparameterConfig] = None,
+        net_config: Optional[Dict[str, Any]] = None,
+        batch_size: int = 64,
+        lr: float = 1e-4,
+        learn_step: int = 2048,
+        gamma: float = 0.99,
+        gae_lambda: float = 0.95,
+        mut: Optional[str] = None,
+        action_std_init: float = 0.0,
+        clip_coef: float = 0.2,
+        ent_coef: float = 0.01,
+        vf_coef: float = 0.5,
+        max_grad_norm: float = 0.5,
+        target_kl: Optional[float] = None,
+        # === Parameters from Author Implementation ===
+        cvar_alpha: float = 0.9, # Corresponds to alpha in paper/author code
+        cvar_beta: float = 2800.0, # Corresponds to beta in paper/author code (used for lambda update)
+        nu_lr: float = 1e-3,
+        lam_lr: float = 1e-3,
+        nu_start: float = 0.0,
+        lam_start: float = 0.5,
+        nu_delay: float = 0.8,
+        delay: float = 1.0,
+        cvar_clip_ratio: float = 0.05, # Clipping for the 'updates' term
+        # ============================================
+        normalize_images: bool = True,
+        update_epochs: int = 4,
+        actor_network: Optional[EvolvableModule] = None,
+        critic_network: Optional[EvolvableModule] = None,
+        share_encoders: bool = True,
+        num_envs: int = 1,
+        use_rollout_buffer: bool = False,
+        rollout_buffer_config: Optional[Dict[str, Any]] = {},
+        recurrent: bool = False,
+        device: str = "cpu",
+        accelerator: Optional[Any] = None,
+        wrap: bool = True,
+        load_bptt_full_buffer: bool = False,
+    ) -> None:
+        super().__init__(
+            observation_space,
+            action_space,
+            index=index,
+            hp_config=hp_config,
+            device=device,
+            accelerator=accelerator,
+            normalize_images=normalize_images,
+            name="CPPO",
+        )
+
+        assert learn_step >= 1, "Learn step must be greater than or equal to one."
+        assert isinstance(learn_step, int), "Learn step must be an integer."
+        assert isinstance(batch_size, int), "Batch size must be an integer."
+        assert batch_size >= 1, "Batch size must be greater than or equal to one."
+        assert isinstance(lr, float), "Learning rate must be a float."
+        assert lr > 0, "Learning rate must be greater than zero."
+        assert isinstance(gamma, (float, int, torch.Tensor)), "Gamma must be a float."
+        assert isinstance(gae_lambda, (float, int)), "Lambda must be a float."
+        assert gae_lambda >= 0, "Lambda must be greater than or equal to zero."
+        assert isinstance(
+            action_std_init, (float, int)
+        ), "Action standard deviation must be a float."
+        assert (
+            action_std_init >= 0
+        ), "Action standard deviation must be greater than or equal to zero."
+        assert isinstance(
+            clip_coef, (float, int)
+        ), "Clipping coefficient must be a float."
+        assert (
+            clip_coef >= 0
+        ), "Clipping coefficient must be greater than or equal to zero."
+        assert isinstance(
+            ent_coef, (float, int)
+        ), "Entropy coefficient must be a float."
+        assert (
+            ent_coef >= 0
+        ), "Entropy coefficient must be greater than or equal to zero."
+        assert isinstance(
+            vf_coef, (float, int)
+        ), "Value function coefficient must be a float."
+        assert (
+            vf_coef >= 0
+        ), "Value function coefficient must be greater than or equal to zero."
+        assert isinstance(
+            max_grad_norm, (float, int)
+        ), "Maximum norm for gradient clipping must be a float."
+        assert (
+            max_grad_norm >= 0
+        ), "Maximum norm for gradient clipping must be greater than or equal to zero."
+        assert (
+            isinstance(target_kl, (float, int)) or target_kl is None
+        ), "Target KL divergence threshold must be a float."
+        if target_kl is not None:
+            assert (
+                target_kl >= 0
+            ), "Target KL divergence threshold must be greater than or equal to zero."
+        assert isinstance(
+            update_epochs, int
+        ), "Policy update epochs must be an integer."
+        assert (
+            update_epochs >= 1
+        ), "Policy update epochs must be greater than or equal to one."
+        assert isinstance(
+            wrap, bool
+        ), "Wrap models flag must be boolean value True or False."
+
+        # CPPO specific assertions
+        assert isinstance(
+            cvar_alpha, float
+        ), "CVaR alpha must be a float."
+        assert (
+            0.0 < cvar_alpha <= 1.0
+        ), "CVaR alpha must be in the range (0, 1]."
+        assert isinstance(
+            cvar_beta, float
+        ), "CVaR beta must be a float."
+        # assert cvar_beta >= 0, "CVaR beta must be non-negative." # Role-dependent
+
+        # New parameters for using RolloutBuffer
+        assert isinstance(
+            use_rollout_buffer, bool
+        ), "Use rollout buffer flag must be boolean value True or False."
+        assert isinstance(
+            recurrent, bool
+        ), "Has hidden states flag must be boolean value True or False."
+
+        if not use_rollout_buffer:
+            warnings.warn(
+                (
+                    "DeprecationWarning: 'use_rollout_buffer=False' is deprecated and will be removed in a future release. "
+                    "The PPO implementation now expects 'use_rollout_buffer=True' for improved performance, "
+                    "cleaner support for recurrent policies, and easier integration with custom environments. "
+                    "Please update your code to use 'use_rollout_buffer=True' and, if you require recurrent policies, set 'recurrent=True'.\n"
+                    "Refer to the documentation for migration instructions and further details."
+                ),
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+        if recurrent:
+            if not use_rollout_buffer:
+                raise ValueError("use_rollout_buffer must be True if recurrent=True.")
+            self.max_seq_len = net_config.get("encoder_config", {}).get(
+                "max_seq_len", None
+            )
+            if self.max_seq_len is None:
+                raise ValueError("max_seq_len must be provided if recurrent=True.")
+
+        self.batch_size = batch_size
+        self.lr = lr
+        self.gamma = gamma
+        self.learn_step = learn_step
+        self.mut = mut
+        self.gae_lambda = gae_lambda
+        self.action_std_init = action_std_init
+        self.net_config = net_config
+        self.clip_coef = clip_coef
+        self.ent_coef = ent_coef
+        self.vf_coef = vf_coef
+        self.max_grad_norm = max_grad_norm
+        self.target_kl = target_kl
+        self.update_epochs = update_epochs
+        self.use_rollout_buffer = use_rollout_buffer
+        self.num_envs = num_envs
+        self.recurrent = recurrent
+        self.rollout_buffer_config = rollout_buffer_config
+        self.load_bptt_full_buffer = load_bptt_full_buffer
+
+        # === Initialize CVaR parameters from Author Implementation ===
+        self.cvar_alpha = cvar_alpha
+        self.cvar_beta = cvar_beta
+        self.nu_lr = nu_lr
+        self.lam_lr = lam_lr
+        self.nu = nu_start
+        self.cvarlam = lam_start # Renamed lambda to cvarlam to avoid conflict
+        self.nu_delay = nu_delay
+        self.delay = delay
+        self.cvar_clip_ratio = cvar_clip_ratio
+        # Track sums for nu/lambda updates across an epoch/rollout
+        self._nu_delta_sum = 0.0
+        self._bad_trajectory_count = 0 # Corresponds to bad_trajectory_num
+        self._total_trajectory_steps = 0 # Corresponds to trajectory_num
+        self._episode_returns = np.zeros(self.num_envs, dtype=np.float32) # Initialize episode returns for each env
+        # ==========================================================
+
+        # === CVaR parameter assertions ===
+        assert isinstance(cvar_alpha, float) and 0 < cvar_alpha <= 1.0, "cvar_alpha must be in (0, 1]"
+        assert isinstance(cvar_beta, float), "cvar_beta must be float"
+        assert isinstance(nu_lr, float) and nu_lr >= 0, "nu_lr must be non-negative float"
+        assert isinstance(lam_lr, float) and lam_lr >= 0, "lam_lr must be non-negative float"
+        assert isinstance(nu_start, float), "nu_start must be float"
+        assert isinstance(lam_start, float) and lam_start >= 0, "lam_start must be non-negative float"
+        assert isinstance(nu_delay, float) and 0 <= nu_delay <= 1.0, "nu_delay must be in [0, 1]"
+        assert isinstance(delay, float) and delay >= 0, "delay must be non-negative"
+        assert isinstance(cvar_clip_ratio, float) and cvar_clip_ratio >= 0, "cvar_clip_ratio must be non-negative"
+        # =================================
+
+        if actor_network is not None and critic_network is not None:
+            if not isinstance(actor_network, EvolvableModule):
+                raise TypeError(
+                    f"Passed actor network is of type {type(actor_network)}, but must be of type EvolvableModule."
+                )
+            if not isinstance(critic_network, EvolvableModule):
+                raise TypeError(
+                    f"Passed critic network is of type {type(critic_network)}, but must be of type EvolvableModule."
+                )
+
+            self.actor, self.critic = make_safe_deepcopies(
+                actor_network, critic_network
+            )
+        else:
+            net_config = {} if net_config is None else net_config
+
+            critic_net_config = copy.deepcopy(net_config)
+
+            head_config = net_config.get("head_config", None)
+            if head_config is not None:
+                critic_head_config = copy.deepcopy(head_config)
+                critic_head_config["output_activation"] = None
+                critic_net_config.pop("squash_output", None)
+            else:
+                critic_head_config = MlpNetConfig(hidden_size=[16])
+
+            critic_net_config["head_config"] = critic_head_config
+
+            self.actor = StochasticActor(
+                observation_space,
+                action_space,
+                action_std_init=self.action_std_init,
+                device=self.device,
+                recurrent=self.recurrent,
+                encoder_name=("shared_encoder" if share_encoders else "actor_encoder"),
+                **net_config,
+            )
+
+            self.critic = ValueNetwork(
+                observation_space,
+                device=self.device,
+                recurrent=self.recurrent,
+                encoder_name=("shared_encoder" if share_encoders else "critic_encoder"),
+                **critic_net_config,
+            )
+
+        # Share encoders between actor and critic
+        self.share_encoders = share_encoders
+        if self.share_encoders and all(
+            isinstance(net, EvolvableNetwork) for net in [self.actor, self.critic]
+        ):
+            self.share_encoder_parameters()
+
+            # Need to register a mutation hook that does this after every mutation
+            self.register_mutation_hook(self.share_encoder_parameters)
+
+        self.optimizer = OptimizerWrapper(
+            optim.Adam, networks=[self.actor, self.critic], lr=self.lr
+        )
+
+        # Initialize rollout buffer if enabled
+        if self.use_rollout_buffer:
+            self.create_rollout_buffer()
+
+            # Need to register a mutation hook that does this after every mutation (e.g. the batch size, sequence length, etc. have changed)
+            self.register_mutation_hook(self.create_rollout_buffer)
+
+        if self.accelerator is not None and wrap:
+            self.wrap_models()
+
+        # Register network groups for mutations
+        self.register_network_group(NetworkGroup(eval=self.actor, policy=True))
+        self.register_network_group(NetworkGroup(eval=self.critic))
+
+        self.hidden_state = None
+
+    def share_encoder_parameters(self) -> None:
+        """Shares the encoder parameters between the actor and critic."""
+        if all(isinstance(net, EvolvableNetwork) for net in [self.actor, self.critic]):
+            share_encoder_parameters(self.actor, self.critic)
+        else:
+            warnings.warn(
+                "Encoder sharing is disabled as actor or critic is not an EvolvableNetwork."
+            )
+
+    def create_rollout_buffer(self) -> None:
+        """Creates a rollout buffer with the current configuration."""
+        self.rollout_buffer = CPPORolloutBuffer(
+            capacity=self.learn_step,
+            observation_space=self.observation_space,
+            action_space=self.action_space,
+            device=self.device,
+            num_envs=self.num_envs,
+            gae_lambda=self.gae_lambda,
+            gamma=self.gamma,
+            recurrent=self.recurrent,
+            # recurrent specific parameters
+            hidden_state_architecture=(
+                self.get_hidden_state_architecture() if self.recurrent else None
+            ),
+            max_seq_len=self.max_seq_len if self.recurrent else None,
+            **self.rollout_buffer_config,
+        )
+
+    def _get_action_and_values(
+        self,
+        obs: ArrayOrTensor,
+        action_mask: Optional[ArrayOrTensor] = None,
+        hidden_state: Optional[ArrayOrTensor] = None,
+        *,  # keyword-only
+        sample: bool = True,  # NEW flag
+    ) -> Tuple[
+        ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[ArrayOrTensor]
+    ]:
+        """Returns the next action to take in the environment and the values.
+
+        :param obs: Environment observation, or multiple observations in a batch
+        :type obs: numpy.ndarray[float]
+        :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
+        :type action_mask: numpy.ndarray, optional
+        :param hidden_state: Hidden state for recurrent policies, defaults to None
+        :type hidden_state: numpy.ndarray, optional
+        :param sample: Whether to sample an action or return the mode/mean. Defaults to True.
+        :type sample: bool
+        :return: Action, log probability, entropy, state values, and next hidden state
+        :rtype: Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[ArrayOrTensor]]
+        """
+        if hidden_state is not None:
+            latent_pi, next_hidden = self.actor.extract_features(
+                obs, hidden_state=hidden_state
+            )
+            action, log_prob, entropy = self.actor.forward_head(
+                latent_pi, action_mask=action_mask, sample=sample
+            )
+
+            if self.share_encoders:
+                values = self.critic.forward_head(latent_pi).squeeze(-1)
+            else:
+                # we can pass the state because the keys are different for the actor and critic,
+                # so they don't conflict and we can just overwrite the next_hidden.
+                # e.g. {"actor_encoder_h": ..., "critic_encoder_h": ...}
+                values, next_hidden = self.critic(obs, hidden_state=next_hidden)
+                values = values.squeeze(-1)
+
+            return action, log_prob, entropy, values, next_hidden
+        else:
+            latent_pi = self.actor.extract_features(obs)
+            action, log_prob, entropy = self.actor.forward_head(
+                latent_pi, action_mask=action_mask, sample=sample
+            )
+            values = (
+                self.critic.forward_head(latent_pi).squeeze(-1)
+                if self.share_encoders
+                else self.critic(obs).squeeze(-1)
+            )
+            return action, log_prob, entropy, values, None
+
+    def get_hidden_state_architecture(self) -> Dict[str, Tuple[int, ...]]:
+        """
+        Get the hidden state architecture for the environment.
+        """
+        return {
+            k: v.shape for k, v in self.get_initial_hidden_state(self.num_envs).items()
+        }
+
+    def get_initial_hidden_state(self, num_envs: int = 1) -> Dict[str, ArrayOrTensor]:
+        """
+        Get the initial hidden state for the environment. The hidden states are generally cached on a per Module basis.
+        The reason the Cache is per Module is because the user might want to have a custom initialization for the hidden states.
+        """
+        if not self.recurrent:
+            raise ValueError(
+                "Cannot get initial hidden state for non-recurrent networks."
+            )
+
+        # Return a batch of initial hidden states
+        # Flat map them into "actor_*" and "critic_*" (if not sharing encoders)
+        flat_hidden = {}
+
+        actor_hidden = self.actor.initialize_hidden_state(batch_size=num_envs)
+        for k, v in actor_hidden.items():
+            flat_hidden[k] = v
+
+        # also add the critic hidden state if not sharing encoders
+        if not self.share_encoders:
+            critic_hidden = self.critic.initialize_hidden_state(batch_size=num_envs)
+            for k, v in critic_hidden.items():
+                flat_hidden[k] = v
+
+        return flat_hidden
+
+    def evaluate_actions(
+        self,
+        obs: ArrayOrTensor,
+        actions: ArrayOrTensor,
+        hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Evaluates the actions.
+
+        :param obs: Environment observation, or multiple observations in a batch
+        :type obs: numpy.ndarray[float]
+        :param actions: Actions to evaluate
+        :type actions: torch.Tensor
+        :param hidden_state: Hidden state for recurrent policies, defaults to None. Expected shape: dict with tensors of shape (batch_size, 1, hidden_size).
+        :type hidden_state: Dict[str, ArrayOrTensor], optional
+        :return: Log probability, entropy, and state values
+        :rtype: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        """
+        obs = self.preprocess_observation(obs)
+
+        eval_hidden_state = None
+        if self.recurrent and hidden_state is not None:
+            # Reshape hidden state for RNN: (batch_size, 1, hidden_size) -> (1, batch_size, hidden_size)
+            eval_hidden_state = {
+                key: val.permute(1, 0, 2) for key, val in hidden_state.items()
+            }
+
+        # Get values from actor-critic
+        _, _, entropy, values, _ = self._get_action_and_values(
+            obs, hidden_state=eval_hidden_state, sample=False  # No need to sample here
+        )
+
+        # Get log probability of the actions using the *original* hidden state if needed by actor?
+        # Let's assume actor.action_log_prob does not require hidden state for now, or handles it internally.
+        # If it does require hidden state, we might need to pass eval_hidden_state or recalculate.
+        log_prob = self.actor.action_log_prob(actions)
+
+        # Use -log_prob as entropy when squashing output in continuous action spaces
+        if entropy is None:
+            entropy = -log_prob.mean()
+
+        return log_prob, entropy, values
+
+    def get_action(
+        self,
+        obs: ArrayOrTensor,
+        action_mask: Optional[ArrayOrTensor] = None,
+        hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
+    ) -> Union[
+        Tuple[
+            ArrayOrTensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            Optional[Dict[str, ArrayOrTensor]],
+        ],
+        Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    ]:
+        """Returns the next action to take in the environment.
+
+        :param obs: Environment observation, or multiple observations in a batch
+        :type obs: numpy.ndarray[float]
+        :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
+        :type action_mask: numpy.ndarray, optional
+        :param hidden_state: Hidden state for recurrent policies, defaults to None
+        :type hidden_state: numpy.ndarray, optional
+        :return: Action, log probability, entropy, state values, and next hidden state
+        :rtype: Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[ArrayOrTensor]]
+        """
+        obs = self.preprocess_observation(obs)
+        with torch.no_grad():
+            if self.recurrent and hidden_state is not None:
+                action, log_prob, entropy, values, next_hidden = (
+                    self._get_action_and_values(obs, action_mask, hidden_state)
+                )
+            else:
+                action, log_prob, entropy, values, next_hidden = (
+                    self._get_action_and_values(obs, action_mask)
+                )
+
+        # Use -log_prob as entropy when squashing output in continuous action spaces
+        entropy = -log_prob.mean() if entropy is None else entropy
+
+        if isinstance(self.action_space, spaces.Box) and self.action_space.shape == (
+            1,
+        ):
+            action = action.unsqueeze(1)
+
+        # Clip to action space during inference
+        action = action.cpu().data.numpy()
+        if not self.training and isinstance(self.action_space, spaces.Box):
+            if self.actor.squash_output:
+                action = self.actor.scale_action(action)
+            else:
+                action = np.clip(action, self.action_space.low, self.action_space.high)
+
+        if self.recurrent:
+            return (
+                action,
+                log_prob.cpu().data.numpy(),
+                entropy.cpu().data.numpy(),
+                values.cpu().data.numpy(),
+                next_hidden if next_hidden is not None else None,
+            )
+        else:
+            return (
+                action,
+                log_prob.cpu().data.numpy(),
+                entropy.cpu().data.numpy(),
+                values.cpu().data.numpy(),
+            )
+
+    def collect_rollouts(
+        self,
+        env: GymEnvType,
+        n_steps: int = None,
+    ) -> None:
+        """
+        Collect rollouts from the environment and store them in the rollout buffer.
+
+        :param env: The environment to collect rollouts from
+        :type env: GymEnvType
+        :param n_steps: Number of steps to collect, defaults to self.learn_step
+        :type n_steps: int, optional
+        """
+        if not self.use_rollout_buffer:
+            raise RuntimeError(
+                "collect_rollouts can only be used when use_rollout_buffer=True"
+            )
+
+        n_steps = n_steps or self.learn_step
+        self.rollout_buffer.reset()
+
+        # Initial reset
+        obs, info = env.reset()
+
+        self.hidden_state = (
+            self.get_initial_hidden_state(self.num_envs) if self.recurrent else None
+        )
+
+        current_hidden_state = self.hidden_state
+
+        # === Start of CPPO Update === #
+        # ================================================================ #
+        # Reset accumulators for next epoch/rollout
+        self._nu_delta_sum = 0.0
+        self._bad_trajectory_count = 0
+        self._total_trajectory_steps = 0
+        self.cvarlam = self.cvarlam + self.lam_lr * (self.cvar_beta - self.nu)
+
+        for _ in range(n_steps):
+            # Get action
+            if self.recurrent:
+                action, log_prob, _, value, next_hidden = self.get_action(
+                    obs,
+                    action_mask=info.get("action_mask", None),
+                    hidden_state=current_hidden_state,
+                )
+                self.hidden_state = next_hidden
+            else:
+                # No need for next_hidden in non-recurrent networks, so we're not even returning it
+                action, log_prob, _, value = self.get_action(
+                    obs, action_mask=info.get("action_mask", None)
+                )
+
+            # Execute action
+            next_obs, reward, done, truncated, next_info = env.step(action)
+            
+            # Accumulate rewards into ep_ret
+            self._episode_returns += np.asarray(reward, dtype=np.float32)
+
+
+            # Handle both single environment and vectorized environments terminal states
+            if isinstance(done, list) or isinstance(done, np.ndarray):
+                is_terminal = (
+                    np.logical_or(done, truncated)
+                    if isinstance(truncated, (list, np.ndarray))
+                    else done
+                )
+            else:
+                is_terminal = done or truncated
+
+            # Ensure shapes are correct (num_envs, ...) for rollout buffer. This isn't necessary by itself, but it's good for debugging.
+            reward_arr = np.asarray(reward, dtype=np.float32).reshape(-1) # Ensure reward is 1D array for calculations
+            is_terminal_arr = np.asarray(is_terminal, dtype=bool).reshape(-1) # Ensure is_terminal is 1D array
+            value_arr = np.asarray(value, dtype=np.float32).reshape(-1) # Ensure value is 1D array
+            log_prob_arr = np.asarray(log_prob, dtype=np.float32).reshape(-1) # Ensure log_prob is 1D array
+
+            # Calculate 'updates' term based on author's CPPO logic
+            # Condition for a "bad step" (from author's code: if ep_ret + v - r < nu)
+            # Ensure ep_ret used here is the current accumulated return for each environment
+            is_bad_step_arr = (self._episode_returns + value_arr - reward_arr) < self.nu
+            
+            # Initialize updates to zeros
+            updates = np.zeros_like(reward_arr, dtype=np.float32)
+
+            self._nu_delta_sum += np.sum(self._episode_returns + value_arr - reward_arr) # Sum over all environments
+
+            if np.any(is_bad_step_arr):
+                # Calculate potential update only for 'bad' steps for those specific environments
+                potential_updates_for_bad_steps = self.delay * self.cvarlam / (1.0 - self.cvar_alpha + 1e-8) * (self.nu - (self._episode_returns + value_arr - reward_arr))
+                
+                # Apply these potential updates only to the elements where is_bad_step_arr is True
+                updates[is_bad_step_arr] = potential_updates_for_bad_steps[is_bad_step_arr]
+
+                # Define the clipping threshold based on the absolute value and cvar_clip_ratio
+                _clip_threshold_values = np.abs(value_arr) * self.cvar_clip_ratio
+                
+                # Clip the updates only for the 'bad' steps
+                updates[is_bad_step_arr] = np.minimum(updates[is_bad_step_arr], _clip_threshold_values[is_bad_step_arr])
+
+
+            self.rollout_buffer.add(
+                obs=obs,
+                action=action,
+                reward=reward_arr, # Use the shaped reward
+                done=is_terminal_arr, # Use the shaped terminal flag
+                value=value_arr, # Use the shaped value
+                log_prob=log_prob_arr, # Use the shaped log_prob
+                update=updates, # Pass the calculated updates term
+                next_obs=next_obs,
+                hidden_state=current_hidden_state,
+            )
+
+            # Update epoch-level accumulators for nu/cvarlam updates
+            self._bad_trajectory_count += np.sum(is_bad_step_arr) # Sum over all environments
+            self._total_trajectory_steps += value_arr.size # Count total steps processed (num_envs)
+
+            # === Update nu and cvarlam based on collected stats (MOVED OUTSIDE LOOP) ===
+            # if self._total_trajectory_steps > 0:
+            #     nu_delta = self._nu_delta_sum / self._total_trajectory_steps
+            #     self.nu = nu_delta * self.nu_delay
+            # ================================================
+
+            # === End of CPPO Update === #
+            # ================================================================ #
+
+            # Reset hidden state and ep_ret for finished environments
+            if self.recurrent and np.any(is_terminal_arr):
+                # Create a mask for finished environments
+                finished_mask = is_terminal_arr.astype(bool)
+                # Get initial hidden states only for the finished environments
+                initial_hidden_states_for_reset = self.get_initial_hidden_state(
+                    self.num_envs
+                )
+
+                if isinstance(self.hidden_state, torch.Tensor):
+                    reset_states = initial_hidden_states_for_reset[finished_mask]
+                    if reset_states.shape[0] > 0:  # Only update if any finished
+                        self.hidden_state[finished_mask] = reset_states
+                elif isinstance(self.hidden_state, dict):
+                    for key in self.hidden_state:
+                        # initial_hidden_states_for_reset[key] has shape (1, num_envs, hidden_size)
+                        # finished_mask has shape (num_envs,)
+                        # Index along the num_envs dimension (dim 1)
+                        reset_states = initial_hidden_states_for_reset[key][
+                            :, finished_mask, :
+                        ]
+
+                        if (
+                            reset_states.shape[1] > 0
+                        ):  # Check num_envs dimension if any env finished
+                            # Assign to the correct slice along the num_envs dimension
+                            self.hidden_state[key][:, finished_mask, :] = reset_states
+
+            # Reset ep_ret for environments that just finished
+            self._episode_returns[is_terminal_arr] = 0.0
+
+            # Update the current hidden state for the next timestep
+            if self.recurrent:
+                current_hidden_state = self.hidden_state
+
+            # Update for next step
+            obs = next_obs
+            info = next_info
+        
+        # === Update nu based on collected stats (MOVED HERE - AFTER LOOP) ===
+        if self._total_trajectory_steps > 0:
+            nu_delta = self._nu_delta_sum / self._total_trajectory_steps
+            self.nu = nu_delta * self.nu_delay
+        # =====================================================================
+
+        # Compute advantages and returns
+        with torch.no_grad():
+            # Get value for last observation
+            if self.recurrent:
+                _, _, _, last_value, _ = self._get_action_and_values(
+                    obs, hidden_state=self.hidden_state
+                )
+            else:
+                _, _, _, last_value, _ = self._get_action_and_values(obs)
+
+            last_value = last_value.cpu().numpy()
+            last_done = np.atleast_1d(done)  # Ensure last_done has shape (num_envs,)
+
+        # Compute returns and advantages (advantage modification happens inside CPPORolloutBuffer)
+        self.rollout_buffer.compute_returns_and_advantages(
+            last_value=last_value, last_done=last_done
+        )
+
+        # # === Log CVaR Metrics ===
+        # if self.rollout_buffer.pos > 0 or self.rollout_buffer.full:
+        #     buffer_current_size = self.rollout_buffer.capacity if self.rollout_buffer.full else self.rollout_buffer.pos
+        #     # updates_in_buffer shape is (capacity, num_envs)
+        #     # We want the mean of the *actually stored* updates relevant to this rollout
+        #     relevant_updates = self.rollout_buffer.updates[:buffer_current_size].reshape(-1) # Flatten to get mean over all steps and envs
+        #     mean_updates_term = np.mean(relevant_updates) if relevant_updates.size > 0 else 0.0
+            
+        #     print(f"--- CVaR Metrics (End of Collect Rollouts) ---")
+        #     print(f"  Nu: {self.nu:.4f}")
+        #     print(f"  CVaR Lambda (cvarlam): {self.cvarlam:.4f}")
+        #     print(f"  Mean 'updates' term in buffer: {mean_updates_term:.4f}")
+        #     print(f"  Bad Trajectory Count: {self._bad_trajectory_count}")
+        #     print(f"  Total Trajectory Steps for Nu Update: {self._total_trajectory_steps}")
+        #     print(f"-----------------------------------------------")
+        # # =========================
+
+    def learn(self, experiences: Union[ExperiencesType, None] = None) -> float:
+        """Updates agent network parameters to learn from experiences.
+
+        :param experience: List of batched states, actions, log_probs, rewards, dones, values, next_state, next_done in that order.
+                        If use_rollout_buffer=True and experiences=None, uses data from rollout buffer.
+        :type experience: Tuple[Union[numpy.ndarray, Dict[str, numpy.ndarray]], ...] or None
+        """
+        # Use rollout buffer if enabled and no experiences provided
+        if self.use_rollout_buffer and experiences is None:
+            return self._learn_from_rollout_buffer()
+        elif self.use_rollout_buffer and experiences is not None:
+            warnings.warn(
+                "Both rollout buffer and experiences provided. Using provided experiences."
+            )
+        elif not self.use_rollout_buffer and experiences is None:
+            raise ValueError(
+                "Experiences cannot be None when use_rollout_buffer is False"
+            )
+
+        # Legacy learning from experiences tuple
+        (states, actions, log_probs, rewards, dones, values, next_state, next_done) = (
+            stack_experiences(*experiences)
+        )
+
+        # Bootstrapping returns using GAE advantage estimation
+        dones = dones.long()
+        with torch.no_grad():
+            num_steps = rewards.size(0)
+            next_state = self.preprocess_observation(next_state)
+            next_value = self.critic(next_state).reshape(1, -1).cpu()
+            advantages = torch.zeros_like(rewards).float()
+            last_gae_lambda = 0
+            for t in reversed(range(num_steps)):
+                if t == num_steps - 1:
+                    next_non_terminal = 1.0 - next_done
+                    nextvalue = next_value.squeeze()
+                else:
+                    next_non_terminal = 1.0 - dones[t + 1]
+                    nextvalue = values[t + 1]
+
+                # Calculate delta (TD error)
+                delta = (
+                    rewards[t] + self.gamma * nextvalue * next_non_terminal - values[t]
+                )
+
+                # Use recurrence relation to compute advantage
+                advantages[t] = last_gae_lambda = (
+                    delta
+                    + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lambda
+                )
+
+            returns = advantages + values
+
+        # Flatten experiences from (batch_size, num_envs, ...) to (batch_size*num_envs, ...)
+        # after checking if experiences are vectorized
+        experiences = (states, actions, log_probs, advantages, returns, values)
+        if is_vectorized_experiences(*experiences):
+            experiences = flatten_experiences(*experiences)
+
+        # Move experiences to algo device
+        experiences = self.to_device(*experiences)
+
+        # Get number of samples from the returns tensor
+        num_samples = experiences[4].size(0)
+        batch_idxs = np.arange(num_samples)
+        mean_loss = 0
+        for epoch in range(self.update_epochs):
+            np.random.shuffle(batch_idxs)
+            for start in range(0, num_samples, self.batch_size):
+                minibatch_idxs = batch_idxs[start : start + self.batch_size]
+                (
+                    batch_states,
+                    batch_actions,
+                    batch_log_probs,
+                    batch_advantages,
+                    batch_returns,
+                    batch_values,
+                ) = get_experiences_samples(minibatch_idxs, *experiences)
+
+                batch_actions = batch_actions.squeeze()
+                batch_returns = batch_returns.squeeze()
+                batch_log_probs = batch_log_probs.squeeze()
+                batch_advantages = batch_advantages.squeeze()
+                batch_values = batch_values.squeeze()
+
+                if len(minibatch_idxs) > 1:
+                    log_prob, entropy, value = self.evaluate_actions(
+                        obs=batch_states, actions=batch_actions
+                    )
+
+                    logratio = log_prob - batch_log_probs
+                    ratio = logratio.exp()
+
+                    with torch.no_grad():
+                        approx_kl = ((ratio - 1) - logratio).mean()
+
+                    minibatch_advs = batch_advantages
+                    minibatch_advs = (minibatch_advs - minibatch_advs.mean()) / (
+                        minibatch_advs.std() + 1e-8
+                    )
+
+                    # Policy loss
+                    pg_loss1 = -minibatch_advs * ratio
+                    pg_loss2 = -minibatch_advs * torch.clamp(
+                        ratio, 1 - self.clip_coef, 1 + self.clip_coef
+                    )
+
+                    pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+
+                    # Value loss
+                    value = value.view(-1)
+                    v_loss_unclipped = (value - batch_returns) ** 2
+                    v_clipped = batch_values + torch.clamp(
+                        value - batch_values, -self.clip_coef, self.clip_coef
+                    )
+
+                    v_loss_clipped = (v_clipped - batch_returns) ** 2
+                    v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
+                    v_loss = 0.5 * v_loss_max.mean()
+
+                    entropy_loss = entropy.mean()
+                    loss = (
+                        pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
+                    )
+
+                    # actor + critic loss backprop
+                    self.optimizer.zero_grad()
+                    if self.accelerator is not None:
+                        self.accelerator.backward(loss)
+                    else:
+                        loss.backward()
+
+                    # Clip gradients
+                    clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+                    clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+
+                    self.optimizer.step()
+
+                    mean_loss += loss.item()
+
+            if self.target_kl is not None:
+                if approx_kl > self.target_kl:
+                    break
+
+        mean_loss /= num_samples * self.update_epochs
+        return mean_loss
+
+    def _learn_from_rollout_buffer(self) -> float:
+        """
+        Learn from data in the rollout buffer.
+
+        :return: Mean loss value
+        :rtype: float
+        """
+        # ------------------------------------------------------------------
+        # Decide whether to use sequence-based BPTT training or flattened batch
+        # ------------------------------------------------------------------
+
+        if self.recurrent and self.max_seq_len is not None and self.max_seq_len > 0:
+            return self._learn_from_rollout_buffer_bptt()
+        else:
+            return self._learn_from_rollout_buffer_flat()
+
+    # ------------------------------------------------------------------
+    # Original flattened learning logic moved to separate helper
+    # ------------------------------------------------------------------
+
+    def _learn_from_rollout_buffer_flat(self) -> float:
+        """Original learning procedure using flattened samples (no BPTT)."""
+        buffer_data = self.rollout_buffer.get_tensor_batch(device=self.device)
+
+        observations = buffer_data["observations"]
+        actions = buffer_data["actions"]
+        old_log_probs = buffer_data["log_probs"]
+        advantages = buffer_data["advantages"]
+        returns = buffer_data["returns"]
+        # values = buffer_data["values"]
+
+        # Normalize advantages
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        batch_size = self.batch_size
+        num_samples = observations.size(0)
+        assert (
+            num_samples == self.rollout_buffer.size()
+        ), f"Expected {self.rollout_buffer.size()} samples, but got {num_samples}"
+
+        indices = np.arange(num_samples)
+        mean_loss = 0.0
+        approx_kl_divs = []
+        approx_kl = 0.0  # Initialize approx_kl here
+
+        for epoch in range(self.update_epochs):
+            np.random.shuffle(indices)
+
+            for start_idx in range(0, num_samples, batch_size):
+                end_idx = min(start_idx + batch_size, num_samples)
+                minibatch_indices = indices[start_idx:end_idx]
+
+                mb_obs = observations[minibatch_indices]
+                mb_actions = actions[minibatch_indices]
+                mb_old_log_probs = old_log_probs[minibatch_indices]
+                mb_advantages = advantages[minibatch_indices]
+                mb_returns = returns[minibatch_indices]
+                # mb_old_values = values[minibatch_indices]
+
+                mb_hidden_states = None
+                if self.recurrent:
+                    mb_hidden_states = {
+                        key: hidden_tensor[minibatch_indices]
+                        for key, hidden_tensor in buffer_data["hidden_states"].items()
+                    }
+
+                # For flat learning, hidden state from buffer is (batch, layer, hidden)
+                # Needs to be (layer, batch, hidden) for _get_action_and_values
+                if mb_hidden_states is not None:
+                    eval_hidden_state = {
+                        k: v.permute(1, 0, 2).contiguous()
+                        for k, v in mb_hidden_states.items()
+                    }
+                else:
+                    eval_hidden_state = None
+
+                # Get values and next hidden state (which we ignore in flat learning)
+                _, _, entropy_t, new_value_t, _ = self._get_action_and_values(
+                    mb_obs,
+                    hidden_state=eval_hidden_state,
+                    sample=False,  # No need to sample here
+                )
+
+                # Compute log prob of taken actions
+                new_log_prob_t = self.actor.action_log_prob(mb_actions)
+
+                # Use -log_prob as entropy when head returns None (continuous actions w/ squashing)
+                if entropy_t is None:
+                    entropy_t = -new_log_prob_t
+
+                ratio = torch.exp(new_log_prob_t - mb_old_log_probs)
+                policy_loss1 = -mb_advantages * ratio
+                policy_loss2 = -mb_advantages * torch.clamp(
+                    ratio, 1 - self.clip_coef, 1 + self.clip_coef
+                )
+                policy_loss = torch.max(policy_loss1, policy_loss2).mean()
+
+                value_loss = 0.5 * ((new_value_t - mb_returns) ** 2).mean()
+                entropy_loss = -entropy_t.mean()
+
+                loss = (
+                    policy_loss
+                    + self.vf_coef * value_loss
+                    + self.ent_coef * entropy_loss
+                )
+
+                with torch.no_grad():
+                    log_ratio = new_log_prob_t - mb_old_log_probs
+                    approx_kl = ((torch.exp(log_ratio) - 1) - log_ratio).mean().item()
+                    approx_kl_divs.append(approx_kl)
+
+                self.optimizer.zero_grad()
+                loss.backward()
+                clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+                clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+                self.optimizer.step()
+
+                mean_loss += loss.item()
+
+            if self.target_kl is not None and np.mean(approx_kl_divs) > self.target_kl:
+                break
+
+        num_updates = (
+            num_samples // batch_size + int(num_samples % batch_size > 0)
+        ) * max(1, self.update_epochs)
+        mean_loss = mean_loss / max(1e-8, num_updates)
+
+        return mean_loss
+
+    # ------------------------------------------------------------------
+    # New BPTT learning logic
+    # ------------------------------------------------------------------
+
+    def _learn_from_rollout_buffer_bptt(self) -> float:
+        """Learning procedure using truncated BPTT for recurrent networks."""
+        seq_len = self.max_seq_len
+
+        # Get current actual size of buffer to prevent errors with insufficient data
+        buffer_actual_size = (
+            self.rollout_buffer.capacity
+            if self.rollout_buffer.full
+            else self.rollout_buffer.pos
+        )
+        if buffer_actual_size < seq_len:
+            warnings.warn(
+                f"Buffer size {buffer_actual_size} is less than seq_len {seq_len}. Skipping BPTT learning step."
+            )
+            return 0.0
+
+        # Normalize advantages globally once before epochs if using minibatch loading
+        if not self.load_bptt_full_buffer:
+            # Ensure advantages are computed
+            if not np.any(
+                self.rollout_buffer.advantages
+            ):  # Simple check, might need a more robust flag
+                warnings.warn(
+                    "Advantages not computed in rollout buffer. Ensure compute_returns_and_advantages is called."
+                )
+                # Optionally compute them here if sure about last_value/last_done, or raise error
+
+            # Flatten advantages from (capacity, num_envs) to (capacity * num_envs) for normalization
+            # then reshape back. Only normalize the valid part of the buffer.
+            valid_advantages = self.rollout_buffer.advantages[:buffer_actual_size]
+            original_shape = valid_advantages.shape
+            flat_adv = valid_advantages.reshape(-1)
+            normalized_flat_adv = (flat_adv - flat_adv.mean()) / (flat_adv.std() + 1e-8)
+            self.rollout_buffer.advantages[:buffer_actual_size] = (
+                normalized_flat_adv.reshape(original_shape)
+            )
+
+        # Option 1: Load all sequences into GPU memory at once (original, memory-intensive way)
+        if self.load_bptt_full_buffer:
+            buffer_data = self.rollout_buffer.get_sequence_tensor_batch(
+                seq_len=seq_len, device=self.device
+            )
+            if (
+                not buffer_data
+                or "observations" not in buffer_data
+                or buffer_data["observations"] is None
+            ):
+                warnings.warn(
+                    "Failed to get sequence tensor batch or observations missing. Skipping BPTT learning step."
+                )
+                return 0.0
+
+            observations = buffer_data[
+                "observations"
+            ]  # (total_sequences, seq_len, *obs)
+            actions = buffer_data["actions"]
+            old_log_probs = buffer_data["log_probs"]
+            advantages_full = buffer_data["advantages"]  # Already on device
+            returns = buffer_data["returns"]
+            initial_hidden_states_full = buffer_data.get("initial_hidden_states", None)
+
+            # Normalize advantages across all timesteps and sequences if loaded full
+            flat_adv_full = advantages_full.reshape(-1)
+            advantages_full = (advantages_full - flat_adv_full.mean()) / (
+                flat_adv_full.std() + 1e-8
+            )
+
+            if isinstance(observations, dict):
+                num_total_sequences = observations[list(observations.keys())[0]].size(0)
+            else:
+                num_total_sequences = observations.size(0)
+
+            indices_full_buffer = np.arange(num_total_sequences)
+            sequences_per_minibatch = (
+                self.batch_size
+            )  # PPO's batch_size is num sequences here
+
+        # Option 2: Prepare for minibatch loading (memory-efficient)
+        else:
+            num_possible_starts_per_env = buffer_actual_size - seq_len + 1
+            if num_possible_starts_per_env <= 0:
+                warnings.warn(
+                    f"Not enough data in buffer ({buffer_actual_size} steps) to form sequences of length {seq_len}. Skipping BPTT."
+                )
+                return 0.0
+
+            all_start_coords = []  # List of (env_idx, time_idx_in_env_rollout)
+            for env_idx in range(self.num_envs):
+                for t_idx in range(num_possible_starts_per_env):
+                    all_start_coords.append((env_idx, t_idx))
+
+            if not all_start_coords:
+                warnings.warn(
+                    "No possible BPTT sequences to sample. Skipping learning step."
+                )
+                return 0.0
+            sequences_per_minibatch = (
+                self.batch_size
+            )  # PPO's batch_size is num sequences here
+
+        mean_loss = 0.0
+        approx_kl_divs = []
+        num_minibatch_updates = 0
+
+        for epoch in range(self.update_epochs):
+            if self.load_bptt_full_buffer:
+                np.random.shuffle(indices_full_buffer)
+                # Iterate through the pre-loaded full buffer data in minibatches
+                for i in range(0, num_total_sequences, sequences_per_minibatch):
+                    minibatch_indices = indices_full_buffer[
+                        i : i + sequences_per_minibatch
+                    ]
+                    if len(minibatch_indices) == 0:
+                        continue
+
+                    if isinstance(observations, dict):
+                        mb_obs_seq = {
+                            k: v[minibatch_indices] for k, v in observations.items()
+                        }
+                    else:
+                        mb_obs_seq = observations[minibatch_indices]
+
+                    mb_actions_seq = actions[minibatch_indices]
+                    mb_old_log_probs_seq = old_log_probs[minibatch_indices]
+                    mb_advantages_seq = advantages_full[
+                        minibatch_indices
+                    ]  # Use globally normalized from full load
+                    mb_returns_seq = returns[minibatch_indices]
+
+                    mb_hidden_state_init_for_batch = None
+                    if initial_hidden_states_full is not None:
+                        mb_hidden_state_init_for_batch = {
+                            key: val[minibatch_indices].clone()
+                            for key, val in initial_hidden_states_full.items()
+                        }
+            else:
+                # Minibatch loading: shuffle coordinates and fetch data per minibatch
+                np.random.shuffle(all_start_coords)
+                for i in range(0, len(all_start_coords), sequences_per_minibatch):
+                    current_coords_minibatch = all_start_coords[
+                        i : i + sequences_per_minibatch
+                    ]
+                    if not current_coords_minibatch:
+                        continue
+
+                    # Fetch ONLY the current minibatch of sequences using specific coordinates
+                    buffer_data_minibatch = (
+                        self.rollout_buffer.get_specific_sequences_tensor_batch(
+                            seq_len=seq_len,
+                            sequence_coords=current_coords_minibatch,
+                            device=self.device,
+                        )
+                    )
+
+                    if (
+                        not buffer_data_minibatch
+                        or "observations" not in buffer_data_minibatch
+                        or buffer_data_minibatch["observations"] is None
+                    ):
+                        warnings.warn(
+                            "Failed to get a valid minibatch of specific sequences. Skipping this minibatch."
+                        )
+                        continue
+
+                    mb_obs_seq = buffer_data_minibatch["observations"]
+                    mb_actions_seq = buffer_data_minibatch["actions"]
+                    mb_old_log_probs_seq = buffer_data_minibatch["log_probs"]
+                    # Advantages from buffer are already globally normalized if not load_bptt_full_buffer
+                    mb_advantages_seq = buffer_data_minibatch["advantages"]
+                    mb_returns_seq = buffer_data_minibatch["returns"]
+                    mb_hidden_state_init_for_batch = buffer_data_minibatch.get(
+                        "initial_hidden_states", None
+                    )
+                    # mb_hidden_state_init_for_batch items are already cloned in get_specific_sequences_tensor_batch if needed
+
+            # Common BPTT processing logic for the current minibatch (mb_... variables)
+            policy_loss_total = 0.0
+            value_loss_total = 0.0
+            entropy_loss_total = 0.0
+
+            # Prepare initial hidden state for the first timestep of sequences in the minibatch
+            # mb_hidden_state_init_for_batch has shape (minibatch_size, num_layers, hidden_size_per_layer)
+            # For _get_action_and_values, it needs to be (num_layers, minibatch_size, hidden_size_per_layer)
+            current_step_hidden_state = None
+            if self.recurrent and mb_hidden_state_init_for_batch is not None:
+                current_step_hidden_state = {
+                    k: v.permute(1, 0, 2).contiguous()  # (layers, batch, size)
+                    for k, v in mb_hidden_state_init_for_batch.items()
+                }
+
+            for t in range(seq_len):
+                if isinstance(mb_obs_seq, dict):
+                    obs_t = {k_obs: v_obs[:, t] for k_obs, v_obs in mb_obs_seq.items()}
+                else:
+                    obs_t = mb_obs_seq[:, t]
+
+                actions_t = mb_actions_seq[:, t]
+                old_log_prob_t = mb_old_log_probs_seq[:, t]
+                adv_t = mb_advantages_seq[:, t]
+                return_t = mb_returns_seq[:, t]
+
+                _, _, entropy_t, new_value_t, next_hidden_state_for_step = (
+                    self._get_action_and_values(
+                        obs_t,
+                        hidden_state=current_step_hidden_state,  # Pass dict (layers, batch, size)
+                        sample=False,
+                    )
+                )
+
+                new_log_prob_t = self.actor.action_log_prob(actions_t)
+                if entropy_t is None:
+                    entropy_t = (
+                        -new_log_prob_t.mean()
+                    )  # Ensure entropy_t is scalar if new_log_prob_t is not
+                else:
+                    entropy_t = entropy_t.mean()  # Ensure scalar
+
+                ratio = torch.exp(new_log_prob_t - old_log_prob_t)
+                policy_loss1 = -adv_t * ratio
+                policy_loss2 = -adv_t * torch.clamp(
+                    ratio, 1 - self.clip_coef, 1 + self.clip_coef
+                )
+                policy_loss = torch.max(policy_loss1, policy_loss2).mean()
+                value_loss = 0.5 * ((new_value_t - return_t) ** 2).mean()
+                entropy_step_loss = -entropy_t  # entropy_t is already mean
+
+                policy_loss_total += policy_loss
+                value_loss_total += value_loss
+                entropy_loss_total += entropy_step_loss
+
+                with torch.no_grad():
+                    log_ratio = new_log_prob_t - old_log_prob_t
+                    approx_kl = ((torch.exp(log_ratio) - 1) - log_ratio).mean().item()
+                    approx_kl_divs.append(approx_kl)
+
+                if self.recurrent and next_hidden_state_for_step is not None:
+                    current_step_hidden_state = (
+                        next_hidden_state_for_step  # Already (layers, batch, size)
+                    )
+
+            # Average losses over sequence length
+            policy_loss_avg_over_seq = policy_loss_total / seq_len
+            value_loss_avg_over_seq = value_loss_total / seq_len
+            entropy_loss_avg_over_seq = entropy_loss_total / seq_len
+
+            loss = (
+                policy_loss_avg_over_seq
+                + self.vf_coef * value_loss_avg_over_seq
+                + self.ent_coef * entropy_loss_avg_over_seq
+            )
+
+            self.optimizer.zero_grad()
+            loss.backward()  # Gradients accumulate over the sequence within this backward call
+            clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+            clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+            self.optimizer.step()
+
+            mean_loss += loss.item()
+            num_minibatch_updates += 1
+
+            if self.target_kl is not None and len(approx_kl_divs) > 0:
+                if (
+                    np.mean(
+                        approx_kl_divs[
+                            -len(
+                                current_coords_minibatch
+                                if not self.load_bptt_full_buffer
+                                else minibatch_indices
+                            )
+                            * seq_len :
+                        ]
+                    )
+                    > self.target_kl
+                ):
+                    # Check KL only for the current minibatch of sequences
+                    warnings.warn(
+                        f"Epoch {epoch}: KL divergence {np.mean(approx_kl_divs[-len(current_coords_minibatch if not self.load_bptt_full_buffer else minibatch_indices)*seq_len:]):.4f} exceeded target {self.target_kl}. Stopping update for this epoch."
+                    )
+                    approx_kl_divs.clear()  # Clear for next epoch or outer check
+                    break  # Break from minibatch loop for this epoch
+
+        # End of epoch loop
+        mean_loss = mean_loss / max(1e-8, num_minibatch_updates)
+        return mean_loss
+
+    def test(
+        self,
+        env: GymEnvType,
+        swap_channels: bool = False,
+        max_steps: Optional[int] = None,
+        loop: int = 3,
+        vectorized: bool = True,
+        callback: Optional[Callable[[float, Dict[str, float]], None]] = None,
+    ) -> float:
+        """Returns mean test score of agent in environment with epsilon-greedy policy.
+
+        :param env: The environment to be tested in
+        :type env: Gym-style environment
+        :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
+        :type swap_channels: bool, optional
+        :param max_steps: Maximum number of testing steps, defaults to None
+        :type max_steps: int, optional
+        :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
+        :type loop: int, optional
+        :param vectorized: Whether the environment is vectorized, defaults to True
+        :type vectorized: bool, optional
+        :param callback: Optional callback function that takes the sum of rewards and the last info dictionary as input, defaults to None
+        :type callback: Optional[Callable[[reward_sum: float, last_info: Dict[str, float]]], optional
+
+        :return: Mean test score of agent in environment
+        :rtype: float
+        """
+        self.set_training_mode(False)
+        with torch.no_grad():
+            rewards = []
+            num_envs = env.num_envs if hasattr(env, "num_envs") and vectorized else 1
+
+            for _ in range(loop):
+                obs, info = env.reset()
+                scores = np.zeros(num_envs)
+                completed_episode_scores = np.zeros(num_envs)
+                finished = np.zeros(num_envs, dtype=bool)
+                step = 0
+                test_hidden_state = (
+                    self.get_initial_hidden_state(num_envs) if self.recurrent else None
+                )
+
+                last_infos = (
+                    [{}] * num_envs if vectorized else {}
+                )  # Initialize last_info holder
+
+                while not np.all(finished):
+                    if swap_channels:
+                        obs = obs_channels_to_first(obs)
+
+                    # Process action mask
+                    action_mask = None
+                    if vectorized:
+                        # Check if info is a list/array of dicts
+                        if (
+                            isinstance(info, (list, np.ndarray))
+                            and len(info) == num_envs
+                            and all(isinstance(i, dict) for i in info)
+                        ):
+                            masks = [env_info.get("action_mask") for env_info in info]
+                            # If all environments returned a mask and they are not None
+                            if all(m is not None for m in masks):
+                                try:
+                                    action_mask = np.stack(masks)
+                                except Exception as e:
+                                    warnings.warn(f"Could not stack action masks: {e}")
+                                    action_mask = None
+                            # If only some environments returned masks, we probably can't use them reliably
+                            elif any(m is not None for m in masks):
+                                warnings.warn(
+                                    "Action masks not provided for all vectorized environments. Skipping mask."
+                                )
+                                action_mask = None
+                            # else: # No masks found, action_mask remains None
+                        # Handle case where info might be a single dict even if vectorized (e.g. VecNormalize)
+                        elif isinstance(info, dict):
+                            action_mask = info.get("action_mask", None)
+                        # else: # info is None or not in expected format, action_mask remains None
+
+                    else:  # Not vectorized
+                        if isinstance(info, dict):
+                            action_mask = info.get("action_mask", None)
+                        # else: action_mask remains None
+
+                    # Get action
+                    if self.recurrent:
+                        action, _, _, _, test_hidden_state = self.get_action(
+                            obs, action_mask=action_mask, hidden_state=test_hidden_state
+                        )
+                    else:
+                        action, _, _, _ = self.get_action(obs, action_mask=action_mask)
+
+                    # Environment step
+                    if vectorized:
+                        obs, reward, done, trunc, info = env.step(action)
+                        last_infos = info  # Store the array of infos
+                    else:
+                        obs, reward, done, trunc, info_single = env.step(action[0])
+                        # Store info in a dictionary for consistency if not vectorized
+                        info = {"final_info": info_single} if done or trunc else {}
+                        last_infos = info  # Store the single info dict
+
+                    step += 1
+                    scores += np.array(reward)
+
+                    # Check for episode termination
+                    newly_finished = (
+                        np.logical_or(
+                            np.logical_or(done, trunc),
+                            (max_steps is not None and step == max_steps),
+                        )
+                        & ~finished
+                    )
+
+                    # Reset hidden state for newly finished environments
+                    if self.recurrent and np.any(newly_finished):
+                        # Get initial hidden states only for the finished environments
+                        initial_hidden_states_for_reset = self.get_initial_hidden_state(
+                            num_envs
+                        )
+
+                        # hidden state is always a dict for recurrent networks
+                        if isinstance(test_hidden_state, dict):
+                            for key in test_hidden_state:
+                                # Assuming dict values have shape [layers, batch, hidden_size]
+                                reset_states = initial_hidden_states_for_reset[key][
+                                    :, newly_finished, :
+                                ]
+                                if (
+                                    reset_states.shape[1] > 0
+                                ):  # Check batch dim if any env finished
+                                    test_hidden_state[key][
+                                        :, newly_finished, :
+                                    ] = reset_states
+
+                    if np.any(newly_finished):
+                        completed_episode_scores[newly_finished] = scores[
+                            newly_finished
+                        ]
+                        finished[newly_finished] = True
+                        # Optionally reset scores for finished envs if loop continues within while
+                        # scores[newly_finished] = 0 # Uncomment if scores should reset immediately
+
+                # End of episode loop for one test run
+                loop_reward_sum = np.sum(completed_episode_scores)
+
+                # Prepare info for callback (use info from the first env if vectorized)
+                final_info_for_callback = {}
+                if vectorized:
+                    if (
+                        isinstance(last_infos, (list, np.ndarray))
+                        and len(last_infos) > 0
+                    ):
+                        final_info_for_callback = (
+                            last_infos[0] if isinstance(last_infos[0], dict) else {}
+                        )
+                    elif isinstance(
+                        last_infos, dict
+                    ):  # Should not happen if vectorized=True and step returned array? But handle just in case.
+                        final_info_for_callback = last_infos
+                else:
+                    if isinstance(last_infos, dict):
+                        final_info_for_callback = last_infos
+
+                if callback is not None:
+                    callback(loop_reward_sum, final_info_for_callback)
+
+                rewards.append(np.mean(completed_episode_scores))
+
+        mean_fit = np.mean(rewards)
+        self.fitness.append(mean_fit)
+        return mean_fit

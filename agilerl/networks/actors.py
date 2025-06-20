@@ -1,13 +1,21 @@
+import os
 from typing import Optional, Tuple, Type, Union
 
+import dotenv
 import torch
 from gymnasium import spaces
 
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.base import EvolvableNetwork
-from agilerl.networks.distributions import EvolvableDistribution
 from agilerl.typing import ArrayOrTensor, ConfigType, TorchObsType
+
+dotenv.load_dotenv()
+
+if os.getenv("USE_EXPERIMENTAL_DISTRIBUTIONS", "False") == "True":
+    from agilerl.networks.distributions_experimental import EvolvableDistribution
+else:
+    from agilerl.networks.distributions import EvolvableDistribution
 
 
 class DeterministicActor(EvolvableNetwork):
@@ -61,8 +69,8 @@ class DeterministicActor(EvolvableNetwork):
         simba: bool = False,
         recurrent: bool = False,
         device: str = "cpu",
+        encoder_name: str = "encoder",
     ):
-
         super().__init__(
             observation_space,
             encoder_cls=encoder_cls,
@@ -75,6 +83,7 @@ class DeterministicActor(EvolvableNetwork):
             simba=simba,
             recurrent=recurrent,
             device=device,
+            encoder_name=encoder_name,
         )
 
         if isinstance(action_space, spaces.Box):
@@ -252,6 +261,7 @@ class StochasticActor(EvolvableNetwork):
         simba: bool = False,
         recurrent: bool = False,
         device: str = "cpu",
+        encoder_name: str = "encoder",
     ):
         super().__init__(
             observation_space,
@@ -265,6 +275,7 @@ class StochasticActor(EvolvableNetwork):
             simba=simba,
             recurrent=recurrent,
             device=device,
+            encoder_name=encoder_name,
         )
 
         # Require the head to output logits to parameterize a distribution
