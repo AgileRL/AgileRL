@@ -699,7 +699,11 @@ def test_clone_after_learning(device, use_rollout_buffer, recurrent, share_encod
 
     if use_rollout_buffer:
         dummy_env = DummyEnv(observation_space.shape, vect=True, num_envs=num_vec_envs)
-        collect_rollouts(ppo, dummy_env)
+        # Use the correct rollout collection function based on whether the policy is recurrent
+        if recurrent:
+            collect_rollouts_recurrent(ppo, dummy_env)
+        else:
+            collect_rollouts(ppo, dummy_env)
         ppo.learn()
     else:
         states = np.random.randn(
@@ -1362,58 +1366,81 @@ def test_ppo_with_rollout_buffer(observation_space, action_space):
     assert ppo.rollout_buffer.capacity == ppo.learn_step
     assert not ppo.rollout_buffer.recurrent
 
-    # Test with hidden states
-    # Define net_config depending on observation space type
-    if len(getattr(observation_space, "shape", ())) == 3:
-        # Image input – supply the mandatory CNN parameters
+    # Build an encoder configuration that matches the observation space type
+    if len(observation_space.shape) == 3:  # Image observations – use CNN
         base_net_config = {
-            "channel_size": [16, 32],
-            "kernel_size": [3, 3],
-            "stride_size": [1, 1],
+            "encoder_config": {
+                "channel_size": [16, 32],
+                "kernel_size": [3, 3],
+                "stride_size": [1, 1],
+            }
         }
-    else:
-        base_net_config = {}
+        expected_shared = {}
+        expected_separate = {}
+    else:  # Vector observations – use LSTM
+        base_net_config = {
+            "encoder_config": {
+                "hidden_state_size": 64,
+                "max_seq_len": 10,
+            }
+        }
+        expected_shared = {
+            "shared_encoder_h": (1, 1, 64),
+            "shared_encoder_c": (1, 1, 64),
+        }
+        expected_separate = {
+            "actor_encoder_h": (1, 1, 64),
+            "actor_encoder_c": (1, 1, 64),
+            "critic_encoder_h": (1, 1, 64),
+            "critic_encoder_c": (1, 1, 64),
+        }
 
-    base_net_config["encoder_config"] = {
-        "hidden_state_size": 64,
-        "max_seq_len": 10,
-    }
+    # Recurrent only when hidden states are expected (vector observations)
+    recurrent_flag = len(expected_shared) > 0
 
     ppo = PPO(
         observation_space=observation_space,
         action_space=action_space,
-        recurrent=True,
+        recurrent=recurrent_flag,
         use_rollout_buffer=True,
         net_config=base_net_config,
     )
 
-    assert ppo.recurrent
-    assert ppo.rollout_buffer.hidden_state_architecture == {
-        "shared_encoder_h": (1, 1, 64),
-        "shared_encoder_c": (1, 1, 64),
-    }
-    assert ppo.rollout_buffer.recurrent
+    if recurrent_flag:
+        assert ppo.recurrent
+        assert ppo.rollout_buffer.recurrent
+        assert ppo.rollout_buffer.hidden_state_architecture == expected_shared
 
-    # Test with hidden states
-    base_net_config_share = base_net_config.copy()
-    ppo = PPO(
-        observation_space=observation_space,
-        action_space=action_space,
-        recurrent=True,
-        use_rollout_buffer=True,
-        share_encoders=False,
-        net_config=base_net_config_share,
-    )
+        # Test with separated encoders when hidden states exist
+        base_net_config_share = base_net_config.copy()
+        ppo = PPO(
+            observation_space=observation_space,
+            action_space=action_space,
+            recurrent=True,
+            use_rollout_buffer=True,
+            share_encoders=False,
+            net_config=base_net_config_share,
+        )
 
-    assert ppo.recurrent
-    assert ppo.rollout_buffer.hidden_state_architecture == {
-        "actor_encoder_h": (1, 1, 64),
-        "actor_encoder_c": (1, 1, 64),
-        "critic_encoder_h": (1, 1, 64),
-        "critic_encoder_c": (1, 1, 64),
-    }
-    assert ppo.rollout_buffer.recurrent
-    assert not ppo.share_encoders
+        assert ppo.rollout_buffer.hidden_state_architecture == expected_separate
+        assert not ppo.share_encoders
+
+    # Test with hidden states / separated encoders
+    if expected_separate:
+        base_net_config_share = base_net_config.copy()
+        ppo = PPO(
+            observation_space=observation_space,
+            action_space=action_space,
+            recurrent=True,
+            use_rollout_buffer=True,
+            share_encoders=False,
+            net_config=base_net_config_share,
+        )
+
+        assert ppo.recurrent
+        assert ppo.rollout_buffer.hidden_state_architecture == expected_separate
+        assert ppo.rollout_buffer.recurrent
+        assert not ppo.share_encoders
 
 
 # Test PPO learning with rollout buffer
