@@ -857,6 +857,8 @@ def test_mutation_applies_architecture_mutations(algo, device, accelerator, init
         mutated_population = [
             mutations.architecture_mutate(agent) for agent in new_population
         ]
+        for individual in mutated_population:
+            individual.mutation_hook()
 
         assert len(mutated_population) == len(population)
         for old, individual in zip(population, mutated_population):
@@ -866,10 +868,13 @@ def test_mutation_applies_architecture_mutations(algo, device, accelerator, init
             assert individual.mut == (policy.last_mutation_attr or "None")
 
             if policy.last_mutation_attr is not None:
+                print("Mutation = ", policy.last_mutation_attr)
+                print(policy)
                 # assert str(old_policy.state_dict()) != str(policy.state_dict())
                 for group in old.registry.groups:
                     if group.eval_network != policy_name:
                         eval_module = getattr(individual, group.eval_network)
+                        print("Eval module = ", eval_module)
                         # old_eval_module = getattr(old, group.eval_network)
                         assert eval_module.last_mutation_attr is not None
                         assert (
@@ -1583,7 +1588,7 @@ def test_reinit_opt(algo, init_pop):
     )
 
     new_population = [agent.clone() for agent in population]
-    mutations.reinit_opt(new_population[0])
+    mutations._reinit_opt(new_population[0])
 
     opt_attr = new_population[0].registry.optimizers[0].name
     new_opt = getattr(new_population[0], opt_attr)

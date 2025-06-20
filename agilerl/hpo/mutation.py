@@ -878,8 +878,9 @@ class Mutations:
 
         # Apply the same mutation to the rest of the evaluation modules
         for name, offspring in offspring_evals.items():
-            self._apply_arch_mutation(offspring, applied_mutation, mut_dict)
-            self._to_device_and_set_individual(individual, name, offspring)
+            if applied_mutation in offspring.mutation_methods:
+                self._apply_arch_mutation(offspring, applied_mutation, mut_dict)
+                self._to_device_and_set_individual(individual, name, offspring)
 
         individual.mutation_hook()  # Apply mutation hook
 

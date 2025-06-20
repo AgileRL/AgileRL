@@ -542,7 +542,6 @@ def train_multi_agent_off_policy(
                 fitness = ["%.2f" % fitness for fitness in fitnesses]
                 avg_fitness = ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
                 avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
-                mean_scores = ["%.2f" % mean_score for mean_score in mean_scores]
             else:
                 fitness_arr = np.array([fitness for fitness in fitnesses])
                 avg_fitness_arr = np.array(
@@ -560,10 +559,6 @@ def train_multi_agent_off_policy(
                 }
                 avg_score = {
                     agent: avg_score_arr[:, idx] for idx, agent in enumerate(agent_ids)
-                }
-                mean_scores = {
-                    agent: "%.2f" % mean_scores[:, idx]
-                    for idx, agent in enumerate(agent_ids)
                 }
 
             agents = [agent.index for agent in pop]

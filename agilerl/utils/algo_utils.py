@@ -69,10 +69,6 @@ def share_encoder_parameters(
         target_params: TensorDict = param_vals.clone().lock_()
         target_params.to_module(other.encoder)
 
-        # Disable architecture mutations since we will be
-        # reinitializing directly through a mutation hook
-        other.encoder.disable_mutations()
-
 
 def is_image_space(space: spaces.Space) -> bool:
     """Check if the space is an image space. We ignore dtype and number of channels
