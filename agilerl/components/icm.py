@@ -212,7 +212,7 @@ class ICMFeatureEncoder(EvolvableModule):
 class ICMInverseModel(EvolvableMLP):
     def __init__(self, 
                  feature_dim: int, 
-                 action_space: Union[spaces.Discrete, spaces.MultiDiscrete], 
+                 action_space: Union[spaces.Discrete, spaces.MultiDiscrete, spaces.Box], 
                  net_config: Optional[Dict] = None, 
                  device: Union[torch.device, str] = 'cpu'):
         input_dim = 2 * feature_dim
@@ -221,17 +221,21 @@ class ICMInverseModel(EvolvableMLP):
         # Store action space for loss computation
         self.action_space = action_space
         self.action_sizes = get_action_sizes(action_space)
+        self.is_continuous = is_continuous_action_space(action_space)
         
         # Use feature_dim for default hidden layer sizes if not provided
         default_hidden = [feature_dim, feature_dim] if feature_dim > 0 else [256, 256]
         resolved_config = get_evolvable_mlp_config(net_config, default_hidden_size=default_hidden, default_output_dim=action_dim)
         
+        # For continuous actions, we might want a different output activation
+        output_activation = None if self.is_continuous else None  # Logits for discrete, raw for continuous
+        
         super().__init__(
             num_inputs=input_dim,
             hidden_size=resolved_config['hidden_size'],
-            num_outputs=action_dim, # Output is action logits
+            num_outputs=action_dim, # Output is action logits (discrete) or action values (continuous)
             activation=resolved_config['activation'],
-            output_activation=None, # Logits, no activation here
+            output_activation=output_activation,
             layer_norm=resolved_config['layer_norm'],
             device=device
         )
@@ -243,7 +247,7 @@ class ICMInverseModel(EvolvableMLP):
 class ICMForwardModel(EvolvableMLP):
     def __init__(self, 
                  feature_dim: int, 
-                 action_space: Union[spaces.Discrete, spaces.MultiDiscrete], 
+                 action_space: Union[spaces.Discrete, spaces.MultiDiscrete, spaces.Box], 
                  net_config: Optional[Dict] = None, 
                  device: Union[torch.device, str] = 'cpu'):
         input_dim = feature_dim + get_action_dim(action_space)
@@ -261,17 +265,19 @@ class ICMForwardModel(EvolvableMLP):
             device=device
         )
 
-    def forward(self, phi_state: torch.Tensor, action_one_hot: torch.Tensor) -> torch.Tensor:
-        x = torch.cat([phi_state, action_one_hot], dim=1)
+    def forward(self, phi_state: torch.Tensor, action_input: torch.Tensor) -> torch.Tensor:
+        x = torch.cat([phi_state, action_input], dim=1)
         return super().forward(x)
 
 # Helper functions for action space handling
 def get_action_dim(action_space):
-    """Get total action dimension for both Discrete and MultiDiscrete spaces."""
+    """Get total action dimension for Discrete, MultiDiscrete, and Box spaces."""
     if isinstance(action_space, spaces.Discrete):
         return action_space.n
     elif isinstance(action_space, spaces.MultiDiscrete):
         return int(action_space.nvec.sum())
+    elif isinstance(action_space, spaces.Box):
+        return int(np.prod(action_space.shape))
     else:
         raise ValueError(f"Unsupported action space type: {type(action_space)}")
 
@@ -281,11 +287,13 @@ def get_action_sizes(action_space):
         return [action_space.n]
     elif isinstance(action_space, spaces.MultiDiscrete):
         return action_space.nvec.tolist()
+    elif isinstance(action_space, spaces.Box):
+        return list(action_space.shape)
     else:
         raise ValueError(f"Unsupported action space type: {type(action_space)}")
 
 def actions_to_one_hot(actions, action_space):
-    """Convert actions to one-hot encoding for both Discrete and MultiDiscrete."""
+    """Convert actions to one-hot encoding for discrete spaces, or normalize for continuous spaces."""
     if isinstance(action_space, spaces.Discrete):
         return F.one_hot(actions.long(), num_classes=action_space.n).float()
     elif isinstance(action_space, spaces.MultiDiscrete):
@@ -295,8 +303,22 @@ def actions_to_one_hot(actions, action_space):
             one_hot = F.one_hot(actions[:, i].long(), num_classes=n_actions).float()
             one_hots.append(one_hot)
         return torch.cat(one_hots, dim=1)
+    elif isinstance(action_space, spaces.Box):
+        # For continuous actions, just return the actions as float tensors
+        # Optionally normalize to [0, 1] range if action space has bounds
+        actions_float = actions.float()
+        if action_space.is_bounded():
+            # Normalize to [0, 1] range
+            low = torch.tensor(action_space.low, device=actions.device, dtype=torch.float32)
+            high = torch.tensor(action_space.high, device=actions.device, dtype=torch.float32)
+            actions_float = (actions_float - low) / (high - low)
+        return actions_float
     else:
         raise ValueError(f"Unsupported action space type: {type(action_space)}")
+
+def is_continuous_action_space(action_space):
+    """Check if the action space is continuous."""
+    return isinstance(action_space, spaces.Box)
 
 class ICM(EvolvableModule):
     def __init__(self,
@@ -336,11 +358,12 @@ class ICM(EvolvableModule):
         self.accelerator = accelerator
         self.use_internal_encoder = use_internal_encoder
 
-        if not isinstance(action_space, (spaces.Discrete, spaces.MultiDiscrete)):
-            raise ValueError("This ICM implementation currently supports Discrete and MultiDiscrete action spaces only.")
+        if not isinstance(action_space, (spaces.Discrete, spaces.MultiDiscrete, spaces.Box)):
+            raise ValueError("This ICM implementation currently supports Discrete, MultiDiscrete, and Box action spaces only.")
 
         self.observation_space = observation_space
         self.action_space = action_space
+        self.is_continuous_action = is_continuous_action_space(action_space)
         
         self.encoder = None
         if self.use_internal_encoder:
@@ -440,11 +463,13 @@ class ICM(EvolvableModule):
             hidden_state_next_obs
         )
 
-        action_batch_t = self._to_tensor(action_batch, dtype=torch.long)
-        action_one_hot = actions_to_one_hot(action_batch_t, self.action_space)
+        # Use appropriate dtype based on action space type
+        dtype = torch.float32 if self.is_continuous_action else torch.long
+        action_batch_t = self._to_tensor(action_batch, dtype=dtype)
+        action_input = actions_to_one_hot(action_batch_t, self.action_space)
 
         with torch.no_grad():
-            pred_phi_next_obs = self.forward_model(phi_obs, action_one_hot)
+            pred_phi_next_obs = self.forward_model(phi_obs, action_input)
         
         mse_per_feature = self.mse_loss_fn(pred_phi_next_obs, phi_next_obs)
         intrinsic_reward = 0.5 * mse_per_feature.sum(dim=1)
@@ -463,9 +488,12 @@ class ICM(EvolvableModule):
                ) -> Tuple[float, float, float, Optional[Tuple[torch.Tensor, torch.Tensor]], Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         obs_batch_t = self._to_tensor(obs_batch)
         next_obs_batch_t = self._to_tensor(next_obs_batch)
-        action_batch_t = self._to_tensor(action_batch, dtype=torch.long)
+        
+        # Use appropriate dtype based on action space type
+        dtype = torch.float32 if self.is_continuous_action else torch.long
+        action_batch_t = self._to_tensor(action_batch, dtype=dtype)
 
-        action_one_hot = actions_to_one_hot(action_batch_t, self.action_space)
+        action_input = actions_to_one_hot(action_batch_t, self.action_space)
 
         total_loss, loss_I, loss_F, returned_hidden_obs, returned_hidden_next_obs = self.compute_loss(
             obs_batch_t,
@@ -473,7 +501,7 @@ class ICM(EvolvableModule):
             next_obs_batch_t,
             hidden_state_obs,
             hidden_state_next_obs,
-            action_one_hot
+            action_input
         )
         
         if self.optimizer is None:
@@ -506,30 +534,38 @@ class ICM(EvolvableModule):
 
         # === Inverse Model Loss (L_I) ===
         # L_I trains the inverse model and the encoder (via phi_obs and phi_next_obs)
-        pred_action_logits = self.inverse_model(phi_obs, phi_next_obs) 
-        targets = torch.zeros_like(pred_action_logits)
-        if isinstance(self.action_space, spaces.Discrete):
-            targets = F.one_hot(action_batch_t.long(), num_classes=self.action_space.n).float()
-            loss_I = self.ce_loss_fn(pred_action_logits, targets)
-        elif isinstance(self.action_space, spaces.MultiDiscrete):
-            # For MultiDiscrete, compute loss for each action dimension
-            losses_I = []
-            start_idx = 0
-            for i, action_size in enumerate(self.inverse_model.action_sizes):
-                end_idx = start_idx + action_size
-                logits_i = pred_action_logits[:, start_idx:end_idx]
-                targets_i = (
-                    F.one_hot(action_batch_t[:, i].long(), num_classes=action_size).float()
-                    if action_batch_t.dim() > 1
-                    else F.one_hot(action_batch_t[i].long(), num_classes=action_size).float()
-                )
-                targets[:, start_idx:end_idx] = targets_i
-                loss_i = self.ce_loss_fn(logits_i, targets_i)
-                losses_I.append(loss_i)
-                start_idx = end_idx
-            loss_I = torch.stack(losses_I).mean()
+        pred_action_output = self.inverse_model(phi_obs, phi_next_obs) 
+        
+        if self.is_continuous_action:
+            # For continuous actions, use MSE loss
+            target_actions = actions_to_one_hot(action_batch_t, self.action_space)
+            loss_I = self.mse_loss_fn(pred_action_output, target_actions).mean()
+            targets = target_actions  # For forward model input
         else:
-            raise ValueError(f"Unsupported action space type: {type(self.action_space)}")
+            # For discrete actions, use cross-entropy loss
+            targets = torch.zeros_like(pred_action_output)
+            if isinstance(self.action_space, spaces.Discrete):
+                targets = F.one_hot(action_batch_t.long(), num_classes=self.action_space.n).float()
+                loss_I = self.ce_loss_fn(pred_action_output, targets)
+            elif isinstance(self.action_space, spaces.MultiDiscrete):
+                # For MultiDiscrete, compute loss for each action dimension
+                losses_I = []
+                start_idx = 0
+                for i, action_size in enumerate(self.inverse_model.action_sizes):
+                    end_idx = start_idx + action_size
+                    logits_i = pred_action_output[:, start_idx:end_idx]
+                    targets_i = (
+                        F.one_hot(action_batch_t[:, i].long(), num_classes=action_size).float()
+                        if action_batch_t.dim() > 1
+                        else F.one_hot(action_batch_t[i].long(), num_classes=action_size).float()
+                    )
+                    targets[:, start_idx:end_idx] = targets_i
+                    loss_i = self.ce_loss_fn(logits_i, targets_i)
+                    losses_I.append(loss_i)
+                    start_idx = end_idx
+                loss_I = torch.stack(losses_I).mean()
+            else:
+                raise ValueError(f"Unsupported action space type: {type(self.action_space)}")
 
         # === Forward Model Loss (L_F) ===
         # L_F trains the forward model and the encoder (via phi_next_obs as target).
@@ -552,12 +588,11 @@ class ICM(EvolvableModule):
         embedded_next_obs = x.get('embedded_obs_next')
         hidden_state = x.get('hidden_state')
         hidden_state_next = x.get('hidden_state_next')
-        action_one_hot = x.get('action_one_hot')
         if not self.use_internal_encoder:
             # When using shared encoder, the main algorithm should handle the update by calling compute_loss
             # and using the returned loss to update the shared components (encoder, inv/fwd models).
             # This forward pass is for when ICM is a standalone component whose loss needs to be calculated.
-            return self.compute_loss(action_batch_t, obs_batch_t, next_obs_batch_t, embedded_obs, embedded_next_obs, hidden_state, hidden_state_next, action_one_hot)
+            return self.compute_loss(action_batch_t, obs_batch_t, next_obs_batch_t, embedded_obs, embedded_next_obs, hidden_state, hidden_state_next)
         else:
             # When using its own encoder, it can perform a full update cycle.
             return self.update(obs_batch_t, action_batch_t, next_obs_batch_t, hidden_state, hidden_state_next)
