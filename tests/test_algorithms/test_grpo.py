@@ -1,10 +1,8 @@
 import copy
 import gc
-import os
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, Tuple
-from unittest import mock
 from unittest.mock import MagicMock, patch
 
 import gymnasium as gym
@@ -1361,17 +1359,17 @@ def test_load_distributed_actor_warning(grpo, accelerator, request, batch_size):
 )
 def test_init_grpo_lora_config_warning(monkeypatch, accelerator, request):
     accelerator, use_deepspeed_optimizer = accelerator
-    with pytest.warns(UserWarning), mock.patch.dict(os.environ, clear=True):
-        env_vars = {
-            "ACCELERATE_USE_DEEPSPEED": "true",
-            "MASTER_ADDR": "localhost",
-            "MASTER_PORT": "10999",
-            "RANK": "0",
-            "LOCAL_RANK": "0",
-            "WORLD_SIZE": "1",
-        }
-        for key, value in env_vars.items():
-            monkeypatch.setenv(key, value)
+    with pytest.warns(UserWarning), patch_environment(**dist_env):
+        # env_vars = {
+        #     "ACCELERATE_USE_DEEPSPEED": "true",
+        #     "MASTER_ADDR": "localhost",
+        #     "MASTER_PORT": "10999",
+        #     "RANK": "0",
+        #     "LOCAL_RANK": "0",
+        #     "WORLD_SIZE": "1",
+        # }
+        # for key, value in env_vars.items():
+        #     monkeypatch.setenv(key, value)
         gc.collect()
         vocab_size = 1000
         input_size = 10
@@ -1421,18 +1419,7 @@ def test_init_grpo_multiple_adapters(monkeypatch, accelerator, request):
     accelerator, use_deepspeed_optimizer = accelerator
     with pytest.warns(
         UserWarning, match="AgileRL RL finetuning is only compatible with one adapter."
-    ), mock.patch.dict(os.environ, clear=True):
-        # Set up environment variables
-        env_vars = {
-            "ACCELERATE_USE_DEEPSPEED": "true",
-            "MASTER_ADDR": "localhost",
-            "MASTER_PORT": "10999",
-            "RANK": "0",
-            "LOCAL_RANK": "0",
-            "WORLD_SIZE": "1",
-        }
-        for key, value in env_vars.items():
-            monkeypatch.setenv(key, value)
+    ), patch_environment(**dist_env):
 
         # Clean up GPU memory
         gc.collect()
@@ -1659,4 +1646,85 @@ def test_set_reference_policy(grpo, accelerator, request):
     assert grpo.reference_update_tracker == reference_update_tracker
 
 
-# Test that ref actor is the same as actor after learning - i.e. its frozen
+@pytest.mark.parametrize(
+    "accelerator",
+    [
+        {"config": None},
+        {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": False},
+        {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": False},
+        {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": False},
+        {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": True},
+        {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": True},
+        {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": True},
+    ],
+    indirect=["accelerator"],
+)  # Test that ref actor is the same as actor after learning - i.e. its frozen
+def test_ref_actor_is_same_as_actor_after_learning_reference_adapater(
+    accelerator, request
+):
+    accelerator, use_deepspeed_optimizer = accelerator
+    with patch_environment(**dist_env):
+        gc.collect()
+        vocab_size = 1000
+        input_size = 10
+        max_tokens = 20
+        group_size = 5
+        observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
+        action_space = gym.spaces.Box(
+            low=0,
+            high=vocab_size - 1,
+            shape=(20,),
+        )
+        grpo = GRPO(
+            observation_space,
+            action_space,
+            actor_network=create_module(
+                input_size=input_size,
+                max_tokens=max_tokens,
+                vocab_size=vocab_size,
+                device="cuda" if torch.cuda.is_available() else "cpu",
+            ),
+            lr=0.1,
+            pad_token_id=vocab_size - 1,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            group_size=group_size,
+            lora_config=LoraConfig(
+                r=16,
+                lora_alpha=64,
+                target_modules=["linear_1"],
+                task_type="CAUSAL_LM",
+                lora_dropout=0.05,
+            ),
+            cosine_lr_schedule_config=(
+                None
+                if accelerator is not None
+                else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+            ),
+            accelerator=accelerator,
+            use_separate_reference_adapter=True,
+        )
+
+    assert not check_ref_adapater_is_same_as_actor_after_learning(grpo)
+    grpo.set_reference_policy(reference_update_tracker=1)
+    assert check_ref_adapater_is_same_as_actor_after_learning(grpo)
+
+
+# def test_ref_actor_is_same_as_actor_after_learning_no_reference_adapater(grpo, accelerator, request):
+
+
+def check_ref_adapater_is_same_as_actor_after_learning(grpo):
+    ref_param = None
+    actor_param = None
+    for name, param in grpo.actor.named_parameters():
+        if "lora" in name:
+            if "reference" in name:
+                ref_param = param
+            elif "actor" in name:
+                actor_param = param
+            else:
+                pass
+        if ref_param is not None and actor_param is not None:
+            assert torch.equal(ref_param, actor_param), ref_param == actor_param
+            ref_param = None
+            actor_param = None
+    return True

@@ -26,7 +26,7 @@ from agilerl.utils.algo_utils import (
     get_experiences_samples,
     stack_and_pad_experiences,
 )
-from agilerl.utils.llm_utils import HuggingFaceGym, _DummyOptimizer, zip_adapters
+from agilerl.utils.llm_utils import HuggingFaceGym, _DummyOptimizer
 
 DeepSpeedOptimizerType = Union[
     DeepSpeedZeroOptimizer,  # ZeRO Stage 1 & 2 optimizer
@@ -383,6 +383,7 @@ class GRPO(LLMAlgorithm):
             for adapter in adapter_name:
                 base_model.delete_adapter(adapter)
             base_model = base_model.model
+            assert False
 
         self.actor = (
             get_peft_model(base_model, self.lora_config, adapter_name="actor")
@@ -599,21 +600,37 @@ class GRPO(LLMAlgorithm):
         assert (
             reference_update_tracker >= self.reference_update_tracker
         ), "Reference policy update tracker should be greater than or equal to the current reference policy update tracker."
+        print("SETTING REFERENCE POLICY")
         if reference_update_tracker > self.reference_update_tracker:
 
             if self.accelerator is not None:
                 self.accelerator.wait_for_everyone()
             # Merge adapter into base model
             # Update the reference update tracker
+            self.actor.disable_adapter()
+            self.actor.set_adapter("actor")
+            print(self.actor)
+            self.actor.disable_adapter()
+            self.actor.set_adapter("reference")
+            print(self.actor)
+            # assert False
             if self.use_separate_reference_adapter:
                 # Activate both adapters
                 # Iterate over the parame
-                for (_, param1), (_, param2) in zip_adapters(
-                    self.actor, "actor", "reference"
-                ):
-                    param1.data.copy_(param2.data)
-                self._use_policy()
-
+                ref_param = None
+                actor_param = None
+                for name, param in self.actor.named_parameters():
+                    if "lora" in name:
+                        if "reference" in name:
+                            ref_param = param
+                        elif "actor" in name:
+                            actor_param = param
+                        else:
+                            pass
+                    if ref_param is not None and actor_param is not None:
+                        ref_param.data.copy_(actor_param.data)
+                        ref_param = None
+                        actor_param = None
             else:
                 if self.accelerator is not None:
                     merged_base_model = self.accelerator.unwrap_model(

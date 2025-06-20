@@ -238,21 +238,27 @@ def zip_adapters(
 
     # Get parameters for both adapters
     peft_model.set_adapter(adapter1)
-    params1 = list(peft_model.named_parameters())
+    params1 = list(peft_model.named_parameters())[:]
+    peft_model.disable_adapter()
 
     peft_model.set_adapter(adapter2)
-    params2 = list(peft_model.named_parameters())
+    params2 = list(peft_model.named_parameters())[:]
 
     # Zip them together
     for (name1, param1), (name2, param2) in zip(params1, params2):
         # Verify matching
+        print("BEFORE REPLACING")
+        print(name1, name2)
         base_name1 = name1.replace(adapter1, "ADAPTER")
         base_name2 = name2.replace(adapter2, "ADAPTER")
-
+        print("IN THE ZIP FUNC")
+        print(base_name1, base_name2)
+        print(base_name1 == base_name2)
         if base_name1 == base_name2:
             yield (name1, param1), (name2, param2)
-        else:
-            raise ValueError(f"Parameter mismatch: {name1} vs {name2}")
+        # else:
+        #     raise ValueError(f"Parameter mismatch: {name1} vs {name2}")
+    assert False
 
 
 class _DummyOptimizer:
