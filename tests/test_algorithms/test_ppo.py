@@ -13,9 +13,9 @@ from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 
 from agilerl.algorithms.ppo import PPO
-from agilerl.rollouts import collect_rollouts, collect_rollouts_recurrent
 from agilerl.components.rollout_buffer import RolloutBuffer
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
+from agilerl.rollouts import collect_rollouts, collect_rollouts_recurrent
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
     generate_dict_or_tuple_space,
@@ -580,7 +580,9 @@ def test_clone_returns_identical_agent(observation_space):
     assert clone_agent.num_envs == ppo.num_envs
     assert clone_agent.index == ppo.index
 
-    accelerator = Accelerator(cpu=True) if torch.backends.mps.is_available() else Accelerator()
+    accelerator = (
+        Accelerator(cpu=True) if torch.backends.mps.is_available() else Accelerator()
+    )
     ppo = PPO(observation_space, action_space, accelerator=accelerator)
     clone_agent = ppo.clone()
 
@@ -609,7 +611,9 @@ def test_clone_returns_identical_agent(observation_space):
     assert clone_agent.num_envs == ppo.num_envs
     assert clone_agent.index == ppo.index
 
-    accelerator = Accelerator(cpu=True) if torch.backends.mps.is_available() else Accelerator()
+    accelerator = (
+        Accelerator(cpu=True) if torch.backends.mps.is_available() else Accelerator()
+    )
     ppo = PPO(
         observation_space,
         action_space,
@@ -996,7 +1000,7 @@ def test_load_from_pretrained(observation_space, encoder_cls, accelerator, tmpdi
     "observation_space, actor_network, input_tensor",
     [
         (
-        generate_random_box_space(shape=(4,), low=0, high=1),
+            generate_random_box_space(shape=(4,), low=0, high=1),
             "simple_mlp",
             torch.randn(1, 4),
         ),
@@ -1194,9 +1198,7 @@ def test_rollout_buffer_add():
     assert np.array_equal(
         buffer.buffer.get("observations")[current_pos_idx, 0].cpu().numpy(), obs
     )
-    print(
-        buffer.buffer.get("actions")[current_pos_idx, 0].cpu().numpy(), action
-    )
+    print(buffer.buffer.get("actions")[current_pos_idx, 0].cpu().numpy(), action)
     assert np.array_equal(
         buffer.buffer.get("actions")[current_pos_idx, 0].cpu().numpy(), action[0]
     )
