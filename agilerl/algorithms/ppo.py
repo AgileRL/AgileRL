@@ -955,7 +955,6 @@ class PPO(RLAlgorithm):
             self.batch_size
         )  # Here, batch_size means number of sequences per minibatch
         mean_loss = 0.0
-        num_minibatch_updates_total = 0
         total_minibatch_updates_total = 0
 
         for epoch in range(self.update_epochs):
