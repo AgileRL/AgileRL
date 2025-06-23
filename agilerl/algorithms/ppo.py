@@ -18,7 +18,7 @@ from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import StochasticActor
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.value_networks import ValueNetwork
-from agilerl.typing import ArrayOrTensor, ExperiencesType, GymEnvType, BPTTSequenceType
+from agilerl.typing import ArrayOrTensor, BPTTSequenceType, ExperiencesType, GymEnvType
 from agilerl.utils.algo_utils import (
     flatten_experiences,
     get_experiences_samples,
@@ -897,9 +897,9 @@ class PPO(RLAlgorithm):
             original_shape = valid_advantages_tensor.shape
             flat_adv = valid_advantages_tensor.reshape(-1)
             normalized_flat_adv = (flat_adv - flat_adv.mean()) / (flat_adv.std() + 1e-8)
-            self.rollout_buffer.buffer["advantages"][
-                :buffer_actual_size
-            ] = normalized_flat_adv.reshape(original_shape)
+            self.rollout_buffer.buffer["advantages"][:buffer_actual_size] = (
+                normalized_flat_adv.reshape(original_shape)
+            )
         else:
             warnings.warn("No advantages to normalize in BPTT pre-normalization step.")
 
@@ -1169,7 +1169,7 @@ class PPO(RLAlgorithm):
         self.actor.eval()
         self.critic.eval()
         self.set_training_mode(False)
-        
+
         with torch.no_grad():
             rewards = []
             num_envs = env.num_envs if hasattr(env, "num_envs") and vectorized else 1
@@ -1300,10 +1300,10 @@ class PPO(RLAlgorithm):
 
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
-        
+
         # cleanup evaluation mode back into the default training mode (e.g. batch norm and dropout layers)
         self.set_training_mode(True)
         self.actor.train()
         self.critic.train()
-        
+
         return mean_fit

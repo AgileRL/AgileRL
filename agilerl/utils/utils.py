@@ -3,7 +3,6 @@ import warnings
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Union
 
-from agilerl.algorithms.core.base import RLAlgorithm
 import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
@@ -33,13 +32,14 @@ from agilerl.algorithms.core.registry import HyperparameterConfig
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules.base import EvolvableModule
-from agilerl.typing import GymEnvType, GymSpaceType, PopulationType
+from agilerl.typing import GymSpaceType, PopulationType
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, clone_llm
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 SupportedObservationSpace = Union[
     spaces.Box, spaces.Discrete, spaces.Dict, spaces.Tuple
 ]
+
 
 def make_vect_envs(
     env_name: Optional[str] = None,

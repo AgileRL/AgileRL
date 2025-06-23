@@ -5,8 +5,8 @@ from typing import Optional
 import numpy as np
 import torch
 
-from agilerl.typing import GymEnvType
 from agilerl.algorithms.core.base import RLAlgorithm
+from agilerl.typing import GymEnvType
 
 
 def _collect_rollouts(

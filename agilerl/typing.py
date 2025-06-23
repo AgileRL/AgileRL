@@ -1,6 +1,6 @@
+from enum import Enum
 from numbers import Number
 from typing import Any, ClassVar, Dict, List, Protocol, Tuple, Union
-from enum import Enum
 
 import gymnasium as gym
 import numpy as np
@@ -66,10 +66,10 @@ class BatchDimension:
 
 class BPTTSequenceType(Enum):
     """Enum for BPTT sequence generation methods. It specifies the strategy used when generating sequences for BPTT training.
-    
+
     CHUNKED is the default method which uses the least amount of memory while keeping all sampled trajectories available in the buffer for sequencing.
         The number of sequences generated is then:  (num_steps / max_seq_len) * num_envs
-    MAXIMUM generates all possible overlapping sequences, which is the most memory-intensive option. 
+    MAXIMUM generates all possible overlapping sequences, which is the most memory-intensive option.
         The number of sequences generated is then:  (num_steps - max_seq_len + 1) * num_envs
     FIFTY_PERCENT_OVERLAP generates sequences with 50% overlap, which is a compromise between the two.
         The number of sequences generated is then:  (num_steps / max_seq_len * 2) * num_envs
@@ -77,4 +77,6 @@ class BPTTSequenceType(Enum):
 
     CHUNKED = "chunked"  # Generate sequences by non-overlapping chunks
     MAXIMUM = "maximum"  # Generate all possible overlapping sequences
-    FIFTY_PERCENT_OVERLAP = "fifty_percent_overlap" # Generate sequences with 50% overlap
+    FIFTY_PERCENT_OVERLAP = (
+        "fifty_percent_overlap"  # Generate sequences with 50% overlap
+    )
