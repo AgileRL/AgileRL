@@ -331,9 +331,16 @@ def test_initialise_single_agent(observation_space, action_space):
         generate_multi_agent_box_spaces(2, (2,)),
     ],
 )
-def test_initialise_multi_agent(observation_space, action_space):
+@pytest.mark.parametrize("agent_ids", [["agent1", "agent2"], None])
+def test_initialise_multi_agent(observation_space, action_space, agent_ids):
+    if agent_ids is None:
+        observation_space = {
+            f"agent{i}": observation_space[i] for i in range(len(observation_space))
+        }
+        action_space = {f"agent{i}": action_space[i] for i in range(len(action_space))}
+
     agent = DummyMARLAlgorithm(
-        observation_space, action_space, agent_ids=["agent1", "agent2"], index=0
+        observation_space, action_space, agent_ids=agent_ids, index=0
     )
     assert agent is not None
 

@@ -1457,22 +1457,34 @@ def test_ippo_get_action_agent_masking(
         generate_multi_agent_multidiscrete_spaces(3, 2),
     ],
 )
+@pytest.mark.parametrize("action_batch_size", [None, 16])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize("accelerator", [None, Accelerator()])
 def test_ippo_get_action(
-    observation_spaces, action_spaces, device, compile_mode, accelerator
+    observation_spaces,
+    action_spaces,
+    device,
+    compile_mode,
+    accelerator,
+    action_batch_size,
 ):
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
-    state = {
-        agent_id: get_sample_from_space(observation_space)
-        for agent_id, observation_space in zip(agent_ids, observation_spaces)
-    }
-    info = (
-        {agent: {"env_defined_actions": None} for agent in agent_ids}
-        if all(isinstance(space, spaces.Box) for space in action_spaces)
-        else None
-    )
 
+    state = {}
+    for agent_id, obs_space in zip(agent_ids, observation_spaces):
+        sample_state = get_sample_from_space(obs_space)
+
+        if (
+            not isinstance(obs_space, (spaces.Dict, spaces.Tuple))
+            and action_batch_size is not None
+        ):
+            sample_state = np.stack([sample_state] * action_batch_size)
+        else:
+            action_batch_size = None
+
+        state[agent_id] = sample_state
+
+    info = None
     ippo = IPPO(
         observation_spaces,
         action_spaces,
@@ -1480,6 +1492,7 @@ def test_ippo_get_action(
         device=device,
         torch_compiler=compile_mode,
         accelerator=accelerator,
+        action_batch_size=action_batch_size,
     )
     actions, log_probs, dist_entropy, state_values = ippo.get_action(
         obs=state, infos=info

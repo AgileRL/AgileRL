@@ -160,10 +160,7 @@ def reinit_shared_networks(mutation_func=None):
 
         return wrapper
 
-    if mutation_func is not None:
-        return decorator(mutation_func)
-
-    return decorator
+    return decorator(mutation_func)
 
 
 class Mutations:
