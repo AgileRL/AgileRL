@@ -610,7 +610,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
     def filter_mutation_methods(self, remove: str) -> None:
         """Filter out mutation methods that contain the specified string in their name.
 
-        param remove: The string to remove.
+        :param remove: The string to remove.
         :type remove: str
         """
 
@@ -623,7 +623,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
     def get_mutation_probs(self, new_layer_prob: float) -> List[float]:
         """Get the mutation probabilities for each mutation method.
 
-        param new_layer_prob: The probability of selecting a layer mutation method.
+        :param new_layer_prob: The probability of selecting a layer mutation method.
         :type new_layer_prob: float
         return: A list of probabilities for each mutation method.
         rtype: List[float]
@@ -651,9 +651,9 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
     ) -> MutationMethod:
         """Sample a mutation method based on the mutation probabilities.
 
-        param new_layer_prob: The probability of selecting a layer mutation method.
+        :param new_layer_prob: The probability of selecting a layer mutation method.
         type new_layer_prob: float
-        param rng: The random number generator.
+        :param rng: The random number generator.
         type rng: Optional[Generator]
         return: The sampled mutation method.
         rtype: MutationMethod

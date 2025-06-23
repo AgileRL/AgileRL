@@ -9,8 +9,6 @@ from tensordict import TensorDict  # Add import
 
 from agilerl.typing import ArrayOrTensor, ObservationType
 
-# from agilerl.utils.utils import convert_np_to_torch_dtype # Import the utility
-
 
 # Define the utility function locally to avoid circular import
 def convert_np_to_torch_dtype(np_dtype):

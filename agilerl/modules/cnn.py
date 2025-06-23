@@ -247,7 +247,7 @@ class EvolvableCNN(EvolvableModule):
         assert len(stride_size) == len(
             channel_size
         ), "Length of stride size list must be the same length as channel size list."
-        # assert len(input_shape) >= 3, "Input shape must have at least 3 dimensions." # Adjusted below
+
         assert (
             num_outputs > 0
         ), "'num_outputs' cannot be less than or equal to zero, please enter a valid integer."
@@ -481,13 +481,6 @@ class EvolvableCNN(EvolvableModule):
         if not isinstance(x, torch.Tensor):
             x = torch.tensor(x, dtype=torch.float32, device=self.device)
 
-        # Handle single-image input for 3D convolutions
-        # if self.block_type == "Conv3d" and len(x.shape) == 4:
-        #     x = x.unsqueeze(2)
-
-        # if len(x.shape) == 3:
-        #     x = x.unsqueeze(0)
-
         expected_dims = 0
         if self.block_type == "Conv1d":
             expected_dims = 3  # (N, C, L)
@@ -682,11 +675,6 @@ class EvolvableCNN(EvolvableModule):
         :param shrink_params: Flag indicating whether to shrink the parameters, defaults to False
         :type shrink_params: bool, optional
         """
-        # sample_input = (
-        #     torch.zeros(1, *self.input_shape, device=self.device)
-        #     if self.sample_input is None # This logic is now handled in __init__
-        #     else self.sample_input
-        # )
 
         # Create model with new architecture
         model = self.create_cnn(

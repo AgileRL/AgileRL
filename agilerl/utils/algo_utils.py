@@ -65,7 +65,6 @@ def share_encoder_parameters(
     for other in others:
         target_params: TensorDict = param_vals.clone().lock_()
 
-        # NOTE: Should we use `use_state_dict=True` here?
         target_params.to_module(other.encoder)
 
         # Disable architecture mutations since we will be
