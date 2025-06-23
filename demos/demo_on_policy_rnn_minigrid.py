@@ -48,233 +48,234 @@ class MiniGridObsWrapper(gym.ObservationWrapper):
         return concat_obs
 
 
-# --- Setup Configuration ---
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
+def run_demo():
+    # --- Setup Configuration ---
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
 
-# Toggle this to True for RNN (LSTM), False for MLP
-recurrent = True  # <--- CHANGE THIS TO ENABLE/DISABLE RECURRENT
+    # Toggle this to True for RNN (LSTM), False for MLP
+    recurrent = True  # <--- CHANGE THIS TO ENABLE/DISABLE RECURRENT
 
-if recurrent:
-    NET_CONFIG = {
-        "encoder_config": {
-            "hidden_state_size": 128,  # LSTM hidden state size
-            "max_seq_len": 128,
-        },
+    if recurrent:
+        NET_CONFIG = {
+            "encoder_config": {
+                "hidden_state_size": 128,  # LSTM hidden state size
+                "max_seq_len": 128,
+            },
+        }
+    else:
+        NET_CONFIG = {
+            "encoder_config": {
+                "hidden_size": [128],
+            },
+        }
+
+    # Hyperparameters
+    INIT_HP = {
+        "POP_SIZE": 1,  # Population size
+        "BATCH_SIZE": 128,
+        "LEARN_STEP": 128,
+        "LR": 1e-4,
+        "GAMMA": 0.99,
+        "GAE_LAMBDA": 0.95,
+        "CLIP_COEF": 0.2,
+        "ENT_COEF": 0.01,
+        "VF_COEF": 0.5,
+        "MAX_GRAD_NORM": 0.5,
+        "UPDATE_EPOCHS": 4,
+        "HIDDEN_STATE_SIZE": 128,
+        "SHARE_ENCODERS": True,
+        "DISCRETE_ACTIONS": True,
+        "ACTION_STD_INIT": 0.6,
+        "TARGET_KL": None,
+        "CHANNELS_LAST": False,
     }
-else:
-    NET_CONFIG = {
-        "encoder_config": {
-            "hidden_size": [128],
-        },
-    }
 
-# Hyperparameters
-INIT_HP = {
-    "POP_SIZE": 1,  # Population size
-    "BATCH_SIZE": 128,
-    "LEARN_STEP": 128,
-    "LR": 1e-4,
-    "GAMMA": 0.99,
-    "GAE_LAMBDA": 0.95,
-    "CLIP_COEF": 0.2,
-    "ENT_COEF": 0.01,
-    "VF_COEF": 0.5,
-    "MAX_GRAD_NORM": 0.5,
-    "UPDATE_EPOCHS": 4,
-    "HIDDEN_STATE_SIZE": 128,
-    "SHARE_ENCODERS": True,
-    "DISCRETE_ACTIONS": True,
-    "ACTION_STD_INIT": 0.6,
-    "TARGET_KL": None,
-    "CHANNELS_LAST": False,
-}
+    # --- Create Environment and Population ---
+    num_envs = 64  # Fewer envs for MiniGrid due to slowness
 
-# --- Create Environment and Population ---
-num_envs = 64  # Fewer envs for MiniGrid due to slowness
+    def make_env(render_mode=None):
+        def thunk():
+            env = gym.make("MiniGrid-DoorKey-8x8-v0", render_mode=render_mode)
+            env = MiniGridObsWrapper(env)
+            return env
 
+        return thunk
 
-def make_env(render_mode=None):
-    def thunk():
-        env = gym.make("MiniGrid-DoorKey-8x8-v0", render_mode=render_mode)
-        env = MiniGridObsWrapper(env)
-        return env
+    env = gym.vector.SyncVectorEnv([make_env() for _ in range(num_envs)])
+    single_test_env = gym.vector.SyncVectorEnv([make_env()])
 
-    return thunk
+    observation_space = env.single_observation_space
+    action_space = env.single_action_space
 
+    pop = create_population(
+        algo="PPO",
+        observation_space=observation_space,
+        action_space=action_space,
+        net_config=NET_CONFIG,
+        INIT_HP=INIT_HP,
+        population_size=INIT_HP["POP_SIZE"],
+        num_envs=num_envs,
+        device=device,
+        algo_kwargs={"use_rollout_buffer": True, "recurrent": recurrent},
+    )
 
-env = gym.vector.SyncVectorEnv([make_env() for _ in range(num_envs)])
-single_test_env = gym.vector.SyncVectorEnv([make_env()])
+    # --- Setup Evolution Components ---
+    tournament = TournamentSelection(
+        tournament_size=2,
+        elitism=True,
+        population_size=INIT_HP["POP_SIZE"],
+        eval_loop=1,
+    )
 
-observation_space = env.single_observation_space
-action_space = env.single_action_space
+    mutations = Mutations(
+        no_mutation=0.4,
+        architecture=0,
+        new_layer_prob=0.0,
+        parameters=0.2,
+        activation=0,
+        rl_hp=0.2,
+        mutation_sd=0.1,
+        activation_selection=["ReLU", "ELU", "GELU"],
+        mutate_elite=True,
+        rand_seed=1,
+        device=device,
+    )
 
-pop = create_population(
-    algo="PPO",
-    observation_space=observation_space,
-    action_space=action_space,
-    net_config=NET_CONFIG,
-    INIT_HP=INIT_HP,
-    population_size=INIT_HP["POP_SIZE"],
-    num_envs=num_envs,
-    device=device,
-    algo_kwargs={"use_rollout_buffer": True, "recurrent": recurrent},
-)
+    # --- Training Loop (Performance-Flamegraph Style) ---
+    max_steps = 5_000_000 // num_envs
+    required_score = 0.9
+    evo_steps = num_envs * INIT_HP["LEARN_STEP"] * 50
+    eval_steps = None
+    eval_loop = 5
 
-# --- Setup Evolution Components ---
-tournament = TournamentSelection(
-    tournament_size=2,
-    elitism=True,
-    population_size=INIT_HP["POP_SIZE"],
-    eval_loop=1,
-)
+    total_steps = 0
+    training_complete = False
 
-mutations = Mutations(
-    no_mutation=0.4,
-    architecture=0,
-    new_layer_prob=0.0,
-    parameters=0.2,
-    activation=0,
-    rl_hp=0.2,
-    mutation_sd=0.1,
-    activation_selection=["ReLU", "ELU", "GELU"],
-    mutate_elite=True,
-    rand_seed=1,
-    device=device,
-)
+    print("Training...")
+    pbar = trange(max_steps * num_envs, unit="step")
+    while (
+        np.less([agent.steps[-1] for agent in pop], max_steps).all()
+        and not training_complete
+    ):
+        for agent in pop:
+            agent.collect_rollouts(env)
+            agent.learn()
+            total_steps += agent.learn_step * num_envs
+            agent.steps[-1] += agent.learn_step
+            pbar.update(agent.learn_step * num_envs // len(pop))
 
-# --- Training Loop (Performance-Flamegraph Style) ---
-max_steps = 5_000_000 // num_envs
-required_score = 0.9
-evo_steps = num_envs * INIT_HP["LEARN_STEP"] * 50
-eval_steps = None
-eval_loop = 5
+        # Evaluate and evolve
+        if total_steps % evo_steps == 0:
+            fitnesses = [
+                agent.test(
+                    single_test_env,
+                    swap_channels=False,
+                    max_steps=eval_steps,
+                    loop=eval_loop,
+                )
+                for agent in pop
+            ]
+            mean_scores = [np.mean(agent.fitness[-eval_loop:]) for agent in pop]
+            print(f"--- Global steps {total_steps} ---")
+            print(f"Steps {[agent.steps[-1] for agent in pop]}")
+            print(f"Scores: {mean_scores}")
+            print(f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}")
+            print(
+                f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}"
+            )
 
-total_steps = 0
-training_complete = False
+            if any(score >= required_score for score in mean_scores):
+                print(
+                    f"\nAgent achieved required score {required_score}. Stopping training."
+                )
+                elite, _ = tournament.select(pop)
+                training_complete = True
+                break
 
-print("Training...")
-pbar = trange(max_steps * num_envs, unit="step")
-while (
-    np.less([agent.steps[-1] for agent in pop], max_steps).all()
-    and not training_complete
-):
-    for agent in pop:
-        agent.collect_rollouts(env)
-        agent.learn()
-        total_steps += agent.learn_step * num_envs
-        agent.steps[-1] += agent.learn_step
-        pbar.update(agent.learn_step * num_envs // len(pop))
+            elite, pop = tournament.select(pop)
+            pop = mutations.mutation(pop)
+            for agent in pop:
+                agent.steps.append(agent.steps[-1])
 
-    # Evaluate and evolve
-    if total_steps % evo_steps == 0:
+    pbar.close()
+    env.close()
+
+    # --- Record GIF of Best Agent ---
+    print("Recording GIF of best agent...")
+
+    gifs_dir = "gifs"
+    os.makedirs(gifs_dir, exist_ok=True)
+    env_to_wrap = make_env(render_mode="rgb_array")()
+
+    if not training_complete:
         fitnesses = [
             agent.test(
-                single_test_env,
+                env_to_wrap,
                 swap_channels=False,
                 max_steps=eval_steps,
                 loop=eval_loop,
+                vectorized=False,
             )
             for agent in pop
         ]
-        mean_scores = [np.mean(agent.fitness[-eval_loop:]) for agent in pop]
-        print(f"--- Global steps {total_steps} ---")
-        print(f"Steps {[agent.steps[-1] for agent in pop]}")
-        print(f"Scores: {mean_scores}")
-        print(f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}")
-        print(
-            f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}"
-        )
+        elite, _ = tournament.select(pop)
 
-        if any(score >= required_score for score in mean_scores):
-            print(
-                f"\nAgent achieved required score {required_score}. Stopping training."
-            )
-            elite, _ = tournament.select(pop)
-            training_complete = True
-            break
-
-        elite, pop = tournament.select(pop)
-        pop = mutations.mutation(pop)
-        for agent in pop:
-            agent.steps.append(agent.steps[-1])
-
-pbar.close()
-env.close()
-
-# --- Record GIF of Best Agent ---
-print("Recording GIF of best agent...")
-
-gifs_dir = "gifs"
-os.makedirs(gifs_dir, exist_ok=True)
-env_to_wrap = make_env(render_mode="rgb_array")()
-
-if not training_complete:
-    fitnesses = [
-        agent.test(
-            env_to_wrap,
-            swap_channels=False,
-            max_steps=eval_steps,
-            loop=eval_loop,
-            vectorized=False,
-        )
-        for agent in pop
-    ]
-    elite, _ = tournament.select(pop)
-
-render_env = gym.wrappers.RecordVideo(
-    env_to_wrap, video_folder="temp_video", disable_logger=True
-)
-
-
-frames = []
-total_steps = 0
-episode_rewards = []
-
-for episode in range(3):
-    obs, _ = render_env.reset()
-    done = False
-    episode_reward = 0
-    episode_steps = 0
-    if recurrent:
-        hidden_state = elite.get_initial_hidden_state(1)
-    episode_frames = []
-
-    while not done:
-        frame = render_env.render()
-        episode_frames.append(frame)
-        if recurrent:
-            action, _, _, _, hidden_state = elite.get_action(
-                obs, hidden_state=hidden_state
-            )
-        else:
-            action, _, _, _, _ = elite.get_action(obs)
-        obs, reward, terminated, truncated, _ = render_env.step(action)
-        done = terminated or truncated
-        episode_reward += reward
-        episode_steps += 1
-
-    if episode_frames:
-        gif_path = os.path.join(
-            gifs_dir,
-            f"minigrid_memory_{'rnn' if recurrent else 'mlp'}_episode_{episode + 1}.gif",
-        )
-        imageio.mimsave(gif_path, episode_frames, fps=15)
-        print(f"Saved GIF for episode {episode + 1} to {gif_path}")
-
-    total_steps += episode_steps
-    episode_rewards.append(episode_reward)
-    print(
-        f"Recorded Episode {episode + 1} Reward: {episode_reward}, Steps: {episode_steps}"
+    render_env = gym.wrappers.RecordVideo(
+        env_to_wrap, video_folder="temp_video", disable_logger=True
     )
 
-avg_reward = sum(episode_rewards) / len(episode_rewards)
-avg_steps = total_steps / len(episode_rewards)
-print(f"Average Reward: {avg_reward:.2f}, Average Steps: {avg_steps:.2f}")
+    total_steps = 0
+    episode_rewards = []
 
-render_env.close()
+    for episode in range(3):
+        obs, _ = render_env.reset()
+        done = False
+        episode_reward = 0
+        episode_steps = 0
+        if recurrent:
+            hidden_state = elite.get_initial_hidden_state(1)
+        episode_frames = []
 
-if os.path.exists("temp_video"):
-    shutil.rmtree("temp_video")
+        while not done:
+            frame = render_env.render()
+            episode_frames.append(frame)
+            if recurrent:
+                action, _, _, _, hidden_state = elite.get_action(
+                    obs, hidden_state=hidden_state
+                )
+            else:
+                action, _, _, _, _ = elite.get_action(obs)
+            obs, reward, terminated, truncated, _ = render_env.step(action)
+            done = terminated or truncated
+            episode_reward += reward
+            episode_steps += 1
 
-print(f"GIFs saved to {os.path.abspath(gifs_dir)}")
+        if episode_frames:
+            gif_path = os.path.join(
+                gifs_dir,
+                f"minigrid_memory_{'rnn' if recurrent else 'mlp'}_episode_{episode + 1}.gif",
+            )
+            imageio.mimsave(gif_path, episode_frames, fps=15)
+            print(f"Saved GIF for episode {episode + 1} to {gif_path}")
+
+        total_steps += episode_steps
+        episode_rewards.append(episode_reward)
+        print(
+            f"Recorded Episode {episode + 1} Reward: {episode_reward}, Steps: {episode_steps}"
+        )
+
+    avg_reward = sum(episode_rewards) / len(episode_rewards)
+    avg_steps = total_steps / len(episode_rewards)
+    print(f"Average Reward: {avg_reward:.2f}, Average Steps: {avg_steps:.2f}")
+
+    render_env.close()
+
+    if os.path.exists("temp_video"):
+        shutil.rmtree("temp_video")
+
+    print(f"GIFs saved to {os.path.abspath(gifs_dir)}")
+
+
+if __name__ == "__main__":
+    run_demo()
