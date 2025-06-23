@@ -646,7 +646,7 @@ print("SUCCESS: GPU-saved checkpoint loaded successfully in no-CUDA environment"
 @pytest.mark.parametrize(
     "action_space",
     [
-        generate_random_box_space((2,)),
+        generate_random_box_space((4,)),
     ],
 )
 def test_gpu_to_no_cuda_load_checkpoint_single_agent(
