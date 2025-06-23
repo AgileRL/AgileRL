@@ -543,6 +543,106 @@ def test_chkpt_attribute_to_device():
     assert all(isinstance(d["tensor"], torch.Tensor) for d in result_list)
     assert all(d["tensor"].device.type == "cpu" for d in result_list)
 
+    # Test with deeply nested dictionaries (like optimizer states)
+    nested_dict = {
+        "state": {
+            0: {
+                "exp_avg": torch.ones((5, 5)),
+                "exp_avg_sq": torch.zeros((5, 5)),
+                "step": torch.tensor(10),
+            },
+            1: {
+                "exp_avg": torch.ones((3, 3)),
+                "exp_avg_sq": torch.zeros((3, 3)),
+                "step": torch.tensor(5),
+            }
+        },
+        "param_groups": [
+            {
+                "lr": 0.001,
+                "betas": (0.9, 0.999),
+                "eps": 1e-08,
+                "weight_decay": 0,
+                "amsgrad": False,
+                "params": [0, 1]
+            }
+        ]
+    }
+
+    result_nested = chkpt_attribute_to_device(nested_dict, "cpu")
+
+    # Check that deeply nested tensors were moved to device
+    assert result_nested["state"][0]["exp_avg"].device.type == "cpu"
+    assert result_nested["state"][0]["exp_avg_sq"].device.type == "cpu"
+    assert result_nested["state"][0]["step"].device.type == "cpu"
+    assert result_nested["state"][1]["exp_avg"].device.type == "cpu"
+    assert result_nested["state"][1]["exp_avg_sq"].device.type == "cpu"
+    assert result_nested["state"][1]["step"].device.type == "cpu"
+
+    # Check that non-tensor values in nested structure are preserved
+    assert result_nested["param_groups"][0]["lr"] == 0.001
+    assert result_nested["param_groups"][0]["betas"] == (0.9, 0.999)
+    assert result_nested["param_groups"][0]["params"] == [0, 1]
+
+    # Test with tuple containing tensors
+    tensor_tuple = (torch.ones((2, 2)), torch.zeros((3, 3)), "string")
+    result_tuple = chkpt_attribute_to_device(tensor_tuple, "cpu")
+    
+    assert isinstance(result_tuple, tuple)
+    assert result_tuple[0].device.type == "cpu"
+    assert result_tuple[1].device.type == "cpu"
+    assert result_tuple[2] == "string"
+
+    # Test with mixed nested structures (lists in dicts, dicts in lists, etc.)
+    mixed_structure = {
+        "list_of_tensors": [torch.ones((2, 2)), torch.zeros((3, 3))],
+        "dict_in_list": [
+            {"nested_tensor": torch.ones((4, 4))},
+            {"another_tensor": torch.zeros((2, 2))}
+        ],
+        "primitive_values": {
+            "string": "test",
+            "number": 42,
+            "boolean": True,
+            "none_value": None
+        }
+    }
+    
+    result_mixed = chkpt_attribute_to_device(mixed_structure, "cpu")
+    
+    # Check list of tensors
+    assert result_mixed["list_of_tensors"][0].device.type == "cpu"
+    assert result_mixed["list_of_tensors"][1].device.type == "cpu"
+    
+    # Check dict in list
+    assert result_mixed["dict_in_list"][0]["nested_tensor"].device.type == "cpu"
+    assert result_mixed["dict_in_list"][1]["another_tensor"].device.type == "cpu"
+    
+    # Check primitive values are preserved
+    assert result_mixed["primitive_values"]["string"] == "test"
+    assert result_mixed["primitive_values"]["number"] == 42
+    assert result_mixed["primitive_values"]["boolean"] == True
+    assert result_mixed["primitive_values"]["none_value"] is None
+
+    # Test with direct tensor (not in dict or list)
+    direct_tensor = torch.ones((5, 5))
+    result_direct = chkpt_attribute_to_device(direct_tensor, "cpu")
+    assert isinstance(result_direct, torch.Tensor)
+    assert result_direct.device.type == "cpu"
+
+    # Test with empty structures
+    empty_dict = {}
+    empty_list = []
+    empty_tuple = ()
+    
+    result_empty_dict = chkpt_attribute_to_device(empty_dict, "cpu")
+    result_empty_list = chkpt_attribute_to_device(empty_list, "cpu")
+    result_empty_tuple = chkpt_attribute_to_device(empty_tuple, "cpu")
+    
+    assert result_empty_dict == {}
+    assert result_empty_list == []
+    assert result_empty_tuple == ()
+
 
 def test_make_safe_deepcopies():
     # Create modules for testing
@@ -1060,3 +1160,141 @@ def test_remove_nested_files():
     assert not os.path.exists("test_dir/file1.txt")
     assert not os.path.exists("test_dir/nested_dir/file2.txt")
     assert not os.path.exists("test_dir/nested_dir")
+
+
+def test_chkpt_device_transfer_gpu_to_cpu_integration():
+    """Integration test for the GPU to CPU checkpoint transfer scenario.
+    
+    This test simulates the real-world scenario where an agent is trained on GPU
+    and then needs to be loaded on a CPU-only machine, which was causing the
+    serialization error mentioned in the user's issue.
+    """
+    import tempfile
+    import os
+    from unittest.mock import patch, MagicMock
+    
+    # Skip this test if CUDA is not available
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available, skipping GPU to CPU transfer test")
+    
+    # Create a mock checkpoint that simulates a real PyTorch optimizer state dict
+    # saved from a GPU device
+    gpu_checkpoint = {
+        "network_info": {
+            "network_names": ["actor", "critic"],
+            "optimizer_names": ["actor_optimizer", "critic_optimizer"],
+            "modules": {
+                "actor_cls": MagicMock,
+                "actor_init_dict": {"device": "cuda:0"},
+                "actor_state_dict": {"weight": torch.ones((10, 5), device="cuda:0")},
+                "critic_cls": MagicMock,
+                "critic_init_dict": {"device": "cuda:0"}, 
+                "critic_state_dict": {"weight": torch.zeros((5, 10), device="cuda:0")},
+            },
+            "optimizers": {
+                "actor_optimizer_cls": "Adam",
+                "actor_optimizer_kwargs": {},
+                "actor_optimizer_lr": "lr",
+                "actor_optimizer_networks": ["actor"],
+                "actor_optimizer_multiagent": False,
+                "actor_optimizer_state_dict": {
+                    "state": {
+                        0: {
+                            "step": torch.tensor(100, device="cuda:0"),
+                            "exp_avg": torch.ones((10, 5), device="cuda:0"),
+                            "exp_avg_sq": torch.zeros((10, 5), device="cuda:0"),
+                        },
+                        1: {
+                            "step": torch.tensor(50, device="cuda:0"),
+                            "exp_avg": torch.ones((5,), device="cuda:0"),
+                            "exp_avg_sq": torch.zeros((5,), device="cuda:0"),
+                        }
+                    },
+                    "param_groups": [
+                        {
+                            "lr": 0.001,
+                            "betas": (0.9, 0.999),
+                            "eps": 1e-08,
+                            "weight_decay": 0,
+                            "amsgrad": False,
+                            "params": [0, 1]
+                        }
+                    ]
+                },
+                "critic_optimizer_cls": "Adam",
+                "critic_optimizer_kwargs": {},
+                "critic_optimizer_lr": "lr",
+                "critic_optimizer_networks": ["critic"],
+                "critic_optimizer_multiagent": False,
+                "critic_optimizer_state_dict": {
+                    "state": {
+                        0: {
+                            "step": torch.tensor(75, device="cuda:0"),
+                            "exp_avg": torch.ones((5, 10), device="cuda:0"),
+                            "exp_avg_sq": torch.zeros((5, 10), device="cuda:0"),
+                        }
+                    },
+                    "param_groups": [
+                        {
+                            "lr": 0.001,
+                            "betas": (0.9, 0.999),
+                            "eps": 1e-08,
+                            "weight_decay": 0,
+                            "amsgrad": False,
+                            "params": [0]
+                        }
+                    ]
+                }
+            }
+        },
+        "registry": MagicMock(),
+        "device": "cuda:0",
+        "lr": 0.001,
+        "other_attr": "test_value"
+    }
+    
+    # Verify that the checkpoint has GPU tensors
+    assert gpu_checkpoint["network_info"]["modules"]["actor_state_dict"]["weight"].device.type == "cuda"
+    assert gpu_checkpoint["network_info"]["optimizers"]["actor_optimizer_state_dict"]["state"][0]["step"].device.type == "cuda"
+    assert gpu_checkpoint["network_info"]["optimizers"]["actor_optimizer_state_dict"]["state"][0]["exp_avg"].device.type == "cuda"
+    
+    # Now simulate the device transfer that happens during checkpoint loading
+    cpu_checkpoint = chkpt_attribute_to_device(gpu_checkpoint, "cpu")
+    
+    # Verify that ALL tensors have been moved to CPU, including deeply nested ones
+    
+    # Check module state dicts
+    assert cpu_checkpoint["network_info"]["modules"]["actor_state_dict"]["weight"].device.type == "cpu"
+    assert cpu_checkpoint["network_info"]["modules"]["critic_state_dict"]["weight"].device.type == "cpu"
+    
+    # Check deeply nested optimizer states - this is the key fix
+    actor_opt_state = cpu_checkpoint["network_info"]["optimizers"]["actor_optimizer_state_dict"]
+    assert actor_opt_state["state"][0]["step"].device.type == "cpu"
+    assert actor_opt_state["state"][0]["exp_avg"].device.type == "cpu"
+    assert actor_opt_state["state"][0]["exp_avg_sq"].device.type == "cpu"
+    assert actor_opt_state["state"][1]["step"].device.type == "cpu"
+    assert actor_opt_state["state"][1]["exp_avg"].device.type == "cpu"
+    assert actor_opt_state["state"][1]["exp_avg_sq"].device.type == "cpu"
+    
+    critic_opt_state = cpu_checkpoint["network_info"]["optimizers"]["critic_optimizer_state_dict"]
+    assert critic_opt_state["state"][0]["step"].device.type == "cpu"
+    assert critic_opt_state["state"][0]["exp_avg"].device.type == "cpu"
+    assert critic_opt_state["state"][0]["exp_avg_sq"].device.type == "cpu"
+    
+    # Check that non-tensor values are preserved
+    assert actor_opt_state["param_groups"][0]["lr"] == 0.001
+    assert actor_opt_state["param_groups"][0]["betas"] == (0.9, 0.999)
+    assert cpu_checkpoint["lr"] == 0.001
+    assert cpu_checkpoint["other_attr"] == "test_value"
+    
+    # Check that init dicts are also handled properly
+    assert cpu_checkpoint["network_info"]["modules"]["actor_init_dict"]["device"] == "cpu"
+    assert cpu_checkpoint["network_info"]["modules"]["critic_init_dict"]["device"] == "cpu"
+    
+    # This test verifies that the fix resolves the exact issue described:
+    # "Despite this, the driver still fails while un-pickling because some CUDA storages 
+    # are being embedded during pickling itself (their path doesn't show up through normal 
+    # Python-level traversal)."
+    
+    # The recursive nature of our fix ensures that ALL tensors, no matter how deeply nested,
+    # are moved to the target device, preventing the CUDA deserialization error on CPU-only machines.

@@ -303,25 +303,32 @@ def recursive_check_module_attrs(obj: Any, networks_only: bool = False) -> bool:
 
 
 def chkpt_attribute_to_device(
-    chkpt_dict: Dict[str, torch.Tensor], device: str
-) -> Dict[str, Any]:
+    chkpt_dict: Union[Dict[str, Any], List[Any], torch.Tensor, Any], device: str
+) -> Any:
     """Place checkpoint attributes on device. Used when loading saved agents.
+    Recursively handles nested dictionaries and lists to ensure all tensors
+    are moved to the specified device, including deeply nested optimizer states.
 
-    :param chkpt_dict: Checkpoint dictionary
-    :type chkpt_dict: dict
+    :param chkpt_dict: Checkpoint dictionary, list, tensor, or other object
+    :type chkpt_dict: Union[Dict[str, Any], List[Any], torch.Tensor, Any]
     :param device: Device for accelerated computing, 'cpu' or 'cuda'
     :type device: str
+    :return: Object with all tensors moved to specified device
+    :rtype: Any
     """
-    if isinstance(chkpt_dict, list):
-        return [chkpt_attribute_to_device(chkpt, device) for chkpt in chkpt_dict]
-
-    assert isinstance(chkpt_dict, dict), f"Expected dict, got {type(chkpt_dict)}"
-
-    for key, value in chkpt_dict.items():
-        if isinstance(value, torch.Tensor):
-            chkpt_dict[key] = value.to(device)
-
-    return chkpt_dict
+    if isinstance(chkpt_dict, torch.Tensor):
+        return chkpt_dict.to(device)
+    elif isinstance(chkpt_dict, dict):
+        result = {}
+        for key, value in chkpt_dict.items():
+            result[key] = chkpt_attribute_to_device(value, device)
+        return result
+    elif isinstance(chkpt_dict, (list, tuple)):
+        result_type = type(chkpt_dict)
+        return result_type(chkpt_attribute_to_device(item, device) for item in chkpt_dict)
+    else:
+        # For non-tensor, non-dict, non-list objects, return as-is
+        return chkpt_dict
 
 
 def key_in_nested_dict(nested_dict: Dict[str, Any], target: str) -> bool:
