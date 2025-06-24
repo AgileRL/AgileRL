@@ -16,7 +16,7 @@ from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
-MODEL_PATH = "Qwen/Qwen2.5-3B"
+MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
 
@@ -27,22 +27,17 @@ def create_model(pretrained_model_name_or_path):
         attn_implementation="flash_attention_2",
         device_map="cpu",
     )
-    peft_config = LoraConfig(
+
+    lora_config = LoraConfig(
         r=16,
         lora_alpha=64,
-        target_modules=[
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",
-            "up_proj",
-            "down_proj",
-            "gate_proj",
-        ],
-        task_type="CAUSAL_LM",
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
         lora_dropout=0.05,
+        bias="none",
     )
-    model = get_peft_model(model, peft_config)
+
+    model = get_peft_model(model, lora_config, adapter_name="actor")
+
     return model
 
 
@@ -54,7 +49,7 @@ def countdown_chat_template(q, a, tokenizer):
         },
         {
             "role": "user",
-            "content": f"Using each number in this tensor only once {tuple(i.item() for i in q)}, create an equation that equals {a.item()}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
+            "content": f"Using each number in this tensor only once {tuple(i for i in q)}, create an equation that equals {a}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
         },
         {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
     ]
@@ -151,32 +146,44 @@ def combined_rewards(completion, solution, prompt):
     return reward
 
 
-def custom_collate_fn(batch):
-    # Extract answers and questions
-    answers = torch.tensor([item["answer"] for item in batch])
-
-    # For questions of variable length, we need to pad them
-    # First, find the maximum length
-    max_len = max(len(item["question"]) for item in batch)
-
-    # Create padded tensor
-    questions = torch.zeros(len(batch), max_len, dtype=torch.long)
-    for i, item in enumerate(batch):
-        q_len = len(item["question"])
-        questions[i, :q_len] = torch.tensor(item["question"])
-
-    return {"answer": answers, "question": questions}
-
-
 def main(init_hp, mut_p):
     # Instantiate the model and the associated tokenizer
     model = create_model(pretrained_model_name_or_path=MODEL_PATH)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
+    # deepspeed_plugin = DeepSpeedPlugin( hf_ds_config={
+    #         "bf16": {
+    #             "enabled": True  # from mixed_precision: bf16
+    #         },
+    #         "zero_optimization": {
+    #             "stage": 2,  # from zero_stage: 2
+    #             "offload_optimizer": {
+    #                 "device": "cpu"  # from offload_optimizer_device: cpu
+    #             },
+    #             "offload_param": {
+    #                 "device": "cpu"  # from offload_param_device: cpu
+    #             }
+    #         },
+    #         "optimizer": {
+    #             "type": "Adam",
+    #             "params": {
+    #                 "lr": init_hp["LR"]
+    #             }
+    #         },
+    #         "gradient_accumulation_steps": 4,  # from gradient_accumulation_steps: 4
+    #         "gradient_clipping": 1.5,  # from gradient_clipping: 1.5
+    #         "train_batch_size": "auto",
+    #         "train_micro_batch_size_per_gpu": "auto",
+    #         "wall_clock_breakdown": False
+    #     },
+    #     zero3_init_flag=False,  # from zero3_init_flag: false
+    #     gradient_accumulation_steps=4,  # from gradient_accumulation_steps: 4
+    #     gradient_clipping=1.5  # from gradient_clipping: 1.5
+    # )
 
     # Convert the HuggingFace dataset into a Gymnasium environment
-    accelerator = Accelerator()
+    accelerator = Accelerator()  # deepspeed_plugin=deepspeed_plugin)
     accelerator.state.deepspeed_plugin.deepspeed_config["activation_checkpointing"] = {
         "partition_activations": True,
         "cpu_checkpointing": True,
@@ -191,18 +198,17 @@ def main(init_hp, mut_p):
         reward_fn=combined_rewards,
         apply_chat_template_fn=countdown_chat_template,
         data_batch_size_per_gpu=2,
-        custom_collate_fn=custom_collate_fn,
         accelerator=accelerator,
     )
 
     init_hp["PAD_TOKEN_ID"] = tokenizer.eos_token_id
 
     hp_config = HyperparameterConfig(
-        beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),
+        # beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),
         lr=RLParameter(min=mut_p["MIN_LR"], max=mut_p["MAX_LR"]),
-        group_size=RLParameter(
-            min=mut_p["MIN_GROUP_SIZE"], max=mut_p["MAX_GROUP_SIZE"], dtype=int
-        ),
+        # group_size=RLParameter(
+        #     min=mut_p["MIN_GROUP_SIZE"], max=mut_p["MAX_GROUP_SIZE"], dtype=int
+        # ),
     )
     pop = create_population(
         algo=init_hp["ALGO"],
@@ -242,11 +248,11 @@ def main(init_hp, mut_p):
         env=env,
         init_hp=init_hp,
         evaluation_interval=10,
-        wb=True,
+        wb=False,
         save_elite=True,
         elite_path="saved_llms",
         max_reward=2.0,
-        evo_steps=10,
+        evo_steps=1,
         mutation=mutations,
         tournament=tournament,
         accelerator=accelerator,
@@ -258,6 +264,42 @@ def main(init_hp, mut_p):
 if __name__ == "__main__":
     import os
 
+    # deepspeed_plugin = DeepSpeedPlugin(hf_ds_config={
+    #     "bf16": {
+    #         "enabled": True
+    #     },
+    #     "train_micro_batch_size_per_gpu": 2,
+    #     "zero_optimization": {
+    #         "stage": 2,
+    #         "offload_optimizer": {
+    #             "device": "cpu",
+    #         }
+    #     },
+    #     # "optimizer": {
+    #     # "type": "Adam",
+    #     # "params": {
+    #     # "lr": 0.00015
+    #     # }
+    # })
+    # accelerator = Accelerator()  # deepspeed_plugin=deepspeed_plugin)
+    # model = nn.Sequential(
+    #     nn.Linear(10, 10),
+    # )
+    # opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+    # print("Model", model)
+    # # import deepspeed
+    # # model, opt = deepspeed.initialize(
+    # #     model=model,
+    # #     model_parameters=model.parameters(),
+    # #     config=deepspeed_plugin.deepspeed_config,
+    # # )
+    # from accelerate.state import AcceleratorState
+    # AcceleratorState().deepspeed_plugin.deepspeed_config[
+    #     "train_micro_batch_size_per_gpu"
+    # ] = 2
+    # accelerator.prepare(model, opt)
+    # print("Prepared model")
+    # assert False
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     with open("configs/training/grpo.yaml") as file:
         config = yaml.safe_load(file)

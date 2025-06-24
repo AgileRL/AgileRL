@@ -6,16 +6,10 @@ from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 import gymnasium as gym
 import torch
 from accelerate import Accelerator
+from peft import PeftModel
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 from transformers.tokenization_utils_base import BatchEncoding
-
-REASONING_SYSTEM_PROMPT = (
-    "A conversation between User and Assistant. The user asks a question, and the Assistant solves it. The assistant "
-    "first thinks about the reasoning process in the mind and then provides the user with the answer. The reasoning "
-    "process and answer are enclosed within <think> </think> and <answer> </answer> tags, respectively, i.e., "
-    "<think> reasoning process here </think><answer> answer here </answer>"
-)
 
 
 class HuggingFaceGym(gym.Env):
@@ -29,6 +23,8 @@ class HuggingFaceGym(gym.Env):
     :type reward_fn: Callable[..., float]
     :param data_batch_size_per_gpu: DataLoader batch size, defaults to 8
     :type data_batch_size_per_gpu: int, optional
+    :param custom_collate_fn: Custom collate function to be used for creating the batch, defaults to None
+    :type custom_collate_fn: Callable, optional
     :param accelerator: Accelerator to be used for training, defaults to None
     :type accelerator: Accelerator, optional
     """
@@ -41,7 +37,7 @@ class HuggingFaceGym(gym.Env):
         reward_fn: Callable[[str, str, str], float],
         apply_chat_template_fn: Callable[[str, str, AutoTokenizer], BatchEncoding],
         data_batch_size_per_gpu: int = 8,
-        custom_collate_fn: Callable = None,
+        custom_collate_fn: Optional[Callable] = None,
         accelerator: Optional[Accelerator] = None,
     ) -> None:
         assert {"question", "answer"}.issubset(
@@ -54,9 +50,11 @@ class HuggingFaceGym(gym.Env):
         self.reward_fn = reward_fn
         self.tokenizer = tokenizer
         self.data_batch_size_per_gpu = data_batch_size_per_gpu
-        dataloader_kwargs = (
-            {} if custom_collate_fn is None else {"collate_fn": custom_collate_fn}
-        )
+        if custom_collate_fn is None:
+            custom_collate_fn = HuggingFaceGym.create_collate_fn(
+                tokenizer, apply_chat_template_fn
+            )
+        dataloader_kwargs = {"collate_fn": custom_collate_fn}
         self.train_dataloader = DataLoader(
             train_dataset,
             batch_size=data_batch_size_per_gpu,
@@ -69,6 +67,10 @@ class HuggingFaceGym(gym.Env):
             shuffle=False,
             **dataloader_kwargs,
         )
+        self.dataset_size = {
+            "train": len(train_dataset),
+            "test": len(test_dataset),
+        }
         self.accelerator = accelerator
         if self.accelerator is not None:
             self.train_dataloader = self.accelerator.prepare(self.train_dataloader)
@@ -83,7 +85,8 @@ class HuggingFaceGym(gym.Env):
             low=0,
             high=tokenizer.vocab_size - 1,
         )
-        self.eval_mode = False
+        self.evaluation_mode = False
+        self.num_dataset_passes = 0
 
     def step(
         self, completions: torch.Tensor
@@ -105,6 +108,7 @@ class HuggingFaceGym(gym.Env):
     def reset(
         self, reset_dataloaders: bool = False
     ) -> Tuple[List[BatchEncoding], Dict[str, Any]]:
+        """Reset the environment and get the next batch of tokenized prompts."""
         if reset_dataloaders:
             self._reset_dataloaders()
         if self.reset_called:
@@ -117,10 +121,9 @@ class HuggingFaceGym(gym.Env):
         return new_tokenized_prompts
 
     def _decode_and_evaluate(self, completions: List[torch.Tensor]) -> torch.Tensor:
+        """Decode the completions and evaluate the rewards."""
         # This is for a batch of completions (prompt_batch x group_size), List of tensors of length batch size, each tensor is a group of answers
         total_rewards = []
-        if self.eval_mode:
-            decoded_completions = []
         for idx, (group_completion, answer, question) in enumerate(
             zip(completions, self.answers, self.questions)
         ):  # Vectorize this in the future
@@ -130,8 +133,6 @@ class HuggingFaceGym(gym.Env):
                 ],
                 skip_special_tokens=True,
             )
-            if self.eval_mode:
-                decoded_completions.append(decoded_group_completion)
             rewards = [
                 self.reward_fn(completion, answer, question)
                 for completion in decoded_group_completion
@@ -140,32 +141,130 @@ class HuggingFaceGym(gym.Env):
         return torch.tensor(total_rewards)
 
     def _get_next_batch(self) -> List[BatchEncoding]:
-        batch = next(self.dataloader)
-        self.questions = batch["question"]
-        self.answers = batch["answer"]
-        tokenized_prompts = [
-            self.apply_chat_template_fn(question, answer, self.tokenizer)
-            for question, answer in zip(self.questions, self.answers)
-        ]
+        """Get the next batch of tokenized prompts."""
+        try:
+            batch = next(self.dataloader)
+            self.questions = batch["question"]
+            self.answers = batch["answer"]
+            tokenized_prompts = batch["tokenized_prompts"]
+        except StopIteration:
+            self._reset_dataloaders(
+                reset_train=not self.evaluation_mode,
+                reset_test=self.evaluation_mode,
+            )
+            self.num_dataset_passes += 1
+            return self._get_next_batch()
         return tokenized_prompts
 
     @contextmanager
-    def eval(self) -> Generator[None, None, None]:
+    def eval_mode(self) -> Generator[None, None, None]:
+        """Context manager to switch to evaluation mode."""
         self.dataloader = self.test_dataloader_iter
-        self.eval_mode = True
+        self.evaluation_mode = True
         last_tokenized_prompts = copy.deepcopy(self.last_tokenized_prompts)
         try:
             yield
         finally:
             self.dataloader = self.train_dataloader_iter
-            self.eval_mode = False
+            self.evaluation_mode = False
             self.last_tokenized_prompts = last_tokenized_prompts
 
     def __len__(self):
-        if self.eval_mode:
+        """Return the length of the dataset."""
+        if self.evaluation_mode:
             return len(self.test_dataloader.dataset)
         return len(self.train_dataloader.dataset)
 
-    def _reset_dataloaders(self):
-        self.train_dataloader_iter = iter(self.train_dataloader)
-        self.test_dataloader_iter = iter(self.test_dataloader)
+    def _reset_dataloaders(self, reset_train: bool = True, reset_test: bool = True):
+        """Reset the dataloaders to the beginning of the dataset."""
+        if reset_train:
+            self.train_dataloader_iter = iter(self.train_dataloader)
+        if reset_test:
+            self.test_dataloader_iter = iter(self.test_dataloader)
+        self.dataloader = (
+            self.test_dataloader_iter
+            if self.evaluation_mode
+            else self.train_dataloader_iter
+        )
+
+    @staticmethod
+    def create_collate_fn(
+        tokenizer: AutoTokenizer,
+        apply_chat_template_fn: Callable[[str, str, AutoTokenizer], BatchEncoding],
+    ) -> Callable[[List[Dict[str, Any]]], Dict[str, Any]]:
+        """
+        Create a collate function that applies the chat template to the batch of questions and answers.
+
+        :param tokenizer: Tokenizer to be used for encoding and decoding the prompts.
+        :type tokenizer: AutoTokenizer
+        :param apply_chat_template_fn: Function to apply the chat template to the batch of questions and answers.
+        :type apply_chat_template_fn: Callable[[str, str, AutoTokenizer], BatchEncoding]
+        :return: Collate function that applies the chat template to the batch of questions and answers.
+        :rtype: Callable[[List[Dict[str, Any]]], Dict[str, Any]]
+        """
+
+        def collate_fn(batch):
+
+            questions = [item["question"] for item in batch]
+            answers = [item["answer"] for item in batch]
+
+            # Apply chat template to all samples
+            tokenized_prompts = [
+                apply_chat_template_fn(q, a, tokenizer)
+                for q, a in zip(questions, answers)
+            ]
+            return {
+                "question": questions,
+                "answer": answers,
+                "tokenized_prompts": tokenized_prompts,  # Keep individual tokenized prompts
+            }
+
+        return collate_fn
+
+
+def zip_adapters(
+    peft_model: PeftModel, adapter1: str, adapter2: str
+) -> Generator[Tuple[Tuple[str, torch.Tensor], Tuple[str, torch.Tensor]], None, None]:
+    """Memory efficient way to zip two adapters together.
+
+    :param peft_model: PeftModel to zip adapters from
+    :type peft_model: PeftModel
+    :param adapter1: First adapter to zip
+    :type adapter1: str
+    :param adapter2: Second adapter to zip
+    :type adapter2: str
+    :return: Tuple of (adapter1, adapter2)
+    """
+
+    # Get parameters for both adapters
+    peft_model.set_adapter(adapter1)
+    params1 = list(peft_model.named_parameters())[:]
+    peft_model.disable_adapter()
+
+    peft_model.set_adapter(adapter2)
+    params2 = list(peft_model.named_parameters())[:]
+
+    # Zip them together
+    for (name1, param1), (name2, param2) in zip(params1, params2):
+        # Verify matching
+        print("BEFORE REPLACING")
+        print(name1, name2)
+        base_name1 = name1.replace(adapter1, "ADAPTER")
+        base_name2 = name2.replace(adapter2, "ADAPTER")
+        print("IN THE ZIP FUNC")
+        print(base_name1, base_name2)
+        print(base_name1 == base_name2)
+        if base_name1 == base_name2:
+            yield (name1, param1), (name2, param2)
+        # else:
+        #     raise ValueError(f"Parameter mismatch: {name1} vs {name2}")
+    assert False
+
+
+class _DummyOptimizer:
+    """
+    Sentinel class to use for the optimizer when the optimizer is defined in the deepspeed config.
+    """
+
+    def __init__(self, params: List[torch.Tensor], lr: float, **kwargs):
+        pass

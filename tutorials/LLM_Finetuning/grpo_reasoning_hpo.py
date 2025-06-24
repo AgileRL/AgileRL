@@ -52,7 +52,7 @@ def countdown_chat_template(q, a, tokenizer):
         },
         {
             "role": "user",
-            "content": f"Using each number in this tensor only once {tuple(i.item() for i in q)}, create an equation that equals {a.item()}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
+            "content": f"Using each number in this tensor only once {tuple(i for i in q)}, create an equation that equals {a}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
         },
         {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
     ]
@@ -151,23 +151,6 @@ def combined_rewards(completion, solution, prompt):
     return reward
 
 
-def custom_collate_fn(batch):
-    # Extract answers and questions
-    answers = torch.tensor([item["answer"] for item in batch])
-
-    # For questions of variable length, we need to pad them
-    # First, find the maximum length
-    max_len = max(len(item["question"]) for item in batch)
-
-    # Create padded tensor
-    questions = torch.zeros(len(batch), max_len, dtype=torch.long)
-    for i, item in enumerate(batch):
-        q_len = len(item["question"])
-        questions[i, :q_len] = torch.tensor(item["question"])
-
-    return {"answer": answers, "question": questions}
-
-
 def main(init_hp, mut_p):
     # Instantiate the model and the associated tokenizer
     model = create_model(pretrained_model_name_or_path=MODEL_PATH)
@@ -191,7 +174,6 @@ def main(init_hp, mut_p):
         reward_fn=combined_rewards,
         apply_chat_template_fn=countdown_chat_template,
         data_batch_size_per_gpu=2,
-        custom_collate_fn=custom_collate_fn,
         accelerator=accelerator,
     )
 
