@@ -1860,8 +1860,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def update_lr(
         optimizer: DeepSpeedOptimizerWrapper,
         lr: float,
-        accelerator: Optional[Accelerator],
-        scheduler_config: Optional[CosineLRScheduleConfig],
+        accelerator: Optional[Accelerator] = None,
+        scheduler_config: Optional[CosineLRScheduleConfig] = None,
     ) -> Tuple[Optional[Accelerator], Optional[SequentialLR]]:
         """Update the learning rate of the optimizer
 

@@ -3159,9 +3159,7 @@ def check_ref_adapater_is_same_as_actor_after_learning(grpo):
             else:
                 pass
         if ref_param is not None and actor_param is not None:
-            if not torch.equal(
-                ref_param, actor_param
-            ):  # (name, ref_param == actor_param)
+            if not torch.equal(ref_param, actor_param):
                 return False
             ref_param = None
             actor_param = None
