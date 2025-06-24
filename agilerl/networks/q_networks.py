@@ -10,7 +10,7 @@ from agilerl.modules.configs import MlpNetConfig, NetConfig
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.custom_modules import DuelingDistributionalMLP
 from agilerl.typing import ArrayOrTensor, ConfigType, TorchObsType
-from agilerl.utils.evolvable_networks import is_image_space
+from agilerl.utils.evolvable_networks import get_default_encoder_config, is_image_space
 
 
 class QNetwork(EvolvableNetwork):
@@ -185,7 +185,9 @@ class RainbowQNetwork(EvolvableNetwork):
             observation_space
         ):
             if encoder_config is None:
-                encoder_config = asdict(MlpNetConfig(hidden_size=[16]))
+                encoder_config = get_default_encoder_config(
+                    observation_space, simba=False, recurrent=False
+                )
 
             encoder_config["noise_std"] = noise_std
             encoder_config["output_activation"] = encoder_config.get(
@@ -312,6 +314,8 @@ class ContinuousQNetwork(EvolvableNetwork):
     :type latent_dim: int
     :param simba: Whether to use SimBA for the network. Defaults to False.
     :type simba: bool
+    :param recurrent: Whether to use a recurrent network. Defaults to False.
+    :type recurrent: bool
     :param normalize_actions: Whether to normalize the actions. Defaults to False. This is set to True if
         the encoder has nn.LayerNorm layers.
     :type normalize_actions: bool
@@ -335,6 +339,7 @@ class ContinuousQNetwork(EvolvableNetwork):
         n_agents: Optional[int] = None,
         latent_dim: int = 32,
         simba: bool = False,
+        recurrent: bool = False,
         normalize_actions: bool = False,
         device: str = "cpu",
     ):
@@ -349,6 +354,7 @@ class ContinuousQNetwork(EvolvableNetwork):
             n_agents=n_agents,
             latent_dim=latent_dim,
             simba=simba,
+            recurrent=recurrent,
             device=device,
         )
 
@@ -362,6 +368,7 @@ class ContinuousQNetwork(EvolvableNetwork):
         # If the encoder has nn.LayerNorm layers, we normalize the actions for
         # better training stability
         # see https://github.com/AgileRL/AgileRL/issues/337
+        # FIXME: Need to also add support for EvolvableMultiInput encoders
         self.normalize_actions = (
             isinstance(self.encoder, EvolvableMLP) and self.encoder.layer_norm
         ) or normalize_actions
