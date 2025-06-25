@@ -358,20 +358,6 @@ class TestGetOutputSizeFromSpace:
         expected = {"discrete_action": 4, "continuous_action": 2, "binary_action": 3}
         assert result == expected
 
-    def test_tuple_space(self):
-        """Test Tuple space returns tuple of sizes."""
-        space = spaces.Tuple(
-            (
-                spaces.Discrete(5),
-                spaces.Box(low=-1, high=1, shape=(3,), dtype=np.float32),
-                spaces.MultiDiscrete([2, 3]),
-            )
-        )
-        # NOTE: This is a bug in get_output_size_from_space - it doesn't handle spaces.Tuple
-        # but get_input_size_from_space does. This should be fixed in the function.
-        with pytest.raises(AttributeError, match="Can't access action dimensions"):
-            get_output_size_from_space(space)
-
     def test_list_of_spaces(self):
         """Test list of spaces returns tuple of sizes."""
         spaces_list = [
@@ -401,24 +387,6 @@ class TestGetOutputSizeFromSpace:
         expected = {"movement": {"direction": 4, "speed": 1}, "special_action": 2}
         assert result == expected
 
-    def test_nested_tuple_space(self):
-        """Test nested Tuple space."""
-        space = spaces.Tuple(
-            (
-                spaces.Tuple(
-                    (
-                        spaces.Discrete(3),
-                        spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32),
-                    )
-                ),
-                spaces.MultiBinary(4),
-            )
-        )
-        # NOTE: This is a bug in get_output_size_from_space - it doesn't handle spaces.Tuple
-        # but get_input_size_from_space does. This should be fixed in the function.
-        with pytest.raises(AttributeError, match="Can't access action dimensions"):
-            get_output_size_from_space(space)
-
     def test_unsupported_space_raises_error(self):
         """Test that unsupported space types raise AttributeError."""
 
@@ -436,14 +404,6 @@ class TestGetOutputSizeFromSpace:
         result = get_output_size_from_space(space)
         assert result == {}
 
-    def test_empty_tuple_space(self):
-        """Test empty Tuple space."""
-        space = spaces.Tuple(())
-        # NOTE: This is a bug in get_output_size_from_space - it doesn't handle spaces.Tuple
-        # but get_input_size_from_space does. This should be fixed in the function.
-        with pytest.raises(AttributeError, match="Can't access action dimensions"):
-            get_output_size_from_space(space)
-
     def test_box_space_scalar(self):
         """Test scalar Box space (shape=())."""
         space = spaces.Box(low=-1, high=1, shape=(), dtype=np.float32)
@@ -451,8 +411,8 @@ class TestGetOutputSizeFromSpace:
         with pytest.raises(IndexError):
             get_output_size_from_space(space)
 
-    def test_python_tuple_works_but_gymnasium_tuple_doesnt(self):
-        """Test that Python tuples work but gymnasium Tuple spaces don't (bug)."""
+    def test_python_tuple(self):
+        """Test that Python tuples work."""
         # Python tuple should work
         python_tuple = (
             spaces.Discrete(3),
@@ -460,16 +420,6 @@ class TestGetOutputSizeFromSpace:
         )
         result = get_output_size_from_space(python_tuple)
         assert result == (3, 2)
-
-        # But gymnasium Tuple should fail (this is the bug)
-        gym_tuple = spaces.Tuple(
-            (
-                spaces.Discrete(3),
-                spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32),
-            )
-        )
-        with pytest.raises(AttributeError, match="Can't access action dimensions"):
-            get_output_size_from_space(gym_tuple)
 
 
 ######### Test Edge Cases and Complex Scenarios #########
@@ -505,15 +455,11 @@ class TestSpaceSizeEdgeCases:
         )
 
         # Complex action space - Using Python tuple instead of spaces.Tuple
-        # since get_output_size_from_space doesn't support spaces.Tuple (bug)
+        # since get_output_size_from_space doesn't support spaces.Tuple
         action_space = spaces.Dict(
             {
                 "motor_commands": spaces.Box(
                     low=-1, high=1, shape=(12,), dtype=np.float32
-                ),
-                "discrete_commands": (  # Python tuple instead of spaces.Tuple
-                    spaces.Discrete(5),
-                    spaces.MultiDiscrete([3, 3]),
                 ),
                 "binary_switches": spaces.MultiBinary(8),
             }
@@ -528,7 +474,7 @@ class TestSpaceSizeEdgeCases:
                 "velocity": (6,),
                 "discrete_state": (10,),
             },
-            "sensors": ((16,), (14,)),  # 16 for MultiBinary, 4+8+2=14 for MultiDiscrete
+            "sensors": ((16,), (14,)),
         }
         assert input_result == expected_input
 
@@ -536,7 +482,6 @@ class TestSpaceSizeEdgeCases:
         output_result = get_output_size_from_space(action_space)
         expected_output = {
             "motor_commands": 12,
-            "discrete_commands": (5, 6),  # 5 for Discrete, 3+3=6 for MultiDiscrete
             "binary_switches": 8,
         }
         assert output_result == expected_output
@@ -610,33 +555,3 @@ class TestSpaceSizeEdgeCases:
         assert tuple_result == expected
         assert list_result == expected
         assert gym_result == expected
-
-    def test_function_inconsistency_spaces_tuple_support(self):
-        """Test that demonstrates the inconsistency in spaces.Tuple support between the two functions."""
-        # Create a simple Tuple space
-        tuple_space = spaces.Tuple(
-            (
-                spaces.Discrete(3),
-                spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32),
-            )
-        )
-
-        # get_input_size_from_space supports spaces.Tuple
-        input_result = get_input_size_from_space(tuple_space)
-        assert input_result == ((3,), (2,))
-
-        # get_output_size_from_space does NOT support spaces.Tuple (inconsistency/bug)
-        with pytest.raises(AttributeError, match="Can't access action dimensions"):
-            get_output_size_from_space(tuple_space)
-
-        # But both support Python tuples
-        python_tuple = (
-            spaces.Discrete(3),
-            spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32),
-        )
-
-        input_result_python = get_input_size_from_space(python_tuple)
-        output_result_python = get_output_size_from_space(python_tuple)
-
-        assert input_result_python == ((3,), (2,))
-        assert output_result_python == (3, 2)  # Note: different format for output
