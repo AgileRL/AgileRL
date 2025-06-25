@@ -337,7 +337,6 @@ def test_distribution_mutation_methods(dummy_rng, head_config):
 
     for method in evolvable_dist.mutation_methods:
         new_dist = evolvable_dist.clone()
-        print(getattr(new_dist, method))
         getattr(new_dist, method)()
 
         if "." in method and new_dist.last_mutation_attr is not None:

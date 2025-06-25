@@ -493,10 +493,12 @@ class EvolvableDistribution(EvolvableWrapper):
         :return: Cloned distribution.
         :rtype: EvolvableDistribution
         """
-        return EvolvableDistribution(
+        clone = EvolvableDistribution(
             action_space=self.action_space,
             network=self.wrapped.clone(),
             action_std_init=self.action_std_init,
             squash_output=self.squash_output,
             device=self.device,
         )
+        clone.rng = self.rng
+        return clone
