@@ -241,54 +241,54 @@ class EvolvableCNN(EvolvableModule):
     ) -> None:
         super().__init__(device)
 
-        assert len(kernel_size) == len(
-            channel_size
-        ), "Length of kernel size list must be the same length as channel size list."
-        assert len(stride_size) == len(
-            channel_size
-        ), "Length of stride size list must be the same length as channel size list."
-
-        assert (
-            num_outputs > 0
-        ), "'num_outputs' cannot be less than or equal to zero, please enter a valid integer."
-        assert (
-            min_hidden_layers < max_hidden_layers
-        ), "'min_hidden_layers' must be less than 'max_hidden_layers."
-        assert (
-            min_channel_size < max_channel_size
-        ), "'min_channel_size' must be less than 'max_channel_size'."
+        assert len(kernel_size) == len(channel_size), (
+            "Length of kernel size list must be the same length as channel size list."
+        )
+        assert len(stride_size) == len(channel_size), (
+            "Length of stride size list must be the same length as channel size list."
+        )
+        # assert len(input_shape) >= 3, "Input shape must have at least 3 dimensions." # Adjusted below
+        assert num_outputs > 0, (
+            "'num_outputs' cannot be less than or equal to zero, please enter a valid integer."
+        )
+        assert min_hidden_layers < max_hidden_layers, (
+            "'min_hidden_layers' must be less than 'max_hidden_layers."
+        )
+        assert min_channel_size < max_channel_size, (
+            "'min_channel_size' must be less than 'max_channel_size'."
+        )
 
         if block_type == "Conv1d":
-            assert (
-                len(input_shape) == 2
-            ), f"For Conv1d, input_shape should be (channels, length), got {input_shape}"
+            assert len(input_shape) == 2, (
+                f"For Conv1d, input_shape should be (channels, length), got {input_shape}"
+            )
             _sample_input = (
                 torch.zeros(1, *input_shape, device=device)  # (1, C, L)
                 if sample_input is None
                 else sample_input
             )
-            assert (
-                len(_sample_input.shape) == 3
-            ), f"Sample input for Conv1d must be (B, C, L), got shape {_sample_input.shape}"
+            assert len(_sample_input.shape) == 3, (
+                f"Sample input for Conv1d must be (B, C, L), got shape {_sample_input.shape}"
+            )
         elif block_type == "Conv2d":
-            assert (
-                len(input_shape) == 3
-            ), f"For Conv2d, input_shape should be (channels, height, width), got {input_shape}"
+            assert len(input_shape) == 3, (
+                f"For Conv2d, input_shape should be (channels, height, width), got {input_shape}"
+            )
             _sample_input = (
                 torch.zeros(1, *input_shape, device=device)
                 if sample_input is None
                 else sample_input
             )
-            assert (
-                len(_sample_input.shape) == 4
-            ), f"Sample input for Conv2d must be (B, C, H, W), got shape {_sample_input.shape}"
+            assert len(_sample_input.shape) == 4, (
+                f"Sample input for Conv2d must be (B, C, H, W), got shape {_sample_input.shape}"
+            )
         elif block_type == "Conv3d":
-            assert (
-                len(input_shape) == 4
-            ), f"For Conv3d, input_shape should be (channels, depth, height, width), got {input_shape}"
-            assert (
-                sample_input is not None and len(sample_input.shape) == 5
-            ), f"Sample input with shape format (B, C, D, H, W) must be provided for 3D convolutional networks, got {sample_input.shape if sample_input is not None else None}."
+            assert len(input_shape) == 3, (
+                f"For Conv3d, input_shape should be (channels, height, width), got {input_shape}"
+            )
+            assert sample_input is not None and len(sample_input.shape) == 5, (
+                f"Sample input with shape format (B, C, D, H, W) must be provided for 3D convolutional networks, got {sample_input.shape if sample_input is not None else None}."
+            )
             _sample_input = sample_input
         else:
             raise ValueError(
@@ -489,12 +489,13 @@ class EvolvableCNN(EvolvableModule):
         elif self.block_type == "Conv3d":
             expected_dims = 5  # (N, C, D, H, W)
 
+            # Specific handling for Conv3d if it expects depth but receives data without it
+            # (e.g. (N, C, H, W) -> (N, C, 1, H, W))
+            if len(x.shape) == expected_dims - 1:
+                x = x.unsqueeze(2)
+
         if len(x.shape) == expected_dims - 1:  # Missing batch dimension
             x = x.unsqueeze(0)
-
-        # Specific handling for Conv3d if it expects depth but receives data without it (e.g. (N,C,H,W) -> (N,C,1,H,W))
-        if self.block_type == "Conv3d" and len(x.shape) == 4 and expected_dims == 5:
-            x = x.unsqueeze(2)
 
         return self.model(x)
 
