@@ -119,7 +119,7 @@ def test_incorrect_instantiation(
 
 @pytest.mark.parametrize(
     "input_shape, channel_size, kernel_size, stride_size, num_outputs",
-    [([1, 1, 16, 16], [3, 32], [3, 3], [2, 2], 10)],  # input_shape is (C, D, H, W)
+    [([1, 16, 16], [3, 32], [3, 3], [2, 2], 10)],  # input_shape is (C, D, H, W)
 )
 def test_instantiation_for_multi_agents(
     input_shape,
@@ -136,9 +136,9 @@ def test_instantiation_for_multi_agents(
         stride_size=stride_size,
         num_outputs=num_outputs,
         block_type="Conv3d",
-        sample_input=torch.randn(1, *input_shape).to(
-            device
-        ),  # sample_input (B, C, D, H, W)
+        sample_input=torch.randn(1, 1, *input_shape)
+        .permute(0, 2, 1, 3, 4)
+        .to(device),  # sample_input (B, C, D, H, W)
         device=device,
     )
     assert isinstance(evolvable_cnn, EvolvableCNN)
@@ -224,7 +224,7 @@ def test_forward(
 @pytest.mark.parametrize(
     "input_shape, channel_size, kernel_size, stride_size, \
         num_outputs, output_shape",
-    [([1, 1, 16, 16], [3, 32], [3, 3], [2, 2], 10, (1, 10))],  # input_shape (C,D,H,W)
+    [([1, 16, 16], [3, 32], [3, 3], [2, 2], 10, (1, 10))],  # input_shape (C,H,W)
 )
 def test_forward_multi(
     input_shape,
@@ -242,9 +242,9 @@ def test_forward_multi(
         stride_size=stride_size,
         num_outputs=num_outputs,
         block_type="Conv3d",
-        sample_input=torch.randn(1, *input_shape).to(
-            device
-        ),  # sample_input (B,C,D,H,W)
+        sample_input=torch.randn(1, 1, *input_shape)
+        .permute(0, 2, 1, 3, 4)
+        .to(device),  # sample_input (B,C,D,H,W)
         device=device,
     )
     input_tensor = torch.randn(1, *input_shape).to(device)  # input_tensor (B,C,D,H,W)
@@ -602,7 +602,7 @@ def test_change_cnn_kernel_else_statement(device):
 
 def test_change_cnn_kernel_multi(device):
     evolvable_cnn = EvolvableCNN(
-        input_shape=[1, 1, 16, 16],  # (C,D,H,W)
+        input_shape=[1, 16, 16],  # (C,H,W)
         channel_size=[32, 32],
         kernel_size=[3, 3],
         stride_size=[1, 1],
@@ -627,7 +627,7 @@ def test_change_cnn_kernel_multi(device):
 
 def test_change_cnn_kernel_multi_else_statement(device):
     evolvable_cnn = EvolvableCNN(
-        input_shape=[1, 1, 16, 16],  # (C,D,H,W)
+        input_shape=[1, 16, 16],  # (C,H,W)
         channel_size=[32],
         kernel_size=[3],
         stride_size=[1],
