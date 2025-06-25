@@ -6,5 +6,5 @@ OptimizerWrapper
 Parameters
 ------------
 
-.. autoclass:: agilerl.algorithms.core.wrappers.OptimizerWrapper
+.. autoclass:: agilerl.algorithms.core.optimizer_wrapper.OptimizerWrapper
   :members:

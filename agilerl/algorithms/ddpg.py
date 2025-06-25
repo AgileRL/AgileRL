@@ -8,9 +8,8 @@ import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
 
-from agilerl.algorithms.core import RLAlgorithm
+from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import DeterministicActor
@@ -78,7 +77,7 @@ class DDPG(RLAlgorithm):
     :type actor_network: Optional[nn.Module], optional
     :param critic_network: Custom critic network, defaults to None
     :type critic_network: Optional[nn.Module], optional
-    :param share_encoders: Share encoders between actor and critic, defaults to True
+    :param share_encoders: Share encoders between actor and critic, defaults to False
     :type share_encoders: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
@@ -114,7 +113,7 @@ class DDPG(RLAlgorithm):
         policy_freq: int = 2,
         actor_network: Optional[EvolvableModule] = None,
         critic_network: Optional[EvolvableModule] = None,
-        share_encoders: bool = True,
+        share_encoders: bool = False,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
@@ -180,6 +179,7 @@ class DDPG(RLAlgorithm):
         self.policy_freq = policy_freq
         self.O_U_noise = O_U_noise
         self.vect_noise_dim = vect_noise_dim
+        self.share_encoders = share_encoders
         self.expl_noise = (
             expl_noise
             if isinstance(expl_noise, np.ndarray)
@@ -245,7 +245,6 @@ class DDPG(RLAlgorithm):
             self.critic_target = create_critic()
 
         # Share encoders between actor and critic
-        self.share_encoders = share_encoders
         if self.share_encoders and all(
             isinstance(net, EvolvableNetwork) for net in [self.actor, self.critic]
         ):
@@ -254,6 +253,7 @@ class DDPG(RLAlgorithm):
             # Need to register a mutation hook that does this after every mutation
             self.register_mutation_hook(self.share_encoder_parameters)
 
+        # Initialize target networks
         self.actor_target.load_state_dict(self.actor.state_dict())
         self.critic_target.load_state_dict(self.critic.state_dict())
 
@@ -272,10 +272,18 @@ class DDPG(RLAlgorithm):
 
         # Register network groups for actor and critic
         self.register_network_group(
-            NetworkGroup(eval=self.actor, shared=self.actor_target, policy=True)
+            NetworkGroup(
+                eval_network=self.actor,
+                shared_networks=self.actor_target,
+                policy=True,
+            )
         )
         self.register_network_group(
-            NetworkGroup(eval=self.critic, shared=self.critic_target, policy=False)
+            NetworkGroup(
+                eval_network=self.critic,
+                shared_networks=self.critic_target,
+                policy=False,
+            )
         )
 
     def share_encoder_parameters(self) -> None:
@@ -383,7 +391,7 @@ class DDPG(RLAlgorithm):
         """Updates agent network parameters to learn from experiences.
 
         :param experiences: TensorDict of batched observations, actions, rewards, next_observations, dones.
-        :type experiences: tensordict.TensorDict
+        :type experiences: dict[str, torch.Tensor[float]]
         :param noise_clip: Maximum noise limit to apply to actions, defaults to 0.5
         :type noise_clip: float, optional
         :param policy_noise: Standard deviation of noise applied to policy, defaults to 0.2
@@ -405,7 +413,7 @@ class DDPG(RLAlgorithm):
             noise = self.multi_dim_clamp(-noise_clip, noise_clip, noise)
             next_actions = next_actions + noise
             next_actions = self.multi_dim_clamp(
-                self.min_action, self.max_action, next_actions
+                self.action_space.low, self.action_space.high, next_actions
             )
 
             q_value_next_state = self.critic_target(next_obs, next_actions)

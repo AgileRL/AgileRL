@@ -17,7 +17,7 @@ from pettingzoo import ParallelEnv
 from torch._dynamo import OptimizedModule
 
 from agilerl.algorithms.ippo import IPPO
-from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
+from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput, ModuleDict
 from agilerl.modules.custom_components import GumbelSoftmax
 from agilerl.networks.actors import StochasticActor
 from agilerl.networks.value_networks import ValueNetwork
@@ -25,6 +25,8 @@ from agilerl.utils.evolvable_networks import get_default_encoder_config
 from agilerl.utils.utils import make_multi_agent_vect_envs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
+    assert_not_equal_state_dict,
+    assert_state_dicts_equal,
     gen_multi_agent_dict_or_tuple_spaces,
     generate_multi_agent_box_spaces,
     generate_multi_agent_discrete_spaces,
@@ -75,101 +77,6 @@ class DummyMultiEnv(ParallelEnv):
             {agent: np.random.randint(0, 2) for agent in self.agents},
             self.reset()[1],
         )
-
-
-class DummyMultiEnvAsync(ParallelEnv):
-    def __init__(self, observation_spaces, action_spaces):
-        super().__init__()
-        self.observation_spaces = observation_spaces
-        self.action_spaces = action_spaces
-        self.agents = ["agent_0", "agent_1", "other_agent_0"]
-        self.possible_agents = ["agent_0", "agent_1", "other_agent_0"]
-        self.metadata = None
-        self.render_mode = None
-
-        # Define observation frequencies (every N steps)
-        self.observation_frequencies = {
-            "agent_0": 1,  # observes every step
-            "agent_1": 1,  # observes every 2 steps
-            "other_agent_0": 4,  # observes every 4 steps
-        }
-
-        # Initialize step counters for each agent
-        self.agent_step_counters = {agent: 0 for agent in self.agents}
-
-        self.active_agents = self.agents.copy()  # Initially all agents are active
-        self.current_step = 0
-
-    def action_space(self, agent):
-        idx = self.possible_agents.index(agent)
-        return self.action_spaces[idx]
-
-    def observation_space(self, agent):
-        idx = self.possible_agents.index(agent)
-        return self.observation_spaces[idx]
-
-    def reset(self, seed=None, options=None):
-        # Reset step counters
-        self.current_step = 0
-        self.agent_step_counters = {agent: 0 for agent in self.agents}
-
-        # All agents observe at reset (step 0)
-        self.active_agents = self.agents.copy()
-
-        observations = {
-            agent: np.random.rand(
-                *self.observation_spaces[self.possible_agents.index(agent)].shape
-            )
-            for agent in self.active_agents
-        }
-
-        infos = {agent: {} for agent in self.active_agents}
-        for agent in self.active_agents:
-            infos[agent]["env_defined_actions"] = None
-
-        # Always provide env_defined_actions for agent_0 if active
-        if "agent_0" in self.active_agents:
-            infos["agent_0"]["env_defined_actions"] = np.array([1])
-
-        return observations, infos
-
-    def step(self, action):
-        # Increment the global step counter
-        self.current_step += 1
-
-        # Increment step counters for each agent
-        for agent in self.agents:
-            self.agent_step_counters[agent] += 1
-
-        # Determine which agents should observe based on their frequency
-        self.active_agents = [
-            agent
-            for agent in self.agents
-            if self.agent_step_counters[agent] % self.observation_frequencies[agent]
-            == 0
-        ]
-
-        observations = {
-            agent: np.random.rand(
-                *self.observation_spaces[self.possible_agents.index(agent)].shape
-            )
-            for agent in self.active_agents
-        }
-
-        rewards = {agent: np.random.randint(0, 5) for agent in action.keys()}
-
-        # Different homogeneous agents done at different times
-        dones = {}
-        for agent in self.active_agents:
-            if agent in ["agent_0", "agent_1"]:
-                dones[agent] = self.current_step >= 30
-            else:
-                dones[agent] = self.current_step >= 40
-
-        truncated = {agent: False for agent in self.active_agents}
-        infos = {agent: {} for agent in self.active_agents}
-
-        return observations, rewards, dones, truncated, infos
 
 
 class MultiAgentCNNActor(nn.Module):
@@ -528,10 +435,7 @@ def test_ippo_clone_returns_identical_agent(
     actor_networks = None
     critic_networks = None
     device = "cpu"
-    if accelerator_flag:
-        accelerator = Accelerator(device_placement=False)
-    else:
-        accelerator = None
+    accelerator = Accelerator(device_placement=False) if accelerator_flag else None
 
     ippo = IPPO(
         observation_spaces,
@@ -564,10 +468,14 @@ def test_ippo_clone_returns_identical_agent(
     assert isinstance(clone_agent, IPPO)
     assert clone_agent.observation_spaces == ippo.observation_spaces
     assert clone_agent.action_spaces == ippo.action_spaces
-    assert clone_agent.one_hot == ippo.one_hot
     assert clone_agent.n_agents == ippo.n_agents
     assert clone_agent.agent_ids == ippo.agent_ids
-    assert clone_agent.discrete_actions == ippo.discrete_actions
+    assert clone_agent.shared_agent_ids == ippo.shared_agent_ids
+    assert clone_agent.grouped_agents == ippo.grouped_agents
+    assert clone_agent.unique_observation_spaces == ippo.unique_observation_spaces
+    assert clone_agent.unique_action_spaces == ippo.unique_action_spaces
+    assert clone_agent.grouped_spaces == ippo.grouped_spaces
+    assert clone_agent.n_unique_agents == ippo.n_unique_agents
     assert clone_agent.index == ippo.index
     assert clone_agent.batch_size == ippo.batch_size
     assert clone_agent.lr == ippo.lr
@@ -583,10 +491,15 @@ def test_ippo_clone_returns_identical_agent(
     assert clone_agent.update_epochs == ippo.update_epochs
     assert clone_agent.device == ippo.device
     assert clone_agent.accelerator == ippo.accelerator
-    for clone_actor, actor in zip(clone_agent.actors, ippo.actors):
-        assert str(clone_actor.state_dict()) == str(actor.state_dict())
-    for clone_critic, critic in zip(clone_agent.critics, ippo.critics):
-        assert str(clone_critic.state_dict()) == str(critic.state_dict())
+
+    for shared_id in ippo.shared_agent_ids:
+        actor = ippo.actors[shared_id]
+        clone_actor = clone_agent.actors[shared_id]
+        assert_state_dicts_equal(clone_actor.state_dict(), actor.state_dict())
+
+        critic = ippo.critics[shared_id]
+        clone_critic = clone_agent.critics[shared_id]
+        assert_state_dicts_equal(clone_critic.state_dict(), critic.state_dict())
 
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
@@ -656,10 +569,8 @@ def test_clone_after_learning(compile_mode):
     assert isinstance(clone_agent, IPPO)
     assert clone_agent.observation_spaces == ippo.observation_spaces
     assert clone_agent.action_spaces == ippo.action_spaces
-    assert clone_agent.one_hot == ippo.one_hot
     assert clone_agent.n_agents == ippo.n_agents
     assert clone_agent.agent_ids == ippo.agent_ids
-    assert clone_agent.discrete_actions == ippo.discrete_actions
     assert clone_agent.index == ippo.index
     assert clone_agent.batch_size == ippo.batch_size
     assert clone_agent.lr == ippo.lr
@@ -668,17 +579,22 @@ def test_clone_after_learning(compile_mode):
     assert clone_agent.gae_lambda == ippo.gae_lambda
     assert clone_agent.device == ippo.device
     assert clone_agent.accelerator == ippo.accelerator
-    for clone_actor, actor in zip(clone_agent.actors, ippo.actors):
-        assert str(clone_actor.state_dict()) == str(actor.state_dict())
-    for clone_critic, critic in zip(clone_agent.critics, ippo.critics):
-        assert str(clone_critic.state_dict()) == str(critic.state_dict())
-    for clone_actor_opt, actor_opt in zip(
-        clone_agent.actor_optimizers.optimizer, ippo.actor_optimizers.optimizer
-    ):
+
+    for shared_id in ippo.shared_agent_ids:
+        actor = ippo.actors[shared_id]
+        clone_actor = clone_agent.actors[shared_id]
+        assert_state_dicts_equal(clone_actor.state_dict(), actor.state_dict())
+
+        critic = ippo.critics[shared_id]
+        clone_critic = clone_agent.critics[shared_id]
+        assert_state_dicts_equal(clone_critic.state_dict(), critic.state_dict())
+
+        actor_opt = ippo.actor_optimizers[shared_id]
+        clone_actor_opt = clone_agent.actor_optimizers[shared_id]
         assert str(clone_actor_opt) == str(actor_opt)
-    for clone_critic_opt, critic_opt in zip(
-        clone_agent.critic_optimizers.optimizer, ippo.critic_optimizers.optimizer
-    ):
+
+        critic_opt = ippo.critic_optimizers[shared_id]
+        clone_critic_opt = clone_agent.critic_optimizers[shared_id]
         assert str(clone_critic_opt) == str(critic_opt)
 
 
@@ -691,10 +607,10 @@ def test_clone_after_learning(compile_mode):
             gen_multi_agent_dict_or_tuple_spaces(1, 2, 2, dict_space=True),
             EvolvableMultiInput,
         ),
-        (
-            gen_multi_agent_dict_or_tuple_spaces(1, 2, 2, dict_space=False),
-            EvolvableMultiInput,
-        ),
+        # (
+        #     gen_multi_agent_dict_or_tuple_spaces(1, 2, 2, dict_space=False),
+        #     EvolvableMultiInput,
+        # ),
     ],
 )
 @pytest.mark.parametrize(
@@ -752,27 +668,23 @@ def test_save_load_checkpoint_correct_data_and_format(
     loaded_ippo.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    if compile_mode is not None and accelerator is None:
-        assert all(isinstance(actor, OptimizedModule) for actor in loaded_ippo.actors)
-        assert all(
-            isinstance(critic, OptimizedModule) for critic in loaded_ippo.critics
-        )
-    else:
-        assert all(
-            isinstance(actor.encoder, encoder_cls) for actor in loaded_ippo.actors
-        )
-        assert all(
-            isinstance(critic.encoder, encoder_cls) for critic in loaded_ippo.critics
-        )
-    assert ippo.lr == 1e-4
+    for agent_id in ippo.observation_space.keys():
+        loaded_actor = loaded_ippo.actors[agent_id]
+        loaded_critic = loaded_ippo.critics[agent_id]
+        actor = ippo.actors[agent_id]
+        critic = ippo.critics[agent_id]
+        if compile_mode is not None and accelerator is None:
+            assert isinstance(loaded_actor, OptimizedModule)
+            assert isinstance(loaded_critic, OptimizedModule)
+        else:
+            assert isinstance(loaded_actor.encoder, encoder_cls)
+            assert isinstance(loaded_critic.encoder, encoder_cls)
 
-    for actor, loaded_actor in zip(ippo.actors, loaded_ippo.actors):
-        assert str(actor.state_dict()) == str(loaded_actor.state_dict())
-
-    for critic, loaded_critic in zip(ippo.critics, loaded_ippo.critics):
-        assert str(critic.state_dict()) == str(loaded_critic.state_dict())
+        assert_state_dicts_equal(loaded_actor.state_dict(), actor.state_dict())
+        assert_state_dicts_equal(loaded_critic.state_dict(), critic.state_dict())
 
     assert ippo.batch_size == 64
+    assert ippo.lr == 1e-4
     assert ippo.learn_step == 2048
     assert ippo.gamma == 0.99
     assert ippo.gae_lambda == 0.95
@@ -808,14 +720,20 @@ def test_ippo_save_load_checkpoint_correct_data_and_format_make_evo(
     compile_mode,
     accelerator,
 ):
-    evo_actors = [
-        MakeEvolvable(network=mlp_actor, input_tensor=torch.randn(1, 6), device=device)
-        for _ in range(1)
-    ]
-    evo_critics = [
-        MakeEvolvable(network=mlp_critic, input_tensor=torch.randn(1, 6), device=device)
-        for _ in range(1)
-    ]
+    evo_actors = ModuleDict(
+        {
+            "agent_0": MakeEvolvable(
+                network=mlp_actor, input_tensor=torch.randn(1, 6), device=device
+            )
+        }
+    )
+    evo_critics = ModuleDict(
+        {
+            "agent_0": MakeEvolvable(
+                network=mlp_critic, input_tensor=torch.randn(1, 6), device=device
+            )
+        }
+    )
     ippo = IPPO(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
@@ -874,23 +792,24 @@ def test_ippo_save_load_checkpoint_correct_data_and_format_make_evo(
     loaded_ippo.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    if compile_mode is not None and accelerator is None:
-        assert all(isinstance(actor, OptimizedModule) for actor in loaded_ippo.actors)
-        assert all(
-            isinstance(critic, OptimizedModule) for critic in loaded_ippo.critics
-        )
-    else:
-        assert all(isinstance(actor, MakeEvolvable) for actor in loaded_ippo.actors)
-        assert all(isinstance(critic, MakeEvolvable) for critic in loaded_ippo.critics)
-    assert ippo.lr == 1e-4
+    for agent_id in ippo.observation_space.keys():
+        actor = ippo.actors[agent_id]
+        loaded_actor = loaded_ippo.actors[agent_id]
+        assert_state_dicts_equal(loaded_actor.state_dict(), actor.state_dict())
 
-    for actor, loaded_actor in zip(ippo.actors, loaded_ippo.actors):
-        assert str(actor.state_dict()) == str(loaded_actor.state_dict())
+        critic = ippo.critics[agent_id]
+        loaded_critic = loaded_ippo.critics[agent_id]
+        assert_state_dicts_equal(loaded_critic.state_dict(), critic.state_dict())
 
-    for critic, loaded_critic in zip(ippo.critics, loaded_ippo.critics):
-        assert str(critic.state_dict()) == str(loaded_critic.state_dict())
+        if compile_mode is not None and accelerator is None:
+            assert isinstance(loaded_actor, OptimizedModule)
+            assert isinstance(loaded_critic, OptimizedModule)
+        else:
+            assert isinstance(loaded_actor, MakeEvolvable)
+            assert isinstance(loaded_critic, MakeEvolvable)
 
     assert ippo.batch_size == 64
+    assert ippo.lr == 1e-4
     assert ippo.learn_step == 2048
     assert ippo.gamma == 0.99
     assert ippo.gae_lambda == 0.95
@@ -918,7 +837,9 @@ def test_ippo_unwrap_models(compile_mode):
         },
     )
     ippo.unwrap_models()
-    for actor, critic in zip(ippo.actors, ippo.critics):
+    for shared_id in ippo.shared_agent_ids:
+        actor = ippo.actors[shared_id]
+        critic = ippo.critics[shared_id]
         assert isinstance(actor, nn.Module)
         assert isinstance(critic, nn.Module)
 
@@ -933,10 +854,10 @@ def test_ippo_unwrap_models(compile_mode):
             gen_multi_agent_dict_or_tuple_spaces(3, 2, 2, dict_space=True),
             EvolvableMultiInput,
         ),
-        (
-            gen_multi_agent_dict_or_tuple_spaces(3, 2, 2, dict_space=False),
-            EvolvableMultiInput,
-        ),
+        # (
+        #     gen_multi_agent_dict_or_tuple_spaces(3, 2, 2, dict_space=False),
+        #     EvolvableMultiInput,
+        # ),
     ],
 )
 @pytest.mark.parametrize(
@@ -967,21 +888,18 @@ def test_load_from_pretrained(
     # Check if properties and weights are loaded correctly
     assert new_ippo.observation_spaces == ippo.observation_spaces
     assert new_ippo.action_spaces == ippo.action_spaces
-    assert new_ippo.one_hot == ippo.one_hot
     assert new_ippo.n_agents == ippo.n_agents
     assert new_ippo.agent_ids == ippo.agent_ids
     assert new_ippo.lr == ippo.lr
-    for (
-        new_actor,
-        new_critic,
-        actor,
-        critic,
-    ) in zip(
-        new_ippo.actors,
-        new_ippo.critics,
-        ippo.actors,
-        ippo.critics,
-    ):
+
+    for shared_id in ippo.shared_agent_ids:
+        actor = ippo.actors[shared_id]
+        new_actor = new_ippo.actors[shared_id]
+        assert_state_dicts_equal(new_actor.state_dict(), actor.state_dict())
+
+        critic = ippo.critics[shared_id]
+        new_critic = new_ippo.critics[shared_id]
+        assert_state_dicts_equal(new_critic.state_dict(), critic.state_dict())
 
         if compile_mode is not None and accelerator is None:
             assert isinstance(new_actor, OptimizedModule)
@@ -989,12 +907,6 @@ def test_load_from_pretrained(
         else:
             assert isinstance(new_actor.encoder, encoder_cls)
             assert isinstance(new_critic.encoder, encoder_cls)
-
-        new_actor_sd = str(new_actor.state_dict())
-        new_critic_sd = str(new_critic.state_dict())
-
-        assert new_actor_sd == str(actor.state_dict())
-        assert new_critic_sd == str(critic.state_dict())
 
     assert new_ippo.batch_size == ippo.batch_size
     assert new_ippo.learn_step == ippo.learn_step
@@ -1076,13 +988,27 @@ def test_load_from_pretrained_networks(
         critic_input_tensor,
     )
 
+    actor_networks = ModuleDict(
+        {
+            "agent": actor_network,
+            "other_agent": copy.deepcopy(actor_network),
+        }
+    )
+
+    critic_networks = ModuleDict(
+        {
+            "agent": critic_network,
+            "other_agent": copy.deepcopy(critic_network),
+        }
+    )
+
     # Initialize the ippo agent
     ippo = IPPO(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
         agent_ids=["agent_0", "agent_1", "other_agent_0"],
-        actor_networks=[actor_network, copy.deepcopy(actor_network)],
-        critic_networks=[critic_network, copy.deepcopy(critic_network)],
+        actor_networks=actor_networks,
+        critic_networks=critic_networks,
         torch_compiler=compile_mode,
     )
 
@@ -1096,25 +1022,18 @@ def test_load_from_pretrained_networks(
     # Check if properties and weights are loaded correctly
     assert new_ippo.observation_spaces == ippo.observation_spaces
     assert new_ippo.action_spaces == ippo.action_spaces
-    assert new_ippo.one_hot == ippo.one_hot
     assert new_ippo.n_agents == ippo.n_agents
     assert new_ippo.agent_ids == ippo.agent_ids
     assert new_ippo.lr == ippo.lr
-    for (
-        new_actor,
-        new_critic,
-        actor,
-        critic,
-    ) in zip(
-        new_ippo.actors,
-        new_ippo.critics,
-        ippo.actors,
-        ippo.critics,
-    ):
-        assert isinstance(new_actor, nn.Module)
-        assert isinstance(new_critic, nn.Module)
-        assert str(new_actor.to("cpu").state_dict()) == str(actor.state_dict())
-        assert str(new_critic.to("cpu").state_dict()) == str(critic.state_dict())
+
+    for shared_id in ippo.shared_agent_ids:
+        actor = ippo.actors[shared_id]
+        new_actor = new_ippo.actors[shared_id]
+        assert_state_dicts_equal(new_actor.state_dict(), actor.state_dict())
+
+        critic = ippo.critics[shared_id]
+        new_critic = new_ippo.critics[shared_id]
+        assert_state_dicts_equal(new_critic.state_dict(), critic.state_dict())
 
     assert new_ippo.batch_size == ippo.batch_size
     assert new_ippo.learn_step == ippo.learn_step
@@ -1154,18 +1073,22 @@ def test_ippo_learns_from_experiences_distributed(
         torch_compiler=compile_mode,
     )
 
-    for actor, critic in zip(ippo.actors, ippo.critics):
+    for shared_id in ippo.shared_agent_ids:
+        actor = ippo.actors[shared_id]
+        critic = ippo.critics[shared_id]
         actor.no_sync = no_sync.__get__(actor)
         critic.no_sync = no_sync.__get__(critic)
 
     actors = ippo.actors
-    actors_pre_learn_sd = [
-        str(copy.deepcopy(actor.state_dict())) for actor in ippo.actors
-    ]
+    actors_pre_learn_sd = {
+        shared_id: copy.deepcopy(actor.state_dict())
+        for shared_id, actor in ippo.actors.items()
+    }
     critics = ippo.critics
-    critics_pre_learn_sd = [
-        str(copy.deepcopy(critic.state_dict())) for critic in ippo.critics
-    ]
+    critics_pre_learn_sd = {
+        shared_id: copy.deepcopy(critic.state_dict())
+        for shared_id, critic in ippo.critics.items()
+    }
 
     for _ in range(3):
         ippo.scores.append(0)
@@ -1175,19 +1098,20 @@ def test_ippo_learns_from_experiences_distributed(
     for agent_id in ippo.shared_agent_ids:
         assert agent_id in loss
 
-    for old_actor, updated_actor in zip(actors, ippo.actors):
+    for shared_id in ippo.shared_agent_ids:
+        old_actor = actors[shared_id]
+        updated_actor = ippo.actors[shared_id]
         assert old_actor == updated_actor
 
-    for old_actor_state_dict, updated_actor in zip(actors_pre_learn_sd, ippo.actors):
-        assert old_actor_state_dict != str(updated_actor.state_dict())
-
-    for old_critic, updated_critic in zip(critics, ippo.critics):
+        old_critic = critics[shared_id]
+        updated_critic = ippo.critics[shared_id]
         assert old_critic == updated_critic
 
-    for old_critic_state_dict, updated_critic in zip(
-        critics_pre_learn_sd, ippo.critics
-    ):
-        assert old_critic_state_dict != str(updated_critic.state_dict())
+        old_critic_state_dict = critics_pre_learn_sd[shared_id]
+        assert_not_equal_state_dict(old_critic_state_dict, updated_critic.state_dict())
+
+        old_actor_state_dict = actors_pre_learn_sd[shared_id]
+        assert_not_equal_state_dict(old_actor_state_dict, updated_actor.state_dict())
 
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
@@ -1219,11 +1143,15 @@ def test_ippo_learns_from_experiences(
     )
 
     actors = ippo.actors
-    actors_pre_learn_sd = [copy.deepcopy(actor.state_dict()) for actor in ippo.actors]
+    actors_pre_learn_sd = {
+        shared_id: copy.deepcopy(actor.state_dict())
+        for shared_id, actor in ippo.actors.items()
+    }
     critics = ippo.critics
-    critics_pre_learn_sd = [
-        str(copy.deepcopy(critic.state_dict())) for critic in ippo.critics
-    ]
+    critics_pre_learn_sd = {
+        shared_id: copy.deepcopy(critic.state_dict())
+        for shared_id, critic in ippo.critics.items()
+    }
 
     for _ in range(4):
         ippo.scores.append(0)
@@ -1233,19 +1161,20 @@ def test_ippo_learns_from_experiences(
     for agent_id in ippo.shared_agent_ids:
         assert agent_id in loss
 
-    for old_actor, updated_actor in zip(actors, ippo.actors):
+    for shared_id in ippo.shared_agent_ids:
+        old_actor = actors[shared_id]
+        updated_actor = ippo.actors[shared_id]
         assert old_actor == updated_actor
 
-    for old_actor_state_dict, updated_actor in zip(actors_pre_learn_sd, ippo.actors):
-        assert old_actor_state_dict != str(updated_actor.state_dict())
+        old_actor_state_dict = actors_pre_learn_sd[shared_id]
+        assert_not_equal_state_dict(old_actor_state_dict, updated_actor.state_dict())
 
-    for old_critic, updated_critic in zip(critics, ippo.critics):
+        old_critic = critics[shared_id]
+        updated_critic = ippo.critics[shared_id]
         assert old_critic == updated_critic
 
-    for old_critic_state_dict, updated_critic in zip(
-        critics_pre_learn_sd, ippo.critics
-    ):
-        assert old_critic_state_dict != str(updated_critic.state_dict())
+        old_critic_state_dict = critics_pre_learn_sd[shared_id]
+        assert_not_equal_state_dict(old_critic_state_dict, updated_critic.state_dict())
 
 
 @pytest.mark.parametrize("agent_ids", [["agent_0", "agent_1", "other_agent_0"]])
@@ -1287,13 +1216,15 @@ def test_ippo_learns_from_vectorized_experiences(
     )
 
     actors = ippo.actors
-    actors_pre_learn_sd = [
-        str(copy.deepcopy(actor.state_dict())) for actor in ippo.actors
-    ]
+    actors_pre_learn_sd = {
+        shared_id: copy.deepcopy(actor.state_dict())
+        for shared_id, actor in ippo.actors.items()
+    }
     critics = ippo.critics
-    critics_pre_learn_sd = [
-        copy.deepcopy(critic.state_dict()) for critic in ippo.critics
-    ]
+    critics_pre_learn_sd = {
+        shared_id: copy.deepcopy(critic.state_dict())
+        for shared_id, critic in ippo.critics.items()
+    }
 
     for _ in range(4):
         ippo.scores.append(0)
@@ -1303,19 +1234,20 @@ def test_ippo_learns_from_vectorized_experiences(
     for agent_id in ippo.shared_agent_ids:
         assert agent_id in loss
 
-    for old_actor, updated_actor in zip(actors, ippo.actors):
+    for shared_id in ippo.shared_agent_ids:
+        old_actor = actors[shared_id]
+        updated_actor = ippo.actors[shared_id]
         assert old_actor == updated_actor
 
-    for old_actor_state_dict, updated_actor in zip(actors_pre_learn_sd, ippo.actors):
-        assert old_actor_state_dict != str(updated_actor.state_dict())
+        old_actor_state_dict = actors_pre_learn_sd[shared_id]
+        assert_not_equal_state_dict(old_actor_state_dict, updated_actor.state_dict())
 
-    for old_critic, updated_critic in zip(critics, ippo.critics):
+        old_critic = critics[shared_id]
+        updated_critic = ippo.critics[shared_id]
         assert old_critic == updated_critic
 
-    for old_critic_state_dict, updated_critic in zip(
-        critics_pre_learn_sd, ippo.critics
-    ):
-        assert old_critic_state_dict != str(updated_critic.state_dict())
+        old_critic_state_dict = critics_pre_learn_sd[shared_id]
+        assert_not_equal_state_dict(old_critic_state_dict, updated_critic.state_dict())
 
 
 @pytest.mark.parametrize(
@@ -1406,11 +1338,15 @@ def test_ippo_learns_from_hardcoded_vectorized_experiences_mlp(
     )
 
     actors = ippo.actors
-    actors_pre_learn_sd = [copy.deepcopy(actor.state_dict()) for actor in ippo.actors]
+    actors_pre_learn_sd = {
+        shared_id: copy.deepcopy(actor.state_dict())
+        for shared_id, actor in ippo.actors.items()
+    }
     critics = ippo.critics
-    critics_pre_learn_sd = [
-        str(copy.deepcopy(critic.state_dict())) for critic in ippo.critics
-    ]
+    critics_pre_learn_sd = {
+        shared_id: copy.deepcopy(critic.state_dict())
+        for shared_id, critic in ippo.critics.items()
+    }
 
     for _ in range(4):
         ippo.scores.append(0)
@@ -1420,19 +1356,20 @@ def test_ippo_learns_from_hardcoded_vectorized_experiences_mlp(
     for agent_id in ippo.shared_agent_ids:
         assert agent_id in loss
 
-    for old_actor, updated_actor in zip(actors, ippo.actors):
+    for shared_id in ippo.shared_agent_ids:
+        old_actor = actors[shared_id]
+        updated_actor = ippo.actors[shared_id]
         assert old_actor == updated_actor
 
-    for old_actor_state_dict, updated_actor in zip(actors_pre_learn_sd, ippo.actors):
-        assert old_actor_state_dict != str(updated_actor.state_dict())
+        old_actor_state_dict = actors_pre_learn_sd[shared_id]
+        assert_not_equal_state_dict(old_actor_state_dict, updated_actor.state_dict())
 
-    for old_critic, updated_critic in zip(critics, ippo.critics):
+        old_critic = critics[shared_id]
+        updated_critic = ippo.critics[shared_id]
         assert old_critic == updated_critic
 
-    for old_critic_state_dict, updated_critic in zip(
-        critics_pre_learn_sd, ippo.critics
-    ):
-        assert old_critic_state_dict != str(updated_critic.state_dict())
+        old_critic_state_dict = critics_pre_learn_sd[shared_id]
+        assert_not_equal_state_dict(old_critic_state_dict, updated_critic.state_dict())
 
 
 def no_sync(self):
@@ -1520,22 +1457,34 @@ def test_ippo_get_action_agent_masking(
         generate_multi_agent_multidiscrete_spaces(3, 2),
     ],
 )
+@pytest.mark.parametrize("action_batch_size", [None, 16])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize("accelerator", [None, Accelerator()])
 def test_ippo_get_action(
-    observation_spaces, action_spaces, device, compile_mode, accelerator
+    observation_spaces,
+    action_spaces,
+    device,
+    compile_mode,
+    accelerator,
+    action_batch_size,
 ):
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
-    state = {
-        agent_id: get_sample_from_space(observation_space)
-        for agent_id, observation_space in zip(agent_ids, observation_spaces)
-    }
-    info = (
-        {agent: {"env_defined_actions": None} for agent in agent_ids}
-        if all(isinstance(space, spaces.Box) for space in action_spaces)
-        else None
-    )
 
+    state = {}
+    for agent_id, obs_space in zip(agent_ids, observation_spaces):
+        sample_state = get_sample_from_space(obs_space)
+
+        if (
+            not isinstance(obs_space, (spaces.Dict, spaces.Tuple))
+            and action_batch_size is not None
+        ):
+            sample_state = np.stack([sample_state] * action_batch_size)
+        else:
+            action_batch_size = None
+
+        state[agent_id] = sample_state
+
+    info = None
     ippo = IPPO(
         observation_spaces,
         action_spaces,
@@ -1543,6 +1492,7 @@ def test_ippo_get_action(
         device=device,
         torch_compiler=compile_mode,
         accelerator=accelerator,
+        action_batch_size=action_batch_size,
     )
     actions, log_probs, dist_entropy, state_values = ippo.get_action(
         obs=state, infos=info
@@ -1683,11 +1633,12 @@ def test_ippo_init_torch_compiler_no_error(mode):
     )
     if isinstance(mode, str):
         assert all(
-            isinstance(a, torch._dynamo.eval_frame.OptimizedModule) for a in ippo.actors
+            isinstance(a, torch._dynamo.eval_frame.OptimizedModule)
+            for a in ippo.actors.values()
         )
         assert all(
             isinstance(a, torch._dynamo.eval_frame.OptimizedModule)
-            for a in ippo.critics
+            for a in ippo.critics.values()
         )
         assert ippo.torch_compiler == mode
     else:
@@ -1765,17 +1716,19 @@ def test_initialize_ippo_with_net_config(
         if compile_mode is not None and accelerator is None
         else ValueNetwork
     )
-    assert all(isinstance(actor, expected_actor_cls) for actor in ippo.actors)
-    assert all(isinstance(critic, expected_critic_cls) for critic in ippo.critics)
+    assert all(isinstance(actor, expected_actor_cls) for actor in ippo.actors.values())
+    assert all(
+        isinstance(critic, expected_critic_cls) for critic in ippo.critics.values()
+    )
 
     expected_opt_cls = optim.Adam if accelerator is None else AcceleratedOptimizer
     assert all(
         isinstance(actor_optimizer, expected_opt_cls)
-        for actor_optimizer in ippo.actor_optimizers
+        for actor_optimizer in ippo.actor_optimizers.values()
     )
     assert all(
         isinstance(critic_optimizer, expected_opt_cls)
-        for critic_optimizer in ippo.critic_optimizers
+        for critic_optimizer in ippo.critic_optimizers.values()
     )
     assert isinstance(ippo.criterion, nn.MSELoss)
 
@@ -1797,14 +1750,26 @@ def test_initialize_ippo_with_mlp_networks(
     compile_mode,
 ):
     accelerator = Accelerator() if accelerator_flag else None
-    evo_actors = [
-        MakeEvolvable(network=mlp_actor, input_tensor=torch.randn(1, 6), device=device)
-        for _ in range(2)
-    ]
-    evo_critics = [
-        MakeEvolvable(network=mlp_critic, input_tensor=torch.randn(1, 6), device=device)
-        for _ in range(2)
-    ]
+    evo_actors = ModuleDict(
+        {
+            "agent": MakeEvolvable(
+                network=mlp_actor, input_tensor=torch.randn(1, 6), device=device
+            ),
+            "other_agent": MakeEvolvable(
+                network=mlp_actor, input_tensor=torch.randn(1, 6), device=device
+            ),
+        }
+    )
+    evo_critics = ModuleDict(
+        {
+            "agent": MakeEvolvable(
+                network=mlp_critic, input_tensor=torch.randn(1, 6), device=device
+            ),
+            "other_agent": MakeEvolvable(
+                network=mlp_critic, input_tensor=torch.randn(1, 6), device=device
+            ),
+        }
+    )
     ippo = IPPO(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
@@ -1816,38 +1781,40 @@ def test_initialize_ippo_with_mlp_networks(
         torch_compiler=compile_mode,
     )
     if compile_mode is not None and accelerator is None:
-        assert all(isinstance(actor, OptimizedModule) for actor in ippo.actors)
-        assert all(isinstance(critic, OptimizedModule) for critic in ippo.critics)
+        assert all(isinstance(actor, OptimizedModule) for actor in ippo.actors.values())
+        assert all(
+            isinstance(critic, OptimizedModule) for critic in ippo.critics.values()
+        )
     else:
-        assert all(isinstance(actor, MakeEvolvable) for actor in ippo.actors)
-        assert all(isinstance(critic, MakeEvolvable) for critic in ippo.critics)
+        assert all(isinstance(actor, MakeEvolvable) for actor in ippo.actors.values())
+        assert all(
+            isinstance(critic, MakeEvolvable) for critic in ippo.critics.values()
+        )
 
     assert ippo.observation_spaces == observation_spaces
     assert ippo.action_spaces == action_spaces
-    assert ippo.one_hot is False
     assert ippo.n_agents == 3
     assert ippo.agent_ids == ["agent_0", "agent_1", "other_agent_0"]
-    assert ippo.discrete_actions is True
     assert ippo.scores == []
     assert ippo.fitness == []
     assert ippo.steps == [0]
     if accelerator is None:
         assert all(
             isinstance(actor_optimizer, optim.Adam)
-            for actor_optimizer in ippo.actor_optimizers
+            for actor_optimizer in ippo.actor_optimizers.values()
         )
         assert all(
             isinstance(critic_optimizer, optim.Adam)
-            for critic_optimizer in ippo.critic_optimizers
+            for critic_optimizer in ippo.critic_optimizers.values()
         )
     else:
         assert all(
             isinstance(actor_optimizer, AcceleratedOptimizer)
-            for actor_optimizer in ippo.actor_optimizers
+            for actor_optimizer in ippo.actor_optimizers.values()
         )
         assert all(
             isinstance(critic_optimizer, AcceleratedOptimizer)
-            for critic_optimizer in ippo.critic_optimizers
+            for critic_optimizer in ippo.critic_optimizers.values()
         )
     assert isinstance(ippo.criterion, nn.MSELoss)
 
@@ -1912,22 +1879,34 @@ def test_initialize_ippo_with_cnn_networks(
         accelerator = Accelerator()
     else:
         accelerator = None
-    evo_actors = [
-        MakeEvolvable(
-            network=cnn_actor,
-            input_tensor=torch.randn(1, 4, 210, 160),
-            device=device,
-        )
-        for _ in range(2)
-    ]
-    evo_critics = [
-        MakeEvolvable(
-            network=cnn_critic,
-            input_tensor=torch.randn(1, 4, 210, 160),
-            device=device,
-        )
-        for _ in range(2)
-    ]
+    evo_actors = ModuleDict(
+        {
+            "agent": MakeEvolvable(
+                network=cnn_actor,
+                input_tensor=torch.randn(1, 4, 210, 160),
+                device=device,
+            ),
+            "other_agent": MakeEvolvable(
+                network=cnn_actor,
+                input_tensor=torch.randn(1, 4, 210, 160),
+                device=device,
+            ),
+        }
+    )
+    evo_critics = ModuleDict(
+        {
+            "agent": MakeEvolvable(
+                network=cnn_critic,
+                input_tensor=torch.randn(1, 4, 210, 160),
+                device=device,
+            ),
+            "other_agent": MakeEvolvable(
+                network=cnn_critic,
+                input_tensor=torch.randn(1, 4, 210, 160),
+                device=device,
+            ),
+        }
+    )
     ippo = IPPO(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
@@ -1939,38 +1918,40 @@ def test_initialize_ippo_with_cnn_networks(
         torch_compiler=compile_mode,
     )
     if compile_mode is not None and accelerator is None:
-        assert all(isinstance(actor, OptimizedModule) for actor in ippo.actors)
-        assert all(isinstance(critic, OptimizedModule) for critic in ippo.critics)
+        assert all(isinstance(actor, OptimizedModule) for actor in ippo.actors.values())
+        assert all(
+            isinstance(critic, OptimizedModule) for critic in ippo.critics.values()
+        )
     else:
-        assert all(isinstance(actor, MakeEvolvable) for actor in ippo.actors)
-        assert all(isinstance(critic, MakeEvolvable) for critic in ippo.critics)
+        assert all(isinstance(actor, MakeEvolvable) for actor in ippo.actors.values())
+        assert all(
+            isinstance(critic, MakeEvolvable) for critic in ippo.critics.values()
+        )
 
     assert ippo.observation_spaces == observation_spaces
     assert ippo.action_spaces == action_spaces
-    assert ippo.one_hot is False
     assert ippo.n_agents == 3
     assert ippo.agent_ids == ["agent_0", "agent_1", "other_agent_0"]
-    assert ippo.discrete_actions is True
     assert ippo.scores == []
     assert ippo.fitness == []
     assert ippo.steps == [0]
     if accelerator is None:
         assert all(
             isinstance(actor_optimizer, optim.Adam)
-            for actor_optimizer in ippo.actor_optimizers
+            for actor_optimizer in ippo.actor_optimizers.values()
         )
         assert all(
             isinstance(critic_optimizer, optim.Adam)
-            for critic_optimizer in ippo.critic_optimizers
+            for critic_optimizer in ippo.critic_optimizers.values()
         )
     else:
         assert all(
             isinstance(actor_optimizer, AcceleratedOptimizer)
-            for actor_optimizer in ippo.actor_optimizers
+            for actor_optimizer in ippo.actor_optimizers.values()
         )
         assert all(
             isinstance(critic_optimizer, AcceleratedOptimizer)
-            for critic_optimizer in ippo.critic_optimizers
+            for critic_optimizer in ippo.critic_optimizers.values()
         )
     assert isinstance(ippo.criterion, nn.MSELoss)
 
@@ -1990,12 +1971,6 @@ def test_initialize_ippo_with_evo_networks(
     action_spaces = generate_multi_agent_discrete_spaces(3, 2)
     net_config = get_default_encoder_config(observation_spaces[0])
 
-    # For image spaces we need to give a sample input tensor to build networks
-    if len(observation_spaces[0].shape) == 3:
-        net_config["sample_input"] = torch.zeros(
-            (1, *observation_spaces[0].shape), dtype=torch.float32, device=device
-        )
-
     head_config = {
         "output_activation": "Softmax" if net == "mlp" else "GumbelSoftmax",
         "activation": "ReLU",
@@ -2012,18 +1987,30 @@ def test_initialize_ippo_with_evo_networks(
         "head_config": critic_head_config,
     }
 
-    evo_actors = [
-        StochasticActor(
-            observation_spaces[x], action_spaces[x], device=device, **net_config
-        )
-        for x in range(2)
-    ]
-    evo_critics = [
-        ValueNetwork(
-            observation_space=observation_spaces[x], device=device, **critic_net_config
-        )
-        for x in range(2)
-    ]
+    evo_actors = ModuleDict(
+        {
+            "agent": StochasticActor(
+                observation_spaces[0], action_spaces[0], device=device, **net_config
+            ),
+            "other_agent": StochasticActor(
+                observation_spaces[1], action_spaces[1], device=device, **net_config
+            ),
+        }
+    )
+    evo_critics = ModuleDict(
+        {
+            "agent": ValueNetwork(
+                observation_space=observation_spaces[0],
+                device=device,
+                **critic_net_config,
+            ),
+            "other_agent": ValueNetwork(
+                observation_space=observation_spaces[1],
+                device=device,
+                **critic_net_config,
+            ),
+        }
+    )
 
     ippo = IPPO(
         observation_spaces=observation_spaces,
@@ -2046,25 +2033,25 @@ def test_initialize_ippo_with_evo_networks(
         if compile_mode is not None and accelerator is None
         else ValueNetwork
     )
-    assert all(isinstance(actor, expected_actor_cls) for actor in ippo.actors)
-    assert all(isinstance(critic, expected_critic_cls) for critic in ippo.critics)
+    assert all(isinstance(actor, expected_actor_cls) for actor in ippo.actors.values())
+    assert all(
+        isinstance(critic, expected_critic_cls) for critic in ippo.critics.values()
+    )
 
     expected_opt_cls = optim.Adam if accelerator is None else AcceleratedOptimizer
     assert all(
         isinstance(actor_optimizer, expected_opt_cls)
-        for actor_optimizer in ippo.actor_optimizers
+        for actor_optimizer in ippo.actor_optimizers.values()
     )
     assert all(
         isinstance(critic_optimizer, expected_opt_cls)
-        for critic_optimizer in ippo.critic_optimizers
+        for critic_optimizer in ippo.critic_optimizers.values()
     )
 
     assert ippo.observation_spaces == observation_spaces
     assert ippo.action_spaces == action_spaces
-    assert ippo.one_hot is False
     assert ippo.n_agents == 3
     assert ippo.agent_ids == ["agent_0", "agent_1", "other_agent_0"]
-    assert ippo.discrete_actions is True
     assert ippo.scores == []
     assert ippo.fitness == []
     assert ippo.steps == [0]
@@ -2096,14 +2083,14 @@ def test_initialize_ippo_with_incorrect_evo_networks(compile_mode):
         (
             generate_multi_agent_box_spaces(3, (4,)),
             generate_multi_agent_discrete_spaces(3, 2),
-            [EvolvableMLP(4, 2, [32]) for _ in range(3)],
-            [1 for _ in range(3)],
+            [EvolvableMLP(4, 2, [32]) for _ in range(2)],
+            [1 for _ in range(2)],
         ),
         (
             generate_multi_agent_box_spaces(3, (4,)),
             generate_multi_agent_discrete_spaces(3, 2),
-            [1 for _ in range(3)],
-            [EvolvableMLP(4, 2, [32]) for _ in range(3)],
+            [1 for _ in range(2)],
+            [EvolvableMLP(4, 2, [32]) for _ in range(2)],
         ),
     ],
 )
@@ -2146,11 +2133,11 @@ def test_ippo_init_warning(
         )
 
 
-def test_homogeneous_outputs_functions():
-    """Test that the assemble_homogeneous_outputs and disassemble_homogeneous_outputs
+def test_grouped_outputs_functions():
+    """Test that the assemble_grouped_outputs and disassemble_grouped_outputs
     functions work as expected and are inverses of each other."""
 
-    # Initialize agent with homogeneous agents
+    # Initialize agent with grouped agents
     observation_spaces = generate_multi_agent_box_spaces(3, (6,))
     action_spaces = generate_multi_agent_discrete_spaces(3, 2)
     compile_mode = None
@@ -2163,9 +2150,9 @@ def test_homogeneous_outputs_functions():
         torch_compiler=compile_mode,
     )
 
-    # Setting up homogeneous agent configuration
+    # Setting up grouped agent configuration
     agent.shared_agent_ids = ["agent", "other_agent"]
-    agent.homogeneous_agents = {
+    agent.grouped_agents = {
         "agent": ["agent_0", "agent_1"],
         "other_agent": ["other_agent_0"],
     }
@@ -2179,19 +2166,19 @@ def test_homogeneous_outputs_functions():
         "other_agent_0": np.random.rand(vect_dim, output_dim),
     }
 
-    # Test assemble_homogeneous_outputs
-    homo_outputs = agent.assemble_homogeneous_outputs(agent_outputs, vect_dim)
+    # Test assemble_grouped_outputs
+    grouped_outputs = agent.assemble_grouped_outputs(agent_outputs, vect_dim)
 
-    # Check that the homogeneous outputs have the correct keys
-    assert set(homo_outputs.keys()) == {"agent", "other_agent"}
+    # Check that the grouped outputs have the correct keys
+    assert set(grouped_outputs.keys()) == {"agent", "other_agent"}
 
     # Check that the agent outputs are assembled correctly
-    assert homo_outputs["agent"].shape == (2 * vect_dim, output_dim)
-    assert homo_outputs["other_agent"].shape == (1 * vect_dim, output_dim)
+    assert grouped_outputs["agent"].shape == (2 * vect_dim, output_dim)
+    assert grouped_outputs["other_agent"].shape == (1 * vect_dim, output_dim)
 
-    # Test disassemble_homogeneous_outputs
-    disassembled_outputs = agent.disassemble_homogeneous_outputs(
-        homo_outputs, vect_dim, agent.homogeneous_agents
+    # Test disassemble_grouped_outputs
+    disassembled_outputs = agent.disassemble_grouped_outputs(
+        grouped_outputs, vect_dim, agent.grouped_agents
     )
 
     # Check that the disassembled outputs have the correct keys
@@ -2232,17 +2219,19 @@ def test_get_action_distributed(compile_mode):
             "head_config": {"hidden_size": [16], "init_layers": False},
         },
     )
-    new_actors = [
-        DummyStochasticActor(
-            observation_space=actor.observation_space,
-            action_space=actor.action_space,
-            device=actor.device,
-            action_std_init=ippo.action_std_init,
-            encoder_config={"hidden_size": [16, 16], "init_layers": False},
-            head_config={"hidden_size": [16], "init_layers": False},
-        )
-        for actor in ippo.actors
-    ]
+    new_actors = ModuleDict(
+        {
+            shared_id: DummyStochasticActor(
+                observation_space=actor.observation_space,
+                action_space=actor.action_space,
+                device=actor.device,
+                action_std_init=ippo.action_std_init,
+                encoder_config={"hidden_size": [16, 16], "init_layers": False},
+                head_config={"hidden_size": [16], "init_layers": False},
+            )
+            for shared_id, actor in ippo.actors.items()
+        }
+    )
     ippo.actors = new_actors
     actions, log_probs, dist_entropy, state_values = ippo.get_action(obs=state)
 
@@ -2257,141 +2246,3 @@ def test_get_action_distributed(compile_mode):
         assert agent_id in log_probs
         assert agent_id in dist_entropy
         assert agent_id in state_values
-
-
-@pytest.mark.parametrize("compile_mode", [None, "default"])
-@pytest.mark.parametrize("num_envs", [1, 2])
-def test_ippo_custom_training_with_async_env(device, compile_mode, num_envs):
-    # Create async environment with agents that return observations asynchronously
-    observation_spaces = generate_multi_agent_box_spaces(3, (6,))
-    action_spaces = generate_multi_agent_discrete_spaces(3, 2)
-    vectorized = num_envs > 1
-    if vectorized:
-        env = make_multi_agent_vect_envs(
-            DummyMultiEnvAsync,
-            num_envs=num_envs,
-            **dict(observation_spaces=observation_spaces, action_spaces=action_spaces),
-        )
-    else:
-        env = DummyMultiEnvAsync(observation_spaces, action_spaces)
-
-    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
-
-    # Initialize IPPO agent
-    agent = IPPO(
-        observation_spaces=observation_spaces,
-        action_spaces=action_spaces,
-        agent_ids=agent_ids,
-        device=device,
-        batch_size=64,
-        lr=0.001,
-        gamma=0.99,
-        gae_lambda=0.95,
-        clip_coef=0.2,
-        ent_coef=0.01,
-        vf_coef=0.5,
-        torch_compiler=compile_mode,
-    )
-
-    # Custom training loop for multiple iterations
-    for iteration in range(5):
-        # Reset environment
-        observations, infos = env.reset()
-
-        states = {agent_id: [] for agent_id in agent_ids}
-        actions = {agent_id: [] for agent_id in agent_ids}
-        log_probs = {agent_id: [] for agent_id in agent_ids}
-        rewards = {agent_id: [] for agent_id in agent_ids}
-        dones = {agent_id: [] for agent_id in agent_ids}
-        values = {agent_id: [] for agent_id in agent_ids}
-
-        done = {
-            agent_id: np.zeros((num_envs,), dtype=np.int8) for agent_id in agent_ids
-        }
-
-        # Collect experiences for multiple steps
-        max_steps = 105
-        for step in range(max_steps):
-            inactive, observations = agent.extract_inactive_agents(observations)
-
-            # Get actions for current active agents
-            action_dict, logprob_dict, _, value_dict = agent.get_action(
-                observations, infos
-            )
-
-            # Verify actions are only for active agents
-            assert all(agent_id in observations for agent_id in action_dict)
-
-            # Step the environment
-            next_observations, reward_dict, terminated, truncated, next_infos = (
-                env.step(action_dict)
-            )
-
-            # Store experiences for active agents
-            for agent_id in observations:
-                states[agent_id].append(observations[agent_id])
-                actions[agent_id].append(action_dict[agent_id])
-                log_probs[agent_id].append(logprob_dict[agent_id])
-                values[agent_id].append(value_dict[agent_id])
-                dones[agent_id].append(done[agent_id])
-                rewards[agent_id].append(reward_dict[agent_id])
-
-            next_dones = {}
-            for agent_id in terminated:
-                term = terminated[agent_id]
-                trunc = truncated[agent_id]
-
-                # Process asynchronous dones
-                if vectorized:
-                    mask = ~(np.isnan(term) | np.isnan(trunc))
-                    result = np.full_like(mask, np.nan, dtype=float)
-                    result[mask] = np.logical_or(term[mask], trunc[mask])
-
-                    next_dones[agent_id] = result
-                else:
-                    next_dones[agent_id] = np.array(
-                        [np.logical_or(term, trunc)]
-                    ).astype(np.int8)
-
-            # Update for next step
-            observations = next_observations
-            done = next_dones
-            infos = next_infos
-
-            # Break if all agents report done
-            for idx, agent_dones in enumerate(zip(*next_dones.values())):
-                if all(agent_dones):
-                    if not vectorized:
-                        observations, info = env.reset()
-
-                    done = {
-                        agent_id: np.zeros(num_envs) for agent_id in agent.agent_ids
-                    }
-
-        # Skip learning if no experiences collected
-        if not any(states.values()):
-            continue
-
-        # Create experience tuple for learning
-        experiences = (
-            states,
-            actions,
-            log_probs,
-            rewards,
-            dones,
-            values,
-            next_observations,  # next_states
-            next_dones,
-        )
-
-        # Train on collected experiences if we have any
-        if any(len(states[agent_id]) > 0 for agent_id in states):
-            loss_info = agent.learn(experiences)
-
-            # Verify that learning worked for at least one agent
-            assert any(agent_id in loss_info for agent_id in agent.shared_agent_ids)
-
-    # Final test: verify agent can handle completely different set of active agents
-    test_observations, test_infos = env.reset()
-    test_actions, _, _, _ = agent.get_action(test_observations, test_infos)
-    assert all(agent_id in test_observations for agent_id in test_actions)

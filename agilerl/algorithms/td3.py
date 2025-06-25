@@ -8,9 +8,8 @@ import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
 
-from agilerl.algorithms.core import RLAlgorithm
+from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import DeterministicActor
@@ -73,7 +72,7 @@ class TD3(RLAlgorithm):
     :type actor_network: nn.Module, optional
     :param critic_networks: List of two custom critic networks (one for each of the two critics), defaults to None
     :type critic_networks: list[nn.Module], optional
-    :param share_encoders: Share encoders between actor and critic, defaults to True
+    :param share_encoders: Share encoders between actor and critic, defaults to False
     :type share_encoders: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
@@ -109,7 +108,7 @@ class TD3(RLAlgorithm):
         policy_freq: int = 2,
         actor_network: Optional[EvolvableModule] = None,
         critic_networks: Optional[list[EvolvableModule]] = None,
-        share_encoders: bool = True,
+        share_encoders: bool = False,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
@@ -175,6 +174,14 @@ class TD3(RLAlgorithm):
         self.net_config = net_config
         self.O_U_noise = O_U_noise
         self.vect_noise_dim = vect_noise_dim
+        self.share_encoders = share_encoders
+        self.action_dim = action_space.shape[0]
+        self.current_noise = np.zeros((vect_noise_dim, self.action_dim))
+        self.theta = theta
+        self.dt = dt
+        self.learn_counter = 0
+
+        # Exploration noise
         self.expl_noise = (
             expl_noise
             if isinstance(expl_noise, np.ndarray)
@@ -185,10 +192,6 @@ class TD3(RLAlgorithm):
             if isinstance(mean_noise, np.ndarray)
             else mean_noise * np.ones((vect_noise_dim, self.action_dim))
         )
-        self.current_noise = np.zeros((vect_noise_dim, self.action_dim))
-        self.theta = theta
-        self.dt = dt
-        self.learn_counter = 0
 
         if actor_network is not None and critic_networks is not None:
             assert isinstance(
@@ -255,7 +258,6 @@ class TD3(RLAlgorithm):
             self.critic_target_2 = create_critic()
 
         # Share encoders between actor and critic
-        self.share_encoders = share_encoders
         if self.share_encoders and all(
             isinstance(net, EvolvableNetwork)
             for net in [self.actor, self.critic_1, self.critic_2]
@@ -265,6 +267,7 @@ class TD3(RLAlgorithm):
             # Need to register a mutation hook that does this after every mutation
             self.register_mutation_hook(self.share_encoder_parameters)
 
+        # Initialize target networks
         self.actor_target.load_state_dict(self.actor.state_dict())
         self.critic_target_1.load_state_dict(self.critic_1.state_dict())
         self.critic_target_2.load_state_dict(self.critic_2.state_dict())
@@ -289,13 +292,23 @@ class TD3(RLAlgorithm):
 
         # Register network groups for actor and critics
         self.register_network_group(
-            NetworkGroup(eval=self.actor, shared=self.actor_target, policy=True)
+            NetworkGroup(
+                eval_network=self.actor,
+                shared_networks=self.actor_target,
+                policy=True,
+            )
         )
         self.register_network_group(
-            NetworkGroup(eval=self.critic_1, shared=self.critic_target_1, policy=False)
+            NetworkGroup(
+                eval_network=self.critic_1,
+                shared_networks=self.critic_target_1,
+            )
         )
         self.register_network_group(
-            NetworkGroup(eval=self.critic_2, shared=self.critic_target_2, policy=False)
+            NetworkGroup(
+                eval_network=self.critic_2,
+                shared_networks=self.critic_target_2,
+            )
         )
 
     def share_encoder_parameters(self) -> None:
@@ -404,8 +417,8 @@ class TD3(RLAlgorithm):
     ) -> Tuple[Optional[float], float]:
         """Updates agent network parameters to learn from experiences.
 
-        :param experience: List of batched states, actions, rewards, next_states, dones in that order.
-        :type experience: list[torch.Tensor[float]]
+        :param experiences: TensorDict of batched observations, actions, rewards, next_observations, dones.
+        :type experiences: dict[str, torch.Tensor[float]]
         :param noise_clip: Maximum noise limit to apply to actions, defaults to 0.5
         :type noise_clip: float, optional
         :param policy_noise: Standard deviation of noise applied to policy, defaults to 0.2
@@ -432,7 +445,7 @@ class TD3(RLAlgorithm):
             noise = self.multi_dim_clamp(-noise_clip, noise_clip, noise.to(self.device))
             next_actions = next_actions + noise
             next_actions = self.multi_dim_clamp(
-                self.min_action, self.max_action, next_actions
+                self.action_space.low, self.action_space.high, next_actions
             )
 
             # Compute the target, y_j, making use of twin critic networks

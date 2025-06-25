@@ -20,9 +20,8 @@ from torch.optim import Optimizer
 from transformers import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
 
-from agilerl.algorithms.core import LLMAlgorithm
+from agilerl.algorithms.core import LLMAlgorithm, OptimizerWrapper
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.typing import ExperiencesType
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
@@ -200,9 +199,9 @@ class GRPO(LLMAlgorithm):
         self._initialize_actors(actor_network, not clone)
 
         # Register network groups for mutations
-        self.register_network_group(NetworkGroup(eval=self.actor, policy=True))
+        self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
         self.register_network_group(
-            NetworkGroup(eval=self.reference_actor, policy=True)
+            NetworkGroup(eval_network=self.reference_actor, policy=True)
         )
         if self.wrap:
             self.wrap_models()

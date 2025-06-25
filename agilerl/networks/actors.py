@@ -31,9 +31,6 @@ class DeterministicActor(EvolvableNetwork):
     :type min_latent_dim: int
     :param max_latent_dim: Maximum dimension of the latent space representation.
     :type max_latent_dim: int
-    :param n_agents: Number of agents in the environment. Defaults to None, which corresponds to
-        single-agent environments.
-    :type n_agents: Optional[int]
     :param latent_dim: Dimension of the latent space representation.
     :type latent_dim: int
     :param simba: Whether to use the SimBa architecture for training the network.
@@ -42,6 +39,8 @@ class DeterministicActor(EvolvableNetwork):
     :type recurrent: bool
     :param device: Device to use for the network.
     :type device: str
+    :param random_seed: Random seed to use for the network. Defaults to None.
+    :type random_seed: Optional[int]
     """
 
     supported_spaces = (spaces.Box, spaces.Discrete)
@@ -56,13 +55,12 @@ class DeterministicActor(EvolvableNetwork):
         clip_actions: bool = True,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
-        n_agents: Optional[int] = None,
         latent_dim: int = 32,
         simba: bool = False,
         recurrent: bool = False,
         device: str = "cpu",
+        random_seed: Optional[int] = None,
     ):
-
         super().__init__(
             observation_space,
             encoder_cls=encoder_cls,
@@ -70,13 +68,14 @@ class DeterministicActor(EvolvableNetwork):
             action_space=action_space,
             min_latent_dim=min_latent_dim,
             max_latent_dim=max_latent_dim,
-            n_agents=n_agents,
             latent_dim=latent_dim,
             simba=simba,
             recurrent=recurrent,
             device=device,
+            random_seed=random_seed,
         )
 
+        self.clip_actions = clip_actions
         if isinstance(action_space, spaces.Box):
             self.action_low = torch.as_tensor(action_space.low, device=self.device)
             self.action_high = torch.as_tensor(action_space.high, device=self.device)
@@ -85,7 +84,7 @@ class DeterministicActor(EvolvableNetwork):
             self.action_high = None
 
         # Set output activation based on action space
-        if isinstance(head_config, dict) and "output_activation" in head_config:
+        if head_config is not None and "output_activation" in head_config:
             output_activation = head_config["output_activation"]
         elif isinstance(action_space, spaces.Box):
             # Squash output by default if continuous action space
@@ -95,7 +94,6 @@ class DeterministicActor(EvolvableNetwork):
         else:
             output_activation = None
 
-        self.clip_actions = clip_actions
         if head_config is None:
             head_config = MlpNetConfig(
                 hidden_size=[32], output_activation=output_activation
@@ -215,9 +213,6 @@ class StochasticActor(EvolvableNetwork):
     :type action_std_init: float
     :param squash_output: Whether to squash the output to the action space.
     :type squash_output: bool
-    :param n_agents: Number of agents in the environment. Defaults to None, which corresponds to
-        single-agent environments.
-    :type n_agents: Optional[int]
     :param latent_dim: Dimension of the latent space representation.
     :type latent_dim: int
     :param simba: Whether to use the SimBa architecture for training the network.
@@ -226,6 +221,8 @@ class StochasticActor(EvolvableNetwork):
     :type recurrent: bool
     :param device: Device to use for the network.
     :type device: str
+    :param random_seed: Random seed to use for the network. Defaults to None.
+    :type random_seed: Optional[int]
     """
 
     head_net: EvolvableDistribution
@@ -247,11 +244,11 @@ class StochasticActor(EvolvableNetwork):
         squash_output: bool = False,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
-        n_agents: Optional[int] = None,
         latent_dim: int = 32,
         simba: bool = False,
         recurrent: bool = False,
         device: str = "cpu",
+        random_seed: Optional[int] = None,
     ):
         super().__init__(
             observation_space,
@@ -260,11 +257,11 @@ class StochasticActor(EvolvableNetwork):
             action_space=action_space,
             min_latent_dim=min_latent_dim,
             max_latent_dim=max_latent_dim,
-            n_agents=n_agents,
             latent_dim=latent_dim,
             simba=simba,
             recurrent=recurrent,
             device=device,
+            random_seed=random_seed,
         )
 
         # Require the head to output logits to parameterize a distribution

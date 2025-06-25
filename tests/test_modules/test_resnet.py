@@ -2,6 +2,7 @@ import pytest
 import torch
 
 from agilerl.modules.resnet import EvolvableResNet
+from tests.helper_functions import assert_state_dicts_equal
 
 
 ######### Define fixtures #########
@@ -261,6 +262,6 @@ def test_clone_instance(
     clone = evolvable_resnet.clone()
     clone_net = clone.model
     assert isinstance(clone, EvolvableResNet)
-    assert str(clone.state_dict()) == str(evolvable_resnet.state_dict())
+    assert_state_dicts_equal(clone.state_dict(), evolvable_resnet.state_dict())
     for key, param in clone_net.named_parameters():
         torch.testing.assert_close(param, original_net_dict[key])

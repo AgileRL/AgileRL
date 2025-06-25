@@ -31,7 +31,6 @@ if __name__ == "__main__":
 
     INIT_HP = {
         "POP_SIZE": 6,  # Population size
-        "DISCRETE_ACTIONS": True,  # Discrete action space
         "BATCH_SIZE": 128,  # Batch size
         "LR": 1e-3,  # Learning rate
         "LEARN_STEP": 128,  # Learning frequency

@@ -204,13 +204,13 @@ def train_on_policy(
         for agent_idx, agent in enumerate(pop):  # Loop through population
             agent.set_training_mode(True)
 
-            state, info = env.reset()  # Reset environment at start of episode
+            obs, info = env.reset()  # Reset environment at start of episode
             scores = np.zeros(num_envs)
             completed_episode_scores = []
             steps = 0
             start_time = time.time()
             for _ in range(-(evo_steps // -agent.learn_step)):
-                states = []
+                observations = []
                 actions = []
                 log_probs = []
                 rewards = []
@@ -219,14 +219,14 @@ def train_on_policy(
 
                 done = np.zeros(num_envs)
                 for idx_step in range(-(agent.learn_step // -num_envs)):
-
+                    # Swap channels for image spaces
                     if swap_channels:
-                        state = obs_channels_to_first(state)
+                        obs = obs_channels_to_first(obs)
 
                     # Get next action from agent
                     action_mask = info.get("action_mask", None)
                     action, log_prob, entropy, value = agent.get_action(
-                        state, action_mask=action_mask
+                        obs, action_mask=action_mask
                     )
 
                     if not is_vectorised:
@@ -250,20 +250,20 @@ def train_on_policy(
                         clipped_action = action
 
                     # Act in environment
-                    next_state, reward, term, trunc, info = env.step(clipped_action)
+                    next_obs, reward, term, trunc, info = env.step(clipped_action)
                     next_done = np.logical_or(term, trunc).astype(np.int8)
 
                     total_steps += num_envs
                     steps += num_envs
 
-                    states.append(state)
+                    observations.append(obs)
                     actions.append(action)
                     log_probs.append(log_prob)
                     rewards.append(reward)
                     dones.append(done)
                     values.append(value)
 
-                    state = next_state
+                    obs = next_obs
                     done = next_done
                     scores += np.array(reward)
 
@@ -278,16 +278,16 @@ def train_on_policy(
                             scores[idx] = 0
 
                 if swap_channels:
-                    next_state = obs_channels_to_first(next_state)
+                    next_obs = obs_channels_to_first(next_obs)
 
                 experiences = (
-                    states,
+                    observations,
                     actions,
                     log_probs,
                     rewards,
                     dones,
                     values,
-                    next_state,
+                    next_obs,
                     next_done,
                 )
                 # Learn according to agent's RL algorithm

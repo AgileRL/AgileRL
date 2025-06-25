@@ -6,6 +6,7 @@ import torch
 
 from agilerl.modules.custom_components import NoisyLinear
 from agilerl.modules.mlp import EvolvableMLP
+from tests.helper_functions import assert_state_dicts_equal
 
 
 ######### Define fixtures #########
@@ -262,6 +263,6 @@ def test_clone_instance(num_inputs, num_outputs, hidden_size, device):
     clone_net = clone.model
     assert isinstance(clone, EvolvableMLP)
     assert clone.init_dict == evolvable_mlp.init_dict
-    assert str(clone.state_dict()) == str(evolvable_mlp.state_dict())
+    assert_state_dicts_equal(clone.state_dict(), evolvable_mlp.state_dict())
     for key, param in clone_net.named_parameters():
         torch.testing.assert_close(param, original_net_dict[key]), evolvable_mlp

@@ -6,13 +6,16 @@ import yaml
 from accelerate import Accelerator
 from pettingzoo.utils import env_logger
 
-from agilerl.algorithms.core import MultiAgentRLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components import MultiAgentReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules import EvolvableMLP
 from agilerl.training.train_multi_agent_off_policy import train_multi_agent_off_policy
+from agilerl.utils.evolvable_networks import (
+    get_input_size_from_space,
+    get_output_size_from_space,
+)
 from agilerl.utils.utils import (
     create_population,
     make_multi_agent_vect_envs,
@@ -49,9 +52,9 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Tru
 
         if INIT_HP["CHANNELS_LAST"]:
             # Environment processing for image based observations
-            # env = ss.frame_skip_v0(env, 4)
-            # env = ss.clip_reward_v0(env, lower_bound=-1, upper_bound=1)
-            # env = ss.color_reduction_v0(env, mode="B")
+            env = ss.frame_skip_v0(env, 4)
+            env = ss.clip_reward_v0(env, lower_bound=-1, upper_bound=1)
+            env = ss.color_reduction_v0(env, mode="B")
             env = ss.resize_v1(env, x_size=84, y_size=84)
             env = ss.frame_stack_v1(env, 4)
 
@@ -64,12 +67,15 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Tru
 
     env.reset(seed=42)
     # Configure the multi-agent algo input arguments
-    observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
-    action_spaces = [env.single_action_space(agent) for agent in env.agents]
+    observation_spaces = {
+        agent: env.single_observation_space(agent) for agent in env.agents
+    }
+    action_spaces = {agent: env.single_action_space(agent) for agent in env.agents}
     if INIT_HP["CHANNELS_LAST"]:
-        observation_spaces = [
-            observation_space_channels_to_first(obs) for obs in observation_spaces
-        ]
+        observation_spaces = {
+            agent: observation_space_channels_to_first(obs)
+            for agent, obs in observation_spaces.items()
+        }
 
     INIT_HP["AGENT_IDS"] = [agent_id for agent_id in env.agents]
 
@@ -122,22 +128,23 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Tru
         ),
     )
 
-    state_dims = MultiAgentRLAlgorithm.get_state_dim(observation_spaces)
-    action_dims = MultiAgentRLAlgorithm.get_action_dim(action_spaces)
-    total_state_dims = sum(state_dim[0] for state_dim in state_dims)
-    total_action_dims = sum(action_dims)
+    state_dims = get_input_size_from_space(observation_spaces)
+    action_dims = get_output_size_from_space(action_spaces)
+    total_state_dims = sum(state_dim[0] for state_dim in state_dims.values())
+    total_action_dims = sum(action_dims.values())
+
     if use_net:
         ## Critic nets currently set-up for MADDPG
         actor = [
             EvolvableMLP(
                 num_inputs=state_dim[0],
                 num_outputs=action_dim,
-                hidden_size=[64, 64],
+                hidden_size=[64, 64, 64],
                 activation="ReLU",
-                output_activation="Sigmoid",
+                output_activation="GumbelSoftmax",
                 device=device,
             )
-            for state_dim, action_dim in zip(state_dims, action_dims)
+            for state_dim, action_dim in zip(state_dims.values(), action_dims.values())
         ]
         NET_CONFIG = None
         critic = [
@@ -145,7 +152,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Tru
                 num_inputs=total_state_dims + total_action_dims,
                 num_outputs=1,
                 device=device,
-                hidden_size=[64, 64],
+                hidden_size=[64, 64, 64, 64],
                 activation="ReLU",
                 output_activation=None,
             )

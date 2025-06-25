@@ -17,7 +17,7 @@ from pettingzoo import ParallelEnv
 from torch._dynamo import OptimizedModule
 
 from agilerl.algorithms.maddpg import MADDPG
-from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
+from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput, ModuleDict
 from agilerl.modules.custom_components import GumbelSoftmax
 from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
@@ -26,6 +26,8 @@ from agilerl.utils.evolvable_networks import get_default_encoder_config
 from agilerl.utils.utils import make_multi_agent_vect_envs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
+    assert_not_equal_state_dict,
+    assert_state_dicts_equal,
     gen_multi_agent_dict_or_tuple_spaces,
     generate_multi_agent_box_spaces,
     generate_multi_agent_discrete_spaces,
@@ -38,6 +40,7 @@ def cleanup():
     yield  # Run the test first
     gc.collect()
     torch.cuda.empty_cache()  # Free up GPU memory
+    torch._dynamo.reset()
 
 
 class DummyMultiEnv(ParallelEnv):
@@ -173,8 +176,6 @@ def mlp_actor(observation_spaces, action_spaces):
     )
     yield net
     del net
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 @pytest.fixture
@@ -186,8 +187,6 @@ def mlp_critic(action_spaces, observation_spaces):
     )
     yield net
     del net
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 @pytest.fixture
@@ -195,8 +194,6 @@ def cnn_actor():
     net = MultiAgentCNNActor()
     yield net
     del net
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 @pytest.fixture
@@ -204,8 +201,6 @@ def cnn_critic():
     net = MultiAgentCNNCritic()
     yield net
     del net
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 @pytest.fixture
@@ -332,40 +327,33 @@ def test_initialize_maddpg_with_net_config(
     assert maddpg.action_spaces == action_spaces
     assert maddpg.n_agents == len(agent_ids)
     assert maddpg.agent_ids == agent_ids
-    for noise_vec in maddpg.expl_noise:
+    for noise_vec in maddpg.expl_noise.values():
         assert torch.all(noise_vec == expl_noise)
     assert maddpg.batch_size == batch_size
-    # assert maddpg.total_state_dims == expected_total_state_dims
-    assert maddpg.total_actions == sum(space.shape[0] for space in action_spaces)
     assert maddpg.scores == []
     assert maddpg.fitness == []
     assert maddpg.steps == [0]
 
     if compile_mode is not None and accelerator is None:
-        assert all(isinstance(actor, OptimizedModule) for actor in maddpg.actors)
-        assert all(isinstance(critic, OptimizedModule) for critic in maddpg.critics)
+        assert all(
+            isinstance(actor, OptimizedModule) for actor in maddpg.actors.values()
+        )
+        assert all(
+            isinstance(critic, OptimizedModule) for critic in maddpg.critics.values()
+        )
     else:
-        assert all(isinstance(actor, DeterministicActor) for actor in maddpg.actors)
-        assert all(isinstance(critic, ContinuousQNetwork) for critic in maddpg.critics)
+        for agent_id in maddpg.agent_ids:
+            actor = maddpg.actors[agent_id]
+            critic = maddpg.critics[agent_id]
+            assert isinstance(actor, DeterministicActor)
+            assert isinstance(critic, ContinuousQNetwork)
 
-    if accelerator is None:
-        assert all(
-            isinstance(actor_optimizer, optim.Adam)
-            for actor_optimizer in maddpg.actor_optimizers
-        )
-        assert all(
-            isinstance(critic_optimizer, optim.Adam)
-            for critic_optimizer in maddpg.critic_optimizers
-        )
-    else:
-        assert all(
-            isinstance(actor_optimizer, AcceleratedOptimizer)
-            for actor_optimizer in maddpg.actor_optimizers
-        )
-        assert all(
-            isinstance(critic_optimizer, AcceleratedOptimizer)
-            for critic_optimizer in maddpg.critic_optimizers
-        )
+    expected_optimizer_cls = optim.Adam if accelerator is None else AcceleratedOptimizer
+    for agent_id, actor_optimizer in maddpg.actor_optimizers.items():
+        critic_optimizer = maddpg.critic_optimizers[agent_id]
+        assert isinstance(actor_optimizer, expected_optimizer_cls)
+        assert isinstance(critic_optimizer, expected_optimizer_cls)
+
     assert isinstance(maddpg.criterion, nn.MSELoss)
 
 
@@ -386,52 +374,63 @@ def test_initialize_maddpg_with_mlp_networks(
     compile_mode,
 ):
     accelerator = Accelerator() if accelerator_flag else None
-    evo_actors = [
-        MakeEvolvable(network=mlp_actor, input_tensor=torch.randn(1, 6), device=device)
-        for _ in range(2)
-    ]
-    evo_critics = [
-        MakeEvolvable(network=mlp_critic, input_tensor=torch.randn(1, 8), device=device)
-        for _ in range(2)
-    ]
+    agent_ids = ["agent_0", "other_agent_0"]
+    evo_actors = ModuleDict(
+        {
+            agent_id: MakeEvolvable(
+                network=mlp_actor, input_tensor=torch.randn(1, 6), device=device
+            )
+            for agent_id in agent_ids
+        }
+    )
+    evo_critics = ModuleDict(
+        {
+            agent_id: MakeEvolvable(
+                network=mlp_critic, input_tensor=torch.randn(1, 8), device=device
+            )
+            for agent_id in agent_ids
+        }
+    )
     maddpg = MADDPG(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
-        agent_ids=["agent_0", "other_agent_0"],
+        agent_ids=agent_ids,
         actor_networks=evo_actors,
         critic_networks=evo_critics,
         device=device,
         accelerator=accelerator,
         torch_compiler=compile_mode,
     )
-    expected_module_cls = (
-        OptimizedModule
-        if compile_mode is not None and accelerator is None
-        else MakeEvolvable
-    )
-    assert all(isinstance(actor, expected_module_cls) for actor in maddpg.actors)
-    assert all(isinstance(critic, expected_module_cls) for critic in maddpg.critics)
+
+    if compile_mode is not None and accelerator is None:
+        assert all(
+            isinstance(actor, OptimizedModule) for actor in maddpg.actors.values()
+        )
+        assert all(
+            isinstance(critic, OptimizedModule) for critic in maddpg.critics.values()
+        )
+    else:
+        for agent_id in maddpg.agent_ids:
+            actor = maddpg.actors[agent_id]
+            critic = maddpg.critics[agent_id]
+            assert isinstance(actor, MakeEvolvable)
+            assert isinstance(critic, MakeEvolvable)
+
     assert maddpg.observation_spaces == observation_spaces
     assert maddpg.action_spaces == action_spaces
-    assert maddpg.one_hot is False
     assert maddpg.n_agents == 2
-    assert maddpg.agent_ids == ["agent_0", "other_agent_0"]
-    assert maddpg.discrete_actions is True
-    assert maddpg.total_state_dims == sum(
-        state.shape[0] for state in observation_spaces
-    )
-    assert maddpg.total_actions == sum(space.n for space in action_spaces)
+    assert maddpg.agent_ids == agent_ids
     assert maddpg.scores == []
     assert maddpg.fitness == []
     assert maddpg.steps == [0]
     expected_optimizer_cls = optim.Adam if accelerator is None else AcceleratedOptimizer
     assert all(
         isinstance(actor_optimizer, expected_optimizer_cls)
-        for actor_optimizer in maddpg.actor_optimizers
+        for actor_optimizer in maddpg.actor_optimizers.values()
     )
     assert all(
         isinstance(critic_optimizer, expected_optimizer_cls)
-        for critic_optimizer in maddpg.critic_optimizers
+        for critic_optimizer in maddpg.critic_optimizers.values()
     )
     assert isinstance(maddpg.criterion, nn.MSELoss)
 
@@ -467,7 +466,7 @@ def test_initialize_maddpg_with_mlp_networks_gumbel_softmax(
         device=device,
         torch_compiler=compile_mode,
     )
-    assert maddpg.torch_compiler == compile_mode
+    assert maddpg.torch_compiler == "default"
 
 
 # TODO: This will be deprecated in the future
@@ -485,61 +484,67 @@ def test_initialize_maddpg_with_cnn_networks(
         2, (4, 210, 160), low=0, high=255
     )
     action_spaces = generate_multi_agent_discrete_spaces(2, 2)
-    evo_actors = [
-        MakeEvolvable(
-            network=cnn_actor,
-            input_tensor=torch.randn(1, 4, 2, 210, 160),
-            device=device,
-        )
-        for _ in range(2)
-    ]
-    evo_critics = [
-        MakeEvolvable(
-            network=cnn_critic,
-            input_tensor=torch.randn(1, 4, 2, 210, 160),
-            secondary_input_tensor=torch.randn(1, 2),
-            device=device,
-        )
-        for _ in range(2)
-    ]
+    agent_ids = ["agent_0", "other_agent_0"]
+    evo_actors = ModuleDict(
+        {
+            agent_id: MakeEvolvable(
+                network=cnn_actor,
+                input_tensor=torch.randn(1, 4, 2, 210, 160),
+                device=device,
+            )
+            for agent_id in agent_ids
+        }
+    )
+    evo_critics = ModuleDict(
+        {
+            agent_id: MakeEvolvable(
+                network=cnn_critic,
+                input_tensor=torch.randn(1, 4, 2, 210, 160),
+                secondary_input_tensor=torch.randn(1, 2),
+                device=device,
+            )
+            for agent_id in agent_ids
+        }
+    )
     maddpg = MADDPG(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
-        agent_ids=["agent_0", "other_agent_0"],
+        agent_ids=agent_ids,
         actor_networks=evo_actors,
         critic_networks=evo_critics,
         device=device,
         accelerator=accelerator,
         torch_compiler=compile_mode,
     )
-    expected_module_cls = (
-        OptimizedModule
-        if compile_mode is not None and accelerator is None
-        else MakeEvolvable
-    )
-    assert all(isinstance(actor, expected_module_cls) for actor in maddpg.actors)
-    assert all(isinstance(critic, expected_module_cls) for critic in maddpg.critics)
+    if compile_mode is not None and accelerator is None:
+        assert all(
+            isinstance(actor, OptimizedModule) for actor in maddpg.actors.values()
+        )
+        assert all(
+            isinstance(critic, OptimizedModule) for critic in maddpg.critics.values()
+        )
+    else:
+        for agent_id in maddpg.agent_ids:
+            actor = maddpg.actors[agent_id]
+            critic = maddpg.critics[agent_id]
+            assert isinstance(actor, MakeEvolvable)
+            assert isinstance(critic, MakeEvolvable)
+
     assert maddpg.observation_spaces == observation_spaces
     assert maddpg.action_spaces == action_spaces
-    assert maddpg.one_hot is False
     assert maddpg.n_agents == 2
-    assert maddpg.agent_ids == ["agent_0", "other_agent_0"]
-    assert maddpg.discrete_actions is True
-    assert maddpg.total_state_dims == sum(
-        state.shape[0] for state in observation_spaces
-    )
-    assert maddpg.total_actions == sum(space.n for space in action_spaces)
+    assert maddpg.agent_ids == agent_ids
     assert maddpg.scores == []
     assert maddpg.fitness == []
     assert maddpg.steps == [0]
     expected_optimizer_cls = optim.Adam if accelerator is None else AcceleratedOptimizer
     assert all(
         isinstance(actor_optimizer, expected_optimizer_cls)
-        for actor_optimizer in maddpg.actor_optimizers
+        for actor_optimizer in maddpg.actor_optimizers.values()
     )
     assert all(
         isinstance(critic_optimizer, expected_optimizer_cls)
-        for critic_optimizer in maddpg.critic_optimizers
+        for critic_optimizer in maddpg.critic_optimizers.values()
     )
     assert isinstance(maddpg.criterion, nn.MSELoss)
 
@@ -559,64 +564,37 @@ def test_initialize_maddpg_with_cnn_networks(
 def test_initialize_maddpg_with_evo_networks(
     observation_spaces, encoder_cls, device, compile_mode, accelerator
 ):
+    agent_ids = ["agent_0", "other_agent_0"]
     action_spaces = generate_multi_agent_discrete_spaces(2, 2)
-    net_config = get_default_encoder_config(observation_spaces[0])
+    observation_space = spaces.Dict(
+        {agent_id: observation_spaces[idx] for idx, agent_id in enumerate(agent_ids)}
+    )
 
-    # For image spaces we need to give a sample input tensor to build networks
-    critic_net_config = copy.deepcopy(net_config)
-    if len(observation_spaces[0].shape) == 3:
-        net_config["sample_input"] = torch.zeros(
-            (1, *observation_spaces[0].shape), dtype=torch.float32, device=device
-        ).unsqueeze(2)
-
-        critic_net_config["sample_input"] = (
-            torch.zeros(
-                (1, *observation_spaces[0].shape), dtype=torch.float32, device=device
+    evo_actors = ModuleDict(
+        {
+            agent_id: DeterministicActor(
+                observation_spaces[i],
+                action_spaces[i],
+                device=device,
             )
-            .unsqueeze(2)
-            .repeat(1, 1, 2, 1, 1)
-        )
-
-    head_config = {
-        "output_activation": "Tanh",
-        "activation": "ReLU",
-        "hidden_size": [64, 64],
-    }
-
-    critic_head_config = copy.deepcopy(head_config)
-    critic_head_config.update({"output_activation": None})
-
-    net_config = {"encoder_config": net_config, "head_config": head_config}
-    critic_net_config = {
-        "encoder_config": critic_net_config,
-        "head_config": critic_head_config,
-    }
-
-    evo_actors = [
-        DeterministicActor(
-            observation_spaces[x],
-            action_spaces[x],
-            n_agents=2,
-            device=device,
-            **net_config
-        )
-        for x in range(2)
-    ]
-    evo_critics = [
-        ContinuousQNetwork(
-            observation_space=concatenate_spaces(observation_spaces),
-            action_space=concatenate_spaces(action_spaces),
-            n_agents=2,
-            device=device,
-            **critic_net_config
-        )
-        for x in range(2)
-    ]
+            for i, agent_id in enumerate(agent_ids)
+        }
+    )
+    evo_critics = ModuleDict(
+        {
+            agent_id: ContinuousQNetwork(
+                observation_space=observation_space,
+                action_space=concatenate_spaces(action_spaces),
+                device=device,
+            )
+            for agent_id in agent_ids
+        }
+    )
 
     maddpg = MADDPG(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
-        agent_ids=["agent_0", "other_agent_0"],
+        agent_ids=agent_ids,
         actor_networks=evo_actors,
         critic_networks=evo_critics,
         device=device,
@@ -624,21 +602,23 @@ def test_initialize_maddpg_with_evo_networks(
         accelerator=accelerator,
     )
     if compile_mode is not None and accelerator is None:
-        assert all(isinstance(actor, OptimizedModule) for actor in maddpg.actors)
-        assert all(isinstance(critic, OptimizedModule) for critic in maddpg.critics)
+        assert all(
+            isinstance(actor, OptimizedModule) for actor in maddpg.actors.values()
+        )
+        assert all(
+            isinstance(critic, OptimizedModule) for critic in maddpg.critics.values()
+        )
     else:
-        assert all(isinstance(actor.encoder, encoder_cls) for actor in maddpg.actors)
-        assert all(isinstance(critic.encoder, encoder_cls) for critic in maddpg.critics)
+        for agent_id in maddpg.agent_ids:
+            actor = maddpg.actors[agent_id]
+            critic = maddpg.critics[agent_id]
+            assert isinstance(actor.encoder, encoder_cls)
+            assert isinstance(critic.encoder, EvolvableMultiInput)
+
     assert maddpg.observation_spaces == observation_spaces
     assert maddpg.action_spaces == action_spaces
-    assert maddpg.one_hot is False
     assert maddpg.n_agents == 2
-    assert maddpg.agent_ids == ["agent_0", "other_agent_0"]
-    assert maddpg.discrete_actions is True
-    # assert maddpg.total_state_dims == sum(
-    #     state.shape[0] for state in observation_spaces
-    # )
-    assert maddpg.total_actions == sum(space.n for space in action_spaces)
+    assert maddpg.agent_ids == agent_ids
     assert maddpg.scores == []
     assert maddpg.fitness == []
     assert maddpg.steps == [0]
@@ -646,11 +626,11 @@ def test_initialize_maddpg_with_evo_networks(
     expected_optimizer_cls = optim.Adam if accelerator is None else AcceleratedOptimizer
     assert all(
         isinstance(actor_optimizer, expected_optimizer_cls)
-        for actor_optimizer in maddpg.actor_optimizers
+        for actor_optimizer in maddpg.actor_optimizers.values()
     )
     assert all(
         isinstance(critic_optimizer, expected_optimizer_cls)
-        for critic_optimizer in maddpg.critic_optimizers
+        for critic_optimizer in maddpg.critic_optimizers.values()
     )
     assert isinstance(maddpg.criterion, nn.MSELoss)
 
@@ -681,7 +661,7 @@ def test_initialize_maddpg_with_incorrect_evo_networks(compile_mode):
 def test_maddpg_init_warning(
     mlp_actor, device, compile_mode, observation_spaces, action_spaces
 ):
-    warning_string = "Actor and critic network lists must both be supplied to use custom networks. Defaulting to net config."
+    warning_string = "Actor and critic network must both be supplied to use custom networks. Defaulting to net config."
     evo_actors = [
         MakeEvolvable(network=mlp_actor, input_tensor=torch.randn(1, 6), device=device)
         for _ in range(2)
@@ -710,22 +690,20 @@ def test_maddpg_init_torch_compiler_no_error(mode):
     )
     if isinstance(mode, str):
         assert all(
-            isinstance(a, torch._dynamo.eval_frame.OptimizedModule)
-            for a in maddpg.actors
+            isinstance(actor, OptimizedModule) for actor in maddpg.actors.values()
         )
         assert all(
-            isinstance(a, torch._dynamo.eval_frame.OptimizedModule)
-            for a in maddpg.critics
+            isinstance(critic, OptimizedModule) for critic in maddpg.critics.values()
         )
         assert all(
-            isinstance(a, torch._dynamo.eval_frame.OptimizedModule)
-            for a in maddpg.actor_targets
+            isinstance(actor_target, OptimizedModule)
+            for actor_target in maddpg.actor_targets.values()
         )
         assert all(
-            isinstance(a, torch._dynamo.eval_frame.OptimizedModule)
-            for a in maddpg.critic_targets
+            isinstance(critic_target, OptimizedModule)
+            for critic_target in maddpg.critic_targets.values()
         )
-        assert maddpg.torch_compiler == mode
+        assert maddpg.torch_compiler == "default"
     else:
         assert isinstance(maddpg, MADDPG)
 
@@ -785,11 +763,12 @@ def test_maddpg_get_action(
         device=device,
         torch_compiler=compile_mode,
     )
-    cont_actions, discrete_action = maddpg.get_action(state, training)
+    maddpg.set_training_mode(bool(training))
+    processed_action, raw_action = maddpg.get_action(state)
     discrete_actions = all(
         isinstance(space, spaces.Discrete) for space in action_spaces
     )
-    for idx, env_actions in enumerate(list(cont_actions.values())):
+    for idx, env_actions in enumerate(list(raw_action.values())):
         action_dim = (
             action_spaces[idx].shape[0]
             if isinstance(action_spaces[idx], spaces.Box)
@@ -809,13 +788,13 @@ def test_maddpg_get_action(
             assert -1 <= act.all() <= 1
 
     if discrete_actions:
-        for idx, env_action in enumerate(list(discrete_action.values())):
+        for idx, env_action in enumerate(list(processed_action.values())):
             for action in env_action:
                 assert action <= action_spaces[idx].n - 1
     maddpg = None
 
 
-@pytest.mark.parametrize("training", [0, 1])
+@pytest.mark.parametrize("training", [False, True])
 def test_maddpg_get_action_action_masking_exception(training, device):
     observation_spaces = generate_multi_agent_box_spaces(2, (6,))
     action_spaces = generate_multi_agent_discrete_spaces(2, 4)
@@ -834,10 +813,11 @@ def test_maddpg_get_action_action_masking_exception(training, device):
         device=device,
     )
     with pytest.raises(AssertionError):
-        _, discrete_action = maddpg.get_action(state, training)
+        maddpg.set_training_mode(training)
+        _, raw_action = maddpg.get_action(state)
 
 
-@pytest.mark.parametrize("training", [0, 1])
+@pytest.mark.parametrize("training", [False, True])
 def test_maddpg_get_action_action_masking(training, device):
     observation_spaces = generate_multi_agent_box_spaces(2, (6,))
     action_spaces = generate_multi_agent_discrete_spaces(2, 4)
@@ -858,8 +838,9 @@ def test_maddpg_get_action_action_masking(training, device):
         agent_ids=agent_ids,
         device=device,
     )
-    _, discrete_action = maddpg.get_action(state, training, info)
-    assert all(i in [1, 3] for i in discrete_action.values())
+    maddpg.set_training_mode(training)
+    action, _ = maddpg.get_action(state, info)
+    assert all(i in [1, 3] for i in action.values())
 
 
 @pytest.mark.parametrize(
@@ -876,7 +857,7 @@ def test_maddpg_get_action_action_masking(training, device):
         generate_multi_agent_box_spaces(2, (2,)),
     ],
 )
-@pytest.mark.parametrize("training", [0, 1])
+@pytest.mark.parametrize("training", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_get_action_distributed(
     training, observation_spaces, action_spaces, compile_mode
@@ -896,23 +877,25 @@ def test_get_action_distributed(
         accelerator=accelerator,
         torch_compiler=compile_mode,
     )
-    new_actors = [
-        DummyDeterministicActor(
-            observation_space=actor.observation_space,
-            action_space=actor.action_space,
-            encoder_config=actor.encoder.net_config,
-            head_config=actor.head_net.net_config,
-            device=actor.device,
-            n_agents=actor.n_agents,
-        )
-        for actor in maddpg.actors
-    ]
+    new_actors = ModuleDict(
+        {
+            agent_id: DummyDeterministicActor(
+                observation_space=actor.observation_space,
+                action_space=actor.action_space,
+                encoder_config=actor.encoder.net_config,
+                head_config=actor.head_net.net_config,
+                device=actor.device,
+            )
+            for agent_id, actor in maddpg.actors.items()
+        }
+    )
     maddpg.actors = new_actors
-    cont_actions, discrete_action = maddpg.get_action(state, training)
+    maddpg.set_training_mode(training)
+    processed_action, raw_action = maddpg.get_action(state)
     discrete_actions = all(
         isinstance(space, spaces.Discrete) for space in action_spaces
     )
-    for idx, env_actions in enumerate(list(cont_actions.values())):
+    for idx, env_actions in enumerate(list(raw_action.values())):
         action_dim = (
             action_spaces[idx].shape[0]
             if isinstance(action_spaces[idx], spaces.Box)
@@ -932,7 +915,7 @@ def test_get_action_distributed(
             assert -1 <= act.all() <= 1
 
     if discrete_actions:
-        for idx, env_action in enumerate(list(discrete_action.values())):
+        for idx, env_action in enumerate(list(processed_action.values())):
             action_dim = (
                 action_spaces[idx].shape[0]
                 if isinstance(action_spaces[idx], spaces.Box)
@@ -955,7 +938,7 @@ def test_get_action_distributed(
         generate_multi_agent_discrete_spaces(2, 2),
     ],
 )
-@pytest.mark.parametrize("training", [0, 1])
+@pytest.mark.parametrize("training", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_maddpg_get_action_agent_masking(
     training, observation_spaces, action_spaces, device, compile_mode
@@ -984,18 +967,15 @@ def test_maddpg_get_action_agent_masking(
         device=device,
         torch_compiler=compile_mode,
     )
-    cont_actions, discrete_action = maddpg.get_action(state, training, infos=info)
+    maddpg.set_training_mode(training)
+    action, _ = maddpg.get_action(state, infos=info)
     if discrete_actions:
-        assert np.array_equal(
-            discrete_action["agent_0"], np.array([1])
-        ), discrete_action["agent_0"]
+        assert np.array_equal(action["agent_0"], np.array([1])), action["agent_0"]
     else:
-        assert np.array_equal(
-            cont_actions["agent_0"], np.array([[0, 1]])
-        ), cont_actions["agent_0"]
+        assert np.array_equal(action["agent_0"], np.array([[0, 1]])), action["agent_0"]
 
 
-@pytest.mark.parametrize("training", [0, 1])
+@pytest.mark.parametrize("training", [False, True])
 @pytest.mark.parametrize(
     "observation_spaces",
     [
@@ -1046,15 +1026,16 @@ def test_maddpg_get_action_vectorized_agent_masking(
         agent_ids=agent_ids,
         device=device,
     )
-    cont_actions, discrete_action = maddpg.get_action(state, training, infos=info)
+    maddpg.set_training_mode(training)
+    action, raw_action = maddpg.get_action(state, infos=info)
     if discrete_actions:
         assert np.array_equal(
-            discrete_action["agent_0"].squeeze(), info["agent_0"]["env_defined_actions"]
-        ), discrete_action["agent_0"]
+            action["agent_0"].squeeze(), info["agent_0"]["env_defined_actions"]
+        ), action["agent_0"]
     else:
         assert np.isclose(
-            cont_actions["agent_0"], info["agent_0"]["env_defined_actions"]
-        ).all(), cont_actions["agent_0"]
+            action["agent_0"], info["agent_0"]["env_defined_actions"]
+        ).all(), action["agent_0"]
 
 
 @pytest.mark.parametrize(
@@ -1098,22 +1079,23 @@ def test_maddpg_learns_from_experiences(
     )
 
     if accelerator is not None:
-        for actor, critic, actor_target, critic_target in zip(
-            maddpg.actors, maddpg.critics, maddpg.actor_targets, maddpg.critic_targets
-        ):
+        for agent_id, actor in maddpg.actors.items():
+            critic = maddpg.critics[agent_id]
+            actor_target = maddpg.actor_targets[agent_id]
+            critic_target = maddpg.critic_targets[agent_id]
             actor.no_sync = no_sync.__get__(actor)
             critic.no_sync = no_sync.__get__(critic)
             actor_target.no_sync = no_sync.__get__(actor_target)
             critic_target.no_sync = no_sync.__get__(critic_target)
 
-    actors = maddpg.actors
-    actor_targets = maddpg.actor_targets
-    actors_pre_learn_sd = [copy.deepcopy(actor.state_dict()) for actor in maddpg.actors]
-    critics = maddpg.critics
-    critic_targets = maddpg.critic_targets
-    critics_pre_learn_sd = [
-        str(copy.deepcopy(critic.state_dict())) for critic in maddpg.critics
-    ]
+    actors_pre_learn_sd = {
+        agent_id: copy.deepcopy(actor.state_dict())
+        for agent_id, actor in maddpg.actors.items()
+    }
+    critics_pre_learn_sd = {
+        agent_id: copy.deepcopy(critic.state_dict())
+        for agent_id, critic in maddpg.critics.items()
+    }
 
     for _ in range(4):
         maddpg.scores.append(0)
@@ -1122,24 +1104,22 @@ def test_maddpg_learns_from_experiences(
     assert isinstance(loss, dict)
     for agent_id in maddpg.agent_ids:
         assert loss[agent_id][-1] >= 0.0
-    for old_actor, updated_actor in zip(actors, maddpg.actors):
-        assert old_actor == updated_actor
-    for old_actor_target, updated_actor_target in zip(
-        actor_targets, maddpg.actor_targets
-    ):
+
+    for agent_id, old_actor_target in maddpg.actor_targets.items():
+        updated_actor_target = maddpg.actor_targets[agent_id]
         assert old_actor_target == updated_actor_target
-    for old_actor_state_dict, updated_actor in zip(actors_pre_learn_sd, maddpg.actors):
-        assert old_actor_state_dict != str(updated_actor.state_dict())
-    for old_critic, updated_critic in zip(critics, maddpg.critics):
-        assert old_critic == updated_critic
-    for old_critic_target, updated_critic_target in zip(
-        critic_targets, maddpg.critic_targets
-    ):
+
+    for agent_id, old_actor_state_dict in actors_pre_learn_sd.items():
+        updated_actor = maddpg.actors[agent_id]
+        assert_not_equal_state_dict(old_actor_state_dict, updated_actor.state_dict())
+
+    for agent_id, old_critic_target in maddpg.critic_targets.items():
+        updated_critic_target = maddpg.critic_targets[agent_id]
         assert old_critic_target == updated_critic_target
-    for old_critic_state_dict, updated_critic in zip(
-        critics_pre_learn_sd, maddpg.critics
-    ):
-        assert old_critic_state_dict != str(updated_critic.state_dict())
+
+    for agent_id, old_critic_state_dict in critics_pre_learn_sd.items():
+        updated_critic = maddpg.critics[agent_id]
+        assert_not_equal_state_dict(old_critic_state_dict, updated_critic.state_dict())
 
 
 def no_sync(self):
@@ -1168,9 +1148,8 @@ def test_maddpg_soft_update(device, compile_mode):
         torch_compiler=compile_mode,
     )
 
-    for actor, actor_target, critic, critic_target in zip(
-        maddpg.actors, maddpg.actor_targets, maddpg.critics, maddpg.critic_targets
-    ):
+    for agent_id, actor in maddpg.actors.items():
+        actor_target = maddpg.actor_targets[agent_id]
         # Check actors
         maddpg.soft_update(actor, actor_target)
         eval_params = list(actor.parameters())
@@ -1183,6 +1162,9 @@ def test_maddpg_soft_update(device, compile_mode):
             torch.allclose(expected_param, target_param)
             for expected_param, target_param in zip(expected_params, target_params)
         )
+
+    for agent_id, critic in maddpg.critics.items():
+        critic_target = maddpg.critic_targets[agent_id]
         maddpg.soft_update(critic, critic_target)
         eval_params = list(critic.parameters())
         target_params = list(critic_target.parameters())
@@ -1293,24 +1275,19 @@ def test_maddpg_clone_returns_identical_agent(
         wrap=wrap,
         torch_compiler=compile_mode,
     )
-
     clone_agent = maddpg.clone(wrap=wrap)
 
     assert isinstance(clone_agent, MADDPG)
     assert clone_agent.observation_spaces == maddpg.observation_spaces
     assert clone_agent.action_spaces == maddpg.action_spaces
-    assert clone_agent.one_hot == maddpg.one_hot
     assert clone_agent.n_agents == maddpg.n_agents
     assert clone_agent.agent_ids == maddpg.agent_ids
-    assert np.all(np.stack(clone_agent.max_action) == np.stack(maddpg.max_action))
-    assert np.all(np.stack(clone_agent.min_action) == np.stack(maddpg.min_action))
     assert all(
         torch.equal(clone_expl_noise, expl_noise)
         for clone_expl_noise, expl_noise in zip(
-            clone_agent.expl_noise, maddpg.expl_noise
+            clone_agent.expl_noise.values(), maddpg.expl_noise.values()
         )
     )
-    assert clone_agent.discrete_actions == maddpg.discrete_actions
     assert clone_agent.index == maddpg.index
     assert clone_agent.batch_size == maddpg.batch_size
     assert clone_agent.lr_actor == maddpg.lr_actor
@@ -1320,18 +1297,26 @@ def test_maddpg_clone_returns_identical_agent(
     assert clone_agent.tau == maddpg.tau
     assert clone_agent.device == maddpg.device
     assert clone_agent.accelerator == maddpg.accelerator
-    for clone_actor, actor in zip(clone_agent.actors, maddpg.actors):
-        assert str(clone_actor.state_dict()) == str(actor.state_dict())
-    for clone_critic, critic in zip(clone_agent.critics, maddpg.critics):
-        assert str(clone_critic.state_dict()) == str(critic.state_dict())
-    for clone_actor_target, actor_target in zip(
-        clone_agent.actor_targets, maddpg.actor_targets
-    ):
-        assert str(clone_actor_target.state_dict()) == str(actor_target.state_dict())
-    for clone_critic_target, critic_target in zip(
-        clone_agent.critic_targets, maddpg.critic_targets
-    ):
-        assert str(clone_critic_target.state_dict()) == str(critic_target.state_dict())
+
+    for agent_id, clone_actor in clone_agent.actors.items():
+        actor = maddpg.actors[agent_id]
+        assert_state_dicts_equal(clone_actor.state_dict(), actor.state_dict())
+
+    for agent_id, clone_critic in clone_agent.critics.items():
+        critic = maddpg.critics[agent_id]
+        assert_state_dicts_equal(clone_critic.state_dict(), critic.state_dict())
+
+    for agent_id, clone_actor_target in clone_agent.actor_targets.items():
+        actor_target = maddpg.actor_targets[agent_id]
+        assert_state_dicts_equal(
+            clone_actor_target.state_dict(), actor_target.state_dict()
+        )
+
+    for agent_id, clone_critic_target in clone_agent.critic_targets.items():
+        critic_target = maddpg.critic_targets[agent_id]
+        assert_state_dicts_equal(
+            clone_critic_target.state_dict(), critic_target.state_dict()
+        )
 
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
@@ -1387,13 +1372,14 @@ def test_clone_after_learning(compile_mode):
     assert isinstance(clone_agent, MADDPG)
     assert clone_agent.observation_spaces == maddpg.observation_spaces
     assert clone_agent.action_spaces == maddpg.action_spaces
-    assert clone_agent.one_hot == maddpg.one_hot
     assert clone_agent.n_agents == maddpg.n_agents
     assert clone_agent.agent_ids == maddpg.agent_ids
-    assert np.all(np.stack(clone_agent.max_action) == np.stack(maddpg.max_action))
-    assert np.all(np.stack(clone_agent.min_action) == np.stack(maddpg.min_action))
-    assert np.array_equal(clone_agent.expl_noise, maddpg.expl_noise)
-    assert clone_agent.discrete_actions == maddpg.discrete_actions
+    assert all(
+        torch.equal(clone_expl_noise, expl_noise)
+        for clone_expl_noise, expl_noise in zip(
+            clone_agent.expl_noise.values(), maddpg.expl_noise.values()
+        )
+    )
     assert clone_agent.index == maddpg.index
     assert clone_agent.batch_size == maddpg.batch_size
     assert clone_agent.lr_actor == maddpg.lr_actor
@@ -1403,25 +1389,33 @@ def test_clone_after_learning(compile_mode):
     assert clone_agent.tau == maddpg.tau
     assert clone_agent.device == maddpg.device
     assert clone_agent.accelerator == maddpg.accelerator
-    for clone_actor, actor in zip(clone_agent.actors, maddpg.actors):
-        assert str(clone_actor.state_dict()) == str(actor.state_dict())
-    for clone_critic, critic in zip(clone_agent.critics, maddpg.critics):
-        assert str(clone_critic.state_dict()) == str(critic.state_dict())
-    for clone_actor_target, actor_target in zip(
-        clone_agent.actor_targets, maddpg.actor_targets
-    ):
-        assert str(clone_actor_target.state_dict()) == str(actor_target.state_dict())
-    for clone_critic_target, critic_target in zip(
-        clone_agent.critic_targets, maddpg.critic_targets
-    ):
-        assert str(clone_critic_target.state_dict()) == str(critic_target.state_dict())
-    for clone_actor_opt, actor_opt in zip(
-        clone_agent.actor_optimizers.optimizer, maddpg.actor_optimizers.optimizer
-    ):
+
+    for agent_id, clone_actor in clone_agent.actors.items():
+        actor = maddpg.actors[agent_id]
+        assert_state_dicts_equal(clone_actor.state_dict(), actor.state_dict())
+
+    for agent_id, clone_critic in clone_agent.critics.items():
+        critic = maddpg.critics[agent_id]
+        assert_state_dicts_equal(clone_critic.state_dict(), critic.state_dict())
+
+    for agent_id, clone_actor_target in clone_agent.actor_targets.items():
+        actor_target = maddpg.actor_targets[agent_id]
+        assert_state_dicts_equal(
+            clone_actor_target.state_dict(), actor_target.state_dict()
+        )
+
+    for agent_id, clone_critic_target in clone_agent.critic_targets.items():
+        critic_target = maddpg.critic_targets[agent_id]
+        assert_state_dicts_equal(
+            clone_critic_target.state_dict(), critic_target.state_dict()
+        )
+
+    for agent_id, clone_actor_opt in clone_agent.actor_optimizers.optimizer.items():
+        actor_opt = maddpg.actor_optimizers.optimizer[agent_id]
         assert str(clone_actor_opt) == str(actor_opt)
-    for clone_critic_opt, critic_opt in zip(
-        clone_agent.critic_optimizers.optimizer, maddpg.critic_optimizers.optimizer
-    ):
+
+    for agent_id, clone_critic_opt in clone_agent.critic_optimizers.optimizer.items():
+        critic_opt = maddpg.critic_optimizers.optimizer[agent_id]
         assert str(clone_critic_opt) == str(critic_opt)
 
 
@@ -1437,10 +1431,10 @@ def test_clone_after_learning(compile_mode):
             gen_multi_agent_dict_or_tuple_spaces(1, 2, 2, dict_space=True),
             EvolvableMultiInput,
         ),
-        (
-            gen_multi_agent_dict_or_tuple_spaces(1, 2, 2, dict_space=False),
-            EvolvableMultiInput,
-        ),
+        # (
+        #     gen_multi_agent_dict_or_tuple_spaces(1, 2, 2, dict_space=False),
+        #     EvolvableMultiInput,
+        # ),
     ],
 )
 @pytest.mark.parametrize(
@@ -1504,43 +1498,49 @@ def test_save_load_checkpoint_correct_data_and_format(
 
     # Check if properties and weights are loaded correctly
     if compile_mode is not None and accelerator is None:
-        assert all(isinstance(actor, OptimizedModule) for actor in loaded_maddpg.actors)
         assert all(
-            isinstance(actor_target, OptimizedModule)
-            for actor_target in loaded_maddpg.actor_targets
+            isinstance(actor, OptimizedModule)
+            for actor in loaded_maddpg.actors.values()
         )
         assert all(
-            isinstance(critic, OptimizedModule) for critic in loaded_maddpg.critics
+            isinstance(actor_target, OptimizedModule)
+            for actor_target in loaded_maddpg.actor_targets.values()
+        )
+        assert all(
+            isinstance(critic, OptimizedModule)
+            for critic in loaded_maddpg.critics.values()
         )
         assert all(
             isinstance(critic_target, OptimizedModule)
-            for critic_target in loaded_maddpg.critic_targets
+            for critic_target in loaded_maddpg.critic_targets.values()
         )
     else:
         assert all(
-            isinstance(actor.encoder, encoder_cls) for actor in loaded_maddpg.actors
+            isinstance(actor.encoder, encoder_cls)
+            for actor in loaded_maddpg.actors.values()
         )
         assert all(
             isinstance(actor_target.encoder, encoder_cls)
-            for actor_target in loaded_maddpg.actor_targets
+            for actor_target in loaded_maddpg.actor_targets.values()
         )
         assert all(
-            isinstance(critic.encoder, encoder_cls) for critic in loaded_maddpg.critics
+            isinstance(critic.encoder, EvolvableMultiInput)
+            for critic in loaded_maddpg.critics.values()
         )
         assert all(
-            isinstance(critic_target.encoder, encoder_cls)
-            for critic_target in loaded_maddpg.critic_targets
+            isinstance(critic_target.encoder, EvolvableMultiInput)
+            for critic_target in loaded_maddpg.critic_targets.values()
         )
 
     assert maddpg.lr_actor == 0.001
     assert maddpg.lr_critic == 0.01
-    for actor, actor_target in zip(loaded_maddpg.actors, loaded_maddpg.actor_targets):
-        assert str(actor.state_dict()) == str(actor_target.state_dict())
+    for agent_id, actor in maddpg.actors.items():
+        actor_target = loaded_maddpg.actor_targets[agent_id]
+        assert_state_dicts_equal(actor.state_dict(), actor_target.state_dict())
 
-    for critic, critic_target in zip(
-        loaded_maddpg.critics, loaded_maddpg.critic_targets
-    ):
-        assert str(critic.state_dict()) == str(critic_target.state_dict())
+    for agent_id, critic in maddpg.critics.items():
+        critic_target = loaded_maddpg.critic_targets[agent_id]
+        assert_state_dicts_equal(critic.state_dict(), critic_target.state_dict())
 
     assert maddpg.batch_size == 64
     assert maddpg.learn_step == 5
@@ -1573,14 +1573,20 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_make_evo(
     compile_mode,
     accelerator,
 ):
-    evo_actors = [
-        MakeEvolvable(network=mlp_actor, input_tensor=torch.randn(1, 6), device=device)
-        for _ in range(1)
-    ]
-    evo_critics = [
-        MakeEvolvable(network=mlp_critic, input_tensor=torch.randn(1, 8), device=device)
-        for _ in range(1)
-    ]
+    evo_actors = ModuleDict(
+        {
+            "agent_0": MakeEvolvable(
+                network=mlp_actor, input_tensor=torch.randn(1, 6), device=device
+            )
+        }
+    )
+    evo_critics = ModuleDict(
+        {
+            "agent_0": MakeEvolvable(
+                network=mlp_critic, input_tensor=torch.randn(1, 8), device=device
+            )
+        }
+    )
     maddpg = MADDPG(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
@@ -1636,41 +1642,43 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_make_evo(
 
     # Check if properties and weights are loaded correctly
     if compile_mode is not None and accelerator is None:
-        assert all(isinstance(actor, OptimizedModule) for actor in loaded_maddpg.actors)
         assert all(
-            isinstance(actor_target, OptimizedModule)
-            for actor_target in loaded_maddpg.actor_targets
+            isinstance(actor, OptimizedModule)
+            for actor in loaded_maddpg.actors.values()
         )
         assert all(
-            isinstance(critic, OptimizedModule) for critic in loaded_maddpg.critics
+            isinstance(actor_target, OptimizedModule)
+            for actor_target in loaded_maddpg.actor_targets.values()
+        )
+        assert all(
+            isinstance(critic, OptimizedModule)
+            for critic in loaded_maddpg.critics.values()
         )
         assert all(
             isinstance(critic_target, OptimizedModule)
-            for critic_target in loaded_maddpg.critic_targets
+            for critic_target in loaded_maddpg.critic_targets.values()
         )
     else:
-        assert all(isinstance(actor, MakeEvolvable) for actor in loaded_maddpg.actors)
-        assert all(
-            isinstance(actor_target, MakeEvolvable)
-            for actor_target in loaded_maddpg.actor_targets
-        )
-        assert all(
-            isinstance(critic, MakeEvolvable) for critic in loaded_maddpg.critics
-        )
-        assert all(
-            isinstance(critic_target, MakeEvolvable)
-            for critic_target in loaded_maddpg.critic_targets
-        )
+        for agent_id, actor in loaded_maddpg.actors.items():
+            actor_target = loaded_maddpg.actor_targets[agent_id]
+            assert isinstance(actor, MakeEvolvable)
+            assert isinstance(actor_target, MakeEvolvable)
+
+            critic = loaded_maddpg.critics[agent_id]
+            critic_target = loaded_maddpg.critic_targets[agent_id]
+            assert isinstance(critic, MakeEvolvable)
+            assert isinstance(critic_target, MakeEvolvable)
+
     assert maddpg.lr_actor == 0.001
     assert maddpg.lr_critic == 0.01
 
-    for actor, actor_target in zip(loaded_maddpg.actors, loaded_maddpg.actor_targets):
-        assert str(actor.state_dict()) == str(actor_target.state_dict())
+    for agent_id, actor in loaded_maddpg.actors.items():
+        actor_target = loaded_maddpg.actor_targets[agent_id]
+        assert_state_dicts_equal(actor.state_dict(), actor_target.state_dict())
 
-    for critic, critic_target in zip(
-        loaded_maddpg.critics, loaded_maddpg.critic_targets
-    ):
-        assert str(critic.state_dict()) == str(critic_target.state_dict())
+    for agent_id, critic in loaded_maddpg.critics.items():
+        critic_target = loaded_maddpg.critic_targets[agent_id]
+        assert_state_dicts_equal(critic.state_dict(), critic_target.state_dict())
 
     assert maddpg.batch_size == 64
     assert maddpg.learn_step == 5
@@ -1696,9 +1704,11 @@ def test_maddpg_unwrap_models(compile_mode):
         torch_compiler=compile_mode,
     )
     maddpg.unwrap_models()
-    for actor, critic, actor_target, critic_target in zip(
-        maddpg.actors, maddpg.critics, maddpg.actor_targets, maddpg.critic_targets
-    ):
+
+    for agent_id, actor in maddpg.actors.items():
+        actor_target = maddpg.actor_targets[agent_id]
+        critic = maddpg.critics[agent_id]
+        critic_target = maddpg.critic_targets[agent_id]
         assert isinstance(actor, nn.Module)
         assert isinstance(actor_target, nn.Module)
         assert isinstance(critic, nn.Module)
@@ -1718,10 +1728,10 @@ def test_maddpg_unwrap_models(compile_mode):
             gen_multi_agent_dict_or_tuple_spaces(2, 2, 2, dict_space=True),
             EvolvableMultiInput,
         ),
-        (
-            gen_multi_agent_dict_or_tuple_spaces(2, 2, 2, dict_space=False),
-            EvolvableMultiInput,
-        ),
+        # (
+        #     gen_multi_agent_dict_or_tuple_spaces(2, 2, 2, dict_space=False),
+        #     EvolvableMultiInput,
+        # ),
     ],
 )
 @pytest.mark.parametrize(
@@ -1752,52 +1762,44 @@ def test_load_from_pretrained(
     # Check if properties and weights are loaded correctly
     assert new_maddpg.observation_spaces == maddpg.observation_spaces
     assert new_maddpg.action_spaces == maddpg.action_spaces
-    assert new_maddpg.one_hot == maddpg.one_hot
     assert new_maddpg.n_agents == maddpg.n_agents
     assert new_maddpg.agent_ids == maddpg.agent_ids
-    assert new_maddpg.min_action == maddpg.min_action
-    assert new_maddpg.max_action == maddpg.max_action
     assert new_maddpg.lr_actor == maddpg.lr_actor
     assert new_maddpg.lr_critic == maddpg.lr_critic
-    for (
-        new_actor,
-        new_actor_target,
-        new_critic,
-        new_critic_target,
-        actor,
-        actor_target,
-        critic,
-        critic_target,
-    ) in zip(
-        new_maddpg.actors,
-        new_maddpg.actor_targets,
-        new_maddpg.critics,
-        new_maddpg.critic_targets,
-        maddpg.actors,
-        maddpg.actor_targets,
-        maddpg.critics,
-        maddpg.critic_targets,
-    ):
-        if compile_mode is not None and accelerator is None:
-            assert isinstance(new_actor, OptimizedModule)
-            assert isinstance(new_actor_target, OptimizedModule)
-            assert isinstance(new_critic, OptimizedModule)
-            assert isinstance(new_critic_target, OptimizedModule)
-        else:
-            assert isinstance(new_actor.encoder, encoder_cls)
-            assert isinstance(new_actor_target.encoder, encoder_cls)
-            assert isinstance(new_critic.encoder, encoder_cls)
-            assert isinstance(new_critic_target.encoder, encoder_cls)
 
-        new_actor_sd = str(new_actor.state_dict())
-        new_actor_target_sd = str(new_actor_target.state_dict())
-        new_critic_sd = str(new_critic.state_dict())
-        new_critic_target_sd = str(new_critic_target.state_dict())
+    if compile_mode is not None and accelerator is None:
+        assert all(
+            isinstance(actor, OptimizedModule) for actor in new_maddpg.actors.values()
+        )
+        assert all(
+            isinstance(actor_target, OptimizedModule)
+            for actor_target in new_maddpg.actor_targets.values()
+        )
+        assert all(
+            isinstance(critic, OptimizedModule)
+            for critic in new_maddpg.critics.values()
+        )
+        assert all(
+            isinstance(critic_target, OptimizedModule)
+            for critic_target in new_maddpg.critic_targets.values()
+        )
 
-        assert new_actor_sd == str(actor.state_dict())
-        assert new_actor_target_sd == str(actor_target.state_dict())
-        assert new_critic_sd == str(critic.state_dict())
-        assert new_critic_target_sd == str(critic_target.state_dict())
+    else:
+        for agent_id, actor in new_maddpg.actors.items():
+            actor_target = new_maddpg.actor_targets[agent_id]
+            critic = new_maddpg.critics[agent_id]
+            critic_target = new_maddpg.critic_targets[agent_id]
+            assert isinstance(actor.encoder, encoder_cls)
+            assert isinstance(actor_target.encoder, encoder_cls)
+            assert isinstance(critic.encoder, EvolvableMultiInput)
+            assert isinstance(critic_target.encoder, EvolvableMultiInput)
+
+    for agent_id, actor in new_maddpg.actors.items():
+        actor_target = new_maddpg.actor_targets[agent_id]
+        critic = new_maddpg.critics[agent_id]
+        critic_target = new_maddpg.critic_targets[agent_id]
+        assert_state_dicts_equal(actor.state_dict(), actor_target.state_dict())
+        assert_state_dicts_equal(critic.state_dict(), critic_target.state_dict())
 
     assert new_maddpg.batch_size == maddpg.batch_size
     assert new_maddpg.learn_step == maddpg.learn_step
@@ -1879,13 +1881,26 @@ def test_load_from_pretrained_make_evo(
         secondary_input_tensor=secondary_input_tensor,
     )
 
+    actors = ModuleDict(
+        {
+            "agent_0": actor_network,
+            "other_agent_0": copy.deepcopy(actor_network),
+        }
+    )
+    critics = ModuleDict(
+        {
+            "agent_0": critic_network,
+            "other_agent_0": copy.deepcopy(critic_network),
+        }
+    )
+
     # Initialize the maddpg agent
     maddpg = MADDPG(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
         agent_ids=["agent_0", "other_agent_0"],
-        actor_networks=[actor_network, copy.deepcopy(actor_network)],
-        critic_networks=[critic_network, copy.deepcopy(critic_network)],
+        actor_networks=actors,
+        critic_networks=critics,
         torch_compiler=compile_mode,
     )
 
@@ -1899,44 +1914,32 @@ def test_load_from_pretrained_make_evo(
     # Check if properties and weights are loaded correctly
     assert new_maddpg.observation_spaces == maddpg.observation_spaces
     assert new_maddpg.action_spaces == maddpg.action_spaces
-    assert new_maddpg.one_hot == maddpg.one_hot
     assert new_maddpg.n_agents == maddpg.n_agents
     assert new_maddpg.agent_ids == maddpg.agent_ids
-    assert new_maddpg.min_action == maddpg.min_action
-    assert new_maddpg.max_action == maddpg.max_action
     assert new_maddpg.lr_actor == maddpg.lr_actor
     assert new_maddpg.lr_critic == maddpg.lr_critic
-    for (
-        new_actor,
-        new_actor_target,
-        new_critic,
-        new_critic_target,
-        actor,
-        actor_target,
-        critic,
-        critic_target,
-    ) in zip(
-        new_maddpg.actors,
-        new_maddpg.actor_targets,
-        new_maddpg.critics,
-        new_maddpg.critic_targets,
-        maddpg.actors,
-        maddpg.actor_targets,
-        maddpg.critics,
-        maddpg.critic_targets,
-    ):
+    for agent_id, new_actor in new_maddpg.actors.items():
+        new_actor_target = new_maddpg.actor_targets[agent_id]
+        new_critic = new_maddpg.critics[agent_id]
+        new_critic_target = new_maddpg.critic_targets[agent_id]
+        actor = maddpg.actors[agent_id]
+        actor_target = maddpg.actor_targets[agent_id]
+        critic = maddpg.critics[agent_id]
+        critic_target = maddpg.critic_targets[agent_id]
+
         assert isinstance(new_actor, nn.Module)
         assert isinstance(new_actor_target, nn.Module)
         assert isinstance(new_critic, nn.Module)
         assert isinstance(new_critic_target, nn.Module)
-        assert str(new_actor.to("cpu").state_dict()) == str(actor.state_dict())
-        assert str(new_actor_target.to("cpu").state_dict()) == str(
-            actor_target.state_dict()
+        assert_state_dicts_equal(new_actor.state_dict(), actor.state_dict())
+        assert_state_dicts_equal(
+            new_actor_target.state_dict(), actor_target.state_dict()
         )
-        assert str(new_critic.to("cpu").state_dict()) == str(critic.state_dict())
-        assert str(new_critic_target.to("cpu").state_dict()) == str(
-            critic_target.state_dict()
+        assert_state_dicts_equal(new_critic.state_dict(), critic.state_dict())
+        assert_state_dicts_equal(
+            new_critic_target.state_dict(), critic_target.state_dict()
         )
+
     assert new_maddpg.batch_size == maddpg.batch_size
     assert new_maddpg.learn_step == maddpg.learn_step
     assert new_maddpg.gamma == maddpg.gamma

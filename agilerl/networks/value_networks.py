@@ -28,8 +28,6 @@ class ValueNetwork(EvolvableNetwork):
     :type min_latent_dim: int
     :param max_latent_dim: Maximum latent dimension.
     :type max_latent_dim: int
-    :param n_agents: Number of agents.
-    :type n_agents: Optional[int]
     :param latent_dim: Latent dimension.
     :type latent_dim: int
     :param simba: Whether to use the SimBa architecture for training the network.
@@ -38,6 +36,8 @@ class ValueNetwork(EvolvableNetwork):
     :type recurrent: bool
     :param device: Device to run the network on.
     :type device: str
+    :param random_seed: Random seed to use for the network. Defaults to None.
+    :type random_seed: Optional[int]
     """
 
     def __init__(
@@ -48,11 +48,11 @@ class ValueNetwork(EvolvableNetwork):
         head_config: Optional[ConfigType] = None,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
-        n_agents: Optional[int] = None,
         latent_dim: int = 32,
         simba: bool = False,
         recurrent: bool = False,
         device: str = "cpu",
+        random_seed: Optional[int] = None,
     ):
 
         super().__init__(
@@ -62,11 +62,11 @@ class ValueNetwork(EvolvableNetwork):
             action_space=None,
             min_latent_dim=min_latent_dim,
             max_latent_dim=max_latent_dim,
-            n_agents=n_agents,
             latent_dim=latent_dim,
             simba=simba,
             recurrent=recurrent,
             device=device,
+            random_seed=random_seed,
         )
 
         if head_config is None:
