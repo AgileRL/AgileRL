@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 import torch
 import torch.optim as optim
+from accelerate import Accelerator
 from gymnasium import spaces
 from torch._dynamo.eval_frame import OptimizedModule
 
@@ -13,33 +14,22 @@ from agilerl.algorithms.core.registry import (
     NetworkGroup,
     RLParameter,
 )
-from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
-from agilerl.modules.base import ModuleDict
+from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput, ModuleDict
 from agilerl.utils.evolvable_networks import is_image_space
-from tests.helper_functions import (
-    assert_state_dicts_equal,
-    gen_multi_agent_dict_or_tuple_spaces,
-    generate_dict_or_tuple_space,
-    generate_discrete_space,
-    generate_multi_agent_box_spaces,
-    generate_multi_agent_discrete_spaces,
-    generate_multidiscrete_space,
-    generate_random_box_space,
-    is_processed_observation,
-)
+from tests.helper_functions import assert_state_dicts_equal, is_processed_observation
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def mlp_config():
     yield {"hidden_size": [8], "min_mlp_nodes": 8, "max_mlp_nodes": 80}
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def cnn_config():
     yield {"channel_size": [3], "kernel_size": [3], "stride_size": [1]}
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def multi_input_config():
     yield {
         "latent_dim": 64,
@@ -48,14 +38,14 @@ def multi_input_config():
     }
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def single_level_net_config(request):
     """Fixture for a single-level net config (one config for all agents)."""
     mlp_config = request.getfixturevalue("mlp_config")
     yield {"encoder_config": mlp_config}
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def homogeneous_group_net_config(request):
     """Fixture for a homogeneous group net config with group-specific configs."""
     mlp_config = request.getfixturevalue("mlp_config")
@@ -65,7 +55,7 @@ def homogeneous_group_net_config(request):
     }
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def homogeneous_agent_net_config(request):
     """Fixture for a homogeneous nested net config with agent-specific configs."""
     mlp_config = request.getfixturevalue("mlp_config")
@@ -75,7 +65,7 @@ def homogeneous_agent_net_config(request):
     }
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def mixed_group_net_config(request):
     """Fixture for a mixed group net config with group-specific configs."""
     mlp_config = request.getfixturevalue("mlp_config")
@@ -86,7 +76,7 @@ def mixed_group_net_config(request):
     }
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def mixed_agent_net_config(request):
     """Fixture for a mixed nested net config with agent-specific configs."""
     mlp_config = request.getfixturevalue("mlp_config")
@@ -99,7 +89,7 @@ def mixed_agent_net_config(request):
     }
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def heterogeneous_agent_net_config(request):
     """Fixture for a heterogeneous nested net config with agent-specific configs."""
     mlp_config = request.getfixturevalue("mlp_config")
@@ -112,7 +102,7 @@ def heterogeneous_agent_net_config(request):
     }
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def homogeneous_agent():
     """Fixture for a homogeneous multi-agent setup where all agents have the same observation space type."""
     # All agents have 1D Box spaces of the same shape
@@ -128,7 +118,7 @@ def homogeneous_agent():
     return DummyMARLAlgorithm(obs_spaces, action_spaces, agent_ids=agent_ids, index=0)
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def mixed_agent():
     """Fixture for a mixed multi-agent setup with two distinct groups."""
     # Create two groups with different observation spaces
@@ -155,7 +145,7 @@ def mixed_agent():
     return DummyMARLAlgorithm(obs_spaces, action_spaces, agent_ids=agent_ids, index=0)
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def heterogeneous_agent():
     """Fixture for a heterogeneous multi-agent setup with fundamentally different observation spaces."""
     # Create four agents with different observation space types
@@ -223,6 +213,9 @@ class DummyRLAlgorithm(RLAlgorithm):
             NetworkGroup(eval_network=self.dummy_actor, policy=True)
         )
 
+        if self.accelerator is not None:
+            self.wrap_models()
+
     def get_action(self, *args, **kwargs):
         return
 
@@ -284,6 +277,11 @@ class DummyMARLAlgorithm(MultiAgentRLAlgorithm):
             NetworkGroup(eval_network=self.dummy_actors, policy=True)
         )
 
+        if self.accelerator is not None:
+            self.wrap_models()
+        elif self.torch_compiler:
+            self.recompile()
+
     def get_action(self, *args, **kwargs):
         return
 
@@ -296,113 +294,100 @@ class DummyMARLAlgorithm(MultiAgentRLAlgorithm):
 
 @pytest.mark.parametrize(
     "observation_space",
-    [
-        generate_dict_or_tuple_space(1, 2),
-        generate_discrete_space(4),
-        generate_random_box_space((4,)),
-        # generate_multidiscrete_space(2, 2)
-    ],
+    ["dict_space", "discrete_space", "vector_space", "multidiscrete_space"],
 )
 @pytest.mark.parametrize(
     "action_space",
-    [
-        generate_discrete_space(4),
-        generate_random_box_space((4,)),
-        # generate_multidiscrete_space(2, 2)
-    ],
+    ["discrete_space", "vector_space", "multidiscrete_space"],
 )
-def test_initialise_single_agent(observation_space, action_space):
-    agent = DummyRLAlgorithm(observation_space, action_space, index=0)
+def test_initialise_single_agent(observation_space, action_space, request):
+    obs_space = request.getfixturevalue(observation_space)
+    act_space = request.getfixturevalue(action_space)
+    agent = DummyRLAlgorithm(obs_space, act_space, index=0)
     assert agent is not None
 
 
 @pytest.mark.parametrize(
     "observation_space",
     [
-        generate_multi_agent_box_spaces(2, (2,)),
-        generate_multi_agent_discrete_spaces(2, 4),
-        gen_multi_agent_dict_or_tuple_spaces(2, 2, 2),
+        "ma_vector_space",
+        "ma_image_space",
+        "ma_discrete_space",
+        "ma_dict_space",
     ],
 )
 @pytest.mark.parametrize(
     "action_space",
     [
-        generate_multi_agent_discrete_spaces(2, 4),
-        generate_multi_agent_box_spaces(2, (2,)),
+        "ma_discrete_space",
+        "ma_vector_space",
     ],
 )
-@pytest.mark.parametrize("agent_ids", [["agent1", "agent2"], None])
-def test_initialise_multi_agent(observation_space, action_space, agent_ids):
+@pytest.mark.parametrize("agent_ids", [["agent_0", "agent_1", "agent_2"], None])
+def test_initialise_multi_agent(observation_space, action_space, agent_ids, request):
+    obs_spaces = request.getfixturevalue(observation_space)
+    act_spaces = request.getfixturevalue(action_space)
+
     if agent_ids is None:
-        observation_space = {
-            f"agent{i}": observation_space[i] for i in range(len(observation_space))
-        }
-        action_space = {f"agent{i}": action_space[i] for i in range(len(action_space))}
+        obs_spaces = {f"agent_{i}": obs_spaces[i] for i in range(len(obs_spaces))}
+        act_spaces = {f"agent_{i}": act_spaces[i] for i in range(len(act_spaces))}
 
-    agent = DummyMARLAlgorithm(
-        observation_space, action_space, agent_ids=agent_ids, index=0
-    )
+    agent = DummyMARLAlgorithm(obs_spaces, act_spaces, agent_ids=agent_ids, index=0)
     assert agent is not None
 
 
-def test_population_single_agent():
-    observation_space = generate_random_box_space((4,))
-    action_space = generate_discrete_space(4)
-    population = DummyRLAlgorithm.population(10, observation_space, action_space)
+def test_population_single_agent(vector_space, discrete_space):
+    population = DummyRLAlgorithm.population(10, vector_space, discrete_space)
     assert len(population) == 10
     for i, agent in enumerate(population):
-        assert agent.observation_space == observation_space
-        assert agent.action_space == action_space
+        assert agent.observation_space == vector_space
+        assert agent.action_space == discrete_space
         assert agent.index == i
 
 
-def test_population_multi_agent():
-    observation_spaces = generate_multi_agent_box_spaces(2, (2,))
-    action_spaces = generate_multi_agent_discrete_spaces(2, 4)
+def test_population_multi_agent(ma_vector_space, ma_discrete_space):
     population = DummyMARLAlgorithm.population(
-        10, observation_spaces, action_spaces, agent_ids=["agent1", "agent2"]
+        10,
+        ma_vector_space,
+        ma_discrete_space,
+        agent_ids=["agent_0", "agent_1", "agent_2"],
     )
     assert len(population) == 10
     for i, agent in enumerate(population):
-        for j in range(2):
+        for j in range(len(agent.agent_ids)):
             agent_id = agent.agent_ids[j]
-            assert agent.observation_space[agent_id] == observation_spaces[j]
-            assert agent.action_space[agent_id] == action_spaces[j]
+            assert agent.possible_observation_spaces[agent_id] == ma_vector_space[j]
+            assert agent.possible_action_spaces[agent_id] == ma_discrete_space[j]
 
         assert agent.index == i
 
 
 @pytest.mark.parametrize(
-    "observation_space",
-    [
-        generate_random_box_space((4,)),
-        generate_random_box_space((3, 32, 32)),
-        generate_dict_or_tuple_space(1, 1, dict_space=True),
-        generate_dict_or_tuple_space(1, 1, dict_space=False),
-    ],
+    "observation_space", ["vector_space", "image_space", "dict_space"]
 )
-def test_preprocess_observation(observation_space):
-    agent = DummyRLAlgorithm(observation_space, generate_discrete_space(4), index=0)
-    observation = agent.preprocess_observation(observation_space.sample())
-    assert is_processed_observation(observation, observation_space)
+def test_preprocess_observation(observation_space, discrete_space, request):
+    obs_space = request.getfixturevalue(observation_space)
+    agent = DummyRLAlgorithm(obs_space, discrete_space, index=0)
+    observation = agent.preprocess_observation(obs_space.sample())
+    assert is_processed_observation(observation, obs_space)
 
 
-def test_incorrect_hp_config():
+def test_incorrect_hp_config(vector_space, discrete_space):
     with pytest.raises(AttributeError):
         hp_config = HyperparameterConfig(lr_actor=RLParameter(min=0.1, max=0.2))
         _ = DummyRLAlgorithm(
-            generate_random_box_space((4,)),
-            generate_discrete_space(4),
+            vector_space,
+            discrete_space,
             index=0,
             hp_config=hp_config,
         )
 
 
-def test_recompile():
+def test_recompile(ma_vector_space, ma_discrete_space):
     agent = DummyMARLAlgorithm(
-        generate_multi_agent_box_spaces(2, (4,)),
-        generate_multi_agent_discrete_spaces(2, 4),
-        agent_ids=["agent1", "agent2"],
+        ma_vector_space,
+        ma_discrete_space,
+        agent_ids=["agent_0", "agent_1", "agent_2"],
         index=0,
         torch_compiler="default",
     )
@@ -412,34 +397,23 @@ def test_recompile():
     ), agent.dummy_actors.values()
 
 
-@pytest.mark.parametrize(
-    "with_hp_config",
-    [
-        False,
-        True,
-    ],
-)
+@pytest.mark.parametrize("with_hp_config", [False, True])
 @pytest.mark.parametrize(
     "observation_space",
-    [
-        generate_random_box_space((4,)),
-        generate_discrete_space(4),
-        generate_dict_or_tuple_space(1, 1, dict_space=True),
-        generate_dict_or_tuple_space(1, 1, dict_space=False),
-        generate_multidiscrete_space(2, 2),
-    ],
+    ["vector_space", "discrete_space", "dict_space", "multidiscrete_space"],
 )
-def test_save_load_checkpoint_single_agent(tmpdir, with_hp_config, observation_space):
-    action_space = generate_discrete_space(4)
+def test_save_load_checkpoint_single_agent(
+    tmpdir, with_hp_config, observation_space, discrete_space, request
+):
+    obs_space = request.getfixturevalue(observation_space)
+    action_space = discrete_space
     # Initialize the dummy agent
     hp_config = None
     if with_hp_config:
         hp_config = HyperparameterConfig(lr=RLParameter(min=0.05, max=0.2))
-        agent = DummyRLAlgorithm(
-            observation_space, action_space, index=0, hp_config=hp_config
-        )
+        agent = DummyRLAlgorithm(obs_space, action_space, index=0, hp_config=hp_config)
     else:
-        agent = DummyRLAlgorithm(observation_space, action_space, index=0)
+        agent = DummyRLAlgorithm(obs_space, action_space, index=0)
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -460,7 +434,7 @@ def test_save_load_checkpoint_single_agent(tmpdir, with_hp_config, observation_s
 
     # Create a new agent with the same hp_config if needed
     new_agent = DummyRLAlgorithm(
-        observation_space,
+        obs_space,
         action_space,
         index=1,  # Different index to verify it gets overwritten
         hp_config=hp_config,
@@ -483,41 +457,45 @@ def test_save_load_checkpoint_single_agent(tmpdir, with_hp_config, observation_s
     assert new_agent.steps == agent.steps
 
 
+@pytest.mark.parametrize("with_hp_config", [False, True])
 @pytest.mark.parametrize(
-    "with_hp_config",
+    "observation_spaces, encoder_cls",
     [
-        False,
-        True,
+        ("ma_vector_space", EvolvableMLP),
+        ("ma_image_space", EvolvableCNN),
+        ("ma_dict_space", EvolvableMultiInput),
     ],
 )
-@pytest.mark.parametrize(
-    "observation_spaces",
-    [
-        generate_multi_agent_box_spaces(2, (4,)),
-        generate_multi_agent_discrete_spaces(2, 4),
-        gen_multi_agent_dict_or_tuple_spaces(2, 1, 1, dict_space=True),
-        gen_multi_agent_dict_or_tuple_spaces(2, 1, 1, dict_space=False),
-    ],
-)
-def test_save_load_checkpoint_multi_agent(tmpdir, with_hp_config, observation_spaces):
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("compile_mode", [None, "default"])
+def test_save_load_checkpoint_multi_agent(
+    tmpdir,
+    with_hp_config,
+    observation_spaces,
+    encoder_cls,
+    ma_discrete_space,
+    accelerator,
+    compile_mode,
+    request,
+):
     # Initialize the dummy multi-agent
-    agent_ids = ["agent1", "agent2"]
-    action_spaces = generate_multi_agent_discrete_spaces(2, 4)
+    obs_spaces = request.getfixturevalue(observation_spaces)
+    agent_ids = ["agent_0", "agent_1", "agent_2"]
+    action_spaces = ma_discrete_space
 
     hp_config = None
     if with_hp_config:
         hp_config = HyperparameterConfig(lr=RLParameter(min=0.05, max=0.2))
-        agent = DummyMARLAlgorithm(
-            observation_spaces,
-            action_spaces,
-            agent_ids=agent_ids,
-            index=0,
-            hp_config=hp_config,
-        )
-    else:
-        agent = DummyMARLAlgorithm(
-            observation_spaces, action_spaces, agent_ids=agent_ids, index=0
-        )
+
+    agent = DummyMARLAlgorithm(
+        obs_spaces,
+        action_spaces,
+        agent_ids=agent_ids,
+        index=0,
+        hp_config=hp_config,
+        accelerator=accelerator,
+        torch_compiler=compile_mode,
+    )
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -539,11 +517,13 @@ def test_save_load_checkpoint_multi_agent(tmpdir, with_hp_config, observation_sp
 
     # Create a new agent with the same hp_config if needed
     new_agent = DummyMARLAlgorithm(
-        observation_spaces,
+        obs_spaces,
         action_spaces,
         agent_ids=agent_ids,
         index=1,  # Different index to verify it gets overwritten
         hp_config=hp_config,
+        accelerator=accelerator,
+        torch_compiler=compile_mode,
     )
 
     # Load checkpoint
@@ -551,10 +531,11 @@ def test_save_load_checkpoint_multi_agent(tmpdir, with_hp_config, observation_sp
 
     # Check if properties and weights are loaded correctly
     for agent_id in agent.agent_ids:
-        assert isinstance(
-            new_agent.dummy_actors[agent_id],
-            (EvolvableMLP, EvolvableCNN, EvolvableMultiInput),
-        )
+        if compile_mode is not None and accelerator is None:
+            assert isinstance(new_agent.dummy_actors[agent_id], OptimizedModule)
+        else:
+            assert isinstance(new_agent.dummy_actors[agent_id], encoder_cls)
+
         assert_state_dicts_equal(
             new_agent.dummy_actors[agent_id].state_dict(),
             agent.dummy_actors[agent_id].state_dict(),
@@ -568,42 +549,35 @@ def test_save_load_checkpoint_multi_agent(tmpdir, with_hp_config, observation_sp
     assert new_agent.agent_ids == agent.agent_ids
 
 
+@pytest.mark.parametrize("device, with_hp_config", [("cpu", False), ("cpu", True)])
 @pytest.mark.parametrize(
-    "device, with_hp_config",
+    "observation_space, encoder_cls",
     [
-        ("cpu", False),
-        ("cpu", True),
+        ("vector_space", EvolvableMLP),
+        ("discrete_space", EvolvableMLP),
+        ("dict_space", EvolvableMultiInput),
+        ("multidiscrete_space", EvolvableMLP),
     ],
 )
-@pytest.mark.parametrize(
-    "observation_space",
-    [
-        generate_random_box_space((4,)),
-        generate_discrete_space(4),
-        generate_dict_or_tuple_space(1, 1, dict_space=True),
-        generate_dict_or_tuple_space(1, 1, dict_space=False),
-        generate_multidiscrete_space(2, 2),
-    ],
-)
-@pytest.mark.parametrize(
-    "action_space",
-    [
-        generate_random_box_space((2,)),
-        generate_discrete_space(4),
-    ],
-)
+@pytest.mark.parametrize("action_space", ["vector_space", "discrete_space"])
 def test_load_from_pretrained_single_agent(
-    device, tmpdir, with_hp_config, observation_space, action_space
+    device,
+    tmpdir,
+    with_hp_config,
+    observation_space,
+    encoder_cls,
+    action_space,
+    request,
 ):
     # Initialize the dummy agent
+    obs_space = request.getfixturevalue(observation_space)
+    act_space = request.getfixturevalue(action_space)
     hp_config = None
     if with_hp_config:
         hp_config = HyperparameterConfig(lr=RLParameter(min=0.05, max=0.2))
-        agent = DummyRLAlgorithm(
-            observation_space, action_space, index=0, hp_config=hp_config
-        )
+        agent = DummyRLAlgorithm(obs_space, act_space, index=0, hp_config=hp_config)
     else:
-        agent = DummyRLAlgorithm(observation_space, action_space, index=0)
+        agent = DummyRLAlgorithm(obs_space, act_space, index=0)
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -615,9 +589,7 @@ def test_load_from_pretrained_single_agent(
     # Check if properties and weights are loaded correctly
     assert new_agent.observation_space == agent.observation_space
     assert new_agent.action_space == agent.action_space
-    assert isinstance(
-        new_agent.dummy_actor, (EvolvableMLP, EvolvableCNN, EvolvableMultiInput)
-    )
+    assert isinstance(new_agent.dummy_actor, encoder_cls)
     assert new_agent.lr == agent.lr
     assert_state_dicts_equal(
         new_agent.dummy_actor.to("cpu").state_dict(), agent.dummy_actor.state_dict()
@@ -628,69 +600,76 @@ def test_load_from_pretrained_single_agent(
     assert new_agent.steps == agent.steps
 
 
+@pytest.mark.parametrize("device, with_hp_config", [("cpu", False), ("cpu", True)])
 @pytest.mark.parametrize(
-    "device, with_hp_config",
+    "observation_spaces, encoder_cls",
     [
-        ("cpu", False),
-        ("cpu", True),
+        ("ma_vector_space", EvolvableMLP),
+        ("ma_image_space", EvolvableCNN),
+        ("ma_discrete_space", EvolvableMLP),
+        ("ma_dict_space", EvolvableMultiInput),
     ],
 )
-@pytest.mark.parametrize(
-    "observation_spaces",
-    [
-        generate_multi_agent_box_spaces(2, (4,)),
-        generate_multi_agent_discrete_spaces(2, 4),
-        gen_multi_agent_dict_or_tuple_spaces(2, 1, 1, dict_space=True),
-        gen_multi_agent_dict_or_tuple_spaces(2, 1, 1, dict_space=False),
-    ],
-)
-@pytest.mark.parametrize(
-    "action_spaces",
-    [
-        generate_multi_agent_box_spaces(2, (2,)),
-        generate_multi_agent_discrete_spaces(2, 4),
-    ],
-)
+@pytest.mark.parametrize("action_spaces", ["ma_vector_space", "ma_discrete_space"])
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_load_from_pretrained_multi_agent(
-    device, tmpdir, with_hp_config, observation_spaces, action_spaces
+    device,
+    tmpdir,
+    with_hp_config,
+    observation_spaces,
+    encoder_cls,
+    action_spaces,
+    accelerator,
+    compile_mode,
+    request,
 ):
     # Initialize the dummy multi-agent
-    agent_ids = ["agent1", "agent2"]
+    obs_spaces = request.getfixturevalue(observation_spaces)
+    act_spaces = request.getfixturevalue(action_spaces)
+    agent_ids = ["agent_0", "agent_1", "agent_2"]
 
     hp_config = None
     if with_hp_config:
         hp_config = HyperparameterConfig(lr=RLParameter(min=0.05, max=0.2))
-        agent = DummyMARLAlgorithm(
-            observation_spaces,
-            action_spaces,
-            agent_ids=agent_ids,
-            index=0,
-            hp_config=hp_config,
-        )
-    else:
-        agent = DummyMARLAlgorithm(
-            observation_spaces, action_spaces, agent_ids=agent_ids, index=0
-        )
+
+    agent = DummyMARLAlgorithm(
+        obs_spaces,
+        act_spaces,
+        agent_ids=agent_ids,
+        index=0,
+        hp_config=hp_config,
+        accelerator=accelerator,
+        torch_compiler=compile_mode,
+    )
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
     agent.save_checkpoint(checkpoint_path)
 
     # Create new agent object using the class method
-    new_agent = DummyMARLAlgorithm.load(checkpoint_path, device=device)
+    new_agent = DummyMARLAlgorithm.load(
+        checkpoint_path, device=device, accelerator=accelerator
+    )
 
     # Check if properties and weights are loaded correctly
     for i, agent_id in enumerate(agent_ids):
         assert (
-            new_agent.observation_space[agent_id] == agent.observation_space[agent_id]
+            new_agent.possible_observation_spaces[agent_id]
+            == agent.possible_observation_spaces[agent_id]
         )
-        assert new_agent.action_space[agent_id] == agent.action_space[agent_id]
+        assert (
+            new_agent.possible_action_spaces[agent_id]
+            == agent.possible_action_spaces[agent_id]
+        )
 
+    print(compile_mode, accelerator)
     for agent_id in agent.agent_ids:
-        assert isinstance(
-            new_agent.dummy_actors[agent_id],
-            (EvolvableMLP, EvolvableCNN, EvolvableMultiInput),
-        )
+        if compile_mode is not None and accelerator is None:
+            assert isinstance(new_agent.dummy_actors[agent_id], OptimizedModule)
+        else:
+            assert isinstance(new_agent.dummy_actors[agent_id], encoder_cls)
+
         assert_state_dicts_equal(
             new_agent.dummy_actors[agent_id].to("cpu").state_dict(),
             agent.dummy_actors[agent_id].state_dict(),
@@ -704,16 +683,10 @@ def test_load_from_pretrained_multi_agent(
     assert new_agent.agent_ids == agent.agent_ids
 
 
-@pytest.mark.parametrize(
-    "observation_space",
-    [
-        generate_random_box_space((4,)),
-    ],
-)
-def test_missing_attribute_warning(tmpdir, observation_space):
-    action_space = generate_discrete_space(4)
+def test_missing_attribute_warning(tmpdir, vector_space, discrete_space):
+    action_space = discrete_space
     # Initialize the dummy agent
-    agent = DummyRLAlgorithm(observation_space, action_space, index=0)
+    agent = DummyRLAlgorithm(vector_space, action_space, index=0)
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"

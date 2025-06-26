@@ -7,11 +7,8 @@ import torch
 from agilerl.modules.lstm import EvolvableLSTM
 from tests.helper_functions import assert_state_dicts_equal
 
-
 ######### Define fixtures #########
-@pytest.fixture
-def device():
-    return "cuda" if torch.cuda.is_available() else "cpu"
+# Device fixture moved to conftest.py
 
 
 @pytest.fixture(autouse=True)
