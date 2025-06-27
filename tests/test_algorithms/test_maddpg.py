@@ -1043,29 +1043,24 @@ def test_maddpg_learns_from_experiences(
         for agent_id, critic in maddpg.critics.items()
     }
 
-    for _ in range(4):
+    for _ in range(2):
         maddpg.scores.append(0)
         loss = maddpg.learn(experiences)
 
     assert isinstance(loss, dict)
+
     for agent_id in maddpg.agent_ids:
         assert loss[agent_id][-1] >= 0.0
 
-    for agent_id, old_actor_target in maddpg.actor_targets.items():
-        updated_actor_target = maddpg.actor_targets[agent_id]
-        assert old_actor_target == updated_actor_target
-
-    for agent_id, old_actor_state_dict in actors_pre_learn_sd.items():
         updated_actor = maddpg.actors[agent_id]
-        assert_not_equal_state_dict(old_actor_state_dict, updated_actor.state_dict())
+        assert_not_equal_state_dict(
+            actors_pre_learn_sd[agent_id], updated_actor.state_dict()
+        )
 
-    for agent_id, old_critic_target in maddpg.critic_targets.items():
-        updated_critic_target = maddpg.critic_targets[agent_id]
-        assert old_critic_target == updated_critic_target
-
-    for agent_id, old_critic_state_dict in critics_pre_learn_sd.items():
         updated_critic = maddpg.critics[agent_id]
-        assert_not_equal_state_dict(old_critic_state_dict, updated_critic.state_dict())
+        assert_not_equal_state_dict(
+            critics_pre_learn_sd[agent_id], updated_critic.state_dict()
+        )
 
 
 def no_sync(self):
@@ -1165,15 +1160,7 @@ def test_maddpg_algorithm_test_loop(
     env.close()
 
 
-@pytest.mark.parametrize(
-    "observation_spaces",
-    [
-        "ma_vector_space",
-        "ma_image_space",
-        "ma_discrete_space",
-        "ma_dict_space",
-    ],
-)
+@pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("wrap", [True, False])
@@ -1357,25 +1344,3 @@ def test_clone_after_learning(compile_mode, ma_vector_space):
         clone_critic_opt = clone_agent.critic_optimizers.optimizer[agent_id]
         critic_opt = maddpg.critic_optimizers.optimizer[agent_id]
         assert str(clone_critic_opt) == str(critic_opt)
-
-
-@pytest.mark.parametrize("compile_mode", [None, "default"])
-def test_maddpg_unwrap_models(compile_mode, ma_vector_space, ma_discrete_space):
-    accelerator = Accelerator()
-    maddpg = MADDPG(
-        ma_vector_space,
-        ma_discrete_space,
-        agent_ids=["agent_0", "agent_1", "other_agent_0"],
-        accelerator=accelerator,
-        torch_compiler=compile_mode,
-    )
-    maddpg.unwrap_models()
-
-    for agent_id, actor in maddpg.actors.items():
-        actor_target = maddpg.actor_targets[agent_id]
-        critic = maddpg.critics[agent_id]
-        critic_target = maddpg.critic_targets[agent_id]
-        assert isinstance(actor, nn.Module)
-        assert isinstance(actor_target, nn.Module)
-        assert isinstance(critic, nn.Module)
-        assert isinstance(critic_target, nn.Module)

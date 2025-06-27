@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 import torch
 
 from agilerl.modules.gpt import (
@@ -11,12 +10,6 @@ from agilerl.modules.gpt import (
 )
 
 #### TESTING EvolvableGPT CLASS ####
-
-
-@pytest.fixture(autouse=True)
-def cleanup():
-    yield  # Run the test first
-    torch.cuda.empty_cache()  # Free up GPU memory
 
 
 # The model can be initialized with default parameters.

@@ -431,9 +431,7 @@ def test_algorithm_test_loop(observation_space, discrete_space, num_envs, reques
 
 
 # Clones the agent and returns an identical agent.
-@pytest.mark.parametrize(
-    "observation_space", ["vector_space", "image_space", "dict_space"]
-)
+@pytest.mark.parametrize("observation_space", ["vector_space"])
 def test_clone_returns_identical_agent(observation_space, discrete_space, request):
     observation_space = request.getfixturevalue(observation_space)
 

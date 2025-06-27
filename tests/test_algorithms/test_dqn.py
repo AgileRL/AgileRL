@@ -400,56 +400,14 @@ def test_soft_update(vector_space, discrete_space):
 
 
 # Runs algorithm test loop
-def test_algorithm_test_loop(vector_space, discrete_space):
-    num_envs = 3
-
-    env = DummyEnv(observation_space=vector_space, vect=True, num_envs=num_envs)
-
-    # env = make_vect_envs("CartPole-v1", num_envs=num_envs)
-    agent = DQN(observation_space=vector_space, action_space=discrete_space)
+@pytest.mark.parametrize("observation_space", ["vector_space", "image_space"])
+@pytest.mark.parametrize("num_envs", [1, 3])
+def test_algorithm_test_loop(observation_space, discrete_space, num_envs, request):
+    observation_space = request.getfixturevalue(observation_space)
+    vect = num_envs > 1
+    env = DummyEnv(observation_space=observation_space, vect=vect, num_envs=num_envs)
+    agent = DQN(observation_space=observation_space, action_space=discrete_space)
     mean_score = agent.test(env, max_steps=10)
-    assert isinstance(mean_score, float)
-
-
-# Runs algorithm test loop with unvectorised env
-def test_algorithm_test_loop_unvectorized(vector_space, discrete_space):
-    env = DummyEnv(observation_space=vector_space, vect=False)
-    agent = DQN(observation_space=vector_space, action_space=discrete_space)
-    mean_score = agent.test(env, max_steps=10)
-    assert isinstance(mean_score, float)
-
-
-# Runs algorithm test loop with images
-def test_algorithm_test_loop_images(image_space, discrete_space):
-    env = DummyEnv(observation_space=image_space, vect=True)
-
-    net_config_cnn = {
-        "encoder_config": {"channel_size": [3], "kernel_size": [3], "stride_size": [1]}
-    }
-
-    agent = DQN(
-        observation_space=image_space,
-        action_space=discrete_space,
-        net_config=net_config_cnn,
-    )
-    mean_score = agent.test(env, max_steps=10)
-    assert isinstance(mean_score, float)
-
-
-# Runs algorithm test loop with unvectorized images
-def test_algorithm_test_loop_images_unvectorized(image_space, discrete_space):
-    env = DummyEnv(observation_space=image_space, vect=False)
-
-    net_config_cnn = {
-        "encoder_config": {"channel_size": [3], "kernel_size": [3], "stride_size": [1]}
-    }
-
-    agent = DQN(
-        observation_space=image_space,
-        action_space=discrete_space,
-        net_config=net_config_cnn,
-    )
-    mean_score = agent.test(env, max_steps=10, swap_channels=False)
     assert isinstance(mean_score, float)
 
 
@@ -486,7 +444,6 @@ def test_clone_returns_identical_agent(vector_space, discrete_space):
 
     assert clone_agent.observation_space == dqn.observation_space
     assert clone_agent.action_space == dqn.action_space
-    # assert clone_agent.actor_network == dqn.actor_network
     assert clone_agent.batch_size == dqn.batch_size
     assert clone_agent.lr == dqn.lr
     assert clone_agent.learn_step == dqn.learn_step
@@ -509,7 +466,6 @@ def test_clone_returns_identical_agent(vector_space, discrete_space):
 
     assert clone_agent.observation_space == dqn.observation_space
     assert clone_agent.action_space == dqn.action_space
-    # assert clone_agent.actor_network == dqn.actor_network
     assert clone_agent.batch_size == dqn.batch_size
     assert clone_agent.lr == dqn.lr
     assert clone_agent.learn_step == dqn.learn_step
@@ -572,15 +528,3 @@ def test_clone_after_learning(vector_space, discrete_space):
     assert clone_agent.fitness == dqn.fitness
     assert clone_agent.steps == dqn.steps
     assert clone_agent.scores == dqn.scores
-
-
-# The method successfully unwraps the actor and actor_target models when an accelerator is present.
-def test_unwrap_models(vector_space, discrete_space):
-    dqn = DQN(
-        observation_space=vector_space,
-        action_space=discrete_space,
-        accelerator=Accelerator(),
-    )
-    dqn.unwrap_models()
-    assert isinstance(dqn.actor, nn.Module)
-    assert isinstance(dqn.actor_target, nn.Module)

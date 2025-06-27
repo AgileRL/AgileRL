@@ -12,12 +12,6 @@ from tests.helper_functions import assert_state_dicts_equal
 # Device fixture moved to conftest.py
 
 
-@pytest.fixture(autouse=True)
-def cleanup():
-    yield  # Run the test first
-    torch.cuda.empty_cache()  # Free up GPU memory
-
-
 def test_noisy_linear(device):
     noisy_linear = NoisyLinear(2, 10).to(device)
     noisy_linear.training = False

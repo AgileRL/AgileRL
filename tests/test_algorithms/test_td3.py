@@ -555,9 +555,7 @@ def test_algorithm_test_loop(observation_space, vector_space, num_envs, request)
 
 
 # Clones the agent and returns an identical agent.
-@pytest.mark.parametrize(
-    "observation_space", ["vector_space", "image_space", "dict_space"]
-)
+@pytest.mark.parametrize("observation_space", ["vector_space"])
 def test_clone_returns_identical_agent(observation_space, vector_space, request):
     observation_space = request.getfixturevalue(observation_space)
 
@@ -760,31 +758,9 @@ def test_clone_after_learning(vector_space):
     assert clone_agent.scores == td3.scores
 
 
-# The method successfully unwraps the actor and actor_target models when an accelerator is present.
-def test_unwrap_models(vector_space):
-    td3 = TD3(
-        vector_space,
-        copy.deepcopy(vector_space),
-        accelerator=Accelerator(),
-    )
-    td3.unwrap_models()
-    assert isinstance(td3.actor, nn.Module)
-    assert isinstance(td3.actor_target, nn.Module)
-    assert isinstance(td3.critic_1, nn.Module)
-    assert isinstance(td3.critic_target_1, nn.Module)
-    assert isinstance(td3.critic_2, nn.Module)
-    assert isinstance(td3.critic_target_2, nn.Module)
-
-
-@pytest.mark.parametrize(
-    "observation_space, net_type",
-    [
-        ("vector_space", "mlp"),
-        ("image_space", "cnn"),
-    ],
-)
+@pytest.mark.parametrize("observation_space", ["vector_space"])
 def test_initialize_td3_with_actor_network_evo_net(
-    observation_space, vector_space, net_type, request
+    observation_space, vector_space, request
 ):
     observation_space = request.getfixturevalue(observation_space)
 

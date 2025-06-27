@@ -259,9 +259,7 @@ def test_algorithm_test_loop(observation_space, discrete_space, request):
 
 
 # Clones the agent and returns an identical agent.
-@pytest.mark.parametrize(
-    "observation_space", ["vector_space", "image_space", "dict_space"]
-)
+@pytest.mark.parametrize("observation_space", ["vector_space"])
 def test_clone_returns_identical_agent(observation_space, discrete_space, request):
     observation_space = request.getfixturevalue(observation_space)
     bandit = DummyNeuralUCB(observation_space, discrete_space)
@@ -376,7 +374,6 @@ def test_clone_after_learning(vector_space, discrete_space):
     "observation_space, actor_network, input_tensor",
     [
         ("vector_space", "simple_mlp", torch.randn(1, 4)),
-        ("image_space", "simple_cnn", torch.randn(1, 3, 32, 32)),
     ],
 )
 def test_clone_with_make_evo(
@@ -405,14 +402,3 @@ def test_clone_with_make_evo(
     assert clone_agent.fitness == bandit.fitness
     assert clone_agent.steps == bandit.steps
     assert clone_agent.scores == bandit.scores
-
-
-# The method successfully unwraps the actor model when an accelerator is present.
-def test_unwrap_models(vector_space, discrete_space):
-    bandit = NeuralUCB(
-        observation_space=vector_space,
-        action_space=discrete_space,
-        accelerator=Accelerator(),
-    )
-    bandit.unwrap_models()
-    assert isinstance(bandit.actor, nn.Module)

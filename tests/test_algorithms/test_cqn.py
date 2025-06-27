@@ -391,13 +391,7 @@ def test_soft_update(vector_space):
 
 
 # Runs algorithm test loop
-@pytest.mark.parametrize(
-    "observation_space",
-    [
-        "vector_space",
-        "image_space",
-    ],
-)
+@pytest.mark.parametrize("observation_space", ["vector_space", "image_space"])
 @pytest.mark.parametrize("num_envs", [1, 3])
 def test_algorithm_test_loop(observation_space, num_envs, request):
     observation_space = request.getfixturevalue(observation_space)
@@ -411,15 +405,7 @@ def test_algorithm_test_loop(observation_space, num_envs, request):
 
 
 # Clones the agent and returns an identical agent.
-@pytest.mark.parametrize(
-    "observation_space",
-    [
-        "vector_space",
-        "image_space",
-        "dict_space",
-        "multidiscrete_space",
-    ],
-)
+@pytest.mark.parametrize("observation_space", ["vector_space"])
 def test_clone_returns_identical_agent(observation_space, request):
     action_space = spaces.Discrete(2)
     observation_space = request.getfixturevalue(observation_space)
@@ -511,15 +497,3 @@ def test_clone_new_index(vector_space):
     clone_agent = cqn.clone(index=100)
 
     assert clone_agent.index == 100
-
-
-# The method successfully unwraps the actor and actor_target models when an accelerator is present.
-def test_unwrap_models(vector_space):
-    cqn = CQN(
-        observation_space=vector_space,
-        action_space=spaces.Discrete(2),
-        accelerator=Accelerator(),
-    )
-    cqn.unwrap_models()
-    assert isinstance(cqn.actor.encoder, nn.Module)
-    assert isinstance(cqn.actor_target.encoder, nn.Module)

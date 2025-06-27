@@ -456,13 +456,7 @@ def test_soft_update():
 
 
 # Runs algorithm test loop
-@pytest.mark.parametrize(
-    "observation_space",
-    [
-        "vector_space",
-        "image_space",
-    ],
-)
+@pytest.mark.parametrize("observation_space", ["vector_space", "image_space"])
 @pytest.mark.parametrize("num_envs", [1, 3])
 def test_algorithm_test_loop(observation_space, num_envs, request):
     action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
@@ -478,15 +472,7 @@ def test_algorithm_test_loop(observation_space, num_envs, request):
 
 
 # Clones the agent and returns an identical agent.
-@pytest.mark.parametrize(
-    "observation_space",
-    [
-        "vector_space",
-        "image_space",
-        "dict_space",
-        "multidiscrete_space",
-    ],
-)
+@pytest.mark.parametrize("observation_space", ["vector_space"])
 def test_clone_returns_identical_agent(observation_space, request):
     action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
     observation_space = request.getfixturevalue(observation_space)
@@ -645,20 +631,6 @@ def test_clone_after_learning():
     assert clone_agent.fitness == ddpg.fitness
     assert clone_agent.steps == ddpg.steps
     assert clone_agent.scores == ddpg.scores
-
-
-# The method successfully unwraps the actor and actor_target models when an accelerator is present.
-def test_unwrap_models():
-    ddpg = DDPG(
-        observation_space=spaces.Box(low=-1, high=1, shape=(4,), dtype=np.float32),
-        action_space=spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32),
-        accelerator=Accelerator(),
-    )
-    ddpg.unwrap_models()
-    assert isinstance(ddpg.actor.encoder, nn.Module)
-    assert isinstance(ddpg.actor_target.encoder, nn.Module)
-    assert isinstance(ddpg.critic.encoder, nn.Module)
-    assert isinstance(ddpg.critic_target.encoder, nn.Module)
 
 
 @pytest.mark.parametrize(

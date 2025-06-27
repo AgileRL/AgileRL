@@ -15,16 +15,7 @@ from agilerl.algorithms.core import MultiAgentRLAlgorithm, RLAlgorithm
 from agilerl.modules import EvolvableMLP
 from agilerl.utils.utils import make_multi_agent_vect_envs
 from agilerl.wrappers.agent import AsyncAgentsWrapper, RSNorm
-from tests.helper_functions import (
-    assert_state_dicts_equal,
-    generate_dict_or_tuple_space,
-    generate_discrete_space,
-    generate_multi_agent_box_spaces,
-    generate_multi_agent_discrete_spaces,
-    generate_multidiscrete_space,
-    generate_random_box_space,
-    get_experiences_batch,
-)
+from tests.helper_functions import assert_state_dicts_equal, get_experiences_batch
 
 
 class DummyMultiEnvAsync(ParallelEnv):
@@ -122,7 +113,7 @@ class DummyMultiEnvAsync(ParallelEnv):
         return observations, rewards, dones, truncated, infos
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 def setup_rs_norm():
     observation_space = spaces.Box(low=-1.0, high=1.0, shape=(3,))
     mock_agent = MagicMock(spec=RLAlgorithm)
@@ -135,7 +126,7 @@ def setup_rs_norm():
     return wrapper, mock_agent
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 def setup_rs_norm_dict():
     observation_space = spaces.Dict(
         {
@@ -153,7 +144,7 @@ def setup_rs_norm_dict():
     return wrapper, mock_agent
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 def setup_rs_norm_tuple():
     observation_space = spaces.Tuple(
         (
@@ -171,7 +162,7 @@ def setup_rs_norm_tuple():
     return wrapper, mock_agent
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 def setup_rs_norm_multi_agent():
     observation_space = {
         "agent_1": spaces.Box(low=-1.0, high=1.0, shape=(3,)),
@@ -188,21 +179,6 @@ def setup_rs_norm_multi_agent():
 
     wrapper = RSNorm(mock_agent)
     return wrapper, mock_agent
-
-
-@pytest.fixture
-def device():
-    return "cuda" if torch.cuda.is_available() else "cpu"
-
-
-@pytest.fixture
-def discrete_space():
-    return spaces.Discrete(2)
-
-
-@pytest.fixture
-def continuous_space():
-    return spaces.Box(low=-1.0, high=1.0, shape=(3,))
 
 
 def test_normalize_observation(setup_rs_norm):
@@ -370,12 +346,11 @@ def test_normalize_observation_multi_agent(setup_rs_norm_multi_agent):
     )
 
 
-@pytest.mark.parametrize(
-    "observation_space",
-    [generate_random_box_space(shape=(4,)), generate_dict_or_tuple_space(2, 2)],
-)
-def test_rsnorm_get_action(observation_space):
-    agent = DDPG(observation_space, generate_random_box_space(shape=(2,)))
+@pytest.mark.parametrize("observation_space", ["vector_space", "dict_space"])
+def test_rsnorm_get_action(observation_space, request):
+    observation_space = request.getfixturevalue(observation_space)
+    action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,))
+    agent = DDPG(observation_space, action_space)
     wrapper = RSNorm(agent)
     obs = wrapper.observation_space.sample()
     action = wrapper.get_action(obs)
@@ -384,16 +359,12 @@ def test_rsnorm_get_action(observation_space):
 
 @pytest.mark.parametrize(
     "observation_space",
-    [
-        generate_random_box_space(shape=(4,)),
-        generate_discrete_space(n=2),
-        generate_multidiscrete_space(2, 2),
-        generate_dict_or_tuple_space(2, 2),
-    ],
+    ["vector_space", "discrete_space", "multidiscrete_space", "dict_space"],
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator()])
-def test_rsnorm_learn(observation_space, accelerator):
-    action_space = generate_random_box_space(shape=(2,))
+def test_rsnorm_learn(observation_space, vector_space, request, accelerator):
+    observation_space = request.getfixturevalue(observation_space)
+    action_space = vector_space
     batch_size = 4
     policy_freq = 4
 
@@ -436,11 +407,12 @@ def test_rsnorm_learn(observation_space, accelerator):
 
 
 # Clones the agent and returns an identical agent.
-def test_rsnorm_clone_returns_identical_agent():
-    observation_space = generate_random_box_space(shape=(4,))
-    action_space = generate_random_box_space(shape=(2,))
-
-    ddpg_norm = RSNorm(DDPG(observation_space, action_space))
+def test_rsnorm_clone_returns_identical_agent(vector_space):
+    observation_space = vector_space
+    action_space = copy.deepcopy(vector_space)
+    ddpg_norm = RSNorm(
+        DDPG(observation_space=observation_space, action_space=action_space)
+    )
     ddpg = ddpg_norm.agent
     ddpg.fitness = [200, 200, 200]
     ddpg.scores = [94, 94, 94]
@@ -480,7 +452,13 @@ def test_rsnorm_clone_returns_identical_agent():
     assert clone_agent.tensor_attribute == ddpg.tensor_attribute
 
     accelerator = Accelerator()
-    ddpg_norm = RSNorm(DDPG(observation_space, action_space, accelerator=accelerator))
+    ddpg_norm = RSNorm(
+        DDPG(
+            observation_space=observation_space,
+            action_space=action_space,
+            accelerator=accelerator,
+        )
+    )
     ddpg = ddpg_norm.agent
     clone = ddpg_norm.clone()
     clone_agent = clone.agent
@@ -552,11 +530,13 @@ def test_rsnorm_clone_returns_identical_agent():
     assert clone_agent.scores == ddpg.scores
 
 
-def test_rsnorm_save_load_checkpoint(tmp_path):
-    observation_space = generate_random_box_space(shape=(4,))
-    action_space = generate_random_box_space(shape=(2,))
+def test_rsnorm_save_load_checkpoint(tmp_path, vector_space):
+    observation_space = vector_space
+    action_space = copy.deepcopy(vector_space)
 
-    ddpg_norm = RSNorm(DDPG(observation_space, action_space))
+    ddpg_norm = RSNorm(
+        DDPG(observation_space=observation_space, action_space=action_space)
+    )
     checkpoint_path = os.path.join(tmp_path, "checkpoint.pth")
     ddpg_norm.save_checkpoint(checkpoint_path)
 
@@ -640,11 +620,13 @@ def test_rsnorm_save_load_checkpoint(tmp_path):
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize("num_envs", [1, 2])
-def test_ippo_custom_training_with_async_env(device, compile_mode, num_envs):
+def test_ippo_custom_training_with_async_env(
+    device, ma_vector_space, ma_discrete_space, compile_mode, num_envs
+):
     # Create async environment with agents that return observations asynchronously
-    observation_spaces = generate_multi_agent_box_spaces(3, (6,))
-    action_spaces = generate_multi_agent_discrete_spaces(3, 2)
     vectorized = num_envs > 1
+    observation_spaces = ma_vector_space
+    action_spaces = ma_discrete_space
     if vectorized:
         env = make_multi_agent_vect_envs(
             DummyMultiEnvAsync,

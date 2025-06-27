@@ -11,12 +11,6 @@ from tests.helper_functions import assert_state_dicts_equal
 # Device fixture moved to conftest.py
 
 
-@pytest.fixture(autouse=True)
-def cleanup():
-    yield  # Run the test first
-    torch.cuda.empty_cache()  # Free up GPU memory
-
-
 ######### Test instantiation #########
 @pytest.mark.parametrize(
     "input_size, hidden_size, num_outputs, num_layers",

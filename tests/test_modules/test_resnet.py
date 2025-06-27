@@ -4,15 +4,6 @@ import torch
 from agilerl.modules.resnet import EvolvableResNet
 from tests.helper_functions import assert_state_dicts_equal
 
-######### Define fixtures #########
-# Device fixture moved to conftest.py
-
-
-@pytest.fixture(autouse=True)
-def cleanup():
-    yield  # Run the test first
-    torch.cuda.empty_cache()  # Free up GPU memory
-
 
 ######### Test instantiation #########
 @pytest.mark.parametrize(

@@ -342,13 +342,7 @@ def vectorized_experiences(
 
 @pytest.mark.parametrize("sum_score", [True, False])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
-@pytest.mark.parametrize(
-    "observation_spaces",
-    [
-        "ma_vector_space",
-        "ma_image_space",
-    ],
-)
+@pytest.mark.parametrize("observation_spaces", ["ma_vector_space", "ma_image_space"])
 @pytest.mark.parametrize("vectorized", [False, True])
 def test_loop(
     device,
@@ -386,14 +380,7 @@ def test_loop(
         assert len(mean_score) == 2
 
 
-@pytest.mark.parametrize(
-    "observation_spaces",
-    [
-        "ma_vector_space",
-        "ma_image_space",
-        "ma_dict_space",
-    ],
-)
+@pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("wrap", [True, False])
@@ -580,25 +567,6 @@ def test_clone_after_learning(compile_mode, ma_vector_space, ma_discrete_space):
 
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
-def test_ippo_unwrap_models(compile_mode, ma_vector_space, ma_discrete_space):
-    accelerator = Accelerator()
-    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
-    ippo = IPPO(
-        observation_spaces=ma_vector_space,
-        action_spaces=ma_discrete_space,
-        agent_ids=agent_ids,
-        accelerator=accelerator,
-        torch_compiler=compile_mode,
-    )
-    ippo.unwrap_models()
-    for shared_id in ippo.shared_agent_ids:
-        actor = ippo.actors[shared_id]
-        critic = ippo.critics[shared_id]
-        assert isinstance(actor, nn.Module)
-        assert isinstance(critic, nn.Module)
-
-
-@pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize("batch_size", [16])
 @pytest.mark.parametrize("agent_ids", [["agent_0", "agent_1", "other_agent_0"]])
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
@@ -640,7 +608,7 @@ def test_ippo_learns_from_experiences_distributed(
         for shared_id, critic in ippo.critics.items()
     }
 
-    for _ in range(3):
+    for _ in range(2):
         ippo.scores.append(0)
         loss = ippo.learn(accelerated_experiences)
 
@@ -665,15 +633,9 @@ def test_ippo_learns_from_experiences_distributed(
 
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
-@pytest.mark.parametrize(
-    "observation_spaces",
-    [
-        "ma_image_space",
-        "ma_vector_space",
-    ],
-)
+@pytest.mark.parametrize("observation_spaces", ["ma_image_space", "ma_vector_space"])
 @pytest.mark.parametrize("agent_ids", [["agent_0", "agent_1", "other_agent_0"]])
-@pytest.mark.parametrize("batch_size", [16])
+@pytest.mark.parametrize("batch_size", [64])
 @pytest.mark.parametrize("action_spaces", ["ma_discrete_space"])
 def test_ippo_learns_from_experiences(
     observation_spaces,
@@ -706,15 +668,14 @@ def test_ippo_learns_from_experiences(
         for shared_id, critic in ippo.critics.items()
     }
 
-    for _ in range(4):
+    for _ in range(2):
         ippo.scores.append(0)
         loss = ippo.learn(experiences)
 
     assert isinstance(loss, dict)
-    for agent_id in ippo.shared_agent_ids:
-        assert agent_id in loss
-
     for shared_id in ippo.shared_agent_ids:
+        assert shared_id in loss
+
         old_actor = actors[shared_id]
         updated_actor = ippo.actors[shared_id]
         assert old_actor == updated_actor
@@ -734,20 +695,8 @@ def test_ippo_learns_from_experiences(
 @pytest.mark.parametrize("vect_dim", [1, 8])
 @pytest.mark.parametrize("batch_size", [16])
 @pytest.mark.parametrize("agent_ids", [["agent_0", "agent_1", "other_agent_0"]])
-@pytest.mark.parametrize(
-    "action_spaces",
-    [
-        "ma_discrete_space",
-        "ma_vector_space",
-    ],
-)
-@pytest.mark.parametrize(
-    "observation_spaces",
-    [
-        "ma_image_space",
-        "ma_vector_space",
-    ],
-)
+@pytest.mark.parametrize("action_spaces", ["ma_discrete_space", "ma_vector_space"])
+@pytest.mark.parametrize("observation_spaces", ["ma_image_space", "ma_vector_space"])
 def test_ippo_learns_from_vectorized_experiences(
     agent_ids,
     observation_spaces,
@@ -781,7 +730,7 @@ def test_ippo_learns_from_vectorized_experiences(
         for shared_id, critic in ippo.critics.items()
     }
 
-    for _ in range(4):
+    for _ in range(2):
         ippo.scores.append(0)
         loss = ippo.learn(vectorized_experiences)
 

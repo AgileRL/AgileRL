@@ -397,6 +397,33 @@ def test_recompile(ma_vector_space, ma_discrete_space):
     ), agent.dummy_actors.values()
 
 
+@pytest.mark.parametrize("compile_mode", [None, "default"])
+def test_unwrap_models_multi_agent(compile_mode, ma_vector_space, ma_discrete_space):
+    accelerator = Accelerator()
+    agent = DummyMARLAlgorithm(
+        ma_vector_space,
+        ma_discrete_space,
+        index=0,
+        agent_ids=["agent_0", "agent_1", "other_agent_0"],
+        accelerator=accelerator,
+        torch_compiler=compile_mode,
+    )
+
+    agent.unwrap_models()
+
+    for _, actor in agent.dummy_actors.items():
+        assert isinstance(actor, torch.nn.Module)
+
+
+def test_unwrap_models_single_agent(vector_space, discrete_space):
+    accelerator = Accelerator()
+    agent = DummyRLAlgorithm(
+        vector_space, discrete_space, index=0, accelerator=accelerator
+    )
+    agent.unwrap_models()
+    assert isinstance(agent.dummy_actor, torch.nn.Module)
+
+
 @pytest.mark.parametrize("with_hp_config", [False, True])
 @pytest.mark.parametrize(
     "observation_space",

@@ -186,7 +186,7 @@ def create_module(input_size, max_tokens, vocab_size, device):
     )
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def accelerator(request):
     gc.collect()
     torch.cuda.empty_cache()
@@ -200,8 +200,8 @@ def accelerator(request):
         accelerator.free_memory()
 
 
-@pytest.fixture(scope="function")
-def grpo(request, accelerator, monkeypatch):
+@pytest.fixture
+def grpo(request, accelerator, monkeypatch, device):
     gc.collect()
     torch.cuda.empty_cache()
     with mock.patch.dict(os.environ, clear=True):
@@ -232,11 +232,11 @@ def grpo(request, accelerator, monkeypatch):
                 input_size=input_size,
                 max_tokens=max_tokens,
                 vocab_size=vocab_size,
-                device="cuda" if torch.cuda.is_available() else "cpu",
+                device=device,
             ),
             lr=0.1,
             pad_token_id=vocab_size - 1,
-            device="cuda" if torch.cuda.is_available() else "cpu",
+            device=device,
             group_size=group_size,
             cosine_lr_schedule_config=CosineLRScheduleConfig(
                 num_epochs=10, warmup_proportion=0.05
@@ -706,12 +706,16 @@ def test_get_logprobs(grpo, accelerator, request, batch_size):
     ids = torch.randint(0, vocab_size, (batch_size, input_size + max_tokens)).to(
         grpo.device
     )
+
     log_probs = grpo._get_logprobs(ids=ids)
     grpo.reduce_memory_peak = True
     log_probs_reduced_mem = grpo._get_logprobs(ids=ids)
     assert log_probs.shape == (ids.shape[0], ids.shape[1] - 1)
     assert log_probs_reduced_mem.shape == (ids.shape[0], ids.shape[1] - 1)
-    assert torch.allclose(log_probs, log_probs_reduced_mem, atol=1e-3)
+    assert torch.allclose(
+        log_probs, log_probs_reduced_mem, atol=1e-3
+    ), f"log_probs: {log_probs}, log_probs_reduced_mem: {log_probs_reduced_mem}"
+
     AcceleratorState._reset_state(True)
 
 

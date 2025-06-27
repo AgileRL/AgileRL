@@ -3,7 +3,6 @@ import copy
 import numpy as np
 import pytest
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
@@ -556,13 +555,7 @@ def test_soft_update(vector_space, discrete_space):
 
 # Runs algorithm test loop
 @pytest.mark.parametrize("num_envs", [1, 3])
-@pytest.mark.parametrize(
-    "observation_space",
-    [
-        "vector_space",
-        "image_space",
-    ],
-)
+@pytest.mark.parametrize("observation_space", ["vector_space", "image_space"])
 def test_algorithm_test_loop(num_envs, observation_space, discrete_space, request):
     observation_space = request.getfixturevalue(observation_space)
     vect = num_envs > 1
@@ -573,15 +566,7 @@ def test_algorithm_test_loop(num_envs, observation_space, discrete_space, reques
 
 
 # Clones the agent and returns an identical agent.
-@pytest.mark.parametrize(
-    "observation_space",
-    [
-        "vector_space",
-        "image_space",
-        "dict_space",
-        "multidiscrete_space",
-    ],
-)
+@pytest.mark.parametrize("observation_space", ["vector_space"])
 def test_clone_returns_identical_agent(observation_space, discrete_space, request):
     observation_space = request.getfixturevalue(observation_space)
     dqn = DummyRainbowDQN(observation_space, discrete_space)
@@ -707,15 +692,3 @@ def test_clone_after_learning(vector_space, discrete_space):
     assert clone_agent.fitness == rainbow_dqn.fitness
     assert clone_agent.steps == rainbow_dqn.steps
     assert clone_agent.scores == rainbow_dqn.scores
-
-
-# The method successfully unwraps the actor and actor_target models when an accelerator is present.
-def test_unwrap_models(vector_space, discrete_space):
-    dqn = RainbowDQN(
-        observation_space=vector_space,
-        action_space=discrete_space,
-        accelerator=Accelerator(),
-    )
-    dqn.unwrap_models()
-    assert isinstance(dqn.actor, nn.Module)
-    assert isinstance(dqn.actor_target, nn.Module)

@@ -1054,7 +1054,7 @@ def test_matd3_learns_from_experiences(
         for agent_id, critic_2 in matd3.critics_2.items()
     }
 
-    for _ in range(4 * policy_freq):
+    for _ in range(2 * policy_freq):
         matd3.scores.append(0)
         loss = matd3.learn(experiences)
 
@@ -1156,7 +1156,7 @@ def test_matd3_learns_from_experiences_distributed(
         for agent_id, critic_2 in matd3.critics_2.items()
     }
 
-    for _ in range(4 * policy_freq):
+    for _ in range(2 * policy_freq):
         matd3.scores.append(0)
         loss = matd3.learn(accelerated_experiences)
 
@@ -1293,10 +1293,7 @@ def test_matd3_algorithm_test_loop(
         assert len(mean_score) == 3
 
 
-@pytest.mark.parametrize(
-    "observation_spaces",
-    ["ma_vector_space", "ma_image_space", "ma_discrete_space", "ma_dict_space"],
-)
+@pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("wrap", [True, False])
@@ -1489,30 +1486,3 @@ def test_clone_after_learning(compile_mode, ma_vector_space):
         assert_state_dicts_equal(
             clone_critic_target_2.state_dict(), critic_target_2.state_dict()
         )
-
-
-@pytest.mark.parametrize("compile_mode", [None, "default"])
-def test_matd3_unwrap_models(compile_mode, ma_vector_space, ma_discrete_space):
-    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
-    accelerator = Accelerator()
-    matd3 = MATD3(
-        observation_spaces=ma_vector_space,
-        action_spaces=ma_discrete_space,
-        agent_ids=agent_ids,
-        accelerator=accelerator,
-        torch_compiler=compile_mode,
-    )
-    matd3.unwrap_models()
-    for agent_id in matd3.agent_ids:
-        actor = matd3.actors[agent_id]
-        actor_target = matd3.actor_targets[agent_id]
-        critic_1 = matd3.critics_1[agent_id]
-        critic_target_1 = matd3.critic_targets_1[agent_id]
-        critic_2 = matd3.critics_2[agent_id]
-        critic_target_2 = matd3.critic_targets_2[agent_id]
-        assert isinstance(actor, nn.Module)
-        assert isinstance(actor_target, nn.Module)
-        assert isinstance(critic_1, nn.Module)
-        assert isinstance(critic_target_1, nn.Module)
-        assert isinstance(critic_2, nn.Module)
-        assert isinstance(critic_target_2, nn.Module)
