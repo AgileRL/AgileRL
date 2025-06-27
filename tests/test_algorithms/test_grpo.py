@@ -186,7 +186,7 @@ def create_module(input_size, max_tokens, vocab_size, device):
     )
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 def accelerator(request):
     gc.collect()
     torch.cuda.empty_cache()
@@ -200,7 +200,7 @@ def accelerator(request):
         accelerator.free_memory()
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 def grpo(request, accelerator, monkeypatch, device):
     gc.collect()
     torch.cuda.empty_cache()
@@ -244,6 +244,7 @@ def grpo(request, accelerator, monkeypatch, device):
             accelerator=accelerator,
         )
         yield grpo
+        del grpo
 
 
 @pytest.mark.parametrize(

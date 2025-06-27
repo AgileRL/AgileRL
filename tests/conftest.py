@@ -22,10 +22,12 @@ from tests.helper_functions import (
 # Only clear CUDA cache when actually needed
 @pytest.fixture(autouse=True, scope="function")
 def cleanup():
-    yield  # Run the test first
+    yield
+
     # Only clear CUDA cache if CUDA was actually used
     if torch.cuda.is_available() and torch.cuda.is_initialized():
         torch.cuda.empty_cache()
+
     # Only collect garbage periodically, not after every test
     if hasattr(cleanup, "call_count"):
         cleanup.call_count += 1
