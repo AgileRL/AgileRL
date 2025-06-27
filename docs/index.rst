@@ -106,6 +106,7 @@ Contents
    api/modules/index
    api/networks/index
    api/train
+   api/rollouts/index
    api/utils/index
    api/vector/index
    api/wrappers/index

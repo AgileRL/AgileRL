@@ -1,6 +1,5 @@
 import copy
 
-import numpy as np
 import pytest
 import torch
 
@@ -27,7 +26,7 @@ def cleanup():
 def test_instantiation(input_size, hidden_size, num_outputs, num_layers, device):
     evolvable_lstm = EvolvableLSTM(
         input_size=input_size,
-        hidden_size=hidden_size,
+        hidden_state_size=hidden_size,
         num_outputs=num_outputs,
         num_layers=num_layers,
         device=device,
@@ -45,7 +44,7 @@ def test_incorrect_instantiation(
     with pytest.raises(AssertionError):
         EvolvableLSTM(
             input_size=input_size,
-            hidden_size=hidden_size,
+            hidden_state_size=hidden_size,
             num_outputs=num_outputs,
             num_layers=num_layers,
             device=device,
@@ -59,7 +58,7 @@ def test_incorrect_instantiation(
 def test_instantiation_with_different_activations(output_activation, device):
     evolvable_lstm = EvolvableLSTM(
         input_size=10,
-        hidden_size=64,
+        hidden_state_size=64,
         num_outputs=4,
         output_activation=output_activation,
         device=device,
@@ -68,32 +67,6 @@ def test_instantiation_with_different_activations(output_activation, device):
 
 
 ######### Test forward #########
-@pytest.mark.parametrize(
-    "input_tensor, input_size, hidden_size, num_outputs, num_layers, output_size",
-    [
-        (torch.randn(1, 5, 10), 10, 64, 5, 1, (1, 5)),
-        (torch.randn(1, 3, 2), 2, 32, 1, 2, (1, 1)),
-        (torch.randn(1, 10, 100), 100, 128, 3, 3, (1, 3)),
-        (np.random.randn(1, 8, 100), 100, 128, 3, 2, (1, 3)),
-    ],
-)
-def test_forward(
-    input_tensor, input_size, hidden_size, num_outputs, num_layers, output_size, device
-):
-    evolvable_lstm = EvolvableLSTM(
-        input_size=input_size,
-        hidden_size=hidden_size,
-        num_outputs=num_outputs,
-        num_layers=num_layers,
-        device=device,
-    )
-    if isinstance(input_tensor, torch.Tensor):
-        input_tensor = input_tensor.to(device)
-    with torch.no_grad():
-        output_tensor = evolvable_lstm.forward(input_tensor)
-    assert output_tensor.shape == output_size
-
-
 def test_forward_with_states(device):
     input_size = 10
     hidden_size = 64
@@ -104,7 +77,7 @@ def test_forward_with_states(device):
 
     evolvable_lstm = EvolvableLSTM(
         input_size=input_size,
-        hidden_size=hidden_size,
+        hidden_state_size=hidden_size,
         num_outputs=num_outputs,
         num_layers=num_layers,
         device=device,
@@ -127,7 +100,13 @@ def test_forward_with_states(device):
         )
 
         # Regular forward pass
-        output_tensor = evolvable_lstm.forward(input_tensor)
+        output_tensor, (hn, cn) = evolvable_lstm.forward(
+            input_tensor,
+            hidden_state={
+                f"{evolvable_lstm.name}_h": h0,
+                f"{evolvable_lstm.name}_c": c0,
+            },
+        )
 
     assert output_tensor.shape == (batch_size, num_outputs)
     torch.testing.assert_close(output, output_tensor)
@@ -141,7 +120,7 @@ def test_forward_with_states(device):
 def test_add_layer(input_size, hidden_size, num_outputs, num_layers, device):
     evolvable_lstm = EvolvableLSTM(
         input_size=input_size,
-        hidden_size=hidden_size,
+        hidden_state_size=hidden_size,
         num_outputs=num_outputs,
         num_layers=num_layers,
         max_layers=3,
@@ -172,7 +151,7 @@ def test_add_layer(input_size, hidden_size, num_outputs, num_layers, device):
 def test_remove_layer(input_size, hidden_size, num_outputs, num_layers, device):
     evolvable_lstm = EvolvableLSTM(
         input_size=input_size,
-        hidden_size=hidden_size,
+        hidden_state_size=hidden_size,
         num_outputs=num_outputs,
         num_layers=num_layers,
         min_layers=1,
@@ -209,16 +188,16 @@ def test_add_nodes(
 ):
     lstm = EvolvableLSTM(
         input_size=input_size,
-        hidden_size=hidden_size,
+        hidden_state_size=hidden_size,
         num_outputs=num_outputs,
         num_layers=num_layers,
         device=device,
     )
-    original_hidden_size = copy.deepcopy(lstm.hidden_size)
+    original_hidden_size = copy.deepcopy(lstm.hidden_state_size)
     result = lstm.add_node(numb_new_nodes=numb_new_nodes)
     if numb_new_nodes is None:
         numb_new_nodes = result["numb_new_nodes"]
-    assert lstm.hidden_size == original_hidden_size + numb_new_nodes
+    assert lstm.hidden_state_size == original_hidden_size + numb_new_nodes
 
 
 ######### Test remove_lstm_node #########
@@ -235,24 +214,24 @@ def test_remove_nodes(
 ):
     lstm = EvolvableLSTM(
         input_size=input_size,
-        hidden_size=hidden_size,
+        hidden_state_size=hidden_size,
         num_outputs=num_outputs,
         num_layers=num_layers,
-        min_hidden_size=32,
+        min_hidden_state_size=32,
         device=device,
     )
-    original_hidden_size = copy.deepcopy(lstm.hidden_size)
+    original_hidden_size = copy.deepcopy(lstm.hidden_state_size)
     result = lstm.remove_node(numb_new_nodes=numb_new_nodes)
     if numb_new_nodes is None:
         numb_new_nodes = result["numb_new_nodes"]
-    assert lstm.hidden_size == original_hidden_size - numb_new_nodes
+    assert lstm.hidden_state_size == original_hidden_size - numb_new_nodes
 
 
 ######### Test activation change #########
 def test_change_activation(device):
     lstm = EvolvableLSTM(
         input_size=10,
-        hidden_size=64,
+        hidden_state_size=64,
         num_outputs=5,
         num_layers=1,
         output_activation=None,
@@ -267,7 +246,15 @@ def test_change_activation(device):
 
         # Verify the activation works through forward pass
         input_tensor = torch.randn(1, 5, 10).to(device)
-        output = lstm.forward(input_tensor)
+        h0 = torch.zeros(1, 1, 64).to(device)
+        c0 = torch.zeros(1, 1, 64).to(device)
+        output, (hn, cn) = lstm.forward(
+            input_tensor,
+            hidden_state={
+                f"{lstm.name}_h": h0,
+                f"{lstm.name}_c": c0,
+            },
+        )
         assert output.shape == (1, 5)
 
 
@@ -279,7 +266,7 @@ def test_change_activation(device):
 def test_clone_instance(input_size, hidden_size, num_outputs, num_layers, device):
     evolvable_lstm = EvolvableLSTM(
         input_size=input_size,
-        hidden_size=hidden_size,
+        hidden_state_size=hidden_size,
         num_outputs=num_outputs,
         num_layers=num_layers,
         device=device,

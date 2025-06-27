@@ -1,7 +1,7 @@
 import time
 import warnings
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import gymnasium as gym
 import numpy as np
@@ -49,6 +49,9 @@ def train_on_policy(
     verbose: bool = True,
     accelerator: Optional[Accelerator] = None,
     wandb_api_key: Optional[str] = None,
+    collect_rollouts_fn: Optional[
+        Callable[[OnPolicyAlgorithms, gym.Env, int], None]
+    ] = None,
 ) -> Tuple[PopulationType, List[List[float]]]:
     """The general on-policy RL training function. Returns trained population of agents
     and their fitnesses.
@@ -102,6 +105,10 @@ def train_on_policy(
     :type accelerator: accelerate.Accelerator(), optional
     :param wandb_api_key: API key for Weights & Biases, defaults to None
     :type wandb_api_key: str, optional
+    :param collect_rollouts_fn: Optional function used to collect rollouts. If
+        ``None`` and agents use a rollout buffer, a default function will be
+        selected based on whether the agent is recurrent.
+    :type collect_rollouts_fn: Callable or None, optional
 
     :return: Trained population of agents and their fitnesses
     :rtype: list[RLAlgorithm], list[list[float]]
@@ -204,95 +211,136 @@ def train_on_policy(
         for agent_idx, agent in enumerate(pop):  # Loop through population
             agent.set_training_mode(True)
 
-            state, info = env.reset()  # Reset environment at start of episode
             scores = np.zeros(num_envs)
             completed_episode_scores = []
             steps = 0
             start_time = time.time()
-            for _ in range(-(evo_steps // -agent.learn_step)):
-                states = []
-                actions = []
-                log_probs = []
-                rewards = []
-                dones = []
-                values = []
 
-                done = np.zeros(num_envs)
-                for idx_step in range(-(agent.learn_step // -num_envs)):
+            active_collect = collect_rollouts_fn
+            if active_collect is None and getattr(agent, "use_rollout_buffer", False):
+                if getattr(agent, "recurrent", False):
+                    from agilerl.rollouts import (
+                        collect_rollouts_recurrent as active_collect,
+                    )
+                else:
+                    from agilerl.rollouts import collect_rollouts as active_collect
 
-                    if swap_channels:
-                        state = obs_channels_to_first(state)
+            if (
+                getattr(agent, "use_rollout_buffer", False)
+                and active_collect is not None
+            ):
+                for _ in range(-(evo_steps // -agent.learn_step)):
+                    active_collect(agent, env, n_steps=agent.learn_step)
 
-                    # Get next action from agent
-                    action_mask = info.get("action_mask", None)
-                    action, log_prob, entropy, value = agent.get_action(
-                        state, action_mask=action_mask
+                    buffer_size = agent.rollout_buffer.pos
+                    rewards_np = (
+                        agent.rollout_buffer.buffer["rewards"][:buffer_size]
+                        .cpu()
+                        .numpy()
+                    )
+                    dones_np = (
+                        agent.rollout_buffer.buffer["dones"][:buffer_size].cpu().numpy()
                     )
 
-                    if not is_vectorised:
-                        action = action[0]
-                        log_prob = log_prob[0]
-                        value = value[0]
-                        entropy = entropy[0] if hasattr(entropy, "__len__") else entropy
+                    for r_step, d_step in zip(rewards_np, dones_np):
+                        scores += np.array(r_step)
+                        finished = np.array(d_step, dtype=bool)
+                        for idx, fin in enumerate(finished):
+                            if fin:
+                                completed_episode_scores.append(scores[idx])
+                                agent.scores.append(scores[idx])
+                                scores[idx] = 0
 
-                    # Store entropy value
-                    pop_entropy[agent_idx].append(entropy)
+                    steps += buffer_size * num_envs
+                    total_steps += buffer_size * num_envs
 
-                    # Clip to action space
-                    if isinstance(agent.action_space, spaces.Box):
-                        if agent.actor.squash_output:
-                            clipped_action = agent.actor.scale_action(action)
-                        else:
-                            clipped_action = np.clip(
-                                action, agent.action_space.low, agent.action_space.high
+                    loss = agent.learn()
+                    pop_loss[agent_idx].append(loss)
+
+            else:
+                state, info = env.reset()
+                for _ in range(-(evo_steps // -agent.learn_step)):
+                    states = []
+                    actions = []
+                    log_probs = []
+                    rewards = []
+                    dones = []
+                    values = []
+
+                    done = np.zeros(num_envs)
+                    for idx_step in range(-(agent.learn_step // -num_envs)):
+                        if swap_channels:
+                            state = obs_channels_to_first(state)
+
+                        action_mask = info.get("action_mask", None)
+                        action, log_prob, entropy, value = agent.get_action(
+                            state, action_mask=action_mask
+                        )
+
+                        if not is_vectorised:
+                            action = action[0]
+                            log_prob = log_prob[0]
+                            value = value[0]
+                            entropy = (
+                                entropy[0] if hasattr(entropy, "__len__") else entropy
                             )
-                    else:
-                        clipped_action = action
 
-                    # Act in environment
-                    next_state, reward, term, trunc, info = env.step(clipped_action)
-                    next_done = np.logical_or(term, trunc).astype(np.int8)
+                        pop_entropy[agent_idx].append(entropy)
 
-                    total_steps += num_envs
-                    steps += num_envs
+                        if isinstance(agent.action_space, spaces.Box):
+                            if agent.actor.squash_output:
+                                clipped_action = agent.actor.scale_action(action)
+                            else:
+                                clipped_action = np.clip(
+                                    action,
+                                    agent.action_space.low,
+                                    agent.action_space.high,
+                                )
+                        else:
+                            clipped_action = action
 
-                    states.append(state)
-                    actions.append(action)
-                    log_probs.append(log_prob)
-                    rewards.append(reward)
-                    dones.append(done)
-                    values.append(value)
+                        next_state, reward, term, trunc, info = env.step(clipped_action)
+                        next_done = np.logical_or(term, trunc).astype(np.int8)
 
-                    state = next_state
-                    done = next_done
-                    scores += np.array(reward)
+                        total_steps += num_envs
+                        steps += num_envs
 
-                    if not is_vectorised:
-                        term = [term]
-                        trunc = [trunc]
+                        states.append(state)
+                        actions.append(action)
+                        log_probs.append(log_prob)
+                        rewards.append(reward)
+                        dones.append(done)
+                        values.append(value)
 
-                    for idx, (d, t) in enumerate(zip(term, trunc)):
-                        if d or t:
-                            completed_episode_scores.append(scores[idx])
-                            agent.scores.append(scores[idx])
-                            scores[idx] = 0
+                        state = next_state
+                        done = next_done
+                        scores += np.array(reward)
 
-                if swap_channels:
-                    next_state = obs_channels_to_first(next_state)
+                        if not is_vectorised:
+                            term = [term]
+                            trunc = [trunc]
 
-                experiences = (
-                    states,
-                    actions,
-                    log_probs,
-                    rewards,
-                    dones,
-                    values,
-                    next_state,
-                    next_done,
-                )
-                # Learn according to agent's RL algorithm
-                loss = agent.learn(experiences)
-                pop_loss[agent_idx].append(loss)
+                        for idx, (d, t) in enumerate(zip(term, trunc)):
+                            if d or t:
+                                completed_episode_scores.append(scores[idx])
+                                agent.scores.append(scores[idx])
+                                scores[idx] = 0
+
+                    if swap_channels:
+                        next_state = obs_channels_to_first(next_state)
+
+                    experiences = (
+                        states,
+                        actions,
+                        log_probs,
+                        rewards,
+                        dones,
+                        values,
+                        next_state,
+                        next_done,
+                    )
+                    loss = agent.learn(experiences)
+                    pop_loss[agent_idx].append(loss)
 
             agent.steps[-1] += steps
             fps = steps / (time.time() - start_time)
