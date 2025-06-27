@@ -801,11 +801,13 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             if isinstance(module_cls, list):
                 loaded_modules = []
                 for mod, d in zip(module_cls, init_dict):
+                    d["device"] = self.device
                     loaded_mod: EvolvableModule = mod(**d)
                     loaded_modules.append(loaded_mod)
 
                 setattr(self, name, loaded_modules)
             else:
+                init_dict["device"] = self.device
                 loaded_module: EvolvableModule = module_cls(**init_dict)
                 setattr(self, name, loaded_module)
 
@@ -947,12 +949,11 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         # Reconstruct the algorithm
         constructor_params = inspect.signature(cls.__init__).parameters.keys()
+        checkpoint["accelerator"] = accelerator
+        checkpoint["device"] = device
         class_init_dict = {
             k: v for k, v in checkpoint.items() if k in constructor_params
         }
-
-        checkpoint["accelerator"] = accelerator
-        checkpoint["device"] = device
         self = cls(**class_init_dict)
         registry: MutationRegistry = checkpoint["registry"]
         self.registry = registry
