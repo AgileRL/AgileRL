@@ -1299,7 +1299,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         preprocessed = {}
         for agent_id, agent_obs in observation.items():
             preprocessed[agent_id] = preprocess_observation(
-                self.observation_space.get(agent_id),
+                self.possible_observation_spaces.get(agent_id),
                 observation=agent_obs,
                 device=self.device,
                 normalize_images=self.normalize_images,

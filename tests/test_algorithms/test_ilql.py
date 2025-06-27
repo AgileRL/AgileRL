@@ -1,6 +1,5 @@
 from pathlib import Path
 
-import pytest
 import torch
 
 from agilerl.algorithms.ilql import ILQL, ILQL_Policy
@@ -20,12 +19,6 @@ torch.serialization.add_safe_globals(
         Language_Observation,
     ]
 )
-
-
-@pytest.fixture(autouse=True)
-def cleanup():
-    yield  # Run the test first
-    torch.cuda.empty_cache()  # Free up GPU memory
 
 
 def test_ilql_init():

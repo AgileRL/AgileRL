@@ -313,12 +313,12 @@ class EvolvableCNN(EvolvableModule):
         self.max_channel_size = max_channel_size
         self.layer_norm = layer_norm
         self.init_layers = init_layers
-        self.sample_input = sample_input
+        self.sample_input = sample_input.to(device)
         self.name = name
         self.mut_kernel_size = MutableKernelSizes(
             sizes=kernel_size,
             cnn_block_type=block_type,
-            sample_input=sample_input,
+            sample_input=self.sample_input,
             rng=self.rng,
         )
 
@@ -327,7 +327,7 @@ class EvolvableCNN(EvolvableModule):
             channel_size=channel_size,
             kernel_size=self.mut_kernel_size.sizes,
             stride_size=stride_size,
-            sample_input=sample_input,
+            sample_input=self.sample_input,
         )
 
     @property
