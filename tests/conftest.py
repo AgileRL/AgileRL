@@ -35,7 +35,7 @@ def cleanup():
         cleanup.call_count = 1
 
     # Only run garbage collection every 10 tests
-    if cleanup.call_count % 10 == 0:
+    if cleanup.call_count % 5 == 0:
         gc.collect()
 
 

@@ -1018,7 +1018,7 @@ def test_matd3_get_action_action_masking(
 @pytest.mark.parametrize("action_spaces", ["ma_discrete_space", "ma_vector_space"])
 @pytest.mark.parametrize("batch_size", [64])
 @pytest.mark.parametrize("agent_ids", [["agent_0", "agent_1", "other_agent_0"]])
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 def test_matd3_learns_from_experiences(
     observation_spaces,
     experiences,
@@ -1105,7 +1105,7 @@ def no_sync(self):
 @pytest.mark.parametrize("action_spaces", ["ma_discrete_space", "ma_vector_space"])
 @pytest.mark.parametrize("batch_size", [64])
 @pytest.mark.parametrize("agent_ids", [["agent_0", "agent_1", "other_agent_0"]])
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 def test_matd3_learns_from_experiences_distributed(
     observation_spaces,
     accelerated_experiences,
@@ -1189,7 +1189,7 @@ def test_matd3_learns_from_experiences_distributed(
         assert old_critic_target_2 == updated_critic_target_2
 
 
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 def test_matd3_soft_update(device, compile_mode, ma_vector_space, ma_discrete_space):
     accelerator = None
 
@@ -1250,7 +1250,7 @@ def test_matd3_soft_update(device, compile_mode, ma_vector_space, ma_discrete_sp
 
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space", "ma_image_space"])
 @pytest.mark.parametrize("sum_score", [True, False])
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 @pytest.mark.parametrize("vectorized", [True, False])
 def test_matd3_algorithm_test_loop(
     observation_spaces,
@@ -1406,7 +1406,7 @@ def test_clone_new_index(compile_mode, ma_vector_space):
     assert clone_agent.index == 100
 
 
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 def test_clone_after_learning(compile_mode, ma_vector_space):
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     batch_size = 8

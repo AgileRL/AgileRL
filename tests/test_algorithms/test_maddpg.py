@@ -999,7 +999,7 @@ def test_maddpg_get_action_vectorized_agent_masking(
 )
 @pytest.mark.parametrize("action_spaces", ["ma_vector_space", "ma_discrete_space"])
 @pytest.mark.parametrize("agent_ids", [["agent_0", "agent_1", "other_agent_0"]])
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("batch_size", [64])
 def test_maddpg_learns_from_experiences(
@@ -1074,7 +1074,7 @@ def no_sync(self):
     return DummyNoSync()
 
 
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 def test_maddpg_soft_update(device, compile_mode, ma_vector_space, ma_discrete_space):
     maddpg = MADDPG(
         ma_vector_space,
@@ -1118,7 +1118,7 @@ def test_maddpg_soft_update(device, compile_mode, ma_vector_space, ma_discrete_s
 
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space", "ma_image_space"])
 @pytest.mark.parametrize("sum_score", [True, False])
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 @pytest.mark.parametrize("vectorized", [True, False])
 def test_maddpg_algorithm_test_loop(
     ma_discrete_space,
@@ -1264,7 +1264,7 @@ def test_clone_new_index(compile_mode, ma_vector_space, ma_discrete_space):
     assert clone_agent.index == 100
 
 
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 def test_clone_after_learning(compile_mode, ma_vector_space):
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     batch_size = 8

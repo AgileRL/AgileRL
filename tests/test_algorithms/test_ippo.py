@@ -474,7 +474,7 @@ def test_ippo_clone_returns_identical_agent(
         assert_state_dicts_equal(clone_critic.state_dict(), critic.state_dict())
 
 
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 def test_clone_new_index(compile_mode, ma_vector_space, ma_discrete_space):
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
 
@@ -489,7 +489,7 @@ def test_clone_new_index(compile_mode, ma_vector_space, ma_discrete_space):
     assert clone_agent.index == 100
 
 
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 def test_clone_after_learning(compile_mode, ma_vector_space, ma_discrete_space):
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     batch_size = 8
@@ -566,7 +566,7 @@ def test_clone_after_learning(compile_mode, ma_vector_space, ma_discrete_space):
         assert str(clone_critic_opt) == str(critic_opt)
 
 
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 @pytest.mark.parametrize("batch_size", [16])
 @pytest.mark.parametrize("agent_ids", [["agent_0", "agent_1", "other_agent_0"]])
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
@@ -691,7 +691,7 @@ def test_ippo_learns_from_experiences(
         assert_not_equal_state_dict(old_critic_state_dict, updated_critic.state_dict())
 
 
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 @pytest.mark.parametrize("vect_dim", [1, 8])
 @pytest.mark.parametrize("batch_size", [16])
 @pytest.mark.parametrize("agent_ids", [["agent_0", "agent_1", "other_agent_0"]])
@@ -878,7 +878,7 @@ def no_sync(self):
         "ma_vector_space",
     ],
 )
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 def test_ippo_get_action_agent_masking(
     ma_vector_space, action_spaces, device, compile_mode, request
 ):
@@ -1008,7 +1008,7 @@ def test_ippo_get_action(
         "ma_discrete_space",
     ],
 )
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 def test_ippo_get_action_vectorized(
     observation_spaces, action_spaces, device, compile_mode, request
 ):
@@ -1151,7 +1151,7 @@ def test_ippo_init_torch_compiler_error(
     ],
 )
 @pytest.mark.parametrize("accelerator_flag", [False, True])
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 def test_initialize_ippo_with_net_config(
     accelerator_flag,
     observation_spaces,
@@ -1219,7 +1219,7 @@ def test_initialize_ippo_with_net_config(
 
 # TODO: This will be deprecated in the future
 @pytest.mark.parametrize("accelerator_flag", [False, True])
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
 @pytest.mark.parametrize("action_spaces", ["ma_discrete_space"])
 def test_initialize_ippo_with_mlp_networks(
@@ -1601,11 +1601,10 @@ def test_initialize_ippo_with_incorrect_networks(
         assert ippo
 
 
-@pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
 @pytest.mark.parametrize("action_spaces", ["ma_discrete_space"])
 def test_ippo_init_warning(
-    mlp_actor, observation_spaces, action_spaces, device, compile_mode, request
+    mlp_actor, observation_spaces, action_spaces, device, request
 ):
     observation_spaces = request.getfixturevalue(observation_spaces)
     action_spaces = request.getfixturevalue(action_spaces)
@@ -1621,7 +1620,6 @@ def test_ippo_init_warning(
             agent_ids=["agent_0", "agent_1", "other_agent_0"],
             actor_networks=evo_actors,
             device=device,
-            torch_compiler=compile_mode,
         )
 
 

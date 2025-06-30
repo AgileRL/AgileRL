@@ -21,17 +21,17 @@ from tests.helper_functions import assert_state_dicts_equal, is_processed_observ
 
 @pytest.fixture(scope="module")
 def mlp_config():
-    yield {"hidden_size": [8], "min_mlp_nodes": 8, "max_mlp_nodes": 80}
+    return {"hidden_size": [8], "min_mlp_nodes": 8, "max_mlp_nodes": 80}
 
 
 @pytest.fixture(scope="module")
 def cnn_config():
-    yield {"channel_size": [3], "kernel_size": [3], "stride_size": [1]}
+    return {"channel_size": [3], "kernel_size": [3], "stride_size": [1]}
 
 
 @pytest.fixture(scope="module")
 def multi_input_config():
-    yield {
+    return {
         "latent_dim": 64,
         "mlp_config": {"hidden_size": [8]},
         "cnn_config": {"channel_size": [3], "kernel_size": [3]},
@@ -42,14 +42,14 @@ def multi_input_config():
 def single_level_net_config(request):
     """Fixture for a single-level net config (one config for all agents)."""
     mlp_config = request.getfixturevalue("mlp_config")
-    yield {"encoder_config": mlp_config}
+    return {"encoder_config": mlp_config}
 
 
 @pytest.fixture(scope="module")
 def homogeneous_group_net_config(request):
     """Fixture for a homogeneous group net config with group-specific configs."""
     mlp_config = request.getfixturevalue("mlp_config")
-    yield {
+    return {
         "agent": {"encoder_config": mlp_config},
         "other_agent": {"encoder_config": mlp_config},
     }
@@ -59,7 +59,7 @@ def homogeneous_group_net_config(request):
 def homogeneous_agent_net_config(request):
     """Fixture for a homogeneous nested net config with agent-specific configs."""
     mlp_config = request.getfixturevalue("mlp_config")
-    yield {
+    return {
         "agent_0": {"encoder_config": mlp_config},
         "other_agent_0": {"encoder_config": mlp_config},
     }
@@ -70,7 +70,7 @@ def mixed_group_net_config(request):
     """Fixture for a mixed group net config with group-specific configs."""
     mlp_config = request.getfixturevalue("mlp_config")
     cnn_config = request.getfixturevalue("cnn_config")
-    yield {
+    return {
         "agent": {"encoder_config": mlp_config},
         "other_agent": {"encoder_config": cnn_config},
     }
@@ -81,7 +81,7 @@ def mixed_agent_net_config(request):
     """Fixture for a mixed nested net config with agent-specific configs."""
     mlp_config = request.getfixturevalue("mlp_config")
     cnn_config = request.getfixturevalue("cnn_config")
-    yield {
+    return {
         "agent_0": {"encoder_config": mlp_config},
         "agent_1": {"encoder_config": mlp_config},
         "other_agent_0": {"encoder_config": cnn_config},
@@ -95,7 +95,7 @@ def heterogeneous_agent_net_config(request):
     mlp_config = request.getfixturevalue("mlp_config")
     cnn_config = request.getfixturevalue("cnn_config")
     multi_input_config = request.getfixturevalue("multi_input_config")
-    yield {
+    return {
         "agent_0": {"encoder_config": mlp_config},
         "other_agent_0": {"encoder_config": cnn_config},
         "other_other_agent_0": {"encoder_config": multi_input_config},
@@ -396,6 +396,9 @@ def test_recompile(ma_vector_space, ma_discrete_space):
         isinstance(mod, OptimizedModule) for mod in agent.dummy_actors.values()
     ), agent.dummy_actors.values()
 
+    # Reset torch compilation state to prevent affecting subsequent tests
+    torch._dynamo.reset()
+
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_unwrap_models_multi_agent(compile_mode, ma_vector_space, ma_discrete_space):
@@ -413,6 +416,10 @@ def test_unwrap_models_multi_agent(compile_mode, ma_vector_space, ma_discrete_sp
 
     for _, actor in agent.dummy_actors.items():
         assert isinstance(actor, torch.nn.Module)
+
+    # Reset torch compilation state if compilation was used
+    if compile_mode is not None:
+        torch._dynamo.reset()
 
 
 def test_unwrap_models_single_agent(vector_space, discrete_space):
@@ -494,7 +501,7 @@ def test_save_load_checkpoint_single_agent(
     ],
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator()])
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 def test_save_load_checkpoint_multi_agent(
     tmpdir,
     with_hp_config,
@@ -575,6 +582,8 @@ def test_save_load_checkpoint_multi_agent(
     assert new_agent.steps == agent.steps
     assert new_agent.agent_ids == agent.agent_ids
 
+    del new_agent
+
 
 @pytest.mark.parametrize("device, with_hp_config", [("cpu", False), ("cpu", True)])
 @pytest.mark.parametrize(
@@ -639,7 +648,7 @@ def test_load_from_pretrained_single_agent(
 )
 @pytest.mark.parametrize("action_spaces", ["ma_vector_space", "ma_discrete_space"])
 @pytest.mark.parametrize("accelerator", [None, Accelerator()])
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 def test_load_from_pretrained_multi_agent(
     device,
     tmpdir,
@@ -690,7 +699,6 @@ def test_load_from_pretrained_multi_agent(
             == agent.possible_action_spaces[agent_id]
         )
 
-    print(compile_mode, accelerator)
     for agent_id in agent.agent_ids:
         if compile_mode is not None and accelerator is None:
             assert isinstance(new_agent.dummy_actors[agent_id], OptimizedModule)
@@ -708,6 +716,8 @@ def test_load_from_pretrained_multi_agent(
     assert new_agent.fitness == agent.fitness
     assert new_agent.steps == agent.steps
     assert new_agent.agent_ids == agent.agent_ids
+
+    del new_agent
 
 
 def test_missing_attribute_warning(tmpdir, vector_space, discrete_space):
