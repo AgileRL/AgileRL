@@ -10,12 +10,6 @@ from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import assert_state_dicts_equal, unpack_network
 
 
-@pytest.fixture(autouse=True)
-def cleanup():
-    yield  # Run the test first
-    torch.cuda.empty_cache()  # Free up GPU memory
-
-
 class TwoArgCNN(nn.Module):
     def __init__(self):
         super().__init__()

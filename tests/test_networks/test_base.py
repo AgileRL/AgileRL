@@ -1,4 +1,3 @@
-import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
@@ -16,25 +15,7 @@ from tests.helper_functions import (
     assert_not_equal_state_dict,
     assert_state_dicts_equal,
     check_equal_params_ind,
-    generate_dict_or_tuple_space,
-    generate_discrete_space,
-    generate_random_box_space,
 )
-
-
-class EvoDummyRNG:
-    rng = np.random.default_rng(seed=42)
-
-    def choice(self, a, size=None, replace=True, p=None):
-        return 1
-
-    def integers(self, low=0, high=None):
-        return self.rng.integers(low, high)
-
-
-@pytest.fixture
-def dummy_rng():
-    yield EvoDummyRNG()
 
 
 class InvalidCustomNetwork(EvolvableNetwork):
@@ -120,22 +101,23 @@ class CustomNetwork(EvolvableNetwork):
         return self.head_net(z)
 
 
-def test_network_incorrect_initialization():
-    observation_space = generate_random_box_space((8,))
+def test_network_incorrect_initialization(vector_space):
     with pytest.raises(AttributeError):
-        InvalidCustomNetwork(observation_space)
+        InvalidCustomNetwork(vector_space)
 
 
 @pytest.mark.parametrize(
     "observation_space, encoder_type",
     [
-        (generate_dict_or_tuple_space(2, 3), "multi_input"),
-        (generate_discrete_space(4), "mlp"),
-        (generate_random_box_space((8,)), "mlp"),
-        (generate_random_box_space((3, 32, 32)), "cnn"),
+        ("dict_space", "multi_input"),
+        ("discrete_space", "mlp"),
+        ("vector_space", "mlp"),
+        ("image_space", "cnn"),
     ],
 )
-def test_network_initialization(observation_space, encoder_type):
+def test_network_initialization(observation_space, encoder_type, request):
+    observation_space = request.getfixturevalue(observation_space)
+
     network = CustomNetwork(observation_space)
 
     assert network.observation_space == observation_space
@@ -149,15 +131,11 @@ def test_network_initialization(observation_space, encoder_type):
 
 
 @pytest.mark.parametrize(
-    "observation_space",
-    [
-        (generate_dict_or_tuple_space(2, 3)),
-        (generate_discrete_space(4)),
-        (generate_random_box_space((8,))),
-        (generate_random_box_space((3, 32, 32))),
-    ],
+    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
 )
-def test_network_mutation_methods(observation_space, dummy_rng):
+def test_network_mutation_methods(observation_space, dummy_rng, request):
+    observation_space = request.getfixturevalue(observation_space)
+
     network = CustomNetwork(observation_space)
     network.rng = dummy_rng
 
@@ -190,15 +168,11 @@ def test_network_mutation_methods(observation_space, dummy_rng):
 
 
 @pytest.mark.parametrize(
-    "observation_space",
-    [
-        (generate_dict_or_tuple_space(2, 3)),
-        (generate_discrete_space(4)),
-        (generate_random_box_space((8,))),
-        (generate_random_box_space((3, 32, 32))),
-    ],
+    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
 )
-def test_network_forward(observation_space: spaces.Space):
+def test_network_forward(observation_space: spaces.Space, request):
+    observation_space = request.getfixturevalue(observation_space)
+
     network = CustomNetwork(observation_space)
 
     x_np = observation_space.sample()
@@ -229,15 +203,11 @@ def test_network_forward(observation_space: spaces.Space):
 
 
 @pytest.mark.parametrize(
-    "observation_space",
-    [
-        (generate_dict_or_tuple_space(2, 3)),
-        (generate_discrete_space(4)),
-        (generate_random_box_space((8,))),
-        (generate_random_box_space((3, 32, 32))),
-    ],
+    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
 )
-def test_network_clone(observation_space: spaces.Space):
+def test_network_clone(observation_space: spaces.Space, request):
+    observation_space = request.getfixturevalue(observation_space)
+
     network = CustomNetwork(observation_space)
 
     original_net_dict = dict(network.named_parameters())

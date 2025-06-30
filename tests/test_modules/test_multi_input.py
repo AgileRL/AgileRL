@@ -17,19 +17,7 @@ from tests.helper_functions import (
 DictOrTupleSpace = Union[Dict, Tuple]
 
 
-######### Define fixtures #########
-@pytest.fixture
-def device():
-    return "cuda" if torch.cuda.is_available() else "cpu"
-
-
-@pytest.fixture(autouse=True)
-def cleanup():
-    yield  # Run the test first
-    torch.cuda.empty_cache()  # Free up GPU memory
-
-
-@pytest.fixture
+@pytest.fixture(scope="module")
 def default_cnn_config():
     return asdict(
         CnnNetConfig(
@@ -41,7 +29,7 @@ def default_cnn_config():
     )
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def multiagent_cnn_config(
     device, image_shape: tuple = (3, 32, 32), sample_input: str = "default"
 ):
@@ -62,7 +50,7 @@ def multiagent_cnn_config(
     )
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def default_mlp_config():
     return asdict(
         MlpNetConfig(
@@ -72,7 +60,7 @@ def default_mlp_config():
     )
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def default_lstm_config():
     return asdict(
         LstmNetConfig(
