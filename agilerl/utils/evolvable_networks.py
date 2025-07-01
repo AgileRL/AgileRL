@@ -11,7 +11,7 @@ from torch.optim import Optimizer
 
 from agilerl.modules.configs import (
     CnnNetConfig,
-    LSTMNetConfig,
+    LstmNetConfig,
     MlpNetConfig,
     MultiInputNetConfig,
     SimBaNetConfig,
@@ -74,12 +74,13 @@ def get_default_encoder_config(
             stride_size=[1, 1],
             output_activation=None,
         )
+    elif simba:
+        return SimBaNetConfig(hidden_size=128, num_blocks=2, output_activation=None)
+    elif recurrent:
+        return LstmNetConfig(
+            hidden_state_size=128, num_layers=2, output_activation=None
+        )
     else:
-        if simba and len(observation_space.shape) == 1:
-            return SimBaNetConfig(hidden_size=128, num_blocks=2, output_activation=None)
-        elif recurrent and len(observation_space.shape) == 2:
-            return LSTMNetConfig(hidden_size=128, num_layers=2, output_activation=None)
-
         return MlpNetConfig(
             hidden_size=[16, 16], output_activation=None, output_vanish=False
         )

@@ -7,7 +7,7 @@ import pytest
 import torch
 from gymnasium.spaces import Dict, Tuple
 
-from agilerl.modules.configs import CnnNetConfig, LstmNetConfig, MlpNetConfig
+from agilerl.modules.configs import CnnNetConfig, MlpNetConfig
 from agilerl.modules.multi_input import EvolvableMultiInput
 from tests.helper_functions import generate_dict_or_tuple_space
 
@@ -69,20 +69,7 @@ def default_mlp_config():
     )
 
 
-@pytest.fixture
-def default_lstm_config():
-    return asdict(
-        LstmNetConfig(
-            hidden_size=64,
-            num_layers=1,
-            output_activation="ReLU",
-        )
-    )
-
-
 ######### Test instantiation #########
-
-
 @pytest.mark.parametrize(
     "observation_space, num_outputs",
     [
@@ -96,14 +83,12 @@ def test_instantiation_without_errors(
     device,
     default_cnn_config,
     default_mlp_config,
-    default_lstm_config,
 ):
     evolvable_composed = EvolvableMultiInput(
         observation_space=observation_space,
         num_outputs=num_outputs,
         cnn_config=default_cnn_config,
         mlp_config=default_mlp_config,
-        lstm_config=default_lstm_config,
         device=device,
     )
     assert isinstance(evolvable_composed, EvolvableMultiInput)
@@ -125,7 +110,6 @@ def test_incorrect_instantiation(
     device,
     default_cnn_config,
     default_mlp_config,
-    default_lstm_config,
 ):
     with pytest.raises((AssertionError, ValueError)):
         EvolvableMultiInput(
@@ -133,7 +117,6 @@ def test_incorrect_instantiation(
             num_outputs=num_outputs,
             cnn_config=default_cnn_config,
             mlp_config=default_mlp_config,
-            lstm_config=default_lstm_config,
             device=device,
         )
 
@@ -150,14 +133,12 @@ def test_instantiation_for_multi_agents(
     device,
     multiagent_cnn_config,
     default_mlp_config,
-    default_lstm_config,
 ):
     evolvable_composed = EvolvableMultiInput(
         observation_space=observation_space,
         num_outputs=num_outputs,
         cnn_config=multiagent_cnn_config,
         mlp_config=default_mlp_config,
-        lstm_config=default_lstm_config,
         device=device,
     )
     assert isinstance(evolvable_composed, EvolvableMultiInput)
@@ -177,7 +158,6 @@ def test_incorrect_instantiation_for_multi_agents(
     device,
     multiagent_cnn_config,
     default_mlp_config,
-    default_lstm_config,
 ):
     with pytest.raises(TypeError):
         EvolvableMultiInput(
@@ -185,7 +165,6 @@ def test_incorrect_instantiation_for_multi_agents(
             num_outputs=num_outputs,
             cnn_config=multiagent_cnn_config(sample_input=sample_input),
             mlp_config=default_mlp_config,
-            lstm_config=default_lstm_config,
             device=device,
         )
 
@@ -205,14 +184,12 @@ def test_forward(
     device,
     default_cnn_config,
     default_mlp_config,
-    default_lstm_config,
 ):
     evolvable_composed = EvolvableMultiInput(
         observation_space=observation_space,
         num_outputs=num_outputs,
         cnn_config=default_cnn_config,
         mlp_config=default_mlp_config,
-        lstm_config=default_lstm_config,
         device=device,
     )
 
@@ -247,14 +224,12 @@ def test_forward_multi(
     device,
     multiagent_cnn_config,
     default_mlp_config,
-    default_lstm_config,
 ):
     evolvable_composed = EvolvableMultiInput(
         observation_space=observation_space,
         num_outputs=num_outputs,
         cnn_config=multiagent_cnn_config,
         mlp_config=default_mlp_config,
-        lstm_config=default_lstm_config,
         device=device,
     )
 
@@ -860,14 +835,12 @@ def test_clone_instance(
     device,
     default_cnn_config,
     default_mlp_config,
-    default_lstm_config,
 ):
     evolvable_composed = EvolvableMultiInput(
         observation_space=observation_space,
         num_outputs=num_outputs,
         cnn_config=default_cnn_config,
         mlp_config=default_mlp_config,
-        lstm_config=default_lstm_config,
         device=device,
     )
 
@@ -898,7 +871,6 @@ def test_add_latent_node(
     device,
     default_cnn_config,
     default_mlp_config,
-    default_lstm_config,
 ):
     evolvable_composed = EvolvableMultiInput(
         observation_space=observation_space,
@@ -908,7 +880,6 @@ def test_add_latent_node(
         max_latent_dim=128,
         cnn_config=default_cnn_config,
         mlp_config=default_mlp_config,
-        lstm_config=default_lstm_config,
         device=device,
     )
 
@@ -930,7 +901,6 @@ def test_remove_latent_node(
     device,
     default_cnn_config,
     default_mlp_config,
-    default_lstm_config,
 ):
     evolvable_composed = EvolvableMultiInput(
         observation_space=observation_space,
@@ -940,7 +910,6 @@ def test_remove_latent_node(
         max_latent_dim=128,
         cnn_config=default_cnn_config,
         mlp_config=default_mlp_config,
-        lstm_config=default_lstm_config,
         device=device,
     )
 
@@ -962,14 +931,12 @@ def test_change_activation(
     device,
     default_cnn_config,
     default_mlp_config,
-    default_lstm_config,
 ):
     evolvable_composed = EvolvableMultiInput(
         observation_space=observation_space,
         num_outputs=num_outputs,
         cnn_config=default_cnn_config,
         mlp_config=default_mlp_config,
-        lstm_config=default_lstm_config,
         device=device,
     )
 
@@ -992,14 +959,12 @@ def test_vector_space_mlp(
     device,
     default_cnn_config,
     default_mlp_config,
-    default_lstm_config,
 ):
     evolvable_composed = EvolvableMultiInput(
         observation_space=observation_space,
         num_outputs=num_outputs,
         cnn_config=default_cnn_config,
         mlp_config=default_mlp_config,
-        lstm_config=default_lstm_config,
         vector_space_mlp=True,
         device=device,
     )
@@ -1031,14 +996,12 @@ def test_latent_dim_bounds(
     device,
     default_cnn_config,
     default_mlp_config,
-    default_lstm_config,
 ):
     evolvable_composed = EvolvableMultiInput(
         observation_space=observation_space,
         num_outputs=num_outputs,
         cnn_config=default_cnn_config,
         mlp_config=default_mlp_config,
-        lstm_config=default_lstm_config,
         latent_dim=128,
         min_latent_dim=8,
         max_latent_dim=128,
@@ -1053,7 +1016,6 @@ def test_latent_dim_bounds(
         num_outputs=num_outputs,
         cnn_config=default_cnn_config,
         mlp_config=default_mlp_config,
-        lstm_config=default_lstm_config,
         latent_dim=8,
         min_latent_dim=8,
         max_latent_dim=128,

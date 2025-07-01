@@ -49,23 +49,13 @@ def test_q_network_initialization(observation_space, encoder_type):
     assert "head_net" in evolvable_modules
 
 
-@pytest.mark.parametrize(
-    "observation_space, encoder_type",
-    [
-        (generate_random_box_space((8,)), "mlp"),
-        (generate_random_box_space((32, 8)), "lstm"),
-    ],
-)
-def test_q_network_initialization_recurrent(observation_space, encoder_type):
+def test_q_network_initialization_recurrent():
     action_space = spaces.Discrete(4)
+    observation_space = generate_random_box_space((8,))
     network = QNetwork(observation_space, action_space, recurrent=True)
 
     assert network.observation_space == observation_space
-
-    if encoder_type == "mlp":
-        assert isinstance(network.encoder, EvolvableMLP)
-    elif encoder_type == "lstm":
-        assert isinstance(network.encoder, EvolvableLSTM)
+    assert isinstance(network.encoder, EvolvableLSTM)
 
     evolvable_modules = network.modules()
     assert "encoder" in evolvable_modules
@@ -350,23 +340,13 @@ def test_continuous_q_network_initialization(observation_space, encoder_type):
     assert "head_net" in evolvable_modules
 
 
-@pytest.mark.parametrize(
-    "observation_space, encoder_type",
-    [
-        (generate_random_box_space((8,)), "mlp"),
-        (generate_random_box_space((32, 8)), "lstm"),
-    ],
-)
-def test_continuous_q_network_initialization_recurrent(observation_space, encoder_type):
+def test_continuous_q_network_initialization_recurrent():
+    observation_space = generate_random_box_space((8,))
     action_space = spaces.Box(low=-1, high=1, shape=(4,))
     network = ContinuousQNetwork(observation_space, action_space, recurrent=True)
 
     assert network.observation_space == observation_space
-
-    if encoder_type == "mlp":
-        assert isinstance(network.encoder, EvolvableMLP)
-    elif encoder_type == "lstm":
-        assert isinstance(network.encoder, EvolvableLSTM)
+    assert isinstance(network.encoder, EvolvableLSTM)
 
     evolvable_modules = network.modules()
     assert "encoder" in evolvable_modules
