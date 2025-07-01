@@ -669,7 +669,7 @@ def test_save_load_checkpoint_correct_data_and_format(
     dqn.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
-    checkpoint = torch.load(checkpoint_path, pickle_module=dill)
+    checkpoint = torch.load(checkpoint_path, pickle_module=dill, weights_only=False)
 
     # Check if the loaded checkpoint has the correct keys
     assert "actor_init_dict" in checkpoint["network_info"]["modules"]
@@ -742,7 +742,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     dqn.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
-    checkpoint = torch.load(checkpoint_path, pickle_module=dill)
+    checkpoint = torch.load(checkpoint_path, pickle_module=dill, weights_only=False)
 
     # Check if the loaded checkpoint has the correct keys
     assert "actor_init_dict" in checkpoint["network_info"]["modules"]
