@@ -61,8 +61,8 @@ class DeterministicActor(EvolvableNetwork):
         simba: bool = False,
         recurrent: bool = False,
         device: str = "cpu",
+        encoder_name: str = "encoder",
     ):
-
         super().__init__(
             observation_space,
             encoder_cls=encoder_cls,
@@ -75,6 +75,7 @@ class DeterministicActor(EvolvableNetwork):
             simba=simba,
             recurrent=recurrent,
             device=device,
+            encoder_name=encoder_name,
         )
 
         if isinstance(action_space, spaces.Box):
@@ -252,6 +253,7 @@ class StochasticActor(EvolvableNetwork):
         simba: bool = False,
         recurrent: bool = False,
         device: str = "cpu",
+        encoder_name: str = "encoder",
     ):
         super().__init__(
             observation_space,
@@ -265,6 +267,7 @@ class StochasticActor(EvolvableNetwork):
             simba=simba,
             recurrent=recurrent,
             device=device,
+            encoder_name=encoder_name,
         )
 
         # Require the head to output logits to parameterize a distribution
