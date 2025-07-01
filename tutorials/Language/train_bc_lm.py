@@ -92,7 +92,11 @@ def train(cfg):
     ):
         print(f'loading optimizer state from: {train_cfg["optim_state_path"]}')
         optim.load_state_dict(
-            torch.load(train_cfg["optim_state_path"], map_location=system_cfg["device"])
+            torch.load(
+                train_cfg["optim_state_path"],
+                map_location=system_cfg["device"],
+                weights_only=False,
+            )
         )
         print("loaded.")
     if isinstance(dataset_train, IterableDataset) and isinstance(

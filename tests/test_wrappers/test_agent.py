@@ -383,7 +383,7 @@ def test_save_load_checkpoint(tmp_path):
     ddpg_norm.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
-    checkpoint = torch.load(checkpoint_path, pickle_module=dill)
+    checkpoint = torch.load(checkpoint_path, pickle_module=dill, weights_only=False)
 
     # Check if the loaded checkpoint has the correct keys
     assert "wrapper_cls" in checkpoint
