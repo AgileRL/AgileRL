@@ -721,6 +721,7 @@ def init_wandb(
     wandb_api_key: Optional[str] = None,
     accelerator: Optional[Accelerator] = None,
     project: str = "AgileRL",
+    addl_args: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Initializes wandb for logging hyperparameters and run metadata.
 
@@ -735,6 +736,8 @@ def init_wandb(
     :param wandb_api_key: Wandb API key, defaults to None
     :type wandb_api_key: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
+    :param addl_args: Additional kwargs to pass to wandb.init()
+    :type addl_args: dict, optional
     """
     if not hasattr(wandb, "api"):
         if wandb_api_key is not None:
@@ -748,29 +751,26 @@ def init_wandb(
     if mutation_hyperparams is not None:
         config_dict.update(mutation_hyperparams)
 
+    kwargs = {
+        # track hyperparameters and run metadata
+        "config": config_dict,
+        # set the wandb project where this run will be logged
+        "project": project,
+        "name": "{}-EvoHPO-{}-{}".format(
+            env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
+        ),
+    }
+
+    if addl_args is not None:
+        kwargs.update(addl_args)
+
     if accelerator is not None:
         accelerator.wait_for_everyone()
         if accelerator.is_main_process:
-            wandb.init(
-                # set the wandb project where this run will be logged
-                project=project,
-                name="{}-EvoHPO-{}-{}".format(
-                    env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
-                ),
-                # track hyperparameters and run metadata
-                config=config_dict,
-            )
+            wandb.init(**kwargs)
         accelerator.wait_for_everyone()
     else:
-        wandb.init(
-            # set the wandb project where this run will be logged
-            project=project,
-            name="{}-EvoHPO-{}-{}".format(
-                env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
-            ),
-            # track hyperparameters and run metadata
-            config=config_dict,
-        )
+        wandb.init(**kwargs)
 
 
 def calculate_vectorized_scores(
