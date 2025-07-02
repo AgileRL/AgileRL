@@ -448,12 +448,14 @@ class EvolvableCNN(EvolvableModule):
         )
 
         # Flatten image encodings and pass through a final linear layer
-        pre_flatten_output = nn.Sequential(net_dict)(sample_input)
-        net_dict[f"{self.name}_flatten"] = nn.Flatten()
+        pre_flatten_model = nn.Sequential(net_dict)
+        pre_flatten_model.eval()
         with torch.no_grad():
+            pre_flatten_output = pre_flatten_model(sample_input)
+            net_dict[f"{self.name}_flatten"] = nn.Flatten()
             cnn_output = nn.Sequential(net_dict)(sample_input)
-            flattened_size = cnn_output.shape[1]
 
+        flattened_size = cnn_output.shape[1]
         net_dict[f"{self.name}_linear_output"] = nn.Linear(
             flattened_size, self.num_outputs, device=self.device
         )
