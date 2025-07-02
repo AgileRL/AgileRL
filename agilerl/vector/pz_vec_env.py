@@ -1,10 +1,10 @@
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 from gymnasium.spaces import Space
 from gymnasium.vector.utils import batch_space
 
-from agilerl.typing import ActionType
+from agilerl.typing import ActionType, PzStepReturn
 
 
 class PettingZooVecEnv:
@@ -82,19 +82,20 @@ class PettingZooVecEnv:
         """
         pass
 
-    def step_wait(self) -> Union[Dict[str, np.ndarray], Dict[str, Any]]:
+    def step_wait(self) -> PzStepReturn:
         """
         Wait for the step taken with step_async().
         """
         pass
 
-    def step(
-        self, actions: Dict[str, np.ndarray]
-    ) -> Union[Dict[str, np.ndarray], Dict[str, Any]]:
+    def step(self, actions: Dict[str, np.ndarray]) -> PzStepReturn:
         """Take an action for each parallel environment
 
         :param actions: Dictionary of vectorized actions for each agent.
         :type actions: dict[str, np.ndarray]
+
+        :return: Tuple of observations, rewards, terminated, truncated, infos
+        :rtype: tuple[dict[str, np.ndarray], dict[str, float], dict[str, bool], dict[str, bool], dict[str, Any]]
         """
         passed_actions_list = [[] for _ in list(actions.values())[0]]
         for env_idx, _ in enumerate(list(actions.values())[0]):

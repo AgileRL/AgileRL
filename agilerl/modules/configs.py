@@ -125,12 +125,13 @@ class CnnNetConfig(NetConfig):
 
 @dataclass
 class LstmNetConfig(NetConfig):
-    hidden_size: int
+    hidden_state_size: int
     num_layers: int = field(default=1)
-    min_hidden_size: int = field(default=16)
-    max_hidden_size: int = field(default=500)
+    min_hidden_state_size: int = field(default=16)
+    max_hidden_state_size: int = field(default=500)
     min_layers: int = field(default=1)
     max_layers: int = field(default=4)
+    max_seq_len: int = field(default=None)
     output_activation: Optional[str] = field(default=None)
     dropout: float = field(default=0.0)
 
@@ -152,7 +153,6 @@ class MultiInputNetConfig(NetConfig):
     # Network configurations
     cnn_config: Optional[ConfigType] = field(default=None)
     mlp_config: Optional[ConfigType] = field(default=None)
-    lstm_config: Optional[ConfigType] = field(default=None)
 
     # Additional settings
     init_dicts: Dict[str, Dict[str, Any]] = field(default_factory=dict)
@@ -186,16 +186,5 @@ class MultiInputNetConfig(NetConfig):
         else:
             self.mlp_config = MlpNetConfig(
                 hidden_size=[64, 64],
-                output_activation="ReLU",
-            )
-
-        if self.lstm_config is not None:
-            assert isinstance(
-                self.lstm_config, LstmNetConfig
-            ), "LSTM config must be an instance of LstmNetConfig"
-        else:
-            self.lstm_config = LstmNetConfig(
-                hidden_size=64,
-                num_layers=2,
                 output_activation="ReLU",
             )

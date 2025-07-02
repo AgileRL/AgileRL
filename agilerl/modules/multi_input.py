@@ -10,11 +10,10 @@ from gymnasium import spaces
 
 from agilerl.modules import EvolvableCNN, EvolvableLSTM, EvolvableMLP
 from agilerl.modules.base import EvolvableModule, ModuleDict, MutationType, mutation
-from agilerl.modules.configs import CnnNetConfig, LstmNetConfig, MlpNetConfig, NetConfig
+from agilerl.modules.configs import CnnNetConfig, MlpNetConfig, NetConfig
 from agilerl.typing import ArrayOrTensor, ConfigType
 from agilerl.utils.evolvable_networks import (
     get_activation,
-    is_box_space_ndim,
     is_image_space,
     is_vector_space,
     tuple_to_dict_space,
@@ -37,11 +36,6 @@ DefaultMlpConfig = MlpNetConfig(
     hidden_size=[64, 64],
     output_activation="ReLU",
 )
-DefaultLstmConfig = LstmNetConfig(
-    hidden_size=64,
-    num_layers=2,
-    output_activation="ReLU",
-)
 
 
 def get_total_flatdim(observation_spaces: spaces.Dict) -> int:
@@ -54,19 +48,15 @@ def get_total_flatdim(observation_spaces: spaces.Dict) -> int:
     return sum([spaces.flatdim(space) for space in observation_spaces.spaces.values()])
 
 
-def is_adhoc_vector_space(space: spaces.Space, recurrent: bool = False) -> bool:
+def is_practical_vector_space(space: spaces.Space) -> bool:
     """Check if the space is a vector space.
 
     :param space: Input space
     :type space: spaces.Space
-    :param recurrent: Whether to check if the space is a 2D Box space, defaults to False
-    :type recurrent: bool, optional
     :return: True if the space is a vector space, False otherwise
     """
-    return (
-        is_vector_space(space)
-        or (is_box_space_ndim(space, 2) and not recurrent)
-        or (isinstance(space, spaces.Box) and len(space.shape) > 3)
+    return is_vector_space(space) or (
+        isinstance(space, spaces.Box) and len(space.shape) > 3
     )
 
 
@@ -93,15 +83,10 @@ class EvolvableMultiInput(EvolvableModule):
     :type cnn_config: MultiInputConfigType, optional
     :param mlp_config: Configuration for the MLP feature extractor. Default is None.
     :type mlp_config: MultiInputConfigType, optional
-    :param lstm_config: Configuration for the LSTM feature extractor. Default is None.
-    :type lstm_config: MultiInputConfigType, optional
     :param init_dicts: Dictionary of initialization dictionaries for the feature extractors. Default is {}.
     :type init_dicts: Dict[str, Dict[str, Any]], optional
     :param output_activation: Activation function for the output layer. Default is None.
     :type output_activation: Optional[str], optional
-    :param recurrent: Whether to use an `EvolvableLSTM` for 2D Box spaces. Otherwise, the observation
-        is flattened and treated as a vector space. Default is False.
-    :type recurrent: bool, optional
     :param min_latent_dim: Minimum dimension of the latent space. Default is 8.
     :type min_latent_dim: int, optional
     :param max_latent_dim: Maximum dimension of the latent space. Default is 128.
@@ -123,10 +108,8 @@ class EvolvableMultiInput(EvolvableModule):
         vector_space_mlp: bool = False,
         cnn_config: Optional[MultiInputConfigType] = None,
         mlp_config: Optional[MultiInputConfigType] = None,
-        lstm_config: Optional[MultiInputConfigType] = None,
         init_dicts: Optional[MultiInputConfigType] = None,
         output_activation: Optional[str] = None,
-        recurrent: bool = False,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
         device: str = "cpu",
@@ -165,7 +148,6 @@ class EvolvableMultiInput(EvolvableModule):
         self.num_outputs = num_outputs
         self.cnn_config = cnn_config or DefaultCnnConfig
         self.mlp_config = mlp_config or DefaultMlpConfig
-        self.lstm_config = lstm_config or DefaultLstmConfig
         self._init_dicts = init_dicts or {}
         self._activation = None
         self.mlp_name = None
@@ -174,15 +156,17 @@ class EvolvableMultiInput(EvolvableModule):
         self.output_activation = output_activation
         self.min_latent_dim = min_latent_dim
         self.max_latent_dim = max_latent_dim
-        self.recurrent = recurrent
         self.name = name
         self.device = device
+
+        # Require certain parameters for encoder MLPs
+        self.mlp_config = self._reformat_mlp_config(self.mlp_config)
 
         self.vector_spaces = spaces.Dict(
             {
                 key: space
                 for key, space in observation_space.spaces.items()
-                if is_adhoc_vector_space(space, self.recurrent)
+                if is_practical_vector_space(space)
             }
         )
         self.total_vector_dims = get_total_flatdim(self.vector_spaces)
@@ -266,10 +250,16 @@ class EvolvableMultiInput(EvolvableModule):
         """Returns the initialization dictionary for the MLP."""
         return copy.deepcopy(self.mlp_config)
 
-    @property
-    def lstm_init_dict(self) -> Dict[str, Any]:
-        """Returns the initialization dictionary for the LSTM."""
-        return copy.deepcopy(self.lstm_config)
+    def _reformat_mlp_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Reformats the MLP configuration."""
+        config["output_vanish"] = False  # Don't want output vanish for encoder
+        config["output_layernorm"] = config.get(
+            "layer_norm", True
+        )  # Add layer norm for output if present generally
+        config["output_activation"] = config.get(
+            "activation", "ReLU"
+        )  # Use same output activation
+        return config
 
     def init_weights_gaussian(
         self, std_coeff: float = 4, output_coeff: float = 4
@@ -297,14 +287,14 @@ class EvolvableMultiInput(EvolvableModule):
         )
 
     def get_inner_init_dict(
-        self, key: str, default: Literal["cnn", "mlp", "lstm"]
+        self, key: str, default: Literal["cnn", "mlp"]
     ) -> ConfigType:
         """Returns the initialization dictionary for the specified key.
 
         :param key: Key of the observation space.
         :type key: str
         :param default: Default value to return if the key is not found.
-        :type default: Literal["cnn", "mlp", "lstm"]
+        :type default: Literal["cnn", "mlp"]
         :return: Initialization dictionary.
         :rtype: ConfigType
         """
@@ -318,13 +308,10 @@ class EvolvableMultiInput(EvolvableModule):
         init_dict = {
             "cnn": self.cnn_init_dict,
             "mlp": self.mlp_init_dict,
-            "lstm": self.lstm_init_dict,
         }.get(default)
 
         if init_dict is None:
-            raise ValueError(
-                "Invalid default value provided, must be 'cnn' or 'mlp' or 'lstm'."
-            )
+            raise ValueError("Invalid default value provided, must be 'cnn' or 'mlp'.")
         else:
             nested_dict = init_dict.get(key)
             init_dict = (
@@ -351,6 +338,7 @@ class EvolvableMultiInput(EvolvableModule):
         for key, space in self.observation_space.spaces.items():
             if isinstance(space, spaces.Box) and len(space.shape) in [0, 1]:
                 continue
+
             # EvolvableCNN for image spaces
             if is_image_space(space):
                 init_dict = copy.deepcopy(self.get_inner_init_dict(key, default="cnn"))
@@ -359,17 +347,7 @@ class EvolvableMultiInput(EvolvableModule):
                     name=init_dict.pop("name", key),
                     **init_dict,
                 )
-            elif self.recurrent:
-                # EvolvableLSTM for 2D Box spaces if recurrent=True
-                init_dict = copy.deepcopy(self.get_inner_init_dict(key, default="lstm"))
-                feature_extractor = EvolvableLSTM(
-                    input_size=space.shape[0],
-                    name=init_dict.pop("name", key) + "_lstm",
-                    device=self.device,
-                    **init_dict,
-                )
-            # Flatten other observation types
-            else:
+            else:  # Flatten other observation types
                 feature_extractor = nn.Flatten()
 
             feature_net[key] = feature_extractor

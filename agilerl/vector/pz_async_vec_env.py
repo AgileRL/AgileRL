@@ -21,7 +21,7 @@ from gymnasium.error import (
 from gymnasium.vector.utils import CloudpickleWrapper, clear_mpi_env_vars
 from pettingzoo import ParallelEnv
 
-from agilerl.typing import ActionType, GymSpaceType, MultiAgentStepType, NumpyObsType
+from agilerl.typing import ActionType, GymSpaceType, NumpyObsType, PzStepReturn
 from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
 AgentID = TypeVar("AgentID")
@@ -297,7 +297,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
 
         self._state = AsyncState.WAITING_STEP
 
-    def step_wait(self, timeout: Optional[float] = None) -> MultiAgentStepType:
+    def step_wait(self, timeout: Optional[float] = None) -> PzStepReturn:
         """
         Wait for the calls to :obj:`step` in each sub-environment to finish.
 

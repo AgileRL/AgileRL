@@ -172,9 +172,6 @@ def encoder_multi_input_config():
             "mlp_config": {
                 "hidden_size": [8],
             },
-            "lstm_config": {
-                "hidden_size": 8,
-            },
         }
     }
 

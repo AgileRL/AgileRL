@@ -3,10 +3,14 @@ import torch
 import torch.nn.functional as F
 from gymnasium import spaces
 
-from agilerl.modules.base import EvolvableModule
-from agilerl.modules.cnn import EvolvableCNN
-from agilerl.modules.mlp import EvolvableMLP
-from agilerl.modules.multi_input import EvolvableMultiInput
+from agilerl.modules import (
+    EvolvableCNN,
+    EvolvableLSTM,
+    EvolvableMLP,
+    EvolvableModule,
+    EvolvableMultiInput,
+    EvolvableSimBa,
+)
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.value_networks import ValueNetwork
 from tests.helper_functions import (
@@ -38,6 +42,30 @@ def test_value_function_initialization(observation_space, encoder_type):
         assert isinstance(network.encoder, EvolvableMLP)
     elif encoder_type == "cnn":
         assert isinstance(network.encoder, EvolvableCNN)
+
+    evolvable_modules = network.modules()
+    assert "encoder" in evolvable_modules
+    assert "head_net" in evolvable_modules
+
+
+def test_value_function_initialization_recurrent():
+    observation_space = generate_random_box_space((32, 8))
+    network = ValueNetwork(observation_space, recurrent=True)
+
+    assert network.observation_space == observation_space
+    assert isinstance(network.encoder, EvolvableLSTM)
+
+    evolvable_modules = network.modules()
+    assert "encoder" in evolvable_modules
+    assert "head_net" in evolvable_modules
+
+
+def test_value_function_initialization_simba():
+    observation_space = generate_random_box_space((8,))
+    network = ValueNetwork(observation_space, simba=True)
+
+    assert network.observation_space == observation_space
+    assert isinstance(network.encoder, EvolvableSimBa)
 
     evolvable_modules = network.modules()
     assert "encoder" in evolvable_modules
