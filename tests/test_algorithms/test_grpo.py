@@ -12,7 +12,7 @@ import torch.nn as nn
 from accelerate import Accelerator
 from accelerate.scheduler import AcceleratedScheduler
 from accelerate.state import AcceleratorState
-from accelerate.utils import DeepSpeedPlugin, patch_environment
+from accelerate.utils import DeepSpeedPlugin
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
@@ -210,6 +210,31 @@ def create_module(input_size, max_tokens, vocab_size, device):
     )
 
 
+@pytest.fixture(autouse=True)
+def deepspeed_env():
+    import os
+
+    existing_vars = {}
+    for key, value in dist_env.items():
+        key = key.upper()
+        if key in os.environ:
+            existing_vars[key] = os.environ[key]
+        os.environ[key] = str(value)
+
+    try:
+        yield
+    finally:
+        for key in dist_env:
+            key = key.upper()
+            if key in existing_vars:
+                # restore previous value
+                os.environ[key] = existing_vars[key]
+            else:
+                os.environ.pop(key, None)
+        gc.collect()
+        torch.cuda.empty_cache()
+
+
 @pytest.fixture
 def accelerator(request):
     gc.collect()
@@ -241,50 +266,49 @@ def grpo(request, accelerator):
     gc.collect()
     torch.cuda.empty_cache()
     accelerator, use_deepspeed_optimizer = accelerator
-    with patch_environment(**dist_env):
-        vocab_size = request.param.get("vocab_size", 1000)
-        input_size = request.param.get("input_size", 10)
-        max_tokens = request.param.get("max_tokens", 20)
-        group_size = request.param.get("group_size", 5)
-        set_reference_policy_adapter = request.param.get(
-            "set_reference_policy_adapter", False
-        )
-        observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
-        action_space = gym.spaces.Box(
-            low=0,
-            high=vocab_size - 1,
-            shape=(20,),
-        )
-        lora_config = LoraConfig(
-            r=16,
-            lora_alpha=64,
-            target_modules=["linear_1"],
-            task_type="CAUSAL_LM",
-            lora_dropout=0.05,
-        )
-        grpo = GRPO(
-            observation_space,
-            action_space,
-            actor_network=create_module(
-                input_size=input_size,
-                max_tokens=max_tokens,
-                vocab_size=vocab_size,
-                device="cuda" if torch.cuda.is_available() else "cpu",
-            ),
-            lr=1e-5,
-            pad_token_id=vocab_size - 1,
+    vocab_size = request.param.get("vocab_size", 1000)
+    input_size = request.param.get("input_size", 10)
+    max_tokens = request.param.get("max_tokens", 20)
+    group_size = request.param.get("group_size", 5)
+    set_reference_policy_adapter = request.param.get(
+        "set_reference_policy_adapter", False
+    )
+    observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
+    action_space = gym.spaces.Box(
+        low=0,
+        high=vocab_size - 1,
+        shape=(20,),
+    )
+    lora_config = LoraConfig(
+        r=16,
+        lora_alpha=64,
+        target_modules=["linear_1"],
+        task_type="CAUSAL_LM",
+        lora_dropout=0.05,
+    )
+    grpo = GRPO(
+        observation_space,
+        action_space,
+        actor_network=create_module(
+            input_size=input_size,
+            max_tokens=max_tokens,
+            vocab_size=vocab_size,
             device="cuda" if torch.cuda.is_available() else "cpu",
-            group_size=group_size,
-            lora_config=lora_config,
-            cosine_lr_schedule_config=(
-                None
-                if accelerator is not None
-                else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
-            ),
-            accelerator=accelerator,
-            use_separate_reference_adapter=set_reference_policy_adapter,
-        )
-        yield grpo
+        ),
+        lr=1e-5,
+        pad_token_id=vocab_size - 1,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        group_size=group_size,
+        lora_config=lora_config,
+        cosine_lr_schedule_config=(
+            None
+            if accelerator is not None
+            else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+        ),
+        accelerator=accelerator,
+        use_separate_reference_adapter=set_reference_policy_adapter,
+    )
+    yield grpo
 
 
 @pytest.mark.parametrize(
@@ -447,7 +471,7 @@ def test_init_grpo_with_no_accelerator(
 @pytest.mark.parametrize("set_reference_policy_adapter", [False, True])
 def test_init_grpo_zero3_warning(accelerator, request, set_reference_policy_adapter):
     accelerator, use_deepspeed_optimizer = accelerator
-    with pytest.warns(UserWarning), patch_environment(**dist_env):
+    with pytest.warns(UserWarning):
         gc.collect()
         vocab_size = 1000
         input_size = 10
@@ -503,7 +527,7 @@ def test_init_grpo_zero3_warning(accelerator, request, set_reference_policy_adap
 @pytest.mark.parametrize("set_reference_policy_adapter", [False, True])
 def test_init_grpo_lr_warning(accelerator, request, set_reference_policy_adapter):
     accelerator, use_deepspeed_optimizer = accelerator
-    with pytest.warns(UserWarning), patch_environment(**dist_env):
+    with pytest.warns(UserWarning):
         gc.collect()
         vocab_size = 1000
         input_size = 10
@@ -564,7 +588,7 @@ def test_init_grpo_max_grad_norm_warning(
     accelerator, request, set_reference_policy_adapter
 ):
     accelerator, use_deepspeed_optimizer = accelerator
-    with pytest.warns(UserWarning), patch_environment(**dist_env):
+    with pytest.warns(UserWarning):
         gc.collect()
         vocab_size = 1000
         input_size = 10
@@ -626,7 +650,7 @@ def test_init_grpo_scheduler_warning(
     accelerator, request, set_reference_policy_adapter
 ):
     accelerator, use_deepspeed_optimizer = accelerator
-    with pytest.warns(UserWarning), patch_environment(**dist_env):
+    with pytest.warns(UserWarning):
         gc.collect()
         vocab_size = 1000
         input_size = 10
@@ -2511,7 +2535,7 @@ def test_load_distributed_actor_warning(grpo, accelerator, request, batch_size):
 )
 def test_init_grpo_lora_config_warning(accelerator, request):
     accelerator, use_deepspeed_optimizer = accelerator
-    with pytest.warns(UserWarning), patch_environment(**dist_env):
+    with pytest.warns(UserWarning):
         gc.collect()
         vocab_size = 1000
         input_size = 10
@@ -2561,7 +2585,7 @@ def test_init_grpo_multiple_adapters(accelerator, request):
     accelerator, use_deepspeed_optimizer = accelerator
     with pytest.warns(
         UserWarning, match="AgileRL RL finetuning is only compatible with one adapter."
-    ), patch_environment(**dist_env):
+    ):
 
         # Clean up GPU memory
         gc.collect()
@@ -3032,46 +3056,45 @@ def test_grpo_ref_actor_is_same_as_actor_after_learning_reference_adapater(
     accelerator, request
 ):
     accelerator, use_deepspeed_optimizer = accelerator
-    with patch_environment(**dist_env):
-        gc.collect()
-        vocab_size = 1000
-        input_size = 10
-        max_tokens = 20
-        group_size = 5
-        observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
-        action_space = gym.spaces.Box(
-            low=0,
-            high=vocab_size - 1,
-            shape=(20,),
-        )
-        grpo = GRPO(
-            observation_space,
-            action_space,
-            actor_network=create_module(
-                input_size=input_size,
-                max_tokens=max_tokens,
-                vocab_size=vocab_size,
-                device="cuda" if torch.cuda.is_available() else "cpu",
-            ),
-            lr=0.1,
-            pad_token_id=vocab_size - 1,
+    gc.collect()
+    vocab_size = 1000
+    input_size = 10
+    max_tokens = 20
+    group_size = 5
+    observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
+    action_space = gym.spaces.Box(
+        low=0,
+        high=vocab_size - 1,
+        shape=(20,),
+    )
+    grpo = GRPO(
+        observation_space,
+        action_space,
+        actor_network=create_module(
+            input_size=input_size,
+            max_tokens=max_tokens,
+            vocab_size=vocab_size,
             device="cuda" if torch.cuda.is_available() else "cpu",
-            group_size=group_size,
-            lora_config=LoraConfig(
-                r=16,
-                lora_alpha=64,
-                target_modules=["linear_1"],
-                task_type="CAUSAL_LM",
-                lora_dropout=0.05,
-            ),
-            cosine_lr_schedule_config=(
-                None
-                if accelerator is not None
-                else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
-            ),
-            accelerator=accelerator,
-            use_separate_reference_adapter=True,
-        )
+        ),
+        lr=0.1,
+        pad_token_id=vocab_size - 1,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        group_size=group_size,
+        lora_config=LoraConfig(
+            r=16,
+            lora_alpha=64,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+        ),
+        cosine_lr_schedule_config=(
+            None
+            if accelerator is not None
+            else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+        ),
+        accelerator=accelerator,
+        use_separate_reference_adapter=True,
+    )
 
     # Ensure adapters have different params
     grpo.actor.set_adapter("actor")
@@ -3099,7 +3122,7 @@ def test_grpo_ref_actor_is_same_as_actor_after_learning_reference_adapater(
 )
 def test_grpo_set_reference_policy_with_wrong_adapter_name(accelerator, request):
     accelerator, use_deepspeed_optimizer = accelerator
-    with pytest.raises(ValueError), patch_environment(**dist_env):
+    with pytest.raises(ValueError):
         gc.collect()
         vocab_size = 1000
         input_size = 10
@@ -3142,9 +3165,7 @@ def test_grpo_set_reference_policy_with_wrong_adapter_name(accelerator, request)
         )
         grpo.actor.add_adapter("wrong_adapter", peft_config=lora_config)
         grpo.set_reference_policy(reference_update_tracker=1)
-
-
-# def test_ref_actor_is_same_as_actor_after_learning_no_reference_adapater(grpo, accelerator, request):
+    AcceleratorState._reset_state(True)
 
 
 def check_ref_adapater_is_same_as_actor_after_learning(grpo):
