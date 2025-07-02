@@ -49,6 +49,7 @@ def train_on_policy(
     verbose: bool = True,
     accelerator: Optional[Accelerator] = None,
     wandb_api_key: Optional[str] = None,
+    wandb_kwargs: Optional[Dict[str, Any]] = None,
     collect_rollouts_fn: Optional[
         Callable[[OnPolicyAlgorithms, gym.Env, int], None]
     ] = None,
@@ -105,6 +106,8 @@ def train_on_policy(
     :type accelerator: accelerate.Accelerator(), optional
     :param wandb_api_key: API key for Weights & Biases, defaults to None
     :type wandb_api_key: str, optional
+    :param wandb_kwargs: Additional kwargs to pass to wandb.init()
+    :type wand_kwargs: dict, optional
     :param collect_rollouts_fn: Optional function used to collect rollouts. If
         ``None`` and agents use a rollout buffer, a default function will be
         selected based on whether the agent is recurrent.
@@ -140,14 +143,17 @@ def train_on_policy(
         )
 
     if wb:
-        init_wandb(
-            algo=algo,
-            env_name=env_name,
-            init_hyperparams=INIT_HP,
-            mutation_hyperparams=MUT_P,
-            wandb_api_key=wandb_api_key,
-            accelerator=accelerator,
-        )
+        init_wandb_kwargs = {
+            "algo": algo,
+            "env_name": env_name,
+            "init_hyperparams": INIT_HP,
+            "mutation_hyperparams": MUT_P,
+            "wandb_api_key": wandb_api_key,
+            "accelerator": accelerator,
+        }
+        if wandb_kwargs is not None:
+            init_wandb_kwargs.update(wandb_kwargs)
+        init_wandb(**init_wandb_kwargs)
 
     # Detect if environment is vectorised
     if hasattr(env, "num_envs"):
