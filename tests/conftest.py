@@ -62,6 +62,11 @@ def dict_space():
 
 
 @pytest.fixture(scope="session")
+def tuple_space():
+    return generate_dict_or_tuple_space(2, 2, dict_space=False)
+
+
+@pytest.fixture(scope="session")
 def multidiscrete_space():
     return generate_multidiscrete_space(2, 2)
 
@@ -243,9 +248,6 @@ def encoder_multi_input_config():
                 "max_channel_size": 10,
             },
             "mlp_config": {"hidden_size": [8], "min_mlp_nodes": 1},
-            "lstm_config": {
-                "hidden_size": 8,
-            },
         },
         "head_config": {"hidden_size": [8], "min_mlp_nodes": 1},
     }

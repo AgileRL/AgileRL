@@ -9,11 +9,10 @@ from gymnasium import spaces
 
 from agilerl.modules import EvolvableCNN, EvolvableLSTM, EvolvableMLP
 from agilerl.modules.base import EvolvableModule, ModuleDict, MutationType, mutation
-from agilerl.modules.configs import CnnNetConfig, LstmNetConfig, MlpNetConfig, NetConfig
-from agilerl.typing import ArrayOrTensor, ConfigType, ModuleType
+from agilerl.modules.configs import CnnNetConfig, MlpNetConfig, NetConfig
+from agilerl.typing import ArrayOrTensor, ConfigType, ModuleType, NetConfigType
 from agilerl.utils.evolvable_networks import (
     get_activation,
-    is_box_space_ndim,
     is_image_space,
     is_vector_space,
     tuple_to_dict_space,
@@ -37,11 +36,6 @@ DefaultMlpConfig = MlpNetConfig(
     output_activation="ReLU",
     output_layernorm=True,
 )
-DefaultLstmConfig = LstmNetConfig(
-    hidden_size=64,
-    num_layers=2,
-    output_activation="ReLU",
-)
 
 
 def get_total_flatdim(observation_spaces: spaces.Dict) -> int:
@@ -54,35 +48,31 @@ def get_total_flatdim(observation_spaces: spaces.Dict) -> int:
     return sum([spaces.flatdim(space) for space in observation_spaces.spaces.values()])
 
 
-def vector_space_check(space: spaces.Space, recurrent: bool = False) -> bool:
-    """Check if the space is a vector space.
+def vector_space_check(space: spaces.Space) -> bool:
+    """Check if the space is a vector space as it pertains to the use of
+    an EvolvableMLP.
 
     :param space: Input space
     :type space: spaces.Space
-    :param recurrent: Whether to check if the space is a 2D Box space, defaults to False
-    :type recurrent: bool, optional
     :return: True if the space is a vector space, False otherwise
     """
-    return (
-        is_vector_space(space)
-        or (is_box_space_ndim(space, 2) and not recurrent)
-        or (isinstance(space, spaces.Box) and len(space.shape) > 3)
+    return is_vector_space(space) or (
+        isinstance(space, spaces.Box) and len(space.shape) > 3
     )
 
 
 class EvolvableMultiInput(EvolvableModule):
     """Evolvable multi-input network for Tuple or Dict observation spaces. It inspects the
     observation space to determine the type of network to build for each key. It builds an
-    EvolvableCNN for image subspaces, an EvolvableLSTM for time-series subspaces if specified
-    through the recurrent flag, and a nn.Flatten() for other types. Vector observations are
-    concatenated with the extracted features before passing through an EvolvableMLP to produce
-    the output tensor. Optionally, users may specify an additional EvolvableMLP to be applied to
+    ``EvolvableCNN`` for image subspaces and a nn.Flatten() for other types. Vector observations are
+    concatenated with the extracted features before passing through an ``EvolvableMLP`` to produce
+    the output tensor. Optionally, users may specify an additional ``EvolvableMLP`` to be applied to
     the concatenated vector observations before concatenation with the extracted features.
 
     Supports the following types of architecture mutations during training:
 
     * Adding or removing latent nodes
-    * Inherits the mutation methods of any nested EvolvableModule objects used in the network
+    * Inherits the mutation methods of any nested ``EvolvableModule`` objects used in the network
 
     :param observation_space: Dictionary or Tuple space of observations.
     :type observation_space: spaces.Dict or spaces.Tuple
@@ -98,15 +88,10 @@ class EvolvableMultiInput(EvolvableModule):
     :type cnn_config: MultiInputConfigType, optional
     :param mlp_config: Configuration for the MLP feature extractor. Default is None.
     :type mlp_config: MultiInputConfigType, optional
-    :param lstm_config: Configuration for the LSTM feature extractor. Default is None.
-    :type lstm_config: MultiInputConfigType, optional
     :param init_dicts: Dictionary of initialization dictionaries for the feature extractors. Default is {}.
     :type init_dicts: Dict[str, Dict[str, Any]], optional
     :param output_activation: Activation function for the output layer. Default is None.
     :type output_activation: Optional[str], optional
-    :param recurrent: Whether to use an EvolvableLSTM for 2D Box spaces. Otherwise, the observation
-        is flattened and treated as a vector space. Default is False.
-    :type recurrent: bool, optional
     :param min_latent_dim: Minimum dimension of the latent space. Default is 8.
     :type min_latent_dim: int, optional
     :param max_latent_dim: Maximum dimension of the latent space. Default is 128.
@@ -129,11 +114,9 @@ class EvolvableMultiInput(EvolvableModule):
         vector_space_mlp: bool = False,
         cnn_config: Optional[MultiInputConfigType] = None,
         mlp_config: Optional[MultiInputConfigType] = None,
-        lstm_config: Optional[MultiInputConfigType] = None,
         init_dicts: Optional[MultiInputConfigType] = None,
         output_activation: Optional[str] = None,
         output_layernorm: bool = False,
-        recurrent: bool = False,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
         device: str = "cpu",
@@ -164,7 +147,6 @@ class EvolvableMultiInput(EvolvableModule):
         self.num_outputs = num_outputs
         self.cnn_config = cnn_config or DefaultCnnConfig
         self.mlp_config = mlp_config or DefaultMlpConfig
-        self.lstm_config = lstm_config or DefaultLstmConfig
         self._init_dicts = init_dicts or {}
         self._activation = None
         self.mlp_name = None
@@ -173,14 +155,13 @@ class EvolvableMultiInput(EvolvableModule):
         self.output_activation = output_activation
         self.min_latent_dim = min_latent_dim
         self.max_latent_dim = max_latent_dim
-        self.recurrent = recurrent
         self.name = name
         self.device = device
 
         # We use an output nn.LayerNorm whenever specified, or if there is an MLP
         # feature extractor that uses layer_norm=True
         self.output_layernorm = output_layernorm or (
-            self.vector_space_mlp and self.mlp_config["layer_norm"]
+            self.vector_space_mlp and self.mlp_config.get("layer_norm", True)
         )
 
         # Modifications for MLP encoders
@@ -192,7 +173,7 @@ class EvolvableMultiInput(EvolvableModule):
             {
                 key: space
                 for key, space in observation_space.spaces.items()
-                if vector_space_check(space, self.recurrent)
+                if vector_space_check(space)
             }
         )
         self.total_vector_dims = get_total_flatdim(self.vector_spaces)
@@ -281,10 +262,16 @@ class EvolvableMultiInput(EvolvableModule):
         """Returns the initialization dictionary for the MLP."""
         return copy.deepcopy(self.mlp_config)
 
-    @property
-    def lstm_init_dict(self) -> Dict[str, Any]:
-        """Returns the initialization dictionary for the LSTM."""
-        return copy.deepcopy(self.lstm_config)
+    def _reformat_mlp_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Reformats the MLP configuration."""
+        config["output_vanish"] = False  # Don't want output vanish for encoder
+        config["output_layernorm"] = config.get(
+            "layer_norm", True
+        )  # Add layer norm for output if present generally
+        config["output_activation"] = config.get(
+            "activation", "ReLU"
+        )  # Use same output activation
+        return config
 
     def _modify_mlp_config(self) -> None:
         """Modifies the MLP architecture to be appropriate for use as an encoder (i.e. disable
@@ -320,7 +307,7 @@ class EvolvableMultiInput(EvolvableModule):
             ]
         )
 
-    def get_inner_init_dict(self, key: str, default: ModuleType) -> ConfigType:
+    def get_inner_init_dict(self, key: str, default: ModuleType) -> NetConfigType:
         """Returns the initialization dictionary for the specified key.
 
         :param key: Key of the observation space.
@@ -340,13 +327,12 @@ class EvolvableMultiInput(EvolvableModule):
         init_dict = {
             ModuleType.CNN: self.cnn_init_dict,
             ModuleType.MLP: self.mlp_init_dict,
-            ModuleType.RNN: self.lstm_init_dict,
             ModuleType.MULTI_INPUT: self.net_config,
         }.get(default)
 
         if init_dict is None:
             raise ValueError(
-                "Invalid default value provided, must be 'cnn' or 'mlp' or 'lstm' or 'multi_input'."
+                "Invalid default value provided, must be 'cnn' or 'mlp' or 'multi_input'."
             )
         else:
             # Check if we are extracting a nested dict
@@ -377,7 +363,7 @@ class EvolvableMultiInput(EvolvableModule):
                 continue
 
             # EvolvableMultiInput for nested multi-input spaces
-            elif isinstance(space, (spaces.Dict, spaces.Tuple)):
+            if isinstance(space, (spaces.Dict, spaces.Tuple)):
                 init_dict = self.get_inner_init_dict(
                     key, default=ModuleType.MULTI_INPUT
                 )
@@ -395,22 +381,7 @@ class EvolvableMultiInput(EvolvableModule):
                     name=init_dict.pop("name", key),
                     **init_dict,
                 )
-
-            # EvolvableLSTM for 2D Box spaces if recurrent=True
-            elif (
-                isinstance(space, spaces.Box)
-                and len(space.shape) == 2
-                and key not in self.vector_spaces.keys()
-            ):
-                init_dict = self.get_inner_init_dict(key, default=ModuleType.RNN)
-                feature_extractor = EvolvableLSTM(
-                    input_size=space.shape[1],
-                    name=init_dict.pop("name", key),
-                    **init_dict,
-                )
-
-            # Flatten other observation types
-            else:
+            else:  # Flatten other observation types
                 feature_extractor = nn.Flatten()
 
             feature_net[key] = feature_extractor

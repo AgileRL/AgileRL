@@ -9,7 +9,7 @@ from agilerl.modules import EvolvableMLP, EvolvableModule, EvolvableMultiInput
 from agilerl.modules.configs import MlpNetConfig, NetConfig
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.custom_modules import DuelingDistributionalMLP
-from agilerl.typing import ArrayOrTensor, ConfigType, TorchObsType
+from agilerl.typing import ArrayOrTensor, NetConfigType, TorchObsType
 from agilerl.utils.evolvable_networks import get_default_encoder_config, is_image_space
 
 
@@ -56,8 +56,8 @@ class QNetwork(EvolvableNetwork):
         observation_space: spaces.Space,
         action_space: Union[spaces.Discrete, spaces.MultiDiscrete],
         encoder_cls: Optional[Union[str, Type[EvolvableModule]]] = None,
-        encoder_config: Optional[ConfigType] = None,
-        head_config: Optional[ConfigType] = None,
+        encoder_config: Optional[NetConfigType] = None,
+        head_config: Optional[NetConfigType] = None,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
         latent_dim: int = 32,
@@ -170,8 +170,8 @@ class RainbowQNetwork(EvolvableNetwork):
         support: torch.Tensor,
         num_atoms: int = 51,
         noise_std: float = 0.5,
-        encoder_config: Optional[ConfigType] = None,
-        head_config: Optional[ConfigType] = None,
+        encoder_config: Optional[NetConfigType] = None,
+        head_config: Optional[NetConfigType] = None,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
         latent_dim: int = 32,
@@ -329,8 +329,8 @@ class ContinuousQNetwork(EvolvableNetwork):
         observation_space: spaces.Space,
         action_space: spaces.Box,
         encoder_cls: Optional[Type[EvolvableModule]] = None,
-        encoder_config: Optional[ConfigType] = None,
-        head_config: Optional[ConfigType] = None,
+        encoder_config: Optional[NetConfigType] = None,
+        head_config: Optional[NetConfigType] = None,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
         latent_dim: int = 32,
@@ -389,11 +389,11 @@ class ContinuousQNetwork(EvolvableNetwork):
 
         return False
 
-    def build_network_head(self, net_config: Optional[ConfigType] = None) -> None:
+    def build_network_head(self, net_config: NetConfigType) -> None:
         """Builds the head of the network.
 
         :param head_config: Configuration of the head.
-        :type head_config: Optional[ConfigType]
+        :type head_config: Optional[NetConfigType]
         """
         self.head_net = self.create_mlp(
             num_inputs=self.latent_dim + self.num_actions,

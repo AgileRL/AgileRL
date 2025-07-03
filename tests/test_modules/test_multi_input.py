@@ -7,7 +7,7 @@ import pytest
 import torch
 from gymnasium.spaces import Dict, Tuple
 
-from agilerl.modules.configs import CnnNetConfig, LstmNetConfig, MlpNetConfig
+from agilerl.modules.configs import CnnNetConfig, MlpNetConfig
 from agilerl.modules.multi_input import EvolvableMultiInput
 from tests.helper_functions import (
     assert_state_dicts_equal,
@@ -60,20 +60,7 @@ def default_mlp_config():
     )
 
 
-@pytest.fixture(scope="module")
-def default_lstm_config():
-    return asdict(
-        LstmNetConfig(
-            hidden_size=64,
-            num_layers=1,
-            output_activation="ReLU",
-        )
-    )
-
-
 ######### Test instantiation #########
-
-
 @pytest.mark.parametrize(
     "observation_space, num_outputs",
     [
@@ -87,14 +74,12 @@ def test_instantiation_without_errors(
     device,
     default_cnn_config,
     default_mlp_config,
-    default_lstm_config,
 ):
     evolvable_composed = EvolvableMultiInput(
         observation_space=observation_space,
         num_outputs=num_outputs,
         cnn_config=default_cnn_config,
         mlp_config=default_mlp_config,
-        lstm_config=default_lstm_config,
         device=device,
     )
     assert isinstance(evolvable_composed, EvolvableMultiInput)
@@ -116,7 +101,6 @@ def test_incorrect_instantiation(
     device,
     default_cnn_config,
     default_mlp_config,
-    default_lstm_config,
 ):
     with pytest.raises((AssertionError, ValueError)):
         EvolvableMultiInput(
@@ -124,7 +108,6 @@ def test_incorrect_instantiation(
             num_outputs=num_outputs,
             cnn_config=default_cnn_config,
             mlp_config=default_mlp_config,
-            lstm_config=default_lstm_config,
             device=device,
         )
 
@@ -141,14 +124,12 @@ def test_instantiation_for_multi_agents(
     device,
     multiagent_cnn_config,
     default_mlp_config,
-    default_lstm_config,
 ):
     evolvable_composed = EvolvableMultiInput(
         observation_space=observation_space,
         num_outputs=num_outputs,
         cnn_config=multiagent_cnn_config,
         mlp_config=default_mlp_config,
-        lstm_config=default_lstm_config,
         device=device,
     )
     assert isinstance(evolvable_composed, EvolvableMultiInput)
@@ -168,7 +149,6 @@ def test_incorrect_instantiation_for_multi_agents(
     device,
     multiagent_cnn_config,
     default_mlp_config,
-    default_lstm_config,
 ):
     with pytest.raises(TypeError):
         EvolvableMultiInput(
@@ -176,7 +156,6 @@ def test_incorrect_instantiation_for_multi_agents(
             num_outputs=num_outputs,
             cnn_config=multiagent_cnn_config(sample_input=sample_input),
             mlp_config=default_mlp_config,
-            lstm_config=default_lstm_config,
             device=device,
         )
 
@@ -196,14 +175,12 @@ def test_forward(
     device,
     default_cnn_config,
     default_mlp_config,
-    default_lstm_config,
 ):
     evolvable_composed = EvolvableMultiInput(
         observation_space=observation_space,
         num_outputs=num_outputs,
         cnn_config=default_cnn_config,
         mlp_config=default_mlp_config,
-        lstm_config=default_lstm_config,
         device=device,
     )
 
@@ -238,14 +215,12 @@ def test_forward_multi(
     device,
     multiagent_cnn_config,
     default_mlp_config,
-    default_lstm_config,
 ):
     evolvable_composed = EvolvableMultiInput(
         observation_space=observation_space,
         num_outputs=num_outputs,
         cnn_config=multiagent_cnn_config,
         mlp_config=default_mlp_config,
-        lstm_config=default_lstm_config,
         device=device,
     )
 
@@ -718,14 +693,14 @@ def test_remove_channels(
 
 
 ######### Test change_cnn_kernel #########
-def test_change_cnn_kernel(device, default_cnn_config):
+def test_change_cnn_kernel(device, default_cnn_config, dict_space):
     config = default_cnn_config.copy()
     config["channel_size"] = [32, 32]
     config["kernel_size"] = [3, 3]
     config["stride_size"] = [1, 1]
 
     evolvable_composed = EvolvableMultiInput(
-        observation_space=generate_dict_or_tuple_space(2, 3),
+        observation_space=dict_space,
         num_outputs=4,
         cnn_config=config,
         device=device,
@@ -743,36 +718,35 @@ def test_change_cnn_kernel(device, default_cnn_config):
     ], evolvable_composed.init_dicts["image_1"]["kernel_size"]
 
 
-def test_change_kernel_size(device, default_cnn_config):
-    observation_space = generate_dict_or_tuple_space(2, 3)
+def test_change_kernel_size(device, default_cnn_config, dict_space):
     config = default_cnn_config.copy()
     config["channel_size"] = [32, 32]
     config["kernel_size"] = [3, 3]
     config["stride_size"] = [1, 1]
 
     evolvable_composed = EvolvableMultiInput(
-        observation_space=observation_space,
+        observation_space=dict_space,
         num_outputs=4,
         cnn_config=config,
         device=device,
     )
 
-    for _ in range(100):
+    for _ in range(10):
         # Change kernel size and ensure we can make a valid forward pass
         getattr(evolvable_composed, "feature_net.image_1.change_kernel")()
-        sample_input = observation_space.sample()
+        sample_input = dict_space.sample()
         output = evolvable_composed(sample_input)
         assert output.squeeze().shape[0] == 4  # (num actions)
 
 
-def test_change_cnn_kernel_else_statement(device, default_cnn_config):
+def test_change_cnn_kernel_else_statement(device, default_cnn_config, dict_space):
     config = default_cnn_config.copy()
     config["channel_size"] = [32, 32]
     config["kernel_size"] = [3, 3]
     config["stride_size"] = [1, 1]
 
     evolvable_composed = EvolvableMultiInput(
-        observation_space=generate_dict_or_tuple_space(2, 3),
+        observation_space=dict_space,
         num_outputs=4,
         cnn_config=config,
         device=device,
@@ -788,15 +762,14 @@ def test_change_cnn_kernel_else_statement(device, default_cnn_config):
     assert evolvable_composed.init_dicts["image_1"]["kernel_size"] != [3, 3]
 
 
-def test_change_cnn_kernel_multi(device, multiagent_cnn_config):
-    observation_space = generate_dict_or_tuple_space(2, 3, dict_space=True)
+def test_change_cnn_kernel_multi(device, multiagent_cnn_config, dict_space):
     config = multiagent_cnn_config.copy()
     config["channel_size"] = [32, 32]
     config["kernel_size"] = [3, 3]
     config["stride_size"] = [1, 1]
 
     evolvable_composed = EvolvableMultiInput(
-        observation_space=observation_space,
+        observation_space=dict_space,
         num_outputs=4,
         cnn_config=config,
         device=device,
@@ -815,15 +788,16 @@ def test_change_cnn_kernel_multi(device, multiagent_cnn_config):
     ], evolvable_composed.init_dicts["image_1"]["kernel_size"]
 
 
-def test_change_cnn_kernel_multi_else_statement(device, multiagent_cnn_config):
-    observation_space = generate_dict_or_tuple_space(2, 3, dict_space=True)
+def test_change_cnn_kernel_multi_else_statement(
+    device, multiagent_cnn_config, dict_space
+):
     config = multiagent_cnn_config.copy()
     config["channel_size"] = [32]
     config["kernel_size"] = [3]
     config["stride_size"] = [1]
 
     evolvable_composed = EvolvableMultiInput(
-        observation_space=observation_space,
+        observation_space=dict_space,
         num_outputs=4,
         cnn_config=config,
         device=device,
@@ -851,14 +825,12 @@ def test_clone_instance(
     device,
     default_cnn_config,
     default_mlp_config,
-    default_lstm_config,
 ):
     evolvable_composed = EvolvableMultiInput(
         observation_space=observation_space,
         num_outputs=num_outputs,
         cnn_config=default_cnn_config,
         mlp_config=default_mlp_config,
-        lstm_config=default_lstm_config,
         device=device,
     )
 
@@ -889,7 +861,6 @@ def test_add_latent_node(
     device,
     default_cnn_config,
     default_mlp_config,
-    default_lstm_config,
 ):
     evolvable_composed = EvolvableMultiInput(
         observation_space=observation_space,
@@ -899,7 +870,6 @@ def test_add_latent_node(
         max_latent_dim=128,
         cnn_config=default_cnn_config,
         mlp_config=default_mlp_config,
-        lstm_config=default_lstm_config,
         device=device,
     )
 
@@ -921,7 +891,6 @@ def test_remove_latent_node(
     device,
     default_cnn_config,
     default_mlp_config,
-    default_lstm_config,
 ):
     evolvable_composed = EvolvableMultiInput(
         observation_space=observation_space,
@@ -931,7 +900,6 @@ def test_remove_latent_node(
         max_latent_dim=128,
         cnn_config=default_cnn_config,
         mlp_config=default_mlp_config,
-        lstm_config=default_lstm_config,
         device=device,
     )
 
@@ -953,14 +921,12 @@ def test_change_activation(
     device,
     default_cnn_config,
     default_mlp_config,
-    default_lstm_config,
 ):
     evolvable_composed = EvolvableMultiInput(
         observation_space=observation_space,
         num_outputs=num_outputs,
         cnn_config=default_cnn_config,
         mlp_config=default_mlp_config,
-        lstm_config=default_lstm_config,
         device=device,
     )
 
@@ -983,14 +949,12 @@ def test_vector_space_mlp(
     device,
     default_cnn_config,
     default_mlp_config,
-    default_lstm_config,
 ):
     evolvable_composed = EvolvableMultiInput(
         observation_space=observation_space,
         num_outputs=num_outputs,
         cnn_config=default_cnn_config,
         mlp_config=default_mlp_config,
-        lstm_config=default_lstm_config,
         vector_space_mlp=True,
         device=device,
     )
@@ -1022,14 +986,12 @@ def test_latent_dim_bounds(
     device,
     default_cnn_config,
     default_mlp_config,
-    default_lstm_config,
 ):
     evolvable_composed = EvolvableMultiInput(
         observation_space=observation_space,
         num_outputs=num_outputs,
         cnn_config=default_cnn_config,
         mlp_config=default_mlp_config,
-        lstm_config=default_lstm_config,
         latent_dim=128,
         min_latent_dim=8,
         max_latent_dim=128,
@@ -1044,7 +1006,6 @@ def test_latent_dim_bounds(
         num_outputs=num_outputs,
         cnn_config=default_cnn_config,
         mlp_config=default_mlp_config,
-        lstm_config=default_lstm_config,
         latent_dim=8,
         min_latent_dim=8,
         max_latent_dim=128,

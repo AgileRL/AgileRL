@@ -57,8 +57,8 @@ def test_value_function_initialization(observation_space, encoder_type, request)
     assert "head_net" in evolvable_modules
 
 
-def test_value_function_initialization_recurrent():
-    observation_space = spaces.Box(low=-1, high=1, shape=(32, 8))
+def test_value_function_initialization_recurrent(vector_space):
+    observation_space = vector_space
     network = ValueNetwork(observation_space, recurrent=True)
 
     assert network.observation_space == observation_space

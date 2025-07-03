@@ -1,5 +1,6 @@
 import copy
 
+import gymnasium
 import numpy as np
 import pytest
 import torch
@@ -10,7 +11,9 @@ from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 
 from agilerl.algorithms.ppo import PPO
+from agilerl.components.rollout_buffer import RolloutBuffer
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
+from agilerl.rollouts import collect_rollouts, collect_rollouts_recurrent
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import assert_not_equal_state_dict, assert_state_dicts_equal
 
@@ -28,10 +31,10 @@ class DummyEnv:
     def __init__(self, state_size, vect=True, num_envs=2):
         self.state_size = state_size
         self.vect = vect
+        self.num_envs = num_envs
         if self.vect:
             self.state_size = (num_envs,) + self.state_size
             self.n_envs = num_envs
-            self.num_envs = num_envs
         else:
             self.n_envs = 1
 
@@ -193,6 +196,7 @@ def test_initialize_ppo_with_make_evo(
     assert ppo.fitness == []
     assert ppo.steps == [0]
     assert isinstance(ppo.optimizer.optimizer, optim.Adam)
+    assert ppo.num_envs == 1
 
 
 def test_initialize_ppo_with_incorrect_actor_net(vector_space, discrete_space):
@@ -279,6 +283,7 @@ def test_returns_expected_action(observation_space, action_space, build_ppo, req
         for act in action[0]:
             assert isinstance(act, np.float32)
     else:
+        print(action, action_space)
         assert isinstance(action, np.ndarray)
         assert action.shape == (1, *action_space.shape)
 
@@ -468,6 +473,8 @@ def test_clone_returns_identical_agent(observation_space, discrete_space, reques
     assert clone_agent.scores == ppo.scores
     assert clone_agent.tensor_attribute == ppo.tensor_attribute
     assert clone_agent.tensor_test == ppo.tensor_test
+    assert clone_agent.num_envs == ppo.num_envs
+    assert clone_agent.index == ppo.index
 
     accelerator = Accelerator()
     ppo = PPO(observation_space, discrete_space, accelerator=accelerator)
@@ -497,8 +504,12 @@ def test_clone_returns_identical_agent(observation_space, discrete_space, reques
     assert clone_agent.fitness == ppo.fitness
     assert clone_agent.steps == ppo.steps
     assert clone_agent.scores == ppo.scores
+    assert clone_agent.num_envs == ppo.num_envs
+    assert clone_agent.index == ppo.index
 
-    accelerator = Accelerator()
+    accelerator = (
+        Accelerator(cpu=True) if torch.backends.mps.is_available() else Accelerator()
+    )
     ppo = PPO(
         observation_space,
         discrete_space,
@@ -531,6 +542,8 @@ def test_clone_returns_identical_agent(observation_space, discrete_space, reques
     assert clone_agent.fitness == ppo.fitness
     assert clone_agent.steps == ppo.steps
     assert clone_agent.scores == ppo.scores
+    assert clone_agent.num_envs == ppo.num_envs
+    assert clone_agent.index == ppo.index
 
 
 def test_clone_new_index(vector_space, discrete_space):
@@ -539,31 +552,88 @@ def test_clone_new_index(vector_space, discrete_space):
     assert clone_agent.index == 100
 
 
-def test_clone_after_learning(vector_space):
+@pytest.mark.parametrize("device", ["cpu", "cuda"], ids=lambda d: f"device={d}")
+@pytest.mark.parametrize(
+    "use_rollout_buffer", [True, False], ids=lambda b: f"use_rollout_buffer={b}"
+)
+@pytest.mark.parametrize("recurrent", [True, False], ids=lambda r: f"recurrent={r}")
+@pytest.mark.parametrize(
+    "share_encoders", [True, False], ids=lambda s: f"share_encoders={s}"
+)
+def test_clone_after_learning(
+    device, use_rollout_buffer, recurrent, share_encoders, vector_space
+):
+    # accept if recurrent and no rollout buffer
+    if recurrent and not use_rollout_buffer:
+        return
+
+    # check if device is available
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    observation_space = vector_space
+    action_space = vector_space
     max_env_steps = 20
     num_vec_envs = 2
-    ppo = PPO(vector_space, copy.deepcopy(vector_space))
 
-    states = np.random.randn(max_env_steps, num_vec_envs, vector_space.shape[0])
-    next_states = np.random.randn(num_vec_envs, vector_space.shape[0])
-    actions = np.random.rand(max_env_steps, num_vec_envs, vector_space.shape[0])
-    log_probs = -np.random.rand(max_env_steps, num_vec_envs)
-    rewards = np.random.randint(0, 100, (max_env_steps, num_vec_envs))
-    dones = np.zeros((max_env_steps, num_vec_envs))
-    values = np.random.randn(max_env_steps, num_vec_envs)
-    next_done = np.zeros((1, num_vec_envs))
-    experiences = (
-        states,
-        actions,
-        log_probs,
-        rewards,
-        dones,
-        values,
-        next_states,
-        next_done,
+    if recurrent:
+        net_config = {
+            "encoder_config": {
+                "hidden_state_size": 64,
+                "max_seq_len": 10,
+            }
+        }
+    else:
+        net_config = {}
+
+    ppo = PPO(
+        observation_space,
+        action_space,
+        device=torch.device(device),
+        use_rollout_buffer=use_rollout_buffer,
+        recurrent=recurrent,
+        net_config=net_config,
+        num_envs=num_vec_envs,
+        share_encoders=share_encoders,
     )
-    ppo.learn(experiences)
+
+    if use_rollout_buffer:
+        dummy_env = DummyEnv(observation_space.shape, vect=True, num_envs=num_vec_envs)
+        # Use the correct rollout collection function based on whether the policy is recurrent
+        if recurrent:
+            collect_rollouts_recurrent(ppo, dummy_env)
+        else:
+            collect_rollouts(ppo, dummy_env)
+        ppo.learn()
+    else:
+        states = np.random.randn(
+            max_env_steps, num_vec_envs, observation_space.shape[0]
+        )
+        next_states = np.random.randn(num_vec_envs, observation_space.shape[0])
+        actions = np.random.rand(max_env_steps, num_vec_envs, action_space.shape[0])
+        log_probs = -np.random.rand(max_env_steps, num_vec_envs)
+        rewards = np.random.randint(0, 100, (max_env_steps, num_vec_envs))
+        dones = np.zeros((max_env_steps, num_vec_envs))
+        values = np.random.randn(
+            max_env_steps,
+            num_vec_envs,
+        )
+        next_done = np.zeros((1, num_vec_envs))
+        experiences = (
+            states,
+            actions,
+            log_probs,
+            rewards,
+            dones,
+            values,
+            next_states,
+            next_done,
+        )
+
+        ppo.learn(experiences)
+
     clone_agent = ppo.clone()
+
     assert clone_agent.observation_space == ppo.observation_space
     assert clone_agent.action_space == ppo.action_space
     assert clone_agent.batch_size == ppo.batch_size
@@ -581,10 +651,885 @@ def test_clone_after_learning(vector_space):
     assert clone_agent.device == ppo.device
     assert clone_agent.accelerator == ppo.accelerator
     assert_state_dicts_equal(clone_agent.actor.state_dict(), ppo.actor.state_dict())
-    assert_state_dicts_equal(clone_agent.critic.state_dict(), ppo.critic.state_dict())
+
+    if share_encoders and recurrent:
+        # the critic might be different if share_encoders is True
+        # (the encoder state might be different because of the logic in the share_encoder_parameters)
+        # The important thing is that the head_net is the same as the encoder is neither ran during
+        # the forward of the exploration, nor the learning step.
+        assert_state_dicts_equal(
+            clone_agent.critic.head_net.state_dict(), ppo.critic.head_net.state_dict()
+        )
+    else:
+        assert_state_dicts_equal(
+            clone_agent.critic.state_dict(), ppo.critic.state_dict()
+        )
+
     assert_state_dicts_equal(
         clone_agent.optimizer.state_dict(), ppo.optimizer.state_dict()
     )
     assert clone_agent.fitness == ppo.fitness
     assert clone_agent.steps == ppo.steps
     assert clone_agent.scores == ppo.scores
+    assert clone_agent.num_envs == ppo.num_envs
+    assert clone_agent.index == ppo.index
+
+
+# Test the RolloutBuffer implementation
+def test_rollout_buffer_initialization(vector_space, discrete_space):
+    observation_space = vector_space
+    action_space = discrete_space
+
+    buffer = RolloutBuffer(
+        capacity=100,
+        num_envs=1,
+        observation_space=observation_space,
+        action_space=action_space,
+        device="cpu",
+        gae_lambda=0.95,
+        gamma=0.99,
+    )
+
+    assert buffer.capacity == 100
+    assert buffer.observation_space == observation_space
+    assert buffer.action_space == action_space
+    assert buffer.gamma == 0.99
+    assert buffer.gae_lambda == 0.95
+    assert buffer.recurrent is False
+    assert buffer.hidden_state_architecture is None
+    assert buffer.device == "cpu"
+    assert buffer.pos == 0
+    assert buffer.full is False
+
+    # Test with hidden states
+    buffer = RolloutBuffer(
+        capacity=100,
+        num_envs=1,
+        observation_space=observation_space,
+        action_space=action_space,
+        device="cpu",
+        gae_lambda=0.95,
+        gamma=0.99,
+        recurrent=False,
+    )
+
+    assert buffer.recurrent is False
+    assert buffer.hidden_state_architecture is None
+    assert buffer.buffer.get("hidden_states") is None
+
+
+# Test the RolloutBuffer implementation
+def test_rollout_buffer_initialization_recurrent(vector_space, discrete_space):
+    observation_space = vector_space
+    action_space = discrete_space
+
+    buffer = RolloutBuffer(
+        capacity=100,
+        num_envs=1,
+        observation_space=observation_space,
+        action_space=action_space,
+        device="cpu",
+        gae_lambda=0.95,
+        gamma=0.99,
+    )
+
+    assert buffer.capacity == 100
+    assert buffer.observation_space == observation_space
+    assert buffer.action_space == action_space
+    assert buffer.gamma == 0.99
+    assert buffer.gae_lambda == 0.95
+    assert buffer.recurrent is False
+    assert buffer.hidden_state_architecture is None
+    assert buffer.device == "cpu"
+    assert buffer.pos == 0
+    assert buffer.full is False
+
+    # Test with hidden states
+    buffer = RolloutBuffer(
+        capacity=100,
+        num_envs=1,
+        observation_space=observation_space,
+        action_space=action_space,
+        device="cpu",
+        gae_lambda=0.95,
+        gamma=0.99,
+        recurrent=True,
+        # (num_layers * directions, num_envs, hidden_size)
+        hidden_state_architecture={
+            "shared_encoder_h": (1, 1, 64),
+            "shared_encoder_c": (1, 1, 64),
+        },
+    )
+
+    assert buffer.recurrent is True
+    assert buffer.hidden_state_architecture is not None
+    assert buffer.buffer.get("hidden_states") is not None
+
+    # Test with hidden states
+    buffer = RolloutBuffer(
+        capacity=100,
+        num_envs=8,
+        observation_space=observation_space,
+        action_space=action_space,
+        device="cpu",
+        gae_lambda=0.95,
+        gamma=0.99,
+        recurrent=True,
+        # (num_layers * directions, num_envs, hidden_size)
+        hidden_state_architecture={
+            "shared_encoder_h": (1, 8, 64),
+            "shared_encoder_c": (1, 8, 64),
+        },
+    )
+
+    assert buffer.recurrent is True
+    assert buffer.hidden_state_architecture is not None
+    assert buffer.buffer.get("hidden_states") is not None
+
+
+# Test adding samples to the buffer
+def test_rollout_buffer_add(vector_space, discrete_space):
+    observation_space = vector_space
+    action_space = discrete_space
+    device = "cpu"
+
+    buffer = RolloutBuffer(
+        capacity=100,
+        num_envs=1,
+        observation_space=observation_space,
+        action_space=action_space,
+        device=device,
+    )
+
+    # Add a single sample
+    obs = np.random.rand(*observation_space.shape).astype(observation_space.dtype)
+    action = np.array([action_space.sample()])  # Ensure action is within space
+    reward = 1.0
+    done = False
+    value = 0.5
+    log_prob = -0.5
+    next_obs = np.random.rand(*observation_space.shape).astype(observation_space.dtype)
+
+    buffer.add(obs, action, reward, done, value, log_prob, next_obs)
+
+    assert buffer.pos == 1
+    assert not buffer.full
+    # where X is the environment index, and Y is the position in the buffer (pos-1 for last added)
+    # Data is stored at buffer.pos - 1
+    current_pos_idx = buffer.pos - 1
+    assert np.array_equal(
+        buffer.buffer.get("observations")[current_pos_idx, 0].cpu().numpy(), obs
+    )
+    print(buffer.buffer.get("actions")[current_pos_idx, 0].cpu().numpy(), action)
+    assert np.array_equal(
+        buffer.buffer.get("actions")[current_pos_idx, 0].cpu().numpy(), action[0]
+    )
+    assert buffer.buffer.get("rewards")[current_pos_idx, 0].item() == reward
+    assert buffer.buffer.get("dones")[current_pos_idx, 0].item() == float(done)
+    assert buffer.buffer.get("values")[current_pos_idx, 0].item() == value
+    assert buffer.buffer.get("log_probs")[current_pos_idx, 0].item() == log_prob
+    assert np.array_equal(
+        buffer.buffer.get("next_observations")[current_pos_idx, 0].cpu().numpy(),
+        next_obs,
+    )
+
+    # Add samples until buffer is full
+    for i in range(buffer.capacity - 1):  # Already added one sample
+        buffer.add(obs, action, reward, done, value, log_prob, next_obs)
+
+    assert buffer.pos == buffer.capacity  # pos is next insertion point
+    assert buffer.full is True  # Buffer is full when pos reaches capacity
+
+    buffer.reset()
+
+    assert buffer.pos == 0
+    assert buffer.full is False
+
+
+# Test computing returns and advantages
+def test_rollout_buffer_compute_returns_and_advantages(vector_space, discrete_space):
+    observation_space = vector_space
+    action_space = discrete_space
+    device = "cpu"
+    capacity = 5
+
+    buffer = RolloutBuffer(
+        capacity=capacity,
+        num_envs=1,
+        observation_space=observation_space,
+        action_space=action_space,
+        gamma=0.99,
+        gae_lambda=0.95,
+        device=device,
+    )
+
+    # Add samples
+    for i in range(capacity):
+        obs = np.random.rand(*observation_space.shape).astype(observation_space.dtype)
+        action = np.array([action_space.sample()])
+        reward = 1.0
+        done = i == (capacity - 1)  # Last step is done
+        value = 0.5
+        log_prob = -0.5
+        next_obs = np.random.rand(*observation_space.shape).astype(
+            observation_space.dtype
+        )
+
+        buffer.add(obs, action, reward, done, value, log_prob, next_obs)
+
+    # Compute returns and advantages
+    last_value = torch.tensor([[0.0]], device=device)  # Shape (num_envs, 1)
+    last_done = torch.tensor([[0.0]], device=device)  # Shape (num_envs, 1)
+    buffer.compute_returns_and_advantages(last_value, last_done)
+
+    # Check that returns and advantages are computed
+    # Slicing [:, 0] gets data for the first (and only) environment
+    assert not np.array_equal(
+        buffer.buffer.get("returns")[:, 0].cpu().numpy(), np.zeros((capacity, 1))
+    )
+    assert not np.array_equal(
+        buffer.buffer.get("advantages")[:, 0].cpu().numpy(), np.zeros((capacity, 1))
+    )
+
+    # Check that returns are higher for earlier steps (due to discounting)
+    assert (
+        buffer.buffer.get("returns")[0, 0].item()
+        > buffer.buffer.get("returns")[capacity - 1, 0].item()
+    )
+
+
+# Test getting batch from buffer
+def test_rollout_buffer_get_batch(vector_space, discrete_space):
+    observation_space = vector_space
+    action_space = discrete_space
+    device = "cpu"
+    num_samples = 10
+
+    buffer = RolloutBuffer(
+        capacity=100,
+        num_envs=1,
+        observation_space=observation_space,
+        action_space=action_space,
+        device=device,
+    )
+
+    # Add samples
+    for i in range(num_samples):
+        obs = np.random.rand(*observation_space.shape).astype(observation_space.dtype)
+        action = np.array([action_space.sample()])
+        reward = 1.0
+        done = i == (num_samples - 1)  # Last step is done
+        value = 0.5
+        log_prob = -0.5
+        next_obs = np.random.rand(*observation_space.shape).astype(
+            observation_space.dtype
+        )
+
+        buffer.add(obs, action, reward, done, value, log_prob, next_obs)
+
+    # Compute returns and advantages
+    last_value = torch.tensor([[0.0]], device=device)
+    last_done = torch.tensor([[0.0]], device=device)
+    buffer.compute_returns_and_advantages(last_value, last_done)
+
+    # Get all data (up to current pos)
+    batch = buffer.get()  # Gets all data up to buffer.pos
+
+    assert len(batch["observations"]) == num_samples
+    assert len(batch["actions"]) == num_samples
+    # Rewards, dones, values, log_probs are (num_samples, 1) after get() flattens num_envs
+    assert len(batch["rewards"]) == num_samples
+    assert len(batch["dones"]) == num_samples
+    assert len(batch["values"]) == num_samples
+    assert len(batch["log_probs"]) == num_samples
+    assert len(batch["advantages"]) == num_samples
+    assert len(batch["returns"]) == num_samples
+
+    # Get batch of specific size
+    batch_size = 5
+    batch = buffer.get(batch_size=batch_size)
+
+    assert len(batch["observations"]) == batch_size
+    assert len(batch["actions"]) == batch_size
+
+    # Get tensor batch
+    tensor_batch = buffer.get_tensor_batch(batch_size=batch_size)
+
+    assert isinstance(tensor_batch["observations"], torch.Tensor)
+    assert isinstance(tensor_batch["actions"], torch.Tensor)
+    assert isinstance(tensor_batch["advantages"], torch.Tensor)
+    assert tensor_batch["observations"].shape[0] == batch_size
+
+
+# Test PPO initialization with rollout buffer
+@pytest.mark.parametrize("observation_space", ["vector_space", "image_space"])
+@pytest.mark.parametrize("action_space", ["discrete_space", "vector_space"])
+def test_ppo_with_rollout_buffer(observation_space, action_space, request):
+    observation_space = request.getfixturevalue(observation_space)
+    action_space = request.getfixturevalue(action_space)
+
+    ppo = PPO(
+        observation_space=observation_space,
+        action_space=action_space,
+        use_rollout_buffer=True,
+        learn_step=100,
+    )
+
+    assert ppo.use_rollout_buffer
+    assert hasattr(ppo, "rollout_buffer")
+    assert isinstance(ppo.rollout_buffer, RolloutBuffer)
+    assert ppo.rollout_buffer.capacity == ppo.learn_step
+    assert not ppo.rollout_buffer.recurrent
+
+    # Build an encoder configuration that matches the observation space type
+    if len(observation_space.shape) == 3:  # Image observations – use CNN
+        base_net_config = {
+            "encoder_config": {
+                "channel_size": [16, 32],
+                "kernel_size": [3, 3],
+                "stride_size": [1, 1],
+            }
+        }
+        expected_shared = {}
+        expected_separate = {}
+    else:  # Vector observations – use LSTM
+        base_net_config = {
+            "encoder_config": {
+                "hidden_state_size": 64,
+                "max_seq_len": 10,
+            }
+        }
+        expected_shared = {
+            "shared_encoder_h": (1, 1, 64),
+            "shared_encoder_c": (1, 1, 64),
+        }
+        expected_separate = {
+            "actor_encoder_h": (1, 1, 64),
+            "actor_encoder_c": (1, 1, 64),
+            "critic_encoder_h": (1, 1, 64),
+            "critic_encoder_c": (1, 1, 64),
+        }
+
+    # Recurrent only when hidden states are expected (vector observations)
+    recurrent_flag = len(expected_shared) > 0
+
+    ppo = PPO(
+        observation_space=observation_space,
+        action_space=action_space,
+        recurrent=recurrent_flag,
+        use_rollout_buffer=True,
+        net_config=base_net_config,
+    )
+
+    if recurrent_flag:
+        assert ppo.recurrent
+        assert ppo.rollout_buffer.recurrent
+        assert ppo.rollout_buffer.hidden_state_architecture == expected_shared
+
+        # Test with separated encoders when hidden states exist
+        base_net_config_share = base_net_config.copy()
+        ppo = PPO(
+            observation_space=observation_space,
+            action_space=action_space,
+            recurrent=True,
+            use_rollout_buffer=True,
+            share_encoders=False,
+            net_config=base_net_config_share,
+        )
+
+        assert ppo.rollout_buffer.hidden_state_architecture == expected_separate
+        assert not ppo.share_encoders
+
+    # Test with hidden states / separated encoders
+    if expected_separate:
+        base_net_config_share = base_net_config.copy()
+        ppo = PPO(
+            observation_space=observation_space,
+            action_space=action_space,
+            recurrent=True,
+            use_rollout_buffer=True,
+            share_encoders=False,
+            net_config=base_net_config_share,
+        )
+
+        assert ppo.recurrent
+        assert ppo.rollout_buffer.hidden_state_architecture == expected_separate
+        assert ppo.rollout_buffer.recurrent
+        assert not ppo.share_encoders
+
+
+# Test PPO learning with rollout buffer
+@pytest.mark.parametrize("observation_space", ["vector_space", "image_space"])
+@pytest.mark.parametrize("action_space", ["discrete_space", "vector_space"])
+def test_ppo_learn_with_rollout_buffer(observation_space, action_space, request):
+    observation_space = request.getfixturevalue(observation_space)
+    action_space = request.getfixturevalue(action_space)
+
+    batch_size = 32
+    learn_step = 64
+
+    ppo = PPO(
+        observation_space=observation_space,
+        action_space=action_space,
+        use_rollout_buffer=True,
+        learn_step=learn_step,
+        batch_size=batch_size,
+    )
+
+    # Fill the buffer manually
+    for i in range(learn_step):
+        obs = np.random.rand(*observation_space.shape).astype(observation_space.dtype)
+        action = np.array([action_space.sample()])
+        reward = 1.0
+        done = i == (learn_step - 1)  # Last step is done
+        value = 0.5
+        log_prob = -0.5
+        next_obs = np.random.rand(*observation_space.shape).astype(
+            observation_space.dtype
+        )
+
+        ppo.rollout_buffer.add(obs, action, reward, done, value, log_prob, next_obs)
+
+    # Compute returns and advantages (normally called by collect_rollouts)
+    # For manual filling, we might need to call it if not implicitly handled by learn()
+    # However, PPO.learn() calls buffer.compute_returns_and_advantages if experiences are None
+    # So, this explicit call might not be strictly necessary if learn() is called without experiences.
+    # For clarity in testing buffer functionality, it's fine.
+    last_value = torch.zeros((ppo.num_envs, 1), device=ppo.device)
+    last_done = torch.zeros((ppo.num_envs, 1), device=ppo.device)
+    ppo.rollout_buffer.compute_returns_and_advantages(last_value, last_done)
+
+    # Learn from rollout buffer
+    loss = ppo.learn()
+
+    assert isinstance(loss, float)
+    assert loss >= 0.0
+
+
+# Test PPO with hidden states
+def test_ppo_with_hidden_states(vector_space, discrete_space):
+    observation_space = vector_space
+    action_space = discrete_space
+
+    ppo = PPO(
+        observation_space=observation_space,
+        action_space=action_space,
+        use_rollout_buffer=True,
+        recurrent=True,
+        net_config={
+            "encoder_config": {
+                "hidden_state_size": 64,
+                "max_seq_len": 10,
+            }
+        },
+    )
+
+    # Get action with hidden state
+    obs = np.random.rand(1, *observation_space.shape).astype(
+        observation_space.dtype
+    )  # Add batch dim for num_envs=1
+    hidden_state = ppo.get_initial_hidden_state()
+
+    action, log_prob, entropy, value, next_hidden = ppo.get_action(
+        obs, hidden_state=hidden_state
+    )
+
+    assert action.shape[0] == 1
+    assert isinstance(log_prob, np.ndarray)
+    assert isinstance(entropy, np.ndarray)
+    assert isinstance(value, np.ndarray)
+    assert next_hidden is not None
+    assert next_hidden.get("shared_encoder_h", None).shape == (
+        1,
+        1,
+        64,
+    )  # (directions, num_envs, hidden_size)
+    assert next_hidden.get("shared_encoder_c", None).shape == (1, 1, 64)
+
+
+# Test PPO with hidden states
+def test_ppo_with_hidden_states_multiple_obs(vector_space, discrete_space):
+    observation_space = vector_space
+    action_space = discrete_space
+    num_envs = 2
+
+    ppo = PPO(
+        observation_space=observation_space,
+        action_space=action_space,
+        use_rollout_buffer=True,
+        recurrent=True,
+        num_envs=num_envs,
+        net_config={
+            "encoder_config": {
+                "hidden_state_size": 64,
+                "max_seq_len": 10,
+            }
+        },
+    )
+
+    # Get action with hidden state (multiple observations)
+    obs = np.zeros((num_envs, *observation_space.shape), dtype=observation_space.dtype)
+    hidden_state = ppo.get_initial_hidden_state(num_envs=num_envs)
+
+    action, log_prob, entropy, value, next_hidden = ppo.get_action(
+        obs, hidden_state=hidden_state
+    )
+
+    assert action.shape[0] == num_envs
+    assert isinstance(log_prob, np.ndarray)
+    assert isinstance(entropy, np.ndarray)
+    assert isinstance(value, np.ndarray)
+    assert next_hidden is not None
+    assert next_hidden.get("shared_encoder_h", None).shape == (1, num_envs, 64)
+    assert next_hidden.get("shared_encoder_c", None).shape == (1, num_envs, 64)
+
+
+# Test PPO with hidden states
+def test_ppo_with_hidden_states_multiple_envs():
+    num_envs = 2
+    env = gymnasium.vector.SyncVectorEnv(
+        [lambda: gymnasium.make("CartPole-v1")] * num_envs
+    )
+
+    observation_space = env.single_observation_space  # Use single env space
+    action_space = env.single_action_space  # Use single env space
+
+    ppo = PPO(
+        observation_space=observation_space,
+        action_space=action_space,
+        use_rollout_buffer=True,
+        recurrent=True,
+        num_envs=num_envs,
+        net_config={
+            "encoder_config": {
+                "hidden_state_size": 64,
+                "max_seq_len": 10,
+            }
+        },
+    )
+
+    # Get action with hidden state (multiple observations)
+    obs, _ = env.reset()
+    hidden_state = ppo.get_initial_hidden_state(num_envs=num_envs)
+
+    action, log_prob, entropy, value, next_hidden = ppo.get_action(
+        obs, hidden_state=hidden_state
+    )
+
+    assert action.shape[0] == num_envs
+    assert isinstance(log_prob, np.ndarray)
+    assert isinstance(entropy, np.ndarray)
+    assert isinstance(value, np.ndarray)
+    assert next_hidden is not None
+    assert next_hidden.get("shared_encoder_h", None).shape == (1, num_envs, 64)
+    assert next_hidden.get("shared_encoder_c", None).shape == (1, num_envs, 64)
+    env.close()
+
+
+# Test PPO with hidden states and collect_rollouts
+def test_ppo_with_hidden_states_multiple_envs_collect_rollouts():
+    num_envs = 2
+    env = gymnasium.vector.SyncVectorEnv(
+        [lambda: gymnasium.make("CartPole-v1")] * num_envs
+    )
+
+    observation_space = env.single_observation_space  # Use single env space
+    action_space = env.single_action_space  # Use single env space
+
+    ppo = PPO(
+        observation_space=observation_space,
+        action_space=action_space,
+        use_rollout_buffer=True,
+        recurrent=True,
+        num_envs=num_envs,
+        learn_step=5,
+        net_config={
+            "encoder_config": {
+                "hidden_state_size": 64,
+                "max_seq_len": 5,
+            }
+        },
+    )
+
+    # Collect rollouts with recurrent network
+    collect_rollouts_recurrent(ppo, env, n_steps=5)
+
+    # Check buffer contents
+    assert ppo.rollout_buffer.pos == 5
+    assert ppo.rollout_buffer.recurrent is True
+    # Check observation for the first env at the first timestep
+    assert not np.array_equal(
+        ppo.rollout_buffer.buffer.get("observations")[0, 0].cpu().numpy(),
+        np.zeros(observation_space.shape, dtype=observation_space.dtype),
+    )
+    # Check actions for all envs at the first timestep
+    assert ppo.rollout_buffer.buffer.get("actions") is not None
+
+    hidden_states = ppo.rollout_buffer.buffer.get("hidden_states")
+    assert hidden_states is not None
+    assert hidden_states.get("shared_encoder_h") is not None
+    assert hidden_states.get("shared_encoder_c") is not None
+
+    # Verify hidden states were properly stored (first step's hidden state)
+    assert hidden_states.get("shared_encoder_h")[0].shape == (
+        num_envs,
+        1,  # num_layers * directions
+        64,  # hidden_size
+    )
+    assert hidden_states.get("shared_encoder_c")[0].shape == (
+        num_envs,
+        1,
+        64,
+    )
+
+    # Learn from collected rollouts
+    loss = ppo.learn()
+
+    assert isinstance(loss, float)
+    assert loss >= 0.0
+    env.close()
+
+
+# Test PPO with hidden states and collect_rollouts
+def test_ppo_with_hidden_states_multiple_envs_collect_rollouts_and_test():
+    num_envs = 8
+    env = gymnasium.vector.SyncVectorEnv(
+        [lambda: gymnasium.make("CartPole-v1")] * num_envs
+    )
+    num_test_envs = 2
+    test_env = gymnasium.vector.SyncVectorEnv(
+        [lambda: gymnasium.make("CartPole-v1")] * num_test_envs
+    )
+
+    observation_space = env.single_observation_space  # Use single env space
+    action_space = env.single_action_space  # Use single env space
+
+    ppo = PPO(
+        observation_space=observation_space,
+        action_space=action_space,
+        use_rollout_buffer=True,
+        recurrent=True,
+        num_envs=num_envs,
+        learn_step=5,
+        net_config={
+            "encoder_config": {
+                "hidden_state_size": 64,
+                "max_seq_len": 5,
+            }
+        },
+    )
+
+    # Collect rollouts with recurrent network
+    collect_rollouts_recurrent(ppo, env, n_steps=5)
+
+    # Check buffer contents
+    assert ppo.rollout_buffer.pos == 5
+    assert ppo.rollout_buffer.recurrent is True
+    assert not np.array_equal(
+        ppo.rollout_buffer.buffer.get("observations")[0, 0].cpu().numpy(),
+        np.zeros(observation_space.shape, dtype=observation_space.dtype),
+    )
+    assert ppo.rollout_buffer.buffer.get("actions")[0].cpu().numpy() is not None
+
+    assert ppo.rollout_buffer.buffer.get("hidden_states") is not None
+
+    # Verify hidden states were properly stored
+    assert ppo.rollout_buffer.buffer.get("hidden_states").get("shared_encoder_h")[
+        0
+    ].shape == (
+        num_envs,
+        1,
+        64,
+    )
+    assert ppo.rollout_buffer.buffer.get("hidden_states").get("shared_encoder_c")[
+        0
+    ].shape == (
+        num_envs,
+        1,
+        64,
+    )
+
+    # Learn from collected rollouts
+    loss = ppo.learn()
+
+    assert isinstance(loss, float)
+    assert loss >= 0.0
+
+    # Test test loop
+    ppo.test(test_env)
+    env.close()
+    test_env.close()
+
+
+# Test PPO collect_rollouts method
+def test_ppo_collect_rollouts(vector_space, discrete_space):
+    observation_space = vector_space
+    action_space = discrete_space
+    learn_step = 5
+
+    ppo = PPO(
+        observation_space=observation_space,
+        action_space=action_space,
+        use_rollout_buffer=True,
+        learn_step=learn_step,
+        num_envs=1,  # Explicitly set num_envs for clarity
+    )
+
+    env = DummyEnv(state_size=observation_space.shape, vect=True, num_envs=ppo.num_envs)
+
+    # Collect rollouts
+    collect_rollouts(ppo, env, n_steps=learn_step)
+
+    # Check buffer contents
+    assert ppo.rollout_buffer.pos == learn_step
+    assert not np.array_equal(
+        ppo.rollout_buffer.buffer.get("observations")[0, 0].cpu().numpy(),
+        np.zeros(observation_space.shape, dtype=observation_space.dtype),
+    )
+    # Check shape and dtype of the stored action tensor for the first timestep
+    assert ppo.rollout_buffer.buffer.get("actions")[0].shape == (
+        ppo.num_envs,
+    )  # Shape should be (num_envs,)
+    assert (
+        ppo.rollout_buffer.buffer.get("actions").dtype == torch.int64
+    )  # Dtype for Discrete action space
+
+    # Compute returns and advantages should have been called by collect_rollouts
+    assert not np.array_equal(
+        ppo.rollout_buffer.buffer.get("returns")[:, 0].cpu().numpy(),
+        np.zeros((learn_step, 1)),
+    )
+
+    # Learn from collected rollouts
+    loss = ppo.learn()
+
+    assert isinstance(loss, float)
+    assert loss >= 0.0
+
+
+def test_ppo_wrap_at_capacity(vector_space, discrete_space):
+    observation_space = vector_space
+    action_space = discrete_space
+
+    ppo = PPO(
+        observation_space=observation_space,
+        action_space=action_space,
+        use_rollout_buffer=True,
+        learn_step=10,  # This sets rollout_buffer.capacity
+        num_envs=1,
+        rollout_buffer_config={"wrap_at_capacity": True},
+    )
+
+    env = DummyEnv(state_size=observation_space.shape, vect=True, num_envs=ppo.num_envs)
+
+    # collect_rollouts resets the buffer if wrap_at_capacity is True and buffer is full
+    # or if n_steps > capacity.
+    # Here, n_steps == capacity, so it fills up.
+    collect_rollouts(ppo, env, n_steps=10)
+
+    assert ppo.rollout_buffer.pos == 10  # pos is next insertion point, so it's capacity
+    assert ppo.rollout_buffer.full is True
+
+    # Collect 7 more steps. Since wrap_at_capacity is True, it will wrap around.
+    # collect_rollouts will reset if full and wrap_at_capacity.
+    # The behavior of collect_rollouts is to fill n_steps. If buffer was full, it resets.
+    # So it will collect 7 fresh samples.
+    collect_rollouts(ppo, env, n_steps=7)
+
+    assert ppo.rollout_buffer.pos == 7
+    assert ppo.rollout_buffer.full is False  # Not full yet, capacity is 10
+
+    # Collect 14 steps. This is > capacity.
+    # If wrap_at_capacity, it should reset and fill.
+    # The buffer will contain the last 'capacity' (10) steps.
+    # pos will be capacity % n_steps if n_steps > capacity, but collect_rollouts
+    # will collect n_steps, and if wrap_at_capacity, it will fill the buffer
+    # and pos will be n_steps % capacity.
+    # More accurately, collect_rollouts with n_steps > capacity and wrap_at_capacity
+    # will perform multiple "virtual" fills. The final state will be as if
+    # n_steps were collected, and pos = n_steps % capacity.
+    # However, the current implementation of collect_rollouts with wrap_at_capacity
+    # will reset the buffer if it's full at the start of the call, or if n_steps > capacity.
+    # Then it collects n_steps. If n_steps > capacity, it effectively collects 'capacity' steps
+    # and pos becomes capacity.
+    collect_rollouts(ppo, env, n_steps=14)
+
+    # After collecting 14 steps into a buffer of capacity 10 with wrapping:
+    # The buffer will contain the last 10 of these 14 steps.
+    # The pos will be 14 % 10 = 4.
+    assert ppo.rollout_buffer.pos == 4
+    assert ppo.rollout_buffer.full is True
+
+
+# Test compatibility with old format
+def test_ppo_backward_compatibility(vector_space, discrete_space):
+    observation_space = vector_space
+    action_space = discrete_space
+
+    # Create PPO with rollout buffer
+    ppo_new = PPO(
+        observation_space=observation_space,
+        action_space=action_space,
+        use_rollout_buffer=True,
+        num_envs=1,  # For consistency with how experiences are shaped
+    )
+
+    # Create PPO with old implementation
+    ppo_old = PPO(
+        observation_space=observation_space,
+        action_space=action_space,
+        use_rollout_buffer=False,
+        num_envs=1,
+    )
+
+    # Prepare experiences in old format
+    num_steps = 5
+    states = torch.rand(num_steps, *observation_space.shape)
+    actions = torch.randint(0, action_space.n, (num_steps,)).float()
+    log_probs = torch.randn(num_steps)
+    rewards = torch.randn(num_steps)
+    dones = torch.randint(0, 2, (num_steps,))
+    values = torch.randn(num_steps)
+    next_state = torch.rand(1, *observation_space.shape)
+    next_done = np.zeros(1)
+    experiences = [
+        [states],
+        [actions],
+        [log_probs],
+        [rewards],
+        [dones],
+        [values],
+        [next_state],
+        [next_done],
+    ]
+
+    # Both should work with old format
+    loss_old = ppo_old.learn(experiences)
+    loss_new = ppo_new.learn(experiences)
+
+    assert isinstance(loss_old, float)
+    assert isinstance(loss_new, float)
+
+    # Fill rollout buffer
+    for i in range(ppo_new.learn_step):
+        obs = np.random.rand(*observation_space.shape)
+        action = np.array([1])
+        reward = 1.0
+        done = i == ppo_new.learn_step - 1
+        value = 0.5
+        log_prob = -0.5
+        next_obs = np.random.rand(*observation_space.shape)
+
+        ppo_new.rollout_buffer.add(obs, action, reward, done, value, log_prob, next_obs)
+
+    ppo_new.rollout_buffer.compute_returns_and_advantages(
+        last_value=0.0, last_done=np.zeros(1)
+    )
+
+    # New implementation should work without experiences (from buffer)
+    loss_from_buffer = ppo_new.learn()
+    assert isinstance(loss_from_buffer, float)
+
+    # Old implementation should fail without experiences (no buffer)
+    with pytest.raises(ValueError):
+        ppo_old.learn()

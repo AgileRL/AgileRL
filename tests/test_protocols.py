@@ -166,7 +166,7 @@ class TestProtocols:
             kwargs["hidden_size"] = [16, 32]
         elif issubclass(module_cls, EvolvableLSTM):
             kwargs["input_size"] = 4
-            kwargs["hidden_size"] = 16
+            kwargs["hidden_state_size"] = 16
         elif issubclass(module_cls, EvolvableMultiInput):
             kwargs["observation_space"] = generate_dict_or_tuple_space(2, 2)
 
