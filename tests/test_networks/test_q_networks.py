@@ -1,35 +1,49 @@
+from dataclasses import asdict
+
 import pytest
 import torch
 import torch.nn.functional as F
 from gymnasium import spaces
 
-from agilerl.modules.base import EvolvableModule
-from agilerl.modules.cnn import EvolvableCNN
-from agilerl.modules.mlp import EvolvableMLP
-from agilerl.modules.multi_input import EvolvableMultiInput
+from agilerl.modules import (
+    EvolvableCNN,
+    EvolvableLSTM,
+    EvolvableMLP,
+    EvolvableModule,
+    EvolvableMultiInput,
+    EvolvableSimBa,
+)
+from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.q_networks import ContinuousQNetwork, QNetwork, RainbowQNetwork
 from tests.helper_functions import (
     assert_close_dict,
+    assert_not_equal_state_dict,
+    assert_state_dicts_equal,
     check_equal_params_ind,
-    generate_dict_or_tuple_space,
-    generate_discrete_space,
-    generate_random_box_space,
 )
+
+
+@pytest.fixture(scope="module")
+def head_config():
+    return asdict(MlpNetConfig(hidden_size=[64, 64]))
 
 
 @pytest.mark.parametrize(
     "observation_space, encoder_type",
     [
-        (generate_dict_or_tuple_space(2, 3), "multi_input"),
-        (generate_discrete_space(4), "mlp"),
-        (generate_random_box_space((8,)), "mlp"),
-        (generate_random_box_space((3, 32, 32)), "cnn"),
+        ("dict_space", "multi_input"),
+        ("discrete_space", "mlp"),
+        ("vector_space", "mlp"),
+        ("image_space", "cnn"),
     ],
 )
-def test_q_network_initialization(observation_space, encoder_type):
-    action_space = spaces.Discrete(4)
-    network = QNetwork(observation_space, action_space)
+def test_q_network_initialization(
+    observation_space, discrete_space, encoder_type, request
+):
+    observation_space = request.getfixturevalue(observation_space)
+
+    network = QNetwork(observation_space, discrete_space)
 
     assert network.observation_space == observation_space
 
@@ -45,18 +59,45 @@ def test_q_network_initialization(observation_space, encoder_type):
     assert "head_net" in evolvable_modules
 
 
+def test_q_network_initialization_recurrent(discrete_space, vector_space):
+    action_space = discrete_space
+    observation_space = vector_space
+    network = QNetwork(observation_space, action_space, recurrent=True)
+
+    assert network.observation_space == observation_space
+    assert isinstance(network.encoder, EvolvableLSTM)
+
+    evolvable_modules = network.modules()
+    assert "encoder" in evolvable_modules
+    assert "head_net" in evolvable_modules
+
+
+@pytest.mark.parametrize("encoder_type", ["mlp", "simba"])
+def test_q_network_initialization_simba(vector_space, discrete_space, encoder_type):
+    simba = encoder_type == "simba"
+    network = QNetwork(vector_space, discrete_space, simba=simba)
+
+    assert network.observation_space == vector_space
+
+    if encoder_type == "mlp":
+        assert isinstance(network.encoder, EvolvableMLP)
+    elif encoder_type == "simba":
+        assert isinstance(network.encoder, EvolvableSimBa)
+
+    evolvable_modules = network.modules()
+    assert "encoder" in evolvable_modules
+    assert "head_net" in evolvable_modules
+
+
 @pytest.mark.parametrize(
-    "observation_space",
-    [
-        (generate_dict_or_tuple_space(2, 3)),
-        (generate_discrete_space(4)),
-        (generate_random_box_space((8,))),
-        (generate_random_box_space((3, 32, 32))),
-    ],
+    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
 )
-def test_q_network_mutation_methods(observation_space):
-    action_space = spaces.Discrete(4)
-    network = QNetwork(observation_space, action_space)
+def test_q_network_mutation_methods(
+    observation_space, discrete_space, head_config, dummy_rng, request
+):
+    observation_space = request.getfixturevalue(observation_space)
+    network = QNetwork(observation_space, discrete_space, head_config=head_config)
+    network.rng = dummy_rng
 
     for method in network.mutation_methods:
         new_network = network.clone()
@@ -74,21 +115,24 @@ def test_q_network_mutation_methods(observation_space):
 
             assert mutated_attr == exec_method
 
-        check_equal_params_ind(network, new_network)
+        if new_network.last_mutation_attr is not None:
+            # Check that architecture has changed
+            assert_not_equal_state_dict(network.state_dict(), new_network.state_dict())
+
+            # Checks that parameters that are not mutated are the same
+            check_equal_params_ind(network, new_network)
+        else:
+            raise ValueError(
+                f"Last mutation attribute is None. Expected {method} to be applied."
+            )
 
 
 @pytest.mark.parametrize(
-    "observation_space",
-    [
-        (generate_dict_or_tuple_space(2, 3)),
-        (generate_discrete_space(4)),
-        (generate_random_box_space((8,))),
-        (generate_random_box_space((3, 32, 32))),
-    ],
+    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
 )
-def test_q_network_forward(observation_space: spaces.Space):
-    action_space = spaces.Discrete(4)
-    network = QNetwork(observation_space, action_space)
+def test_q_network_forward(observation_space: spaces.Space, discrete_space, request):
+    observation_space = request.getfixturevalue(observation_space)
+    network = QNetwork(observation_space, discrete_space)
 
     x_np = observation_space.sample()
 
@@ -103,7 +147,7 @@ def test_q_network_forward(observation_space: spaces.Space):
         out = network(x_np)
 
     assert isinstance(out, torch.Tensor)
-    assert out.shape == torch.Size([1, 4])
+    assert out.shape == torch.Size([1, discrete_space.n])
 
     if isinstance(observation_space, spaces.Dict):
         x = {key: torch.tensor(value) for key, value in x_np.items()}
@@ -116,21 +160,15 @@ def test_q_network_forward(observation_space: spaces.Space):
         out = network(x)
 
     assert isinstance(out, torch.Tensor)
-    assert out.shape == torch.Size([1, 4])
+    assert out.shape == torch.Size([1, discrete_space.n])
 
 
 @pytest.mark.parametrize(
-    "observation_space",
-    [
-        (generate_dict_or_tuple_space(2, 3)),
-        (generate_discrete_space(4)),
-        (generate_random_box_space((8,))),
-        (generate_random_box_space((3, 32, 32))),
-    ],
+    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
 )
-def test_q_network_clone(observation_space: spaces.Space):
-    action_space = spaces.Discrete(4)
-    network = QNetwork(observation_space, action_space)
+def test_q_network_clone(observation_space: spaces.Space, discrete_space, request):
+    observation_space = request.getfixturevalue(observation_space)
+    network = QNetwork(observation_space, discrete_space)
 
     original_net_dict = dict(network.named_parameters())
     clone = network.clone()
@@ -138,7 +176,7 @@ def test_q_network_clone(observation_space: spaces.Space):
 
     assert_close_dict(network.init_dict, clone.init_dict)
 
-    assert str(clone.state_dict()) == str(network.state_dict())
+    assert_state_dicts_equal(clone.state_dict(), network.state_dict())
     for key, param in clone.named_parameters():
         torch.testing.assert_close(param, original_net_dict[key])
 
@@ -146,16 +184,18 @@ def test_q_network_clone(observation_space: spaces.Space):
 @pytest.mark.parametrize(
     "observation_space, encoder_type",
     [
-        (generate_dict_or_tuple_space(2, 3), "multi_input"),
-        (generate_discrete_space(4), "mlp"),
-        (generate_random_box_space((8,)), "mlp"),
-        (generate_random_box_space((3, 32, 32)), "cnn"),
+        ("dict_space", "multi_input"),
+        ("discrete_space", "mlp"),
+        ("vector_space", "mlp"),
+        ("image_space", "cnn"),
     ],
 )
-def test_rainbow_q_network_initialization(observation_space, encoder_type):
-    action_space = spaces.Discrete(4)
+def test_rainbow_q_network_initialization(
+    observation_space, discrete_space, encoder_type, request
+):
+    observation_space = request.getfixturevalue(observation_space)
     support = torch.linspace(-10, 10, 51)
-    network = RainbowQNetwork(observation_space, action_space, support)
+    network = RainbowQNetwork(observation_space, discrete_space, support)
 
     assert network.observation_space == observation_space
 
@@ -172,19 +212,17 @@ def test_rainbow_q_network_initialization(observation_space, encoder_type):
 
 
 @pytest.mark.parametrize(
-    "observation_space",
-    [
-        (generate_dict_or_tuple_space(2, 3)),
-        (generate_discrete_space(4)),
-        (generate_random_box_space((8,))),
-        (generate_random_box_space((3, 32, 32))),
-    ],
+    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
 )
-def test_rainbow_q_network_mutation_methods(observation_space):
-    action_space = spaces.Discrete(4)
+def test_rainbow_q_network_mutation_methods(
+    observation_space, discrete_space, head_config, dummy_rng, request
+):
+    observation_space = request.getfixturevalue(observation_space)
     support = torch.linspace(-10, 10, 51)
-    network = RainbowQNetwork(observation_space, action_space, support)
-
+    network = RainbowQNetwork(
+        observation_space, discrete_space, support, head_config=head_config
+    )
+    network.rng = dummy_rng
     for method in network.mutation_methods:
         new_network = network.clone()
         getattr(new_network, method)()
@@ -201,22 +239,27 @@ def test_rainbow_q_network_mutation_methods(observation_space):
 
             assert mutated_attr == exec_method
 
-        check_equal_params_ind(network, new_network)
+        if new_network.last_mutation_attr is not None:
+            # Check that architecture has changed
+            assert_not_equal_state_dict(network.state_dict(), new_network.state_dict())
+
+            # Checks that parameters that are not mutated are the same
+            check_equal_params_ind(network, new_network)
+        else:
+            raise ValueError(
+                f"Last mutation attribute is None. Expected {method} to be applied."
+            )
 
 
 @pytest.mark.parametrize(
-    "observation_space",
-    [
-        (generate_dict_or_tuple_space(2, 3)),
-        (generate_discrete_space(4)),
-        (generate_random_box_space((8,))),
-        (generate_random_box_space((3, 32, 32))),
-    ],
+    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
 )
-def test_rainbow_q_network_forward(observation_space: spaces.Space):
-    action_space = spaces.Discrete(4)
+def test_rainbow_q_network_forward(
+    observation_space: spaces.Space, discrete_space, request
+):
+    observation_space = request.getfixturevalue(observation_space)
     support = torch.linspace(-10, 10, 51)
-    network = RainbowQNetwork(observation_space, action_space, support)
+    network = RainbowQNetwork(observation_space, discrete_space, support)
 
     x_np = observation_space.sample()
 
@@ -231,7 +274,7 @@ def test_rainbow_q_network_forward(observation_space: spaces.Space):
         out = network(x_np)
 
     assert isinstance(out, torch.Tensor)
-    assert out.shape == torch.Size([1, 4])
+    assert out.shape == torch.Size([1, discrete_space.n])
 
     if isinstance(observation_space, spaces.Dict):
         x = {key: torch.tensor(value) for key, value in x_np.items()}
@@ -244,22 +287,18 @@ def test_rainbow_q_network_forward(observation_space: spaces.Space):
         out = network(x)
 
     assert isinstance(out, torch.Tensor)
-    assert out.shape == torch.Size([1, 4])
+    assert out.shape == torch.Size([1, discrete_space.n])
 
 
 @pytest.mark.parametrize(
-    "observation_space",
-    [
-        (generate_dict_or_tuple_space(2, 3)),
-        (generate_discrete_space(4)),
-        (generate_random_box_space((8,))),
-        (generate_random_box_space((3, 32, 32))),
-    ],
+    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
 )
-def test_rainbow_q_network_clone(observation_space: spaces.Space):
-    action_space = spaces.Discrete(4)
+def test_rainbow_q_network_clone(
+    observation_space: spaces.Space, discrete_space, request
+):
+    observation_space = request.getfixturevalue(observation_space)
     support = torch.linspace(-10, 10, 51)
-    network = RainbowQNetwork(observation_space, action_space, support)
+    network = RainbowQNetwork(observation_space, discrete_space, support)
 
     original_net_dict = dict(network.named_parameters())
     clone = network.clone()
@@ -267,7 +306,7 @@ def test_rainbow_q_network_clone(observation_space: spaces.Space):
 
     assert_close_dict(network.init_dict, clone.init_dict)
 
-    assert str(clone.state_dict()) == str(network.state_dict())
+    assert_state_dicts_equal(clone.state_dict(), network.state_dict())
     for key, param in clone.named_parameters():
         torch.testing.assert_close(param, original_net_dict[key])
 
@@ -275,15 +314,17 @@ def test_rainbow_q_network_clone(observation_space: spaces.Space):
 @pytest.mark.parametrize(
     "observation_space, encoder_type",
     [
-        (generate_dict_or_tuple_space(2, 3), "multi_input"),
-        (generate_discrete_space(4), "mlp"),
-        (generate_random_box_space((8,)), "mlp"),
-        (generate_random_box_space((3, 32, 32)), "cnn"),
+        ("dict_space", "multi_input"),
+        ("discrete_space", "mlp"),
+        ("vector_space", "mlp"),
+        ("image_space", "cnn"),
     ],
 )
-def test_continuous_q_network_initialization(observation_space, encoder_type):
-    action_space = spaces.Box(low=-1, high=1, shape=(4,))
-    network = ContinuousQNetwork(observation_space, action_space)
+def test_continuous_q_network_initialization(
+    observation_space, vector_space, encoder_type, request
+):
+    observation_space = request.getfixturevalue(observation_space)
+    network = ContinuousQNetwork(observation_space, vector_space)
 
     assert network.observation_space == observation_space
 
@@ -299,19 +340,49 @@ def test_continuous_q_network_initialization(observation_space, encoder_type):
     assert "head_net" in evolvable_modules
 
 
-@pytest.mark.parametrize(
-    "observation_space",
-    [
-        (generate_dict_or_tuple_space(2, 3)),
-        (generate_discrete_space(4)),
-        (generate_random_box_space((8,))),
-        (generate_random_box_space((3, 32, 32))),
-    ],
-)
-def test_continuous_q_network_mutation_methods(observation_space):
-    action_space = spaces.Box(low=-1, high=1, shape=(4,))
-    network = ContinuousQNetwork(observation_space, action_space)
+def test_continuous_q_network_initialization_recurrent(vector_space, discrete_space):
+    observation_space = vector_space
+    action_space = discrete_space
+    network = ContinuousQNetwork(observation_space, action_space, recurrent=True)
 
+    assert network.observation_space == observation_space
+    assert isinstance(network.encoder, EvolvableLSTM)
+
+    evolvable_modules = network.modules()
+    assert "encoder" in evolvable_modules
+    assert "head_net" in evolvable_modules
+
+
+@pytest.mark.parametrize("encoder_type", ["mlp", "simba"])
+def test_continuous_q_network_initialization_simba(
+    vector_space, discrete_space, encoder_type
+):
+    simba = encoder_type == "simba"
+    network = ContinuousQNetwork(vector_space, discrete_space, simba=simba)
+
+    assert network.observation_space == vector_space
+
+    if encoder_type == "mlp":
+        assert isinstance(network.encoder, EvolvableMLP)
+    elif encoder_type == "simba":
+        assert isinstance(network.encoder, EvolvableSimBa)
+
+    evolvable_modules = network.modules()
+    assert "encoder" in evolvable_modules
+    assert "head_net" in evolvable_modules
+
+
+@pytest.mark.parametrize(
+    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
+)
+def test_continuous_q_network_mutation_methods(
+    observation_space, vector_space, head_config, dummy_rng, request
+):
+    observation_space = request.getfixturevalue(observation_space)
+    network = ContinuousQNetwork(
+        observation_space, vector_space, head_config=head_config
+    )
+    network.rng = dummy_rng
     for method in network.mutation_methods:
         new_network = network.clone()
         getattr(new_network, method)()
@@ -328,24 +399,29 @@ def test_continuous_q_network_mutation_methods(observation_space):
 
             assert mutated_attr == exec_method
 
-        check_equal_params_ind(network, new_network)
+        if new_network.last_mutation_attr is not None:
+            # Check that architecture has changed
+            assert_not_equal_state_dict(network.state_dict(), new_network.state_dict())
+
+            # Checks that parameters that are not mutated are the same
+            check_equal_params_ind(network, new_network)
+        else:
+            raise ValueError(
+                f"Last mutation attribute is None. Expected {method} to be applied."
+            )
 
 
 @pytest.mark.parametrize(
-    "observation_space",
-    [
-        (generate_dict_or_tuple_space(2, 3)),
-        (generate_discrete_space(4)),
-        (generate_random_box_space((8,))),
-        (generate_random_box_space((3, 32, 32))),
-    ],
+    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
 )
-def test_continuous_q_network_forward(observation_space: spaces.Space):
-    action_space = spaces.Box(low=-1, high=1, shape=(4,))
-    network = ContinuousQNetwork(observation_space, action_space)
+def test_continuous_q_network_forward(
+    observation_space: spaces.Space, vector_space, request
+):
+    observation_space = request.getfixturevalue(observation_space)
+    network = ContinuousQNetwork(observation_space, vector_space)
 
     x_np = observation_space.sample()
-    actions_np = action_space.sample()
+    actions_np = vector_space.sample()
 
     if isinstance(observation_space, spaces.Discrete):
         x_np = (
@@ -376,17 +452,13 @@ def test_continuous_q_network_forward(observation_space: spaces.Space):
 
 
 @pytest.mark.parametrize(
-    "observation_space",
-    [
-        (generate_dict_or_tuple_space(2, 3)),
-        (generate_discrete_space(4)),
-        (generate_random_box_space((8,))),
-        (generate_random_box_space((3, 32, 32))),
-    ],
+    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
 )
-def test_continuous_q_network_clone(observation_space: spaces.Space):
-    action_space = spaces.Box(low=-1, high=1, shape=(4,))
-    network = ContinuousQNetwork(observation_space, action_space)
+def test_continuous_q_network_clone(
+    observation_space: spaces.Space, vector_space, request
+):
+    observation_space = request.getfixturevalue(observation_space)
+    network = ContinuousQNetwork(observation_space, vector_space)
 
     original_net_dict = dict(network.named_parameters())
     clone = network.clone()
@@ -394,6 +466,6 @@ def test_continuous_q_network_clone(observation_space: spaces.Space):
 
     assert_close_dict(network.init_dict, clone.init_dict)
 
-    assert str(clone.state_dict()) == str(network.state_dict())
+    assert_state_dicts_equal(clone.state_dict(), network.state_dict())
     for key, param in clone.named_parameters():
         torch.testing.assert_close(param, original_net_dict[key])

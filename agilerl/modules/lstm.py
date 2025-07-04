@@ -1,6 +1,5 @@
 from typing import Any, Dict, Optional, Tuple
 
-import numpy as np
 import torch
 import torch.nn as nn
 
@@ -36,6 +35,8 @@ class EvolvableLSTM(EvolvableModule):
     :type device: str, optional
     :param name: Name of the network, defaults to 'lstm'
     :type name: str, optional
+    :param random_seed: Random seed to use for the network. Defaults to None.
+    :type random_seed: Optional[int]
     """
 
     def __init__(
@@ -53,8 +54,9 @@ class EvolvableLSTM(EvolvableModule):
         dropout: float = 0.0,
         device: str = "cpu",
         name: str = "lstm",
+        random_seed: Optional[int] = None,
     ):
-        super().__init__(device)
+        super().__init__(device, random_seed)
 
         assert (
             input_size > 0
@@ -235,7 +237,7 @@ class EvolvableLSTM(EvolvableModule):
         :rtype: Dict[str, int]
         """
         if numb_new_nodes is None:
-            numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
+            numb_new_nodes = self.rng.choice([16, 32, 64])
 
         if (
             self.hidden_state_size + numb_new_nodes <= self.max_hidden_state_size
@@ -254,7 +256,7 @@ class EvolvableLSTM(EvolvableModule):
         :rtype: Dict[str, int]
         """
         if numb_new_nodes is None:
-            numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
+            numb_new_nodes = self.rng.choice([16, 32, 64])
 
         if (
             self.hidden_state_size - numb_new_nodes >= self.min_hidden_state_size

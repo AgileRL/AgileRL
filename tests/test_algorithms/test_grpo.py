@@ -235,7 +235,7 @@ def deepspeed_env():
         torch.cuda.empty_cache()
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 def accelerator(request):
     gc.collect()
     torch.cuda.empty_cache()
@@ -261,7 +261,7 @@ def accelerator(request):
         accelerator.free_memory()
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 def grpo(request, accelerator):
     gc.collect()
     torch.cuda.empty_cache()
@@ -309,6 +309,7 @@ def grpo(request, accelerator):
         use_separate_reference_adapter=set_reference_policy_adapter,
     )
     yield grpo
+    del grpo
 
 
 @pytest.mark.parametrize(
@@ -1391,12 +1392,16 @@ def test_get_logprobs(grpo, accelerator, request, batch_size):
     ids = torch.randint(0, vocab_size, (batch_size, input_size + max_tokens)).to(
         grpo.device
     )
+
     log_probs = grpo._get_logprobs(ids=ids)
     grpo.reduce_memory_peak = True
     log_probs_reduced_mem = grpo._get_logprobs(ids=ids)
     assert log_probs.shape == (ids.shape[0], ids.shape[1] - 1)
     assert log_probs_reduced_mem.shape == (ids.shape[0], ids.shape[1] - 1)
-    assert torch.allclose(log_probs, log_probs_reduced_mem, atol=1e-3)
+    assert torch.allclose(
+        log_probs, log_probs_reduced_mem, atol=1e-3
+    ), f"log_probs: {log_probs}, log_probs_reduced_mem: {log_probs_reduced_mem}"
+
     AcceleratorState._reset_state(True)
 
 

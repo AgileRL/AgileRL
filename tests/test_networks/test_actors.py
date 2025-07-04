@@ -1,37 +1,51 @@
+from dataclasses import asdict
+
 import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
 from gymnasium import spaces
 
-from agilerl.modules.base import EvolvableModule
-from agilerl.modules.cnn import EvolvableCNN
-from agilerl.modules.mlp import EvolvableMLP
-from agilerl.modules.multi_input import EvolvableMultiInput
+from agilerl.modules import (
+    EvolvableCNN,
+    EvolvableLSTM,
+    EvolvableMLP,
+    EvolvableModule,
+    EvolvableMultiInput,
+    EvolvableSimBa,
+)
+from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import DeterministicActor, StochasticActor
 from agilerl.networks.base import EvolvableNetwork
 from tests.helper_functions import (
     assert_close_dict,
+    assert_not_equal_state_dict,
+    assert_state_dicts_equal,
     check_equal_params_ind,
-    generate_dict_or_tuple_space,
-    generate_discrete_space,
-    generate_random_box_space,
 )
 
 
-@pytest.mark.parametrize("action_space", [generate_random_box_space((4,))])
+@pytest.fixture(scope="module")
+def head_config():
+    return asdict(MlpNetConfig(hidden_size=[64, 64]))
+
+
+@pytest.mark.parametrize("action_space", ["vector_space"])
 @pytest.mark.parametrize(
     "observation_space, encoder_type",
     [
-        (generate_dict_or_tuple_space(2, 3), "multi_input"),
-        (generate_discrete_space(4), "mlp"),
-        (generate_random_box_space((8,)), "mlp"),
-        (generate_random_box_space((3, 32, 32)), "cnn"),
+        ("dict_space", "multi_input"),
+        ("discrete_space", "mlp"),
+        ("vector_space", "mlp"),
+        ("image_space", "cnn"),
     ],
 )
 def test_deterministic_actor_initialization(
-    observation_space, action_space, encoder_type
+    observation_space, action_space, encoder_type, request
 ):
+    observation_space = request.getfixturevalue(observation_space)
+    action_space = request.getfixturevalue(action_space)
+
     network = DeterministicActor(observation_space, action_space)
 
     assert network.observation_space == observation_space
@@ -48,18 +62,44 @@ def test_deterministic_actor_initialization(
     assert "head_net" in evolvable_modules
 
 
-@pytest.mark.parametrize("action_space", [generate_random_box_space((4,))])
+def test_deterministic_actor_initialization_recurrent(vector_space):
+    observation_space = spaces.Box(low=-1, high=1, shape=(32,))
+    network = DeterministicActor(observation_space, vector_space, recurrent=True)
+
+    assert network.observation_space == observation_space
+    assert isinstance(network.encoder, EvolvableLSTM)
+
+    evolvable_modules = network.modules()
+    assert "encoder" in evolvable_modules
+    assert "head_net" in evolvable_modules
+
+
+def test_deterministic_actor_initialization_simba(vector_space):
+    observation_space = spaces.Box(low=-1, high=1, shape=(8,))
+    network = DeterministicActor(observation_space, vector_space, simba=True)
+
+    assert network.observation_space == observation_space
+    assert isinstance(network.encoder, EvolvableSimBa)
+
+    evolvable_modules = network.modules()
+    assert "encoder" in evolvable_modules
+    assert "head_net" in evolvable_modules
+
+
+@pytest.mark.parametrize("action_space", ["vector_space"])
 @pytest.mark.parametrize(
-    "observation_space",
-    [
-        generate_dict_or_tuple_space(2, 3),
-        generate_discrete_space(4),
-        generate_random_box_space((8,)),
-        generate_random_box_space((3, 32, 32)),
-    ],
+    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
 )
-def test_deterministic_actor_mutation_methods(observation_space, action_space):
-    network = DeterministicActor(observation_space, action_space)
+def test_deterministic_actor_mutation_methods(
+    observation_space, action_space, head_config, dummy_rng, request
+):
+    observation_space = request.getfixturevalue(observation_space)
+    action_space = request.getfixturevalue(action_space)
+
+    network = DeterministicActor(
+        observation_space, action_space, head_config=head_config
+    )
+    network.rng = dummy_rng
 
     for method in network.mutation_methods:
         new_network = network.clone()
@@ -77,22 +117,28 @@ def test_deterministic_actor_mutation_methods(observation_space, action_space):
 
             assert mutated_attr == exec_method
 
-        check_equal_params_ind(network, new_network)
+        if new_network.last_mutation_attr is not None:
+            # Check that architecture has changed
+            assert_not_equal_state_dict(network.state_dict(), new_network.state_dict())
+
+            # Checks that parameters that are not mutated are the same
+            check_equal_params_ind(network, new_network)
+        else:
+            raise ValueError(
+                f"Last mutation attribute is None. Expected {method} to be applied."
+            )
 
 
-@pytest.mark.parametrize("action_space", [generate_random_box_space((4,))])
+@pytest.mark.parametrize("action_space", ["vector_space"])
 @pytest.mark.parametrize(
-    "observation_space",
-    [
-        generate_dict_or_tuple_space(2, 3),
-        generate_discrete_space(4),
-        generate_random_box_space((8,)),
-        generate_random_box_space((3, 32, 32)),
-    ],
+    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
 )
 def test_deterministic_actor_forward(
-    observation_space: spaces.Space, action_space: spaces.Space
+    observation_space: spaces.Space, action_space: spaces.Space, request
 ):
+    observation_space = request.getfixturevalue(observation_space)
+    action_space = request.getfixturevalue(action_space)
+
     network = DeterministicActor(observation_space, action_space)
 
     x_np = observation_space.sample()
@@ -124,19 +170,16 @@ def test_deterministic_actor_forward(
     assert out.shape == torch.Size([1, spaces.flatdim(action_space)])
 
 
-@pytest.mark.parametrize("action_space", [generate_random_box_space((4,))])
+@pytest.mark.parametrize("action_space", ["vector_space"])
 @pytest.mark.parametrize(
-    "observation_space",
-    [
-        generate_dict_or_tuple_space(2, 3),
-        generate_discrete_space(4),
-        generate_random_box_space((8,)),
-        generate_random_box_space((3, 32, 32)),
-    ],
+    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
 )
 def test_deterministic_actor_clone(
-    observation_space: spaces.Space, action_space: spaces.Space
+    observation_space: spaces.Space, action_space: spaces.Space, request
 ):
+    observation_space = request.getfixturevalue(observation_space)
+    action_space = request.getfixturevalue(action_space)
+
     network = DeterministicActor(observation_space, action_space)
 
     original_net_dict = dict(network.named_parameters())
@@ -145,7 +188,7 @@ def test_deterministic_actor_clone(
 
     assert_close_dict(network.init_dict, clone.init_dict)
 
-    assert str(clone.state_dict()) == str(network.state_dict())
+    assert_state_dicts_equal(clone.state_dict(), network.state_dict())
     for key, param in clone.named_parameters():
         torch.testing.assert_close(param, original_net_dict[key])
 
@@ -258,25 +301,65 @@ def test_deterministic_actor_forward_rescaling():
             actor.head_net.forward = original_head_forward
 
 
+def test_distribution_mutation_methods(dummy_rng, head_config):
+    observation_space = spaces.Box(low=-1, high=1, shape=(2,))
+    action_space = spaces.Box(low=-1, high=1, shape=(2,))
+    network = StochasticActor(observation_space, action_space, head_config=head_config)
+
+    evolvable_dist = network.head_net
+    evolvable_dist.rng = dummy_rng
+
+    for method in evolvable_dist.mutation_methods:
+        new_dist = evolvable_dist.clone()
+        getattr(new_dist, method)()
+
+        if "." in method and new_dist.last_mutation_attr is not None:
+            net_name = method.split(".")[0]
+            mutated_module: EvolvableModule = getattr(new_dist, net_name)
+
+            exec_method = new_dist.last_mutation_attr.split(".")[-1]
+            mutated_attr = mutated_module.last_mutation_attr.split(".")[-1]
+
+            assert mutated_attr == exec_method
+
+        if new_dist.last_mutation_attr is not None:
+            # Check that architecture has changed
+            assert_not_equal_state_dict(
+                evolvable_dist.state_dict(), new_dist.state_dict()
+            )
+
+            # Checks that parameters that are not mutated are the same
+            check_equal_params_ind(evolvable_dist, new_dist)
+        else:
+            print(method)
+            print(new_dist.last_mutation_attr)
+            print(new_dist.wrapped.last_mutation_attr)
+            print(evolvable_dist)
+            print(new_dist)
+            raise ValueError(
+                f"Last mutation attribute is None. Expected {method} to be applied."
+            )
+
+
 @pytest.mark.parametrize(
     "action_space",
-    [
-        generate_random_box_space((4,)),
-        generate_discrete_space(4),
-        spaces.MultiDiscrete([3, 4, 5]),
-        spaces.MultiBinary(4),
-    ],
+    ["vector_space", "discrete_space", "multidiscrete_space", "multibinary_space"],
 )
 @pytest.mark.parametrize(
     "observation_space, encoder_type",
     [
-        (generate_dict_or_tuple_space(2, 3), "multi_input"),
-        (generate_discrete_space(4), "mlp"),
-        (generate_random_box_space((8,)), "mlp"),
-        (generate_random_box_space((3, 32, 32)), "cnn"),
+        ("dict_space", "multi_input"),
+        ("discrete_space", "mlp"),
+        ("vector_space", "mlp"),
+        ("image_space", "cnn"),
     ],
 )
-def test_stochastic_actor_initialization(observation_space, action_space, encoder_type):
+def test_stochastic_actor_initialization(
+    observation_space, action_space, encoder_type, request
+):
+    observation_space = request.getfixturevalue(observation_space)
+    action_space = request.getfixturevalue(action_space)
+
     network = StochasticActor(observation_space, action_space)
 
     assert network.observation_space == observation_space
@@ -293,26 +376,45 @@ def test_stochastic_actor_initialization(observation_space, action_space, encode
     assert "head_net" in evolvable_modules
 
 
+def test_stochastic_actor_initialization_recurrent(vector_space):
+    observation_space = spaces.Box(low=-1, high=1, shape=(32, 8))
+    network = StochasticActor(observation_space, vector_space, recurrent=True)
+
+    assert network.observation_space == observation_space
+    assert isinstance(network.encoder, EvolvableLSTM)
+
+    evolvable_modules = network.modules()
+    assert "encoder" in evolvable_modules
+    assert "head_net" in evolvable_modules
+
+
+def test_stochastic_actor_initialization_simba(vector_space):
+    observation_space = spaces.Box(low=-1, high=1, shape=(8,))
+    network = StochasticActor(observation_space, vector_space, simba=True)
+
+    assert network.observation_space == observation_space
+    assert isinstance(network.encoder, EvolvableSimBa)
+
+    evolvable_modules = network.modules()
+    assert "encoder" in evolvable_modules
+    assert "head_net" in evolvable_modules
+
+
 @pytest.mark.parametrize(
     "action_space",
-    [
-        generate_random_box_space((4,)),
-        generate_discrete_space(4),
-        spaces.MultiDiscrete([3, 4, 5]),
-        spaces.MultiBinary(4),
-    ],
+    ["vector_space", "discrete_space", "multidiscrete_space", "multibinary_space"],
 )
 @pytest.mark.parametrize(
-    "observation_space",
-    [
-        generate_dict_or_tuple_space(2, 3),
-        generate_discrete_space(4),
-        generate_random_box_space((8,)),
-        generate_random_box_space((3, 32, 32)),
-    ],
+    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
 )
-def test_stochastic_actor_mutation_methods(observation_space, action_space):
-    network = StochasticActor(observation_space, action_space)
+def test_stochastic_actor_mutation_methods(
+    observation_space, action_space, head_config, dummy_rng, request
+):
+    observation_space = request.getfixturevalue(observation_space)
+    action_space = request.getfixturevalue(action_space)
+
+    network = StochasticActor(observation_space, action_space, head_config=head_config)
+    network.rng = dummy_rng
 
     for method in network.mutation_methods:
         new_network = network.clone()
@@ -331,30 +433,31 @@ def test_stochastic_actor_mutation_methods(observation_space, action_space):
 
             assert mutated_attr == exec_method
 
-        check_equal_params_ind(network, new_network)
+        if new_network.last_mutation_attr is not None:
+            # Check that architecture has changed
+            assert_not_equal_state_dict(network.state_dict(), new_network.state_dict())
+
+            # Checks that parameters that are not mutated are the same
+            check_equal_params_ind(network, new_network)
+        else:
+            raise ValueError(
+                f"Last mutation attribute is None. Expected {method} to be applied."
+            )
 
 
 @pytest.mark.parametrize(
     "action_space",
-    [
-        generate_random_box_space((4,)),
-        generate_discrete_space(4),
-        spaces.MultiDiscrete([3, 4, 5]),
-        spaces.MultiBinary(4),
-    ],
+    ["vector_space", "discrete_space", "multidiscrete_space", "multibinary_space"],
 )
 @pytest.mark.parametrize(
-    "observation_space",
-    [
-        generate_dict_or_tuple_space(2, 3),
-        generate_discrete_space(4),
-        generate_random_box_space((8,)),
-        generate_random_box_space((3, 32, 32)),
-    ],
+    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
 )
 def test_stochastic_actor_forward(
-    observation_space: spaces.Space, action_space: spaces.Space
+    observation_space: spaces.Space, action_space: spaces.Space, request
 ):
+    observation_space = request.getfixturevalue(observation_space)
+    action_space = request.getfixturevalue(action_space)
+
     # For continuous action spaces, we need to set squash_output=True to ensure actions are scaled
     squash_output = isinstance(action_space, spaces.Box)
 
@@ -430,25 +533,17 @@ def test_stochastic_actor_forward(
 
 @pytest.mark.parametrize(
     "action_space",
-    [
-        generate_random_box_space((4,)),
-        generate_discrete_space(4),
-        spaces.MultiDiscrete([3, 4, 5]),
-        spaces.MultiBinary(4),
-    ],
+    ["vector_space", "discrete_space", "multidiscrete_space", "multibinary_space"],
 )
 @pytest.mark.parametrize(
-    "observation_space",
-    [
-        generate_dict_or_tuple_space(2, 3),
-        generate_discrete_space(4),
-        generate_random_box_space((8,)),
-        generate_random_box_space((3, 32, 32)),
-    ],
+    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
 )
 def test_stochastic_actor_clone(
-    observation_space: spaces.Space, action_space: spaces.Space
+    observation_space: spaces.Space, action_space: spaces.Space, request
 ):
+    observation_space = request.getfixturevalue(observation_space)
+    action_space = request.getfixturevalue(action_space)
+
     network = StochasticActor(observation_space, action_space)
 
     original_net_dict = dict(network.named_parameters())
@@ -457,7 +552,7 @@ def test_stochastic_actor_clone(
 
     assert_close_dict(network.init_dict, clone.init_dict)
 
-    assert str(clone.state_dict()) == str(network.state_dict())
+    assert_state_dicts_equal(clone.state_dict(), network.state_dict())
     for key, param in clone.named_parameters():
         torch.testing.assert_close(param, original_net_dict[key])
 
@@ -539,15 +634,11 @@ def test_stochastic_actor_scaling():
 
 @pytest.mark.parametrize(
     "action_space",
-    [
-        generate_random_box_space((4,)),
-        generate_discrete_space(4),
-        spaces.MultiDiscrete([3, 4, 5]),
-        spaces.MultiBinary(4),
-    ],
+    ["vector_space", "discrete_space", "multidiscrete_space", "multibinary_space"],
 )
-def test_stochastic_actor_distribution_methods(action_space: spaces.Space):
+def test_stochastic_actor_distribution_methods(action_space: spaces.Space, request):
     """Test StochasticActor's distribution-related methods with different action spaces."""
+    action_space = request.getfixturevalue(action_space)
     observation_space = spaces.Box(low=-1, high=1, shape=(8,))
     network = StochasticActor(observation_space, action_space)
 

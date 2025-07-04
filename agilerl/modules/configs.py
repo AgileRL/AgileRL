@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 import torch
 import yaml
 
-from agilerl.typing import ConfigType
+from agilerl.typing import NetConfigType
 
 
 @dataclass
@@ -29,6 +29,9 @@ class NetConfig:
 
     def __setitem__(self, key: str, value: Any) -> None:
         setattr(self, key, value)
+
+    def __contains__(self, key: str) -> bool:
+        return hasattr(self, key)
 
     def get(self, key: str, default: Any = None) -> Any:
         return getattr(self, key, default)
@@ -60,6 +63,7 @@ class MlpNetConfig(NetConfig):
     max_mlp_nodes: int = field(default=500)
     layer_norm: bool = field(default=True)
     output_vanish: bool = field(default=True)
+    output_layernorm: bool = field(default=False)
     init_layers: bool = field(default=True)
     noisy: bool = field(default=False)
     noise_std: float = field(default=0.5)
@@ -117,20 +121,21 @@ class CnnNetConfig(NetConfig):
     block_type: Literal["Conv2d", "Conv3d"] = field(default="Conv2d")
     min_hidden_layers: int = field(default=1)
     max_hidden_layers: int = field(default=6)
-    min_channel_size: int = field(default=32)
+    min_channel_size: int = field(default=16)
     max_channel_size: int = field(default=256)
-    layer_norm: bool = field(default=True)
+    layer_norm: bool = field(default=False)
     init_layers: bool = field(default=True)
 
 
 @dataclass
 class LstmNetConfig(NetConfig):
-    hidden_size: int
+    hidden_state_size: int
     num_layers: int = field(default=1)
-    min_hidden_size: int = field(default=16)
-    max_hidden_size: int = field(default=500)
+    min_hidden_state_size: int = field(default=16)
+    max_hidden_state_size: int = field(default=500)
     min_layers: int = field(default=1)
     max_layers: int = field(default=4)
+    max_seq_len: int = field(default=None)
     output_activation: Optional[str] = field(default=None)
     dropout: float = field(default=0.0)
 
@@ -150,9 +155,8 @@ class MultiInputNetConfig(NetConfig):
     output_activation: Optional[str] = field(default=None)
 
     # Network configurations
-    cnn_config: Optional[ConfigType] = field(default=None)
-    mlp_config: Optional[ConfigType] = field(default=None)
-    lstm_config: Optional[ConfigType] = field(default=None)
+    cnn_config: Optional[NetConfigType] = field(default=None)
+    mlp_config: Optional[NetConfigType] = field(default=None)
 
     # Additional settings
     init_dicts: Dict[str, Dict[str, Any]] = field(default_factory=dict)
@@ -170,32 +174,21 @@ class MultiInputNetConfig(NetConfig):
         # Validate network configurations if provided
         if self.cnn_config is not None:
             assert isinstance(
-                self.cnn_config, CnnNetConfig
+                self.cnn_config, (dict, CnnNetConfig)
             ), "CNN config must be an instance of CnnNetConfig"
         else:
             self.cnn_config = CnnNetConfig(
-                channel_size=[16, 16],
+                channel_size=[32, 32],
                 kernel_size=[3, 3],
                 stride_size=[1, 1],
                 output_activation="ReLU",
             )
         if self.mlp_config is not None:
             assert isinstance(
-                self.mlp_config, MlpNetConfig
+                self.mlp_config, (dict, MlpNetConfig)
             ), "MLP config must be an instance of MlpNetConfig"
         else:
             self.mlp_config = MlpNetConfig(
                 hidden_size=[64, 64],
-                output_activation="ReLU",
-            )
-
-        if self.lstm_config is not None:
-            assert isinstance(
-                self.lstm_config, LstmNetConfig
-            ), "LSTM config must be an instance of LstmNetConfig"
-        else:
-            self.lstm_config = LstmNetConfig(
-                hidden_size=64,
-                num_layers=2,
                 output_activation="ReLU",
             )

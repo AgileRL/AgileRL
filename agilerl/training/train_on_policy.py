@@ -5,11 +5,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import gymnasium as gym
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from gymnasium import spaces
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import PPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -264,9 +264,9 @@ def train_on_policy(
                     pop_loss[agent_idx].append(loss)
 
             else:
-                state, info = env.reset()
+                obs, info = env.reset()
                 for _ in range(-(evo_steps // -agent.learn_step)):
-                    states = []
+                    observations = []
                     actions = []
                     log_probs = []
                     rewards = []
@@ -276,11 +276,11 @@ def train_on_policy(
                     done = np.zeros(num_envs)
                     for idx_step in range(-(agent.learn_step // -num_envs)):
                         if swap_channels:
-                            state = obs_channels_to_first(state)
+                            obs = obs_channels_to_first(obs)
 
                         action_mask = info.get("action_mask", None)
                         action, log_prob, entropy, value = agent.get_action(
-                            state, action_mask=action_mask
+                            obs, action_mask=action_mask
                         )
 
                         if not is_vectorised:
@@ -304,21 +304,20 @@ def train_on_policy(
                                 )
                         else:
                             clipped_action = action
-
-                        next_state, reward, term, trunc, info = env.step(clipped_action)
+                        next_obs, reward, term, trunc, info = env.step(clipped_action)
                         next_done = np.logical_or(term, trunc).astype(np.int8)
 
                         total_steps += num_envs
                         steps += num_envs
 
-                        states.append(state)
+                        observations.append(obs)
                         actions.append(action)
                         log_probs.append(log_prob)
                         rewards.append(reward)
                         dones.append(done)
                         values.append(value)
 
-                        state = next_state
+                        obs = next_obs
                         done = next_done
                         scores += np.array(reward)
 
@@ -333,16 +332,17 @@ def train_on_policy(
                                 scores[idx] = 0
 
                     if swap_channels:
-                        next_state = obs_channels_to_first(next_state)
+
+                        next_obs = obs_channels_to_first(next_obs)
 
                     experiences = (
-                        states,
+                        observations,
                         actions,
                         log_probs,
                         rewards,
                         dones,
                         values,
-                        next_state,
+                        next_obs,
                         next_done,
                     )
                     loss = agent.learn(experiences)

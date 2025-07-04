@@ -7,12 +7,12 @@ import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl.algorithms import (
     CQN,
     DDPG,
@@ -31,7 +31,7 @@ from agilerl.algorithms.core import EvolvableAlgorithm, LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.modules.base import EvolvableModule
+from agilerl.modules import EvolvableModule
 from agilerl.typing import GymSpaceType, PopulationType
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, clone_llm
 from agilerl.utils.llm_utils import _DummyOptimizer
@@ -440,51 +440,21 @@ def create_population(
                 index=idx,
                 hp_config=hp_config,
                 net_config=net_config,
-                batch_size=INIT_HP["BATCH_SIZE"],
-                lr=INIT_HP["LR"],
-                learn_step=INIT_HP["LEARN_STEP"],
-                gamma=INIT_HP["GAMMA"],
-                gae_lambda=INIT_HP["GAE_LAMBDA"],
-                action_std_init=INIT_HP["ACTION_STD_INIT"],
-                clip_coef=INIT_HP["CLIP_COEF"],
-                ent_coef=INIT_HP["ENT_COEF"],
-                vf_coef=INIT_HP["VF_COEF"],
-                max_grad_norm=INIT_HP["MAX_GRAD_NORM"],
-                target_kl=INIT_HP["TARGET_KL"],
-                update_epochs=INIT_HP["UPDATE_EPOCHS"],
+                batch_size=INIT_HP.get("BATCH_SIZE", 64),
+                lr=INIT_HP.get("LR", 0.0001),
+                learn_step=INIT_HP.get("LEARN_STEP", 2048),
+                gamma=INIT_HP.get("GAMMA", 0.99),
+                gae_lambda=INIT_HP.get("GAE_LAMBDA", 0.95),
+                action_std_init=INIT_HP.get("ACTION_STD_INIT", 0.0),
+                clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
+                ent_coef=INIT_HP.get("ENT_COEF", 0.01),
+                vf_coef=INIT_HP.get("VF_COEF", 0.5),
+                max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 0.5),
+                target_kl=INIT_HP.get("TARGET_KL"),
+                update_epochs=INIT_HP.get("UPDATE_EPOCHS", 4),
                 actor_networks=actor_network,
                 critic_networks=critic_network,
                 action_batch_size=INIT_HP.get("ACTION_BATCH_SIZE", None),
-                device=device,
-                accelerator=accelerator,
-                torch_compiler=torch_compiler,
-                **algo_kwargs,
-            )
-            population.append(agent)
-
-    elif algo == "IPPO":
-        for idx in range(population_size):
-            agent = IPPO(
-                observation_spaces=observation_space,
-                action_spaces=action_space,
-                agent_ids=INIT_HP["AGENT_IDS"],
-                index=idx,
-                hp_config=hp_config,
-                net_config=net_config,
-                batch_size=INIT_HP["BATCH_SIZE"],
-                lr=INIT_HP["LR"],
-                learn_step=INIT_HP["LEARN_STEP"],
-                gamma=INIT_HP["GAMMA"],
-                gae_lambda=INIT_HP["GAE_LAMBDA"],
-                action_std_init=INIT_HP["ACTION_STD_INIT"],
-                clip_coef=INIT_HP["CLIP_COEF"],
-                ent_coef=INIT_HP["ENT_COEF"],
-                vf_coef=INIT_HP["VF_COEF"],
-                max_grad_norm=INIT_HP["MAX_GRAD_NORM"],
-                target_kl=INIT_HP["TARGET_KL"],
-                update_epochs=INIT_HP["UPDATE_EPOCHS"],
-                actor_networks=actor_network,
-                critic_networks=critic_network,
                 device=device,
                 accelerator=accelerator,
                 torch_compiler=torch_compiler,
@@ -915,11 +885,11 @@ def aggregate_metrics_across_gpus(
     return avg_metrics
 
 
-def save_llm_checkpoint(agent: EvolvableAlgorithm, checkpoint_path: str | None) -> None:
+def save_llm_checkpoint(agent: LLMAlgorithm, checkpoint_path: str | None) -> None:
     """Checkpoint the LLM
 
     :param agent: Agent
-    :type agent: EvolvableAlgorithm
+    :type agent: LLMAlgorithm
     :param checkpoint_path: Checkpoint path
     :type checkpoint_path: str
     """

@@ -4,14 +4,14 @@ from typing import Any, Dict, List, Optional, Union
 import torch.nn as nn
 from torch.optim import Optimizer
 
-from agilerl.modules.base import EvolvableModule
+from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.protocols import EvolvableAlgorithm
 from agilerl.typing import OptimizerType, StateDict
 from agilerl.utils.llm_utils import _DummyOptimizer
 
 ModuleList = List[EvolvableModule]
-_Optimizer = Union[OptimizerType, List[OptimizerType], _DummyOptimizer]
-_Module = Union[EvolvableModule, ModuleList, List[ModuleList]]
+_Optimizer = Union[OptimizerType, Dict[str, OptimizerType], _DummyOptimizer]
+_Module = Union[EvolvableModule, ModuleDict, ModuleList]
 
 
 def init_from_multiple(
@@ -65,8 +65,8 @@ class OptimizerWrapper:
 
     :param optimizer_cls: The optimizer class to be initialized.
     :type optimizer_cls: Type[torch.optim.Optimizer]
-    :param networks: The list of networks that the optimizer will update.
-    :type networks: List[EvolvableModule]
+    :param networks: The network/s that the optimizer will update.
+    :type networks: EvolvableModule, ModuleDict
     :param lr: The learning rate of the optimizer.
     :type lr: float
     :param optimizer_kwargs: The keyword arguments to be passed to the optimizer.
@@ -75,8 +75,6 @@ class OptimizerWrapper:
     :type network_names: List[str]
     :param lr_name: The attribute name of the learning rate in the parent container.
     :type lr_name: str
-    :param multiagent: Flag to indicate if the optimizer is multi-agent.
-    :type multiagent: bool
     """
 
     optimizer: _Optimizer
@@ -89,27 +87,27 @@ class OptimizerWrapper:
         optimizer_kwargs: Optional[Dict[str, Any]] = None,
         network_names: Optional[List[str]] = None,
         lr_name: Optional[str] = None,
-        multiagent: bool = False,
     ) -> None:
 
         self.optimizer_cls = optimizer_cls
         self.optimizer_kwargs = optimizer_kwargs if optimizer_kwargs is not None else {}
         self.lr = lr
-        self.multiagent = multiagent
 
         if isinstance(networks, nn.Module):
             self.networks = [networks]
-        else:
-            assert isinstance(networks, list) and all(
-                isinstance(net, nn.Module) for net in networks
-            ), "Expected a single network or a list of networks."
-
+        elif isinstance(networks, list) and all(
+            isinstance(net, nn.Module) for net in networks
+        ):
             self.networks = networks
+        else:
+            raise TypeError("Expected a single / list of torch.nn.Module objects.")
 
         # NOTE: This should be passed when reintializing the optimizer
         # when mutating an individual.
         if network_names is not None:
-            assert lr_name is not None, "Learning rate attribute name must be passed."
+            assert (
+                lr_name is not None
+            ), "Learning rate attribute name must be passed along with the network names."
             self.network_names = network_names
             self.lr_name = lr_name
         else:
@@ -121,35 +119,25 @@ class OptimizerWrapper:
 
         # Initialize the optimizer/s
         # NOTE: For multi-agent algorithms, we want to have a different optimizer
-        # for each of the networks in the passed list since they correspond to
+        # for each of the networks in the passed ModuleDict since they correspond to
         # different agents.
         multiple_attrs = len(self.network_names) > 1
-        multiple_networks = len(self.networks) > 1
-        if multiagent:
-            multiple_networks = isinstance(self.networks[0], list)
-            self.optimizer = []
-            for i, net in enumerate(self.networks):
+        if isinstance(self.networks[0], ModuleDict):
+            self.optimizer = {}
+            networks = self.networks[0]
+            for agent_id, net in networks.items():
                 optimizer = (
-                    optimizer_cls[i]
-                    if isinstance(optimizer_cls, list)
+                    optimizer_cls[agent_id]
+                    if isinstance(optimizer_cls, dict)
                     else optimizer_cls
                 )
-                kwargs = (
-                    optimizer_kwargs[i]
-                    if isinstance(self.optimizer_kwargs, list)
-                    else self.optimizer_kwargs
+                kwargs = self.optimizer_kwargs.get(agent_id, {})
+                self.optimizer[agent_id] = init_from_single(
+                    net, optimizer, self.lr, kwargs
                 )
-                if isinstance(net, list):
-                    self.optimizer.append(
-                        init_from_multiple(net, optimizer, self.lr, kwargs)
-                    )
-                else:
-                    self.optimizer.append(
-                        init_from_single(net, optimizer, self.lr, kwargs)
-                    )
 
         # Single-agent algorithms with multiple networks for a single optimizer
-        elif multiple_networks and multiple_attrs:
+        elif len(self.networks) > 1 and multiple_attrs:
             assert len(self.networks) == len(
                 self.network_names
             ), "Number of networks and network attribute names do not match."
@@ -174,16 +162,29 @@ class OptimizerWrapper:
                 self.networks[0], optimizer_cls, self.lr, self.optimizer_kwargs
             )
 
-    def __getitem__(self, index: int) -> Optimizer:
+    def __getitem__(self, agent_id: str) -> Optimizer:
         try:
-            return self.optimizer[index]
+            return self.optimizer[agent_id]
         except TypeError:
             raise TypeError(
                 f"Can't access item of a single {type(self.optimizer)} object."
             )
 
-    def __iter__(self):
-        return iter(self.optimizer)
+    def items(self):
+        if isinstance(self.optimizer, dict):
+            return self.optimizer.items()
+        else:
+            raise TypeError(
+                f"Can't iterate over a single {type(self.optimizer)} object."
+            )
+
+    def values(self):
+        if isinstance(self.optimizer, dict):
+            return self.optimizer.values()
+        else:
+            raise TypeError(
+                f"Can't iterate over a single {type(self.optimizer)} object."
+            )
 
     def __getattr__(self, name: str):
         try:
@@ -212,9 +213,7 @@ class OptimizerWrapper:
         """
 
         def _match_condition(attr_value: Any) -> bool:
-            if not self.multiagent:
-                return any(id(attr_value) == id(net) for net in self.networks)
-            return id(attr_value) == id(self.networks)
+            return any(id(attr_value) == id(net) for net in self.networks)
 
         return [
             attr_name
@@ -263,37 +262,68 @@ class OptimizerWrapper:
         :param state_dict: State dictionary of the optimizer.
         :type state_dict: Dict[str, Any]
         """
-        if self.multiagent:
-            assert isinstance(state_dict, list) and len(state_dict) == len(
-                self.optimizer
-            ), "Expected a list of optimizer state dictionaries for multi-agent optimizers."
-            optimizers: List[Optimizer] = self.optimizer
-            for i, opt in enumerate(optimizers):
-                opt.load_state_dict(state_dict[i])
+        if isinstance(self.networks[0], ModuleDict):
+            assert (
+                isinstance(state_dict, dict)
+                and state_dict.keys() == self.optimizer.keys()
+            ), "Expected a dictionary of optimizer state dictionaries for multi-agent optimizers."
+            for agent_id, opt in self.optimizer.items():
+                opt.load_state_dict(state_dict[agent_id])
         else:
             assert isinstance(
                 state_dict, dict
             ), "Expected a single optimizer state dictionary for single-agent optimizers."
+
             self.optimizer.load_state_dict(state_dict)
 
-    def state_dict(self) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
+    def state_dict(self) -> StateDict:
         """
         Return the state of the optimizer as a dictionary.
 
         :return: State dictionary of the optimizer.
-        :rtype: Dict[str, Any]
+        :rtype: StateDict
         """
-        if self.multiagent:
-            optimizers: List[Optimizer] = self.optimizer
-            return [opt.state_dict() for opt in optimizers]
+        if isinstance(self.networks[0], ModuleDict):
+            return {
+                agent_id: opt.state_dict() for agent_id, opt in self.optimizer.items()
+            }
 
         return self.optimizer.state_dict()
+
+    def optimizer_cls_names(self) -> Union[str, Dict[str, str]]:
+        """
+        Return the names of the optimizers.
+        """
+        if isinstance(self.networks[0], ModuleDict):
+            return {
+                agent_id: self.optimizer_cls.__name__
+                for agent_id in self.optimizer.keys()
+            }
+        return self.optimizer_cls.__name__
+
+    def checkpoint_dict(self, name: str) -> Dict[str, Any]:
+        """
+        Return a dictionary of the optimizer's state and parameters.
+
+        :param name: The name of the optimizer.
+        :type name: str
+
+        :return: A dictionary of the optimizer's state and parameters.
+        :rtype: Dict[str, Any]
+        """
+        return {
+            f"{name}_cls": self.optimizer_cls_names(),
+            f"{name}_state_dict": self.state_dict(),
+            f"{name}_networks": self.network_names,
+            f"{name}_lr": self.lr_name,
+            f"{name}_kwargs": self.optimizer_kwargs,
+        }
 
     def zero_grad(self) -> None:
         """
         Zero the gradients of the optimizer.
         """
-        if self.multiagent:
+        if isinstance(self.networks[0], ModuleDict):
             raise ValueError(
                 "Please use the zero_grad() method of the individual optimizer in "
                 "a multi-agent algorithm."
@@ -305,7 +335,7 @@ class OptimizerWrapper:
         """
         Perform a single optimization step.
         """
-        if self.multiagent:
+        if isinstance(self.networks[0], ModuleDict):
             raise ValueError(
                 "Please use the step() method of the individual optimizer in "
                 "a multi-agent algorithm."
@@ -316,10 +346,9 @@ class OptimizerWrapper:
     def __repr__(self) -> str:
         return (
             f"OptimizerWrapper(\n"
-            f"    optimizer={self.optimizer_cls.__name__},\n"
+            f"    optimizer={self.optimizer_cls_names()},\n"
             f"    lr={self.lr},\n"
             f"    networks={self.network_names},\n"
             f"    optimizer_kwargs={self.optimizer_kwargs}\n"
-            f"    multiagent={self.multiagent}\n"
-            f")"
+            ")"
         )

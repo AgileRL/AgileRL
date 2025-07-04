@@ -26,22 +26,13 @@ Rainbow-DQN Overview
 Rainbow DQN is an extension of DQN that integrates multiple improvements and techniques to achieve
 state-of-the-art performance. These improvements include:
 
-* Double DQN (DDQN): Addresses the overestimation bias of Q-values by using two networks to decouple
-  the selection and evaluation of the action in the Q-learning target.
-* Prioritized Experience Replay: Instead of uniformly sampling from the replay buffer, it samples more
-  important transitions more frequently based on the magnitude of their temporal difference (TD) error.
-* Dueling Networks: Splits the Q-network into two separate streams — one for estimating the state value
-  function and another for estimating the advantages for each action. They are then combined to produce
-  Q-values.
-* Multi-step Learning (n-step returns): Instead of using just the immediate reward for learning, it uses
-  multi-step returns which consider a sequence of future rewards.
-* Distributional RL: Instead of estimating the expected value of the cumulative future reward, it predicts
-  the entire distribution of the cumulative future reward.
-* Noisy Nets: Adds noise directly to the weights of the network, providing a way to explore the environment
-  without the need for epsilon-greedy exploration.
-* Categorical DQN (C51): A specific form of distributional RL where the continuous range of possible
-  cumulative future rewards is discretized into a fixed set of categories.
-
+    * **Double DQN (DDQN)**: Addresses the overestimation bias of Q-values by using two networks to decouple the selection and evaluation of the action in the Q-learning target.
+    * **Prioritized Experience Replay**: Instead of uniformly sampling from the replay buffer, it samples more important transitions more frequently based on the magnitude of their temporal difference (TD) error.
+    * **Dueling Networks**: Splits the Q-network into two separate streams — one for estimating the state value function and another for estimating the advantages for each action. They are then combined to produce Q-values.
+    * **Multi-step Learning (n-step returns)**: Instead of using just the immediate reward for learning, it uses multi-step returns which consider a sequence of future rewards.
+    * **Distributional RL**: Instead of estimating the expected value of the cumulative future reward, it predicts the entire distribution of the cumulative future reward.
+    * **Noisy Nets**: Adds noise directly to the weights of the network, providing a way to explore the environment without the need for epsilon-greedy exploration.
+    * **Categorical DQN (C51)**: A specific form of distributional RL where the continuous range of possible cumulative future rewards is discretized into a fixed set of categories.
 
 
 Dependencies
@@ -71,36 +62,36 @@ Defining Hyperparameters
 Before we commence training, it's easiest to define all of our hyperparameters in one dictionary. Below is an example of
 such for the Rainbow-DQN algorithm. For this example, we are training a single agent without hyperparameter optimisation,
 so we will not be performing mutations or tournament selection like we have in our other tutorials where we have. As this
-is the case, we do not need to define a mutatinos parameters dictionary.
+is the case, we do not need to define a dictionary for the mutation hyperparameters.
 
-.. code-block:: python
+.. collapse:: Hyperparameter Configuration
 
-    # Initial hyperparameters
-    INIT_HP = {
-        "BATCH_SIZE": 64,  # Batch size
-        "LR": 0.0001,  # Learning rate
-        "GAMMA": 0.99,  # Discount factor
-        "MEMORY_SIZE": 100_000,  # Max memory buffer size
-        "LEARN_STEP": 1,  # Learning frequency
-        "N_STEP": 3,  # Step number to calculate td error
-        "PER": True,  # Use prioritized experience replay buffer
-        "ALPHA": 0.6,  # Prioritized replay buffer parameter
-        "BETA": 0.4,  # Importance sampling coefficient
-        "TAU": 0.001,  # For soft update of target parameters
-        "PRIOR_EPS": 0.000001,  # Minimum priority for sampling
-        "NUM_ATOMS": 51,  # Unit number of support
-        "V_MIN": -200.0,  # Minimum value of support
-        "V_MAX": 200.0,  # Maximum value of support
-        "NOISY": True,  # Add noise directly to the weights of the network
-        # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-        "LEARNING_DELAY": 1000,  # Steps before starting learning
-        "CHANNELS_LAST": False,  # Use with RGB states
-        "TARGET_SCORE": 200.0,  # Target score that will beat the environment
-        "MAX_STEPS": 200000,  # Maximum number of steps an agent takes in an environment
-        "EVO_STEPS": 10000,  # Evolution frequency
-        "EVAL_STEPS": None,  # Number of evaluation steps per episode
-        "EVAL_LOOP": 1,  # Number of evaluation episodes
-    }
+    .. code-block:: python
+
+        # Initial hyperparameters
+        INIT_HP = {
+            "BATCH_SIZE": 64,  # Batch size
+            "LR": 0.0001,  # Learning rate
+            "GAMMA": 0.99,  # Discount factor
+            "MEMORY_SIZE": 100_000,  # Max memory buffer size
+            "LEARN_STEP": 1,  # Learning frequency
+            "N_STEP": 3,  # Step number to calculate td error
+            "PER": True,  # Use prioritized experience replay buffer
+            "ALPHA": 0.6,  # Prioritized replay buffer parameter
+            "BETA": 0.4,  # Importance sampling coefficient
+            "TAU": 0.001,  # For soft update of target parameters
+            "PRIOR_EPS": 0.000001,  # Minimum priority for sampling
+            "NUM_ATOMS": 51,  # Unit number of support
+            "V_MIN": -200.0,  # Minimum value of support
+            "V_MAX": 200.0,  # Maximum value of support
+            "NOISY": True,  # Add noise directly to the weights of the network
+            "LEARNING_DELAY": 1000,  # Steps before starting learning
+            "TARGET_SCORE": 200.0,  # Target score that will beat the environment
+            "MAX_STEPS": 200000,  # Maximum number of steps an agent takes in an environment
+            "EVO_STEPS": 10000,  # Evolution frequency
+            "EVAL_STEPS": None,  # Number of evaluation steps per episode
+            "EVAL_LOOP": 1,  # Number of evaluation episodes
+        }
 
 Create the Environment
 ----------------------
@@ -115,9 +106,6 @@ initialises the population of agents from the corresponding observation and acti
 
     observation_space = env.single_observation_space
     action_space = env.single_action_space
-    if INIT_HP["CHANNELS_LAST"]:
-        # Adjust dimensions for PyTorch API (C, H, W), for envs with RGB image states
-        observation_space = observation_space_channels_to_first(observation_space)
 
 Instantiate an Agent
 --------------------
@@ -133,21 +121,11 @@ Instantiate an Agent
         "head_config": {"hidden_size": [64, 64]}  # Head hidden size
     }
 
-    # RL hyperparameters configuration for mutation during training
-    hp_config = HyperparameterConfig(
-        lr = RLParameter(min=6.25e-5, max=1e-2),
-        learn_step = RLParameter(min=1, max=10),
-        batch_size = RLParameter(
-            min=8, max=512, dtype=int
-            )
-    )
-
     # Define a Rainbow-DQN agent
     rainbow_dqn = RainbowDQN(
         observation_space=observation_space,
         action_space=action_space,
         net_config=net_config,
-        hp_config=hp_config,
         batch_size=INIT_HP["BATCH_SIZE"],
         lr=INIT_HP["LR"],
         learn_step=INIT_HP["LEARN_STEP"],
@@ -189,9 +167,6 @@ you would define your memory and n_step_memory.
 Training and Saving an Agent
 ----------------------------
 
-Using AgileRL ``train_off_policy`` function
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
 To train a single agent without performing tournament selection, mutations, and hyperparameter optimisation
 we can still use the AgileRL ``train_off_policy`` function (Rainbow-DQN is an off-policy algorithm). We need to ensure
 that our single agent is passed to the function in a list (essentially a population of 1) and that we pass ``None``
@@ -208,7 +183,6 @@ for both the tournament and mutation arguments.
         memory=memory,
         n_step_memory=n_step_memory,
         INIT_HP=INIT_HP,
-        swap_channels=INIT_HP["CHANNELS_LAST"],
         max_steps=INIT_HP["MAX_STEPS"],
         evo_steps=INIT_HP["EVO_STEPS"],
         eval_steps=INIT_HP["EVAL_STEPS"],
@@ -226,7 +200,8 @@ for both the tournament and mutation arguments.
 
 .. note::
 
-   Known `Gymnasium issue <https://github.com/Farama-Foundation/Gymnasium/issues/722>`_ - running vectorize environments as top-level code (without ``if __name__ == "__main__":``) may cause multiprocessing errors. To fix, run the above as a method under ``main``, e.g.
+   Known `Gymnasium issue <https://github.com/Farama-Foundation/Gymnasium/issues/722>`_ - running vectorize environments as top-level code (without ``if __name__ == "__main__":``) may cause
+   multiprocessing errors. To fix, run the above as a method under ``main``, e.g.
 
    .. code-block:: python
 
@@ -242,115 +217,113 @@ If we wanted to have more control over the training process, it is also possible
 training loops to train our agents. The training loop below can be used alternatively to the above ``train_off_policy``
 function and is an example of how we might choose to train an AgileRL agent.
 
-.. code-block:: python
+.. collapse:: Custom Training Loop
 
-    total_steps = 0
-    save_path = "RainbowDQN.pt"
+    .. code-block:: python
 
-    # TRAINING LOOP
-    print("Training...")
-    pbar = trange(INIT_HP["MAX_STEPS"], unit="step")
-    while rainbow_dqn.steps[-1] < INIT_HP["MAX_STEPS"]:
-        state = env.reset()[0]  # Reset environment at start of episode
-        scores = np.zeros(num_envs)
-        completed_episode_scores = []
-        steps = 0
-        for idx_step in range(INIT_HP["EVO_STEPS"] // num_envs):
-            # Swap channels if channels last is True
-            state = obs_channels_to_first(state) if INIT_HP["CHANNELS_LAST"] else state
+        total_steps = 0
+        save_path = "RainbowDQN.pt"
 
-            # Get next action from agent
-            action = rainbow_dqn.get_action(state)
-            next_state, reward, terminated, truncated, info = env.step(action)  # Act in environment
-            scores += np.array(reward)
-            steps += num_envs
-            total_steps += num_envs
+        # TRAINING LOOP
+        print("Training...")
+        pbar = trange(INIT_HP["MAX_STEPS"], unit="step")
+        rainbow_dqn.set_training_mode(True)
+        while rainbow_dqn.steps[-1] < INIT_HP["MAX_STEPS"]:
+            obs = env.reset()[0]  # Reset environment at start of episode
+            scores = np.zeros(num_envs)
+            completed_episode_scores = []
+            steps = 0
+            for idx_step in range(INIT_HP["EVO_STEPS"] // num_envs):
+                # Get next action from agent
+                action = rainbow_dqn.get_action(obs)
+                next_obs, reward, terminated, truncated, info = env.step(action)  # Act in environment
+                scores += np.array(reward)
+                steps += num_envs
+                total_steps += num_envs
 
-            # Collect scores for completed episodes
-            for idx, (d, t) in enumerate(zip(terminated, truncated)):
-                if d or t:
-                    completed_episode_scores.append(scores[idx])
-                    rainbow_dqn.scores.append(scores[idx])
-                    scores[idx] = 0
+                # Collect scores for completed episodes
+                for idx, (d, t) in enumerate(zip(terminated, truncated)):
+                    if d or t:
+                        completed_episode_scores.append(scores[idx])
+                        rainbow_dqn.scores.append(scores[idx])
+                        scores[idx] = 0
 
-            next_state = obs_channels_to_first(next_state) if INIT_HP["CHANNELS_LAST"] else next_state
-            done = terminated or truncated
+                done = terminated or truncated
 
-            transition = Transition(
-                obs=state,
-                action=action,
-                reward=reward,
-                next_obs=next_state,
-                done=done,
-                batch_size=[num_envs]
+                transition = Transition(
+                    obs=obs,
+                    action=action,
+                    reward=reward,
+                    next_obs=next_obs,
+                    done=done,
+                    batch_size=[num_envs]
+                )
+
+                transition = transition.to_tensordict()
+
+                one_step_transition = n_step_memory.add(transition)
+                if one_step_transition:
+                    memory.add(one_step_transition)
+
+                # Update agent beta
+                fraction = min(
+                    ((rainbow_dqn.steps[-1] + idx_step + 1) * num_envs / INIT_HP["MAX_STEPS"]), 1.0
+                )
+                rainbow_dqn.beta += fraction * (1.0 - rainbow_dqn.beta)
+
+                # Learn according to learning frequency
+                if len(memory) >= rainbow_dqn.batch_size and memory.counter > INIT_HP["LEARNING_DELAY"]:
+                    for _ in range(num_envs // rainbow_dqn.learn_step):
+                        # Sample replay buffer
+                        # Learn according to agent's RL algorithm
+                        experiences = memory.sample(rainbow_dqn.batch_size, rainbow_dqn.beta)
+                        n_step_experiences = n_step_memory.sample_from_indices(experiences[6])
+                        experiences += n_step_experiences
+                        loss, idxs, priorities = rainbow_dqn.learn(experiences, n_step=n_step, per=per)
+                        memory.update_priorities(idxs, priorities)
+
+                obs = next_obs
+                total_steps += num_envs
+                steps += num_envs
+
+            # Evaluate population
+            fitness = rainbow_dqn.test(
+                env,
+                max_steps=INIT_HP["EVAL_STEPS"],
+                loop=INIT_HP["EVO_LOOP"],
+            )
+            mean_score = (
+            np.mean(completed_episode_scores)
+            if len(completed_episode_scores) > 0
+            else "0 completed episodes"
             )
 
-            transition = transition.to_tensordict()
+            print(f"--- Global steps {total_steps} ---")
+            print(f"Steps {rainbow_dqn.steps[-1]}")
+            print(f"Scores: {"%.2f"%mean_score}")
+            print(f'Fitness: {"%.2f"%fitness}')
+            print(f'5 fitness avg: {"%.2f"%np.mean(rainbow_dqn.fitness[-5:])}')
 
-            one_step_transition = n_step_memory.add(transition)
-            if one_step_transition:
-                memory.add(one_step_transition)
+            fitness = "%.2f" % fitness
+            avg_fitness = "%.2f" % np.mean(rainbow_dqn.fitness[-100:])
+            avg_score = "%.2f" % np.mean(rainbow_dqn.scores[-100:])
+            num_steps = rainbow_dqn.steps[-1]
 
-            # Update agent beta
-            fraction = min(
-                ((rainbow_dqn.steps[-1] + idx_step + 1) * num_envs / INIT_HP["MAX_STEPS"]), 1.0
+            print(
+                f"""
+                --- Epoch {episode + 1} ---
+                Fitness:\t\t{fitness}
+                100 fitness avgs:\t{avg_fitness}
+                100 score avgs:\t{avg_score}
+                Steps:\t\t{num_steps}
+                """,
+                end="\r",
             )
-            rainbow_dqn.beta += fraction * (1.0 - rainbow_dqn.beta)
 
-            # Learn according to learning frequency
-            if len(memory) >= rainbow_dqn.batch_size and memory.counter > INIT_HP["LEARNING_DELAY"]:
-                for _ in range(num_envs // rainbow_dqn.learn_step):
-                    # Sample replay buffer
-                    # Learn according to agent's RL algorithm
-                    experiences = memory.sample(rainbow_dqn.batch_size, rainbow_dqn.beta)
-                    n_step_experiences = n_step_memory.sample_from_indices(experiences[6])
-                    experiences += n_step_experiences
-                    loss, idxs, priorities = rainbow_dqn.learn(experiences, n_step=n_step, per=per)
-                    memory.update_priorities(idxs, priorities)
+            rainbow_dqn.steps.append(rainbow_dqn.steps[-1])
 
-            state = next_state
-            total_steps += num_envs
-            steps += num_envs
-
-        # Evaluate population
-        fitness = rainbow_dqn.test(
-            env,
-            swap_channels=INIT_HP["CHANNELS_LAST"],
-            max_steps=INIT_HP["EVAL_STEPS"],
-            loop=INIT_HP["EVO_LOOP"],
-        )
-        mean_score = (
-           np.mean(completed_episode_scores)
-           if len(completed_episode_scores) > 0
-           else "0 completed episodes"
-        )
-
-        print(f"--- Global steps {total_steps} ---")
-        print(f"Steps {rainbow_dqn.steps[-1]}")
-        print(f"Scores: {"%.2f"%mean_score}")
-        print(f'Fitness: {"%.2f"%fitness}')
-        print(f'5 fitness avg: {"%.2f"%np.mean(rainbow_dqn.fitness[-5:])}')
-
-        fitness = "%.2f" % fitness
-        avg_fitness = "%.2f" % np.mean(rainbow_dqn.fitness[-100:])
-        avg_score = "%.2f" % np.mean(rainbow_dqn.scores[-100:])
-        num_steps = rainbow_dqn.steps[-1]
-
-        print(
-            f"""
-            --- Epoch {episode + 1} ---
-            Fitness:\t\t{fitness}
-            100 fitness avgs:\t{avg_fitness}
-            100 score avgs:\t{avg_score}
-            Steps:\t\t{num_steps}
-            """,
-            end="\r",
-        )
-
-        rainbow_dqn.steps.append(rainbow_dqn.steps[-1])
-
-    # Save the trained algorithm at the end of the training loop
-    rainbow_dqn.save_checkpoint(save_path)
+        # Save the trained algorithm at the end of the training loop
+        rainbow_dqn.save_checkpoint(save_path)
 
 
 Loading an Agent for Inference and Rendering your Solved Environment
@@ -377,23 +350,19 @@ Test loop for inference
     test_env = gym.make("CartPole-v1", render_mode="rgb_array")
     with torch.no_grad():
         for ep in range(testing_eps):
-            state = test_env.reset()[0]  # Reset environment at start of episode
+            obs = test_env.reset()[0]  # Reset environment at start of episode
             score = 0
 
             for step in range(max_testing_steps):
-                # If your state is an RGB image
-                if INIT_HP["CHANNELS_LAST"]:
-                    state = obs_channels_to_first(state)
-
                 # Get next action from agent
-                action, *_ = rainbow_dqn.get_action(state, training=False)
+                action, *_ = rainbow_dqn.get_action(obs, training=False)
 
                 # Save the frame for this step and append to frames list
                 frame = test_env.render()
                 frames.append(frame)
 
                 # Take the action in the environment
-                state, reward, terminated, truncated, _ = test_env.step(action)
+                obs, reward, terminated, truncated, _ = test_env.step(action)
 
                 # Collect the score of environment 0
                 score += reward

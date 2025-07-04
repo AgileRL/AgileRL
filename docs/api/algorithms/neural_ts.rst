@@ -3,12 +3,10 @@
 Neural Contextual Bandits with Thompson Sampling (NeuralTS)
 ================================================================
 
-NeuralTS adapts deep neural networks for both exploration and exploitation by using a posterior distribution of the reward
+`NeuralTS <https://arxiv.org/abs/1911.04462>`_ adapts deep neural networks for both exploration and exploitation by using a posterior distribution of the reward
 with a neural network approximator as its mean, and neural tangent features as its variance.
 
 This is a contextual multi-armed :ref:`bandit algorithm<bandits>`, meaning it is suited to RL problems with just a single timestep.
-
-* Neural Bandits paper: https://arxiv.org/abs/1911.04462
 
 
 Example
@@ -125,7 +123,7 @@ Evolutionary Hyperparameter Optimization
 AgileRL allows for efficient hyperparameter optimization during training to provide state-of-the-art results in a fraction of the time.
 For more information on how this is done, please refer to the :ref:`Evolutionary Hyperparameter Optimization <evo_hyperparam_opt>` documentation.
 
-Saving and loading agents
+Saving and Loading Agents
 -------------------------
 
 To save an agent, use the ``save_checkpoint`` method:

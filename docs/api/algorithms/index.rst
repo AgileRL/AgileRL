@@ -14,11 +14,10 @@ Core algorithm tools:
    registry
    wrappers
 
-Implemented Algorithms:
-------------------------------------------------
-
 Observation Spaces
-~~~~~~~~~~~~~~~~~~
+------------------
+
+AgileRL currently supports processing the following observation spaces:
 
 .. list-table::
    :widths: 25 25 25 25
@@ -118,12 +117,12 @@ Action Spaces
      - ✅
      - ✅
    * - :ref:`MADDPG <maddpg>`
-     - ❌
+     - ✅
      - ✅
      - ❌
      - ❌
    * - :ref:`MATD3 <matd3>`
-     - ❌
+     - ✅
      - ✅
      - ❌
      - ❌

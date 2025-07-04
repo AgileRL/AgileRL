@@ -16,9 +16,8 @@ from torch.nn.utils import clip_grad_norm_
 from transformers import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
 
-from agilerl.algorithms.core import LLMAlgorithm
+from agilerl.algorithms.core import LLMAlgorithm, OptimizerWrapper
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.typing import ExperiencesType, OptimizerType
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,

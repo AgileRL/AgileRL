@@ -1,5 +1,5 @@
-# This file contains utility functions for tuning
 from collections import OrderedDict
+from dataclasses import asdict
 from typing import Dict, Iterable, List, Literal, Optional, Tuple, Union
 
 import numpy as np
@@ -7,12 +7,16 @@ import torch
 import torch.nn as nn
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
+from torch._dynamo.eval_frame import OptimizedModule
 from torch.optim import Optimizer
 
+from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.modules.configs import (
     CnnNetConfig,
+    LstmNetConfig,
     MlpNetConfig,
     MultiInputNetConfig,
+    NetConfig,
     SimBaNetConfig,
 )
 from agilerl.modules.custom_components import (
@@ -22,9 +26,178 @@ from agilerl.modules.custom_components import (
     ResidualBlock,
     SimbaResidualBlock,
 )
-from agilerl.typing import ConfigType, DeviceType
+from agilerl.typing import DeviceType, GymSpaceType, NetConfigType
 
 TupleorInt = Union[Tuple[int, ...], int]
+
+
+def get_input_size_from_space(
+    observation_space: GymSpaceType,
+) -> Union[int, Dict[str, int], Tuple[int, ...]]:
+    """Returns the dimension of the state space as it pertains to the underlying
+    networks (i.e. the input size of the networks).
+
+    :param observation_space: The observation space of the environment.
+    :type observation_space: spaces.Space or List[spaces.Space] or Dict[str, spaces.Space].
+
+    :return: The dimension of the state space.
+    :rtype: Union[int, Dict[str, int], Tuple[int, ...]]
+    """
+    if isinstance(observation_space, (list, tuple, spaces.Tuple)):
+        return tuple(get_input_size_from_space(space) for space in observation_space)
+    elif isinstance(observation_space, (spaces.Dict, dict)):
+        return {
+            key: get_input_size_from_space(subspace)
+            for key, subspace in observation_space.items()
+        }
+    elif isinstance(observation_space, spaces.Discrete):
+        return (observation_space.n,)
+    elif isinstance(observation_space, spaces.MultiDiscrete):
+        return (sum(observation_space.nvec),)
+    elif isinstance(observation_space, spaces.Box):
+        return observation_space.shape
+    elif isinstance(observation_space, spaces.MultiBinary):
+        return (observation_space.n,)
+    else:
+        raise AttributeError(
+            f"Can't access state dimensions for {type(observation_space)} spaces."
+        )
+
+
+def get_output_size_from_space(
+    action_space: GymSpaceType,
+) -> Union[int, Dict[str, int], Tuple[int, ...]]:
+    """Returns the dimension of the action space as it pertains to the underlying
+    networks (i.e. the output size of the networks).
+
+    :param action_space: The action space of the environment.
+    :type action_space: spaces.Space or list[spaces.Space] or Dict[str, spaces.Space].
+
+    :return: The dimension of the action space.
+    :rtype: Union[int, Dict[str, int], Tuple[int, ...]]
+    """
+    if isinstance(action_space, (list, tuple)):
+        return tuple(get_output_size_from_space(space) for space in action_space)
+    elif isinstance(action_space, (spaces.Dict, dict)):
+        return {
+            key: get_output_size_from_space(subspace)
+            for key, subspace in action_space.items()
+        }
+    elif isinstance(action_space, spaces.MultiBinary):
+        return action_space.n
+    elif isinstance(action_space, spaces.Discrete):
+        return action_space.n
+    elif isinstance(action_space, spaces.MultiDiscrete):
+        return sum(action_space.nvec)
+    elif isinstance(action_space, spaces.Box):
+        # NOTE: Assume continuous actions are always one-dimensional
+        return action_space.shape[0]
+    else:
+        raise AttributeError(
+            f"Can't access action dimensions for {type(action_space)} spaces."
+        )
+
+
+def compile_model(
+    model: Union[nn.Module, ModuleDict[EvolvableModule]],
+    mode: Optional[str] = "default",
+) -> Union[OptimizedModule, ModuleDict[EvolvableModule]]:
+    """Compiles torch model if not already compiled
+
+    :param model: torch model
+    :type model: nn.Module | ModuleDict[EvolvableModule]
+    :param mode: torch compile mode, defaults to "default"
+    :type mode: str, optional
+    :return: compiled model
+    :rtype: OptimizedModule | ModuleDict[OptimizedModule]
+    """
+    if isinstance(model, ModuleDict):
+        return ModuleDict(
+            {
+                agent_id: compile_model(module, mode)
+                for agent_id, module in model.items()
+            }
+        )
+
+    if not isinstance(model, OptimizedModule) and mode is not None:
+        compiled_model = torch.compile(model, mode=mode, dynamic=True)
+    else:
+        compiled_model = model
+
+    return compiled_model
+
+
+def is_image_space(space: spaces.Space) -> bool:
+    """Check if the space is an image space. We ignore dtype and number of channels
+    checks.
+
+    :param space: Input space
+    :type space: spaces.Space
+
+    :return: True if the space is an image space, False otherwise
+    :rtype: bool
+    """
+    return isinstance(space, spaces.Box) and len(space.shape) == 3
+
+
+def is_box_space_ndim(space: spaces.Space, ndim: int) -> bool:
+    """Check if the space is a Box space with the given number of dimensions.
+
+    :param space: Input space
+    :type space: spaces.Space
+    :param ndim: Number of dimensions
+    :type ndim: int
+
+    :return: True if the space is a Box space with the given number of dimensions, False otherwise
+    """
+    return isinstance(space, spaces.Box) and len(space.shape) == ndim
+
+
+def is_vector_space(space: spaces.Space) -> bool:
+    """Check if the space is a vector space.
+
+    :param space: Input space
+    :type space: spaces.Space
+
+    :return: True if the space is a vector space, False otherwise
+    :rtype: bool
+    """
+    return (
+        (isinstance(space, spaces.Box) and len(space.shape) in [0, 1])
+        or isinstance(space, spaces.Discrete)
+        or isinstance(space, spaces.MultiDiscrete)
+    )
+
+
+def config_from_dict(config_dict: NetConfigType) -> NetConfig:
+    """Get the class of the net config from the dictionary.
+
+    :param config_dict: The dictionary to get the class from.
+    :type config_dict: NetConfigType
+    :return: The net config class.
+    :rtype: NetConfig
+    """
+    config_keys = config_dict.keys()
+    if "hidden_size" in config_keys:
+        if "num_layers" in config_keys:
+            config_cls = LstmNetConfig
+        elif "num_blocks" in config_keys:
+            config_cls = SimBaNetConfig
+        else:
+            config_cls = MlpNetConfig
+    elif "channel_size" in config_keys:
+        config_cls = CnnNetConfig
+    elif any(
+        key in MultiInputNetConfig.__dataclass_fields__.keys() for key in config_keys
+    ):
+        config_cls = MultiInputNetConfig
+    else:
+        raise ValueError(
+            f"Unable to determine net config class from: {config_dict}. "
+            "Please verify that the keys correspond to the arguments of the net config class."
+        )
+
+    return config_cls.from_dict(config_dict)
 
 
 def tuple_to_dict_space(tuple_space: spaces.Tuple) -> spaces.Dict:
@@ -50,32 +223,41 @@ def tuple_to_dict_obs(tuple_obs: tuple) -> dict:
 
 
 def get_default_encoder_config(
-    observation_space: spaces.Space, simba: bool = False
-) -> ConfigType:
+    observation_space: spaces.Space, simba: bool = False, recurrent: bool = False
+) -> NetConfigType:
     """Get the default configuration for the encoder network based on the observation space.
 
     :param observation_space: Observation space of the environment.
     :type observation_space: spaces.Space
+    :param simba: Whether to use SimBA encoder.
+    :type simba: bool
+    :param recurrent: Whether to use recurrent encoder.
+    :type recurrent: bool
 
     :return: Default configuration for the encoder network.
     :rtype: Dict[str, Any]
     """
     if isinstance(observation_space, (spaces.Dict, spaces.Tuple)):
-        return MultiInputNetConfig()
+        config = MultiInputNetConfig(output_activation=None)
     elif is_image_space(observation_space):
-        return CnnNetConfig(
-            channel_size=[16, 16],
+        config = CnnNetConfig(
+            channel_size=[32, 32],
             kernel_size=[3, 3],
             stride_size=[1, 1],
             output_activation=None,
         )
-    else:
-        if simba:
-            return SimBaNetConfig(hidden_size=128, num_blocks=2)
-
-        return MlpNetConfig(
-            hidden_size=[16, 16], output_activation=None, output_vanish=False
+    elif simba:
+        config = SimBaNetConfig(hidden_size=128, num_blocks=2, output_activation=None)
+    elif recurrent:
+        config = LstmNetConfig(
+            hidden_state_size=128, num_layers=2, output_activation=None
         )
+    else:
+        config = MlpNetConfig(
+            hidden_size=[64, 64], output_activation=None, output_vanish=False
+        )
+
+    return asdict(config)
 
 
 def unwrap_optimizer(
@@ -342,89 +524,6 @@ def init_weights_gaussian(m: nn.Module, mean: float, std: float) -> None:
             torch.nn.init.constant_(m.bias, 0)
 
 
-def calc_max_kernel_sizes(
-    channel_size: List[int],
-    kernel_size: List[int],
-    stride_size: List[int],
-    input_shape: List[int],
-) -> List[int]:
-    """Calculates the max kernel size for each convolutional layer of the feature net.
-
-    :param channel_size: List of channel sizes for each convolutional layer
-    :type channel_size: list[int]
-    :param kernel_size: List of kernel sizes for each convolutional layer
-    :type kernel_size: list[int]
-    :param stride_size: List of stride sizes for each convolutional layer
-    :type stride_size: list[int]
-    :param input_shape: Input shape of the network
-    :type input_shape: list[int]
-    :return: List of max kernel sizes for each convolutional layer
-    :rtype: list[int]
-    """
-    max_kernel_list = []
-    height_in, width_in = input_shape[-2:]
-    for idx, _ in enumerate(channel_size):
-        height_out = 1 + np.floor(
-            (height_in + 2 * (0) - kernel_size[idx]) / (stride_size[idx])
-        )
-        width_out = 1 + np.floor(
-            (width_in + 2 * (0) - kernel_size[idx]) / (stride_size[idx])
-        )
-        max_kernel_size = min(height_out, width_out) * 0.25
-        max_kernel_size = int(max_kernel_size)
-        if max_kernel_size <= 0:
-            max_kernel_size = 1
-        elif max_kernel_size > 9:
-            max_kernel_size = 9
-        max_kernel_list.append(max_kernel_size)
-        height_in = height_out
-        width_in = width_out
-
-    return max_kernel_list
-
-
-def is_image_space(space: spaces.Space) -> bool:
-    """Check if the space is an image space. We ignore dtype and number of channels
-    checks.
-
-    :param space: Input space
-    :type space: spaces.Space
-
-    :return: True if the space is an image space, False otherwise
-    :rtype: bool
-    """
-    return is_box_space_ndim(space, 3)
-
-
-def is_box_space_ndim(space: spaces.Space, ndim: int) -> bool:
-    """Check if the space is a Box space with the given number of dimensions.
-
-    :param space: Input space
-    :type space: spaces.Space
-    :param ndim: Number of dimensions
-    :type ndim: int
-
-    :return: True if the space is a Box space with the given number of dimensions, False otherwise
-    """
-    return isinstance(space, spaces.Box) and len(space.shape) == ndim
-
-
-def is_vector_space(space: spaces.Space) -> bool:
-    """Check if the space is a vector space.
-
-    :param space: Input space
-    :type space: spaces.Space
-
-    :return: True if the space is a vector space, False otherwise
-    :rtype: bool
-    """
-    return (
-        (isinstance(space, spaces.Box) and len(space.shape) in [0, 1])
-        or isinstance(space, spaces.Discrete)
-        or isinstance(space, spaces.MultiDiscrete)
-    )
-
-
 def create_cnn(
     block_type: Literal["Conv2d", "Conv3d"],
     in_channels: int,
@@ -590,7 +689,9 @@ def create_mlp(
     net_dict[f"{name}_linear_layer_output"] = output_layer
 
     if output_layernorm:
-        net_dict[f"{name}_layer_norm_output"] = nn.LayerNorm(output_size, device=device)
+        net_dict[f"{name}_layer_norm_output"] = nn.LayerNorm(
+            output_size, device=device, elementwise_affine=False
+        )
 
     net_dict[f"{name}_activation_output"] = get_activation(
         activation_name=output_activation, new_gelu=new_gelu

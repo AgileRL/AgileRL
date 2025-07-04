@@ -40,29 +40,8 @@ if __name__ == "__main__":
         env = ss.color_reduction_v0(env, mode="B")
         env = ss.resize_v1(env, x_size=84, y_size=84)
         env = ss.frame_stack_v1(env, 4)
-    env.reset()
-    try:
-        state_dim = [env.observation_space(agent).n for agent in env.agents]
-        one_hot = True
-    except Exception:
-        state_dim = [env.observation_space(agent).shape for agent in env.agents]
-        one_hot = False
-    try:
-        action_dim = [env.action_space(agent).n for agent in env.agents]
-        discrete_actions = True
-        max_action = None
-        min_action = None
-    except Exception:
-        action_dim = [env.action_space(agent).shape[0] for agent in env.agents]
-        discrete_actions = False
-        max_action = [env.action_space(agent).high for agent in env.agents]
-        min_action = [env.action_space(agent).low for agent in env.agents]
 
-    # Pre-process image dimensions for pytorch convolutional layers
-    if channels_last:
-        state_dim = [
-            (state_dim[2], state_dim[0], state_dim[1]) for state_dim in state_dim
-        ]
+    env.reset()
 
     # Append number of agents and agent IDs to the initial hyperparameter dictionary
     n_agents = env.num_agents
@@ -94,13 +73,7 @@ if __name__ == "__main__":
                     for agent_id, s in state.items()
                 }
             # Get next action from agent
-            cont_actions, discrete_action = maddpg.get_action(
-                state, training=False, infos=info
-            )
-            if maddpg.discrete_actions:
-                action = discrete_action
-            else:
-                action = cont_actions
+            action, _ = maddpg.get_action(state, training=False, infos=info)
 
             # Save the frame for this step and append to frames list
             frame = env.render()

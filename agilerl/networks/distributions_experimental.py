@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from gymnasium import spaces
 
 from agilerl.modules.base import EvolvableModule, EvolvableWrapper
-from agilerl.typing import ArrayOrTensor, ConfigType, DeviceType
+from agilerl.typing import ArrayOrTensor, DeviceType, NetConfigType
 
 # NOTE: we still import Normal / Bernoulli solely for continuous & binary helpers,
 #       but no Categorical objects are ever instantiated any more.
@@ -247,11 +247,11 @@ class EvolvableDistribution(EvolvableWrapper):
             )
 
     @property
-    def net_config(self) -> ConfigType:
+    def net_config(self) -> NetConfigType:
         """Configuration of the network.
 
         :return: Configuration of the network.
-        :rtype: ConfigType
+        :rtype: NetConfigType
         """
         return self.wrapped.net_config
 

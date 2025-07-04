@@ -1,5 +1,6 @@
 import copy
 import warnings
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -8,29 +9,28 @@ import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
 
-from agilerl.algorithms.core import MultiAgentRLAlgorithm
+from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.modules.base import EvolvableModule
+from agilerl.modules.base import EvolvableModule, ModuleDict
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.typing import (
     ArrayDict,
     InfosDict,
+    MultiAgentModule,
     ObservationType,
     PzEnvType,
-    TensorDict,
+    StandardTensorDict,
 )
 from agilerl.utils.algo_utils import (
     concatenate_spaces,
-    contains_image_space,
+    format_shared_critic_encoder,
+    get_deepest_head_config,
     key_in_nested_dict,
     make_safe_deepcopies,
-    multi_agent_sample_tensor_from_space,
     obs_channels_to_first,
 )
-from agilerl.utils.evolvable_networks import get_default_encoder_config
 
 
 class MATD3(MultiAgentRLAlgorithm):
@@ -39,11 +39,11 @@ class MATD3(MultiAgentRLAlgorithm):
     Paper: https://arxiv.org/abs/1910.01465
 
     :param observation_spaces: Observation space for each agent
-    :type observation_spaces: List[spaces.Space]
+    :type observation_spaces: Union[List[spaces.Space], spaces.Dict]
     :param action_spaces: Action space for each agent
-    :type action_spaces: List[spaces.Space]
+    :type action_spaces: Union[List[spaces.Space], spaces.Dict]
     :param agent_ids: Agent ID for each agent
-    :type agent_ids: List[str]
+    :type agent_ids: Optional[List[str]], optional
     :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
     :type O_U_noise: bool, optional
     :param expl_noise: Scale for Ornstein Uhlenbeck action noise, or standard deviation for Gaussian exploration noise
@@ -81,9 +81,9 @@ class MATD3(MultiAgentRLAlgorithm):
     :param mut: Most recent mutation to agent, defaults to None
     :type mut: Optional[str], optional
     :param actor_networks: List of custom actor networks, defaults to None
-    :type actor_networks: Optional[List[EvolvableModule]], optional
+    :type actor_networks: Optional[ModuleDict], optional
     :param critic_networks: List containing two lists of custom critic networks, defaults to None
-    :type critic_networks: Optional[List[List[EvolvableModule]]], optional
+    :type critic_networks: Optional[List[ModuleDict]], optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -94,18 +94,20 @@ class MATD3(MultiAgentRLAlgorithm):
     :type wrap: bool, optional
     """
 
-    actors: List[Union[nn.Module, DeterministicActor]]
-    actor_targets: List[Union[nn.Module, DeterministicActor]]
-    critics_1: List[Union[nn.Module, ContinuousQNetwork]]
-    critic_targets_1: List[Union[nn.Module, ContinuousQNetwork]]
-    critics_2: List[Union[nn.Module, ContinuousQNetwork]]
-    critic_targets_2: List[Union[nn.Module, ContinuousQNetwork]]
+    possible_action_spaces: Dict[str, Union[spaces.Box, spaces.Discrete]]
+
+    actors: MultiAgentModule[DeterministicActor]
+    actor_targets: MultiAgentModule[DeterministicActor]
+    critics_1: MultiAgentModule[ContinuousQNetwork]
+    critic_targets_1: MultiAgentModule[ContinuousQNetwork]
+    critics_2: MultiAgentModule[ContinuousQNetwork]
+    critic_targets_2: MultiAgentModule[ContinuousQNetwork]
 
     def __init__(
         self,
-        observation_spaces: List[spaces.Space],
-        action_spaces: List[spaces.Space],
-        agent_ids: List[str],
+        observation_spaces: Union[List[spaces.Space], spaces.Dict],
+        action_spaces: Union[List[spaces.Space], spaces.Dict],
+        agent_ids: Optional[List[str]] = None,
         O_U_noise: bool = True,
         expl_noise: float = 0.1,
         vect_noise_dim: int = 1,
@@ -124,8 +126,8 @@ class MATD3(MultiAgentRLAlgorithm):
         tau: float = 0.01,
         normalize_images: bool = True,
         mut: Optional[str] = None,
-        actor_networks: Optional[list[EvolvableModule]] = None,
-        critic_networks: Optional[List[List[nn.Module]]] = None,
+        actor_networks: Optional[ModuleDict] = None,
+        critic_networks: Optional[List[ModuleDict]] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         torch_compiler: Optional[str] = None,
@@ -134,8 +136,8 @@ class MATD3(MultiAgentRLAlgorithm):
         super().__init__(
             observation_spaces,
             action_spaces,
-            agent_ids,
             index=index,
+            agent_ids=agent_ids,
             hp_config=hp_config,
             device=device,
             accelerator=accelerator,
@@ -161,13 +163,12 @@ class MATD3(MultiAgentRLAlgorithm):
         assert policy_freq > 0, "Policy frequency must be greater than zero."
         if (actor_networks is not None) != (critic_networks is not None):
             warnings.warn(
-                "Actor and critic network lists must both be supplied to use custom networks. Defaulting to net config."
+                "Actor and critic network must both be supplied to use custom networks. Defaulting to net config."
             )
         assert isinstance(
             wrap, bool
         ), "Wrap models flag must be boolean value True or False."
 
-        self.is_image_space = contains_image_space(self.single_space)
         self.batch_size = batch_size
         self.lr_actor = lr_actor
         self.lr_critic = lr_critic
@@ -180,53 +181,100 @@ class MATD3(MultiAgentRLAlgorithm):
         self.learn_counter = {agent: 0 for agent in self.agent_ids}
         self.O_U_noise = O_U_noise
         self.vect_noise_dim = vect_noise_dim
-        self.sample_gaussian = [
-            torch.zeros(*(vect_noise_dim, self.action_dims[idx]), device=self.device)
-            for idx in range(self.n_agents)
-        ]
-        self.expl_noise = (
-            expl_noise
-            if isinstance(expl_noise, list)
-            else [
-                expl_noise
-                * torch.ones(*(vect_noise_dim, action_dim), device=self.device)
-                for action_dim in self.action_dims
-            ]
-        )
-        self.mean_noise = (
-            mean_noise
-            if isinstance(mean_noise, list)
-            else [
-                mean_noise
-                * torch.ones(*(vect_noise_dim, action_dim), device=self.device)
-                for action_dim in self.action_dims
-            ]
-        )
-        self.current_noise = [
-            torch.zeros(*(vect_noise_dim, action_dim), device=self.device)
-            for action_dim in self.action_dims
-        ]
         self.theta = theta
         self.dt = dt
         self.sqdt = dt ** (0.5)
 
+        # Initialise noise for exploration
+        self.sample_gaussian = {
+            agent_id: torch.zeros(*(vect_noise_dim, action_dim), device=self.device)
+            for agent_id, action_dim in self.action_dims.items()
+        }
+        self.expl_noise = (
+            expl_noise
+            if isinstance(expl_noise, dict)
+            else {
+                agent_id: expl_noise
+                * torch.ones(*(vect_noise_dim, action_dim), device=self.device)
+                for agent_id, action_dim in self.action_dims.items()
+            }
+        )
+        self.mean_noise = (
+            mean_noise
+            if isinstance(mean_noise, dict)
+            else {
+                agent_id: mean_noise
+                * torch.ones(*(vect_noise_dim, action_dim), device=self.device)
+                for agent_id, action_dim in self.action_dims.items()
+            }
+        )
+        self.current_noise = {
+            agent_id: torch.zeros(*(vect_noise_dim, action_dim), device=self.device)
+            for agent_id, action_dim in self.action_dims.items()
+        }
+
         if actor_networks is not None and critic_networks is not None:
-            assert (
-                len({type(net) for net in actor_networks}) == 1
+            assert isinstance(
+                critic_networks, list
+            ), "critic_networks must be a list containing the two critics in MATD3."
+
+            if isinstance(actor_networks, list):
+                assert len(actor_networks) == len(
+                    self.agent_ids
+                ), "actor_networks must be a list of the same length as the number of agents"
+                actor_networks = ModuleDict(
+                    {
+                        self.agent_ids[i]: actor_networks[i]
+                        for i in range(len(self.agent_ids))
+                    }
+                )
+            if isinstance(critic_networks[0], list):
+                assert len(critic_networks[0]) == len(
+                    self.agent_ids
+                ), "critic_networks at index 0 must be a list of the same length as the number of agents"
+                assert len(critic_networks[1]) == len(
+                    self.agent_ids
+                ), "critic_networks at index 1 must be a list of the same length as the number of agents"
+
+                critic_networks[0] = ModuleDict(
+                    {
+                        self.agent_ids[i]: critic_networks[0][i]
+                        for i in range(len(self.agent_ids))
+                    }
+                )
+                critic_networks[1] = ModuleDict(
+                    {
+                        self.agent_ids[i]: critic_networks[1][i]
+                        for i in range(len(self.agent_ids))
+                    }
+                )
+
+            actors_list = list(actor_networks.values())
+            critics_list = list(critic_networks[0].values()) + list(
+                critic_networks[1].values()
+            )
+            assert all(
+                isinstance(net, actors_list[0].__class__) for net in actors_list
             ), "'actor_networks' must all be the same type"
-            assert (
-                len({type(net) for net in critic_networks}) == 1
+            assert all(
+                isinstance(net, critics_list[0].__class__) for net in critics_list
             ), "'critic_networks' must all be the same type"
 
-            if not all(isinstance(net, EvolvableModule) for net in actor_networks):
+            if not all(
+                isinstance(net, EvolvableModule) for net in actor_networks.values()
+            ):
                 raise TypeError(
                     "All actor networks must be instances of EvolvableModule"
                 )
-            if not all(isinstance(net, EvolvableModule) for net in critic_networks[0]):
+            if not all(
+                isinstance(net, EvolvableModule) for net in critic_networks[0].values()
+            ):
                 raise TypeError(
                     "All critic networks must be instances of EvolvableModule"
                 )
-            if not all(isinstance(net, EvolvableModule) for net in critic_networks[1]):
+            if not all(
+                isinstance(net, EvolvableModule) for net in critic_networks[1].values()
+            ):
                 raise TypeError(
                     "All critic networks must be instances of EvolvableModule"
                 )
@@ -239,152 +287,139 @@ class MATD3(MultiAgentRLAlgorithm):
                 )
             )
         else:
-            net_config = {} if net_config is None else net_config
-            simba = net_config.get("simba", False)
-            critic_net_config = copy.deepcopy(net_config)
+            agent_configs, encoder_configs = self.build_net_config(
+                net_config, return_encoders=True
+            )
 
-            encoder_config = net_config.get("encoder_config", None)
-            critic_encoder_config = critic_net_config.get("encoder_config", None)
-            head_config = net_config.get("head_config", None)
+            # Iterate over actor configs and modify accordingly
+            for agent_id, space in self.possible_action_spaces.items():
+                agent_config = agent_configs[agent_id]
+                head_config = agent_config.get("head_config", None)
 
-            # Determine actor output activation from action space
-            if head_config is not None:
-                if self.discrete_actions:
-                    head_config["output_activation"] = "GumbelSoftmax"
-
-                critic_head_config = copy.deepcopy(head_config)
-                critic_head_config["output_activation"] = None
-            else:
-                output_activation = "GumbelSoftmax" if self.discrete_actions else None
-                head_config = MlpNetConfig(
-                    hidden_size=[64], output_activation=output_activation
-                )
-                if head_config.output_activation is None:
-                    head_config.pop("output_activation")
-
-                critic_head_config = MlpNetConfig(hidden_size=[64])
-
-            if encoder_config is None:
-                encoder_config = get_default_encoder_config(self.single_space, simba)
-                critic_encoder_config = get_default_encoder_config(
-                    self.single_space, simba
-                )
-
-            # For image spaces we need to give a sample input tensor to
-            # build networks with Conv3d blocks appropriately
-            # NOTE: Currently AgileRL only supports Dict observation spaces
-            # with a unique image space (i.e. all agents and all subspaces
-            # contain the same image space).
-            if self.is_image_space:
-                actor_sample_input = multi_agent_sample_tensor_from_space(
-                    self.single_space, self.n_agents, device=self.device
-                )
-                critic_sample_input = multi_agent_sample_tensor_from_space(
-                    self.single_space,
-                    self.n_agents,
-                    device=self.device,
-                    critic=True,
-                )
-
-                def get_first_sample_input(
-                    sample_input: Union[
-                        Tuple[torch.Tensor, ...], Dict[str, torch.Tensor]
-                    ],
-                ) -> torch.Tensor:
-                    if isinstance(self.single_space, spaces.Dict):
-                        return list(sample_input.values())[0]
-                    elif isinstance(self.single_space, spaces.Tuple):
-                        return sample_input[0]
-
-                    return sample_input
-
-                actor_sample_input = get_first_sample_input(actor_sample_input)
-                critic_sample_input = get_first_sample_input(critic_sample_input)
-
-                if isinstance(self.single_space, (spaces.Dict, spaces.Tuple)):
-                    encoder_config["cnn_config"]["sample_input"] = actor_sample_input
-                    critic_encoder_config["cnn_config"][
-                        "sample_input"
-                    ] = critic_sample_input
+                # Determine actor output activation from action space
+                discrete_actions = isinstance(space, spaces.Discrete)
+                if head_config is not None:
+                    if discrete_actions:
+                        head_config["output_activation"] = "GumbelSoftmax"
                 else:
-                    encoder_config["sample_input"] = actor_sample_input
-                    critic_encoder_config["sample_input"] = critic_sample_input
+                    output_activation = "GumbelSoftmax" if discrete_actions else None
+                    head_config = MlpNetConfig(
+                        hidden_size=[64], output_activation=output_activation
+                    )
+                    if head_config.output_activation is None:
+                        head_config.pop("output_activation")
 
-            net_config["encoder_config"] = encoder_config
-            net_config["head_config"] = head_config
+                agent_config["head_config"] = head_config
+                agent_configs[agent_id] = agent_config
 
-            critic_net_config["encoder_config"] = critic_encoder_config
-            critic_net_config["head_config"] = critic_head_config
-
+            # Format critic net config from actor net configs
+            latent_dim = max(
+                [
+                    agent_configs[agent_id].get("latent_dim", 32)
+                    for agent_id in self.agent_ids
+                ]
+            )
+            min_latent_dim = min(
+                [
+                    agent_configs[agent_id].get("min_latent_dim", 8)
+                    for agent_id in self.agent_ids
+                ]
+            )
+            max_latent_dim = max(
+                [
+                    agent_configs[agent_id].get("max_latent_dim", 128)
+                    for agent_id in self.agent_ids
+                ]
+            )
+            critic_encoder_config = format_shared_critic_encoder(encoder_configs)
+            critic_head_config = get_deepest_head_config(agent_configs, self.agent_ids)
+            critic_net_config = {
+                "encoder_config": critic_encoder_config,
+                "head_config": critic_head_config,
+                "latent_dim": latent_dim,
+                "min_latent_dim": min_latent_dim,
+                "max_latent_dim": max_latent_dim,
+            }
             clip_actions = self.torch_compiler is None
 
-            def create_actor(idx):
+            def create_actor(agent_id):
                 return DeterministicActor(
-                    self.observation_spaces[idx],
-                    self.action_spaces[idx],
-                    n_agents=self.n_agents,
+                    self.possible_observation_spaces[agent_id],
+                    self.possible_action_spaces[agent_id],
                     device=self.device,
                     clip_actions=clip_actions,
-                    **copy.deepcopy(net_config),
+                    **copy.deepcopy(agent_configs[agent_id]),
                 )
 
-            # NOTE: Critic uses observations + actions of all agents to predict Q-value
-            concatenated_obs_space = concatenate_spaces(observation_spaces)
-            concatenated_action_space = concatenate_spaces(action_spaces)
-
+            # Critic uses observations + actions of all agents to predict Q-value
             def create_critic():
                 return ContinuousQNetwork(
-                    observation_space=concatenated_obs_space,
-                    action_space=concatenated_action_space,
-                    n_agents=self.n_agents,
+                    observation_space=self.possible_observation_spaces,
+                    action_space=concatenate_spaces(
+                        list(self.possible_action_spaces.values())
+                    ),
                     device=self.device,
                     **copy.deepcopy(critic_net_config),
                 )
 
-            self.actors = [create_actor(idx) for idx in range(self.n_agents)]
-            self.critics_1 = [create_critic() for _ in range(self.n_agents)]
-            self.critics_2 = [create_critic() for _ in range(self.n_agents)]
-            self.actor_targets = [create_actor(idx) for idx in range(self.n_agents)]
-            self.critic_targets_1 = [create_critic() for _ in range(self.n_agents)]
-            self.critic_targets_2 = [create_critic() for _ in range(self.n_agents)]
+            self.actors = ModuleDict(
+                {agent_id: create_actor(agent_id) for agent_id in self.agent_ids}
+            )
+            self.critics_1 = ModuleDict(
+                {agent_id: create_critic() for agent_id in self.agent_ids}
+            )
+            self.critics_2 = ModuleDict(
+                {agent_id: create_critic() for agent_id in self.agent_ids}
+            )
+            self.actor_targets = ModuleDict(
+                {agent_id: create_actor(agent_id) for agent_id in self.agent_ids}
+            )
+            self.critic_targets_1 = ModuleDict(
+                {agent_id: create_critic() for agent_id in self.agent_ids}
+            )
+            self.critic_targets_2 = ModuleDict(
+                {agent_id: create_critic() for agent_id in self.agent_ids}
+            )
 
         # Initialise target network parameters
-        for actor, actor_target in zip(self.actors, self.actor_targets):
-            actor_target.load_state_dict(actor.state_dict())
-
-        for critic_1, critic_2, critic_target_1, critic_target_2 in zip(
-            self.critics_1, self.critics_2, self.critic_targets_1, self.critic_targets_2
-        ):
-            critic_target_1.load_state_dict(critic_1.state_dict())
-            critic_target_2.load_state_dict(critic_2.state_dict())
+        for agent_id in self.agent_ids:
+            self.actor_targets[agent_id].load_state_dict(
+                self.actors[agent_id].state_dict()
+            )
+            self.critic_targets_1[agent_id].load_state_dict(
+                self.critics_1[agent_id].state_dict()
+            )
+            self.critic_targets_2[agent_id].load_state_dict(
+                self.critics_2[agent_id].state_dict()
+            )
 
         # Optimizers
         self.actor_optimizers = OptimizerWrapper(
             optim.Adam,
             networks=self.actors,
             lr=lr_actor,
-            multiagent=True,
         )
 
         self.critic_1_optimizers = OptimizerWrapper(
             optim.Adam,
             networks=self.critics_1,
             lr=lr_critic,
-            multiagent=True,
         )
 
         self.critic_2_optimizers = OptimizerWrapper(
             optim.Adam,
             networks=self.critics_2,
             lr=lr_critic,
-            multiagent=True,
         )
 
         if self.accelerator is not None and wrap:
             self.wrap_models()
         elif self.torch_compiler:
             if (
-                any(actor.output_activation == "GumbelSoftmax" for actor in self.actors)
+                any(
+                    actor.output_activation == "GumbelSoftmax"
+                    for actor in self.actors.values()
+                )
                 and self.torch_compiler != "default"
             ):
                 warnings.warn(
@@ -400,29 +435,34 @@ class MATD3(MultiAgentRLAlgorithm):
         # Register network groups for mutations
         self.register_network_group(
             NetworkGroup(
-                eval=self.actors,
-                shared=self.actor_targets,
+                eval_network=self.actors,
+                shared_networks=self.actor_targets,
                 policy=True,
-                multiagent=True,
             )
         )
         self.register_network_group(
             NetworkGroup(
-                eval=self.critics_1, shared=self.critic_targets_1, multiagent=True
+                eval_network=self.critics_1,
+                shared_networks=self.critic_targets_1,
             )
         )
         self.register_network_group(
             NetworkGroup(
-                eval=self.critics_2, shared=self.critic_targets_2, multiagent=True
+                eval_network=self.critics_2,
+                shared_networks=self.critic_targets_2,
             )
         )
 
-    def process_infos(self, infos: InfosDict) -> Tuple[ArrayDict, ArrayDict, ArrayDict]:
+    def process_infos(
+        self, infos: Optional[InfosDict] = None
+    ) -> Tuple[ArrayDict, ArrayDict, ArrayDict]:
         """
         Process the information, extract env_defined_actions, action_masks and agent_masks
 
         :param infos: Info dict
         :type infos: Dict[str, Dict[...]]
+        :return: Action masks, env defined actions, agent masks
+        :rtype: Tuple[ArrayDict, ArrayDict, ArrayDict]
         """
         if infos is None:
             infos = {agent: {} for agent in self.agent_ids}
@@ -432,10 +472,7 @@ class MATD3(MultiAgentRLAlgorithm):
         return action_masks, env_defined_actions, agent_masks
 
     def get_action(
-        self,
-        obs: Dict[str, ObservationType],
-        training: bool = True,
-        infos: Optional[InfosDict] = None,
+        self, obs: Dict[str, ObservationType], infos: Optional[InfosDict] = None
     ) -> Tuple[ArrayDict, ArrayDict]:
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
@@ -443,12 +480,10 @@ class MATD3(MultiAgentRLAlgorithm):
 
         :param obs: Environment observations: {'agent_0': state_dim_0, ..., 'agent_n': state_dim_n}
         :type obs: Dict[str, numpy.Array]
-        :param training: Agent is training, use exploration noise, defaults to True
-        :type training: bool, optional
         :param infos: Information dictionary from environment, defaults to None
         :type infos: Dict[str, Dict[...]], optional
 
-        :return: Action to take in the environment
+        :return: Processed actions for each agent, raw actions for each agent
         :rtype: Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]
         """
         assert not key_in_nested_dict(
@@ -458,12 +493,11 @@ class MATD3(MultiAgentRLAlgorithm):
         action_masks, env_defined_actions, agent_masks = self.process_infos(infos)
 
         # Preprocess observations
-        preprocessed_states = list(self.preprocess_observation(obs).values())
+        preprocessed_states = self.preprocess_observation(obs)
 
-        action_dict = {}
-        for idx, (agent_id, obs, actor) in enumerate(
-            zip(self.agent_ids, preprocessed_states, self.actors)
-        ):
+        action_dict: Dict[str, np.ndarray] = {}
+        for agent_id, obs in preprocessed_states.items():
+            actor = self.actors[agent_id]
             actor.eval()
             if self.accelerator is not None:
                 with actor.no_sync(), torch.no_grad():
@@ -472,8 +506,9 @@ class MATD3(MultiAgentRLAlgorithm):
                 with torch.no_grad():
                     actions = actor(obs)
 
+            # Need to rescale actions outside of forward pass if using torch.compile
             if self.torch_compiler is not None and isinstance(
-                self.action_spaces[idx], spaces.Box
+                self.possible_action_spaces[agent_id], spaces.Box
             ):
                 actions = DeterministicActor.rescale_action(
                     action=actions,
@@ -483,82 +518,86 @@ class MATD3(MultiAgentRLAlgorithm):
                 )
 
             actor.train()
-            if training:
-                if self.discrete_actions:
+            if self.training:
+                if isinstance(self.possible_action_spaces[agent_id], spaces.Discrete):
                     min_action, max_action = 0, 1
                 else:
-                    min_action, max_action = (
-                        self.min_action[idx][0],
-                        self.max_action[idx][0],
-                    )
+                    min_action = self.possible_action_spaces[agent_id].low
+                    max_action = self.possible_action_spaces[agent_id].high
 
                 # Add noise to actions for exploration
                 actions = torch.clamp(
-                    actions + self.action_noise(idx),
-                    min_action,
-                    max_action,
+                    actions + self.action_noise(agent_id),
+                    torch.as_tensor(min_action, device=actions.device),
+                    torch.as_tensor(max_action, device=actions.device),
                 )
 
             action_dict[agent_id] = actions.cpu().numpy()
 
-        discrete_action_dict = None
-        if self.discrete_actions:
-            discrete_action_dict = {}
-            for agent, action in action_dict.items():
+        # Process agents with discrete actions
+        processed_action_dict: ArrayDict = OrderedDict()
+        for agent_id, action_space in self.possible_action_spaces.items():
+            if isinstance(action_space, spaces.Discrete):
+                action = action_dict[agent_id]
                 mask = (
-                    1 - np.array(action_masks[agent])
-                    if action_masks[agent] is not None
+                    1 - np.array(action_masks[agent_id])
+                    if action_masks[agent_id] is not None
                     else None
                 )
                 action: np.ndarray = np.ma.array(action, mask=mask)
+                processed_action_dict[agent_id] = action.argmax(axis=-1)
 
-                discrete_action_dict[agent] = action.argmax(axis=-1)
-                if len(discrete_action_dict[agent].shape) == 1:
-                    discrete_action_dict[agent] = discrete_action_dict[agent][
-                        :, np.newaxis
-                    ]
-        else:
-            discrete_action_dict = None
+                if (
+                    len(processed_action_dict[agent_id].shape) == 1
+                    and env_defined_actions
+                ):
+                    env_defined_actions = {
+                        agent: action.squeeze(1) if len(action.shape) > 1 else action
+                        for agent, action in env_defined_actions.items()
+                    }
+                    agent_masks = {
+                        agent: mask.squeeze(1) if len(mask.shape) > 1 else mask
+                        for agent, mask in agent_masks.items()
+                    }
+            else:
+                processed_action_dict[agent_id] = action_dict[agent_id]
 
         # If using env_defined_actions replace actions
         if env_defined_actions is not None:
             for agent in self.agent_ids:
-                if self.discrete_actions:
-                    discrete_action_dict[agent][agent_masks[agent]] = (
-                        env_defined_actions[agent][agent_masks[agent]]
-                    )
-                else:
-                    action_dict[agent][agent_masks[agent]] = env_defined_actions[agent][
-                        agent_masks[agent]
-                    ]
+                processed_action_dict[agent][agent_masks[agent]] = env_defined_actions[
+                    agent
+                ][agent_masks[agent]]
 
-        return (action_dict, discrete_action_dict)
+        return processed_action_dict, action_dict
 
-    def action_noise(self, idx: int) -> torch.Tensor:
+    def action_noise(self, agent_id: str) -> torch.Tensor:
         """Create action noise for exploration, either Ornstein Uhlenbeck or
             from a normal distribution.
 
-        :param idx: Agent index for action dims
-        :type idx: int
+        :param agent_id: Agent ID for action dims
+        :type agent_id: str
         :return: Action noise
         :rtype: torch.Tensor
         """
         if self.O_U_noise:
             noise = (
-                self.current_noise[idx]
+                self.current_noise[agent_id]
                 + self.theta
-                * (self.mean_noise[idx] - self.current_noise[idx])
+                * (self.mean_noise[agent_id] - self.current_noise[agent_id])
                 * self.dt
-                + self.expl_noise[idx] * self.sqdt * self.sample_gaussian[idx].normal_()
+                + self.expl_noise[agent_id]
+                * self.sqdt
+                * self.sample_gaussian[agent_id].normal_()
             )
-            self.current_noise[idx] = noise
+            self.current_noise[agent_id] = noise
         else:
             torch.normal(
-                self.mean_noise[idx],
-                self.expl_noise[idx],
-                out=self.sample_gaussian[idx],
+                self.mean_noise[agent_id],
+                self.expl_noise[agent_id],
+                out=self.sample_gaussian[agent_id],
             )
-            noise = self.sample_gaussian[idx]
+            noise = self.sample_gaussian[agent_id]
         return noise
 
     def reset_action_noise(self, indices: List[int]) -> None:
@@ -567,11 +606,11 @@ class MATD3(MultiAgentRLAlgorithm):
         :param indices: List of indices to reset noise for
         :type indices: List[int]
         """
-        for i in range(len(self.current_noise)):
+        for agent_id in self.agent_ids:
             for idx in indices:
-                self.current_noise[i][idx, :] = 0
+                self.current_noise[agent_id][idx, :] = 0
 
-    def learn(self, experiences: Tuple[TensorDict, ...]) -> Dict[str, float]:
+    def learn(self, experiences: Tuple[StandardTensorDict, ...]) -> Dict[str, float]:
         """Updates agent network parameters to learn from experiences.
 
         :param experience: Tuple of dictionaries containing batched states, actions,
@@ -602,172 +641,106 @@ class MATD3(MultiAgentRLAlgorithm):
 
         next_actions = []
         with torch.no_grad():
-            for i, agent_id_label in enumerate(self.agent_ids):
-                next_actions.append(self.actor_targets[i](next_states[agent_id_label]))
+            for agent_id in self.agent_ids:
+                next_actions.append(self.actor_targets[agent_id](next_states[agent_id]))
 
         # Stack states and actions
-        stacked_states = self.stack_critic_observations(states)
-        stacked_next_states = self.stack_critic_observations(next_states)
         stacked_actions = torch.cat(list(actions.values()), dim=1)
         stacked_next_actions = torch.cat(next_actions, dim=1)
 
         loss_dict = {}
-        for idx, (
-            agent_id,
-            actor,
-            critic_1,
-            critic_target_1,
-            critic_2,
-            critic_target_2,
-            actor_optimizer,
-            critic_1_optimizer,
-            critic_2_optimizer,
-        ) in enumerate(
-            zip(
-                self.agent_ids,
-                self.actors,
-                self.critics_1,
-                self.critic_targets_1,
-                self.critics_2,
-                self.critic_targets_2,
-                self.actor_optimizers,
-                self.critic_1_optimizers,
-                self.critic_2_optimizers,
-            )
-        ):
+        for agent_id in self.agent_ids:
             loss_dict[f"{agent_id}"] = self.learn_individual(
-                idx,
                 agent_id,
-                actor,
-                critic_1,
-                critic_target_1,
-                critic_2,
-                critic_target_2,
-                actor_optimizer,
-                critic_1_optimizer,
-                critic_2_optimizer,
-                stacked_states,
-                stacked_actions,
-                stacked_next_states,
-                stacked_next_actions,
-                states,
-                actions,
-                rewards,
-                dones,
+                stacked_actions=stacked_actions,
+                stacked_next_actions=stacked_next_actions,
+                states=states,
+                next_states=next_states,
+                actions=actions,
+                rewards=rewards,
+                dones=dones,
             )
 
         if self.learn_counter[agent_id] % self.policy_freq == 0:
-            for (
-                actor,
-                actor_target,
-                critic_1,
-                critic_target_1,
-                critic_2,
-                critic_target_2,
-            ) in zip(
-                self.actors,
-                self.actor_targets,
-                self.critics_1,
-                self.critic_targets_1,
-                self.critics_2,
-                self.critic_targets_2,
-            ):
-                self.soft_update(actor, actor_target)
-                self.soft_update(critic_1, critic_target_1)
-                self.soft_update(critic_2, critic_target_2)
+            for agent_id in self.agent_ids:
+                self.soft_update(self.actors[agent_id], self.actor_targets[agent_id])
+                self.soft_update(
+                    self.critics_1[agent_id], self.critic_targets_1[agent_id]
+                )
+                self.soft_update(
+                    self.critics_2[agent_id], self.critic_targets_2[agent_id]
+                )
 
         return loss_dict
 
     def learn_individual(
         self,
-        idx: int,
         agent_id: str,
-        actor: nn.Module,
-        critic_1: nn.Module,
-        critic_target_1: nn.Module,
-        critic_2: nn.Module,
-        critic_target_2: nn.Module,
-        actor_optimizer: optim.Optimizer,
-        critic_1_optimizer: optim.Optimizer,
-        critic_2_optimizer: optim.Optimizer,
-        stacked_states: torch.Tensor,
         stacked_actions: torch.Tensor,
-        stacked_next_states: torch.Tensor,
         stacked_next_actions: torch.Tensor,
-        states: TensorDict,
-        actions: TensorDict,
-        rewards: TensorDict,
-        dones: TensorDict,
+        states: StandardTensorDict,
+        next_states: StandardTensorDict,
+        actions: StandardTensorDict,
+        rewards: StandardTensorDict,
+        dones: StandardTensorDict,
     ) -> Tuple[Optional[float], float]:
         """
         Inner call to each agent for the learning/algo training steps, up until the soft updates.
         Applies all forward/backward props.
 
-        :param idx: Index of the agent
-        :type idx: int
         :param agent_id: ID of the agent
         :type agent_id: str
-        :param actor: Actor network of the agent
-        :type actor: nn.Module
-        :param critic_1: First critic network of the agent
-        :type critic_1: nn.Module
-        :param critic_target_1: Target network for the first critic
-        :type critic_target_1: nn.Module
-        :param critic_2: Second critic network of the agent
-        :type critic_2: nn.Module
-        :param critic_target_2: Target network for the second critic
-        :type critic_target_2: nn.Module
-        :param actor_optimizer: Optimizer for the actor network
-        :type actor_optimizer: optim.Optimizer
-        :param critic_1_optimizer: Optimizer for the first critic network
-        :type critic_1_optimizer: optim.Optimizer
-        :param critic_2_optimizer: Optimizer for the second critic network
-        :type critic_2_optimizer: optim.Optimizer
-        :param stacked_states: Stacked states tensor for CNN architecture
-        :type stacked_states: Optional[torch.Tensor]
+
         :param stacked_actions: Stacked actions tensor for CNN architecture
         :type stacked_actions: Optional[torch.Tensor]
-        :param stacked_next_states: Stacked next states tensor for CNN architecture
-        :type stacked_next_states: Optional[torch.Tensor]
         :param stacked_next_actions: Stacked next actions tensor for CNN architecture
         :type stacked_next_actions: Optional[torch.Tensor]
         :param states: Dictionary of current states for each agent
-        :type states: TensorDict
+        :type states: dict[str, torch.Tensor]
         :param actions: Dictionary of actions taken by each agent
-        :type actions: TensorDict
+        :type actions: dict[str, torch.Tensor]
         :param rewards: Dictionary of rewards received by each agent
-        :type rewards: TensorDict
+        :type rewards: dict[str, torch.Tensor]
         :param dones: Dictionary of done flags for each agent
-        :type dones: TensorDict
+        :type dones: dict[str, torch.Tensor]
 
         :return: Tuple containing actor loss (if applicable) and critic loss
         :rtype: Tuple[Optional[float], float]
         """
+        actor = self.actors[agent_id]
+        critic_1 = self.critics_1[agent_id]
+        critic_target_1 = self.critic_targets_1[agent_id]
+        critic_2 = self.critics_2[agent_id]
+        critic_target_2 = self.critic_targets_2[agent_id]
+        actor_optimizer = self.actor_optimizers[agent_id]
+        critic_1_optimizer = self.critic_1_optimizers[agent_id]
+        critic_2_optimizer = self.critic_2_optimizers[agent_id]
+
         if self.accelerator is not None:
             with critic_1.no_sync():
-                q_value_1 = critic_1(stacked_states, stacked_actions)
+                q_value_1 = critic_1(states, stacked_actions)
             with critic_2.no_sync():
-                q_value_2 = critic_2(stacked_states, stacked_actions)
+                q_value_2 = critic_2(states, stacked_actions)
         else:
-            q_value_1 = critic_1(stacked_states, stacked_actions)
-            q_value_2 = critic_2(stacked_states, stacked_actions)
+            q_value_1 = critic_1(states, stacked_actions)
+            q_value_2 = critic_2(states, stacked_actions)
 
         with torch.no_grad():
             if self.accelerator is not None:
                 with critic_target_1.no_sync():
                     q_value_next_state_1 = critic_target_1(
-                        stacked_next_states, stacked_next_actions
+                        next_states, stacked_next_actions
                     )
                 with critic_target_2.no_sync():
                     q_value_next_state_2 = critic_target_2(
-                        stacked_next_states, stacked_next_actions
+                        next_states, stacked_next_actions
                     )
             else:
                 q_value_next_state_1 = critic_target_1(
-                    stacked_next_states, stacked_next_actions
+                    next_states, stacked_next_actions
                 )
                 q_value_next_state_2 = critic_target_2(
-                    stacked_next_states, stacked_next_actions
+                    next_states, stacked_next_actions
                 )
 
         q_value_next_state = torch.min(q_value_next_state_1, q_value_next_state_2)
@@ -820,11 +793,9 @@ class MATD3(MultiAgentRLAlgorithm):
             stacked_detached_actions = torch.cat(list(detached_actions.values()), dim=1)
             if self.accelerator is not None:
                 with critic_1.no_sync():
-                    actor_loss = -critic_1(
-                        stacked_states, stacked_detached_actions
-                    ).mean()
+                    actor_loss = -critic_1(states, stacked_detached_actions).mean()
             else:
-                actor_loss = -critic_1(stacked_states, stacked_detached_actions).mean()
+                actor_loss = -critic_1(states, stacked_detached_actions).mean()
 
             # actor loss backprop
             actor_optimizer.zero_grad()
@@ -902,13 +873,12 @@ class MATD3(MultiAgentRLAlgorithm):
                             agent_id: obs_channels_to_first(s, expand_dims)
                             for agent_id, s in obs.items()
                         }
-                    cont_actions, discrete_action = self.get_action(
+
+                    action, _ = self.get_action(
                         obs,
-                        training=False,
                         infos=info,
                     )
 
-                    action = discrete_action if self.discrete_actions else cont_actions
                     if not is_vectorised:
                         action = {agent: act[0] for agent, act in action.items()}
 

@@ -1,9 +1,10 @@
-from abc import ABC, abstractmethod
+from abc import ABC
 from collections import OrderedDict
 from functools import partial
-from typing import Any, Dict, List, Optional, Tuple, TypeVar, Union
+from typing import Any, Callable, Dict, Generic, List, Optional, Tuple, TypeVar, Union
 
 import dill
+import numpy as np
 import torch
 from gymnasium import spaces
 from tensordict import is_tensor_collection
@@ -14,22 +15,31 @@ from agilerl.algorithms.core import (
     RLAlgorithm,
 )
 from agilerl.algorithms.core.base import get_checkpoint_dict
-from agilerl.typing import DeviceType, ExperiencesType, ObservationType
-from agilerl.utils.algo_utils import obs_to_tensor
+from agilerl.typing import (
+    ActionReturnType,
+    DeviceType,
+    ExperiencesType,
+    ObservationType,
+)
+from agilerl.utils.algo_utils import obs_to_tensor, stack_experiences
+from agilerl.wrappers.utils import RunningMeanStd
 
-AgentType = Union[RLAlgorithm, MultiAgentRLAlgorithm]
+AgentType = TypeVar("AgentType", bound=Union[RLAlgorithm, MultiAgentRLAlgorithm])
 MARLObservationType = Dict[str, ObservationType]
 SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound="AgentWrapper")
 
 
-class AgentWrapper(ABC):
+class AgentWrapper(ABC, Generic[AgentType]):
     """Base class for all agent wrappers. Agent wrappers are used to apply an
     additional functionality to the ``get_action()`` and ``learn()`` methods of
     an ``EvolvableAlgorithm`` instance.
 
     :param agent: Agent to be wrapped
-    :type agent: EvolvableAlgorithm
+    :type agent: AgentType
     """
+
+    wrapped_get_action: Callable
+    wrapped_learn: Callable
 
     def __init__(self, agent: AgentType) -> None:
         self.agent = agent
@@ -38,8 +48,8 @@ class AgentWrapper(ABC):
         self.multi_agent = isinstance(agent, MultiAgentRLAlgorithm)
 
         # Wrap the agent's methods
-        self.agent_get_action = agent.get_action
-        self.agent_learn = agent.learn
+        self.wrapped_get_action = agent.get_action
+        self.wrapped_learn = agent.learn
 
         self.agent.get_action = partial(self.get_action)
         self.agent.learn = partial(self.learn)
@@ -86,9 +96,7 @@ class AgentWrapper(ABC):
         else:
             super().__setattr__(name, value)
 
-    def clone(
-        self: SelfAgentWrapper, index: Optional[int] = None, wrap: bool = True
-    ) -> SelfAgentWrapper:
+    def clone(self, index: Optional[int] = None, wrap: bool = True) -> SelfAgentWrapper:
         """Clones the wrapper with the underlying agent.
 
         :param index: Index of the agent in a population, defaults to None
@@ -116,9 +124,8 @@ class AgentWrapper(ABC):
         """
         checkpoint = get_checkpoint_dict(self.agent)
 
-        # Need to remove the learn and get_action methods since they are not serializable
-        checkpoint.pop("learn")
-        checkpoint.pop("get_action")
+        del checkpoint["learn"]
+        del checkpoint["get_action"]
 
         # Add wrapper attributes to checkpoint
         checkpoint["wrapper_cls"] = self.__class__
@@ -152,7 +159,6 @@ class AgentWrapper(ABC):
         for key, value in checkpoint["wrapper_attrs"].items():
             setattr(self, key, value)
 
-    @abstractmethod
     def get_action(
         self,
         obs: Union[ObservationType, MARLObservationType],
@@ -171,9 +177,8 @@ class AgentWrapper(ABC):
         :return: Action from the agent
         :rtype: Any
         """
-        raise NotImplementedError
+        return self.wrapped_get_action(obs, *args, **kwargs)
 
-    @abstractmethod
     def learn(self, experiences: ExperiencesType, *args: Any, **kwargs: Any) -> Any:
         """Learns from the experiences.
 
@@ -187,64 +192,7 @@ class AgentWrapper(ABC):
         :return: Learning information
         :rtype: Any
         """
-        raise NotImplementedError
-
-
-class RunningMeanStd:
-    """Tracks mean, variance, and count of values using torch tensors.
-
-    :param epsilon: Small value to avoid division by zero, defaults to 1e-4
-    :type epsilon: float, optional
-    :param shape: Shape of the tensor, defaults to ()
-    :type shape: tuple[int, ...], optional
-    :param device: Device to store the tensors, defaults to "cpu"
-    :type device: DeviceType, optional
-    :param dtype: Data type of the tensor, defaults to torch.float32
-    :type dtype: torch.dtype, optional
-    """
-
-    def __init__(
-        self,
-        epsilon: float = 1e-4,
-        shape: tuple[int, ...] = (),
-        device: DeviceType = "cpu",
-        dtype=torch.float32,
-    ) -> None:
-
-        self.epsilon = epsilon
-        self.device = device
-        self.mean = torch.zeros(shape, dtype=dtype, device=device)
-        self.var = torch.ones(shape, dtype=dtype, device=device)
-        self.count = torch.tensor(epsilon, dtype=dtype, device=device)
-
-    def update(self, x: torch.Tensor) -> None:
-        """Updates mean, variance, and count using a batch of samples."""
-        batch_mean = torch.mean(x, dim=0)
-        batch_var = torch.var(x, dim=0, unbiased=False)  # Matches NumPy's default
-        batch_count = x.shape[0]
-        self.update_from_moments(batch_mean, batch_var, batch_count)
-
-    def update_from_moments(
-        self, batch_mean: torch.Tensor, batch_var: torch.Tensor, batch_count: int
-    ) -> None:
-        """Updates mean and variance using batch moments.
-
-        :param batch_mean: Mean of the batch
-        :type batch_mean: torch.Tensor
-        :param batch_var: Variance of the batch
-        :type batch_var: torch.Tensor
-        :param batch_count: Number of samples in the batch
-        :type batch_count: int
-        """
-        delta = batch_mean - self.mean
-        tot_count = self.count + batch_count
-
-        self.mean = self.mean + delta * batch_count / tot_count
-        m_a = self.var * self.count
-        m_b = batch_var * batch_count
-        M2 = m_a + m_b + (delta**2) * (self.count * batch_count / tot_count)
-        self.var = M2 / tot_count
-        self.count = tot_count
+        return self.wrapped_learn(experiences, *args, **kwargs)
 
 
 RunningStatsType = Union[
@@ -252,7 +200,7 @@ RunningStatsType = Union[
 ]
 
 
-class RSNorm(AgentWrapper):
+class RSNorm(AgentWrapper[AgentType]):
     """Wrapper to normalize observations such that each coordinate is centered with unit variance.
     Handles both single and multi-agent settings, as well as Dict and Tuple observation spaces.
 
@@ -421,7 +369,7 @@ class RSNorm(AgentWrapper):
             self.update_statistics(obs)
 
         obs = self.normalize_observation(obs)
-        return self.agent_get_action(obs, *args, **kwargs)
+        return self.wrapped_get_action(obs, *args, **kwargs)
 
     def learn(self, experiences: ExperiencesType, *args: Any, **kwargs: Any) -> Any:
         """Learns from the experiences after normalizing the observations.
@@ -436,6 +384,7 @@ class RSNorm(AgentWrapper):
         :return: Learning information
         :rtype: Any
         """
+        # NOTE: We want to move towards always passing experiences as TensorDict objects
         if is_tensor_collection(experiences):
             experiences["obs"] = self.normalize_observation(experiences["obs"])
             experiences["next_obs"] = self.normalize_observation(
@@ -450,4 +399,194 @@ class RSNorm(AgentWrapper):
                 *experiences[4:],
             )
 
-        return self.agent_learn(experiences, *args, **kwargs)
+        return self.wrapped_learn(experiences, *args, **kwargs)
+
+
+class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
+    """Wrapper for multi-agent algorithms that solve environments with asynchronous agents (i.e. environments
+    where agents don't return observations with the same frequency).
+
+    .. warning::
+        This is currently only supported for on-policy multi-agent algorithms such as IPPO.
+
+    :param agent: MultiAgentRLAlgorithm instance to be wrapped.
+    :type agent: MultiAgentRLAlgorithm
+    """
+
+    def __init__(self, agent: MultiAgentRLAlgorithm) -> None:
+        super().__init__(agent)
+
+        assert (
+            self.agent.algo == "IPPO"
+        ), "AsyncAgentsWrapper is currently only supported for IPPO."
+
+    def extract_inactive_agents(
+        self, obs: Dict[str, ObservationType]
+    ) -> Tuple[Dict[str, np.ndarray], Dict[str, ObservationType]]:
+        """Extract the inactive agents from an observation. Inspects each key in the
+        observation dictionary and, if all the values are `np.nan` (as set by
+        ``AsyncPettingZooVecEnv``), the agent is considered inactive and removed from
+        the observation dictionary.
+
+        :param obs: Observation dictionary
+        :type obs: Dict[str, ObservationType]
+
+        :return: Tuple of inactive agents and filtered observations
+        :rtype: Tuple[Dict[str, np.ndarray], Dict[str, ObservationType]]
+        """
+        inactive_agents = {}
+        agents_to_remove = []
+
+        # Process each agent's observations
+        for agent_id, agent_obs in obs.items():
+            # Get the sample observation based on type
+            if isinstance(agent_obs, dict):
+                sample = next(iter(agent_obs.values()))
+            elif isinstance(agent_obs, tuple):
+                sample = agent_obs[0]
+            else:
+                sample = agent_obs
+
+            # Skip non-vectorized environments, assuming env doesn't return
+            # observations for inactive agents
+            if len(sample.shape) == 1:
+                continue
+
+            # Create boolean mask for active agents
+            active_mask: np.ndarray = ~np.isnan(sample).all(axis=1)
+
+            # If all agents are active, skip
+            if active_mask.all():
+                continue
+
+            # Get indices of inactive agents
+            inactive_agent_indices = np.where(~active_mask)[0]
+
+            # If all agents are inactive, mark for removal
+            if not active_mask.any():
+                agents_to_remove.append(agent_id)
+                continue
+
+            # Apply mask to filter observations
+            if isinstance(agent_obs, dict):
+                obs[agent_id] = {k: v[active_mask] for k, v in agent_obs.items()}
+            elif isinstance(agent_obs, tuple):
+                obs[agent_id] = tuple(v[active_mask] for v in agent_obs)
+            else:
+                obs[agent_id] = agent_obs[active_mask]
+
+            inactive_agents[agent_id] = inactive_agent_indices
+
+        # Remove completely inactive agents
+        for agent_id in agents_to_remove:
+            obs.pop(agent_id)
+
+        return inactive_agents, obs
+
+    def stack_experiences(self, experience: ExperiencesType) -> ExperiencesType:
+        """Stacks the experiences.
+
+        :param experiences: Experiences from the environment
+        :type experiences: ExperiencesType
+        """
+        stacked_experience = {}
+        for agent_id, inp in experience.items():
+            if isinstance(inp, list):
+                stacked_exp = (
+                    stack_experiences(inp, to_torch=False)[0] if len(inp) > 0 else None
+                )
+            else:
+                stacked_exp = inp
+
+            stacked_experience[agent_id] = stacked_exp
+
+        return stacked_experience
+
+    def get_action(
+        self, obs: ObservationType, *args: Any, **kwargs: Any
+    ) -> ActionReturnType:
+        """Returns the action from the agent. Since the environments may not return observations for all agents
+        at the same time, we need to extract the inactive agents from the observation and fill in placeholder
+        values for their actions.
+
+        :param obs: Observation from the environment
+        :type obs: ObservationType
+
+        :return: Action from the agent
+        :rtype: Any
+        """
+        inactive_agents, obs = self.extract_inactive_agents(obs)
+        action_return: ActionReturnType = self.wrapped_get_action(obs, *args, **kwargs)
+
+        # Need to fill in placeholder np.nan for inactive agents
+        action_dict = (
+            action_return[0] if isinstance(action_return, tuple) else action_return
+        )
+        for agent_id, inactive_array in inactive_agents.items():
+            placeholder = (
+                int(np.nan)
+                if np.issubdtype(action_dict[agent_id].dtype, np.integer)
+                else np.nan
+            )
+
+            # Insert placeholder values for inactive agents
+            action_dict[agent_id] = np.insert(
+                action_dict[agent_id], inactive_array, placeholder, axis=0
+            )
+
+        if isinstance(action_return, tuple):
+            action_return = (action_dict,) + action_return[1:]
+        else:
+            action_return = action_dict
+
+        return action_return
+
+    def learn(self, experiences: ExperiencesType, *args: Any, **kwargs: Any) -> Any:
+        """Learns from the collected experiences.
+
+        :param experiences: Experiences from the environment
+        :type experiences: ExperiencesType
+        :param args: Additional positional arguments
+        :type args: Any
+        :param kwargs: Additional keyword arguments
+        :type kwargs: Any
+
+        :return: Learning information
+        :rtype: Any
+        """
+        (states, actions, log_probs, rewards, dones, values, next_state, next_done) = (
+            map(self.stack_experiences, experiences)
+        )
+
+        # Handle case where we haven't collected a next state for each sub-agent
+        for agent_id in self.agent.agent_ids:
+            agent_next_state: Optional[np.ndarray] = next_state.get(agent_id, None)
+
+            # If we haven't collected a next state for this agent yet, we need to use
+            # last collected state as next_state
+            if agent_next_state is None or np.isnan(agent_next_state).all():
+                agent_states = states[agent_id]
+                agent_dones = dones[agent_id]
+                agent_rewards = rewards[agent_id]
+
+                # Update to use last collected state as next_state
+                next_state[agent_id] = agent_states[-1]
+                next_done[agent_id] = agent_dones[-1]
+                states[agent_id] = agent_states[:-1]
+                dones[agent_id] = agent_dones[:-1]
+                rewards[agent_id] = agent_rewards[:-1]
+                actions[agent_id] = actions[agent_id][:-1]
+                log_probs[agent_id] = log_probs[agent_id][:-1]
+                values[agent_id] = values[agent_id][:-1]
+
+        experiences = (
+            states,
+            actions,
+            log_probs,
+            rewards,
+            dones,
+            values,
+            next_state,
+            next_done,
+        )
+        return self.wrapped_learn(experiences, *args, **kwargs)

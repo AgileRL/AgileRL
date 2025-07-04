@@ -3,18 +3,12 @@
 Independent Proximal Policy Optimization (IPPO)
 ===============================================
 
-IPPO (Independent Proximal Policy Optimization) extends the PPO algorithm for multi-agent settings,
-enabling cooperative or competitive training of multiple agents in complex environments.
-The algorithm employs independent learning, in which each agent simply estimates its local value function,
-and is well-suited to problems with many homogeneous agents.
+`IPPO <https://arxiv.org/pdf/2011.09533>`_ (Independent Proximal Policy Optimization) extends the :ref:`PPO<_ppo>` algorithm for multi-agent settings,
+enabling cooperative or competitive training of multiple agents in complex environments. The algorithm employs independent learning, in which each agent
+simply estimates its local value function, and is well-suited to problems with many homogeneous agents.
 
-* IPPO paper: https://arxiv.org/pdf/2011.09533
-
-Can I use it?
--------------
-
-Action Space
-^^^^^^^^^^^^
+Compatible Action Spaces
+------------------------
 
 .. list-table::
    :widths: 20 20 20 20
@@ -30,12 +24,12 @@ Action Space
      - ✔️
 
 
-Homogeneous Agents
-------------------
+Grouped Agents
+--------------
 
 IPPO can efficiently solve environments with large numbers of homogeneous (identical) agents because they share actor and critic networks.
 This is useful for problems where we want multiple agents to learn the same behaviour, and can avoid training them all individually. Allowing
-all homogeneous agents to learn from the experiences collected by each other can be a very fast way to explore an environment.
+all grouped agents to learn from the experiences collected by each other can be a very fast way to explore an environment.
 
 Labelling agents as homogeneous (or not) is as simple as choosing the names of agents in an environment. The agent_ids will be
 read from the environment, and split on the final ``"_"``. Any agent_ids with matching prefixes will be assumed to be homogeneous.
@@ -79,26 +73,25 @@ multi-agent training function by passing the info dictionary into the agents get
 .. code-block:: python
 
     state, info = env.reset()  # or: next_state, reward, done, truncation, info = env.step(action)
-    cont_actions, discrete_action = agent.get_action(state, infos=info)
-    if agent.discrete_actions:
-        action = discrete_action
-    else:
-        action = cont_actions
+    action = agent.get_action(state, infos=info)
 
 
 Example Training Loop
 ---------------------
 
-.. code-block:: python
+.. collapse:: Example Training Loop
+  :open:
+
+  .. code-block:: python
 
     import numpy as np
     import torch
     from pettingzoo.mpe import simple_speaker_listener_v4
-    from tqdm import trange
+    from gymnasium import spaces
+    from tqdm import tqdm
 
     from agilerl.algorithms import IPPO
     from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
-    from agilerl.utils.algo_utils import obs_channels_to_first
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_envs = 8
@@ -115,99 +108,113 @@ Example Training Loop
     action_spaces = [env.single_action_space(agent) for agent in env.agents]
     agent_ids = [agent_id for agent_id in env.agents]
 
-    channels_last = False  # Flag to swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-
     agent = IPPO(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
         agent_ids=agent_ids,
         device=device,
+        batch_size=128,
     )
 
     # Define training loop parameters
     max_steps = 100000  # Max steps
+    pbar = tqdm(total=max_steps)
     while agent.steps[-1] < max_steps:
-        state, info  = env.reset() # Reset environment at start of episode
+        obs, info  = env.reset() # Reset environment at start of episode
         scores = np.zeros((num_envs, len(agent.shared_agent_ids)))
         completed_episode_scores = []
         steps = 0
-
-        if channels_last:
-            state = {
-                agent_id: obs_channels_to_first(s)
-                for agent_id, s in state.items()
-            }
-
         for _ in range(agent.learn_step):
-
             states = {agent_id: [] for agent_id in agent.agent_ids}
             actions = {agent_id: [] for agent_id in agent.agent_ids}
             log_probs = {agent_id: [] for agent_id in agent.agent_ids}
+            entropies = {agent_id: [] for agent_id in agent.agent_ids}
             rewards = {agent_id: [] for agent_id in agent.agent_ids}
             dones = {agent_id: [] for agent_id in agent.agent_ids}
             values = {agent_id: [] for agent_id in agent.agent_ids}
 
             done = {agent_id: np.zeros(num_envs) for agent_id in agent.agent_ids}
 
-            for idx_step in range(-(agent.learn_step // -num_envs)):
-
+            for _ in range(-(agent.learn_step // -num_envs)):
                 # Get next action from agent
-                action, log_prob, _, value = agent.get_action(obs=state, infos=info)
+                action, log_prob, entropy, value = agent.get_action(
+                    obs=obs, infos=info
+                )
 
                 # Clip to action space
                 clipped_action = {}
                 for agent_id, agent_action in action.items():
-                    shared_id = agent.get_homo_id(agent_id)
-                    actor_idx = agent.shared_agent_ids.index(shared_id)
-                    agent_space = agent.action_space[agent_id]
+                    network_id = (
+                        agent_id
+                        if agent_id in agent.actors.keys()
+                        else agent.get_group_id(agent_id)
+                    )
+                    agent_space = agent.possible_action_spaces[agent_id]
                     if isinstance(agent_space, spaces.Box):
-                        if agent.actors[actor_idx].squash_output:
-                            clipped_agent_action = agent.actors[actor_idx].scale_action(agent_action)
+                        if agent.actors[network_id].squash_output:
+                            clipped_agent_action = agent.actors[
+                                network_id
+                            ].scale_action(agent_action)
                         else:
-                            clipped_agent_action = np.clip(agent_action, agent_space.low, agent_space.high)
+                            clipped_agent_action = np.clip(
+                                agent_action, agent_space.low, agent_space.high
+                            )
                     else:
                         clipped_agent_action = agent_action
 
                     clipped_action[agent_id] = clipped_agent_action
 
                 # Act in environment
-                next_state, reward, termination, truncation, info = env.step(clipped_action)
-                scores += np.array(list(reward.values())).transpose()
+                next_obs, reward, termination, truncation, info = env.step(
+                    clipped_action
+                )
 
+                # Compute score increment (replace NaNs representing inactive agents with 0)
+                agent_rewards = np.array(list(reward.values())).transpose()
+                agent_rewards = np.where(np.isnan(agent_rewards), 0, agent_rewards)
+                score_increment = np.sum(agent_rewards, axis=-1)[:, np.newaxis]
+
+                scores += score_increment
                 steps += num_envs
 
-                next_done = {}
-                for agent_id in agent.agent_ids:
-                    states[agent_id].append(state[agent_id])
+                # Save transition
+                for agent_id in obs:
+                    states[agent_id].append(obs[agent_id])
+                    rewards[agent_id].append(reward[agent_id])
                     actions[agent_id].append(action[agent_id])
                     log_probs[agent_id].append(log_prob[agent_id])
-                    rewards[agent_id].append(reward[agent_id])
-                    dones[agent_id].append(done[agent_id])
+                    entropies[agent_id].append(entropy[agent_id])
                     values[agent_id].append(value[agent_id])
-                    next_done[agent_id] = np.logical_or(termination[agent_id], truncation[agent_id]).astype(np.int8)
-
-                if channels_last:
-                    next_state = {
-                        agent_id: obs_channels_to_first(s)
-                        for agent_id, s in next_state.items()
-                    }
+                    dones[agent_id].append(done[agent_id])
 
                 # Find which agents are "done" - i.e. terminated or truncated
-                dones = {
-                    agent_id: termination[agent_id] | truncation[agent_id]
-                    for agent_id in agent.agent_ids
-                }
+                next_done = {}
+                for agent_id in termination:
+                    terminated = termination[agent_id]
+                    truncated = truncation[agent_id]
 
-                # Calculate scores for completed episodes
-                for idx, agent_dones in enumerate(zip(*dones.values())):
+                    # Process asynchronous dones
+                    mask = ~(np.isnan(terminated) | np.isnan(truncated))
+                    result = np.full_like(mask, np.nan, dtype=float)
+                    result[mask] = np.logical_or(
+                        terminated[mask], truncated[mask]
+                    )
+
+                    next_done[agent_id] = result
+
+                obs = next_obs
+                done = next_done
+                for idx, agent_dones in enumerate(zip(*next_done.values())):
                     if all(agent_dones):
                         completed_score = list(scores[idx])
                         completed_episode_scores.append(completed_score)
                         agent.scores.append(completed_score)
                         scores[idx].fill(0)
 
-                state = next_state
-                done = next_done
+                        done = {
+                            agent_id: np.zeros(num_envs)
+                            for agent_id in agent.agent_ids
+                        }
 
             experiences = (
                 states,
@@ -216,14 +223,17 @@ Example Training Loop
                 rewards,
                 dones,
                 values,
-                next_state,
+                next_obs,
                 next_done,
             )
 
             # Learn according to agent's RL algorithm
             loss = agent.learn(experiences)
+            pbar.update(-(agent.learn_step // -num_envs))
+            pbar.set_description(f"Score: {np.mean(completed_episode_scores[-10:])}")
 
         agent.steps[-1] += steps
+
 
 
 Neural Network Configuration
@@ -296,7 +306,7 @@ Evolutionary Hyperparameter Optimization
 AgileRL allows for efficient hyperparameter optimization during training to provide state-of-the-art results in a fraction of the time.
 For more information on how this is done, please refer to the :ref:`Evolutionary Hyperparameter Optimization <evo_hyperparam_opt>` documentation.
 
-Saving and loading agents
+Saving and Loading Agents
 -------------------------
 
 To save an agent, use the ``save_checkpoint`` method:

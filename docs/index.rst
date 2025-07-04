@@ -1,72 +1,100 @@
+===============
+
+.. raw:: html
+
+   <style>
+   h1:first-of-type {
+       display: none;
+   }
+   </style>
+
+.. raw:: html
+
+   <div align="center">
+
 .. figure:: https://user-images.githubusercontent.com/47857277/222710068-e09a4e3c-368c-458a-9e01-b68674806887.png
    :height: 120
    :align: center
 
-   |License| |Docs status| |PyPI download total| |Discord|
+.. raw:: html
 
-.. |License| image:: https://img.shields.io/badge/License-Apache_2.0-blue.svg
-   :target: https://opensource.org/licenses/Apache-2.0
+   <p align="center"><b>Reinforcement learning streamlined.</b><br>Easier and faster reinforcement learning with RLOps.
+   Visit our <a href="https://agilerl.com">website</a>. View <a href="https://docs.agilerl.com">documentation</a>.
+   Join the <a href="https://discord.gg/eB8HyTA2ux">Discord Server</a> for questions, help and collaboration.
+   Train super-fast for free on <a href="https://arena.agilerl.com">Arena</a>, the RLOps platform from AgileRL.</p>
 
-.. |Docs status| image:: https://readthedocs.org/projects/agilerl/badge/?version=latest
-   :target: https://agilerl.readthedocs.io/en/latest/?badge=latest
+   <br>
 
-.. |PyPI download total| image:: https://static.pepy.tech/badge/agilerl
-   :target: https://pypi.python.org/pypi/agilerl/
+   <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"></a>
+   <a href="https://docs.agilerl.com/en/latest/?badge=latest"><img src="https://readthedocs.org/projects/agilerl/badge/?version=latest" alt="Documentation Status"></a>
+   <a href="https://pypi.python.org/pypi/agilerl/"><img src="https://static.pepy.tech/badge/agilerl" alt="Downloads"></a>
+   <a href="https://discord.gg/eB8HyTA2ux"><img src="https://dcbadge.vercel.app/api/server/eB8HyTA2ux?style=flat" alt="Discord"></a>
+   <a href="https://arena.agilerl.com"><img src="../_static/arena-github-badge.svg" alt="Arena"></a>
+   <br><br>
+   <h3><i>🚀 <b>Train super-fast for free on <a href="https://arena.agilerl.com">Arena</a>, the RLOps platform from AgileRL 🚀</b></i></h3>
 
-.. |Discord| image:: https://dcbadge.vercel.app/api/server/eB8HyTA2ux?style=flat
-   :target: https://discord.gg/eB8HyTA2ux
-
-Streamlining reinforcement learning.
-====================================
-
-.. highlights::
-
-   **✨ NEW: AgileRL 2.0 is here! Check out the latest powerful** :ref:`updates <agilerl2changes>` **✨**
-
-   **🚀 Train super-fast for free on** `Arena <https://arena.agilerl.com>`_ **, the RLOps platform from AgileRL 🚀**
+   </div>
 
 **AgileRL** is a Deep Reinforcement Learning library focused on improving development by introducing RLOps - MLOps for reinforcement learning.
 
-This library is initially focused on reducing the time taken for training models and hyperparameter optimisation (HPO) by pioneering evolutionary HPO techniques for reinforcement learning.
-Evolutionary HPO has been shown to drastically reduce overall training times by automatically converging on optimal hyperparameters, without requiring numerous training runs.
-We are constantly adding more algorithms and features. AgileRL already includes state-of-the-art evolvable on-policy, off-policy, offline and multi-agent reinforcement learning algorithms with distributed training.
+This library is initially focused on reducing the time taken for training models and hyperparameter optimization (HPO) by pioneering
+`evolutionary HPO techniques <../evo_hyperparam_opt/index.html>`_ for reinforcement learning. Evolutionary HPO has been shown to drastically reduce
+overall training times by automatically converging on optimal hyperparameters, without requiring numerous training runs.
 
-Join the AgileRL `Discord server <https://discord.com/invite/eB8HyTA2ux>`_ to ask questions, get help, and learn more about reinforcement learning.
+We are constantly adding more algorithms and features. AgileRL already includes state-of-the-art evolvable `on-policy <../on_policy/index.html>`_, `off-policy <../off_policy/index.html>`_, `offline <../offline_training/index.html>`_, `multi-agent <../multi_agent_training/index.html>`_ and `contextual multi-armed bandit <../bandits/index.html>`_ reinforcement learning algorithms with `distributed training <../distributed_training/index.html>`_.
 
 .. figure:: https://user-images.githubusercontent.com/47857277/236407686-21363eb3-ffcf-419f-b019-0be4ddf1ed4a.gif
-   :width: 900px
+   :width: 100%
    :align: center
 
    AgileRL offers 10x faster hyperparameter optimization than SOTA.
 
-   Global steps is the sum of every step taken by any agent in the environment, including across an entire population, during the entire hyperparameter optimization process.
+.. raw:: html
 
-Installation
-------------
+   <h2 id="benchmarks">Benchmarks</h2>
 
-Install as a package with pip:
+Reinforcement learning algorithms and libraries are usually benchmarked once the optimal hyperparameters for training are known, but it often takes hundreds or thousands of experiments to discover these. This is unrealistic and does not reflect the true, total time taken for training. What if we could remove the need to conduct all these prior experiments?
 
-.. code-block:: bash
+In the charts below, a single AgileRL run, which automatically tunes hyperparameters, is benchmarked against Optuna's multiple training runs traditionally required for hyperparameter optimization, demonstrating the real time savings possible. Global steps is the sum of every step taken by any agent in the environment, including across an entire population.
 
-   pip install agilerl
+.. figure:: https://user-images.githubusercontent.com/47857277/227481592-27a9688f-7c0a-4655-ab32-90d659a71c69.png
+   :width: 600px
+   :align: center
 
-Or install in development mode:
+   AgileRL offers an order of magnitude speed up in hyperparameter optimization vs popular reinforcement learning training frameworks combined with Optuna. Remove the need for multiple training runs and save yourself hours.
 
-.. code-block:: bash
+AgileRL also supports multi-agent reinforcement learning using the Petting Zoo-style (parallel API). The charts below highlight the performance of our MADDPG and MATD3 algorithms with evolutionary hyper-parameter optimisation (HPO), benchmarked against epymarl's MADDPG algorithm with grid-search HPO for the simple speaker listener and simple spread environments.
 
-   git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
-   pip install -e .
+.. figure:: https://github-production-user-asset-6210df.s3.amazonaws.com/118982716/264712154-4965ea5f-b777-423c-989b-e4db86eda3bd.png
+   :width: 700px
+   :align: center
 
 
-Contents
---------
+.. raw:: html
+
+   <h3 id="citing-agilerl">Citing AgileRL</h3>
+
+If you use AgileRL in your work, please cite the repository:
+
+.. code-block:: bibtex
+
+   @software{Ustaran-Anderegg_AgileRL,
+   author = {Ustaran-Anderegg, Nicholas and Pratt, Michael and Sabal-Bermudez, Jaime},
+   license = {Apache-2.0},
+   title = {{AgileRL}},
+   url = {https://github.com/AgileRL/AgileRL}
+   }
+
+.. raw:: html
+
+   <h3 id="contents">Contents</h3>
 
 .. toctree::
    :maxdepth: 1
    :caption: Introduction
 
    get_started/index
-   get_started/agilerl2changes
+   releases/index
 
 
 .. toctree::
@@ -117,22 +145,3 @@ Contents
    GitHub <https://github.com/AgileRL/AgileRL>
    Discord <https://discord.com/invite/eB8HyTA2ux>
    Contribute to AgileRL <https://github.com/AgileRL/AgileRL/blob/main/CONTRIBUTING.md>
-
-Benchmarks
-----------
-
-Reinforcement learning algorithms and libraries are usually benchmarked once the optimal hyperparameters for training are known, but it often takes hundreds or thousands of experiments to discover these. This is unrealistic and does not reflect the true, total time taken for training. What if we could remove the need to conduct all these prior experiments?
-
-In the charts below, a single AgileRL run, which automatically tunes hyperparameters, is benchmarked against Optuna's multiple training runs traditionally required for hyperparameter optimization, demonstrating the real time savings possible. Global steps is the sum of every step taken by any agent in the environment, including across an entire population.
-
-.. figure:: https://user-images.githubusercontent.com/47857277/227481592-27a9688f-7c0a-4655-ab32-90d659a71c69.png
-   :width: 600px
-   :align: center
-
-   AgileRL offers an order of magnitude speed up in hyperparameter optimization vs popular reinforcement learning training frameworks combined with Optuna. Remove the need for multiple training runs and save yourself hours.
-
-AgileRL also supports multi-agent reinforcement learning using the Petting Zoo-style (parallel API). The charts below highlight the performance of our MADDPG and MATD3 algorithms with evolutionary hyper-parameter optimisation (HPO), benchmarked against epymarl's MADDPG algorithm with grid-search HPO for the simple speaker listener and simple spread environments.
-
-.. figure:: https://github-production-user-asset-6210df.s3.amazonaws.com/118982716/264712154-4965ea5f-b777-423c-989b-e4db86eda3bd.png
-   :width: 700px
-   :align: center
