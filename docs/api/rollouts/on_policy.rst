@@ -1,3 +1,5 @@
+.. _on_policy_rollouts:
+
 On-Policy Rollout Functions
 ===========================
 

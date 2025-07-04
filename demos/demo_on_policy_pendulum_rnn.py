@@ -1,99 +1,21 @@
-# AgileRL On-policy (RNN/MLP) Memory Game Demo
+# AgileRL On-policy (RNN/MLP) Demo
 #
-# This script demonstrates how to use recurrent neural networks (RNNs) or MLPs with PPO to solve a simple "remember the input" memory game.
-# The agent is shown a random symbol (one-hot) at the start, then receives blank observations for N steps, and is then asked to output the same symbol.
-# This is a minimal memory challenge for RL agents.
+# This script demonstrates how to use recurrent neural networks (RNNs) or MLPs with PPO to solve the Pendulum-v1
+# environment with masked angular velocities.
+
+from typing import List
 
 import gymnasium as gym
 import numpy as np
 import torch
 from tqdm import trange
 
+from agilerl.algorithms import PPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.rollouts import collect_rollouts, collect_rollouts_recurrent
-from agilerl.utils.utils import create_population
-
-
-# --- Define the Memory Game Environment ---
-class MemoryGameEnv(gym.Env):
-    """
-    Observation: one-hot vector of length n_symbols, or all zeros during delay.
-    Action: discrete, n_symbols.
-    Reward: +1 if action matches the original symbol at the query step, else 0.
-    Episode: Each episode is delay_steps+2 steps (show, delay, query).
-    """
-
-    metadata = {"render_modes": ["human"], "render_fps": 4}
-
-    def __init__(self, n_symbols=5, delay_steps=2, render_mode=None):
-        super().__init__()
-        self.n_symbols = n_symbols
-        self.delay_steps = delay_steps
-        self.observation_space = gym.spaces.Box(
-            low=0.0, high=1.0, shape=(n_symbols,), dtype=np.float32
-        )
-        self.action_space = gym.spaces.Discrete(n_symbols)
-        self.render_mode = render_mode
-        self._reset_state()
-
-    def _reset_state(self):
-        self.current_step = 0
-        self.symbol = np.random.randint(self.n_symbols)
-        self.done = False
-        self.last_action = None
-        self.reward_given = False
-
-    def reset(self, *, seed=None, options=None):
-        super().reset(seed=seed)
-        self._reset_state()
-        obs = np.zeros(self.n_symbols, dtype=np.float32)
-        obs[self.symbol] = 1.0  # Show symbol at first step
-        info = {}
-        return obs, info
-
-    def step(self, action):
-        self.current_step += 1
-        obs = np.zeros(self.n_symbols, dtype=np.float32)  # Default to zeros
-        reward = 0.0
-        terminated = False
-        truncated = False
-        info = {}
-
-        # Note: Step 0 (symbol display) is handled by reset()
-
-        if self.current_step <= self.delay_steps:
-            # Delay steps: obs remains zeros
-            pass
-        elif self.current_step == self.delay_steps + 1:
-            # Query step: Set a distinct observation
-            obs = np.ones(
-                self.n_symbols, dtype=np.float32
-            )  # <-- Change observation here
-            self.last_action = action
-            if action == self.symbol:
-                reward = 1.0
-            terminated = True
-            self.done = True
-        else:
-            # Should not happen
-            terminated = True
-            self.done = True
-
-        return obs, reward, terminated, truncated, info
-
-    def render(self):
-        if self.current_step == 0:
-            print(f"Show symbol: {self.symbol}")
-        elif self.current_step <= self.delay_steps:
-            print(f"Delay step {self.current_step}")
-        elif self.current_step == self.delay_steps + 1:
-            print(
-                f"Query: Agent answered {self.last_action}, correct was {self.symbol}"
-            )
-
-    def close(self):
-        pass
+from agilerl.rollouts.on_policy import collect_rollouts_recurrent
+from agilerl.utils.utils import create_population, make_vect_envs
+from benchmarking.benchmarking_recurrent import MaskVelocityWrapper
 
 
 def run_demo():
@@ -102,18 +24,17 @@ def run_demo():
     print(f"Using device: {device}")
 
     # Toggle this to True for RNN (LSTM), False for MLP
-    recurrent = False  # <--- CHANGE THIS TO ENABLE/DISABLE RECURRENT
+    recurrent = True  # <--- CHANGE THIS TO ENABLE/DISABLE RECURRENT
 
     # --- Create Environment and Population ---
-    n_symbols = 5
-    delay_steps = 5
-    num_envs = 64  # Can be higher for faster training
+    num_envs = 4  # Can be higher for faster training
 
     if recurrent:
         NET_CONFIG = {
             "encoder_config": {
                 "hidden_state_size": 64,  # LSTM hidden state size
-                "max_seq_len": delay_steps + 2,  # Match episode length
+                "num_layers": 1,
+                "max_seq_len": 1024,
             },
         }
     else:
@@ -125,37 +46,36 @@ def run_demo():
 
     # Hyperparameters
     INIT_HP = {
-        "POP_SIZE": 2,  # Population size
+        "POP_SIZE": 1,  # Population size
         "BATCH_SIZE": 256,
-        "LEARN_STEP": (delay_steps + 2),  # Match episode length (delay_steps + 2)
-        "LR": 1e-4,
-        "GAMMA": 0.99,
-        "GAE_LAMBDA": 1.0,
+        "LEARN_STEP": 1024,
+        "LR": 1e-3,
+        "GAMMA": 0.9,
+        "GAE_LAMBDA": 0.95,
         "CLIP_COEF": 0.2,
-        "ENT_COEF": 0.001,
+        "ENT_COEF": 0.0,
         "VF_COEF": 1.0,
         "MAX_GRAD_NORM": 0.5,
-        "UPDATE_EPOCHS": 2,
+        "UPDATE_EPOCHS": 4,
         "SHARE_ENCODERS": True,
-        "RECURRENT": recurrent,
         "USE_ROLLOUT_BUFFER": True,
+        "RECURRENT": recurrent,
         "ACTION_STD_INIT": 0.6,
         "TARGET_KL": None,
     }
 
     def make_env():
-        def thunk():
-            return MemoryGameEnv(n_symbols=n_symbols, delay_steps=delay_steps)
+        return MaskVelocityWrapper(gym.make("Pendulum-v1"))
 
-        return thunk
-
-    env = gym.vector.SyncVectorEnv([make_env() for _ in range(num_envs)])
-    single_test_env = gym.vector.SyncVectorEnv([make_env()])
+    env = make_vect_envs(
+        make_env=make_env, num_envs=num_envs, should_async_vector=False
+    )
+    single_test_env = gym.vector.SyncVectorEnv([make_env])
 
     observation_space = env.single_observation_space
     action_space = env.single_action_space
 
-    pop = create_population(
+    pop: List[PPO] = create_population(
         algo="PPO",
         observation_space=observation_space,
         action_space=action_space,
@@ -167,7 +87,7 @@ def run_demo():
     )
 
     # --- Setup Evolution Components ---
-    eval_loop = 10
+    eval_loop = 3
     tournament = TournamentSelection(
         tournament_size=2,
         elitism=True,
@@ -190,29 +110,25 @@ def run_demo():
     )
 
     # --- Training Loop (Performance-Flamegraph Style) ---
-    max_steps = 5_000_000 // num_envs
+    max_steps = 1_000_000 // len(pop)
     required_score = 0.95
-    evo_steps = num_envs * INIT_HP["LEARN_STEP"] * 100
+    evo_steps = num_envs * INIT_HP["LEARN_STEP"] * 1
     eval_steps = None
 
     total_steps = 0
     training_complete = False
 
     print("Training...")
-    pbar = trange(max_steps * num_envs, unit="step")
+    pbar = trange(max_steps * len(pop), unit="step")
     while (
         np.less([agent.steps[-1] for agent in pop], max_steps).all()
         and not training_complete
     ):
         for agent in pop:
-            active_collect = (
-                collect_rollouts if not recurrent else collect_rollouts_recurrent
-            )
-            active_collect(agent, env)
-
+            collect_rollouts_recurrent(agent, env)
             agent.learn()
             total_steps += agent.learn_step * num_envs
-            agent.steps[-1] += agent.learn_step
+            agent.steps[-1] += agent.learn_step * num_envs
             pbar.update(agent.learn_step * num_envs // len(pop))
 
         # Evaluate and evolve
@@ -279,6 +195,7 @@ def run_demo():
         episode_steps = 0
         if recurrent:
             hidden_state = elite.get_initial_hidden_state(1)
+
         while not done[0]:
             if recurrent:
                 action, _, _, _, hidden_state = elite.get_action(
@@ -286,7 +203,6 @@ def run_demo():
                 )
             else:
                 action, _, _, _, _ = elite.get_action(obs)
-
             obs, reward, terminated, truncated, _ = single_test_env.step(action)
             done = np.logical_or(terminated, truncated)
             episode_reward += reward[0]

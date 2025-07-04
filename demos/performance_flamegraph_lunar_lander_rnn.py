@@ -17,7 +17,9 @@ from IPython.display import Video, display
 from torch.profiler import ProfilerActivity, profile, record_function
 from tqdm import trange
 
+from agilerl.rollouts.on_policy import collect_rollouts_recurrent
 from agilerl.utils.utils import create_population, make_vect_envs
+from benchmarking.benchmarking_recurrent import MaskVelocityWrapper
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -34,7 +36,12 @@ print(f"Using device: {device}")
 # Network configuration
 NET_CONFIG = {
     "encoder_config": {
-        "hidden_size": [256, 256],  # Larger MLP hidden size for LunarLander
+        "hidden_state_size": 64,  # LSTM hidden state size
+        "num_layers": 1,
+        "max_seq_len": 4,
+    },
+    "head_config": {
+        "hidden_size": [64],
     },
 }
 
@@ -52,19 +59,25 @@ INIT_HP = {
     "MAX_GRAD_NORM": 0.5,
     "UPDATE_EPOCHS": 4,
     "SHARE_ENCODERS": True,
+    "USE_ROLLOUT_BUFFER": True,
+    "RECURRENT": True,
     # PPO Specific
-    "DISCRETE_ACTIONS": True,  # LunarLander-v3 has discrete actions
     "ACTION_STD_INIT": 0.6,  # Only used for continuous actions
     "TARGET_KL": None,
     "CHANNELS_LAST": False,  # LunarLander obs are 1D
 }
 
+
 # =====================================================================
 # CREATE ENVIRONMENT AND AGENT
 # =====================================================================
+def make_env():
+    return MaskVelocityWrapper(gym.make("LunarLander-v3"))
+
+
 # Create vectorized environment
 num_envs = 64  # Number of parallel environments for profiling
-env = make_vect_envs("LunarLander-v3", num_envs=num_envs, should_async_vector=False)
+env = make_vect_envs(make_env=make_env, num_envs=num_envs, should_async_vector=False)
 
 observation_space = env.single_observation_space
 action_space = env.single_action_space
@@ -79,9 +92,6 @@ pop = create_population(
     population_size=INIT_HP["POP_SIZE"],
     num_envs=num_envs,
     device=device,
-    algo_kwargs={
-        "use_rollout_buffer": True,
-    },
 )
 
 # Get the agent from the population
@@ -96,7 +106,7 @@ pr = cProfile.Profile()
 pr.enable()
 
 # Run the function to profile
-agent.collect_rollouts(env)
+collect_rollouts_recurrent(agent, env)
 
 pr.disable()
 
@@ -140,7 +150,7 @@ print("\n--- Running Training Loop ---")
 pbar = trange(max_steps * num_envs, unit="step")
 while total_steps < max_steps:
     # Collect rollouts and learn
-    agent.collect_rollouts(env)  # Collect rollouts for each environment
+    collect_rollouts_recurrent(agent, env)  # Collect rollouts for each environment
     agent.learn()
     # Update counters
     total_steps += INIT_HP["LEARN_STEP"]
@@ -214,7 +224,7 @@ with profile(
     activities=[ProfilerActivity.CPU], record_shapes=True, with_stack=True
 ) as prof:
     with record_function("training_step"):
-        agent.collect_rollouts(env)
+        collect_rollouts_recurrent(agent, env)
         agent.learn()
 
 # Export trace that can be loaded in chrome://tracing

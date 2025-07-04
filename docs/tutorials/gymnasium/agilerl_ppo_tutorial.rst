@@ -43,15 +43,12 @@ Dependencies
     import numpy as np
     import torch
 
-    from agilerl.algorithms.ppo import PPO
+    from agilerl.algorithms import PPO
+    from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
     from agilerl.training.train_on_policy import train_on_policy
-    from agilerl.utils.utils import (
-        create_population,
-        make_vect_envs,
-        observation_space_channels_to_first
-    )
+    from agilerl.utils.utils import create_population, make_vect_envs
 
 
 Defining Hyperparameters
@@ -102,6 +99,15 @@ Additionally, we also define our upper and lower limits for these hyperparameter
             "RAND_SEED": 42,  # Random seed
         }
 
+        # RL hyperparameters configuration for mutation during training
+        hp_config = HyperparameterConfig(
+            lr = RLParameter(min=1e-4, max=1e-2),
+            batch_size = RLParameter(
+                min=8, max=1024, dtype=int
+                )
+        )
+
+
 Create the Environment
 ----------------------
 In this particular tutorial, we will be focussing on the acrobot environment as you can use PPO with
@@ -132,14 +138,6 @@ followed by mutations) is detailed further below.
 
     # Define the network configuration of a simple mlp with two hidden layers, each with 64 nodes
     net_config = {"head_config": {"hidden_size": [64, 64]}}
-
-    # RL hyperparameters configuration for mutation during training
-    hp_config = HyperparameterConfig(
-        lr = RLParameter(min=1e-4, max=1e-2),
-        batch_size = RLParameter(
-            min=8, max=1024, dtype=int
-            )
-    )
 
     # Define a population
     pop = create_population(

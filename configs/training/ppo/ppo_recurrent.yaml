@@ -1,15 +1,15 @@
 ---
 # Define initial hyperparameters
 INIT_HP:
-    ENV_NAME: stocks-v0   # Gym environment name
+    ENV_NAME: Pendulum-v1   # Gym environment name
     ALGO: PPO                  # Algorithm
     # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     CHANNELS_LAST: false
     NUM_ENVS: 16               # No. parallel environments for training
-    BATCH_SIZE: 128            # Batch size
+    BATCH_SIZE: 256            # Batch size
     LR: 0.001                  # Learning rate
-    LEARN_STEP: 2048           # Learning frequency
-    MAX_STEPS: 2_000_000       # Max no. steps
+    LEARN_STEP: 1024           # Learning frequency
+    MAX_STEPS: 1_000_000       # Max no. steps
     TARGET_SCORE: 2000.         # Early training stop at avg score of last 100 episodes
     GAMMA: 0.99                # Discount factor
     GAE_LAMBDA: 0.95           # Lambda for general advantage estimation
@@ -25,8 +25,11 @@ INIT_HP:
     POP_SIZE: 4                # Population size
     EVO_STEPS: 10_190          # Evolution frequency
     EVAL_STEPS:                # Evaluation steps
+    SHARE_ENCODERS: true       # Share encoders between actor and critic
+    USE_ROLLOUT_BUFFER: true   # Use rollout buffer
+    RECURRENT: true            # Use recurrent network
     EVAL_LOOP: 1               # Evaluation episodes
-    WANDB: true                # Log with Weights and Biases
+    WANDB: false                # Log with Weights and Biases
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation
@@ -45,18 +48,16 @@ MUTATION_PARAMS:
     MAX_LEARN_STEP: 8192
 
 NET_CONFIG:
-    latent_dim: 128
-    recurrent: true
+    latent_dim: 64
 
     encoder_config:
-        hidden_size: 128
-        num_layers: 2
-        # hidden_size: [128, 128]
-        # activation: ReLU
+        hidden_state_size: 64
+        num_layers: 1
+        max_seq_len: 4
 
     head_config:
-        hidden_size: [128]
-        activation: Tanh
+        hidden_size: [64]
+        activation: ReLU
         min_hidden_layers: 1
         max_hidden_layers: 2
         min_mlp_nodes: 128
