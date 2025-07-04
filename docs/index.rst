@@ -134,6 +134,7 @@ If you use AgileRL in your work, please cite the repository:
    api/modules/index
    api/networks/index
    api/train
+   api/rollouts/index
    api/utils/index
    api/vector/index
    api/wrappers/index

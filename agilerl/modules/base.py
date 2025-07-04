@@ -615,8 +615,8 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
     def filter_mutation_methods(self, remove: str) -> None:
         """Filter out mutation methods that contain the specified string in their name.
 
-        param remove: The string to remove.
-        type remove: str
+        :param remove: The string to remove.
+        :type remove: str
         """
 
         def filter_methods(methods: List[str]) -> List[str]:
@@ -628,8 +628,8 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
     def get_mutation_probs(self, new_layer_prob: float) -> List[float]:
         """Get the mutation probabilities for each mutation method.
 
-        param new_layer_prob: The probability of selecting a layer mutation method.
-        type new_layer_prob: float
+        :param new_layer_prob: The probability of selecting a layer mutation method.
+        :type new_layer_prob: float
         return: A list of probabilities for each mutation method.
         rtype: List[float]
         """
@@ -656,9 +656,9 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
     ) -> MutationMethod:
         """Sample a mutation method based on the mutation probabilities.
 
-        param new_layer_prob: The probability of selecting a layer mutation method.
+        :param new_layer_prob: The probability of selecting a layer mutation method.
         type new_layer_prob: float
-        param rng: The random number generator.
+        :param rng: The random number generator.
         type rng: Optional[Generator]
         return: The sampled mutation method.
         rtype: MutationMethod
@@ -695,10 +695,12 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
 
         # Load state dict if the network has been trained
         try:
-            clone.load_state_dict(self.state_dict())
-        except RuntimeError:
+            clone.load_state_dict(self.state_dict(), strict=False)
+        except RuntimeError as e:
+            print(
+                f"Warning: Failed to load state_dict during unpickling of {self.__class__.__name__} to device {self.device}. Error: {e}"
+            )
             pass
-
         return clone
 
 

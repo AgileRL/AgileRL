@@ -63,7 +63,7 @@ def test_deterministic_actor_initialization(
 
 
 def test_deterministic_actor_initialization_recurrent(vector_space):
-    observation_space = spaces.Box(low=-1, high=1, shape=(32, 8))
+    observation_space = spaces.Box(low=-1, high=1, shape=(32,))
     network = DeterministicActor(observation_space, vector_space, recurrent=True)
 
     assert network.observation_space == observation_space

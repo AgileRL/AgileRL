@@ -1,4 +1,3 @@
-import copy
 from dataclasses import asdict
 
 import pytest
@@ -60,21 +59,13 @@ def test_q_network_initialization(
     assert "head_net" in evolvable_modules
 
 
-@pytest.mark.parametrize("encoder_type", ["mlp", "lstm"])
-def test_q_network_initialization_recurrent(discrete_space, encoder_type):
-    if encoder_type == "mlp":
-        observation_space = spaces.Box(low=-1, high=1, shape=(8,))
-    elif encoder_type == "lstm":
-        observation_space = spaces.Box(low=-1, high=1, shape=(32, 8))
-
-    network = QNetwork(observation_space, discrete_space, recurrent=True)
+def test_q_network_initialization_recurrent(discrete_space, vector_space):
+    action_space = discrete_space
+    observation_space = vector_space
+    network = QNetwork(observation_space, action_space, recurrent=True)
 
     assert network.observation_space == observation_space
-
-    if encoder_type == "mlp":
-        assert isinstance(network.encoder, EvolvableMLP)
-    elif encoder_type == "lstm":
-        assert isinstance(network.encoder, EvolvableLSTM)
+    assert isinstance(network.encoder, EvolvableLSTM)
 
     evolvable_modules = network.modules()
     assert "encoder" in evolvable_modules
@@ -349,21 +340,13 @@ def test_continuous_q_network_initialization(
     assert "head_net" in evolvable_modules
 
 
-@pytest.mark.parametrize("encoder_type", ["mlp", "lstm"])
-def test_continuous_q_network_initialization_recurrent(vector_space, encoder_type):
-    if encoder_type == "mlp":
-        observation_space = spaces.Box(low=-1, high=1, shape=(8,))
-    elif encoder_type == "lstm":
-        observation_space = spaces.Box(low=-1, high=1, shape=(32, 8))
-
-    network = ContinuousQNetwork(observation_space, vector_space, recurrent=True)
+def test_continuous_q_network_initialization_recurrent(vector_space, discrete_space):
+    observation_space = vector_space
+    action_space = discrete_space
+    network = ContinuousQNetwork(observation_space, action_space, recurrent=True)
 
     assert network.observation_space == observation_space
-
-    if encoder_type == "mlp":
-        assert isinstance(network.encoder, EvolvableMLP)
-    elif encoder_type == "lstm":
-        assert isinstance(network.encoder, EvolvableLSTM)
+    assert isinstance(network.encoder, EvolvableLSTM)
 
     evolvable_modules = network.modules()
     assert "encoder" in evolvable_modules
@@ -371,9 +354,11 @@ def test_continuous_q_network_initialization_recurrent(vector_space, encoder_typ
 
 
 @pytest.mark.parametrize("encoder_type", ["mlp", "simba"])
-def test_continuous_q_network_initialization_simba(vector_space, encoder_type):
+def test_continuous_q_network_initialization_simba(
+    vector_space, discrete_space, encoder_type
+):
     simba = encoder_type == "simba"
-    network = ContinuousQNetwork(vector_space, copy.deepcopy(vector_space), simba=simba)
+    network = ContinuousQNetwork(vector_space, discrete_space, simba=simba)
 
     assert network.observation_space == vector_space
 

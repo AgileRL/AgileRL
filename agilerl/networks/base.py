@@ -1,11 +1,11 @@
 import inspect
 import warnings
+from copy import deepcopy
 from dataclasses import asdict
-from typing import Any, Dict, Optional, Type, TypeVar, Union
+from typing import Any, Dict, Optional, Tuple, Type, TypeVar, Union
 
 import numpy as np
 import torch
-import torch.nn as nn
 from gymnasium import spaces
 
 from agilerl.modules import (
@@ -18,7 +18,12 @@ from agilerl.modules import (
 )
 from agilerl.modules.base import EvolvableModule, ModuleMeta, mutation
 from agilerl.protocols import MutationType
-from agilerl.typing import ConfigType, DeviceType, TorchObsType
+from agilerl.typing import (
+    BatchDimension,
+    DeviceType,
+    NetConfigType,
+)
+from agilerl.utils.algo_utils import get_hidden_states_shape_from_model
 from agilerl.utils.evolvable_networks import get_default_encoder_config, is_image_space
 
 SelfEvolvableNetwork = TypeVar("SelfEvolvableNetwork", bound="EvolvableNetwork")
@@ -92,11 +97,13 @@ def assert_correct_lstm_net_config(net_config: Dict[str, Any]) -> None:
     :type net_config: Dict[str, Any]
     """
     assert (
-        "hidden_size" in net_config.keys()
-    ), "Net config must contain hidden_size: int."
-    assert isinstance(
-        net_config["hidden_size"], (int, np.int64)
-    ), "Net config hidden_size must be an integer."
+        "hidden_state_size" in net_config.keys()
+    ), "LSTM net config must contain hidden_state_size: int."
+    assert isinstance(net_config["hidden_state_size"], (int, np.int64)), (
+        "LSTM net config hidden_state_size must be an integer but is "
+        + str(type(net_config["hidden_state_size"]))
+        + "."
+    )
 
 
 # TODO: Need to think of a way to do this check without the metaclass
@@ -114,9 +121,7 @@ class NetworkMeta(ModuleMeta):
                 attr = mut_method.split(".")[0]
                 if attr not in ["encoder", "head_net"]:
                     raise AttributeError(
-                        "Mutation methods of nested modules in EvolvableNetwork objects should only correspond "
-                        "to the 'encoder' or 'head_net'. This is done to ensure that equivalent architecture "
-                        "mutations can be applied across different evaluation networks (e.g. actor and critic)."
+                        "Mutation methods of nested modules in EvolvableNetwork objects should only correspond to the 'encoder' or 'head_net'. This is done to ensure that equivalent architecture mutations can be applied across different evaluation networks (e.g. actor and critic)."
                     )
 
         return instance
@@ -175,7 +180,8 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         self,
         observation_space: spaces.Space,
         encoder_cls: Optional[Union[str, Type[EvolvableModule]]] = None,
-        encoder_config: Optional[ConfigType] = None,
+        encoder_config: Optional[NetConfigType] = None,
+        encoder_name: str = "encoder",
         action_space: Optional[spaces.Space] = None,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
@@ -209,6 +215,8 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         self.simba = simba
         self.recurrent = recurrent
         self.flatten_obs = False
+        self.encoder_name = encoder_name
+        self.cached_hidden_state = None
 
         # By default we use same activation for encoder output as for the rest of the network
         output_activation = encoder_config.get("output_activation", None)
@@ -227,7 +235,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             input_args = inspect.getfullargspec(self.encoder_cls.__init__).args
             if "num_outputs" not in input_args:
                 warnings.warn(
-                    f"Custom encoder {self.encoder_cls.__name__} does not contain `num_outputs` as an "
+                    f"{self.encoder_cls.__name__} does not contain `num_outputs` as an "
                     "input argument. Disabling latent space mutations. Make sure to set the number of "
                     "outputs to the latent dimension in the encoder configuration."
                 )
@@ -235,7 +243,15 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             else:
                 encoder_config["num_outputs"] = self.latent_dim
 
-            self.encoder = self.encoder_cls(**encoder_config)
+            self.encoder = self.encoder_cls(
+                **{
+                    "observation_space": self.observation_space,
+                    "num_outputs": self.latent_dim,
+                    "device": self.device,
+                    "name": self.encoder_name,
+                    **encoder_config,
+                }
+            )
         else:
             self.encoder = self._build_encoder(encoder_config)
 
@@ -281,19 +297,23 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         """Forward pass of the network."""
         return self.forward(*args, **kwargs)
 
-    def extract_features(self, x: TorchObsType) -> torch.Tensor:
-        """Forward pass of the network.
+    def extract_features(
+        self, x: torch.Tensor, hidden_state: Optional[Dict[str, torch.Tensor]] = None
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """Extract features from the encoder part of the network.
 
-        :param x: Input to the network.
-        :type x: TorchObsType
-
-        :return: Output of the network.
+        :param x: Input tensor to extract features from
+        :type x: torch.Tensor
+        :param hidden_states: Hidden states for recurrent networks (unused in non-recurrent networks)
+        :type hidden_states: Dict[str, torch.Tensor], optional
+        :return: The encoded features
         :rtype: torch.Tensor
         """
-        if self.flatten_obs:
-            x = nn.Flatten()(x)
-
-        return self.encoder(x)
+        # For compatibility with both recurrent and non-recurrent networks
+        if hidden_state is None:
+            return self.encoder(x)
+        else:
+            return self.encoder(x, hidden_state=hidden_state)
 
     def forward_head(self, latent: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         """Forward pass of the network head using pre-computed latent encodings.
@@ -360,6 +380,36 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                 module.init_weights_gaussian(
                     std_coeff=std_coeff, output_coeff=output_coeff
                 )
+
+    def initialize_hidden_state(self, batch_size: int = 1) -> Dict[str, torch.Tensor]:
+        """Initialize the hidden state for the network.
+
+        :param env: The environment to initialize the hidden state for
+        :type env: GymEnvType
+        """
+        if self.recurrent:
+
+            # if the hidden state is not initialized, initialize it
+            if (
+                self.cached_hidden_state is None
+                or len(self.cached_hidden_state) == 0
+                or self.cached_hidden_state_batch_size != batch_size
+            ):
+                self.cached_hidden_state = {}
+                self.cached_hidden_state_batch_size = batch_size
+                for name, shape in get_hidden_states_shape_from_model(
+                    self.encoder
+                ).items():
+                    # shape might have a batch dimension 'BatchPlaceholder', so we need to replace it
+                    shape = tuple(
+                        batch_size if x == BatchDimension else x for x in shape
+                    )
+                    self.cached_hidden_state[name] = torch.zeros(shape).to(self.device)
+            return deepcopy(self.cached_hidden_state)
+        else:
+            raise ValueError(
+                "Cannot initialize hidden state for non-recurrent networks."
+            )
 
     def change_activation(self, activation: str, output: bool = False) -> None:
         """Change the activation function for the network.
@@ -436,7 +486,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                 observation_space=self.observation_space,
                 num_outputs=self.latent_dim,
                 device=self.device,
-                name="encoder",
+                name=self.encoder_name,
                 **net_config,
             )
         elif is_image_space(self.observation_space):
@@ -446,21 +496,17 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                 input_shape=self.observation_space.shape,
                 num_outputs=self.latent_dim,
                 device=self.device,
-                name="encoder",
+                name=self.encoder_name,
                 **net_config,
             )
-        elif (
-            isinstance(self.observation_space, spaces.Box)
-            and len(self.observation_space.shape) == 2
-            and self.recurrent
-        ):
+        elif self.recurrent:
             assert_correct_lstm_net_config(net_config)
 
             encoder = EvolvableLSTM(
-                input_size=self.observation_space.shape[1],
+                input_size=self.observation_space.shape[0],
                 num_outputs=self.latent_dim,
                 device=self.device,
-                name="encoder",
+                name=self.encoder_name,
                 **net_config,
             )
         else:
@@ -482,7 +528,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                 num_inputs=spaces.flatdim(self.observation_space),
                 num_outputs=self.latent_dim,
                 device=self.device,
-                name="encoder",
+                name=self.encoder_name,
                 **net_config,
             )
 

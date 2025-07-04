@@ -26,7 +26,7 @@ from agilerl.modules.custom_components import (
     ResidualBlock,
     SimbaResidualBlock,
 )
-from agilerl.typing import ConfigType, DeviceType, GymSpaceType, NetConfigType
+from agilerl.typing import DeviceType, GymSpaceType, NetConfigType
 
 TupleorInt = Union[Tuple[int, ...], int]
 
@@ -224,7 +224,7 @@ def tuple_to_dict_obs(tuple_obs: tuple) -> dict:
 
 def get_default_encoder_config(
     observation_space: spaces.Space, simba: bool = False, recurrent: bool = False
-) -> ConfigType:
+) -> NetConfigType:
     """Get the default configuration for the encoder network based on the observation space.
 
     :param observation_space: Observation space of the environment.
@@ -246,19 +246,16 @@ def get_default_encoder_config(
             stride_size=[1, 1],
             output_activation=None,
         )
+    elif simba:
+        config = SimBaNetConfig(hidden_size=128, num_blocks=2, output_activation=None)
+    elif recurrent:
+        config = LstmNetConfig(
+            hidden_state_size=128, num_layers=2, output_activation=None
+        )
     else:
-        if simba and len(observation_space.shape) == 1:
-            config = SimBaNetConfig(
-                hidden_size=128, num_blocks=2, output_activation=None
-            )
-        elif recurrent and len(observation_space.shape) == 2:
-            config = LstmNetConfig(
-                hidden_size=128, num_layers=2, output_activation=None
-            )
-        else:
-            config = MlpNetConfig(
-                hidden_size=[64, 64], output_activation=None, output_vanish=False
-            )
+        config = MlpNetConfig(
+            hidden_size=[64, 64], output_activation=None, output_vanish=False
+        )
 
     return asdict(config)
 
@@ -374,13 +371,13 @@ def get_conv_layer(
     :return: Convolutional layer
     :rtype: nn.Module
     """
-    if conv_layer_name not in ["Conv2d", "Conv3d"]:
+    if conv_layer_name not in ["Conv1d", "Conv2d", "Conv3d"]:
         raise ValueError(
-            f"Invalid convolutional layer {conv_layer_name}. Must be one of 'Conv2d', 'Conv3d'."
+            f"Invalid convolutional layer {conv_layer_name}. Must be one of 'Conv1d', 'Conv2d', 'Conv3d'."
         )
 
     convolutional_layers = {
-        # "1d": nn.Conv1d,
+        "1d": nn.Conv1d,
         "2d": nn.Conv2d,
         "3d": nn.Conv3d,
     }

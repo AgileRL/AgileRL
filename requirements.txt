@@ -21,12 +21,12 @@ redis==4.4.4
 scipy==1.12.0
 SuperSuit==3.9.0
 torch==2.5.1
-tensordict==0.6.*
+tensordict==0.8.*
 termcolor==1.1.0
 tqdm==4.66.4
 ucimlrepo==0.0.3
 wandb==0.17.6
 huggingface
 datasets==3.3.2
-transformers==4.48.1
+transformers==4.50.0
 peft==0.15.2

@@ -56,7 +56,6 @@ from agilerl.protocols import (
 from agilerl.typing import (
     ActionType,
     ArrayDict,
-    ConfigType,
     DeviceType,
     ExperiencesType,
     GymSpaceType,
@@ -773,10 +772,12 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             if isinstance(module_cls, dict):
                 loaded_modules = {}
                 for agent_id, mod in module_cls.items():
+                    init_dict[agent_id]["device"] = self.device
                     loaded_modules[agent_id] = mod(**init_dict[agent_id])
 
                 setattr(self, name, module_dict_cls(loaded_modules))
             else:
+                init_dict["device"] = self.device
                 loaded_module: EvolvableModule = module_cls(**init_dict)
                 setattr(self, name, loaded_module)
 
@@ -919,12 +920,11 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         # Reconstruct the algorithm
         constructor_params = inspect.signature(cls.__init__).parameters.keys()
+        checkpoint["accelerator"] = accelerator
+        checkpoint["device"] = device
         class_init_dict = {
             k: v for k, v in checkpoint.items() if k in constructor_params
         }
-
-        checkpoint["accelerator"] = accelerator
-        checkpoint["device"] = device
         self = cls(**class_init_dict)
         registry: MutationRegistry = checkpoint["registry"]
         self.registry = registry
@@ -1451,7 +1451,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             )
 
         # Helper function to get or create encoder config for an agent
-        def _get_encoder_config(config: ConfigType, agent_id: str) -> NetConfigType:
+        def _get_encoder_config(config: NetConfigType, agent_id: str) -> NetConfigType:
             encoder_config = config.get("encoder_config")
             simba = config.get("simba", False)
             if encoder_config is None:

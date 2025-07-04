@@ -165,8 +165,12 @@ def heterogeneous_agent():
 
 
 class DummyRLAlgorithm(RLAlgorithm):
-    def __init__(self, observation_space, action_space, index, lr=True, **kwargs):
-        super().__init__(observation_space, action_space, index, **kwargs)
+    def __init__(
+        self, observation_space, action_space, index, lr=True, device="cpu", **kwargs
+    ):
+        super().__init__(
+            observation_space, action_space, index, device=device, **kwargs
+        )
 
         num_outputs = (
             self.action_space.n
@@ -180,6 +184,7 @@ class DummyRLAlgorithm(RLAlgorithm):
                 channel_size=[3],
                 kernel_size=[3],
                 stride_size=[1],
+                device=self.device,
             )
         elif isinstance(self.observation_space, (spaces.Box, spaces.Discrete)):
             num_inputs = (
@@ -187,11 +192,15 @@ class DummyRLAlgorithm(RLAlgorithm):
                 if isinstance(self.observation_space, spaces.Box)
                 else self.observation_space.n
             )
-            self.dummy_actor = EvolvableMLP(num_inputs, num_outputs, hidden_size=[8])
+            self.dummy_actor = EvolvableMLP(
+                num_inputs, num_outputs, hidden_size=[8], device=self.device
+            )
         elif isinstance(self.observation_space, spaces.MultiDiscrete):
             # Handle MultiDiscrete spaces
             num_inputs = len(self.observation_space.nvec)
-            self.dummy_actor = EvolvableMLP(num_inputs, num_outputs, hidden_size=[8])
+            self.dummy_actor = EvolvableMLP(
+                num_inputs, num_outputs, hidden_size=[8], device=self.device
+            )
         elif isinstance(self.observation_space, (spaces.Dict, spaces.Tuple)):
             config = {
                 "mlp_config": {"hidden_size": [8]},
@@ -202,7 +211,7 @@ class DummyRLAlgorithm(RLAlgorithm):
                 },
             }
             self.dummy_actor = EvolvableMultiInput(
-                self.observation_space, num_outputs, **config
+                self.observation_space, num_outputs, **config, device=self.device
             )
 
         self.lr = 0.1
@@ -227,8 +236,18 @@ class DummyRLAlgorithm(RLAlgorithm):
 
 
 class DummyMARLAlgorithm(MultiAgentRLAlgorithm):
-    def __init__(self, observation_spaces, action_spaces, agent_ids, index, **kwargs):
-        super().__init__(observation_spaces, action_spaces, index, agent_ids, **kwargs)
+    def __init__(
+        self,
+        observation_spaces,
+        action_spaces,
+        agent_ids,
+        index,
+        device="cpu",
+        **kwargs,
+    ):
+        super().__init__(
+            observation_spaces, action_spaces, index, agent_ids, device=device, **kwargs
+        )
 
         def create_actor(idx):
             obs_space = self.possible_observation_spaces[self.agent_ids[idx]]
@@ -245,6 +264,7 @@ class DummyMARLAlgorithm(MultiAgentRLAlgorithm):
                     channel_size=[3],
                     kernel_size=[3],
                     stride_size=[1],
+                    device=self.device,
                 )
             elif isinstance(obs_space, (spaces.Box, spaces.Discrete)):
                 num_inputs = (
@@ -252,7 +272,9 @@ class DummyMARLAlgorithm(MultiAgentRLAlgorithm):
                     if isinstance(obs_space, spaces.Box)
                     else obs_space.n
                 )
-                return EvolvableMLP(num_inputs, num_outputs, hidden_size=[8])
+                return EvolvableMLP(
+                    num_inputs, num_outputs, hidden_size=[8], device=self.device
+                )
             elif isinstance(obs_space, (spaces.Dict, spaces.Tuple)):
                 config = {
                     "mlp_config": {"hidden_size": [8]},
@@ -262,7 +284,9 @@ class DummyMARLAlgorithm(MultiAgentRLAlgorithm):
                         "stride_size": [1],
                     },
                 }
-                return EvolvableMultiInput(obs_space, num_outputs, **config)
+                return EvolvableMultiInput(
+                    obs_space, num_outputs, **config, device=self.device
+                )
 
         self.dummy_actors = ModuleDict(
             {
@@ -720,8 +744,287 @@ def test_load_from_pretrained_multi_agent(
     del new_agent
 
 
-def test_missing_attribute_warning(tmpdir, vector_space, discrete_space):
-    action_space = discrete_space
+def test_gpu_to_no_cuda_transfer_single_agent(tmpdir, vector_space):
+    """Test saving agent on GPU and loading when CUDA is completely unavailable."""
+    import os
+    import subprocess
+    import sys
+
+    # Skip test if CUDA is not available
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available, skipping GPU to no-CUDA transfer test")
+
+    # Initialize the dummy agent
+    observation_space = vector_space
+    action_space = vector_space
+    agent = DummyRLAlgorithm(observation_space, action_space, index=0, device="cuda")
+
+    # Verify agent is on GPU
+    assert next(agent.dummy_actor.parameters()).device.type == "cuda"
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    agent.save_checkpoint(checkpoint_path)
+
+    # Create a subprocess that runs with CUDA_VISIBLE_DEVICES="" to simulate no GPU environment
+    test_script = f"""
+import sys
+sys.path.insert(0, "{os.getcwd()}")
+import torch
+from pathlib import Path
+from tests.test_algorithms.test_base import DummyRLAlgorithm
+
+# Verify CUDA is not available in this subprocess
+assert not torch.cuda.is_available(), "CUDA should not be available"
+
+# Load the checkpoint (should work even though it was saved on GPU)
+checkpoint_path = Path("{checkpoint_path}")
+new_agent = DummyRLAlgorithm.load(checkpoint_path, device="cpu")
+
+# Verify the agent is on CPU
+assert next(new_agent.dummy_actor.parameters()).device.type == "cpu"
+
+print("SUCCESS: GPU-saved checkpoint loaded successfully in no-CUDA environment")
+    """
+
+    script_path = Path(tmpdir) / "test_no_cuda.py"
+    with open(script_path, "w") as f:
+        f.write(test_script)
+
+    # Run the test script with CUDA_VISIBLE_DEVICES="" to hide GPU
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = ""
+
+    result = subprocess.run(
+        [sys.executable, str(script_path)], env=env, capture_output=True, text=True
+    )
+
+    # Check that the subprocess succeeded
+    assert result.returncode == 0, f"Subprocess failed: {result.stderr}"
+    assert "SUCCESS" in result.stdout
+
+
+def test_gpu_to_no_cuda_load_checkpoint_single_agent(tmpdir, vector_space):
+    """Test saving agent on GPU and loading checkpoint when CUDA is completely unavailable."""
+    import os
+    import subprocess
+    import sys
+
+    # Skip test if CUDA is not available
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available, skipping GPU to no-CUDA load_checkpoint test")
+
+    # Initialize the dummy agent
+    observation_space = vector_space
+    action_space = vector_space
+    agent = DummyRLAlgorithm(observation_space, action_space, index=0, device="cuda")
+
+    # Verify agent is on GPU
+    assert next(agent.dummy_actor.parameters()).device.type == "cuda"
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    agent.save_checkpoint(checkpoint_path)
+
+    # Create a subprocess that runs with CUDA_VISIBLE_DEVICES="" to simulate no GPU environment
+    # Serialize observation and action spaces
+    obs_space_init = "generate_random_box_space((4,))"
+    action_space_init = "generate_random_box_space((4,))"
+
+    test_script = f"""
+import sys
+sys.path.insert(0, "{os.getcwd()}")
+import torch
+import numpy as np
+from pathlib import Path
+from gymnasium import spaces
+from tests.test_algorithms.test_base import DummyRLAlgorithm
+from tests.helper_functions import generate_random_box_space
+
+# Verify CUDA is not available in this subprocess
+assert not torch.cuda.is_available(), "CUDA should not be available"
+
+# Create observation and action spaces
+observation_space = {obs_space_init}
+action_space = {action_space_init}
+
+# Create a new agent in no-CUDA environment
+new_agent = DummyRLAlgorithm(observation_space, action_space, index=1)
+
+# Load checkpoint using instance method
+checkpoint_path = Path("{checkpoint_path}")
+new_agent.load_checkpoint(checkpoint_path)
+
+# Verify the agent is on CPU
+assert next(new_agent.dummy_actor.parameters()).device.type == "cpu"
+
+print("SUCCESS: GPU-saved checkpoint loaded via load_checkpoint in no-CUDA environment")
+    """
+
+    script_path = Path(tmpdir) / "test_load_checkpoint_no_cuda.py"
+    with open(script_path, "w") as f:
+        f.write(test_script)
+
+    # Run the test script with CUDA_VISIBLE_DEVICES="" to hide GPU
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = ""
+
+    result = subprocess.run(
+        [sys.executable, str(script_path)], env=env, capture_output=True, text=True
+    )
+
+    # Check that the subprocess succeeded
+    assert result.returncode == 0, f"Subprocess failed: {result.stderr}"
+    assert "SUCCESS" in result.stdout
+
+
+def test_gpu_to_no_cuda_transfer_multi_agent(tmpdir, ma_vector_space):
+    """Test saving multi-agent on GPU and loading when CUDA is completely unavailable."""
+    import os
+    import subprocess
+    import sys
+
+    # Skip test if CUDA is not available
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available, skipping GPU to no-CUDA transfer test")
+
+    # Initialize the dummy multi-agent
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    observation_spaces = ma_vector_space
+    action_spaces = ma_vector_space
+    agent = DummyMARLAlgorithm(
+        observation_spaces, action_spaces, agent_ids=agent_ids, index=0, device="cuda"
+    )
+
+    # Verify agents are on GPU
+    for actor in agent.dummy_actors.values():
+        assert next(actor.parameters()).device.type == "cuda"
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    agent.save_checkpoint(checkpoint_path)
+
+    # Create a subprocess that runs with CUDA_VISIBLE_DEVICES="" to simulate no GPU environment
+    test_script = f"""
+import sys
+sys.path.insert(0, "{os.getcwd()}")
+import torch
+from pathlib import Path
+from tests.test_algorithms.test_base import DummyMARLAlgorithm
+
+# Verify CUDA is not available in this subprocess
+assert not torch.cuda.is_available(), "CUDA should not be available"
+
+# Load the checkpoint (should work even though it was saved on GPU)
+checkpoint_path = Path("{checkpoint_path}")
+new_agent = DummyMARLAlgorithm.load(checkpoint_path, device="cpu")
+
+# Verify all agents are on CPU
+agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+for actor in new_agent.dummy_actors.values():
+    assert next(actor.parameters()).device.type == "cpu"
+
+print("SUCCESS: GPU-saved multi-agent checkpoint loaded successfully in no-CUDA environment")
+    """
+
+    script_path = Path(tmpdir) / "test_no_cuda_multi.py"
+    with open(script_path, "w") as f:
+        f.write(test_script)
+
+    # Run the test script with CUDA_VISIBLE_DEVICES="" to hide GPU
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = ""
+
+    result = subprocess.run(
+        [sys.executable, str(script_path)], env=env, capture_output=True, text=True
+    )
+
+    # Check that the subprocess succeeded
+    assert result.returncode == 0, f"Subprocess failed: {result.stderr}"
+    assert "SUCCESS" in result.stdout
+
+
+def test_gpu_to_no_cuda_load_checkpoint_multi_agent(tmpdir, ma_vector_space):
+    """Test saving multi-agent on GPU and loading checkpoint when CUDA is completely unavailable."""
+    import os
+    import subprocess
+    import sys
+
+    # Skip test if CUDA is not available
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available, skipping GPU to no-CUDA load_checkpoint test")
+
+    # Initialize the dummy multi-agent
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    observation_spaces = ma_vector_space
+    action_spaces = ma_vector_space
+    agent = DummyMARLAlgorithm(
+        observation_spaces, action_spaces, agent_ids=agent_ids, index=0, device="cuda"
+    )
+
+    # Verify agents are on GPU
+    for actor in agent.dummy_actors.values():
+        assert next(actor.parameters()).device.type == "cuda"
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    agent.save_checkpoint(checkpoint_path)
+
+    # Create a subprocess that runs with CUDA_VISIBLE_DEVICES="" to simulate no GPU environment
+    obs_spaces_init = "generate_multi_agent_box_spaces(3, (4,))"
+    action_spaces_init = "generate_multi_agent_box_spaces(3, (2,))"
+
+    test_script = f"""
+import sys
+sys.path.insert(0, "{os.getcwd()}")
+import torch
+import numpy as np
+from pathlib import Path
+from gymnasium import spaces
+from tests.test_algorithms.test_base import DummyMARLAlgorithm
+from tests.helper_functions import generate_multi_agent_box_spaces
+
+# Verify CUDA is not available in this subprocess
+assert not torch.cuda.is_available(), "CUDA should not be available"
+
+# Create observation and action spaces
+observation_spaces = {obs_spaces_init}
+action_spaces = {action_spaces_init}
+
+# Create a new multi-agent in no-CUDA environment
+agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+new_agent = DummyMARLAlgorithm(observation_spaces, action_spaces, agent_ids=agent_ids, index=1)
+
+# Load checkpoint using instance method
+checkpoint_path = Path("{checkpoint_path}")
+new_agent.load_checkpoint(checkpoint_path)
+
+# Verify all agents are on CPU
+for actor in new_agent.dummy_actors.values():
+    assert next(actor.parameters()).device.type == "cpu"
+
+print("SUCCESS: GPU-saved multi-agent checkpoint loaded via load_checkpoint in no-CUDA environment")
+    """
+
+    script_path = Path(tmpdir) / "test_load_checkpoint_no_cuda_multi.py"
+    with open(script_path, "w") as f:
+        f.write(test_script)
+
+    # Run the test script with CUDA_VISIBLE_DEVICES="" to hide GPU
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = ""
+
+    result = subprocess.run(
+        [sys.executable, str(script_path)], env=env, capture_output=True, text=True
+    )
+
+    # Check that the subprocess succeeded
+    assert result.returncode == 0, f"Subprocess failed: {result.stderr}"
+    assert "SUCCESS" in result.stdout
+
+
+def test_missing_attribute_warning(tmpdir, vector_space):
+    action_space = vector_space
     # Initialize the dummy agent
     agent = DummyRLAlgorithm(vector_space, action_space, index=0)
 

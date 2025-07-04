@@ -6,7 +6,7 @@ from gymnasium import spaces
 from torch.distributions import Bernoulli, Categorical, Distribution, Normal
 
 from agilerl.modules.base import EvolvableModule, EvolvableWrapper
-from agilerl.typing import ArrayOrTensor, ConfigType, DeviceType
+from agilerl.typing import ArrayOrTensor, DeviceType, NetConfigType
 
 DistributionType = Union[Distribution, List[Distribution]]
 
@@ -325,7 +325,6 @@ class EvolvableDistribution(EvolvableWrapper):
         squash_output: bool = False,
         device: DeviceType = "cpu",
     ):
-
         super().__init__(network)
 
         self.action_space = action_space
@@ -345,11 +344,11 @@ class EvolvableDistribution(EvolvableWrapper):
             )
 
     @property
-    def net_config(self) -> ConfigType:
+    def net_config(self) -> NetConfigType:
         """Configuration of the network.
 
         :return: Configuration of the network.
-        :rtype: ConfigType
+        :rtype: NetConfigType
         """
         return self.wrapped.net_config
 
@@ -455,8 +454,13 @@ class EvolvableDistribution(EvolvableWrapper):
         return masked_logits
 
     def forward(
-        self, latent: torch.Tensor, action_mask: Optional[ArrayOrTensor] = None
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        self,
+        latent: torch.Tensor,
+        action_mask: Optional[ArrayOrTensor] = None,
+        sample: bool = True,
+    ) -> Union[
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor], Tuple[None, None, torch.Tensor]
+    ]:
         """Forward pass of the network.
 
         :param latent: Latent space representation.
@@ -482,8 +486,13 @@ class EvolvableDistribution(EvolvableWrapper):
         self.dist = self.get_distribution(logits)
 
         # Sample action, compute log probability and entropy
-        action = self.dist.sample()
-        log_prob = self.dist.log_prob(action)
+        if sample:
+            action = self.dist.sample()
+            log_prob = self.dist.log_prob(action)
+        else:
+            action = None
+            log_prob = None
+
         entropy = self.dist.entropy()
         return action, log_prob, entropy
 

@@ -167,6 +167,7 @@ def create_population(
     device: str = "cpu",
     accelerator: Optional[Any] = None,
     torch_compiler: Optional[Any] = None,
+    algo_kwargs: Optional[Dict[str, Any]] = {},
 ) -> PopulationType:
     """Returns population of identical agents.
 
@@ -198,7 +199,10 @@ def create_population(
     :type torch_compiler: Any, optional
     :return: Population of agents
     :rtype: list[EvolvableAlgorithm]
+    :param algo_kwargs: Additional keyword arguments for the algorithm
+    :type algo_kwargs: dict, optional
     """
+
     population = []
     if algo == "DQN":
         for idx in range(population_size):
@@ -218,6 +222,7 @@ def create_population(
                 actor_network=actor_network,
                 device=device,
                 accelerator=accelerator,
+                **algo_kwargs,
             )
             population.append(agent)
 
@@ -243,6 +248,7 @@ def create_population(
                 actor_network=actor_network,
                 device=device,
                 accelerator=accelerator,
+                **algo_kwargs,
             )
             population.append(agent)
 
@@ -272,6 +278,7 @@ def create_population(
                 share_encoders=INIT_HP.get("SHARE_ENCODERS", True),
                 device=device,
                 accelerator=accelerator,
+                **algo_kwargs,
             )
 
             agent = (
@@ -306,6 +313,8 @@ def create_population(
                 critic_network=critic_network,
                 device=device,
                 accelerator=accelerator,
+                num_envs=num_envs,
+                **algo_kwargs,
             )
             population.append(agent)
 
@@ -326,6 +335,7 @@ def create_population(
                 actor_network=actor_network,
                 device=device,
                 accelerator=accelerator,
+                **algo_kwargs,
             )
             population.append(agent)
 
@@ -355,6 +365,7 @@ def create_population(
                 share_encoders=INIT_HP.get("SHARE_ENCODERS", True),
                 device=device,
                 accelerator=accelerator,
+                **algo_kwargs,
             )
             population.append(agent)
 
@@ -384,6 +395,7 @@ def create_population(
                 device=device,
                 accelerator=accelerator,
                 torch_compiler=torch_compiler,
+                **algo_kwargs,
             )
             population.append(agent)
 
@@ -414,6 +426,7 @@ def create_population(
                 device=device,
                 accelerator=accelerator,
                 torch_compiler=torch_compiler,
+                **algo_kwargs,
             )
             population.append(agent)
 
@@ -444,6 +457,7 @@ def create_population(
                 device=device,
                 accelerator=accelerator,
                 torch_compiler=torch_compiler,
+                **algo_kwargs,
             )
             population.append(agent)
 
@@ -464,6 +478,7 @@ def create_population(
                 actor_network=actor_network,
                 device=device,
                 accelerator=accelerator,
+                **algo_kwargs,
             )
             population.append(agent)
 
@@ -484,6 +499,7 @@ def create_population(
                 actor_network=actor_network,
                 device=device,
                 accelerator=accelerator,
+                **algo_kwargs,
             )
             population.append(agent)
 
@@ -517,6 +533,7 @@ def create_population(
                 ),
                 accelerator=Accelerator() if accelerator else None,
                 device=device,
+                **algo_kwargs,
             )
             population.append(agent)
 
@@ -674,6 +691,7 @@ def init_wandb(
     wandb_api_key: Optional[str] = None,
     accelerator: Optional[Accelerator] = None,
     project: str = "AgileRL",
+    addl_args: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Initializes wandb for logging hyperparameters and run metadata.
 
@@ -688,6 +706,8 @@ def init_wandb(
     :param wandb_api_key: Wandb API key, defaults to None
     :type wandb_api_key: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
+    :param addl_args: Additional kwargs to pass to wandb.init()
+    :type addl_args: dict, optional
     """
     if not hasattr(wandb, "api"):
         if wandb_api_key is not None:
@@ -701,29 +721,26 @@ def init_wandb(
     if mutation_hyperparams is not None:
         config_dict.update(mutation_hyperparams)
 
+    kwargs = {
+        # track hyperparameters and run metadata
+        "config": config_dict,
+        # set the wandb project where this run will be logged
+        "project": project,
+        "name": "{}-EvoHPO-{}-{}".format(
+            env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
+        ),
+    }
+
+    if addl_args is not None:
+        kwargs.update(addl_args)
+
     if accelerator is not None:
         accelerator.wait_for_everyone()
         if accelerator.is_main_process:
-            wandb.init(
-                # set the wandb project where this run will be logged
-                project=project,
-                name="{}-EvoHPO-{}-{}".format(
-                    env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
-                ),
-                # track hyperparameters and run metadata
-                config=config_dict,
-            )
+            wandb.init(**kwargs)
         accelerator.wait_for_everyone()
     else:
-        wandb.init(
-            # set the wandb project where this run will be logged
-            project=project,
-            name="{}-EvoHPO-{}-{}".format(
-                env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
-            ),
-            # track hyperparameters and run metadata
-            config=config_dict,
-        )
+        wandb.init(**kwargs)
 
 
 def calculate_vectorized_scores(

@@ -8,7 +8,7 @@ Evolvable module architectures implemented: (More coming soon!)
     * MultiInput
     * Transformers - GPT and BERT
 
-We are constantly adding more neural network architectures, with a view to add recurrent and hierarchical networks soon.
+We are constantly adding more neural network architectures, so keep an eye out for updates!
 
 .. toctree::
    :maxdepth: 1

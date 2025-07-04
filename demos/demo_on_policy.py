@@ -106,7 +106,6 @@ if __name__ == "__main__":
             steps = 0
 
             for _ in range(-(evo_steps // -agent.learn_step)):
-
                 states = []
                 actions = []
                 log_probs = []
@@ -193,9 +192,9 @@ if __name__ == "__main__":
         print(f"--- Global steps {total_steps} ---")
         print(f"Steps {[agent.steps[-1] for agent in pop]}")
         print(f"Scores: {mean_scores}")
-        print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
+        print(f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}")
         print(
-            f'5 fitness avgs: {["%.2f"%np.mean(agent.fitness[-5:]) for agent in pop]}'
+            f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}"
         )
 
         # Tournament selection and population mutation
