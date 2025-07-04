@@ -468,6 +468,9 @@ def test_consolidate_mutations():
         agent.lr = 0.01
         agent.optimizer = Mock()
         agent.optimizer.param_groups = [{"lr": 0.01}]
+        agent.accelerator = MagicMock(spec=Accelerator)
+        agent.accelerator.is_main_process = True
+        agent.accelerator.wait_for_everyone = Mock()
     consolidate_mutations(population)
     for agent in population:
         assert agent.mut == "lr"
