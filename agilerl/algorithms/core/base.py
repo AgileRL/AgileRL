@@ -69,7 +69,6 @@ from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     chkpt_attribute_to_device,
     clone_llm,
-    compile_model,
     create_warmup_cosine_scheduler,
     isroutine,
     key_in_nested_dict,
@@ -79,6 +78,7 @@ from agilerl.utils.algo_utils import (
     stack_experiences,
 )
 from agilerl.utils.evolvable_networks import (
+    compile_model,
     config_from_dict,
     get_default_encoder_config,
     get_input_size_from_space,
