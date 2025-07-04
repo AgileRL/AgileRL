@@ -11,6 +11,7 @@ from accelerate import Accelerator
 from accelerate.state import AcceleratorState
 from accelerate.utils import DeepSpeedPlugin
 from gymnasium import spaces
+from peft import LoraConfig
 
 from agilerl.algorithms.core import EvolvableAlgorithm
 from agilerl.algorithms.grpo import GRPO
@@ -1451,6 +1452,13 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
                     hp_config=grpo_hp_config,
                     pad_token_id=1000 - 1,
                     device="cuda" if torch.cuda.is_available() else "cpu",
+                    lora_config=LoraConfig(
+                        r=16,
+                        lora_alpha=64,
+                        target_modules=["linear_1"],
+                        task_type="CAUSAL_LM",
+                        lora_dropout=0.05,
+                    ),
                     accelerator=accelerator,
                 )
             ]  # some sort of population
@@ -1517,6 +1525,13 @@ def test_mutations_warns_on_llm_algorithm(
             hp_config=grpo_hp_config,
             pad_token_id=1000 - 1,
             device="cuda" if torch.cuda.is_available() else "cpu",
+            lora_config=LoraConfig(
+                r=16,
+                lora_alpha=64,
+                target_modules=["linear_1"],
+                task_type="CAUSAL_LM",
+                lora_dropout=0.05,
+            ),
         )
     ]  # some sort of population
 

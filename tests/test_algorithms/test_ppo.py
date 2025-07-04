@@ -439,7 +439,6 @@ def test_algorithm_test_loop(observation_space, discrete_space, num_envs, reques
 @pytest.mark.parametrize("observation_space", ["vector_space"])
 def test_clone_returns_identical_agent(observation_space, discrete_space, request):
     observation_space = request.getfixturevalue(observation_space)
-
     ppo = DummyPPO(observation_space, discrete_space)
     ppo.fitness = [200, 200, 200]
     ppo.scores = [94, 94, 94]
@@ -700,7 +699,6 @@ def test_rollout_buffer_initialization(vector_space, discrete_space):
     assert buffer.device == "cpu"
     assert buffer.pos == 0
     assert buffer.full is False
-
     # Test with hidden states
     buffer = RolloutBuffer(
         capacity=100,
@@ -1012,7 +1010,6 @@ def test_ppo_with_rollout_buffer(observation_space, action_space, request):
 
     # Recurrent only when hidden states are expected (vector observations)
     recurrent_flag = len(expected_shared) > 0
-
     ppo = PPO(
         observation_space=observation_space,
         action_space=action_space,
@@ -1059,6 +1056,8 @@ def test_ppo_with_rollout_buffer(observation_space, action_space, request):
 
 
 # Test PPO learning with rollout buffer
+
+
 @pytest.mark.parametrize("observation_space", ["vector_space", "image_space"])
 @pytest.mark.parametrize("action_space", ["discrete_space", "vector_space"])
 def test_ppo_learn_with_rollout_buffer(observation_space, action_space, request):
@@ -1362,6 +1361,8 @@ def test_ppo_with_hidden_states_multiple_envs_collect_rollouts_and_test():
 
 
 # Test PPO collect_rollouts method
+
+
 def test_ppo_collect_rollouts(vector_space, discrete_space):
     observation_space = vector_space
     action_space = discrete_space
@@ -1462,6 +1463,8 @@ def test_ppo_wrap_at_capacity(vector_space, discrete_space):
 
 
 # Test compatibility with old format
+
+
 def test_ppo_backward_compatibility(vector_space, discrete_space):
     observation_space = vector_space
     action_space = discrete_space

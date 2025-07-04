@@ -7,9 +7,10 @@ from torch.optim import Optimizer
 from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.protocols import EvolvableAlgorithm
 from agilerl.typing import OptimizerType, StateDict
+from agilerl.utils.llm_utils import _DummyOptimizer
 
 ModuleList = List[EvolvableModule]
-_Optimizer = Union[OptimizerType, Dict[str, OptimizerType]]
+_Optimizer = Union[OptimizerType, Dict[str, OptimizerType], _DummyOptimizer]
 _Module = Union[EvolvableModule, ModuleDict, ModuleList]
 
 

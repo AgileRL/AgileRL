@@ -1,10 +1,8 @@
 import copy
 import gc
-import os
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, Tuple
-from unittest import mock
 from unittest.mock import MagicMock, patch
 
 import gymnasium as gym
@@ -17,13 +15,22 @@ from accelerate.state import AcceleratorState
 from accelerate.utils import DeepSpeedPlugin
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from deepspeed.runtime.engine import DeepSpeedEngine
-from peft import LoraConfig, get_peft_model
+from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
+from peft import (
+    LoraConfig,
+    PeftModelForCausalLM,
+    get_peft_model,
+    get_peft_model_state_dict,
+)
 from torch.optim.lr_scheduler import SequentialLR
-from transformers import GenerationConfig, PretrainedConfig, PreTrainedModel
+from transformers.configuration_utils import PretrainedConfig
+from transformers.generation.configuration_utils import GenerationConfig
+from transformers.modeling_utils import PreTrainedModel
 
 from agilerl.algorithms import GRPO
-from agilerl.algorithms.core.base import OptimizerWrapper
+from agilerl.algorithms.core.base import LLMAlgorithm, OptimizerWrapper
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, clone_llm
+from agilerl.utils.utils import _DummyOptimizer
 
 dist_env = dict(
     ACCELERATE_USE_DEEPSPEED="true",
@@ -35,8 +42,12 @@ dist_env = dict(
 )
 
 deepspeed_base_config = {
-    "fp32": {"enabled": True},
-    "gradient_clipping": 1.5,
+    "fp32": {
+        "enabled": True,
+    },
+    "auto_cast": True,
+    "gradient_clipping": 0.5,
+    "gradient_accumulation_steps": 1,
 }
 
 deepspeed_config_stage_1 = deepspeed_base_config | {
@@ -54,6 +65,19 @@ deepspeed_config_stage_2 = deepspeed_base_config | {
 deepspeed_config_stage_3 = deepspeed_base_config | {
     "zero_optimization": {
         "stage": 3,
+    },
+}
+
+deepspeed_config_stage_1_with_scheduler = deepspeed_base_config | {
+    "zero_optimization": {
+        "stage": 1,
+    },
+    "scheduler": {
+        "params": {
+            "warmup_max_lr": 0.001,
+            "num_epochs": 10,
+            "warmup_proportion": 0.05,
+        }
     },
 }
 
@@ -170,7 +194,7 @@ class DummyHuggingFaceEnv:
         )
 
     @contextmanager
-    def eval(self):
+    def eval_mode(self):
         try:
             yield
         finally:
@@ -186,73 +210,150 @@ def create_module(input_size, max_tokens, vocab_size, device):
     )
 
 
+@pytest.fixture(autouse=True)
+def deepspeed_env():
+    import os
+
+    existing_vars = {}
+    for key, value in dist_env.items():
+        key = key.upper()
+        if key in os.environ:
+            existing_vars[key] = os.environ[key]
+        os.environ[key] = str(value)
+
+    try:
+        yield
+    finally:
+        for key in dist_env:
+            key = key.upper()
+            if key in existing_vars:
+                # restore previous value
+                os.environ[key] = existing_vars[key]
+            else:
+                os.environ.pop(key, None)
+        gc.collect()
+        torch.cuda.empty_cache()
+
+
 @pytest.fixture(scope="function")
 def accelerator(request):
     gc.collect()
     torch.cuda.empty_cache()
     AcceleratorState._reset_state(True)
     config = request.param.get("config", None)
+    use_deepspeed_optimizer = request.param.get("use_deepspeed_optimizer", False)
+    if use_deepspeed_optimizer and config is not None:
+        config["optimizer"] = {
+            "type": "AdamW",
+            "params": {
+                "lr": 1e-4,  # Smaller learning rate
+                "betas": [0.9, 0.999],
+                "eps": 1e-8,
+                "weight_decay": 0.01,
+            },
+        }
     if config is None:
-        yield None
+        yield None, False
     else:
         accelerator = Accelerator(deepspeed_plugin=DeepSpeedPlugin(hf_ds_config=config))
-        yield accelerator
+        yield accelerator, use_deepspeed_optimizer
+        config.pop("optimizer", None)
         accelerator.free_memory()
 
 
 @pytest.fixture(scope="function")
-def grpo(request, accelerator, monkeypatch, device):
+def grpo(request, accelerator):
     gc.collect()
     torch.cuda.empty_cache()
-    with mock.patch.dict(os.environ, clear=True):
-        env_vars = {
-            "ACCELERATE_USE_DEEPSPEED": "true",
-            "MASTER_ADDR": "localhost",
-            "MASTER_PORT": "10999",
-            "RANK": "0",
-            "LOCAL_RANK": "0",
-            "WORLD_SIZE": "1",
-        }
-        for key, value in env_vars.items():
-            monkeypatch.setenv(key, value)
-        vocab_size = request.param.get("vocab_size", 1000)
-        input_size = request.param.get("input_size", 10)
-        max_tokens = request.param.get("max_tokens", 20)
-        group_size = request.param.get("group_size", 5)
-        observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
-        action_space = gym.spaces.Box(
-            low=0,
-            high=vocab_size - 1,
-            shape=(20,),
-        )
-        grpo = GRPO(
-            observation_space,
-            action_space,
-            actor_network=create_module(
-                input_size=input_size,
-                max_tokens=max_tokens,
-                vocab_size=vocab_size,
-                device=device,
-            ),
-            lr=0.1,
-            pad_token_id=vocab_size - 1,
-            device=device,
-            group_size=group_size,
-            cosine_lr_schedule_config=CosineLRScheduleConfig(
-                num_epochs=10, warmup_proportion=0.05
-            ),
-            accelerator=accelerator,
-        )
-        yield grpo
-        del grpo
+    accelerator, use_deepspeed_optimizer = accelerator
+    vocab_size = request.param.get("vocab_size", 1000)
+    input_size = request.param.get("input_size", 10)
+    max_tokens = request.param.get("max_tokens", 20)
+    group_size = request.param.get("group_size", 5)
+    set_reference_policy_adapter = request.param.get(
+        "set_reference_policy_adapter", False
+    )
+    observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
+    action_space = gym.spaces.Box(
+        low=0,
+        high=vocab_size - 1,
+        shape=(20,),
+    )
+    lora_config = LoraConfig(
+        r=16,
+        lora_alpha=64,
+        target_modules=["linear_1"],
+        task_type="CAUSAL_LM",
+        lora_dropout=0.05,
+    )
+    grpo = GRPO(
+        observation_space,
+        action_space,
+        actor_network=create_module(
+            input_size=input_size,
+            max_tokens=max_tokens,
+            vocab_size=vocab_size,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+        ),
+        lr=1e-5,
+        pad_token_id=vocab_size - 1,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        group_size=group_size,
+        lora_config=lora_config,
+        cosine_lr_schedule_config=(
+            None
+            if accelerator is not None
+            else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+        ),
+        accelerator=accelerator,
+        use_separate_reference_adapter=set_reference_policy_adapter,
+    )
+    yield grpo
+    del grpo
 
 
 @pytest.mark.parametrize(
     "accelerator, grpo",
     [
         (
-            {"config": deepspeed_config_stage_2},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
         ),
     ],
     indirect=["accelerator", "grpo"],
@@ -262,20 +363,19 @@ def test_init_grpo_with_accelerator(
     accelerator,
     request,
 ):
+
+    accelerator, use_deepspeed_optimizer = accelerator
     assert isinstance(grpo.observation_space, gym.spaces.Box)
     assert isinstance(grpo.action_space, gym.spaces.Box)
     assert grpo.batch_size == 1
     assert grpo.beta == 0.001
-    assert grpo.lr == 0.1
+    assert grpo.lr == 1e-5 if not use_deepspeed_optimizer else 1e-4
     assert grpo.clip_coef == 0.2
     assert grpo.max_grad_norm is None
     assert grpo.update_epochs == 1
     assert grpo.group_size == request.node.callspec.params["grpo"]["group_size"]
     assert grpo.temperature == 0.9
     assert grpo.calc_position_embeddings
-    assert isinstance(grpo.cosine_lr_schedule_config, CosineLRScheduleConfig), type(
-        grpo.cosine_lr_schedule_config
-    )
     assert grpo.device == accelerator.device
     assert grpo.index == 0
     assert grpo.scores == []
@@ -284,13 +384,22 @@ def test_init_grpo_with_accelerator(
     assert grpo.zero_stage == 2
     assert isinstance(grpo.generation_config, GenerationConfig)
     assert isinstance(grpo.actor, DeepSpeedEngine)
-    assert isinstance(grpo.optimizer, DeepSpeedOptimizerWrapper)
-    assert isinstance(grpo.lr_scheduler, AcceleratedScheduler), grpo.lr_scheduler
-    assert not isinstance(grpo.reference_actor, DummyMLPPreTrainedModel)
-    for ref_param, param in zip(
-        grpo.reference_actor.parameters(), grpo.actor.parameters()
-    ):
-        assert torch.equal(ref_param, param)
+    if not use_deepspeed_optimizer:
+        if accelerator is None:
+            assert isinstance(
+                grpo.lr_scheduler, AcceleratedScheduler
+            ), grpo.lr_scheduler
+            assert isinstance(
+                grpo.cosine_lr_schedule_config, CosineLRScheduleConfig
+            ), type(grpo.cosine_lr_schedule_config)
+        assert isinstance(grpo.optimizer, DeepSpeedOptimizerWrapper)
+    else:
+        assert isinstance(grpo.optimizer, OptimizerWrapper)
+        assert isinstance(grpo.optimizer.optimizer, _DummyOptimizer)
+        assert isinstance(grpo.actor.optimizer, DeepSpeedZeroOptimizer)
+        assert grpo.lr_scheduler is None
+        assert grpo.cosine_lr_schedule_config is None
+
     AcceleratorState._reset_state(True)
 
 
@@ -299,7 +408,23 @@ def test_init_grpo_with_accelerator(
     [
         (
             {"config": None},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": None},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
         ),
     ],
     indirect=["accelerator", "grpo"],
@@ -309,11 +434,12 @@ def test_init_grpo_with_no_accelerator(
     accelerator,
     request,
 ):
+    accelerator, _ = accelerator
     assert isinstance(grpo.observation_space, gym.spaces.Box)
     assert isinstance(grpo.action_space, gym.spaces.Box)
     assert grpo.batch_size == 1
     assert grpo.beta == 0.001
-    assert grpo.lr == 0.1
+    assert grpo.lr == 1e-5
     assert grpo.clip_coef == 0.2
     assert grpo.max_grad_norm == 0.1
     assert grpo.update_epochs == 1
@@ -329,36 +455,24 @@ def test_init_grpo_with_no_accelerator(
     assert grpo.fitness == []
     assert grpo.steps == [0]
     assert isinstance(grpo.generation_config, GenerationConfig)
-    assert isinstance(grpo.actor, DummyMLPPreTrainedModel)
+    assert isinstance(grpo.actor, PeftModelForCausalLM)
     assert isinstance(grpo.optimizer, OptimizerWrapper)
     assert isinstance(grpo.lr_scheduler, SequentialLR), grpo.lr_scheduler
-    for ref_param, param in zip(
-        grpo.reference_actor.parameters(), grpo.actor.parameters()
-    ):
-        assert torch.equal(ref_param, param)
-    assert not grpo.reference_actor.gradient_checkpointing_enabled
     AcceleratorState._reset_state(True)
 
 
 @pytest.mark.parametrize(
     "accelerator",
     [
-        {"config": deepspeed_config_stage_3},
+        {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": False},
+        {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": True},
     ],
     indirect=["accelerator"],
 )
-def test_init_grpo_zero3_warning(monkeypatch, accelerator, request):
-    with pytest.warns(UserWarning), mock.patch.dict(os.environ, clear=True):
-        env_vars = {
-            "ACCELERATE_USE_DEEPSPEED": "true",
-            "MASTER_ADDR": "localhost",
-            "MASTER_PORT": "10999",
-            "RANK": "0",
-            "LOCAL_RANK": "0",
-            "WORLD_SIZE": "1",
-        }
-        for key, value in env_vars.items():
-            monkeypatch.setenv(key, value)
+@pytest.mark.parametrize("set_reference_policy_adapter", [False, True])
+def test_init_grpo_zero3_warning(accelerator, request, set_reference_policy_adapter):
+    accelerator, use_deepspeed_optimizer = accelerator
+    with pytest.warns(UserWarning):
         gc.collect()
         vocab_size = 1000
         input_size = 10
@@ -383,10 +497,20 @@ def test_init_grpo_zero3_warning(monkeypatch, accelerator, request):
             pad_token_id=vocab_size - 1,
             device="cuda" if torch.cuda.is_available() else "cpu",
             group_size=group_size,
-            cosine_lr_schedule_config=CosineLRScheduleConfig(
-                num_epochs=10, warmup_proportion=0.05
+            lora_config=LoraConfig(
+                r=16,
+                lora_alpha=64,
+                target_modules=["linear_1"],
+                task_type="CAUSAL_LM",
+                lora_dropout=0.05,
+            ),
+            cosine_lr_schedule_config=(
+                None
+                if accelerator is not None
+                else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
             ),
             accelerator=accelerator,
+            use_separate_reference_adapter=set_reference_policy_adapter,
         )
         gc.collect()
         torch.cuda.empty_cache()
@@ -396,22 +520,15 @@ def test_init_grpo_zero3_warning(monkeypatch, accelerator, request):
 @pytest.mark.parametrize(
     "accelerator",
     [
-        {"config": deepspeed_config_stage_2},
+        {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": False},
+        {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": True},
     ],
     indirect=["accelerator"],
 )
-def test_init_grpo_max_grad_norm_warning(monkeypatch, accelerator, request):
-    with pytest.warns(UserWarning), mock.patch.dict(os.environ, clear=True):
-        env_vars = {
-            "ACCELERATE_USE_DEEPSPEED": "true",
-            "MASTER_ADDR": "localhost",
-            "MASTER_PORT": "10999",
-            "RANK": "0",
-            "LOCAL_RANK": "0",
-            "WORLD_SIZE": "1",
-        }
-        for key, value in env_vars.items():
-            monkeypatch.setenv(key, value)
+@pytest.mark.parametrize("set_reference_policy_adapter", [False, True])
+def test_init_grpo_lr_warning(accelerator, request, set_reference_policy_adapter):
+    accelerator, use_deepspeed_optimizer = accelerator
+    with pytest.warns(UserWarning):
         gc.collect()
         vocab_size = 1000
         input_size = 10
@@ -422,6 +539,74 @@ def test_init_grpo_max_grad_norm_warning(monkeypatch, accelerator, request):
             low=0,
             high=vocab_size - 1,
             shape=(20,),
+        )
+        lora_config = LoraConfig(
+            r=16,
+            lora_alpha=64,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+        )
+        grpo = GRPO(
+            observation_space,
+            action_space,
+            actor_network=create_module(
+                input_size=input_size,
+                max_tokens=max_tokens,
+                vocab_size=vocab_size,
+                device="cuda" if torch.cuda.is_available() else "cpu",
+            ),
+            lr=0.1,
+            pad_token_id=vocab_size - 1,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            group_size=group_size,
+            lora_config=lora_config,
+            cosine_lr_schedule_config=(
+                None
+                if accelerator is not None
+                else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+            ),
+            max_grad_norm=0.1,
+            accelerator=accelerator,
+            use_separate_reference_adapter=set_reference_policy_adapter,
+        )
+        assert grpo.lr == 1e-4 if use_deepspeed_optimizer else 0.1
+        gc.collect()
+        torch.cuda.empty_cache()
+    AcceleratorState._reset_state(True)
+
+
+@pytest.mark.parametrize(
+    "accelerator",
+    [
+        {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": False},
+        {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": True},
+    ],
+    indirect=["accelerator"],
+)
+@pytest.mark.parametrize("set_reference_policy_adapter", [False, True])
+def test_init_grpo_max_grad_norm_warning(
+    accelerator, request, set_reference_policy_adapter
+):
+    accelerator, use_deepspeed_optimizer = accelerator
+    with pytest.warns(UserWarning):
+        gc.collect()
+        vocab_size = 1000
+        input_size = 10
+        max_tokens = 20
+        group_size = 5
+        observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
+        action_space = gym.spaces.Box(
+            low=0,
+            high=vocab_size - 1,
+            shape=(20,),
+        )
+        lora_config = LoraConfig(
+            r=16,
+            lora_alpha=64,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
         )
         GRPO(
             observation_space,
@@ -436,11 +621,75 @@ def test_init_grpo_max_grad_norm_warning(monkeypatch, accelerator, request):
             pad_token_id=vocab_size - 1,
             device="cuda" if torch.cuda.is_available() else "cpu",
             group_size=group_size,
+            lora_config=lora_config,
+            cosine_lr_schedule_config=(
+                None
+                if accelerator is not None
+                else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+            ),
+            max_grad_norm=0.1,
+            accelerator=accelerator,
+            use_separate_reference_adapter=set_reference_policy_adapter,
+        )
+        gc.collect()
+        torch.cuda.empty_cache()
+    AcceleratorState._reset_state(True)
+
+
+@pytest.mark.parametrize(
+    "accelerator",
+    [
+        {
+            "config": deepspeed_config_stage_1_with_scheduler,
+            "use_deepspeed_optimizer": True,
+        },
+    ],
+    indirect=["accelerator"],
+)
+@pytest.mark.parametrize("set_reference_policy_adapter", [False, True])
+def test_init_grpo_scheduler_warning(
+    accelerator, request, set_reference_policy_adapter
+):
+    accelerator, use_deepspeed_optimizer = accelerator
+    with pytest.warns(UserWarning):
+        gc.collect()
+        vocab_size = 1000
+        input_size = 10
+        max_tokens = 20
+        group_size = 5
+        observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
+        action_space = gym.spaces.Box(
+            low=0,
+            high=vocab_size - 1,
+            shape=(20,),
+        )
+        lora_config = LoraConfig(
+            r=16,
+            lora_alpha=64,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+        )
+        GRPO(
+            observation_space,
+            action_space,
+            actor_network=create_module(
+                input_size=input_size,
+                max_tokens=max_tokens,
+                vocab_size=vocab_size,
+                device="cuda" if torch.cuda.is_available() else "cpu",
+            ),
+            lr=0.1,
+            pad_token_id=vocab_size - 1,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            group_size=group_size,
+            lora_config=lora_config,
             cosine_lr_schedule_config=CosineLRScheduleConfig(
                 num_epochs=10, warmup_proportion=0.05
             ),
             max_grad_norm=0.1,
             accelerator=accelerator,
+            use_separate_reference_adapter=set_reference_policy_adapter,
         )
         gc.collect()
         torch.cuda.empty_cache()
@@ -452,19 +701,83 @@ def test_init_grpo_max_grad_norm_warning(monkeypatch, accelerator, request):
     [
         (
             {"config": None},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
             {"config": deepspeed_config_stage_1},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
             {"config": deepspeed_config_stage_2},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
             {"config": deepspeed_config_stage_3},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": None},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_1},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_3},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
         ),
     ],
     indirect=["accelerator", "grpo"],
@@ -476,6 +789,7 @@ def test_get_action_grpo(grpo, accelerator, request, training, data_batch_size):
     input_size = request.node.callspec.params["grpo"]["input_size"]
     max_tokens = request.node.callspec.params["grpo"]["max_tokens"]
     group_size = request.node.callspec.params["grpo"]["group_size"]
+    accelerator, use_deepspeed_optimizer = accelerator
     states = [
         {
             "input_ids": torch.randint(0, vocab_size, (input_size,)),
@@ -499,19 +813,83 @@ def test_get_action_grpo(grpo, accelerator, request, training, data_batch_size):
     [
         (
             {"config": None},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
             {"config": deepspeed_config_stage_1},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
             {"config": deepspeed_config_stage_2},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
             {"config": deepspeed_config_stage_3},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": None},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_1},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_3},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
         ),
     ],
     indirect=["accelerator", "grpo"],
@@ -540,19 +918,83 @@ def test_calculate_advantage(grpo, accelerator, request, rewards):
     [
         (
             {"config": None},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
             {"config": deepspeed_config_stage_1},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
             {"config": deepspeed_config_stage_2},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
             {"config": deepspeed_config_stage_3},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": None},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_1},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_3},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
         ),
     ],
     indirect=["accelerator", "grpo"],
@@ -575,19 +1017,83 @@ def test_calculate_kl_divergence(grpo, accelerator, request, batch_size):
     [
         (
             {"config": None},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
             {"config": deepspeed_config_stage_1},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
             {"config": deepspeed_config_stage_2},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
             {"config": deepspeed_config_stage_3},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": None},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_1},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_3},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
         ),
     ],
     indirect=["accelerator", "grpo"],
@@ -614,21 +1120,130 @@ def test_grpo_loss(grpo, accelerator, request):
     [
         (
             {"config": None},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
-            {"config": deepspeed_config_stage_1},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
-            {"config": deepspeed_config_stage_2},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": None},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": None},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": None},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
         ),
     ],
     indirect=["accelerator", "grpo"],
 )
 @pytest.mark.parametrize("batch_size", [2])
 def test_grpo_learn(grpo, accelerator, request, batch_size):
+    accelerator, use_deepspeed_optimizer = accelerator
     vocab_size = request.node.callspec.params["grpo"]["vocab_size"]
     input_size = request.node.callspec.params["grpo"]["input_size"]
     max_tokens = request.node.callspec.params["grpo"]["max_tokens"]
@@ -647,31 +1262,37 @@ def test_grpo_learn(grpo, accelerator, request, batch_size):
     ]
     rewards = torch.stack(
         [
-            torch.randint(0, 10, (group_size,), dtype=torch.float32)
+            torch.tensor([0.1, 0.2, 0.3, 0.4, 0.5], dtype=torch.float32)
+            * 0.1  # Small, increasing rewards scaled down
             for _ in range(batch_size)
         ],
         dim=0,
     )
 
-    pre_learn_actor_state_dict = copy.deepcopy(grpo.actor.state_dict())
-    pre_learn_reference_actor_state_dict = copy.deepcopy(
-        grpo.reference_actor.state_dict()
+    pre_learn_actor_adapter_state_dict = copy.deepcopy(
+        get_peft_model_state_dict(grpo.actor, adapter_name="actor")
     )
-
+    pre_learn_actor_state_dict = copy.deepcopy(grpo.actor.state_dict())
     mean_loss, mean_kl = grpo.learn((completions, action_masks, rewards))
     assert isinstance(mean_loss, float)
     assert isinstance(mean_kl, float)
 
     # Check that the actor network is updated and the reference actor is not
     for param, pre_learn_param in zip(
-        grpo.actor.state_dict().values(), pre_learn_actor_state_dict.values()
+        get_peft_model_state_dict(grpo.actor, adapter_name="actor").values(),
+        pre_learn_actor_adapter_state_dict.values(),
     ):
         assert not torch.equal(param, pre_learn_param)
-    for param, pre_learn_param in zip(
-        grpo.reference_actor.state_dict().values(),
-        pre_learn_reference_actor_state_dict.values(),
+
+    for param_name, pre_param_name in zip(
+        grpo.actor.state_dict().keys(),
+        pre_learn_actor_state_dict.keys(),
     ):
-        assert torch.equal(param, pre_learn_param)
+        if "lora" not in param_name.lower():
+            assert torch.equal(
+                grpo.actor.state_dict()[param_name],
+                pre_learn_actor_state_dict[pre_param_name],
+            )
     AcceleratorState._reset_state(True)
 
 
@@ -680,19 +1301,83 @@ def test_grpo_learn(grpo, accelerator, request, batch_size):
     [
         (
             {"config": None},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
             {"config": deepspeed_config_stage_1},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
             {"config": deepspeed_config_stage_2},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
             {"config": deepspeed_config_stage_3},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": None},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_1},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_3},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
         ),
     ],
     indirect=["accelerator", "grpo"],
@@ -720,20 +1405,69 @@ def test_get_logprobs(grpo, accelerator, request, batch_size):
     AcceleratorState._reset_state(True)
 
 
+# FIXME add in zero 3 and work out why its not working
 @pytest.mark.parametrize(
     "accelerator, grpo",
     [
         (
             {"config": None},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
             {"config": deepspeed_config_stage_1},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
             {"config": deepspeed_config_stage_2},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": None},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_1},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
         ),
     ],
     indirect=["accelerator", "grpo"],
@@ -777,19 +1511,83 @@ def test_grpo_load():
     [
         (
             {"config": None},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
-            {"config": deepspeed_config_stage_1},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
-            {"config": deepspeed_config_stage_2},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
-            {"config": deepspeed_config_stage_3},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": None},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
         ),
     ],
     indirect=["accelerator", "grpo"],
@@ -805,19 +1603,83 @@ def test_grpo_load_checkpoint(grpo, accelerator, request):
     [
         (
             {"config": None},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
             {"config": deepspeed_config_stage_1},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
             {"config": deepspeed_config_stage_2},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
             {"config": deepspeed_config_stage_3},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": None},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_1},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_3},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
         ),
     ],
     indirect=["accelerator", "grpo"],
@@ -833,7 +1695,23 @@ def test_grpo_save_checkpoint(grpo, accelerator, request):
     [
         (
             {"config": None},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": None},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
         ),
     ],
     indirect=["accelerator", "grpo"],
@@ -855,16 +1733,124 @@ def test_save_load_distributed_actor_no_accelerator(
     "accelerator, grpo",
     [
         (
-            {"config": deepspeed_config_stage_1},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
-            {"config": deepspeed_config_stage_2},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
-            {"config": deepspeed_config_stage_3},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
         ),
     ],
     indirect=["accelerator", "grpo"],
@@ -874,10 +1860,17 @@ def test_grpo_save_load_checkpoint(grpo, accelerator, request, tmpdir):
     input_size = request.node.callspec.params["grpo"]["input_size"]
     max_tokens = request.node.callspec.params["grpo"]["max_tokens"]
     group_size = request.node.callspec.params["grpo"]["group_size"]
+    set_reference_policy_adapter = request.node.callspec.params["grpo"][
+        "set_reference_policy_adapter"
+    ]
+    accelerator, use_deepspeed_optimizer = accelerator
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
     grpo._save_distributed_actor(checkpoint_path)
-    grpo_optimizer = grpo.optimizer
-    grpo_optim_state_dict = grpo.optimizer.state_dict()
+    grpo_optim_state_dict = (
+        grpo.optimizer.state_dict()
+        if not use_deepspeed_optimizer
+        else grpo.actor.optimizer.state_dict()
+    )
     grpo_optim_state_dict.pop("loss_scaler", None)
     new_grpo = GRPO(
         gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
@@ -891,18 +1884,36 @@ def test_grpo_save_load_checkpoint(grpo, accelerator, request, tmpdir):
         pad_token_id=vocab_size - 1,
         device="cuda" if torch.cuda.is_available() else "cpu",
         group_size=group_size,
-        cosine_lr_schedule_config=CosineLRScheduleConfig(
-            num_epochs=10, warmup_proportion=0.05
+        lora_config=LoraConfig(
+            r=16,
+            lora_alpha=64,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+        ),
+        cosine_lr_schedule_config=(
+            None
+            if accelerator is not None
+            else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
         ),
         accelerator=accelerator,
+        use_separate_reference_adapter=set_reference_policy_adapter,
     )
     new_grpo._load_distributed_actor(checkpoint_path)
 
-    assert (
-        new_grpo.optimizer.optimizer.loss_scaler.cur_scale
-        == grpo_optimizer.optimizer.loss_scaler.cur_scale
-    )
-    assert new_grpo.optimizer.state_dict().keys() == grpo_optimizer.state_dict().keys()
+    if use_deepspeed_optimizer:
+        opt = grpo.actor.optimizer
+        new_opt = new_grpo.actor.optimizer
+    else:
+        opt = grpo.optimizer
+        new_opt = new_grpo.optimizer
+
+    if not use_deepspeed_optimizer:
+        assert (
+            new_opt.optimizer.loss_scaler.cur_scale
+            == opt.optimizer.loss_scaler.cur_scale
+        )
+    assert new_opt.state_dict().keys() == opt.state_dict().keys()
 
     # Check that the actor network is updated and the reference actor is not
     for param, pre_learn_param in zip(
@@ -910,61 +1921,171 @@ def test_grpo_save_load_checkpoint(grpo, accelerator, request, tmpdir):
     ):
         assert torch.equal(param, pre_learn_param)
 
-    for key in new_grpo.optimizer.state_dict().keys():
+    for key in new_opt.state_dict().keys():
         if key == "loss_scaler":
             continue
-
-        if isinstance(grpo_optim_state_dict[key], torch.Tensor):
-            assert torch.allclose(
-                new_grpo.optimizer.state_dict()[key], grpo_optim_state_dict[key]
-            )
-
+        assert str(new_opt.state_dict()[key]) == str(grpo_optim_state_dict[key])
     AcceleratorState._reset_state(True)
 
 
+# NOTE cloning does not work with deepspeed v3
 @pytest.mark.parametrize(
     "accelerator, grpo",
     [
         (
             {"config": None},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
-            {"config": deepspeed_config_stage_1},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
-            {"config": deepspeed_config_stage_2},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        # (
+        #     {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": False},
+        #     {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5, "set_reference_policy_adapter": False},
+        # ),
+        (
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
-            {"config": deepspeed_config_stage_3},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
+        # (
+        #     {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": True},
+        #     {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5, "set_reference_policy_adapter": False},
+        # ),
+        (
+            {"config": None},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        # (
+        #     {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": False},
+        #     {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5, "set_reference_policy_adapter": True},
+        # ),
+        (
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        # (
+        #     {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": True},
+        #     {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5, "set_reference_policy_adapter": True},
+        # ),
     ],
     indirect=["accelerator", "grpo"],
 )
 def test_grpo_clone_with_accelerator(grpo, accelerator, request, tmpdir):
+    accelerator, use_deepspeed_optimizer = accelerator
     grpo_accelerator = grpo.accelerator
     grpo_lr_scheduler = grpo.lr_scheduler
-    grpo_optimizer = grpo.optimizer
     grpo.fitness = [1, 2, 3]
+    original_actor_state_dict = (
+        grpo.actor.state_dict()
+        if accelerator is None
+        else accelerator.unwrap_model(grpo.actor).state_dict()
+    )
     new_grpo = grpo.clone(index=1)
-    for param, pre_learn_param in zip(
-        new_grpo.actor.parameters(), grpo.actor.parameters()
+
+    # Check that the actor network is updated and the reference actor is not
+    for (name, cloned_param), param in zip(
+        new_grpo.actor.state_dict().items(),
+        original_actor_state_dict.values(),
     ):
-        assert torch.equal(param, pre_learn_param)
-    for param, pre_learn_param in zip(
-        new_grpo.reference_actor.parameters(), grpo.reference_actor.parameters()
-    ):
-        assert torch.equal(param, pre_learn_param)
+        assert torch.equal(cloned_param, param)
+
     assert new_grpo.index == 1
     if grpo.accelerator is not None:
         assert new_grpo.accelerator != grpo_accelerator
-    assert new_grpo.lr_scheduler != grpo_lr_scheduler
+    if grpo.lr_scheduler is not None:
+        assert new_grpo.lr_scheduler != grpo_lr_scheduler
+
+    if use_deepspeed_optimizer:
+        opt = grpo.actor.optimizer
+        new_opt = new_grpo.actor.optimizer
+    else:
+        opt = grpo.optimizer
+        new_opt = new_grpo.optimizer
+
     for pg1, pg2 in zip(
-        grpo_optimizer.optimizer.param_groups,
-        new_grpo.optimizer.optimizer.param_groups,
+        opt.param_groups,
+        new_opt.param_groups,
     ):
         assert pg1["lr"] == pg2["lr"]
         assert pg1["weight_decay"] == pg2["weight_decay"]
@@ -994,19 +2115,143 @@ def test_grpo_clone_with_accelerator(grpo, accelerator, request, tmpdir):
     [
         (
             {"config": None},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
-            {"config": deepspeed_config_stage_1},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
             {"config": deepspeed_config_stage_2},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
-            {"config": deepspeed_config_stage_3},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": None},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
         ),
     ],
     indirect=["accelerator", "grpo"],
@@ -1079,63 +2324,151 @@ def test_clone_llm_peft(vocab_size, input_size, max_tokens):
     [
         (
             {"config": None},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
-            {"config": deepspeed_config_stage_1},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
-            {"config": deepspeed_config_stage_2},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         ),
         (
-            {"config": deepspeed_config_stage_3},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": None},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
         ),
     ],
     indirect=["accelerator", "grpo"],
 )
 @pytest.mark.parametrize("batch_size", [8])
 def test_grpo_clean_up(grpo, accelerator, request, batch_size):
-    # # @pytest.mark
-    # @pytest.mark.parametrize("vocab_size", [1000])
-    # @pytest.mark.parametrize("input_size", [10])
-    # @pytest.mark.parametrize("max_tokens", [20])
-    # @pytest.mark.parametrize("group_size", [5])
-    # @pytest.mark.parametrize("batch_size", [8])
-    # def test_grpo_clean_up(
-    #     vocab_size, input_size, max_tokens, group_size, batch_size, tmpdir
-    # ):
-    #     observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
-    #     action_space = gym.spaces.Box(
-    #         low=0,
-    #         high=vocab_size - 1,
-    #         shape=(20,),
-    #     )
-    #     grpo = GRPO(
-    #         observation_space,
-    #         action_space,
-    #         actor_network=create_module(
-    #             input_size=input_size,
-    #             max_tokens=max_tokens,
-    #             vocab_size=vocab_size,
-    #             device="cuda" if torch.cuda.is_available() else "cpu",
-    #         ),
-    #         pad_token_id=vocab_size - 1,
-    #         device="cuda" if torch.cuda.is_available() else "cpu",
-    #         group_size=group_size,
-    #         cosine_lr_schedule_config=CosineLRScheduleConfig(
-    #             num_epochs=10, warmup_proportion=0.05
-    #         ),
-    #         accelerator=None,
-    #     )
-    #     mock_accelerator = MagicMock(spec=Accelerator)
-    #     mock_accelerator.free_memory = lambda *args: (None,) * len(args)
-    #     grpo.accelerator = mock_accelerator
     grpo.clean_up()
     assert grpo.actor is None
-    assert grpo.reference_actor is None
     assert grpo.optimizer is None
     assert grpo.lr_scheduler is None
     del grpo
@@ -1148,7 +2481,13 @@ def test_grpo_clean_up(grpo, accelerator, request, batch_size):
     [
         (
             {"config": None},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         )
     ],
     indirect=["accelerator", "grpo"],
@@ -1169,7 +2508,13 @@ def test_grpo_preprocess_observation(grpo, accelerator, request, batch_size):
     [
         (
             {"config": None},
-            {"vocab_size": 1000, "input_size": 10, "max_tokens": 20, "group_size": 5},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
         )
     ],
     indirect=["accelerator", "grpo"],
@@ -1184,3 +2529,664 @@ def test_load_distributed_actor_warning(grpo, accelerator, request, batch_size):
     del grpo
     gc.collect()
     torch.cuda.empty_cache()
+
+
+@pytest.mark.parametrize(
+    "accelerator",
+    [
+        {"config": None},
+    ],
+    indirect=["accelerator"],
+)
+def test_init_grpo_lora_config_warning(accelerator, request):
+    accelerator, use_deepspeed_optimizer = accelerator
+    with pytest.warns(UserWarning):
+        gc.collect()
+        vocab_size = 1000
+        input_size = 10
+        max_tokens = 20
+        group_size = 5
+        observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
+        action_space = gym.spaces.Box(
+            low=0,
+            high=vocab_size - 1,
+            shape=(20,),
+        )
+        with pytest.raises(ValueError):
+            GRPO(
+                observation_space,
+                action_space,
+                actor_network=create_module(
+                    input_size=input_size,
+                    max_tokens=max_tokens,
+                    vocab_size=vocab_size,
+                    device="cuda" if torch.cuda.is_available() else "cpu",
+                ),
+                lr=0.1,
+                pad_token_id=vocab_size - 1,
+                device="cuda" if torch.cuda.is_available() else "cpu",
+                group_size=group_size,
+                cosine_lr_schedule_config=(
+                    None
+                    if accelerator is not None
+                    else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+                ),
+                accelerator=accelerator,
+            )
+        gc.collect()
+        torch.cuda.empty_cache()
+    AcceleratorState._reset_state(True)
+
+
+@pytest.mark.parametrize(
+    "accelerator",
+    [
+        {"config": None},
+    ],
+    indirect=["accelerator"],
+)
+def test_init_grpo_multiple_adapters(accelerator, request):
+    """Test GRPO initialization with a PEFT model containing multiple adapters."""
+    accelerator, use_deepspeed_optimizer = accelerator
+    with pytest.warns(
+        UserWarning, match="AgileRL RL finetuning is only compatible with one adapter."
+    ):
+
+        # Clean up GPU memory
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        # Set up test parameters
+        vocab_size = 1000
+        input_size = 10
+        max_tokens = 20
+        group_size = 5
+
+        # Create spaces
+        observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
+        action_space = gym.spaces.Box(
+            low=0,
+            high=vocab_size - 1,
+            shape=(20,),
+        )
+
+        # Create base model
+        base_model = create_module(
+            input_size=input_size,
+            max_tokens=max_tokens,
+            vocab_size=vocab_size,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+        )
+
+        # Create first adapter
+        lora_config_1 = LoraConfig(
+            r=16,
+            lora_alpha=64,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+        )
+        peft_model = get_peft_model(base_model, lora_config_1, adapter_name="adapter1")
+
+        # Add second adapter
+        lora_config_2 = LoraConfig(
+            r=8,
+            lora_alpha=32,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+        )
+        peft_model.add_adapter(adapter_name="adapter2", peft_config=lora_config_2)
+
+        # Initialize GRPO with the multi-adapter model
+        grpo = GRPO(
+            observation_space,
+            action_space,
+            actor_network=peft_model,
+            lr=0.1,
+            pad_token_id=vocab_size - 1,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            group_size=group_size,
+            cosine_lr_schedule_config=(
+                None
+                if accelerator is not None
+                else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+            ),
+            accelerator=accelerator,
+            clone=False,
+        )
+
+        # Verify that only the first adapter is used
+        assert len(grpo.actor.peft_config) == 1
+        assert "actor" in grpo.actor.peft_config
+        assert (
+            grpo.actor.peft_config["actor"].r == lora_config_1.r
+        )  # Check that first adapter's config is used
+
+        # Test that the model still functions
+        test_input = torch.randint(0, vocab_size - 1, (1, input_size))
+        test_attention_mask = torch.ones_like(test_input)
+        test_state = {"input_ids": test_input, "attention_mask": test_attention_mask}
+
+        # Test get_action
+        completion_ids, action_masks = grpo.get_action([test_state], training=True)
+        assert isinstance(completion_ids, list)
+        assert isinstance(action_masks, list)
+        assert len(completion_ids) == 1
+        assert len(action_masks) == 1
+
+        # Clean up
+        gc.collect()
+        torch.cuda.empty_cache()
+        AcceleratorState._reset_state(True)
+
+
+@pytest.mark.parametrize(
+    "accelerator, grpo",
+    [
+        (
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {
+                "config": deepspeed_config_stage_1_with_scheduler,
+                "use_deepspeed_optimizer": True,
+            },
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {
+                "config": deepspeed_config_stage_1_with_scheduler,
+                "use_deepspeed_optimizer": True,
+            },
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+    ],
+    indirect=["accelerator", "grpo"],
+)
+def test_update_lr(grpo, accelerator, request):
+    accelerator, use_deepspeed_optimizer = accelerator
+    opt = (
+        grpo.optimizer.optimizer
+        if not use_deepspeed_optimizer
+        else grpo.actor.optimizer
+    )
+    grpo.accelerator, grpo.lr_scheduler = LLMAlgorithm.update_lr(
+        opt, 0.5, grpo.accelerator, grpo.cosine_lr_schedule_config
+    )
+    for param_group in opt.param_groups:
+        print(param_group, param_group["lr"])
+        assert param_group["lr"] == 0.5
+
+    if use_deepspeed_optimizer:
+        grpo.accelerator.deepspeed_plugin.deepspeed_config["optimizer"]["params"][
+            "lr"
+        ] = 0.5
+
+        if (
+            grpo.accelerator.deepspeed_plugin.deepspeed_config.get("scheduler", None)
+            is not None
+        ):
+            grpo.accelerator.deepspeed_plugin.deepspeed_config["scheduler"]["params"][
+                "warmup_max_lr"
+            ] = 0.5
+            grpo.accelerator.deepspeed_plugin.deepspeed_config["scheduler"]["params"][
+                "num_epochs"
+            ] = 10
+            grpo.accelerator.deepspeed_plugin.deepspeed_config["scheduler"]["params"][
+                "warmup_proportion"
+            ] = 0.05
+
+
+@pytest.mark.parametrize(
+    "accelerator, grpo",
+    [
+        (
+            {"config": None},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": False,
+            },
+        ),
+        (
+            {"config": None},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": False},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+        (
+            {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": True},
+            {
+                "vocab_size": 1000,
+                "input_size": 10,
+                "max_tokens": 20,
+                "group_size": 5,
+                "set_reference_policy_adapter": True,
+            },
+        ),
+    ],
+    indirect=["accelerator", "grpo"],
+)
+def test_set_reference_policy(grpo, accelerator, request):
+    input_size = request.node.callspec.params["grpo"]["input_size"]
+    max_tokens = request.node.callspec.params["grpo"]["max_tokens"]
+    reference_update_tracker = 0
+    grpo.set_reference_policy(reference_update_tracker)
+    input_ids = torch.tensor([[i + 1 for i in range(input_size + max_tokens)]]).to(
+        grpo.device
+    )
+    action_masks = torch.tensor([[1 for _ in range(input_size + max_tokens)]]).to(
+        grpo.device
+    )
+    output_before = grpo.actor(
+        **{
+            "input_ids": input_ids,
+            "attention_mask": action_masks,
+        }
+    ).logits
+    assert grpo.reference_update_tracker == reference_update_tracker
+    reference_update_tracker += 1
+    grpo.set_reference_policy(reference_update_tracker)
+
+    output_after = grpo.actor(
+        **{
+            "input_ids": input_ids,
+            "attention_mask": action_masks,
+        }
+    ).logits
+    assert torch.allclose(output_before, output_after)
+    assert grpo.reference_update_tracker == reference_update_tracker
+
+
+@pytest.mark.parametrize(
+    "accelerator",
+    [
+        {"config": None},
+        {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": False},
+        {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": False},
+        # {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": False},
+        {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": True},
+        {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": True},
+        # {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": True},
+    ],
+    indirect=["accelerator"],
+)  # Test that ref actor is the same as actor after learning - i.e. its frozen
+def test_grpo_ref_actor_is_same_as_actor_after_learning_reference_adapater(
+    accelerator, request
+):
+    accelerator, use_deepspeed_optimizer = accelerator
+    gc.collect()
+    vocab_size = 1000
+    input_size = 10
+    max_tokens = 20
+    group_size = 5
+    observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
+    action_space = gym.spaces.Box(
+        low=0,
+        high=vocab_size - 1,
+        shape=(20,),
+    )
+    grpo = GRPO(
+        observation_space,
+        action_space,
+        actor_network=create_module(
+            input_size=input_size,
+            max_tokens=max_tokens,
+            vocab_size=vocab_size,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+        ),
+        lr=0.1,
+        pad_token_id=vocab_size - 1,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        group_size=group_size,
+        lora_config=LoraConfig(
+            r=16,
+            lora_alpha=64,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+        ),
+        cosine_lr_schedule_config=(
+            None
+            if accelerator is not None
+            else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+        ),
+        accelerator=accelerator,
+        use_separate_reference_adapter=True,
+    )
+
+    # Ensure adapters have different params
+    grpo.actor.set_adapter("actor")
+    for name, param in grpo.actor.named_parameters():
+        if "actor" in name:
+            param.data *= 2
+    assert not check_ref_adapater_is_same_as_actor_after_learning(grpo)
+    grpo.set_reference_policy(reference_update_tracker=1)
+    assert check_ref_adapater_is_same_as_actor_after_learning(grpo)
+    AcceleratorState._reset_state(True)
+
+
+@pytest.mark.parametrize(
+    "accelerator",
+    [
+        {"config": None},
+        {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": False},
+        {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": False},
+        # {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": False},
+        {"config": deepspeed_config_stage_1, "use_deepspeed_optimizer": True},
+        {"config": deepspeed_config_stage_2, "use_deepspeed_optimizer": True},
+        # {"config": deepspeed_config_stage_3, "use_deepspeed_optimizer": True},
+    ],
+    indirect=["accelerator"],
+)
+def test_grpo_set_reference_policy_with_wrong_adapter_name(accelerator, request):
+    accelerator, use_deepspeed_optimizer = accelerator
+    with pytest.raises(ValueError):
+        gc.collect()
+        vocab_size = 1000
+        input_size = 10
+        max_tokens = 20
+        group_size = 5
+        observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
+        action_space = gym.spaces.Box(
+            low=0,
+            high=vocab_size - 1,
+            shape=(20,),
+        )
+        lora_config = LoraConfig(
+            r=16,
+            lora_alpha=64,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+        )
+        grpo = GRPO(
+            observation_space,
+            action_space,
+            actor_network=create_module(
+                input_size=input_size,
+                max_tokens=max_tokens,
+                vocab_size=vocab_size,
+                device="cuda" if torch.cuda.is_available() else "cpu",
+            ),
+            lr=0.1,
+            pad_token_id=vocab_size - 1,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            group_size=group_size,
+            lora_config=lora_config,
+            cosine_lr_schedule_config=(
+                None
+                if accelerator is not None
+                else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+            ),
+            accelerator=accelerator,
+            use_separate_reference_adapter=True,
+        )
+        grpo.actor.add_adapter("wrong_adapter", peft_config=lora_config)
+        grpo.set_reference_policy(reference_update_tracker=1)
+    AcceleratorState._reset_state(True)
+
+
+def check_ref_adapater_is_same_as_actor_after_learning(grpo):
+    ref_param = None
+    actor_param = None
+    for name, param in grpo.actor.named_parameters():
+        if "lora" in name:
+            if "reference" in name:
+                ref_param = param
+            elif "actor" in name:
+                actor_param = param
+            else:
+                pass
+        if ref_param is not None and actor_param is not None:
+            if not torch.equal(ref_param, actor_param):
+                return False
+            ref_param = None
+            actor_param = None
+    return True

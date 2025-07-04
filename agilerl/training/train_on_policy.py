@@ -304,7 +304,6 @@ def train_on_policy(
                                 )
                         else:
                             clipped_action = action
-
                         next_obs, reward, term, trunc, info = env.step(clipped_action)
                         next_done = np.logical_or(term, trunc).astype(np.int8)
 
@@ -333,6 +332,7 @@ def train_on_policy(
                                 scores[idx] = 0
 
                     if swap_channels:
+
                         next_obs = obs_channels_to_first(next_obs)
 
                     experiences = (

@@ -230,8 +230,7 @@ for displaying these behaviours, the agent itself discovers the best way to achi
 Now we have defined our reward functions, we must also design our prompt. This forms the input given
 to the agent and provides the context necessary to complete the task. This is a task-specific feature,
 and different reasoning problems will require different chat templates, although they can follow a similar
-format. We must also define a function to collate our questions and answers, and standardise their length.
-Combining all these components, we can now initialise the HuggingFaceGym object.
+format. Combining all these components, we can now initialise the HuggingFaceGym object.
 
 .. collapse:: Convert HuggingFace Dataset to Gymnasium Environment
 
