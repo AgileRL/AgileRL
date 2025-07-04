@@ -248,7 +248,7 @@ class GRPO(LLMAlgorithm):
         self._initialize_actors(actor_network, not clone)
 
         # Register network groups for mutations
-        self.register_network_group(NetworkGroup(eval=self.actor, policy=True))
+        self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
         if self.wrap:
             self.wrap_models()
 
