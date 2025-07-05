@@ -71,6 +71,7 @@ mutations we want to happen, to what extent we want these mutations to occur, an
 Additionally, we also define our upper and lower limits for these hyperparameters to define search spaces.
 
 .. collapse:: Hyperparameter Configuration
+    :open:
 
     .. code-block:: python
 
@@ -308,3 +309,120 @@ fitnesses (fitness is each agents test scores on the environment).
 
       if __name__ == "__main__":
           train_agent()
+
+
+Using a custom training loop
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+If we wanted to have more control over the training process, it is also possible to write our own custom
+training loops to train our agents. The training loop below can be used alternatively to the above ``train_on_policy``
+function and is an example of how we might choose to make use of a population of AgileRL agents in our own training loop.
+
+.. collapse:: Custom Training Loop
+
+    .. code-block:: python
+
+
+        # --- Training Loop (Performance-Flamegraph Style) ---
+        max_steps = 1_000_000 // len(pop)
+        required_score = 0.95
+        evo_steps = num_envs * INIT_HP["LEARN_STEP"] * 1
+        eval_steps = None
+
+        total_steps = 0
+        training_complete = False
+
+        print("Training...")
+        pbar = trange(max_steps * len(pop), unit="step")
+        while (
+            np.less([agent.steps[-1] for agent in pop], max_steps).all()
+            and not training_complete
+        ):
+            for agent in pop:
+                collect_rollouts_recurrent(agent, env)
+                agent.learn()
+                total_steps += agent.learn_step * num_envs
+                agent.steps[-1] += agent.learn_step * num_envs
+                pbar.update(agent.learn_step * num_envs // len(pop))
+
+            # Evaluate and evolve
+            if total_steps % evo_steps == 0:
+                fitnesses = [
+                    agent.test(
+                        single_test_env,
+                        max_steps=eval_steps,
+                        loop=eval_loop,
+                    )
+                    for agent in pop
+                ]
+                mean_scores = [
+                    round(np.mean(agent.fitness[-eval_loop:]), 1) for agent in pop
+                ]
+                print(f"--- Global steps {total_steps} ---")
+                print(f"Steps {[agent.steps[-1] for agent in pop]}")
+                print(f"Scores: {mean_scores}")
+                print(f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}")
+                print(
+                    f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}"
+                )
+
+                if any(score >= required_score for score in mean_scores):
+                    print(
+                        f"\nAgent achieved required score {required_score}. Stopping training."
+                    )
+                    elite, _ = tournament.select(pop)
+                    training_complete = True
+                    break
+
+                elite, pop = tournament.select(pop)
+                pop = mutations.mutation(pop)
+                for agent in pop:
+                    agent.steps.append(agent.steps[-1])
+
+        pbar.close()
+        env.close()
+
+
+Loading an Agent for Inference and Rendering your Solved Environment
+--------------------------------------------------------------------
+Once we have trained and saved an agent, we may want to then use our trained agent for inference. Below outlines
+how we would load a saved agent and how it can then be used in a testing loop.
+
+Load agent
+~~~~~~~~~~
+.. code-block:: python
+
+    ppo = PPO.load(save_path, device=device)
+
+Test loop for inference
+~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: python
+
+    single_test_env = gym.vector.SyncVectorEnv([make_env])
+    total_steps = 0
+    episode_rewards = []
+
+    for episode in range(20):
+        obs, _ = single_test_env.reset()
+        done = np.array([False])
+        episode_reward = 0
+        episode_steps = 0
+        hidden_state = ppo.get_initial_hidden_state(1)
+
+        while not done[0]:
+            action, _, _, _, hidden_state = ppo.get_action(
+                obs, hidden_state=hidden_state
+            )
+            obs, reward, terminated, truncated, _ = single_test_env.step(action)
+            done = np.logical_or(terminated, truncated)
+            episode_reward += reward[0]
+            episode_steps += 1
+        print(
+            f"Episode {episode + 1}: Reward: {episode_reward}, Steps: {episode_steps}"
+        )
+        total_steps += episode_steps
+        episode_rewards.append(episode_reward)
+
+    avg_reward = sum(episode_rewards) / len(episode_rewards)
+    avg_steps = total_steps / len(episode_rewards)
+    print(f"Average Reward: {avg_reward:.2f}, Average Steps: {avg_steps:.2f}")

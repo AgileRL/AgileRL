@@ -8,8 +8,8 @@ It aims to combine the stability of `Trust Region Policy Optimization (TRPO) <ht
 and scalability of vanilla policy gradients, effectively maintaining a balance between exploration and exploitation.
 
 AgileRL offers support for recurrent policies in PPO to solve Partially Observable Markov Decision Processes (POMDPs). For more information, please
-refer to the :ref:`Partially Observable Markov Decision Processes (POMDPs) <pomdp>` documentation, or our tutorial on solving ``LunarLander-v3`` with masked
-velocity observations :ref:`here <agilerl_recurrent_ppo_tutorial>`.
+refer to the :ref:`Partially Observable Markov Decision Processes (POMDPs) <pomdp>` documentation, or our tutorial on solving ``Pendulum-v1`` with masked
+angular velocity observations :ref:`here <agilerl_recurrent_ppo_tutorial>`.
 
 Compatible Action Spaces
 ------------------------
