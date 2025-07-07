@@ -1364,18 +1364,36 @@ def clone_llm(
 ) -> PreTrainedModelType:
     """Clone the actor.
 
-    :param model: Model to clone
-    :type model: PreTrainedModelType
+    :param original_model: Model to clone
+    :type original_model: PreTrainedModelType
     :param state_dict: State dict to load, defaults to None
     :type state_dict: Optional[Dict[str, torch.Tensor]], optional
     :return: Cloned model
     """
-    model_config = original_model.config
-    base_model = original_model.model
-    model = type(base_model)(model_config)
-    if is_peft_model(original_model):
-        peft_config = original_model.peft_config[original_model.active_adapter]
-        model = get_peft_model(model, peft_config)
+    if isinstance(original_model, PeftModel):
+        model_config = original_model.config
+        base_model = original_model.model
+        model = type(base_model)(model_config)
+        # Get all adapter names
+        adapter_names = list(original_model.peft_config.keys())
+
+        if len(adapter_names) > 1:
+            warnings.warn(
+                "Multiple adapters detected. Only the first adapter will be used for RL finetuning."
+            )
+        # Add first adapter using get_peft_model
+        first_adapter = adapter_names[0]
+        first_config = original_model.peft_config[first_adapter]
+        model = get_peft_model(model, first_config, adapter_name=first_adapter)
+
+        # Add remaining adapters using add_adapter
+        for adapter_name in adapter_names[1:]:
+            peft_config = original_model.peft_config[adapter_name]
+            print(f"{adapter_name} config", peft_config)
+            model.add_adapter(peft_config=peft_config, adapter_name=adapter_name)
+        model.disable_adapter()
+    else:
+        model = type(original_model)(original_model.config)
     if state_dict is not None:
         model.load_state_dict(state_dict)
     return model

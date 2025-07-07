@@ -326,6 +326,8 @@ class PPO(RLAlgorithm):
 
         self.hidden_state = None
 
+        self.hidden_state = None
+
     def share_encoder_parameters(self) -> None:
         """Shares the encoder parameters between the actor and critic."""
         if all(isinstance(net, EvolvableNetwork) for net in [self.actor, self.critic]):
