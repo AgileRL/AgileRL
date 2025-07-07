@@ -3,10 +3,10 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch.distributed as dist
-import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import GRPO
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.hpo.mutation import Mutations
@@ -239,7 +239,7 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE_PER_GPU"]
                     accelerator.wait_for_everyone()
         else:
             if (i + 1) % max_steps == 0:
-                save_llm_checkpoint(agent, elite_path, i + 1)
+                save_llm_checkpoint(agent, elite_path)
 
         if wb and (accelerator is None or accelerator.is_main_process):
             wandb_dict = {
