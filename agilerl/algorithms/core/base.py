@@ -28,6 +28,7 @@ import torch
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
+from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 from gymnasium import spaces
 from numpy.typing import ArrayLike
 from tensordict import TensorDict
@@ -279,7 +280,16 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
     def get_action(
         self, obs: Union[ObservationType, MultiAgentObservationType], *args, **kwargs
     ) -> ActionType:
-        """Abstract method for getting an action fr om the algorithm."""
+        """Abstract method for getting an action from the algorithm.
+
+        :param obs: The observation to get an action for.
+        :type obs: Union[ObservationType, MultiAgentObservationType]
+        :param args: Additional arguments to pass to the action function.
+        :type args: Any
+        :param kwargs: Additional keyword arguments to pass to the action function.
+        :type kwargs: Any
+        :return: The action to take.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -1926,9 +1936,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
             actor_state_dict = None
             if self.zero_stage is None or self.zero_stage < 2:
-                actor_state_dict = (
-                    actor.state_dict()
-                )  # FIXME clone_tensors_for_torch_save(actor.state_dict())
+                actor_state_dict = clone_tensors_for_torch_save(actor.state_dict())
 
             cloned_model = clone_llm(actor, state_dict=actor_state_dict)
 
@@ -1992,7 +2000,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :type lr: float
         :param accelerator: Accelerator
         :type accelerator: Optional[Accelerator]
+        :param scheduler_config: Scheduler configuration
+        :type scheduler_config: Optional[CosineLRScheduleConfig]
 
+        :return: Tuple of accelerator and scheduler
         :return: Accelerator
         """
 

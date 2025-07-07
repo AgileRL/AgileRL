@@ -307,7 +307,7 @@ class GRPO(LLMAlgorithm):
             old_log_probs = self._get_logprobs(
                 completion_ids,
                 use_reference=False,
-                eval_mode=True,  # Should this be true or false, it was recently changed from True to false??
+                eval_mode=True,
             )
         experiences = (
             completion_ids,
