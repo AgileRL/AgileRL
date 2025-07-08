@@ -32,7 +32,7 @@ We are constantly adding more algorithms and features. AgileRL already includes 
   * [Get Started](#get-started)
   * [Benchmarks](#benchmarks)
   * [Tutorials](#tutorials)
-  * [Algorithms implemented](#evolvable-algorithms-implemented-more-coming-soon)
+  * [Algorithms implemented](#evolvable-algorithms-more-coming-soon)
   * [Train an agent](#train-an-agent-to-beat-a-gym-environment)
   * [Citing AgileRL](#citing-agilerl)
 
