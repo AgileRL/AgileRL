@@ -200,7 +200,7 @@ class MutableKernelSizes:
                 depth = self.sizes[hidden_layer][0]
                 self.sizes[hidden_layer] = (depth, new_kernel_size, new_kernel_size)
             elif self.cnn_block_type == "Conv1d":
-                self.sizes[hidden_layer] = (new_kernel_size,
+                self.sizes[hidden_layer] = (new_kernel_size,)
         else:
             self.sizes[hidden_layer] = new_kernel_size
 

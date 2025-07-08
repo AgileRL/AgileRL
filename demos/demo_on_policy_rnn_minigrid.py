@@ -166,7 +166,6 @@ def run_demo():
             total_steps += agent.learn_step * num_envs
             agent.steps[-1] += agent.learn_step * num_envs
             pbar.update(agent.learn_step * num_envs)
-y
 
         # Evaluate and evolve
         if total_steps % evo_steps == 0:
