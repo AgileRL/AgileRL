@@ -5,11 +5,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import gymnasium as gym
 import numpy as np
+import wandb
 from accelerate import Accelerator
 from gymnasium import spaces
 from tqdm import trange
 
-import wandb
 from agilerl.algorithms import PPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -249,6 +249,7 @@ def train_on_policy(
                     )
                 else:
                     from agilerl.rollouts import collect_rollouts as active_collect
+
                     for r_step, d_step in zip(rewards_np, dones_np):
                         scores += np.array(r_step)
                         finished = np.array(d_step, dtype=bool)
@@ -304,7 +305,7 @@ def train_on_policy(
                                 )
                         else:
                             clipped_action = action
-                            
+
                         next_obs, reward, term, trunc, info = env.step(clipped_action)
                         next_done = np.logical_or(term, trunc).astype(np.int8)
 

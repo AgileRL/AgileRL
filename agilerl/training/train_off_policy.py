@@ -5,12 +5,12 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import gymnasium as gym
 import numpy as np
+import wandb
 from accelerate import Accelerator
 from tensordict import TensorDictBase
 from torch.utils.data import DataLoader
 from tqdm import trange
 
-import wandb
 from agilerl.algorithms import DDPG, DQN, TD3, RainbowDQN
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.components import (

@@ -13,7 +13,6 @@ SupportedOnPolicy = PPO
 
 def _collect_rollouts(
     agent: SupportedOnPolicy,
-
     env: GymEnvType,
     n_steps: Optional[int] = None,
     *,

@@ -552,7 +552,6 @@ class RolloutBuffer:
         # All tensors inside self.buffer are already torch.Tensors on CPU
         valid_buffer_data_view: TensorDict = self.buffer[:buffer_size]
 
-
         # Reshape to flatten the num_envs dimension into the first batch dimension
         # New batch_size will be [buffer_size * num_envs]
         # .view(-1) is crucial for not creating a copy if possible
@@ -861,7 +860,7 @@ class RolloutBuffer:
     ) -> Dict[str, Union[np.ndarray, Dict[str, np.ndarray]]]:
         """
         Convert a TensorDict to a dictionary of numpy arrays.
-        
+
         :param td: TensorDict to convert.
         :type td: TensorDict
         :return: Dictionary of numpy arrays.

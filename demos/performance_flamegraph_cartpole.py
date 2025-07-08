@@ -16,6 +16,7 @@ import torch
 from IPython.display import Video, display
 from torch.profiler import ProfilerActivity, profile, record_function
 from tqdm import trange
+
 from agilerl.rollouts.on_policy import collect_rollouts
 from agilerl.utils.utils import create_population, make_vect_envs
 
