@@ -2844,7 +2844,6 @@ def test_update_lr(grpo, accelerator, request):
         opt, 0.5, grpo.accelerator, grpo.cosine_lr_schedule_config
     )
     for param_group in opt.param_groups:
-        print(param_group, param_group["lr"])
         assert param_group["lr"] == 0.5
 
     if use_deepspeed_optimizer:

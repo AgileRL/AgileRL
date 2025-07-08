@@ -283,7 +283,6 @@ def test_returns_expected_action(observation_space, action_space, build_ppo, req
         for act in action[0]:
             assert isinstance(act, np.float32)
     else:
-        print(action, action_space)
         assert isinstance(action, np.ndarray)
         assert action.shape == (1, *action_space.shape)
 
@@ -818,7 +817,6 @@ def test_rollout_buffer_add(vector_space, discrete_space):
     assert np.array_equal(
         buffer.buffer.get("observations")[current_pos_idx, 0].cpu().numpy(), obs
     )
-    print(buffer.buffer.get("actions")[current_pos_idx, 0].cpu().numpy(), action)
     assert np.array_equal(
         buffer.buffer.get("actions")[current_pos_idx, 0].cpu().numpy(), action[0]
     )

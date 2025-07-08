@@ -864,7 +864,6 @@ def test_get_action_distributed(
     discrete_actions = all(
         isinstance(space, spaces.Discrete) for space in action_spaces
     )
-    print(raw_action)
     for idx, env_actions in enumerate(list(raw_action.values())):
         action_dim = (
             action_spaces[idx].shape[0]

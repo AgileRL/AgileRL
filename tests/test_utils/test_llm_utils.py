@@ -91,7 +91,6 @@ def test_hugging_face_gym_init(dataset, num_samples):
     assert isinstance(env.tokenizer, DummyTokenizer)
     assert isinstance(env.train_dataloader, DataLoader)
     assert isinstance(env.test_dataloader, DataLoader)
-    print("KEYS", list(next(env.train_dataloader_iter).keys()))
     assert list(next(env.train_dataloader_iter).keys()) == [
         "question",
         "answer",
@@ -177,10 +176,8 @@ def test_hugging_face_gym_reset_dataloaders(dataset, num_samples, reset_dataload
     )  # use test_dataloader_iter as it is not shuffled
     env._reset_dataloaders()
 
-    print("FIRST DATA POINT", first_data_point)
     # assert False
     first_data_point_reset = next(env.test_dataloader_iter)
-    print("FIRST DATA POINT KEYS", first_data_point.keys())
     for key1, key2 in zip(first_data_point.keys(), first_data_point_reset.keys()):
         if key1 == "tokenized_prompts":
             for item1, item2 in zip(
