@@ -5,8 +5,11 @@ Proximal Policy Optimization (PPO)
 
 `PPO <https://arxiv.org/abs/1707.06347v2>`_ is an on-policy policy gradient algorithm that uses a clipped objective to constrain policy updates.
 It aims to combine the stability of `Trust Region Policy Optimization (TRPO) <https://arxiv.org/abs/1502.05477>`_ with the simplicity
-and scalability of vanilla policy gradients, effectively maintaining a balance between exploration
-and exploitation.
+and scalability of vanilla policy gradients, effectively maintaining a balance between exploration and exploitation.
+
+AgileRL offers support for recurrent policies in PPO to solve Partially Observable Markov Decision Processes (POMDPs). For more information, please
+refer to the :ref:`Partially Observable Markov Decision Processes (POMDPs) <pomdp>` documentation, or our tutorial on solving ``Pendulum-v1`` with masked
+angular velocity observations :ref:`here <agilerl_recurrent_ppo_tutorial>`.
 
 Compatible Action Spaces
 ------------------------
@@ -109,8 +112,8 @@ Neural Network Configuration
 ----------------------------
 
 To configure the architecture of the network's encoder / head, pass a kwargs dict to the PPO ``net_config`` field.
-Full arguments can be found in the documentation of :ref:`EvolvableMLP<mlp>`, :ref:`EvolvableCNN<cnn>`, and
-:ref:`EvolvableMultiInput<multi_input>`.
+Full arguments can be found in the documentation of :ref:`EvolvableMLP<mlp>`, :ref:`EvolvableCNN<cnn>`,
+:ref:`EvolvableMultiInput<multi_input>`, and :ref:`EvolvableLSTM<lstm>`.
 
 For discrete / vector observations:
 
@@ -157,6 +160,22 @@ For dictionary / tuple observations containing any combination of image, discret
       },
       "head_config": {'hidden_size': [32]}  # Network head hidden size
     }
+
+For recurrent observations:
+
+.. code-block:: python
+
+  NET_CONFIG = {
+    "encoder_config": {
+      "hidden_state_size": 64,
+      "num_layers": 1,
+      "max_seq_len": 512,
+    },
+    "head_config": {
+      "hidden_size": [64],
+    }
+  }
+
 .. code-block:: python
 
   # Create PPO agent

@@ -1,55 +1,67 @@
-.. _ppo_tutorial:
+.. _agilerl_recurrent_ppo_tutorial:
 
-Acrobot with PPO
-=================
+Partially Observable Pendulum-v1 with Recurrent PPO
+======================================================
 
 In this tutorial, we will be training and optimising the hyperparameters of a population of PPO agents
-to beat the Gymnasium acrobot environment. AgileRL is a deep reinforcement learning
-library, focussed on improving the RL training process through evolutionary hyperparameter
-optimisation (HPO), which has resulted in up to 10x faster HPO compared to other popular deep RL
-libraries. Check out the AgileRL github
-`repository <https://github.com/AgileRL/AgileRL/>`__
-for more information about the library.
+to beat a partially observable variant of the Gymnasium ``Pendulum-v1`` environment where angular velocity observations are masked.
 
-To complete the acrobot environment, the agent must learn to apply torques on the joint to swing the free end
-of the linear chain above the black line from an initial state of hanging stationary.
+The pendulum starts in a random position and the goal is to apply torque on the free end to swing it into an upright position, with
+its center of gravity right above the fixed point.
 
-.. figure:: ../gymnasium/agilerl_ppo_acrobot.gif
+.. figure:: ../gymnasium/agilerl_ppo_pendulum.gif
   :width: 400
   :alt: agent-environment-diagram
   :align: center
 
-  Figure 1: Completed Acrobot environment using an AgileRL PPO agent
+  Figure 1: Completed Pendulum-v1 environment using an AgileRL PPO agent
 
+Partially Observable Markov Decision Processes (POMDPs)
+-------------------------------------------------------
 
-PPO Overview
-------------
-PPO (proximal policy optimisation) is an on-policy algorithm that uses policy gradient methods
-to directly optimise the policy function, which determines the agent's actions based on the
-environment's state. PPO strikes an effective balance between exploration and exploitation, making
-it robust in learning diverse tasks.
+The Markov assumption states that the future depends only on the current state, not on the history of how we got there. However, in
+many real-world applications, agents need information about the past to predict the future effectively. For example:
+
+- A robot navigating a maze needs to remember which paths it has already tried, not just its current position
+- A trading agent must track price trends over time, not just the current price point
+- A self-driving car has to remember the recent trajectory of other vehicles to predict where they might go next
+
+These scenarios are examples of Partially Observable Markov Decision Processes (POMDPs), where the agent only receives incomplete or noisy
+observations of the true environment state. This partial observability makes the learning task significantly more challenging than fully
+observable MDPs, since the agent needs to:
+
+1. Remember important information from past observations
+2. Infer hidden state information from incomplete observations
+3. Deal with uncertainty about the true state of the environment
+
+This is where recurrent neural networks (RNNs) become particularly valuable. Unlike standard feedforward networks, RNNs maintain an internal
+memory state that can help the agent:
+
+- Track important features over time
+- Identify temporal patterns in the observation sequence
+- Make better decisions with incomplete information
+
+The Pendulum-v1 environment we'll be using demonstrates this concept by masking velocity information - forcing the agent to infer angular velocity
+from position changes over time rather than receiving it directly. This creates a POMDP that requires temporal reasoning to solve effectively.
 
 Dependencies
 ------------
 
 .. code-block:: python
 
-    # Author: Michael Pratt
-    import os
-
-    from tqdm import trange
-    import imageio
+    # Author: Jaime Sabal
     import gymnasium as gym
     import numpy as np
     import torch
+    from typing import List
+    from tqdm import trange
 
     from agilerl.algorithms import PPO
     from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
-    from agilerl.training.train_on_policy import train_on_policy
     from agilerl.utils.utils import create_population, make_vect_envs
-    from agilerl.rollouts.on_policy import collect_rollouts
+    from agilerl.rollouts.on_policy import collect_rollouts_recurrent
 
 Defining Hyperparameters
 ------------------------
@@ -59,22 +71,25 @@ mutations we want to happen, to what extent we want these mutations to occur, an
 Additionally, we also define our upper and lower limits for these hyperparameters to define search spaces.
 
 .. collapse:: Hyperparameter Configuration
+    :open:
 
     .. code-block:: python
 
         # Initial hyperparameters
         INIT_HP = {
             "POP_SIZE": 4,  # Population size
-            "BATCH_SIZE": 128,  # Batch size
+            "BATCH_SIZE": 256,  # Batch size
             "LR": 0.001,  # Learning rate
             "LEARN_STEP": 1024,  # Learning frequency
-            "GAMMA": 0.99,  # Discount factor
+            "GAMMA": 0.9,  # Discount factor
             "GAE_LAMBDA": 0.95,  # Lambda for general advantage estimation
             "ACTION_STD_INIT": 0.6,  # Initial action standard deviation
             "CLIP_COEF": 0.2,  # Surrogate clipping coefficient
-            "ENT_COEF": 0.01,  # Entropy coefficient
+            "ENT_COEF": 0.0,  # Entropy coefficient
             "VF_COEF": 0.5,  # Value function coefficient
             "MAX_GRAD_NORM": 0.5,  # Maximum norm for gradient clipping
+            "RECURRENT": True # Flag to signal that we want a recurrent policy
+            "USE_ROLLOUT_BUFFER ": True # Use a rollout buffer for data collection
             "TARGET_KL": None,  # Target KL divergence threshold
             "UPDATE_EPOCHS": 4,  # Number of policy update epochs
             "TARGET_SCORE": 200.0,  # Target score that will beat the environment
@@ -107,17 +122,59 @@ Additionally, we also define our upper and lower limits for these hyperparameter
                 )
         )
 
-
 Create the Environment
 ----------------------
-In this particular tutorial, we will be focussing on the acrobot environment as you can use PPO with
-either discrete or continuous action spaces. The snippet below creates a vectorised environment and
-initialises the population of agents from the corresponding observation and action spaces.
+In this particular tutorial, we will be focusing on the ``Pendulum-v1`` environment with masked angular velocities. To do the
+latter, we can define a wrapper to modify the observations after they have been collected.
 
 .. code-block:: python
 
+    class MaskVelocityWrapper(gym.ObservationWrapper):
+        """
+        Gym environment observation wrapper used to mask velocity terms in
+        observations. The intention is the make the MDP partially observable.
+        Adapted from https://github.com/LiuWenlin595/FinalProject.
+
+        Taken from https://github.com/DLR-RM/rl-baselines3-zoo/blob/master/rl_zoo3/wrappers.py#L299.
+
+        :param env: Gym environment
+        """
+
+        # Supported envs
+        velocity_indices: ClassVar[dict[str, np.ndarray]] = {
+            "CartPole-v1": np.array([1, 3]),
+            "MountainCar-v0": np.array([1]),
+            "MountainCarContinuous-v0": np.array([1]),
+            "Pendulum-v1": np.array([2]),
+            "LunarLander-v3": np.array([2, 3, 5]),
+            "LunarLanderContinuous-v3": np.array([2, 3, 5]),
+        }
+
+        def __init__(self, env: gym.Env):
+            super().__init__(env)
+
+            assert env.unwrapped.spec is not None
+            env_id: str = env.unwrapped.spec.id
+            # By default no masking
+            self.mask = np.ones_like(env.observation_space.sample())
+            try:
+                # Mask velocity
+                self.mask[self.velocity_indices[env_id]] = 0.0
+            except KeyError as e:
+                raise NotImplementedError(f"Velocity masking not implemented for {env_id}") from e
+
+        def observation(self, observation: np.ndarray) -> np.ndarray:
+            observation = np.squeeze(observation)
+            return observation * self.mask
+
+
+.. code-block:: python
+
+    def make_env():
+        return MaskVelocityWrapper(gym.make("Pendulum-v1"))
+
     num_envs = 8
-    env = make_vect_envs("Acrobot-v1", num_envs=num_envs)  # Create environment
+    env = make_vect_envs(make_env=make_env, num_envs=num_envs, should_async_vector=False)
 
     observation_space = env.single_observation_space
     action_space = env.single_action_space
@@ -137,7 +194,13 @@ followed by mutations) is detailed further below.
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Define the network configuration of a simple mlp with two hidden layers, each with 64 nodes
-    net_config = {"head_config": {"hidden_size": [64, 64]}}
+    net_config = {
+        "encoder_config": {
+            "hidden_state_size": 64,  # LSTM hidden state size
+            "num_layers": 1,
+            "max_seq_len": 1024,
+        },
+    }
 
     # Define a population
     pop = create_population(
@@ -219,7 +282,7 @@ fitnesses (fitness is each agents test scores on the environment).
 
     trained_pop, pop_fitnesses = train_on_policy(
         env=env,
-        env_name="Acrobot-v1",
+        env_name="PendulumPO-v1",
         algo="PPO",
         pop=pop,
         INIT_HP=INIT_HP,
@@ -247,6 +310,7 @@ fitnesses (fitness is each agents test scores on the environment).
       if __name__ == "__main__":
           train_agent()
 
+
 Using a custom training loop
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 If we wanted to have more control over the training process, it is also possible to write our own custom
@@ -257,56 +321,62 @@ function and is an example of how we might choose to make use of a population of
 
     .. code-block:: python
 
+
+        # --- Training Loop (Performance-Flamegraph Style) ---
+        max_steps = 1_000_000 // len(pop)
+        required_score = 0.95
+        evo_steps = num_envs * INIT_HP["LEARN_STEP"] * 1
+        eval_steps = None
+
         total_steps = 0
+        training_complete = False
 
-        # TRAINING LOOP
         print("Training...")
-        pbar = trange(INIT_HP["MAX_STEPS"], unit="step")
-        while np.less([agent.steps[-1] for agent in pop], INIT_HP["MAX_STEPS"]).all():
-            pop_episode_scores = []
-            for agent in pop:  # Loop through population
-                collect_rollouts(agent, env)
-                agent.learn() # Learn according to agent's RL algorithm
-
-                agent.steps[-1] += steps
-                pop_episode_scores.append(completed_episode_scores)
-
-            # Evaluate population
-            fitnesses = [
-                agent.test(
-                    env,
-                    max_steps=INIT_HP["EVAL_STEPS"],
-                    loop=INIT_HP["EVAL_LOOP"],
-                )
-                for agent in pop
-            ]
-            mean_scores = [
-                (
-                    np.mean(episode_scores)
-                    if len(episode_scores) > 0
-                    else "0 completed episodes"
-                )
-                for episode_scores in pop_episode_scores
-            ]
-
-            print(f"--- Global steps {total_steps} ---")
-            print(f"Steps {[agent.steps[-1] for agent in pop]}")
-            print(f"Scores: {mean_scores}")
-            print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-            print(
-                f'5 fitness avgs: {["%.2f"%np.mean(agent.fitness[-5:]) for agent in pop]}'
-            )
-
-            # Tournament selection and population mutation
-            elite, pop = tournament.select(pop)
-            pop = mutations.mutation(pop)
-
-            # Update step counter
+        pbar = trange(max_steps * len(pop), unit="step")
+        while (
+            np.less([agent.steps[-1] for agent in pop], max_steps).all()
+            and not training_complete
+        ):
             for agent in pop:
-                agent.steps.append(agent.steps[-1])
+                collect_rollouts_recurrent(agent, env)
+                agent.learn()
+                total_steps += agent.learn_step * num_envs
+                agent.steps[-1] += agent.learn_step * num_envs
+                pbar.update(agent.learn_step * num_envs // len(pop))
 
-        # Save the trained algorithm
-        elite.save_checkpoint(save_path)
+            # Evaluate and evolve
+            if total_steps % evo_steps == 0:
+                fitnesses = [
+                    agent.test(
+                        single_test_env,
+                        max_steps=eval_steps,
+                        loop=eval_loop,
+                    )
+                    for agent in pop
+                ]
+                mean_scores = [
+                    round(np.mean(agent.fitness[-eval_loop:]), 1) for agent in pop
+                ]
+                print(f"--- Global steps {total_steps} ---")
+                print(f"Steps {[agent.steps[-1] for agent in pop]}")
+                print(f"Scores: {mean_scores}")
+                print(f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}")
+                print(
+                    f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}"
+                )
+
+                if any(score >= required_score for score in mean_scores):
+                    print(
+                        f"\nAgent achieved required score {required_score}. Stopping training."
+                    )
+                    elite, _ = tournament.select(pop)
+                    training_complete = True
+                    break
+
+                elite, pop = tournament.select(pop)
+                pop = mutations.mutation(pop)
+                for agent in pop:
+                    agent.steps.append(agent.steps[-1])
 
         pbar.close()
         env.close()
@@ -328,47 +398,31 @@ Test loop for inference
 
 .. code-block:: python
 
-    test_env = gym.make("Acrobot-v1", render_mode="rgb_array")
-    rewards = []
-    frames = []
-    testing_eps = 7
-    max_testing_steps = 1000
-    with torch.no_grad():
-        for ep in range(testing_eps):
-            obs = test_env.reset()[0]  # Reset environment at start of episode
-            score = 0
+    single_test_env = gym.vector.SyncVectorEnv([make_env])
+    total_steps = 0
+    episode_rewards = []
 
-            for step in range(max_testing_steps):
-                # Get next action from agent
-                action, *_ = ppo.get_action(obs)
-                action = action.squeeze()
+    for episode in range(20):
+        obs, _ = single_test_env.reset()
+        done = np.array([False])
+        episode_reward = 0
+        episode_steps = 0
+        hidden_state = ppo.get_initial_hidden_state(1)
 
-                # Save the frame for this step and append to frames list
-                frame = test_env.render()
-                frames.append(frame)
+        while not done[0]:
+            action, _, _, _, hidden_state = ppo.get_action(
+                obs, hidden_state=hidden_state
+            )
+            obs, reward, terminated, truncated, _ = single_test_env.step(action)
+            done = np.logical_or(terminated, truncated)
+            episode_reward += reward[0]
+            episode_steps += 1
+        print(
+            f"Episode {episode + 1}: Reward: {episode_reward}, Steps: {episode_steps}"
+        )
+        total_steps += episode_steps
+        episode_rewards.append(episode_reward)
 
-                # Take the action in the environment
-                obs, reward, terminated, truncated, _ = test_env.step(action)
-
-                # Collect the score
-                score += reward
-
-                # Break if environment 0 is done or truncated
-                if terminated or truncated:
-                    break
-
-            # Collect and print episodic reward
-            rewards.append(score)
-            print("-" * 15, f"Episode: {ep}", "-" * 15)
-            print("Episodic Reward: ", rewards[-1])
-
-        test_env.close()
-
-Save test episosdes as a gif
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-.. code-block:: python
-
-    gif_path = "./videos/"
-    os.makedirs(gif_path, exist_ok=True)
-    imageio.mimwrite(os.path.join("./videos/", "ppo_acrobot.gif"), frames, loop=0)
-    mean_fitness = np.mean(rewards)
+    avg_reward = sum(episode_rewards) / len(episode_rewards)
+    avg_steps = total_steps / len(episode_rewards)
+    print(f"Average Reward: {avg_reward:.2f}, Average Steps: {avg_steps:.2f}")

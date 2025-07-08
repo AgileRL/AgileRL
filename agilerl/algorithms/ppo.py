@@ -326,8 +326,6 @@ class PPO(RLAlgorithm):
 
         self.hidden_state = None
 
-        self.hidden_state = None
-
     def share_encoder_parameters(self) -> None:
         """Shares the encoder parameters between the actor and critic."""
         if all(isinstance(net, EvolvableNetwork) for net in [self.actor, self.critic]):
@@ -546,11 +544,6 @@ class PPO(RLAlgorithm):
 
         # Use -log_prob as entropy when squashing output in continuous action spaces
         entropy = -log_prob.mean() if entropy is None else entropy
-
-        if isinstance(self.action_space, spaces.Box) and self.action_space.shape == (
-            1,
-        ):
-            action = action.unsqueeze(1)
 
         # Clip to action space during inference
         action_np = action.cpu().data.numpy()

@@ -34,6 +34,18 @@ class TorchDistribution:
     *   keeps only **raw tensors** (``logits`` or ``mu``/``log_std``)
     *   implements ``sample``, ``log_prob`` and ``entropy`` with pure tensor ops
         → no Python allocations per call, all kernels run on GPU.
+
+    :param action_space: Action space of the environment.
+    :type action_space: spaces.Space
+    :param logits: Logits.
+    :type logits: torch.Tensor
+    :param mu: Mean.
+    :type mu: torch.Tensor
+    :param log_std: Log standard deviation.
+    :type log_std: torch.Tensor
+    :param squash_output: Whether to squash the output to the action space.
+    :type squash_output: bool
+
     """
 
     def __init__(

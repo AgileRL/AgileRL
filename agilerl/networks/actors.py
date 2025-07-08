@@ -41,6 +41,8 @@ class DeterministicActor(EvolvableNetwork):
     :type device: str
     :param random_seed: Random seed to use for the network. Defaults to None.
     :type random_seed: Optional[int]
+    :param encoder_name: Name of the encoder network.
+    :type encoder_name: str
     """
 
     supported_spaces = (spaces.Box, spaces.Discrete)
@@ -225,6 +227,8 @@ class StochasticActor(EvolvableNetwork):
     :type device: str
     :param random_seed: Random seed to use for the network. Defaults to None.
     :type random_seed: Optional[int]
+    :param encoder_name: Name of the encoder network.
+    :type encoder_name: str
     """
 
     head_net: EvolvableDistribution

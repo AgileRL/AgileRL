@@ -310,6 +310,8 @@ def create_population(
                 target_kl=INIT_HP.get("TARGET_KL"),
                 update_epochs=INIT_HP.get("UPDATE_EPOCHS", 4),
                 share_encoders=INIT_HP.get("SHARE_ENCODERS", True),
+                recurrent=INIT_HP.get("RECURRENT", False),
+                use_rollout_buffer=INIT_HP.get("USE_ROLLOUT_BUFFER", False),
                 actor_network=actor_network,
                 critic_network=critic_network,
                 device=device,

@@ -20,7 +20,7 @@ policy, potentially limiting exploration and the use of past experiences.
    * - **Algorithms**
      - **Tutorials**
    * - :ref:`PPO<ppo>`
-     - :ref:`Acrobot<ppo_tutorial>`
+     - :ref:`Acrobot<ppo_tutorial>`, :ref:`Masked Velocity LunarLander-v3<agilerl_recurrent_ppo_tutorial>`
 
 
 .. _initpop_on_policy:
@@ -341,3 +341,74 @@ Alternatively, use a custom on-policy training loop:
 
         pbar.close()
         env.close()
+
+.. _recurrent_on_policy:
+
+Training Loop for Recurrent On-Policy Algorithms
+-----------------------------------------------
+
+Recurrent on-policy algorithms require a different training loop to the standard on-policy algorithms. This is because the agent needs to maintain a hidden state
+between steps, which is not possible with the standard training loop. AgileRL currently supports recurrent policies to be used with ``PPO``. To use a recurrent policy,
+users must set both ``recurrent`` and ``use_rollout_buffer`` to ``True`` as arguments to the algorithm.
+
+.. collapse:: Example Population Creation
+  :open:
+
+    .. code-block:: python
+
+        import torch
+        from agilerl.utils.utils import (
+            create_population,
+            make_vect_envs,
+            observation_space_channels_to_first
+        )
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        NET_CONFIG = {
+            "encoder_config": {
+                "hidden_state_size": 64,
+                "num_layers": 1,
+                "max_seq_len": 512,
+            },
+            "head_config": {
+                "hidden_size": [64],
+            }
+        }
+
+        INIT_HP = {
+            "POP_SIZE": 6,  # Population size
+            "BATCH_SIZE": 128,  # Batch size
+            "LR": 1e-3,  # Learning rate
+            "LEARN_STEP": 128,  # Learning frequency
+            "GAMMA": 0.99,  # Discount factor
+            "GAE_LAMBDA": 0.95,  # Lambda for general advantage estimation
+            "ACTION_STD_INIT": 0.6,  # Initial action standard deviation
+            "CLIP_COEF": 0.2,  # Surrogate clipping coefficient
+            "ENT_COEF": 0.01,  # Entropy coefficient
+            "VF_COEF": 0.5,  # Value function coefficient
+            "MAX_GRAD_NORM": 0.5,  # Maximum norm for gradient clipping
+            "RECURRENT": True,
+            "USE_ROLLOUT_BUFFER": True,
+            "TARGET_KL": None,  # Target KL divergence threshold
+            "UPDATE_EPOCHS": 4,  # Number of policy update epochs
+        }
+
+        # Create environment
+        num_envs = 16
+        env = make_vect_envs("LunarLander-v3", num_envs=num_envs)
+
+        observation_space = env.single_observation_space
+        action_space = env.single_action_space
+
+        # Create population
+        pop = create_population(
+            algo="PPO",  # RL algorithm
+            observation_space=observation_space,  # State dimension
+            action_space=action_space,  # Action dimension
+            net_config=NET_CONFIG,  # Network configuration
+            INIT_HP=INIT_HP,  # Initial hyperparameters
+            population_size=INIT_HP["POP_SIZE"],  # Population size
+            num_envs=num_envs,  # Number of vectorized envs
+            device=device,
+        )

@@ -247,6 +247,8 @@ def train_on_policy(
                     dones_np = (
                         agent.rollout_buffer.buffer["dones"][:buffer_size].cpu().numpy()
                     )
+                else:
+                    from agilerl.rollouts import collect_rollouts as active_collect
 
                     for r_step, d_step in zip(rewards_np, dones_np):
                         scores += np.array(r_step)
@@ -259,7 +261,6 @@ def train_on_policy(
 
                     steps += buffer_size * num_envs
                     total_steps += buffer_size * num_envs
-
                     loss = agent.learn()
                     pop_loss[agent_idx].append(loss)
 
@@ -304,6 +305,7 @@ def train_on_policy(
                                 )
                         else:
                             clipped_action = action
+
                         next_obs, reward, term, trunc, info = env.step(clipped_action)
                         next_done = np.logical_or(term, trunc).astype(np.int8)
 
@@ -332,7 +334,6 @@ def train_on_policy(
                                 scores[idx] = 0
 
                     if swap_channels:
-
                         next_obs = obs_channels_to_first(next_obs)
 
                     experiences = (

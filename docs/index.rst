@@ -104,6 +104,7 @@ If you use AgileRL in your work, please cite the repository:
    evo_hyperparam_opt/index
    off_policy/index
    on_policy/index
+   pomdp/index
    offline_training/index
    multi_agent_training/index
    llm_finetuning/index
