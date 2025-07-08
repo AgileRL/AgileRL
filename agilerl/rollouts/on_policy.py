@@ -13,6 +13,7 @@ SupportedOnPolicy = PPO
 
 def _collect_rollouts(
     agent: SupportedOnPolicy,
+
     env: GymEnvType,
     n_steps: Optional[int] = None,
     *,
@@ -127,6 +128,7 @@ def collect_rollouts(
     :param n_steps: The number of steps to collect rollouts for.
     :type n_steps: Optional[int]
     """
+
     return _collect_rollouts(agent, env, n_steps, recurrent=False)
 
 
@@ -142,4 +144,5 @@ def collect_rollouts_recurrent(
     :param n_steps: The number of steps to collect rollouts for.
     :type n_steps: Optional[int]
     """
+
     return _collect_rollouts(agent, env, n_steps, recurrent=True)

@@ -200,7 +200,7 @@ class MutableKernelSizes:
                 depth = self.sizes[hidden_layer][0]
                 self.sizes[hidden_layer] = (depth, new_kernel_size, new_kernel_size)
             elif self.cnn_block_type == "Conv1d":
-                self.sizes[hidden_layer] = (new_kernel_size,)
+                self.sizes[hidden_layer] = (new_kernel_size,
         else:
             self.sizes[hidden_layer] = new_kernel_size
 
@@ -612,6 +612,7 @@ class EvolvableCNN(EvolvableModule):
 
             # Determine kernel size for the new layer
             # Kernel size k_new: 2 <= k_new <= l_in_for_new_layer
+
             k_new = self.rng.integers(2, l_in_for_new_layer + 1)
             self.mut_kernel_size.add_layer(k_new)  # Provisional: add kernel
 

@@ -34,6 +34,7 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules import EvolvableModule
 from agilerl.typing import GymSpaceType, PopulationType
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, clone_llm
+from agilerl.utils.llm_utils import _DummyOptimizer
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 SupportedObservationSpace = Union[
@@ -510,9 +511,7 @@ def create_population(
             agent = GRPO(
                 observation_space=observation_space,
                 action_space=action_space,
-                actor_network=clone_llm(
-                    actor_network, state_dict=actor_network.state_dict()
-                ),
+                actor_network=clone_llm(actor_network, actor_network.state_dict()),
                 pad_token_id=INIT_HP.get("PAD_TOKEN_ID"),
                 hp_config=hp_config,
                 index=idx,
@@ -538,7 +537,6 @@ def create_population(
                 **algo_kwargs,
             )
             population.append(agent)
-
     return population
 
 
@@ -930,4 +928,14 @@ def consolidate_mutations(population: PopulationType) -> None:
         agent.mut = mut
         setattr(agent, mut, mut_value)
         if mut == "lr":
-            LLMAlgorithm.update_lr(agent.optimizer, getattr(agent, mut))
+            opt = (
+                agent.optimizer
+                if not isinstance(agent.optimizer.optimizer, _DummyOptimizer)
+                else agent.actor.optimizer
+            )
+            agent.accelerator, agent.lr_scheduler = LLMAlgorithm.update_lr(
+                opt,
+                getattr(agent, mut),
+                agent.accelerator,
+                agent.cosine_lr_schedule_config,
+            )

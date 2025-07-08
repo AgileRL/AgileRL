@@ -209,7 +209,6 @@ def run_demo():
                 collect_rollouts if not recurrent else collect_rollouts_recurrent
             )
             active_collect(agent, env)
-
             agent.learn()
             total_steps += agent.learn_step * num_envs
             agent.steps[-1] += agent.learn_step

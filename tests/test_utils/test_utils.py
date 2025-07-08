@@ -5,7 +5,7 @@ import gymnasium as gym
 import numpy as np
 import pytest
 import torch
-from accelerate import Accelerator
+from accelerate import Accelerator, DeepSpeedPlugin
 from gymnasium import spaces
 from pettingzoo.mpe import simple_speaker_listener_v4
 
@@ -468,6 +468,13 @@ def test_consolidate_mutations():
         agent.lr = 0.01
         agent.optimizer = Mock()
         agent.optimizer.param_groups = [{"lr": 0.01}]
+        agent.cosine_lr_schedule_config = {"warmup_steps": 0, "total_steps": 100}
+        agent.accelerator = MagicMock(spec=Accelerator)
+        agent.accelerator.is_main_process = True
+        agent.accelerator.wait_for_everyone = Mock()
+        agent.accelerator.state = MagicMock()
+        agent.accelerator.state.deepspeed_plugin = MagicMock(spec=DeepSpeedPlugin)
+        agent.accelerator.state.deepspeed_plugin.deepspeed_config = {}
     consolidate_mutations(population)
     for agent in population:
         assert agent.mut == "lr"

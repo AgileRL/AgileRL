@@ -16,7 +16,7 @@ from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
-MODEL_PATH = "Qwen/Qwen2.5-3B"
+MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
 
@@ -27,22 +27,17 @@ def create_model(pretrained_model_name_or_path):
         attn_implementation="flash_attention_2",
         device_map="cpu",
     )
-    peft_config = LoraConfig(
+
+    lora_config = LoraConfig(
         r=16,
         lora_alpha=64,
-        target_modules=[
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",
-            "up_proj",
-            "down_proj",
-            "gate_proj",
-        ],
-        task_type="CAUSAL_LM",
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
         lora_dropout=0.05,
+        bias="none",
     )
-    model = get_peft_model(model, peft_config)
+
+    model = get_peft_model(model, lora_config, adapter_name="actor")
+
     return model
 
 
@@ -54,7 +49,7 @@ def countdown_chat_template(q, a, tokenizer):
         },
         {
             "role": "user",
-            "content": f"Using each number in this tensor only once {tuple(i.item() for i in q)}, create an equation that equals {a.item()}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
+            "content": f"Using each number in this tensor only once {tuple(i for i in q)}, create an equation that equals {a}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
         },
         {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
     ]
@@ -151,23 +146,6 @@ def combined_rewards(completion, solution, prompt):
     return reward
 
 
-def custom_collate_fn(batch):
-    # Extract answers and questions
-    answers = torch.tensor([item["answer"] for item in batch])
-
-    # For questions of variable length, we need to pad them
-    # First, find the maximum length
-    max_len = max(len(item["question"]) for item in batch)
-
-    # Create padded tensor
-    questions = torch.zeros(len(batch), max_len, dtype=torch.long)
-    for i, item in enumerate(batch):
-        q_len = len(item["question"])
-        questions[i, :q_len] = torch.tensor(item["question"])
-
-    return {"answer": answers, "question": questions}
-
-
 def main(init_hp, mut_p):
     # Instantiate the model and the associated tokenizer
     model = create_model(pretrained_model_name_or_path=MODEL_PATH)
@@ -191,7 +169,6 @@ def main(init_hp, mut_p):
         reward_fn=combined_rewards,
         apply_chat_template_fn=countdown_chat_template,
         data_batch_size_per_gpu=2,
-        custom_collate_fn=custom_collate_fn,
         accelerator=accelerator,
     )
 
@@ -242,11 +219,11 @@ def main(init_hp, mut_p):
         env=env,
         init_hp=init_hp,
         evaluation_interval=10,
-        wb=True,
+        wb=False,
         save_elite=True,
         elite_path="saved_llms",
         max_reward=2.0,
-        evo_steps=10,
+        evo_steps=1,
         mutation=mutations,
         tournament=tournament,
         accelerator=accelerator,

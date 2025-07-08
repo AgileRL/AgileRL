@@ -8,6 +8,7 @@ import os
 import shutil
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+
 import gymnasium as gym
 import imageio
 import numpy as np
@@ -166,6 +167,7 @@ def run_demo():
             total_steps += agent.learn_step * num_envs
             agent.steps[-1] += agent.learn_step * num_envs
             pbar.update(agent.learn_step * num_envs)
+y
 
         # Evaluate and evolve
         if total_steps % evo_steps == 0:
@@ -237,6 +239,7 @@ def run_demo():
             hidden_state = elite.get_initial_hidden_state(1)
 
         episode_frames = []
+
         while not done:
             frame = render_env.render()
             episode_frames.append(frame)

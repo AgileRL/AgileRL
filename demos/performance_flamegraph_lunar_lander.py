@@ -16,7 +16,7 @@ import torch
 from IPython.display import Video, display
 from torch.profiler import ProfilerActivity, profile, record_function
 from tqdm import trange
-from agilerl.rollouts.on_policy import collect_rollouts
+
 from agilerl.utils.utils import create_population, make_vect_envs
 
 # !Note: If you are running this demo without having installed agilerl,
@@ -34,16 +34,16 @@ print(f"Using device: {device}")
 # Network configuration
 NET_CONFIG = {
     "encoder_config": {
-        "hidden_size": [64, 64],  # MLP hidden size
+        "hidden_size": [256, 256],  # Larger MLP hidden size for LunarLander
     },
 }
 
 # Hyperparameters
 INIT_HP = {
     "POP_SIZE": 1,  # Single agent for profiling
-    "BATCH_SIZE": 64,  # minibatch size
+    "BATCH_SIZE": 128,
     "LEARN_STEP": 128,  # Smaller learn step for profiling
-    "LR": 1e-4,
+    "LR": 3e-4,
     "GAMMA": 0.99,
     "GAE_LAMBDA": 0.95,
     "CLIP_COEF": 0.2,
@@ -52,19 +52,19 @@ INIT_HP = {
     "MAX_GRAD_NORM": 0.5,
     "UPDATE_EPOCHS": 4,
     "SHARE_ENCODERS": True,
-    "USE_ROLLOUT_BUFFER": True,
     # PPO Specific
+    "DISCRETE_ACTIONS": True,  # LunarLander-v3 has discrete actions
     "ACTION_STD_INIT": 0.6,  # Only used for continuous actions
     "TARGET_KL": None,
-    "CHANNELS_LAST": False,  # CartPole obs are 1D
+    "CHANNELS_LAST": False,  # LunarLander obs are 1D
 }
 
 # =====================================================================
 # CREATE ENVIRONMENT AND AGENT
 # =====================================================================
 # Create vectorized environment
-num_envs = 32  # Number of parallel environments for profiling
-env = make_vect_envs("CartPole-v1", num_envs=num_envs, should_async_vector=False)
+num_envs = 64  # Number of parallel environments for profiling
+env = make_vect_envs("LunarLander-v3", num_envs=num_envs, should_async_vector=False)
 
 observation_space = env.single_observation_space
 action_space = env.single_action_space
@@ -79,6 +79,9 @@ pop = create_population(
     population_size=INIT_HP["POP_SIZE"],
     num_envs=num_envs,
     device=device,
+    algo_kwargs={
+        "use_rollout_buffer": True,
+    },
 )
 
 # Get the agent from the population
@@ -93,7 +96,7 @@ pr = cProfile.Profile()
 pr.enable()
 
 # Run the function to profile
-collect_rollouts(agent, env)
+agent.collect_rollouts(env)
 
 pr.disable()
 
@@ -120,10 +123,10 @@ profiler.stop()
 # PROFILING A COMPLETE TRAINING LOOP
 # =====================================================================
 # Choose whether to profile the full training loop
-use_profiler = True  # Set to True to enable flamegraph profiling for the full loop
+use_profiler = False  # Set to True to enable flamegraph profiling for the full loop
 
 # Training parameters
-max_steps = 200000 // num_envs
+max_steps = 400000 // num_envs  # Reduced for profiling
 total_steps = 0
 start_time = time.time()
 
@@ -137,7 +140,7 @@ print("\n--- Running Training Loop ---")
 pbar = trange(max_steps * num_envs, unit="step")
 while total_steps < max_steps:
     # Collect rollouts and learn
-    collect_rollouts(agent, env)  # Collect rollouts for each environment
+    agent.collect_rollouts(env)  # Collect rollouts for each environment
     agent.learn()
     # Update counters
     total_steps += INIT_HP["LEARN_STEP"]
@@ -171,7 +174,7 @@ if not os.path.exists(video_folder):
 # Create a single synchronous environment for testing and recording
 # We use gym.make directly as RecordVideo works best with a base environment
 # render_mode='rgb_array' is required for RecordVideo
-testing_env_single = gym.make("CartPole-v1", render_mode="rgb_array")
+testing_env_single = gym.make("LunarLander-v3", render_mode="rgb_array")
 
 # Wrap the environment for recording
 # Record only the first episode (episode_trigger=lambda x: x == 0)
@@ -182,7 +185,7 @@ recorded_env = gym.wrappers.RecordVideo(
 # Test the agent using the recorded environment
 print("Testing agent and recording video...")
 # Run test for 1 loop (episode)
-mean_reward = agent.test(recorded_env, loop=1, max_steps=500, vectorized=False)
+mean_reward = agent.test(recorded_env, loop=1, max_steps=1000, vectorized=False)
 print(f"Achieved mean reward of: {mean_reward}")
 
 # Close the environment wrapper (this also closes the base environment)
@@ -211,7 +214,7 @@ with profile(
     activities=[ProfilerActivity.CPU], record_shapes=True, with_stack=True
 ) as prof:
     with record_function("training_step"):
-        collect_rollouts(agent, env)
+        agent.collect_rollouts(env)
         agent.learn()
 
 # Export trace that can be loaded in chrome://tracing

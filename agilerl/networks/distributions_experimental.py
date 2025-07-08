@@ -45,6 +45,7 @@ class TorchDistribution:
     :type log_std: torch.Tensor
     :param squash_output: Whether to squash the output to the action space.
     :type squash_output: bool
+
     """
 
     def __init__(
