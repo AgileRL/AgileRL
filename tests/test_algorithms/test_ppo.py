@@ -12,7 +12,9 @@ from gymnasium import spaces
 
 from agilerl.algorithms.ppo import PPO
 from agilerl.components.rollout_buffer import RolloutBuffer
+from agilerl.components.rollout_buffer import RolloutBuffer
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
+from agilerl.rollouts import collect_rollouts, collect_rollouts_recurrent
 from agilerl.rollouts import collect_rollouts, collect_rollouts_recurrent
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import assert_not_equal_state_dict, assert_state_dicts_equal
@@ -31,6 +33,7 @@ class DummyEnv:
     def __init__(self, state_size, vect=True, num_envs=2):
         self.state_size = state_size
         self.vect = vect
+        self.num_envs = num_envs
         self.num_envs = num_envs
         if self.vect:
             self.state_size = (num_envs,) + self.state_size
@@ -197,6 +200,7 @@ def test_initialize_ppo_with_make_evo(
     assert ppo.steps == [0]
     assert isinstance(ppo.optimizer.optimizer, optim.Adam)
     assert ppo.num_envs == 1
+    assert ppo.num_envs == 1
 
 
 def test_initialize_ppo_with_incorrect_actor_net(vector_space, discrete_space):
@@ -283,6 +287,7 @@ def test_returns_expected_action(observation_space, action_space, build_ppo, req
         for act in action[0]:
             assert isinstance(act, np.float32)
     else:
+        print(action, action_space)
         assert isinstance(action, np.ndarray)
         assert action.shape == (1, *action_space.shape)
 
@@ -473,6 +478,8 @@ def test_clone_returns_identical_agent(observation_space, discrete_space, reques
     assert clone_agent.tensor_test == ppo.tensor_test
     assert clone_agent.num_envs == ppo.num_envs
     assert clone_agent.index == ppo.index
+    assert clone_agent.num_envs == ppo.num_envs
+    assert clone_agent.index == ppo.index
 
     accelerator = Accelerator()
     ppo = PPO(observation_space, discrete_space, accelerator=accelerator)
@@ -504,7 +511,12 @@ def test_clone_returns_identical_agent(observation_space, discrete_space, reques
     assert clone_agent.scores == ppo.scores
     assert clone_agent.num_envs == ppo.num_envs
     assert clone_agent.index == ppo.index
+    assert clone_agent.num_envs == ppo.num_envs
+    assert clone_agent.index == ppo.index
 
+    accelerator = (
+        Accelerator(cpu=True) if torch.backends.mps.is_available() else Accelerator()
+    )
     accelerator = (
         Accelerator(cpu=True) if torch.backends.mps.is_available() else Accelerator()
     )
@@ -540,6 +552,8 @@ def test_clone_returns_identical_agent(observation_space, discrete_space, reques
     assert clone_agent.fitness == ppo.fitness
     assert clone_agent.steps == ppo.steps
     assert clone_agent.scores == ppo.scores
+    assert clone_agent.num_envs == ppo.num_envs
+    assert clone_agent.index == ppo.index
     assert clone_agent.num_envs == ppo.num_envs
     assert clone_agent.index == ppo.index
 
@@ -630,7 +644,65 @@ def test_clone_after_learning(
 
         ppo.learn(experiences)
 
+
+    if recurrent:
+        net_config = {
+            "encoder_config": {
+                "hidden_state_size": 64,
+                "max_seq_len": 10,
+            }
+        }
+    else:
+        net_config = {}
+
+    ppo = PPO(
+        observation_space,
+        action_space,
+        device=torch.device(device),
+        use_rollout_buffer=use_rollout_buffer,
+        recurrent=recurrent,
+        net_config=net_config,
+        num_envs=num_vec_envs,
+        share_encoders=share_encoders,
+    )
+
+    if use_rollout_buffer:
+        dummy_env = DummyEnv(observation_space.shape, vect=True, num_envs=num_vec_envs)
+        # Use the correct rollout collection function based on whether the policy is recurrent
+        if recurrent:
+            collect_rollouts_recurrent(ppo, dummy_env)
+        else:
+            collect_rollouts(ppo, dummy_env)
+        ppo.learn()
+    else:
+        states = np.random.randn(
+            max_env_steps, num_vec_envs, observation_space.shape[0]
+        )
+        next_states = np.random.randn(num_vec_envs, observation_space.shape[0])
+        actions = np.random.rand(max_env_steps, num_vec_envs, action_space.shape[0])
+        log_probs = -np.random.rand(max_env_steps, num_vec_envs)
+        rewards = np.random.randint(0, 100, (max_env_steps, num_vec_envs))
+        dones = np.zeros((max_env_steps, num_vec_envs))
+        values = np.random.randn(
+            max_env_steps,
+            num_vec_envs,
+        )
+        next_done = np.zeros((1, num_vec_envs))
+        experiences = (
+            states,
+            actions,
+            log_probs,
+            rewards,
+            dones,
+            values,
+            next_states,
+            next_done,
+        )
+
+        ppo.learn(experiences)
+
     clone_agent = ppo.clone()
+
 
     assert clone_agent.observation_space == ppo.observation_space
     assert clone_agent.action_space == ppo.action_space

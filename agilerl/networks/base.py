@@ -121,7 +121,8 @@ class NetworkMeta(ModuleMeta):
                 attr = mut_method.split(".")[0]
                 if attr not in ["encoder", "head_net"]:
                     raise AttributeError(
-                        "Mutation methods of nested modules in EvolvableNetwork objects should only correspond to the 'encoder' or 'head_net'. This is done to ensure that equivalent architecture mutations can be applied across different evaluation networks (e.g. actor and critic)."
+                        "Mutation methods of nested modules in EvolvableNetwork objects should only correspond to the 'encoder' or 'head_net'. "
+                        "This is done to ensure that equivalent architecture mutations can be applied across different evaluation networks (e.g. actor and critic)."
                     )
 
         return instance

@@ -98,6 +98,33 @@ def get_hidden_states_shape_from_model(model: nn.Module) -> Dict[str, int]:
     return hidden_state_architecture
 
 
+def get_hidden_states_shape_from_model(model: Module) -> Dict[str, int]:
+    """Loops through all of the modules in the model and checks if they have a
+    `hidden_state_architecture` attribute. If they do, it adds the items to a
+    dictionary and returns it. This should make it easier to initialize the
+    hidden states of the model.
+
+    :param model: The model to get the hidden states from.
+    :type model: Module
+    :param x: The input to the model.
+    :type x: TorchObsType
+    :return: The hidden states shape from the model.
+    :rtype: torch.Tensor
+    """
+    hidden_state_architecture = {}
+
+    for name, module in model.named_modules():
+        if hasattr(module, "hidden_state_architecture"):
+            hidden_state_architecture.update(
+                {
+                    f"{module.name}_{k}": v
+                    for k, v in module.hidden_state_architecture.items()
+                }
+            )
+
+    return hidden_state_architecture
+
+
 def is_image_space(space: spaces.Space) -> bool:
     """Check if the space is an image space. We ignore dtype and number of channels
     checks.

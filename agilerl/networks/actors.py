@@ -368,11 +368,7 @@ class StochasticActor(EvolvableNetwork):
         return self.head_net.entropy()
 
     def recreate_network(self) -> None:
-        """Recreates the network with the same parameters as the current network.
-
-        :param shrink_params: Whether to shrink the parameters of the network. Defaults to False.
-        :type shrink_params: bool
-        """
+        """Recreates the network with the same parameters as the current network."""
         self.recreate_encoder()
 
         head_net = self.create_mlp(

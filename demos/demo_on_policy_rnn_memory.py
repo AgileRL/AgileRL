@@ -102,7 +102,7 @@ def run_demo():
     print(f"Using device: {device}")
 
     # Toggle this to True for RNN (LSTM), False for MLP
-    recurrent = False  # <--- CHANGE THIS TO ENABLE/DISABLE RECURRENT
+    recurrent = True  # <--- CHANGE THIS TO ENABLE/DISABLE RECURRENT
 
     # --- Create Environment and Population ---
     n_symbols = 5
@@ -285,7 +285,6 @@ def run_demo():
                 )
             else:
                 action, _, _, _, _ = elite.get_action(obs)
-
             obs, reward, terminated, truncated, _ = single_test_env.step(action)
             done = np.logical_or(terminated, truncated)
             episode_reward += reward[0]
