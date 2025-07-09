@@ -836,6 +836,9 @@ def test_initialize_td3_with_incorrect_actor_net(vector_space):
     ],
 )
 def test_multi_dim_clamp(vector_space, min, max, action, expected_result, device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
     if isinstance(min, list):
         min = np.array(min)
     if isinstance(max, list):

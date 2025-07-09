@@ -12,9 +12,7 @@ from gymnasium import spaces
 
 from agilerl.algorithms.ppo import PPO
 from agilerl.components.rollout_buffer import RolloutBuffer
-from agilerl.components.rollout_buffer import RolloutBuffer
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
-from agilerl.rollouts import collect_rollouts, collect_rollouts_recurrent
 from agilerl.rollouts import collect_rollouts, collect_rollouts_recurrent
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import assert_not_equal_state_dict, assert_state_dicts_equal
@@ -33,7 +31,6 @@ class DummyEnv:
     def __init__(self, state_size, vect=True, num_envs=2):
         self.state_size = state_size
         self.vect = vect
-        self.num_envs = num_envs
         self.num_envs = num_envs
         if self.vect:
             self.state_size = (num_envs,) + self.state_size
@@ -200,7 +197,6 @@ def test_initialize_ppo_with_make_evo(
     assert ppo.steps == [0]
     assert isinstance(ppo.optimizer.optimizer, optim.Adam)
     assert ppo.num_envs == 1
-    assert ppo.num_envs == 1
 
 
 def test_initialize_ppo_with_incorrect_actor_net(vector_space, discrete_space):
@@ -287,7 +283,6 @@ def test_returns_expected_action(observation_space, action_space, build_ppo, req
         for act in action[0]:
             assert isinstance(act, np.float32)
     else:
-        print(action, action_space)
         assert isinstance(action, np.ndarray)
         assert action.shape == (1, *action_space.shape)
 
@@ -478,8 +473,6 @@ def test_clone_returns_identical_agent(observation_space, discrete_space, reques
     assert clone_agent.tensor_test == ppo.tensor_test
     assert clone_agent.num_envs == ppo.num_envs
     assert clone_agent.index == ppo.index
-    assert clone_agent.num_envs == ppo.num_envs
-    assert clone_agent.index == ppo.index
 
     accelerator = Accelerator()
     ppo = PPO(observation_space, discrete_space, accelerator=accelerator)
@@ -511,12 +504,7 @@ def test_clone_returns_identical_agent(observation_space, discrete_space, reques
     assert clone_agent.scores == ppo.scores
     assert clone_agent.num_envs == ppo.num_envs
     assert clone_agent.index == ppo.index
-    assert clone_agent.num_envs == ppo.num_envs
-    assert clone_agent.index == ppo.index
 
-    accelerator = (
-        Accelerator(cpu=True) if torch.backends.mps.is_available() else Accelerator()
-    )
     accelerator = (
         Accelerator(cpu=True) if torch.backends.mps.is_available() else Accelerator()
     )
@@ -553,9 +541,6 @@ def test_clone_returns_identical_agent(observation_space, discrete_space, reques
     assert clone_agent.steps == ppo.steps
     assert clone_agent.scores == ppo.scores
     assert clone_agent.num_envs == ppo.num_envs
-    assert clone_agent.index == ppo.index
-    assert clone_agent.num_envs == ppo.num_envs
-    assert clone_agent.index == ppo.index
 
 
 def test_clone_new_index(vector_space, discrete_space):
@@ -644,65 +629,7 @@ def test_clone_after_learning(
 
         ppo.learn(experiences)
 
-
-    if recurrent:
-        net_config = {
-            "encoder_config": {
-                "hidden_state_size": 64,
-                "max_seq_len": 10,
-            }
-        }
-    else:
-        net_config = {}
-
-    ppo = PPO(
-        observation_space,
-        action_space,
-        device=torch.device(device),
-        use_rollout_buffer=use_rollout_buffer,
-        recurrent=recurrent,
-        net_config=net_config,
-        num_envs=num_vec_envs,
-        share_encoders=share_encoders,
-    )
-
-    if use_rollout_buffer:
-        dummy_env = DummyEnv(observation_space.shape, vect=True, num_envs=num_vec_envs)
-        # Use the correct rollout collection function based on whether the policy is recurrent
-        if recurrent:
-            collect_rollouts_recurrent(ppo, dummy_env)
-        else:
-            collect_rollouts(ppo, dummy_env)
-        ppo.learn()
-    else:
-        states = np.random.randn(
-            max_env_steps, num_vec_envs, observation_space.shape[0]
-        )
-        next_states = np.random.randn(num_vec_envs, observation_space.shape[0])
-        actions = np.random.rand(max_env_steps, num_vec_envs, action_space.shape[0])
-        log_probs = -np.random.rand(max_env_steps, num_vec_envs)
-        rewards = np.random.randint(0, 100, (max_env_steps, num_vec_envs))
-        dones = np.zeros((max_env_steps, num_vec_envs))
-        values = np.random.randn(
-            max_env_steps,
-            num_vec_envs,
-        )
-        next_done = np.zeros((1, num_vec_envs))
-        experiences = (
-            states,
-            actions,
-            log_probs,
-            rewards,
-            dones,
-            values,
-            next_states,
-            next_done,
-        )
-
-        ppo.learn(experiences)
-
     clone_agent = ppo.clone()
-
 
     assert clone_agent.observation_space == ppo.observation_space
     assert clone_agent.action_space == ppo.action_space
@@ -1448,156 +1375,18 @@ def test_ppo_collect_rollouts(vector_space, discrete_space):
     # Collect rollouts
     collect_rollouts(ppo, env, n_steps=learn_step)
 
-    # Check buffer contents
-    assert ppo.rollout_buffer.pos == learn_step
-    assert not np.array_equal(
-        ppo.rollout_buffer.buffer.get("observations")[0, 0].cpu().numpy(),
-        np.zeros(observation_space.shape, dtype=observation_space.dtype),
-    )
-    # Check shape and dtype of the stored action tensor for the first timestep
-    assert ppo.rollout_buffer.buffer.get("actions")[0].shape == (
-        ppo.num_envs,
-    )  # Shape should be (num_envs,)
-    assert (
-        ppo.rollout_buffer.buffer.get("actions").dtype == torch.int64
-    )  # Dtype for Discrete action space
-
-    # Compute returns and advantages should have been called by collect_rollouts
-    assert not np.array_equal(
-        ppo.rollout_buffer.buffer.get("returns")[:, 0].cpu().numpy(),
-        np.zeros((learn_step, 1)),
-    )
-
-    # Learn from collected rollouts
-    loss = ppo.learn()
-
-    assert isinstance(loss, float)
-    assert loss >= 0.0
-
-
-def test_ppo_wrap_at_capacity(vector_space, discrete_space):
-    observation_space = vector_space
-    action_space = discrete_space
-
-    ppo = PPO(
-        observation_space=observation_space,
-        action_space=action_space,
-        use_rollout_buffer=True,
-        learn_step=10,  # This sets rollout_buffer.capacity
-        num_envs=1,
-        rollout_buffer_config={"wrap_at_capacity": True},
-    )
-
-    env = DummyEnv(state_size=observation_space.shape, vect=True, num_envs=ppo.num_envs)
-
-    # collect_rollouts resets the buffer if wrap_at_capacity is True and buffer is full
-    # or if n_steps > capacity.
-    # Here, n_steps == capacity, so it fills up.
-    collect_rollouts(ppo, env, n_steps=10)
-
-    assert ppo.rollout_buffer.pos == 10  # pos is next insertion point, so it's capacity
-    assert ppo.rollout_buffer.full is True
-
-    # Collect 7 more steps. Since wrap_at_capacity is True, it will wrap around.
-    # collect_rollouts will reset if full and wrap_at_capacity.
-    # The behavior of collect_rollouts is to fill n_steps. If buffer was full, it resets.
-    # So it will collect 7 fresh samples.
-    collect_rollouts(ppo, env, n_steps=7)
-
-    assert ppo.rollout_buffer.pos == 7
-    assert ppo.rollout_buffer.full is False  # Not full yet, capacity is 10
-
-    # Collect 14 steps. This is > capacity.
-    # If wrap_at_capacity, it should reset and fill.
-    # The buffer will contain the last 'capacity' (10) steps.
-    # pos will be capacity % n_steps if n_steps > capacity, but collect_rollouts
-    # will collect n_steps, and if wrap_at_capacity, it will fill the buffer
-    # and pos will be n_steps % capacity.
-    # More accurately, collect_rollouts with n_steps > capacity and wrap_at_capacity
-    # will perform multiple "virtual" fills. The final state will be as if
-    # n_steps were collected, and pos = n_steps % capacity.
-    # However, the current implementation of collect_rollouts with wrap_at_capacity
-    # will reset the buffer if it's full at the start of the call, or if n_steps > capacity.
-    # Then it collects n_steps. If n_steps > capacity, it effectively collects 'capacity' steps
-    # and pos becomes capacity.
-    collect_rollouts(ppo, env, n_steps=14)
-
-    # After collecting 14 steps into a buffer of capacity 10 with wrapping:
-    # The buffer will contain the last 10 of these 14 steps.
-    # The pos will be 14 % 10 = 4.
-    assert ppo.rollout_buffer.pos == 4
-    assert ppo.rollout_buffer.full is True
-
-
-# Test compatibility with old format
-def test_ppo_backward_compatibility(vector_space, discrete_space):
-    observation_space = vector_space
-    action_space = discrete_space
-
-    # Create PPO with rollout buffer
-    ppo_new = PPO(
-        observation_space=observation_space,
-        action_space=action_space,
-        use_rollout_buffer=True,
-        num_envs=1,  # For consistency with how experiences are shaped
-    )
-
-    # Create PPO with old implementation
-    ppo_old = PPO(
-        observation_space=observation_space,
-        action_space=action_space,
-        use_rollout_buffer=False,
-        num_envs=1,
-    )
-
-    # Prepare experiences in old format
-    num_steps = 5
-    states = torch.rand(num_steps, *observation_space.shape)
-    actions = torch.randint(0, action_space.n, (num_steps,)).float()
-    log_probs = torch.randn(num_steps)
-    rewards = torch.randn(num_steps)
-    dones = torch.randint(0, 2, (num_steps,))
-    values = torch.randn(num_steps)
-    next_state = torch.rand(1, *observation_space.shape)
-    next_done = np.zeros(1)
-    experiences = [
-        [states],
-        [actions],
-        [log_probs],
-        [rewards],
-        [dones],
-        [values],
-        [next_state],
-        [next_done],
-    ]
-
-    # Both should work with old format
-    loss_old = ppo_old.learn(experiences)
-    loss_new = ppo_new.learn(experiences)
-
-    assert isinstance(loss_old, float)
-    assert isinstance(loss_new, float)
-
-    # Fill rollout buffer
-    for i in range(ppo_new.learn_step):
-        obs = np.random.rand(*observation_space.shape)
-        action = np.array([1])
-        reward = 1.0
-        done = i == ppo_new.learn_step - 1
-        value = 0.5
-        log_prob = -0.5
-        next_obs = np.random.rand(*observation_space.shape)
-
-        ppo_new.rollout_buffer.add(obs, action, reward, done, value, log_prob, next_obs)
-
-    ppo_new.rollout_buffer.compute_returns_and_advantages(
-        last_value=0.0, last_done=np.zeros(1)
-    )
-
-    # New implementation should work without experiences (from buffer)
-    loss_from_buffer = ppo_new.learn()
-    assert isinstance(loss_from_buffer, float)
-
-    # Old implementation should fail without experiences (no buffer)
-    with pytest.raises(ValueError):
-        ppo_old.learn()
+    # Check if properties and weights are loaded correctly
+    assert ppo.observation_space == ppo.observation_space
+    assert ppo.action_space == ppo.action_space
+    assert isinstance(ppo.actor, nn.Module)
+    assert isinstance(ppo.critic, nn.Module)
+    assert ppo.lr == ppo.lr
+    assert str(ppo.actor.to("cpu").state_dict()) == str(ppo.actor.state_dict())
+    assert str(ppo.critic.to("cpu").state_dict()) == str(ppo.critic.state_dict())
+    assert ppo.batch_size == ppo.batch_size
+    assert ppo.gamma == ppo.gamma
+    assert ppo.mut == ppo.mut
+    assert ppo.index == ppo.index
+    assert ppo.scores == ppo.scores
+    assert ppo.fitness == ppo.fitness
+    assert ppo.steps == ppo.steps

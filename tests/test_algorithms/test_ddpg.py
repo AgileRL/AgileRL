@@ -659,6 +659,9 @@ def test_clone_after_learning():
     ],
 )
 def test_multi_dim_clamp(min, max, action, expected_result, vector_space, device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
     if isinstance(min, list):
         min = np.array(min)
     if isinstance(max, list):
