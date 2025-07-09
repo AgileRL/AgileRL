@@ -1,12 +1,11 @@
 import gc
 import os
 import warnings
-from typing import Dict, List, Optional, Tuple, Type, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-import torch.optim as optim
 from accelerate import Accelerator
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
@@ -18,7 +17,7 @@ from transformers.modeling_utils import PreTrainedModel
 
 from agilerl.algorithms.core import LLMAlgorithm, OptimizerWrapper
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.typing import ExperiencesType, OptimizerType
+from agilerl.typing import ExperiencesType
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     create_warmup_cosine_scheduler,
@@ -589,23 +588,6 @@ class GRPO(LLMAlgorithm):
         if self.lr_scheduler is not None:
             self.lr_scheduler.step()
             self.lr = self.lr_scheduler.get_last_lr()[0]
-
-    def _select_optim_class(self) -> Union[Type[OptimizerType], Type[_DummyOptimizer]]:
-        """Select the optimizer class based on the accelerator and deepspeed config.
-
-        :return: Optimizer class
-        :rtype: Union[Type[torch.optim.Optimizer], Type[_DummyOptimizer]]
-        """
-        if self.accelerator is None:
-            return optim.AdamW
-        if (
-            self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
-                "optimizer", None
-            )
-            is not None
-        ):
-            return _DummyOptimizer
-        return optim.AdamW
 
     def set_reference_policy(self, reference_update_tracker: int) -> None:
         """Update the reference policy when the reference policy update tracker is greater than the current reference policy update tracker.

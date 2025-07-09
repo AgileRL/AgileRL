@@ -33,6 +33,7 @@ from gymnasium import spaces
 from numpy.typing import ArrayLike
 from tensordict import TensorDict
 from torch._dynamo import OptimizedModule
+from torch.optim import AdamW
 from torch.optim.lr_scheduler import SequentialLR
 
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
@@ -64,6 +65,7 @@ from agilerl.typing import (
     MultiAgentSetup,
     NetConfigType,
     ObservationType,
+    OptimizerType,
     TorchObsType,
 )
 from agilerl.utils.algo_utils import (
@@ -87,6 +89,7 @@ from agilerl.utils.evolvable_networks import (
     is_image_space,
     is_vector_space,
 )
+from agilerl.utils.llm_utils import _DummyOptimizer
 
 __all__ = ["EvolvableAlgorithm", "RLAlgorithm", "MultiAgentRLAlgorithm"]
 
@@ -137,6 +140,9 @@ def get_checkpoint_dict(agent: SelfEvolvableAlgorithm) -> Dict[str, Any]:
         elif isinstance(evolvable_obj, (OptimizedModule, EvolvableModule)):
             module_chkpt = module_checkpoint_dict(evolvable_obj, attr)
             network_info["modules"].update(module_chkpt)
+
+        elif isinstance(evolvable_obj, DeepSpeedOptimizerWrapper):
+            pass
 
         else:
             raise TypeError(
@@ -1758,10 +1764,13 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :param path: Location to save checkpoint at
         :type path: string
         """
-        raise NotImplementedError(
-            "The save_checkpoint method is not supported for this algorithm class. "
-            "Please use agent.actor.save_pretrained(checkpoint_path) instead."
-        )
+        # Save the actor
+        self._save_distributed_actor(path, tag="save_checkpoint")
+        attribute_dict = EvolvableAlgorithm.inspect_attributes(self)
+
+        attribute_dict.pop("actor")
+        attribute_dict.pop("accelerator")
+        torch.save(attribute_dict, path + "/attributes.pt")
 
     def load_checkpoint(self, path: str) -> None:
         """
@@ -1770,23 +1779,44 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :param path: Location to load checkpoint from
         :type path: string
         """
-        raise NotImplementedError(
-            "The load_checkpoint method is not supported for this algorithm class."
-            """
-            To load a saved LLM, please load the model as follows, and then re-instantiate the GRPO
-            class.
+        self._load_distributed_actor(path, tag="save_checkpoint")
 
-            base_model = AutoModelForCausalLM.from_pretrained(
-                "Qwen/Qwen2.5-3B",
-                torch_dtype=torch.bfloat16,
-                device_map="auto"
-            )
-            tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B")
-            model = PeftModel.from_pretrained(base_model, "/path/to/adapter/folder")
-            """
+        attribute_dict = torch.load(path + "/attributes.pt", weights_only=False)
+
+        for attr, value in attribute_dict.items():
+            setattr(self, attr, value)
+
+        self.optimizer, self.accelerator = None, None
+        self.accelerator = Accelerator()
+        self.optimizer = OptimizerWrapper(
+            self._select_optim_class(),
+            networks=[self.actor],
+            network_names=["actor"],
+            lr=self.lr,
+            lr_name="lr",
         )
+        self.wrap_models()
 
-    def _save_distributed_actor(self, path: str) -> None:
+    def _select_optim_class(self) -> Union[Type[OptimizerType], Type[_DummyOptimizer]]:
+        """Select the optimizer class based on the accelerator and deepspeed config.
+
+        :return: Optimizer class
+        :rtype: Union[Type[torch.optim.Optimizer], Type[_DummyOptimizer]]
+        """
+        if self.accelerator is None:
+            return AdamW
+        if (
+            self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
+                "optimizer", None
+            )
+            is not None
+        ):
+            return _DummyOptimizer
+        return AdamW
+
+    def _save_distributed_actor(
+        self, path: str, tag: str = "intermediate_checkpoint"
+    ) -> None:
         """
         Override the save_checkpoint method to provide guidance on the correct method to use.
 
@@ -1795,14 +1825,16 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """
         if self.accelerator is not None:
             os.makedirs(path, exist_ok=True)
-            self.actor.save_checkpoint(path, tag="checkpoint")
+            self.actor.save_checkpoint(path, tag=tag)
             self.actor.set_adapter("actor")
         else:
             warnings.warn(
                 "Distributed actor save not supported for non-distributed training."
             )
 
-    def _load_distributed_actor(self, path: str) -> None:
+    def _load_distributed_actor(
+        self, path: str, tag: str = "intermediate_checkpoint"
+    ) -> None:
         """
         Override the load_checkpoint method to provide guidance on the correct method to use.
 
@@ -1810,12 +1842,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :type path: str
         """
         if self.accelerator is not None:
-            deepspeed_dirs = sorted(glob.glob(f"{path}/checkpoint"))
+            deepspeed_dirs = sorted(glob.glob(f"{path}/{tag}"))
             try:
                 assert len(deepspeed_dirs) > 0
                 load_path, _ = self.actor.load_checkpoint(
                     path,
-                    tag="checkpoint",
+                    tag=tag,
                     load_module_strict=False,
                     load_optimizer_states=True,
                     load_lr_scheduler_states=True,
@@ -1863,7 +1895,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if self.accelerator is not None:
             opt = (
                 self.optimizer.optimizer
-                if self.optimizer.optimizer_cls == torch.optim.AdamW
+                if self.optimizer.optimizer_cls == AdamW
                 else self.optimizer
             )
             self.actor, self.optimizer, self.lr_scheduler = self.accelerator.prepare(
