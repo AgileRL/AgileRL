@@ -11,6 +11,7 @@ from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from gymnasium import spaces
 from peft import LoraConfig, PeftModel, get_peft_model
+from torch import optim
 from torch.nn.utils import clip_grad_norm_
 from transformers import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
@@ -24,7 +25,7 @@ from agilerl.utils.algo_utils import (
     get_experiences_samples,
     stack_and_pad_experiences,
 )
-from agilerl.utils.llm_utils import HuggingFaceGym, _DummyOptimizer
+from agilerl.utils.llm_utils import DummyOptimizer, HuggingFaceGym
 
 DeepSpeedOptimizerType = Union[
     DeepSpeedZeroOptimizer,  # ZeRO Stage 1 & 2 optimizer
@@ -209,7 +210,6 @@ class GRPO(LLMAlgorithm):
             min_new_tokens=min_output_tokens,
             pad_token_id=pad_token_id,
         )
-        self.optimizer = None  # Initialize optimizer to None, will be set in _initialize_actors if not defined in deepspeed config
         if lora_config is None:
             warnings.warn(
                 "No LoRA config provided. Using default LoRA configuration for RL finetuning."
@@ -400,7 +400,7 @@ class GRPO(LLMAlgorithm):
                 base_model.delete_adapter(adapter)
             base_model = base_model.model
 
-        self.actor = (
+        self.actor: PeftModel = (
             get_peft_model(base_model, self.lora_config, adapter_name="actor")
             if add_adapters
             else base_model
@@ -408,8 +408,8 @@ class GRPO(LLMAlgorithm):
 
         if self.use_separate_reference_adapter and add_adapters:
             self.actor.add_adapter(
-                adapter_name="reference", peft_config=self.lora_config
-            )
+                adapter_name="reference", peft_config=self.lora_config  # type: ignore
+            )  # type: ignore
         self.actor.set_adapter("actor")
 
         optim_class = self._select_optim_class()
@@ -420,7 +420,7 @@ class GRPO(LLMAlgorithm):
             create_warmup_cosine_scheduler(
                 (
                     self.optimizer.optimizer
-                    if self.optimizer.optimizer_cls != _DummyOptimizer
+                    if self.optimizer.optimizer_cls != DummyOptimizer
                     else self.actor.optimizer
                 ),
                 self.cosine_lr_schedule_config,
@@ -576,7 +576,7 @@ class GRPO(LLMAlgorithm):
         """
         if self.accelerator is not None:
             self.accelerator.backward(loss)
-            if not isinstance(self.optimizer.optimizer, _DummyOptimizer):
+            if isinstance(self.optimizer.optimizer, optim.AdamW):
                 # Accelerate handles optimizer step and zero grad if optimizer is defined in deepspeed config
                 self.optimizer.step()
                 self.optimizer.zero_grad()

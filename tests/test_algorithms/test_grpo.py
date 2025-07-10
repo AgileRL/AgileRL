@@ -13,7 +13,6 @@ from accelerate import Accelerator
 from accelerate.scheduler import AcceleratedScheduler
 from accelerate.state import AcceleratorState
 from accelerate.utils import DeepSpeedPlugin
-from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from peft import (
@@ -30,7 +29,7 @@ from transformers.modeling_utils import PreTrainedModel
 from agilerl.algorithms import GRPO
 from agilerl.algorithms.core.base import LLMAlgorithm, OptimizerWrapper
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, clone_llm
-from agilerl.utils.utils import _DummyOptimizer
+from agilerl.utils.utils import DummyOptimizer
 
 dist_env = dict(
     ACCELERATE_USE_DEEPSPEED="true",
@@ -392,10 +391,10 @@ def test_init_grpo_with_accelerator(
             assert isinstance(
                 grpo.cosine_lr_schedule_config, CosineLRScheduleConfig
             ), type(grpo.cosine_lr_schedule_config)
-        assert isinstance(grpo.optimizer, DeepSpeedOptimizerWrapper)
+        assert isinstance(grpo.optimizer, OptimizerWrapper)
     else:
         assert isinstance(grpo.optimizer, OptimizerWrapper)
-        assert isinstance(grpo.optimizer.optimizer, _DummyOptimizer)
+        assert isinstance(grpo.optimizer.optimizer, DummyOptimizer)
         assert isinstance(grpo.actor.optimizer, DeepSpeedZeroOptimizer)
         assert grpo.lr_scheduler is None
         assert grpo.cosine_lr_schedule_config is None

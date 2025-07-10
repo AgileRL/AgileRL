@@ -7,12 +7,12 @@ import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl.algorithms import (
     CQN,
     DDPG,
@@ -34,7 +34,7 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules import EvolvableModule
 from agilerl.typing import GymSpaceType, PopulationType
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, clone_llm
-from agilerl.utils.llm_utils import _DummyOptimizer
+from agilerl.utils.llm_utils import DummyOptimizer
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 SupportedObservationSpace = Union[
@@ -895,6 +895,7 @@ def save_llm_checkpoint(agent: LLMAlgorithm, checkpoint_path: str | None) -> Non
     :param checkpoint_path: Checkpoint path
     :type checkpoint_path: str
     """
+    assert agent.actor is not None, "Actor is not initialized"
     base_path = "./saved_checkpoints" if checkpoint_path is None else checkpoint_path
     path = base_path + f"/{agent.algo}"
     os.makedirs(path, exist_ok=True)
@@ -906,7 +907,7 @@ def save_llm_checkpoint(agent: LLMAlgorithm, checkpoint_path: str | None) -> Non
         agent.actor.save_pretrained(path)
 
 
-def consolidate_mutations(population: PopulationType) -> None:
+def consolidate_mutations(population: list[LLMAlgorithm]) -> None:
     """Consolidate mutations across processes during LLM fintuning
 
     :param population: Population of agents
@@ -916,6 +917,7 @@ def consolidate_mutations(population: PopulationType) -> None:
         warnings.warn("Consolidate mutations is only supported for LLMAlgorithm.")
         return
     for agent in population:
+        assert agent.actor is not None, "Actor is not initialized"
         index, mut, mut_value = broadcast_object_list(
             [
                 agent.index,
@@ -930,7 +932,7 @@ def consolidate_mutations(population: PopulationType) -> None:
         if mut == "lr":
             opt = (
                 agent.optimizer
-                if not isinstance(agent.optimizer.optimizer, _DummyOptimizer)
+                if not isinstance(agent.optimizer.optimizer, DummyOptimizer)
                 else agent.actor.optimizer
             )
             agent.accelerator, agent.lr_scheduler = LLMAlgorithm.update_lr(

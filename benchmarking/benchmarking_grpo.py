@@ -161,6 +161,15 @@ def main(init_hp, mut_p):
         "synchronize_checkpoint_boundary": True,
         "number_checkpoints": 2,
     }
+    # accelerator.state.deepspeed_plugin.deepspeed_config["optimizer"] = {
+    #     "type": "Adam",
+    #     "params": {
+    #         "lr": 0.001,
+    #         "betas": [0.8, 0.999],
+    #         "eps": 1e-8,
+    #         "weight_decay": 3e-7,
+    #     },
+    # }
 
     env = HuggingFaceGym(
         train_dataset=train_dataset,
@@ -175,11 +184,11 @@ def main(init_hp, mut_p):
     init_hp["PAD_TOKEN_ID"] = tokenizer.eos_token_id
 
     hp_config = HyperparameterConfig(
-        beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),
+        # beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),
         lr=RLParameter(min=mut_p["MIN_LR"], max=mut_p["MAX_LR"]),
-        group_size=RLParameter(
-            min=mut_p["MIN_GROUP_SIZE"], max=mut_p["MAX_GROUP_SIZE"], dtype=int
-        ),
+        # group_size=RLParameter(
+        #     min=mut_p["MIN_GROUP_SIZE"], max=mut_p["MAX_GROUP_SIZE"], dtype=int
+        # ),
     )
     pop = create_population(
         algo=init_hp["ALGO"],
