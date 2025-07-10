@@ -217,6 +217,8 @@ class StochasticActor(EvolvableNetwork):
     :type action_std_init: float
     :param squash_output: Whether to squash the output to the action space.
     :type squash_output: bool
+    :param use_experimental_distribution: Whether to use the experimental distribution implementation.
+    :type use_experimental_distribution: bool
     :param latent_dim: Dimension of the latent space representation.
     :type latent_dim: int
     :param simba: Whether to use the SimBa architecture for training the network.
@@ -248,6 +250,7 @@ class StochasticActor(EvolvableNetwork):
         head_config: Optional[NetConfigType] = None,
         action_std_init: float = 0.0,
         squash_output: bool = False,
+        use_experimental_distribution: bool = False,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
         latent_dim: int = 32,
@@ -281,6 +284,7 @@ class StochasticActor(EvolvableNetwork):
         self.action_std_init = action_std_init
         self.squash_output = squash_output
         self.action_space = action_space
+        self.use_experimental_distribution = use_experimental_distribution
 
         self.build_network_head(head_config)
         self.output_activation = None
@@ -295,6 +299,13 @@ class StochasticActor(EvolvableNetwork):
             self.action_high = None
 
         # Wrap the network in an EvolvableDistribution
+        if use_experimental_distribution:
+            from agilerl.networks.distributions_experimental import (
+                EvolvableDistribution,
+            )
+        else:
+            from agilerl.networks.distributions import EvolvableDistribution
+
         self.head_net = EvolvableDistribution(
             action_space=action_space,
             network=self.head_net,
@@ -368,11 +379,7 @@ class StochasticActor(EvolvableNetwork):
         return self.head_net.entropy()
 
     def recreate_network(self) -> None:
-        """Recreates the network with the same parameters as the current network.
-
-        :param shrink_params: Whether to shrink the parameters of the network. Defaults to False.
-        :type shrink_params: bool
-        """
+        """Recreates the network with the same parameters as the current network."""
         self.recreate_encoder()
 
         head_net = self.create_mlp(

@@ -119,10 +119,11 @@ class EvolvableGPT(EvolvableModule):
         self.bias = bias
 
         self.transformer = self.build_networks()
-        self.transformer = self.transformer.to(self.device)
         self.transformer_keys = list(self.transformer.keys())
 
-        self.lm_head = nn.Linear(self.n_embd, self.vocab_size, bias=False)
+        self.lm_head = nn.Linear(
+            self.n_embd, self.vocab_size, bias=False, device=self.device
+        )
 
         self.transformer.wte.weight = self.lm_head.weight
 
@@ -195,11 +196,12 @@ class EvolvableGPT(EvolvableModule):
                     self.dim_feedfwd,
                     self.activation,
                     self.layer_norm_eps,
+                    device=self.device,
                 )
                 for _ in range(self.n_layer)
             ]
         )
-        net_dict["ln_f"] = LayerNorm(self.n_embd, bias=self.bias)
+        net_dict["ln_f"] = LayerNorm(self.n_embd, bias=self.bias, device=self.device)
         return nn.ModuleDict(net_dict)
 
     def forward(
@@ -265,6 +267,7 @@ class EvolvableGPT(EvolvableModule):
         # token embeddings of shape (b, t, n_embd)
         if tok_emb is None:
             tok_emb = self.transformer.wte(idx)
+
         # position embeddings of shape (1, t, n_embd)
         pos_emb = self.transformer.wpe(pos)
         x = self.transformer.drop(tok_emb + pos_emb)

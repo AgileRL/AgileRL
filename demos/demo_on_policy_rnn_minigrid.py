@@ -235,7 +235,6 @@ def run_demo():
         episode_steps = 0
         if recurrent:
             hidden_state = elite.get_initial_hidden_state(1)
-
         episode_frames = []
 
         while not done:
