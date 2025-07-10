@@ -14,6 +14,7 @@ from agilerl.algorithms.ppo import PPO
 from agilerl.components.rollout_buffer import RolloutBuffer
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
 from agilerl.rollouts import collect_rollouts, collect_rollouts_recurrent
+from agilerl.typing import BPTTSequenceType
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import assert_not_equal_state_dict, assert_state_dicts_equal
 
@@ -1357,9 +1358,37 @@ def test_ppo_with_hidden_states_multiple_envs_collect_rollouts_and_test():
 
 
 # Test PPO collect_rollouts method
-def test_ppo_collect_rollouts(vector_space, discrete_space):
-    observation_space = vector_space
-    action_space = discrete_space
+@pytest.mark.parametrize(
+    "observation_space",
+    [
+        "vector_space",
+        "image_space",
+        # "dict_space",
+    ],
+)
+@pytest.mark.parametrize(
+    "action_space",
+    [
+        "discrete_space",
+        "vector_space",
+        "multidiscrete_space",
+        "multibinary_space",
+    ],
+)
+@pytest.mark.parametrize(
+    "bptt_sequence_type",
+    [
+        BPTTSequenceType.CHUNKED,
+        BPTTSequenceType.MAXIMUM,
+        BPTTSequenceType.FIFTY_PERCENT_OVERLAP,
+    ],
+)
+def test_ppo_collect_rollouts(
+    observation_space, action_space, bptt_sequence_type, request
+):
+    observation_space = request.getfixturevalue(observation_space)
+    action_space = request.getfixturevalue(action_space)
+
     learn_step = 5
 
     ppo = PPO(
@@ -1368,6 +1397,7 @@ def test_ppo_collect_rollouts(vector_space, discrete_space):
         use_rollout_buffer=True,
         learn_step=learn_step,
         num_envs=1,  # Explicitly set num_envs for clarity
+        bptt_sequence_type=bptt_sequence_type,
     )
 
     env = DummyEnv(state_size=observation_space.shape, vect=True, num_envs=ppo.num_envs)

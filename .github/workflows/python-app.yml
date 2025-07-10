@@ -38,9 +38,6 @@ jobs:
             - name: Lint with ruff
               run: |
                   ruff check .
-            - name: Run isort
-              run: |
-                  isort . --profile black
             - name: Run pyupgrade
               run: |
                   pyupgrade --py38-plus
