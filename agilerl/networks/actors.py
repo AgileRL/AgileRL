@@ -7,7 +7,7 @@ from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.distributions import EvolvableDistribution
-from agilerl.typing import ArrayOrTensor, ConfigType, TorchObsType
+from agilerl.typing import ArrayOrTensor, NetConfigType, TorchObsType
 
 
 class DeterministicActor(EvolvableNetwork):
@@ -22,18 +22,15 @@ class DeterministicActor(EvolvableNetwork):
         automatically built using an AgileRL module according the observation space.
     :type encoder_cls: Optional[Union[str, Type[EvolvableModule]]]
     :param encoder_config: Configuration of the encoder network.
-    :type encoder_config: ConfigType
+    :type encoder_config: NetConfigType
     :param head_config: Configuration of the network MLP head.
-    :type head_config: Optional[ConfigType]
+    :type head_config: Optional[NetConfigType]
     :param clip_actions: Whether to clip the actions to the action space.
     :type clip_actions: bool
     :param min_latent_dim: Minimum dimension of the latent space representation.
     :type min_latent_dim: int
     :param max_latent_dim: Maximum dimension of the latent space representation.
     :type max_latent_dim: int
-    :param n_agents: Number of agents in the environment. Defaults to None, which corresponds to
-        single-agent environments.
-    :type n_agents: Optional[int]
     :param latent_dim: Dimension of the latent space representation.
     :type latent_dim: int
     :param simba: Whether to use the SimBa architecture for training the network.
@@ -42,6 +39,10 @@ class DeterministicActor(EvolvableNetwork):
     :type recurrent: bool
     :param device: Device to use for the network.
     :type device: str
+    :param random_seed: Random seed to use for the network. Defaults to None.
+    :type random_seed: Optional[int]
+    :param encoder_name: Name of the encoder network.
+    :type encoder_name: str
     """
 
     supported_spaces = (spaces.Box, spaces.Discrete)
@@ -51,16 +52,16 @@ class DeterministicActor(EvolvableNetwork):
         observation_space: spaces.Space,
         action_space: Union[spaces.Box, spaces.Discrete],
         encoder_cls: Optional[Union[str, Type[EvolvableModule]]] = None,
-        encoder_config: Optional[ConfigType] = None,
-        head_config: Optional[ConfigType] = None,
+        encoder_config: Optional[NetConfigType] = None,
+        head_config: Optional[NetConfigType] = None,
         clip_actions: bool = True,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
-        n_agents: Optional[int] = None,
         latent_dim: int = 32,
         simba: bool = False,
         recurrent: bool = False,
         device: str = "cpu",
+        random_seed: Optional[int] = None,
         encoder_name: str = "encoder",
     ):
         super().__init__(
@@ -70,14 +71,15 @@ class DeterministicActor(EvolvableNetwork):
             action_space=action_space,
             min_latent_dim=min_latent_dim,
             max_latent_dim=max_latent_dim,
-            n_agents=n_agents,
             latent_dim=latent_dim,
             simba=simba,
             recurrent=recurrent,
             device=device,
+            random_seed=random_seed,
             encoder_name=encoder_name,
         )
 
+        self.clip_actions = clip_actions
         if isinstance(action_space, spaces.Box):
             self.action_low = torch.as_tensor(action_space.low, device=self.device)
             self.action_high = torch.as_tensor(action_space.high, device=self.device)
@@ -86,7 +88,7 @@ class DeterministicActor(EvolvableNetwork):
             self.action_high = None
 
         # Set output activation based on action space
-        if isinstance(head_config, dict) and "output_activation" in head_config:
+        if head_config is not None and "output_activation" in head_config:
             output_activation = head_config["output_activation"]
         elif isinstance(action_space, spaces.Box):
             # Squash output by default if continuous action space
@@ -96,7 +98,6 @@ class DeterministicActor(EvolvableNetwork):
         else:
             output_activation = None
 
-        self.clip_actions = clip_actions
         if head_config is None:
             head_config = MlpNetConfig(
                 hidden_size=[32], output_activation=output_activation
@@ -146,7 +147,7 @@ class DeterministicActor(EvolvableNetwork):
 
         return rescaled_action
 
-    def build_network_head(self, net_config: Optional[ConfigType] = None) -> None:
+    def build_network_head(self, net_config: Optional[NetConfigType] = None) -> None:
         """Builds the head of the network.
 
         :param net_config: Configuration of the head.
@@ -209,16 +210,15 @@ class StochasticActor(EvolvableNetwork):
         automatically built using an AgileRL module according the observation space.
     :type encoder_cls: Optional[Union[str, Type[EvolvableModule]]]
     :param encoder_config: Configuration of the encoder network.
-    :type encoder_config: ConfigType
+    :type encoder_config: NetConfigType
     :param head_config: Configuration of the network MLP head.
-    :type head_config: Optional[ConfigType]
+    :type head_config: Optional[NetConfigType]
     :param action_std_init: Initial log standard deviation of the action distribution. Defaults to 0.0.
     :type action_std_init: float
     :param squash_output: Whether to squash the output to the action space.
     :type squash_output: bool
-    :param n_agents: Number of agents in the environment. Defaults to None, which corresponds to
-        single-agent environments.
-    :type n_agents: Optional[int]
+    :param use_experimental_distribution: Whether to use the experimental distribution implementation.
+    :type use_experimental_distribution: bool
     :param latent_dim: Dimension of the latent space representation.
     :type latent_dim: int
     :param simba: Whether to use the SimBa architecture for training the network.
@@ -227,6 +227,10 @@ class StochasticActor(EvolvableNetwork):
     :type recurrent: bool
     :param device: Device to use for the network.
     :type device: str
+    :param random_seed: Random seed to use for the network. Defaults to None.
+    :type random_seed: Optional[int]
+    :param encoder_name: Name of the encoder network.
+    :type encoder_name: str
     """
 
     head_net: EvolvableDistribution
@@ -242,17 +246,18 @@ class StochasticActor(EvolvableNetwork):
         observation_space: spaces.Space,
         action_space: spaces.Space,
         encoder_cls: Optional[Union[str, Type[EvolvableModule]]] = None,
-        encoder_config: Optional[ConfigType] = None,
-        head_config: Optional[ConfigType] = None,
+        encoder_config: Optional[NetConfigType] = None,
+        head_config: Optional[NetConfigType] = None,
         action_std_init: float = 0.0,
         squash_output: bool = False,
+        use_experimental_distribution: bool = False,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
-        n_agents: Optional[int] = None,
         latent_dim: int = 32,
         simba: bool = False,
         recurrent: bool = False,
         device: str = "cpu",
+        random_seed: Optional[int] = None,
         encoder_name: str = "encoder",
     ):
         super().__init__(
@@ -262,11 +267,11 @@ class StochasticActor(EvolvableNetwork):
             action_space=action_space,
             min_latent_dim=min_latent_dim,
             max_latent_dim=max_latent_dim,
-            n_agents=n_agents,
             latent_dim=latent_dim,
             simba=simba,
             recurrent=recurrent,
             device=device,
+            random_seed=random_seed,
             encoder_name=encoder_name,
         )
 
@@ -279,6 +284,7 @@ class StochasticActor(EvolvableNetwork):
         self.action_std_init = action_std_init
         self.squash_output = squash_output
         self.action_space = action_space
+        self.use_experimental_distribution = use_experimental_distribution
 
         self.build_network_head(head_config)
         self.output_activation = None
@@ -293,6 +299,13 @@ class StochasticActor(EvolvableNetwork):
             self.action_high = None
 
         # Wrap the network in an EvolvableDistribution
+        if use_experimental_distribution:
+            from agilerl.networks.distributions_experimental import (
+                EvolvableDistribution,
+            )
+        else:
+            from agilerl.networks.distributions import EvolvableDistribution
+
         self.head_net = EvolvableDistribution(
             action_space=action_space,
             network=self.head_net,
@@ -301,7 +314,7 @@ class StochasticActor(EvolvableNetwork):
             device=device,
         )
 
-    def build_network_head(self, net_config: Optional[ConfigType] = None) -> None:
+    def build_network_head(self, net_config: Optional[NetConfigType] = None) -> None:
         """Builds the head of the network.
 
         :param net_config: Configuration of the head.
@@ -366,11 +379,7 @@ class StochasticActor(EvolvableNetwork):
         return self.head_net.entropy()
 
     def recreate_network(self) -> None:
-        """Recreates the network with the same parameters as the current network.
-
-        :param shrink_params: Whether to shrink the parameters of the network. Defaults to False.
-        :type shrink_params: bool
-        """
+        """Recreates the network with the same parameters as the current network."""
         self.recreate_encoder()
 
         head_net = self.create_mlp(

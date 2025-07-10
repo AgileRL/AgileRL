@@ -3,18 +3,16 @@
 Proximal Policy Optimization (PPO)
 =========================================
 
-PPO is a policy gradient method that uses a clipped objective to constrain policy updates.
-It aims to combine the stability of Trust Region Policy Optimization (TRPO) with the simplicity
-and scalability of vanilla policy gradients, effectively maintaining a balance between exploration
-and exploitation. PPO is an on-policy algorithm.
+`PPO <https://arxiv.org/abs/1707.06347v2>`_ is an on-policy policy gradient algorithm that uses a clipped objective to constrain policy updates.
+It aims to combine the stability of `Trust Region Policy Optimization (TRPO) <https://arxiv.org/abs/1502.05477>`_ with the simplicity
+and scalability of vanilla policy gradients, effectively maintaining a balance between exploration and exploitation.
 
-* PPO paper: https://arxiv.org/abs/1707.06347v2
+AgileRL offers support for recurrent policies in PPO to solve Partially Observable Markov Decision Processes (POMDPs). For more information, please
+refer to the :ref:`Partially Observable Markov Decision Processes (POMDPs) <pomdp>` documentation, or our tutorial on solving ``Pendulum-v1`` with masked
+angular velocity observations :ref:`here <agilerl_recurrent_ppo_tutorial>`.
 
-Can I use it?
--------------
-
-Action Space
-^^^^^^^^^^^^
+Compatible Action Spaces
+------------------------
 
 .. list-table::
    :widths: 20 20 20 20
@@ -29,33 +27,37 @@ Action Space
      - ✔️
      - ✔️
 
-Example
-------------
+LunarLanderContinuous-v3 Example
+---------------------------------
 
 .. code-block:: python
 
-  import gymnasium as gym
   import numpy as np
+  from gymnasium import spaces
+  from tqdm import tqdm
 
-  from agilerl.utils.algo_utils import obs_channels_to_first
-  from agilerl.utils.utils import make_vect_envs, observation_space_channels_first
+  from agilerl.utils.utils import make_vect_envs
   from agilerl.algorithms.ppo import PPO
 
   # Create environment
-  num_envs = 1
+  num_envs = 16
+  max_steps = 100000
   env = make_vect_envs('LunarLanderContinuous-v3', num_envs=num_envs)
-  observation_space = env.observation_space
-  action_space = env.action_space
+  observation_space = env.single_observation_space
+  action_space = env.single_action_space
 
-  channels_last = False # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
+  # Create PPO agent
+  agent = PPO(
+      observation_space,
+      action_space,
+      lr=1e-3,
+      batch_size=128,
+      learn_step=2048
+  )
 
-  if channels_last:
-      observation_space = observation_space_channels_first(observation_space)
-
-  agent = PPO(observation_space, action_space)   # Create PPO agent
-
+  pbar = tqdm(total=max_steps)
   while True:
-      states = []
+      observations = []
       actions = []
       log_probs = []
       rewards = []
@@ -63,13 +65,11 @@ Example
       values = []
 
       done = np.zeros(num_envs)
-
-      for step in range(agent.learn_step):
-          if channels_last:
-              state = obs_channels_to_first(state)
-
+      obs, info = env.reset()
+      agent.set_training_mode(True)
+      for _ in range(-(agent.learn_step // -num_envs)):
           # Get next action from agent
-          action, log_prob, _, value = agent.get_action(state)
+          action, log_prob, _, value = agent.get_action(obs)
 
           # Clip to action space
           if isinstance(agent.action_space, spaces.Box):
@@ -80,38 +80,40 @@ Example
           else:
               clipped_action = action
 
-          next_state, reward, term, trunc, _ = env.step(clipped_action)  # Act in environment
+          next_obs, reward, term, trunc, _ = env.step(clipped_action)  # Act in environment
           next_done = np.logical_or(term, trunc).astype(np.int8)
 
-          states.append(state)
+          observations.append(obs)
           actions.append(action)
           log_probs.append(log_prob)
           rewards.append(reward)
           dones.append(done)
           values.append(value)
 
-          state = next_state
+          obs = next_obs
           done = next_done
 
       experiences = (
-          states,
+          observations,
           actions,
           log_probs,
           rewards,
           dones,
           values,
-          next_state,
+          next_obs,
           next_done,
       )
-      # Learn according to agent's RL algorithm
-      agent.learn(experiences)
+      agent.learn(experiences)    # Learn according to agent's RL algorithm
+
+      pbar.update(agent.learn_step)
+      pbar.set_description(f"Score: {np.mean(np.sum(rewards, axis=0))}")
 
 Neural Network Configuration
 ----------------------------
 
 To configure the architecture of the network's encoder / head, pass a kwargs dict to the PPO ``net_config`` field.
-Full arguments can be found in the documentation of :ref:`EvolvableMLP<mlp>`, :ref:`EvolvableCNN<cnn>`, and
-:ref:`EvolvableMultiInput<multi_input>`.
+Full arguments can be found in the documentation of :ref:`EvolvableMLP<mlp>`, :ref:`EvolvableCNN<cnn>`,
+:ref:`EvolvableMultiInput<multi_input>`, and :ref:`EvolvableLSTM<lstm>`.
 
 For discrete / vector observations:
 
@@ -158,6 +160,22 @@ For dictionary / tuple observations containing any combination of image, discret
       },
       "head_config": {'hidden_size': [32]}  # Network head hidden size
     }
+
+For recurrent observations:
+
+.. code-block:: python
+
+  NET_CONFIG = {
+    "encoder_config": {
+      "hidden_state_size": 64,
+      "num_layers": 1,
+      "max_seq_len": 512,
+    },
+    "head_config": {
+      "hidden_size": [64],
+    }
+  }
+
 .. code-block:: python
 
   # Create PPO agent
@@ -173,7 +191,7 @@ Evolutionary Hyperparameter Optimization
 AgileRL allows for efficient hyperparameter optimization during training to provide state-of-the-art results in a fraction of the time.
 For more information on how this is done, please refer to the :ref:`Evolutionary Hyperparameter Optimization <evo_hyperparam_opt>` documentation.
 
-Saving and loading agents
+Saving and Loading Agents
 -------------------------
 
 To save an agent, use the ``save_checkpoint`` method:

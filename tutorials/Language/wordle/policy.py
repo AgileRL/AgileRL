@@ -4,11 +4,11 @@ from collections import defaultdict
 from typing import List, Optional, Union
 
 from tqdm.auto import tqdm
-from wordle.wordle_env import WordleObservation
-from wordle.wordle_game import Vocabulary
 
 from agilerl.data.language_environment import Policy
 from agilerl.utils.cache import Cache
+from wordle.wordle_env import WordleObservation
+from wordle.wordle_game import Vocabulary
 
 
 class UserPolicy(Policy):

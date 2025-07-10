@@ -9,14 +9,12 @@ from gymnasium import spaces
 from tensordict import TensorDict
 from torch.nn.utils import clip_grad_norm_
 
-from agilerl.algorithms.core import RLAlgorithm
+from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.components.rollout_buffer import RolloutBuffer
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
-from agilerl.networks.actors import StochasticActor
-from agilerl.networks.base import EvolvableNetwork
+from agilerl.networks import EvolvableNetwork, StochasticActor
 from agilerl.networks.value_networks import ValueNetwork
 from agilerl.typing import ArrayOrTensor, BPTTSequenceType, ExperiencesType, GymEnvType
 from agilerl.utils.algo_utils import (
@@ -323,8 +321,10 @@ class PPO(RLAlgorithm):
             self.wrap_models()
 
         # Register network groups for mutations
-        self.register_network_group(NetworkGroup(eval=self.actor, policy=True))
-        self.register_network_group(NetworkGroup(eval=self.critic))
+        self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
+        self.register_network_group(NetworkGroup(eval_network=self.critic))
+
+        self.hidden_state = None
 
         self.hidden_state = None
 
@@ -547,11 +547,6 @@ class PPO(RLAlgorithm):
         # Use -log_prob as entropy when squashing output in continuous action spaces
         entropy = -log_prob.mean() if entropy is None else entropy
 
-        if isinstance(self.action_space, spaces.Box) and self.action_space.shape == (
-            1,
-        ):
-            action = action.unsqueeze(1)
-
         # Clip to action space during inference
         action_np = action.cpu().data.numpy()
         if not self.training and isinstance(self.action_space, spaces.Box):
@@ -628,13 +623,13 @@ class PPO(RLAlgorithm):
 
         # Not self.use_rollout_buffer
         (
-            states,
+            observations,
             actions,
             log_probs,
             rewards,
             dones,
             values,
-            next_state,
+            next_obs,
             next_done,
         ) = stack_experiences(*experiences)
 
@@ -642,8 +637,8 @@ class PPO(RLAlgorithm):
         dones = dones.long()
         with torch.no_grad():
             num_steps = rewards.size(0)
-            next_state = self.preprocess_observation(next_state)
-            next_value = self.critic(next_state).reshape(1, -1).cpu()
+            next_obs = self.preprocess_observation(next_obs)
+            next_value = self.critic(next_obs).reshape(1, -1).cpu()
             advantages = torch.zeros_like(rewards).float()
             last_gae_lambda = 0
             for t in reversed(range(num_steps)):
@@ -669,7 +664,7 @@ class PPO(RLAlgorithm):
 
         # Flatten experiences from (batch_size, num_envs, ...) to (batch_size*num_envs, ...)
         # after checking if experiences are vectorized
-        experiences = (states, actions, log_probs, advantages, returns, values)
+        experiences = (observations, actions, log_probs, advantages, returns, values)
         if is_vectorized_experiences(*experiences):
             experiences = flatten_experiences(*experiences)
 
@@ -685,7 +680,7 @@ class PPO(RLAlgorithm):
             for start in range(0, num_samples, self.batch_size):
                 minibatch_idxs = batch_idxs[start : start + self.batch_size]
                 (
-                    batch_states,
+                    batch_observations,
                     batch_actions,
                     batch_log_probs,
                     batch_advantages,
@@ -701,7 +696,7 @@ class PPO(RLAlgorithm):
 
                 if len(minibatch_idxs) > 1:
                     log_prob, entropy, value = self.evaluate_actions(
-                        obs=batch_states, actions=batch_actions
+                        obs=batch_observations, actions=batch_actions
                     )
 
                     logratio = log_prob - batch_log_probs

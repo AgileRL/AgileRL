@@ -22,13 +22,12 @@ INIT_HP:
     UPDATE_EPOCHS: 4           # Number of policy update epochs
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
-    POP_SIZE: 1                # Population size
+    POP_SIZE: 4                # Population size
     EVO_STEPS: 10_000          # Evolution frequency
     EVAL_STEPS:                # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
     WANDB: true                # Log with Weights and Biases
     TORCH_COMPILE: default
-
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation
@@ -55,8 +54,8 @@ NET_CONFIG:
 
     encoder_config:
         hidden_size: [64]
-        activation: Tanh
-        min_mlp_nodes: 16
+        activation: ReLU
+        min_mlp_nodes: 32
         max_mlp_nodes: 500
         layer_norm: true
         # channel_size: [32, 16]
@@ -69,8 +68,8 @@ NET_CONFIG:
         activation: ReLU
         output_activation:
         min_hidden_layers: 1
-        max_hidden_layers: 2
-        min_mlp_nodes: 16
+        max_hidden_layers: 3
+        min_mlp_nodes: 32
         max_mlp_nodes: 256
         output_vanish: false
         layer_norm: true

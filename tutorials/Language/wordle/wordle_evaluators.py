@@ -2,12 +2,11 @@ import random
 from collections import defaultdict
 from typing import Any, Dict, Optional
 
+from agilerl.algorithms.ilql import ILQL
+from agilerl.data.rl_data import DataPoint
 from wordle.wordle_dataset import WordleListDataset
 from wordle.wordle_env import WordleObservation
 from wordle.wordle_game import N_CHARS, WordleGame
-
-from agilerl.algorithms.ilql import ILQL
-from agilerl.data.rl_data import DataPoint
 
 
 class Action_Ranking_Evaluator:

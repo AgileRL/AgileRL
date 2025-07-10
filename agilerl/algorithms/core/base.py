@@ -6,6 +6,8 @@ import os
 import tempfile
 import warnings
 from abc import ABC, ABCMeta, abstractmethod
+from collections import OrderedDict, defaultdict
+from dataclasses import asdict
 from importlib.metadata import version
 from typing import (
     Any,
@@ -20,7 +22,6 @@ from typing import (
     Union,
 )
 
-import deepspeed
 import dill
 import numpy as np
 import torch
@@ -28,24 +29,28 @@ from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
-from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
 from gymnasium import spaces
 from numpy.typing import ArrayLike
 from tensordict import TensorDict
 from torch._dynamo import OptimizedModule
+from torch.optim.lr_scheduler import SequentialLR
 
+from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
     MutationRegistry,
     NetworkGroup,
     OptimizerConfig,
 )
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
+from agilerl.modules.configs import (
+    MlpNetConfig,
+)
 from agilerl.protocols import (
     AgentWrapper,
     EvolvableAttributeDict,
     EvolvableAttributeType,
     EvolvableModule,
+    ModuleDict,
 )
 from agilerl.typing import (
     ActionType,
@@ -54,29 +59,40 @@ from agilerl.typing import (
     ExperiencesType,
     GymSpaceType,
     InfosDict,
+    ModuleType,
+    MultiAgentObservationType,
+    MultiAgentSetup,
+    NetConfigType,
     ObservationType,
     TorchObsType,
 )
 from agilerl.utils.algo_utils import (
-    assert_supported_space,
+    CosineLRScheduleConfig,
     chkpt_attribute_to_device,
     clone_llm,
-    compile_model,
-    is_module_list,
+    create_warmup_cosine_scheduler,
     isroutine,
     key_in_nested_dict,
+    module_checkpoint_dict,
     preprocess_observation,
     recursive_check_module_attrs,
-    remove_compile_prefix,
+    stack_experiences,
 )
-from agilerl.utils.evolvable_networks import is_image_space
+from agilerl.utils.evolvable_networks import (
+    compile_model,
+    config_from_dict,
+    get_default_encoder_config,
+    get_input_size_from_space,
+    get_output_size_from_space,
+    is_image_space,
+    is_vector_space,
+)
 
 __all__ = ["EvolvableAlgorithm", "RLAlgorithm", "MultiAgentRLAlgorithm"]
 
 SelfEvolvableAlgorithm = TypeVar("SelfEvolvableAlgorithm", bound="EvolvableAlgorithm")
 SelfRLAlgorithm = TypeVar("SelfRLAlgorithm", bound="RLAlgorithm")
 SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound="AgentWrapper")
-MARLObservationType = Dict[str, ObservationType]
 
 
 class _RegistryMeta(type):
@@ -110,55 +126,22 @@ def get_checkpoint_dict(agent: SelfEvolvableAlgorithm) -> Dict[str, Any]:
     """
     attribute_dict = EvolvableAlgorithm.inspect_attributes(agent)
 
-    # Extract info on evolvable modules and optimizers in the algorithm
+    # Get checkpoint dictionaries for evolvable modules and optimizers
     network_info: Dict[str, Dict[str, Any]] = {"modules": {}, "optimizers": {}}
     for attr in agent.evolvable_attributes():
-        obj: EvolvableAttributeType = getattr(agent, attr)
-        if isinstance(obj, OptimizerWrapper):
-            network_info["optimizers"].update(
-                {
-                    f"{attr}_cls": obj.optimizer_cls.__name__,
-                    f"{attr}_state_dict": obj.state_dict(),
-                    f"{attr}_networks": obj.network_names,
-                    f"{attr}_lr": obj.lr_name,
-                    f"{attr}_kwargs": obj.optimizer_kwargs,
-                    f"{attr}_multiagent": obj.multiagent,
-                }
-            )
-        elif isinstance(obj, (OptimizedModule, EvolvableModule)) or is_module_list(obj):
-            if is_module_list(obj):
-                obj_list = obj
-                obj_cls = [
-                    (
-                        m._orig_mod.__class__
-                        if isinstance(m, OptimizedModule)
-                        else m.__class__
-                    )
-                    for m in obj_list
-                ]
-                init_dict = [m.init_dict for m in obj_list]
-                state_dict = [remove_compile_prefix(m.state_dict()) for m in obj_list]
-            else:
-                obj_list = [obj]
-                obj_cls = (
-                    obj._orig_mod.__class__
-                    if isinstance(obj, OptimizedModule)
-                    else obj.__class__
-                )
-                init_dict = obj.init_dict
-                state_dict = remove_compile_prefix(obj.state_dict())
+        evolvable_obj: EvolvableAttributeType = getattr(agent, attr)
+        if isinstance(evolvable_obj, OptimizerWrapper):
+            optimizer_chkpt = evolvable_obj.checkpoint_dict(attr)
+            network_info["optimizers"].update(optimizer_chkpt)
 
-            network_info["modules"].update(
-                {
-                    f"{attr}_cls": obj_cls,
-                    f"{attr}_init_dict": init_dict,
-                    f"{attr}_state_dict": state_dict,
-                }
-            )
+        elif isinstance(evolvable_obj, (OptimizedModule, EvolvableModule)):
+            module_chkpt = module_checkpoint_dict(evolvable_obj, attr)
+            network_info["modules"].update(module_chkpt)
+
         else:
             raise TypeError(
-                f"Something went wrong. Identified '{attr}' as an evolvable module "
-                f"when it is of type {type(obj)}."
+                f"Something went wrong. Identified '{attr}' as an evolvable module or "
+                f"optimizer when it is of type {type(evolvable_obj)}."
             )
 
     network_attr_names = [
@@ -175,9 +158,32 @@ def get_checkpoint_dict(agent: SelfEvolvableAlgorithm) -> Dict[str, Any]:
     attribute_dict["network_info"] = network_info
     attribute_dict["agilerl_version"] = version("agilerl")
     attribute_dict.pop("accelerator", None)
+
     if attribute_dict.pop("lr_scheduler", None) is not None:
         attribute_dict["lr_scheduler"] = agent.lr_scheduler.state_dict()
+
     return attribute_dict
+
+
+def get_optimizer_cls(
+    optimizer_cls: Union[str, Dict[str, str]],
+) -> Union[Type[torch.optim.Optimizer], Dict[str, Type[torch.optim.Optimizer]]]:
+    """Returns the optimizer class from the string or dictionary of optimizer classes.
+
+    :param optimizer_cls: The optimizer class or dictionary of optimizer classes.
+    :type optimizer_cls: Union[str, Dict[str, str]]
+    :return: The optimizer class or dictionary of optimizer classes.
+    :rtype: Union[Type[torch.optim.Optimizer], Dict[str, Type[torch.optim.Optimizer]]]
+    """
+    if isinstance(optimizer_cls, dict):
+        optimizer_cls = {
+            agent_id: getattr(torch.optim, optimizer_cls[agent_id])
+            for agent_id in optimizer_cls.keys()
+        }
+    else:
+        optimizer_cls = getattr(torch.optim, optimizer_cls)
+
+    return optimizer_cls
 
 
 class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
@@ -272,9 +278,18 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
     @abstractmethod
     def get_action(
-        self, obs: Union[ObservationType, MARLObservationType], *args, **kwargs
+        self, obs: Union[ObservationType, MultiAgentObservationType], *args, **kwargs
     ) -> ActionType:
-        """Abstract method for getting an action from the algorithm."""
+        """Abstract method for getting an action from the algorithm.
+
+        :param obs: The observation to get an action for.
+        :type obs: Union[ObservationType, MultiAgentObservationType]
+        :param args: Additional arguments to pass to the action function.
+        :type args: Any
+        :param kwargs: Additional keyword arguments to pass to the action function.
+        :type kwargs: Any
+        :return: The action to take.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -291,33 +306,16 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :type observation_space: spaces.Space or List[spaces.Space].
 
         :return: The dimension of the state space.
-        :rtype: Tuple[int, ...]."""
-        if isinstance(observation_space, (list, tuple, spaces.Tuple)):
-            assert_supported_space(observation_space)
-            return tuple(
-                EvolvableAlgorithm.get_state_dim(space) for space in observation_space
-            )
-        elif isinstance(observation_space, spaces.Dict):
-            assert_supported_space(observation_space)
-            return {
-                key: EvolvableAlgorithm.get_state_dim(subspace)
-                for key, subspace in observation_space.spaces.items()
-            }
-        elif isinstance(observation_space, spaces.Discrete):
-            return (observation_space.n,)
-        elif isinstance(observation_space, spaces.MultiDiscrete):
-            return (sum(observation_space.nvec),)
-        elif isinstance(observation_space, spaces.Box):
-            return observation_space.shape
-        elif isinstance(observation_space, spaces.MultiBinary):
-            return (observation_space.n,)
-        else:
-            raise AttributeError(
-                f"Can't access state dimensions for {type(observation_space)} spaces."
-            )
+        :rtype: Tuple[int, ...].
+        """
+        warnings.warn(
+            "This method is deprecated. Use get_input_size_from_space instead.",
+            category=DeprecationWarning,
+        )
+        return get_input_size_from_space(observation_space)
 
     @staticmethod
-    def get_action_dim(action_space: GymSpaceType) -> int:
+    def get_action_dim(action_space: GymSpaceType) -> Tuple[int, ...]:
         """Returns the dimension of the action space as it pertains to the underlying
         networks (i.e. the output size of the networks).
 
@@ -327,24 +325,11 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :return: The dimension of the action space.
         :rtype: int.
         """
-        if isinstance(action_space, (list, tuple)):
-            return tuple(
-                EvolvableAlgorithm.get_action_dim(space) for space in action_space
-            )
-        elif isinstance(action_space, spaces.MultiBinary):
-            return action_space.n
-        elif isinstance(action_space, spaces.Discrete):
-            return action_space.n
-        elif isinstance(action_space, spaces.MultiDiscrete):
-            return sum(action_space.nvec)
-        elif isinstance(action_space, spaces.Box):
-            # NOTE: Here we assume the action space only has one dimension
-            #       (i.e. the actions correspond to a one-dimensional vector)
-            return action_space.shape[0]
-        else:
-            raise AttributeError(
-                f"Can't access action dimensions for {type(action_space)} spaces."
-            )
+        warnings.warn(
+            "This method is deprecated. Use get_output_size_from_space instead.",
+            category=DeprecationWarning,
+        )
+        return get_output_size_from_space(action_space)
 
     @staticmethod
     def inspect_attributes(
@@ -493,7 +478,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 lr=value.lr_name,
                 optimizer_cls=value.optimizer_cls,
                 optimizer_kwargs=value.optimizer_kwargs,
-                multiagent=value.multiagent,
             )
             self.registry.register_optimizer(config)
 
@@ -541,18 +525,21 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                         "not been set as an attribute in the algorithm."
                     )
 
-    def _wrap_attr(self, attr: EvolvableAttributeType) -> EvolvableModule:
+    def _wrap_attr(self, attr: EvolvableAttributeType) -> EvolvableAttributeType:
         """Wraps the model with the accelerator.
 
         :param attr: The attribute to wrap.
         :type attr: EvolvableAttributeType
 
         :return: The wrapped attribute.
-        :rtype: EvolvableModule
+        :rtype: EvolvableAttributeType
         """
         if isinstance(attr, OptimizerWrapper):
-            if isinstance(attr.optimizer, list):
-                wrapped_opt = [self.accelerator.prepare(opt) for opt in attr.optimizer]
+            if isinstance(attr.optimizer, dict):
+                wrapped_opt = {
+                    agent_id: self.accelerator.prepare(opt)
+                    for agent_id, opt in attr.optimizer.items()
+                }
             else:
                 wrapped_opt = self.accelerator.prepare(attr.optimizer)
 
@@ -600,7 +587,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         """Returns the policy network of the algorithm."""
         for group in self.registry.groups:
             if group.policy:
-                return getattr(self, group.eval)
+                return getattr(self, group.eval_network)
 
         raise AttributeError(
             "No policy network has been registered with the algorithm."
@@ -609,14 +596,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
     def recompile(self) -> None:
         """Recompiles the evolvable modules in the algorithm with the specified torch compiler."""
         for name, obj in self.evolvable_attributes(networks_only=True).items():
-            if isinstance(obj, list):
-                compiled = [
-                    compile_model(module, self.torch_compiler) for module in obj
-                ]
-            else:
-                compiled = compile_model(obj, self.torch_compiler)
-
-            setattr(self, name, compiled)
+            setattr(self, name, compile_model(obj, self.torch_compiler))
 
     def to_device(self, *experiences: TorchObsType) -> Tuple[TorchObsType, ...]:
         """Moves experiences to the device.
@@ -645,8 +625,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         self, networks_only: bool = False
     ) -> EvolvableAttributeDict:
         """Returns the attributes related to the evolvable networks in the algorithm. Includes
-        attributes that are either evolvable networks or a list of evolvable networks, as well
-        as the optimizers associated with the networks.
+        attributes that are either EvolvableModule or ModuleDict objects, as well as the optimizers
+        associated with the networks.
 
         :param networks_only: If True, only include evolvable networks, defaults to False
         :type networks_only: bool, optional
@@ -678,22 +658,31 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         for attr in self.evolvable_attributes():
             obj = getattr(self, attr)
-            if isinstance(obj, list):
-                setattr(self, attr, [self._wrap_attr(m) for m in obj])
+            if isinstance(obj, dict):
+                wrapped_obj = {
+                    agent_id: self._wrap_attr(opt) for agent_id, opt in obj.items()
+                }
             else:
-                setattr(self, attr, self._wrap_attr(obj))
+                wrapped_obj = self._wrap_attr(obj)
 
-    def unwrap_models(self):
+            setattr(self, attr, wrapped_obj)
+
+    def unwrap_models(self) -> None:
         """Unwraps the models in the algorithm from the accelerator."""
         if self.accelerator is None:
             raise AttributeError("No accelerator has been set for the algorithm.")
 
         for attr in self.evolvable_attributes(networks_only=True):
             obj = getattr(self, attr)
-            if isinstance(obj, list):
-                setattr(self, attr, [self.accelerator.unwrap_model(m) for m in obj])
+            if isinstance(obj, dict):
+                unwrapped_obj = {
+                    agent_id: self.accelerator.unwrap_model(opt)
+                    for agent_id, opt in obj.items()
+                }
             else:
-                setattr(self, attr, self.accelerator.unwrap_model(obj))
+                unwrapped_obj = self.accelerator.unwrap_model(obj)
+
+            setattr(self, attr, unwrapped_obj)
 
     def clone(
         self: SelfEvolvableAlgorithm, index: Optional[int] = None, wrap: bool = True
@@ -720,11 +709,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         # Clone evolvable modules
         cloned_modules = {}
         for attr, obj in self.evolvable_attributes(networks_only=True).items():
-            if isinstance(obj, list):
-                cloned_modules[attr] = [m.clone() for m in obj]
-            else:
-                cloned_modules[attr] = obj.clone()
-
+            cloned_modules[attr] = obj.clone()
             setattr(clone, attr, cloned_modules[attr])
 
         # Run mutation hook at this step given possibility of sharing
@@ -735,11 +720,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         for opt_config in self.registry.optimizers:
             orig_optimizer: OptimizerWrapper = getattr(self, opt_config.name)
 
-            networks = (
-                cloned_modules[opt_config.networks[0]]
-                if opt_config.multiagent
-                else [cloned_modules[net] for net in opt_config.networks]
-            )
+            networks = [cloned_modules[net] for net in opt_config.networks]
             opt = OptimizerWrapper(
                 getattr(torch.optim, opt_config.optimizer_cls),
                 networks=networks,
@@ -747,7 +728,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 network_names=opt_config.networks,
                 lr_name=opt_config.lr,
                 optimizer_kwargs=opt_config.optimizer_kwargs,
-                multiagent=opt_config.multiagent,
             )
             opt.load_state_dict(orig_optimizer.state_dict())
             setattr(clone, opt_config.name, opt)
@@ -798,14 +778,15 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
             module_cls = net_dict[f"{name}_cls"]
             init_dict = net_dict[f"{name}_init_dict"]
-            if isinstance(module_cls, list):
-                loaded_modules = []
-                for mod, d in zip(module_cls, init_dict):
-                    d["device"] = self.device
-                    loaded_mod: EvolvableModule = mod(**d)
-                    loaded_modules.append(loaded_mod)
 
-                setattr(self, name, loaded_modules)
+            module_dict_cls = net_dict.get(f"{name}_module_dict_cls", None)
+            if isinstance(module_cls, dict):
+                loaded_modules = {}
+                for agent_id, mod in module_cls.items():
+                    init_dict[agent_id]["device"] = self.device
+                    loaded_modules[agent_id] = mod(**init_dict[agent_id])
+
+                setattr(self, name, module_dict_cls(loaded_modules))
             else:
                 init_dict["device"] = self.device
                 loaded_module: EvolvableModule = module_cls(**init_dict)
@@ -824,10 +805,11 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             }
             loaded_module = getattr(self, name)
             state_dict = net_dict[f"{name}_state_dict"]
-            if isinstance(loaded_module, list):
-                for loaded_mod, state in zip(loaded_module, state_dict):
-                    if state:
-                        loaded_mod.load_state_dict(state)
+            if isinstance(loaded_module, ModuleDict):
+                for agent_id, mod in loaded_module.items():
+                    if state_dict[agent_id]:
+                        mod.load_state_dict(state_dict[agent_id])
+
             elif state_dict:
                 loaded_module.load_state_dict(state_dict)
 
@@ -841,23 +823,18 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
             # Initialize optimizer
             opt_kwargs = opt_dict[f"{name}_kwargs"]
-            optimizer_cls = opt_dict[f"{name}_cls"]
+            optimizer_cls = get_optimizer_cls(opt_dict[f"{name}_cls"])
             opt_networks = opt_dict[f"{name}_networks"]
             opt_lr = opt_dict[f"{name}_lr"]
-            is_multiagent = opt_dict[f"{name}_multiagent"]
-            networks = (
-                getattr(self, opt_networks[0])
-                if is_multiagent
-                else [getattr(self, net) for net in opt_networks]
-            )
+            networks = [getattr(self, net) for net in opt_networks]
+
             optimizer = OptimizerWrapper(
-                getattr(torch.optim, optimizer_cls),
+                optimizer_cls=optimizer_cls,
                 networks=networks,
                 lr=getattr(self, opt_lr),
+                optimizer_kwargs=opt_kwargs,
                 network_names=opt_networks,
                 lr_name=opt_lr,
-                optimizer_kwargs=opt_kwargs,
-                multiagent=is_multiagent,
             )
 
             # Load optimizer state
@@ -932,16 +909,21 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
             init_dict = chkpt_attribute_to_device(init_dict, device)
 
+            # Reconstruct the module dict class if necessary
+            ModuleDictCls = net_dict.get(f"{name}_module_dict_cls", None)
+            if ModuleDictCls is not None:
+                loaded_modules[name] = ModuleDictCls()
+
             # Reconstruct the modules
-            module_cls: Union[Type[EvolvableModule], List[Type[EvolvableModule]]] = (
-                net_dict[f"{name}_cls"]
-            )
-            if isinstance(module_cls, list):
-                loaded_modules[name] = []
-                for mod_cls, d in zip(module_cls, init_dict):
+            module_cls: Union[
+                Type[EvolvableModule], Dict[str, Type[EvolvableModule]]
+            ] = net_dict[f"{name}_cls"]
+            if isinstance(module_cls, dict):
+                for agent_id, mod_cls in module_cls.items():
+                    d = init_dict[agent_id]
                     d["device"] = device
                     mod: EvolvableModule = mod_cls(**d)
-                    loaded_modules[name].append(mod)
+                    loaded_modules[name][agent_id] = mod
             else:
                 init_dict["device"] = device
                 module = module_cls(**init_dict)
@@ -970,14 +952,14 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             net_dict = {
                 k: v for k, v in network_info["modules"].items() if k.startswith(name)
             }
-            loaded_module: Union[EvolvableModule, List[EvolvableModule]] = getattr(
-                self, name
-            )
+            loaded_module: Union[EvolvableModule, ModuleDict] = getattr(self, name)
             state_dict = net_dict[f"{name}_state_dict"]
-            if isinstance(loaded_module, list):
-                for loaded_mod, state in zip(loaded_module, state_dict):
-                    if state:
-                        loaded_mod.load_state_dict(state)
+            if isinstance(loaded_module, ModuleDict):
+                for agent_id, agent_module in loaded_module.items():
+                    agent_state_dict = state_dict[agent_id]
+                    if agent_state_dict:
+                        agent_module.load_state_dict(agent_state_dict)
+
             elif state_dict:
                 loaded_module.load_state_dict(state_dict)
 
@@ -994,23 +976,17 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             # Add device to optimizer kwargs
             opt_kwargs = chkpt_attribute_to_device(opt_dict[f"{name}_kwargs"], device)
             lr = opt_dict[f"{name}_lr"]
-            optimizer_cls = opt_dict[f"{name}_cls"]
+            optimizer_cls = get_optimizer_cls(opt_dict[f"{name}_cls"])
             opt_networks = opt_dict[f"{name}_networks"]
-
-            networks = (
-                loaded_modules[opt_networks[0]]
-                if opt_dict[f"{name}_multiagent"]
-                else [loaded_modules[net] for net in opt_networks]
-            )
+            networks = [loaded_modules[net] for net in opt_networks]
 
             optimizer = OptimizerWrapper(
-                getattr(torch.optim, optimizer_cls),
+                optimizer_cls=optimizer_cls,
                 networks=networks,
                 lr=getattr(self, lr),
                 network_names=opt_networks,
                 lr_name=lr,
                 optimizer_kwargs=opt_kwargs,
-                multiagent=opt_dict[f"{name}_multiagent"],
             )
 
             state_dict = chkpt_attribute_to_device(
@@ -1101,23 +1077,7 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         self.observation_space = observation_space
         self.action_space = action_space
         self.normalize_images = normalize_images
-
-        # TODO: Temporary hack to support legacy code
-        self.state_dim = self.get_state_dim(observation_space)
-        self.action_dim = self.get_action_dim(action_space)
-        self.discrete_actions = isinstance(
-            action_space, (spaces.Discrete, spaces.MultiDiscrete)
-        )
-        self.min_action = (
-            np.array(action_space.low).astype(np.float32)
-            if hasattr(action_space, "low")
-            else None
-        )
-        self.max_action = (
-            np.array(action_space.high).astype(np.float32)
-            if hasattr(action_space, "high")
-            else None
-        )
+        self.action_dim = get_output_size_from_space(self.action_space)
 
     def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
         """Preprocesses observations for forward pass through neural network.
@@ -1140,13 +1100,13 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
     """Base object for all multi-agent algorithms in the AgileRL framework.
 
     :param observation_spaces: The observation spaces of the agent environments.
-    :type observation_spaces: List[spaces.Space]
+    :type observation_spaces: Union[List[spaces.Space], spaces.Dict]
     :param action_spaces: The action spaces of the agent environments.
-    :type action_spaces: List[spaces.Space]
-    :param agent_ids: The agent IDs of the agents in the environment.
-    :type agent_ids: List[int]
+    :type action_spaces: Union[List[spaces.Space], spaces.Dict]
     :param index: The index of the individual in the population.
     :type index: int.
+    :param agent_ids: The agent IDs of the agents in the environment.
+    :type agent_ids: Optional[List[int]], optional
     :param learn_step: Learning frequency, defaults to 2048
     :type learn_step: int, optional
     :param device: Device to run the algorithm on, defaults to "cpu"
@@ -1163,12 +1123,20 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
     :type name: Optional[str], optional
     """
 
+    possible_observation_spaces: Dict[str, spaces.Space]
+    possible_action_spaces: Dict[str, spaces.Space]
+
+    shared_agent_ids: List[str]
+    grouped_agents: Dict[str, List[str]]
+    unique_observation_spaces: Dict[str, spaces.Space]
+    unique_action_spaces: Dict[str, spaces.Space]
+
     def __init__(
         self,
-        observation_spaces: Iterable[spaces.Space],
-        action_spaces: Iterable[spaces.Space],
-        agent_ids: Iterable[int],
+        observation_spaces: Union[Iterable[spaces.Space], spaces.Dict],
+        action_spaces: Union[Iterable[spaces.Space], spaces.Dict],
         index: int,
+        agent_ids: Optional[Iterable[int]] = None,
         hp_config: Optional[HyperparameterConfig] = None,
         device: Union[str, torch.device] = "cpu",
         accelerator: Optional[Accelerator] = None,
@@ -1180,117 +1148,153 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         super().__init__(index, hp_config, device, accelerator, torch_compiler, name)
 
-        assert isinstance(
-            agent_ids, (tuple, list)
-        ), "Agent IDs must be stores in a tuple or list."
-        assert len(agent_ids) == len(
-            observation_spaces
-        ), "Number of agent IDs must match number of observation spaces."
-        assert isinstance(
-            observation_spaces, (list, tuple)
-        ), "Observation spaces must be a list or tuple."
-        assert all(
-            isinstance(_space, spaces.Space) for _space in observation_spaces
-        ), "Observation spaces must be instances of gymnasium.spaces.Space."
-        assert isinstance(
-            action_spaces, (list, tuple)
-        ), "Action spaces must be a list or tuple."
-        assert all(
-            isinstance(_space, spaces.Space) for _space in action_spaces
-        ), "Action spaces must be instances of gymnasium.spaces.Space."
+        assert type(observation_spaces) is type(action_spaces), (
+            "Observation spaces and action spaces must be the same type. "
+            f"Got {type(observation_spaces)} and {type(action_spaces)}."
+        )
 
-        if not all(
-            isinstance(space, observation_spaces[0].__class__)
-            for space in observation_spaces
-        ):
+        if isinstance(observation_spaces, (list, tuple)):
+            assert isinstance(
+                agent_ids, (tuple, list)
+            ), "Agent IDs must be specified if observation spaces are passed as a list."
+            assert len(agent_ids) == len(
+                observation_spaces
+            ), "Number of agent IDs must match number of observation spaces."
+            assert all(
+                isinstance(_space, spaces.Space) for _space in observation_spaces
+            ), "Observation spaces must be instances of gymnasium.spaces.Space."
+            assert all(
+                isinstance(_space, spaces.Space) for _space in action_spaces
+            ), "Action spaces must be instances of gymnasium.spaces.Space."
+            self.possible_observation_spaces = spaces.Dict(
+                {
+                    agent_id: space
+                    for agent_id, space in zip(agent_ids, observation_spaces)
+                }
+            )
+            self.possible_action_spaces = spaces.Dict(
+                {agent_id: space for agent_id, space in zip(agent_ids, action_spaces)}
+            )
+        elif isinstance(observation_spaces, (spaces.Dict, dict)):
+            if isinstance(observation_spaces, dict):
+                observation_spaces = spaces.Dict(observation_spaces)
+                action_spaces = spaces.Dict(action_spaces)
+
+            self.possible_observation_spaces = observation_spaces
+            self.possible_action_spaces = action_spaces
+        else:
             raise ValueError(
-                "AgileRL 2.0 only supports homogeneous multi-agent environments "
-                "(i.e. all agents have the same type of observation space)"
+                f"Observation spaces must be a list or dictionary of spaces.Space objects. Got {type(observation_spaces)}."
             )
 
-        # TODO: This can be removed once we have a more robust implementation
-        self.state_dims = self.get_state_dim(observation_spaces)
-        self.action_dims = self.get_action_dim(action_spaces)
-        self.one_hot = all(
-            isinstance(space, (spaces.Discrete, spaces.MultiDiscrete))
-            for space in observation_spaces
-        )
-        self.discrete_actions = all(
-            isinstance(space, (spaces.Discrete, spaces.MultiDiscrete))
-            for space in action_spaces
-        )
-
-        # For continuous action spaces, store the min and max action values
-        if all(isinstance(space, spaces.Box) for space in action_spaces):
-            self.min_action = [
-                np.array(space.low).astype(np.float32) for space in action_spaces
-            ]
-            self.max_action = [
-                np.array(space.high).astype(np.float32) for space in action_spaces
-            ]
-        else:
-            self.min_action, self.max_action = None, None
-
-        self.agent_ids = agent_ids
-        self.n_agents = len(agent_ids)
+        self.agent_ids = agent_ids or list(self.possible_observation_spaces.keys())
+        self.n_agents = len(self.agent_ids)
         self.placeholder_value = placeholder_value
+        self.normalize_images = normalize_images
 
+        # These attributes are deprecated and will be removed in the future
+        self.observation_spaces = list(self.possible_observation_spaces.values())
+        self.action_spaces = list(self.possible_action_spaces.values())
+
+        self.action_dims = get_output_size_from_space(self.possible_action_spaces)
+
+        # Determine groups of agents from their IDs
         self.shared_agent_ids = []
-        self.homogeneous_agents = {}
-        self.unique_observation_spaces = {}
-        self.unique_action_spaces = {}
-        for agent_id, obs_space, action_space in zip(
-            self.agent_ids, observation_spaces, action_spaces
-        ):
+        self.grouped_agents = defaultdict(list)
+        self.unique_observation_spaces = OrderedDict()
+        self.unique_action_spaces = OrderedDict()
+        for agent_id in self.agent_ids:
+            obs_space = self.possible_observation_spaces[agent_id]
+            action_space = self.possible_action_spaces[agent_id]
             # Split agent names on expected pattern of e.g. speaker_0, speaker_1,
             # listener_0, listener_1, to determine which agents are homogeneous
-            homo_id = self.get_homo_id(agent_id)
-            if homo_id in self.homogeneous_agents:
-                self.homogeneous_agents[homo_id].append(agent_id)
-                assert obs_space == self.unique_observation_spaces[homo_id], (
-                    f"Homogeneous agents, i.e. agents that share the prefix {homo_id}, "
-                    f"must have the same observation space. Found {self.unique_observation_spaces[homo_id]} and {obs_space}."
-                )
-                assert action_space == self.unique_action_spaces[homo_id], (
-                    f"Homogeneous agents, i.e. agents that share the prefix {homo_id}, "
-                    f"must have the same action space. Found {self.unique_action_spaces[homo_id]} and {action_space}."
-                )
-            else:
-                self.shared_agent_ids.append(homo_id)
-                self.homogeneous_agents[homo_id] = [agent_id]
-                self.unique_observation_spaces[homo_id] = obs_space
-                self.unique_action_spaces[homo_id] = action_space
+            group_id = self.get_group_id(agent_id)
+            if group_id not in self.grouped_agents:
+                self.shared_agent_ids.append(group_id)
+                self.unique_observation_spaces[group_id] = obs_space
+                self.unique_action_spaces[group_id] = action_space
+
+            assert obs_space == self.unique_observation_spaces[group_id], (
+                f"Homogeneous agents, i.e. agents that share the prefix {group_id}, "
+                f"must have the same observation space. Found {self.unique_observation_spaces[group_id]} and {obs_space}."
+            )
+            assert action_space == self.unique_action_spaces[group_id], (
+                f"Homogeneous agents, i.e. agents that share the prefix {group_id}, "
+                f"must have the same action space. Found {self.unique_action_spaces[group_id]} and {action_space}."
+            )
+
+            self.grouped_agents[group_id].append(agent_id)
 
         self.n_unique_agents = len(self.shared_agent_ids)
-        self.normalize_images = normalize_images
-        self.observation_spaces = observation_spaces
-        self.action_spaces = action_spaces
-        self.total_actions = sum(self.action_dims)
-        self.total_state_dims = None
 
-        if not any(
-            isinstance(space, (spaces.Dict, spaces.Tuple))
-            for space in observation_spaces
-        ):
-            self.total_state_dims = sum(state_dim[0] for state_dim in self.state_dims)
+        # Dictionary containing groups of agents for each space type
+        self.grouped_spaces = defaultdict(list)
+        for agent_id in self.agent_ids:
+            obs_space = self.possible_observation_spaces[agent_id]
+            if is_vector_space(obs_space):
+                self.grouped_spaces[ModuleType.MLP].append(agent_id)
+            elif is_image_space(obs_space):
+                self.grouped_spaces[ModuleType.CNN].append(agent_id)
+            elif isinstance(obs_space, (spaces.Dict, spaces.Tuple)):
+                self.grouped_spaces[ModuleType.MULTI_INPUT].append(agent_id)
+            else:
+                raise ValueError(f"Unknown observation space type: {type(obs_space)}")
 
-        # Build observation and action space dictionaries using agent IDs
-        self.single_space = observation_spaces[0]
-        self.observation_space = spaces.Dict(
-            {agent_id: space for agent_id, space in zip(agent_ids, observation_spaces)}
-        )
-        self.action_space = spaces.Dict(
-            {agent_id: space for agent_id, space in zip(agent_ids, action_spaces)}
-        )
+        self.setup = self.get_setup()
 
-    def get_homo_id(self, agent_id: str) -> str:
-        """Get the homogeneous ID for an agent.
+        # Build observation space based on setup
+        if self.has_grouped_agents():
+            self.observation_space = self.unique_observation_spaces
+            self.action_space = self.unique_action_spaces
+        else:
+            self.observation_space = self.possible_observation_spaces
+            self.action_space = self.possible_action_spaces
 
-        :param agent_id: The agent ID
-        :type agent_id: str
-        :return: The homogeneous ID
+    def _registry_init(self) -> None:
+        super()._registry_init()
+
+        # Additional check to ensure multi-agent networks are initialized with valid keys
+        for name, network in self.evolvable_attributes(networks_only=True).items():
+            if isinstance(network, ModuleDict):
+                for key in network.keys():
+                    if (key not in self.agent_ids) and (
+                        key not in self.shared_agent_ids
+                    ):
+                        raise ValueError(
+                            f"Network '{name}' contains key '{key}' which is not present in `self.agent_ids` "
+                            f"or `self.shared_agent_ids`. Please initialize multi-agent networks through agilerl.modules.ModuleDict "
+                            "objects with the agent or group/shared IDs as keys."
+                        )
+
+    def has_grouped_agents(self) -> bool:
+        """Whether the algorithm contains groups of agents assigned to the same
+        policy for centralized execution.
+
+        :rtype: bool
         """
-        return agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
+        return len(self.shared_agent_ids) < len(self.agent_ids)
+
+    def get_setup(self) -> MultiAgentSetup:
+        """Get the type of multi-agent setup, as determined by the observation spaces of the agents.
+        By having the 'same' observation space, we mean that the spaces are analogous, i.e. we can use
+        the same `EvolvableModule` to process their observations.
+
+        1. HOMOGENEOUS: All agents have the same observation space.
+        2. MIXED: Agents can be grouped by their observation spaces.
+        3. HETEROGENEOUS: All agents have different observation spaces.
+
+        :return: The type of multi-agent setup.
+        :rtype: MultiAgentSetup
+        """
+        return (
+            MultiAgentSetup.HOMOGENEOUS
+            if len(self.grouped_spaces) == 1
+            else (
+                MultiAgentSetup.MIXED
+                if len(self.grouped_spaces) < len(self.agent_ids)
+                else MultiAgentSetup.HETEROGENEOUS
+            )
+        )
 
     def preprocess_observation(
         self, observation: ObservationType
@@ -1306,7 +1310,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         preprocessed = {}
         for agent_id, agent_obs in observation.items():
             preprocessed[agent_id] = preprocess_observation(
-                self.observation_space.get(agent_id),
+                self.possible_observation_spaces.get(agent_id),
                 observation=agent_obs,
                 device=self.device,
                 normalize_images=self.normalize_images,
@@ -1324,25 +1328,32 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         :return: Action masks
         :rtype: Dict[str, np.ndarray]
         """
+        # Get dict of form {"agent_id" : [1, 0, 0, 0]...} etc
         action_masks = {
             agent: info.get("action_mask", None) if isinstance(info, dict) else None
             for agent, info in infos.items()
             if agent in self.agent_ids
-        }  # Get dict of form {"agent_id" : [1, 0, 0, 0]...} etc
+        }
 
         return action_masks
 
-    def extract_agent_masks(self, infos: InfosDict) -> Tuple[ArrayDict, ArrayDict]:
+    def extract_agent_masks(
+        self, infos: Optional[InfosDict] = None
+    ) -> Tuple[ArrayDict, ArrayDict]:
         """Extract env_defined_actions from info dictionary and determine agent masks
 
         :param infos: Info dict
         :type infos: Dict[str, Dict[...]]
-        """
 
+        :return: Env defined actions and agent masks
+        :rtype: Tuple[ArrayDict, ArrayDict]
+        """
         # Deal with case of no env_defined_actions defined in the info dict
         # Deal with empty info dicts for each sub agent
-        if not key_in_nested_dict(infos, "env_defined_actions") or all(
-            not info for agent, info in infos.items() if agent in self.agent_ids
+        if (
+            infos is None
+            or not key_in_nested_dict(infos, "env_defined_actions")
+            or all(not info for agent, info in infos.items() if agent in self.agent_ids)
         ):
             return None, None
 
@@ -1358,162 +1369,265 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         agent_masks = None
         if env_defined_actions is not None:
             agent_masks = {}
-            for idx, agent in enumerate(env_defined_actions.keys()):
+            for agent_id in env_defined_actions.keys():
                 # Handle None if environment isn't vectorized
-                if env_defined_actions[agent] is None:
-                    if not self.discrete_actions:
-                        nan_arr = np.empty(self.action_dims[idx])
+                if env_defined_actions[agent_id] is None:
+                    if not isinstance(
+                        self.possible_action_spaces[agent_id], spaces.Discrete
+                    ):
+                        nan_arr = np.empty(self.action_dims[agent_id])
                         nan_arr[:] = np.nan
                     else:
                         nan_arr = np.array([[np.nan]])
-                    env_defined_actions[agent] = nan_arr
+
+                    env_defined_actions[agent_id] = nan_arr
 
                 # Handle discrete actions + env not vectorized
-                if isinstance(env_defined_actions[agent], (int, float)):
-                    env_defined_actions[agent] = np.array(
-                        [[env_defined_actions[agent]]]
+                if isinstance(env_defined_actions[agent_id], (int, float)):
+                    env_defined_actions[agent_id] = np.array(
+                        [[env_defined_actions[agent_id]]]
                     )
 
                 # Ensure additional dimension is added in so shapes align for masking
-                if len(env_defined_actions[agent].shape) == 1:
-                    env_defined_actions[agent] = (
-                        env_defined_actions[agent][:, np.newaxis]
-                        if self.discrete_actions
-                        else env_defined_actions[agent][np.newaxis, :]
+                if len(env_defined_actions[agent_id].shape) == 1:
+                    env_defined_actions[agent_id] = (
+                        env_defined_actions[agent_id][:, np.newaxis]
+                        if isinstance(
+                            self.possible_action_spaces[agent_id], spaces.Discrete
+                        )
+                        else env_defined_actions[agent_id][np.newaxis, :]
                     )
-                agent_masks[agent] = np.where(
-                    np.isnan(env_defined_actions[agent]), 0, 1
+                agent_masks[agent_id] = np.where(
+                    np.isnan(env_defined_actions[agent_id]), 0, 1
                 ).astype(bool)
 
         return env_defined_actions, agent_masks
 
-    def stack_critic_observations(self, obs: Dict[str, TorchObsType]) -> TorchObsType:
-        """Process observations for critic network input.
+    def build_net_config(
+        self,
+        net_config: Optional[NetConfigType] = None,
+        flatten: bool = True,
+        return_encoders: bool = False,
+    ) -> Union[NetConfigType, Tuple[NetConfigType, Dict[str, NetConfigType]]]:
+        """Extract an appropriate net config for each sub-agent from the passed net config dictionary. If
+        grouped_agents is True, the net config will be built for the grouped agents i.e. through their
+        common prefix in their agent_id, whenever the passed net config is None.
 
-        .. note:: Assumes that the observation spaces for the different agents are the same.
+        .. note::
+            If return_encoders is True, we return the encoder configs for each sub-agent. The only exception is
+            for MLPs, where we only return the deepest architecture found. This is useful for algorithms
+            with shared critics that process the observations of all agents, and therefore use an `EvolvableMultiInput`
+            module to process the observations of all agents (assigning an encoder to each sub-agent and, optionally, a
+            single `EvolvableMLP` to process the concatenated vector observations).
 
-        :param obs: Observation dict
-        :type obs: Dict[str, torch.Tensor]
-
-        :return: Stacked observations
-        :rtype: torch.Tensor
+        :param net_config: Net config dictionary
+        :type net_config: Optional[NetConfigType]
+        :param flatten: Whether to return a net config for each possible sub-agent, even in grouped settings.
+        :type flatten: bool, optional
+        :param return_encoders: Whether to return the encoder configs for each sub-agent. Defaults to False.
+        :type return_encoders: bool, optional
+        :return: Net config dictionary for each sub-agent
+        :rtype: NetConfigType
         """
-        obs = list(obs.values())
-        if isinstance(self.single_space, spaces.Dict):
-            processed_obs = {}
-            for key, space in self.single_space.spaces.items():
-                if is_image_space(space):
-                    processed_obs[key] = torch.stack(
-                        [obs[i][key] for i in range(self.n_agents)], dim=2
-                    )
-                else:
-                    processed_obs[key] = torch.cat(
-                        [obs[i][key] for i in range(self.n_agents)], dim=1
-                    )
+        grouped_config = self.has_grouped_agents() and not flatten
+        agent_ids = self.shared_agent_ids if grouped_config else self.agent_ids
+        observation_spaces = (
+            self.unique_observation_spaces
+            if grouped_config
+            else self.possible_observation_spaces
+        )
+        encoder_configs = OrderedDict()
 
-        elif isinstance(self.single_space, spaces.Tuple):
-            processed_obs = []
-            for i, space in enumerate(self.single_space):
-                if is_image_space(space):
-                    processed_obs.append(
-                        torch.stack([obs[j][i] for j in range(self.n_agents)], dim=2)
-                    )
-                else:
-                    processed_obs.append(
-                        torch.cat([obs[j][i] for j in range(self.n_agents)], dim=1)
-                    )
-            processed_obs = tuple(processed_obs)
+        # Helper function to append unique configs to the unique_configs dictionary
+        # -> Access to unique configs is relevant for algorithms with networks that process
+        # multiple agents' observations (e.g. shared critic in MADDPG)
+        def _add_to_encoder_configs(config: Dict[str, Any], agent_id: str = "") -> None:
+            config = config_from_dict(config)
+            config_key = "mlp_config" if isinstance(config, MlpNetConfig) else agent_id
 
-        elif is_image_space(self.single_space):
-            processed_obs = torch.stack(obs, dim=2)
-        else:
-            processed_obs = torch.cat(obs, dim=1)
+            if config_key not in encoder_configs:
+                encoder_configs[config_key] = asdict(config)
 
-        return processed_obs
+            # Update MLP config if new one has deeper architecture
+            elif isinstance(config, MlpNetConfig) and len(config["hidden_size"]) > len(
+                encoder_configs["mlp_config"]["hidden_size"]
+            ):
+                encoder_configs[config_key] = asdict(config)
 
-    def extract_inactive_agents(
-        self, obs: Dict[str, ObservationType]
-    ) -> Tuple[Dict[str, np.ndarray], Dict[str, ObservationType]]:
-        """Extract inactive agents from observation.
-
-        :param obs: Observation dictionary
-        :type obs: Dict[str, ObservationType]
-
-        :return: Tuple of inactive agents and filtered observations
-        :rtype: Tuple[Dict[str, np.ndarray], Dict[str, ObservationType]]
-        """
-        inactive_agents = {}
-        agents_to_remove = []
-        for agent_id, agent_obs in obs.items():
-            if isinstance(agent_obs, dict):
-                sample = next(iter(agent_obs.values()))
-            elif isinstance(agent_obs, tuple):
-                sample = agent_obs[0]
-            else:
-                sample = agent_obs
-
-            # For non-vectorised environments we assume observations for
-            # inactive agents are not returned
-            if len(sample.shape) == 1:
-                continue
-
-            # Extract rows where all values are -1
-            inactive_agent_indices = np.where(np.isnan(sample).all(axis=1))[0]
-
-            # If agent is active in all environments, don't need to save info
-            if inactive_agent_indices.shape[0] == 0:
-                continue
-
-            filtered_obs: np.ndarray = np.delete(
-                obs[agent_id], inactive_agent_indices, axis=0
+        # Helper function to check if any agent ID exists in the net_config
+        def _has_agent_ids(config: NetConfigType) -> bool:
+            return any(
+                (agent_id in self.agent_ids) or (agent_id in self.shared_agent_ids)
+                for agent_id in config.keys()
             )
 
-            # Don't need to save info if same agent is inactive in all environments
-            if filtered_obs.shape[0] == 0:
-                agents_to_remove.append(agent_id)
-                continue
+        # Helper function to get or create encoder config for an agent
+        def _get_encoder_config(config: NetConfigType, agent_id: str) -> NetConfigType:
+            encoder_config = config.get("encoder_config")
+            simba = config.get("simba", False)
+            if encoder_config is None:
+                encoder_config = get_default_encoder_config(
+                    observation_spaces[agent_id], simba
+                )
+                config["encoder_config"] = encoder_config
 
-            obs[agent_id] = filtered_obs
-            inactive_agents[agent_id] = inactive_agent_indices
+            return encoder_config
 
-        for agent_id in agents_to_remove:
-            obs.pop(agent_id)
+        # 1. net_config is None -> Automatically define an encoder for each sub-agent or group
+        if net_config is None:
+            net_config = defaultdict(OrderedDict)
+            for agent_id in agent_ids:
+                encoder_config = get_default_encoder_config(
+                    observation_spaces[agent_id]
+                )
+                net_config[agent_id]["encoder_config"] = encoder_config
+                _add_to_encoder_configs(encoder_config, agent_id)
 
-        return inactive_agents, obs
+            if return_encoders:
+                return net_config, encoder_configs
 
-    def disassemble_homogeneous_outputs(
+            return net_config
+
+        # 2a. (Legacy) -> Passed a single-level config in a multi-agent setting - can only
+        # do this in homogeneous settings where all agents have the same observation space as
+        # it pertains to the network (i.e. allow as long as the observation spaces result in the
+        # same encoder)
+        if not _has_agent_ids(net_config):
+            assert self.setup == MultiAgentSetup.HOMOGENEOUS, (
+                "Single-level net config can only be passed when the multi-agent environment is homogeneous "
+                "(i.e. all agents can use the same encoder to process their observations). Please specify "
+                "a net config for some combination of agents (or groups of agents) in the multi-agent environment."
+            )
+
+            encoder_config = _get_encoder_config(net_config, agent_ids[0])
+
+            full_config = OrderedDict()
+            for agent_id in agent_ids:
+                # Create a copy of the config for each agent
+                full_config[agent_id] = net_config.copy()
+
+                if return_encoders:
+                    _add_to_encoder_configs(encoder_config, agent_id)
+
+            if return_encoders:
+                return full_config, encoder_configs
+
+            return full_config
+
+        if any(
+            agent_id in self.agent_ids and grouped_config
+            for agent_id in net_config.keys()
+        ):
+            raise KeyError(
+                "Found key in net_config corresponding to an individual sub-agent in a grouped setting. "
+                "Please specify the configuration for groups instead (e.g. {'agent': {...}, ...} rather than {'agent_0': {...}, ...})"
+            )
+
+        # 2b. Handle nested config with agent/group IDs
+        result_config = {}
+        config_keys = net_config.keys()
+        for agent_id in agent_ids:
+            group_id = self.get_group_id(agent_id) if not grouped_config else agent_id
+
+            # 2bi. Check if agent_id is present in net_config
+            if agent_id in config_keys:
+                agent_config = net_config[agent_id]
+                encoder_config = _get_encoder_config(agent_config, agent_id)
+                result_config[agent_id] = agent_config
+
+            # 2bii. Check if group_id is present in net_config
+            elif group_id in config_keys:
+                group_config = net_config[group_id]
+                encoder_config = _get_encoder_config(group_config, agent_id)
+                result_config[agent_id] = group_config
+
+            # 2biii. agent_id or group_id not in net_config -> Add default encoder config
+            else:
+                default_config = {}
+                encoder_config = get_default_encoder_config(
+                    observation_spaces[agent_id]
+                )
+                default_config["encoder_config"] = encoder_config
+                result_config[agent_id] = default_config
+
+            if return_encoders:
+                _add_to_encoder_configs(encoder_config, agent_id)
+
+        if return_encoders:
+            return result_config, encoder_configs
+
+        return result_config
+
+    ####---------------------------------------####
+    #### Grouped Multi-Agent Utility Functions ####
+    ####---------------------------------------####
+    def get_group_id(self, agent_id: str) -> str:
+        """Get the group ID for an agent.
+
+        :param agent_id: The agent ID
+        :type agent_id: str
+        :return: The group ID
+        """
+        return agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
+
+    def assemble_shared_inputs(self, experience: ExperiencesType) -> ExperiencesType:
+        """Preprocesses inputs by constructing dictionaries by shared agents.
+
+        :param experience: experience to reshape from environment
+        :type experience: ExperiencesType
+
+        :return: Preprocessed inputs
+        :rtype: ExperiencesType
+        """
+        stacked_experience = {group_id: {} for group_id in self.observation_space}
+        for agent_id, inp in experience.items():
+            group_id = (
+                self.get_group_id(agent_id) if self.has_grouped_agents() else agent_id
+            )
+            if isinstance(inp, list):
+                stacked_exp = (
+                    stack_experiences(inp, to_torch=False)[0] if len(inp) > 0 else None
+                )
+            else:
+                stacked_exp = inp
+
+            stacked_experience[group_id][agent_id] = stacked_exp
+
+        return stacked_experience
+
+    def disassemble_grouped_outputs(
         self,
-        homo_outputs: ArrayDict,
+        group_outputs: ArrayDict,
         vect_dim: int,
-        homogeneous_agents: Dict[str, List[str]],
+        grouped_agents: Dict[str, List[str]],
     ) -> ArrayDict:
-        """Disassembles batched output by shared policies into their homogeneous agents' outputs.
+        """Disassembles batched output by shared policies into their grouped agents' outputs.
 
         .. note:: This assumes that for any given sub-agent the termination condition is deterministic,
             i.e. any given agent will always terminate at the same timestep in different vectorized environments.
 
-        :param homo_outputs: Dictionary to be disassembled, has the form {'agent': [4, 7, 8]}
-        :type homo_outputs: Dict[str, np.ndarray]
+        :param group_outputs: Dictionary to be disassembled, has the form {'agent': [4, 7, 8]}
+        :type group_outputs: Dict[str, np.ndarray]
         :param vect_dim: Vectorization dimension size, i.e. number of vect envs
         :type vect_dim: int
-        :param homogeneous_agents: Dictionary of homogeneous agent IDs
-        :type homogeneous_agents: Dict[str, List[str]]
+        :param grouped_agents: Dictionary of grouped agent IDs
+        :type grouped_agents: Dict[str, List[str]]
         :return: Assembled dictionary, e.g. {'agent_0': 4, 'agent_1': 7, 'agent_2': 8}
         :rtype: Dict[str, np.ndarray]
         """
         output_dict = {}
-        for homo_id, agent_ids in homogeneous_agents.items():
-            homo_outputs[homo_id] = np.reshape(
-                homo_outputs[homo_id],
+        for group_id, agent_ids in grouped_agents.items():
+            group_outputs[group_id] = np.reshape(
+                group_outputs[group_id],
                 (len(agent_ids), vect_dim, -1),
             )
             for i, agent_id in enumerate(agent_ids):
-                output_dict[agent_id] = homo_outputs[homo_id][i]
+                output_dict[agent_id] = group_outputs[group_id][i]
 
         return output_dict
 
     def sum_shared_rewards(self, rewards: ArrayDict) -> ArrayDict:
-        """Sums the rewards for homogeneous agents
+        """Sums the rewards for grouped agents
 
         :param rewards: Reward dictionary from environment
         :type rewards: Dict[str, np.ndarray]
@@ -1528,12 +1642,12 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             agent_id: np.zeros(reward_shape) for agent_id in self.shared_agent_ids
         }
         for agent_id, reward in rewards.items():
-            homo_id = self.get_homo_id(agent_id)
-            summed_rewards[homo_id] += reward
+            group_id = self.get_group_id(agent_id)
+            summed_rewards[group_id] += reward
 
         return summed_rewards
 
-    def assemble_homogeneous_outputs(
+    def assemble_grouped_outputs(
         self, agent_outputs: ArrayDict, vect_dim: int
     ) -> ArrayDict:
         """Assembles individual agent outputs into batched outputs for shared policies.
@@ -1545,27 +1659,43 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         :return: Assembled dictionary with the form {'agent': [4, 7, 8]}
         :rtype: Dict[str, np.ndarray]
         """
-        homo_outputs = {}
-        for unique_id in self.shared_agent_ids:
+        group_outputs = {}
+        for group_id in self.shared_agent_ids:
             # Get all outputs for agents that share this ID
-            homo_agent_outputs = []
-            for homo_id in self.homogeneous_agents[unique_id]:
-                if homo_id in agent_outputs:
-                    homo_agent_outputs.append(agent_outputs[homo_id])
+            group_agent_outputs = []
+            for group in self.grouped_agents[group_id]:
+                if group in agent_outputs:
+                    group_agent_outputs.append(agent_outputs[group])
 
-            if homo_agent_outputs:
+            if group_agent_outputs:
                 # Stack outputs along first dimension
-                stacked_outputs = np.stack(homo_agent_outputs, axis=0)
+                stacked_outputs = np.stack(group_agent_outputs, axis=0)
                 # Reshape into a form suitable for batch processing
-                homo_outputs[unique_id] = np.reshape(
-                    stacked_outputs, (len(homo_agent_outputs) * vect_dim, -1)
+                group_outputs[group_id] = np.reshape(
+                    stacked_outputs, (len(group_agent_outputs) * vect_dim, -1)
                 )
 
-        return homo_outputs
+        return group_outputs
 
 
 class LLMAlgorithm(EvolvableAlgorithm, ABC):
-    """Base object for all LLM algorithms in the AgileRL framework."""
+    """Base object for all LLM algorithms in the AgileRL framework.
+
+    :param observation_space: The observation space of the environment.
+    :type observation_space: gymnasium.spaces.Space
+    :param action_space: The action space of the environment.
+    :type action_space: gymnasium.spaces.Space
+    :param index: The index of the algorithm.
+    :type index: int
+    :param hp_config: The hyperparameter configuration.
+    :type hp_config: Optional[HyperparameterConfig]
+    :param device: The device to run the algorithm on.
+    :type device: Union[str, torch.device]
+    :param accelerator: The accelerator to use.
+    :type accelerator: Optional[Accelerator]
+    :param name: The name of the algorithm.
+    :type name: Optional[str]
+    """
 
     def __init__(
         self,
@@ -1588,13 +1718,15 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.observation_space = observation_space
         self.action_space = action_space
         self.zero_stage = None
+        self.reference_update_tracker = 0  # Updated every time the reference policy is updated which is updated each time we pass through the train dataset
+
         if self.accelerator is not None:
             self.zero_stage = self.accelerator.state.deepspeed_plugin.deepspeed_config[
                 "zero_optimization"
             ]["stage"]
         if (
             self.zero_stage is not None
-            and self.zero_stage >= 2
+            and self.zero_stage > 2
             and self.accelerator.is_main_process
         ):
             warnings.warn(
@@ -1664,6 +1796,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if self.accelerator is not None:
             os.makedirs(path, exist_ok=True)
             self.actor.save_checkpoint(path, tag="checkpoint")
+            self.actor.set_adapter("actor")
         else:
             warnings.warn(
                 "Distributed actor save not supported for non-distributed training."
@@ -1691,6 +1824,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     raise ValueError(
                         f"Deepspeed failed to resume from checkpoint {path}"
                     )
+                self.actor.set_adapter("actor")
 
             except Exception as e:
                 raise ValueError(
@@ -1724,31 +1858,20 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             """
         )
 
-    def wrap_models(self):
+    def wrap_models(self) -> None:
         """Wrap the models in the accelerator"""
         if self.accelerator is not None:
+            opt = (
+                self.optimizer.optimizer
+                if self.optimizer.optimizer_cls == torch.optim.AdamW
+                else self.optimizer
+            )
             self.actor, self.optimizer, self.lr_scheduler = self.accelerator.prepare(
-                self.actor, self.optimizer.optimizer, self.lr_scheduler
+                self.actor, opt, self.lr_scheduler
             )
-            deepspeed_plugin = self.accelerator.state.deepspeed_plugin
-            config_kwargs = copy.deepcopy(deepspeed_plugin.deepspeed_config)
-            self.reference_actor = deepspeed.init_inference(
-                self.reference_actor,
-                tensor_parallel={"tp_size": self.accelerator.num_processes},
-                dtype=(
-                    torch.bfloat16
-                    if config_kwargs.get("bf16", {}).get("enabled", False)
-                    else (
-                        torch.float16
-                        if config_kwargs.get("fp16", {}).get("enabled", False)
-                        else torch.float32
-                    )
-                ),
-                checkpoint=None,
-                replace_with_kernel_inject=True,
-                zero=DeepSpeedZeroConfig(**config_kwargs["zero_optimization"]),
-            )
-            self.reference_actor.eval()
+        else:
+            self.actor = self.actor.to(self.device)
+            self.actor.gradient_checkpointing_enable()
 
     def clean_up(self) -> None:
         """Clean up the algorithm."""
@@ -1756,28 +1879,20 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if self.accelerator is not None:
             (
                 self.actor,
-                self.reference_actor,
                 self.optimizer,
                 self.lr_scheduler,
-                self.reference_actor_state_dict,
             ) = self.accelerator.free_memory(
                 self.actor,
-                self.reference_actor,
                 self.optimizer,
                 self.lr_scheduler,
-                self.reference_actor_state_dict,
             )
             self.accelerator.wait_for_everyone()
         else:
             (
                 self.actor,
-                self.reference_actor,
                 self.optimizer,
                 self.lr_scheduler,
-                self.reference_actor_state_dict,
             ) = (
-                None,
-                None,
                 None,
                 None,
                 None,
@@ -1810,10 +1925,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             input_args = EvolvableAlgorithm.inspect_attributes(
                 self, input_args_only=True
             )
-            input_args["clone"] = True
             input_args["wrap"] = False
+            input_args["clone"] = True
 
-            # extract base model and peft config
             actor = (
                 self.accelerator.unwrap_model(self.actor)
                 if self.accelerator is not None
@@ -1824,19 +1938,15 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if self.zero_stage is None or self.zero_stage < 2:
                 actor_state_dict = clone_tensors_for_torch_save(actor.state_dict())
 
-            cloned_actor = clone_llm(actor, state_dict=actor_state_dict)
+            cloned_model = clone_llm(actor, state_dict=actor_state_dict)
 
             actor = None  # De-reference the actor
-            input_args["actor_network"] = cloned_actor
+            input_args["actor_network"] = cloned_model
             input_args["accelerator"] = (
                 Accelerator() if self.accelerator is not None else None
             )
 
             clone = type(self)(**input_args)
-
-            # Maybe this needs to change -> should really init deepspeed engine after state dict is loaded
-            clone.reference_actor.load_state_dict(self.reference_actor_state_dict)
-            clone.reference_actor.eval()
             clone.mutation_hook()
 
             # Clone attributes
@@ -1876,11 +1986,52 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         return clone
 
     @staticmethod
-    def update_lr(optimizer: DeepSpeedOptimizerWrapper, lr: float) -> None:
+    def update_lr(
+        optimizer: DeepSpeedOptimizerWrapper,
+        lr: float,
+        accelerator: Optional[Accelerator] = None,
+        scheduler_config: Optional[CosineLRScheduleConfig] = None,
+    ) -> Tuple[Optional[Accelerator], Optional[SequentialLR]]:
         """Update the learning rate of the optimizer
 
         :param optimizer: Optimizer
         :type optimizer: Optimizer
+        :param lr: Learning rate
+        :type lr: float
+        :param accelerator: Accelerator
+        :type accelerator: Optional[Accelerator]
+        :param scheduler_config: Scheduler configuration
+        :type scheduler_config: Optional[CosineLRScheduleConfig]
+
+        :return: Tuple of accelerator and scheduler
+        :return: Accelerator
         """
+
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
+
+        if accelerator is None:
+            scheduler = (
+                create_warmup_cosine_scheduler(optimizer, scheduler_config, 1e-8, lr)
+                if scheduler_config is not None
+                else None
+            )
+            return accelerator, scheduler
+
+        if (
+            accelerator.state.deepspeed_plugin.deepspeed_config.get("scheduler", None)
+            is not None
+        ):
+            accelerator.state.deepspeed_plugin.deepspeed_config["scheduler"]["params"][
+                "warmup_max_lr"
+            ] = lr
+
+        if (
+            accelerator.state.deepspeed_plugin.deepspeed_config.get("optimizer", None)
+            is not None
+        ):
+            accelerator.deepspeed_plugin.deepspeed_config["optimizer"]["params"][
+                "lr"
+            ] = lr
+
+        return accelerator, None

@@ -4,18 +4,10 @@ import pytest
 import torch
 
 from agilerl.modules.lstm import EvolvableLSTM
-
+from tests.helper_functions import assert_state_dicts_equal
 
 ######### Define fixtures #########
-@pytest.fixture
-def device():
-    return "cuda" if torch.cuda.is_available() else "cpu"
-
-
-@pytest.fixture(autouse=True)
-def cleanup():
-    yield  # Run the test first
-    torch.cuda.empty_cache()  # Free up GPU memory
+# Device fixture moved to conftest.py
 
 
 ######### Test instantiation #########
@@ -277,7 +269,7 @@ def test_clone_instance(input_size, hidden_size, num_outputs, num_layers, device
 
     assert isinstance(clone, EvolvableLSTM)
     assert clone.init_dict == evolvable_lstm.init_dict
-    assert str(clone.state_dict()) == str(evolvable_lstm.state_dict())
+    assert_state_dicts_equal(clone.state_dict(), evolvable_lstm.state_dict())
 
     for key, param in clone_net.named_parameters():
         torch.testing.assert_close(param, original_net_dict[key]), evolvable_lstm

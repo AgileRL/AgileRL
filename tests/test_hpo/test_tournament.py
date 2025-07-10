@@ -4,6 +4,7 @@ import gymnasium as gym
 import pytest
 from accelerate import Accelerator
 from accelerate.state import AcceleratorState
+from peft import LoraConfig
 
 from agilerl.algorithms import CQN, DDPG, DQN, GRPO, MADDPG, MATD3, PPO, TD3, RainbowDQN
 from agilerl.hpo.tournament import TournamentSelection
@@ -77,7 +78,7 @@ def test_returns_best_agent_and_new_population():
     observation_space = generate_random_box_space((4,))
     discrete_action_space = generate_discrete_space(2)
     continuous_action_space = generate_random_box_space((2,))
-    net_config = {"encoder_config": {"hidden_size": [8, 8]}}
+    net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
     population_size = 4
     device = "cpu"
     population_size = 5
@@ -134,7 +135,7 @@ def test_returns_best_agent_and_new_population_without_elitism():
     observation_space = generate_random_box_space((4,))
     discrete_action_space = generate_discrete_space(2)
     continuous_action_space = generate_random_box_space((2,))
-    net_config = {"encoder_config": {"hidden_size": [8, 8]}}
+    net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
     population_size = 4
     device = "cpu"
     population_size = 5
@@ -189,7 +190,7 @@ def test_returns_best_agent_and_new_population_without_elitism():
 def test_returns_best_agent_and_new_population_multi_agent():
     observation_space = generate_multi_agent_box_spaces(2, (4,))
     action_space = generate_multi_agent_discrete_spaces(2, 2)
-    net_config = {"encoder_config": {"hidden_size": [8, 8]}}
+    net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
     population_size = 4
     device = "cpu"
     population_size = 5
@@ -233,7 +234,7 @@ def test_returns_best_agent_and_new_population_multi_agent():
 def test_returns_best_agent_and_new_population_without_elitism_multi_agent():
     observation_space = generate_multi_agent_box_spaces(2, (4,))
     action_space = generate_multi_agent_discrete_spaces(2, 2)
-    net_config = {"encoder_config": {"hidden_size": [8, 8]}}
+    net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
     population_size = 4
     device = "cpu"
     population_size = 5
@@ -341,6 +342,13 @@ def test_language_model_tournament(use_accelerator, elitism, num_processes):
             reduce_memory_peak=INIT_HP.get("REDUCE_MEMORY_PEAK", False),
             max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS", 1024),
             min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS", None),
+            lora_config=LoraConfig(
+                r=16,
+                lora_alpha=64,
+                target_modules=["linear_1"],
+                task_type="CAUSAL_LM",
+                lora_dropout=0.05,
+            ),
             cosine_lr_schedule_config=None,
             accelerator=None,
             device="cpu",

@@ -6,6 +6,7 @@
 # using a population and a simple evolutionary loop.
 import os
 import shutil
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import gymnasium as gym
 import imageio
@@ -13,8 +14,10 @@ import numpy as np
 import torch
 from tqdm import trange
 
+from agilerl.algorithms import PPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.rollouts.on_policy import collect_rollouts_recurrent
 from agilerl.utils.utils import create_population
 
 
@@ -25,7 +28,7 @@ class MiniGridObsWrapper(gym.ObservationWrapper):
     and concatenates a one-hot encoding of the 'direction' field.
     """
 
-    def __init__(self, env):
+    def __init__(self, env: gym.Env):
         super().__init__(env)
         img_shape = self.observation_space["image"].shape
         flat_img_dim = np.prod(img_shape)
@@ -34,11 +37,11 @@ class MiniGridObsWrapper(gym.ObservationWrapper):
             low=0.0, high=1.0, shape=(flat_img_dim + 4,), dtype=np.float32
         )
 
-    def reset(self, **kwargs):
+    def reset(self, **kwargs: Any) -> Tuple[np.ndarray, Dict[str, Any]]:
         obs, info = self.env.reset(**kwargs)
         return self.observation(obs), info
 
-    def observation(self, obs):
+    def observation(self, obs: Dict[str, np.ndarray]) -> np.ndarray:
         img = obs["image"].astype(np.float32)
         flat_img = img.flatten()
         direction = obs["direction"]
@@ -85,17 +88,17 @@ def run_demo():
         "UPDATE_EPOCHS": 4,
         "HIDDEN_STATE_SIZE": 128,
         "SHARE_ENCODERS": True,
-        "DISCRETE_ACTIONS": True,
+        "USE_ROLLOUT_BUFFER": True,
+        "RECURRENT": recurrent,
         "ACTION_STD_INIT": 0.6,
         "TARGET_KL": None,
-        "CHANNELS_LAST": False,
     }
 
     # --- Create Environment and Population ---
     num_envs = 64  # Fewer envs for MiniGrid due to slowness
 
-    def make_env(render_mode=None):
-        def thunk():
+    def make_env(render_mode: Optional[str] = None) -> Callable[[], gym.Env]:
+        def thunk() -> gym.Env:
             env = gym.make("MiniGrid-DoorKey-8x8-v0", render_mode=render_mode)
             env = MiniGridObsWrapper(env)
             return env
@@ -108,7 +111,7 @@ def run_demo():
     observation_space = env.single_observation_space
     action_space = env.single_action_space
 
-    pop = create_population(
+    pop: List[PPO] = create_population(
         algo="PPO",
         observation_space=observation_space,
         action_space=action_space,
@@ -117,7 +120,6 @@ def run_demo():
         population_size=INIT_HP["POP_SIZE"],
         num_envs=num_envs,
         device=device,
-        algo_kwargs={"use_rollout_buffer": True, "recurrent": recurrent},
     )
 
     # --- Setup Evolution Components ---
@@ -143,9 +145,9 @@ def run_demo():
     )
 
     # --- Training Loop (Performance-Flamegraph Style) ---
-    max_steps = 5_000_000 // num_envs
+    max_steps = 5_000_000 // len(pop)
     required_score = 0.9
-    evo_steps = num_envs * INIT_HP["LEARN_STEP"] * 50
+    evo_steps = num_envs * INIT_HP["LEARN_STEP"] * 10
     eval_steps = None
     eval_loop = 5
 
@@ -153,24 +155,23 @@ def run_demo():
     training_complete = False
 
     print("Training...")
-    pbar = trange(max_steps * num_envs, unit="step")
+    pbar = trange(max_steps * len(pop), unit="step")
     while (
         np.less([agent.steps[-1] for agent in pop], max_steps).all()
         and not training_complete
     ):
         for agent in pop:
-            agent.collect_rollouts(env)
+            collect_rollouts_recurrent(agent, env)
             agent.learn()
             total_steps += agent.learn_step * num_envs
-            agent.steps[-1] += agent.learn_step
-            pbar.update(agent.learn_step * num_envs // len(pop))
+            agent.steps[-1] += agent.learn_step * num_envs
+            pbar.update(agent.learn_step * num_envs)
 
         # Evaluate and evolve
         if total_steps % evo_steps == 0:
             fitnesses = [
                 agent.test(
                     single_test_env,
-                    swap_channels=False,
                     max_steps=eval_steps,
                     loop=eval_loop,
                 )
@@ -212,7 +213,6 @@ def run_demo():
         fitnesses = [
             agent.test(
                 env_to_wrap,
-                swap_channels=False,
                 max_steps=eval_steps,
                 loop=eval_loop,
                 vectorized=False,

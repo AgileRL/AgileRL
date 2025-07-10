@@ -5,12 +5,14 @@ from typing import Optional
 import numpy as np
 import torch
 
-from agilerl.algorithms.core.base import RLAlgorithm
+from agilerl.algorithms import PPO
 from agilerl.typing import GymEnvType
+
+SupportedOnPolicy = PPO
 
 
 def _collect_rollouts(
-    agent: RLAlgorithm,
+    agent: SupportedOnPolicy,
     env: GymEnvType,
     n_steps: Optional[int] = None,
     *,
@@ -114,14 +116,32 @@ def _collect_rollouts(
 
 
 def collect_rollouts(
-    agent: RLAlgorithm, env: GymEnvType, n_steps: Optional[int] = None
+    agent: SupportedOnPolicy, env: GymEnvType, n_steps: Optional[int] = None
 ) -> None:
-    """Collect rollouts for non-recurrent on-policy algorithms."""
+    """Collect rollouts for non-recurrent on-policy algorithms.
+
+    :param agent: The agent to collect rollouts for.
+    :type agent: RLAlgorithm
+    :param env: The environment to collect rollouts from.
+    :type env: GymEnvType
+    :param n_steps: The number of steps to collect rollouts for.
+    :type n_steps: Optional[int]
+    """
+
     return _collect_rollouts(agent, env, n_steps, recurrent=False)
 
 
 def collect_rollouts_recurrent(
-    agent: RLAlgorithm, env: GymEnvType, n_steps: Optional[int] = None
+    agent: SupportedOnPolicy, env: GymEnvType, n_steps: Optional[int] = None
 ) -> None:
-    """Collect rollouts for recurrent on-policy algorithms."""
+    """Collect rollouts for recurrent on-policy algorithms.
+
+    :param agent: The agent to collect rollouts for.
+    :type agent: RLAlgorithm
+    :param env: The environment to collect rollouts from.
+    :type env: GymEnvType
+    :param n_steps: The number of steps to collect rollouts for.
+    :type n_steps: Optional[int]
+    """
+
     return _collect_rollouts(agent, env, n_steps, recurrent=True)

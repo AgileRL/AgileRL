@@ -6,7 +6,7 @@ from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from functools import singledispatch
 from numbers import Number
-from typing import Any, Dict, Iterable, List, Optional, Tuple, TypeGuard, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -19,7 +19,6 @@ from peft import PeftModel, get_peft_model
 from tensordict import TensorDict, from_module
 from tensordict.nn import CudaGraphModule
 from torch._dynamo import OptimizedModule
-from torch.nn import Module
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from transformers import PreTrainedModel
@@ -28,16 +27,20 @@ from agilerl.protocols import (
     EvolvableAttributeType,
     EvolvableModule,
     EvolvableNetwork,
+    ModuleDict,
     OptimizerWrapper,
 )
 from agilerl.typing import (
     ArrayOrTensor,
     ExperiencesType,
     MaybeObsList,
+    MultiAgentModule,
+    NetConfigType,
     NetworkType,
     NumpyObsType,
     ObservationType,
     OptimizerType,
+    SupportedObsSpaces,
     TorchObsType,
 )
 
@@ -67,19 +70,15 @@ def share_encoder_parameters(
 
         target_params.to_module(other.encoder)
 
-        # Disable architecture mutations since we will be
-        # reinitializing directly through a mutation hook
-        other.encoder.disable_mutations()
 
-
-def get_hidden_states_shape_from_model(model: Module) -> Dict[str, int]:
+def get_hidden_states_shape_from_model(model: nn.Module) -> Dict[str, int]:
     """Loops through all of the modules in the model and checks if they have a
     `hidden_state_architecture` attribute. If they do, it adds the items to a
     dictionary and returns it. This should make it easier to initialize the
     hidden states of the model.
 
     :param model: The model to get the hidden states from.
-    :type model: Module
+    :type model: nn.Module
     :param x: The input to the model.
     :type x: TorchObsType
     :return: The hidden states shape from the model.
@@ -112,77 +111,6 @@ def is_image_space(space: spaces.Space) -> bool:
     return isinstance(space, spaces.Box) and len(space.shape) == 3
 
 
-def contains_image_space(space: spaces.Space) -> bool:
-    """Checks if the space contains an image space.
-
-    :param space: Observation space
-    :type space: spaces.Space
-    :return: True if the space contains an image space, False otherwise
-    :rtype: bool
-    """
-    if isinstance(space, spaces.Dict):
-        return any(contains_image_space(subspace) for subspace in space.spaces.values())
-    elif isinstance(space, spaces.Tuple):
-        return any(contains_image_space(subspace) for subspace in space.spaces)
-    elif isinstance(space, spaces.Box):
-        return is_image_space(space)
-    return False
-
-
-def multi_agent_sample_tensor_from_space(
-    space: spaces.Space,
-    n_agents: int,
-    critic: bool = False,
-    device: torch.device = torch.device("cpu"),
-) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
-    """Gets the sample tensor from an observation space for multi-agent settings.
-
-    :param space: Observation space
-    :type space: spaces.Space
-    :param n_agents: Number of agents
-    :type n_agents: int
-    :param critic: If True, the tensor is for the critic, defaults to False
-    :type critic: bool, optional
-
-    :return: Sample tensor
-    :rtype: torch.Tensor or dict[str, torch.Tensor]
-    """
-
-    def sample(image_shape: Tuple[int, ...], critic: bool) -> torch.Tensor:
-        tensor = torch.zeros(
-            (1, *image_shape), dtype=torch.float32, device=device
-        ).unsqueeze(2)
-
-        if critic:
-            tensor = tensor.repeat(1, 1, n_agents, 1, 1)
-
-        return tensor
-
-    if isinstance(space, spaces.Dict):
-        sample_tensor = {
-            key: multi_agent_sample_tensor_from_space(
-                subspace, n_agents, critic, device
-            )
-            for key, subspace in space.spaces.items()
-            if is_image_space(subspace)
-        }
-    elif isinstance(space, spaces.Tuple):
-        sample_tensor = tuple(
-            (
-                multi_agent_sample_tensor_from_space(subspace, n_agents, critic, device)
-                if is_image_space(subspace)
-                else None
-            )
-            for subspace in space.spaces
-        )
-    elif is_image_space(space):
-        sample_tensor = sample(space.shape, critic)
-    else:
-        sample_tensor = None
-
-    return sample_tensor
-
-
 def make_safe_deepcopies(
     *args: Union[EvolvableModule, List[EvolvableModule]],
 ) -> List[EvolvableModule]:
@@ -204,56 +132,6 @@ def make_safe_deepcopies(
         copies.append(arg_copy)
 
     return copies[0] if len(copies) == 1 else copies
-
-
-def is_module_list(obj: EvolvableAttributeType) -> TypeGuard[Iterable[EvolvableModule]]:
-    """Type guard to check if an object is a list of EvolvableModule objects.
-
-    :param obj: The object to check.
-    :type obj: EvolvableAttributeType.
-
-    :return: True if the object is a list of EvolvableModule objects, False otherwise.
-    :rtype: bool.
-    """
-    if not isinstance(obj, list):
-        return False
-
-    return all(
-        isinstance(inner_obj, (OptimizedModule, EvolvableModule)) for inner_obj in obj
-    )
-
-
-def is_optimizer_list(obj: EvolvableAttributeType) -> TypeGuard[Iterable[Optimizer]]:
-    """Type guard to check if an object is a list of Optimizer's.
-
-    :param obj: The object to check.
-    :type obj: EvolvableAttributeType.
-
-    :return: True if the object is a list of Optimizer's, False otherwise.
-    :rtype: bool.
-    """
-    return all(isinstance(inner_obj, Optimizer) for inner_obj in obj)
-
-
-def assert_supported_space(space: spaces.Space) -> bool:
-    """Checks if the space is supported by the AgileRL framework.
-
-    :param space: The space to check.
-    :type space: spaces.Space.
-
-    :return: True if the space is supported, False otherwise.
-    :rtype: bool.
-    """
-    # Nested Dict or Tuple spaces are not supported
-    if isinstance(space, spaces.Dict) and any(
-        isinstance(subspace, (spaces.Dict, spaces.Tuple))
-        for subspace in space.spaces.values()
-    ):
-        raise TypeError(f"Nested {type(space)} spaces are not supported.")
-    elif isinstance(space, spaces.Tuple) and any(
-        isinstance(subspace, (spaces.Dict, spaces.Tuple)) for subspace in space.spaces
-    ):
-        raise TypeError(f"Nested {type(space)} spaces are not supported.")
 
 
 def isroutine(obj: object) -> bool:
@@ -305,10 +183,11 @@ def recursive_check_module_attrs(obj: Any, networks_only: bool = False) -> bool:
 
     :param obj: The object to check for EvolvableModule objects or Optimizer's.
     :type obj: Any
-    :return: True if the object has any attributes that are EvolvableModule objects or Optimizer's, False otherwise.
-    :rtype: bool
     :param networks_only: If True, only check for EvolvableModule objects, defaults to False
     :type networks_only: bool, optional
+
+    :return: True if the object has any attributes that are EvolvableModule objects or Optimizer's, False otherwise.
+    :rtype: bool
     """
     check_types = (OptimizedModule, EvolvableModule)
     if not networks_only:
@@ -339,6 +218,9 @@ def chkpt_attribute_to_device(
     :type chkpt_dict: dict
     :param device: Device for accelerated computing, 'cpu' or 'cuda'
     :type device: str
+
+    :return: Checkpoint dictionary with attributes on device
+    :rtype: Dict[str, Any]
     """
     if isinstance(chkpt_dict, list):
         return [chkpt_attribute_to_device(chkpt, device) for chkpt in chkpt_dict]
@@ -359,6 +241,9 @@ def key_in_nested_dict(nested_dict: Dict[str, Any], target: str) -> bool:
     :type nested_dict: Dict[str, Dict[str, ...]]
     :param target: Target string
     :type target: str
+
+    :return: True if key is in nested dictionary, False otherwise
+    :rtype: bool
     """
     for k, v in nested_dict.items():
         if k == target:
@@ -368,31 +253,13 @@ def key_in_nested_dict(nested_dict: Dict[str, Any], target: str) -> bool:
     return False
 
 
-def compile_model(model: Module, mode: Optional[str] = "default") -> Module:
-    """Compiles torch model if not already compiled
-
-    :param model: torch model
-    :type model: nn.Module
-    :param mode: torch compile mode, defaults to "default"
-    :type mode: str, optional
-    :return: compiled model
-    :rtype: OptimizedModule
-    """
-    return (
-        torch.compile(model, mode=mode)
-        if not isinstance(model, torch._dynamo.eval_frame.OptimizedModule)
-        and mode is not None
-        else model
-    )
-
-
 def remove_compile_prefix(state_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Removes _orig_mod prefix on state dict created by torch compile
 
     :param state_dict: model state dict
     :type state_dict: dict
     :return: state dict with prefix removed
-    :rtype: dict
+    :rtype: Dict[str, Any]
     """
     return OrderedDict(
         [
@@ -402,18 +269,148 @@ def remove_compile_prefix(state_dict: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
-SupportedSpace = Union[
-    spaces.Box, spaces.Dict, spaces.Tuple, spaces.Discrete, spaces.MultiDiscrete
-]
+def module_checkpoint_dict(module: EvolvableAttributeType, name: str) -> Dict[str, Any]:
+    """Returns a dictionary containing the module's class, init dict, and state dict.
+
+    :param module: The module to checkpoint.
+    :type module: EvolvableAttributeType
+    :param name: The name of the attribute to checkpoint.
+    :type name: str
+
+    :return: A dictionary containing the module's class, init dict, and state dict.
+    :rtype: Dict[str, Any]
+    """
+    if isinstance(module, ModuleDict):
+        return module_checkpoint_multiagent(module, name)
+    else:
+        return module_checkpoint_single(module, name)
 
 
-def concatenate_spaces(space_list: List[SupportedSpace]) -> spaces.Space:
+def module_checkpoint_single(module: EvolvableModule, name: str) -> Dict[str, Any]:
+    """Returns a dictionary containing the module's class, init dict, and state dict.
+
+    :param module: The module to checkpoint.
+    :type module: Union[EvolvableModule, List[EvolvableModule]]
+    :param name: The name of the attribute to checkpoint.
+    :type name: str
+    :return: A dictionary containing the module's class, init dict, and state dict.
+    :rtype: Dict[str, Any]
+    """
+    module_cls = (
+        module._orig_mod.__class__
+        if isinstance(module, OptimizedModule)
+        else module.__class__
+    )
+    init_dict = module.init_dict
+    state_dict = remove_compile_prefix(module.state_dict())
+    return {
+        f"{name}_cls": module_cls,
+        f"{name}_init_dict": init_dict,
+        f"{name}_state_dict": state_dict,
+        f"{name}_module_dict_cls": None,
+    }
+
+
+def module_checkpoint_multiagent(module: MultiAgentModule, name: str) -> Dict[str, Any]:
+    """Returns a dictionary containing the module's class, init dict, and state dict.
+
+    :param module: The module to checkpoint.
+    :type module: ModuleDict
+    :param name: The name of the attribute to checkpoint.
+
+    :return: A dictionary containing the module's class, init dict, and state dict.
+    :rtype: Dict[str, Any]
+    """
+    agent_module_cls = OrderedDict()
+    agent_init_dicts = OrderedDict()
+    agent_state_dicts = OrderedDict()
+    for agent_id, agent_mod in module.items():
+        agent_mod_cls = (
+            agent_mod._orig_mod.__class__
+            if isinstance(agent_mod, OptimizedModule)
+            else agent_mod.__class__
+        )
+        agent_module_cls[agent_id] = agent_mod_cls
+        agent_init_dicts[agent_id] = agent_mod.init_dict
+        agent_state_dicts[agent_id] = remove_compile_prefix(agent_mod.state_dict())
+
+    return {
+        f"{name}_cls": agent_module_cls,
+        f"{name}_init_dict": agent_init_dicts,
+        f"{name}_state_dict": agent_state_dicts,
+        f"{name}_module_dict_cls": module.__class__,
+    }
+
+
+def format_shared_critic_encoder(
+    encoder_configs: NetConfigType,
+) -> Dict[str, Any]:
+    """Formats the shared critic  (i.e. `EvolvableMultiInput`) config from the available
+    encoder configs from all of the sub-agents. This dictionary is built when extracting the net
+    config passed by the user in `MultiAgentAlgorithm.extract_net_config`.
+
+    .. note::
+        If the user specified multiple different MLP configurations for different sub-agents /
+        groups, the deepest MLP config will be used for the shared critics `EvolvableMLP`.
+
+    :param encoder_configs: Network configuration
+    :type encoder_configs: Dict[str, Any]
+    :return: Formatted shared critic encoder config
+    :rtype: Dict[str, Any]
+    """
+    encoder_config = defaultdict(dict)
+    for encoder_key, config in encoder_configs.items():
+        if encoder_key == "mlp_config":
+            encoder_config[encoder_key] = config
+
+            # If we have homogeneous agents, we can process the raw observations with an EvolvableMLP
+            encoder_config["vector_space_mlp"] = len(encoder_configs) == 1
+            encoder_config["latent_dim"] = config.get("hidden_size", [32])[-1]
+            encoder_config["output_layernorm"] = config.get("layer_norm", False)
+        else:
+            encoder_config["init_dicts"][encoder_key] = config
+
+    return encoder_config
+
+
+def get_deepest_head_config(
+    net_config: NetConfigType, agent_ids: List[str]
+) -> NetConfigType:
+    """Returns the deepest head config from the nested net config.
+
+    :param net_config: Network configuration
+    :type net_config: NetConfigType
+    :param agent_ids: List of agent IDs
+    :type agent_ids: List[str]
+    :return: Largest head config
+    """
+    assert all(
+        agent_id in net_config.keys() for agent_id in agent_ids
+    ), "All passed agent IDs must be present in the net config."
+
+    deepest = None
+    for agent_id in agent_ids:
+        agent_config = net_config[agent_id]
+        agent_head_config = agent_config.get("head_config", None)
+        if agent_head_config is not None:
+            if deepest is None:
+                deepest = agent_head_config
+            elif len(agent_head_config["hidden_size"]) > len(deepest["hidden_size"]):
+                deepest = agent_head_config
+
+    if deepest is None:
+        raise ValueError("No head config found in the passed net config.")
+
+    return deepest
+
+
+def concatenate_spaces(space_list: List[SupportedObsSpaces]) -> spaces.Space:
     """Concatenates a list of spaces into a single space. If spaces correspond to images,
     we check that their shapes are the same and use the first space's shape as the shape of the
     concatenated space.
 
-    :param spaces: List of spaces to concatenate
-    :type spaces: List[spaces.Space]
+    :param space_list: List of spaces to concatenate
+    :type space_list: List[SupportedObsSpaces]
     :return: Concatenated space
     :rtype: spaces.Space
     """
@@ -434,14 +431,12 @@ def concatenate_spaces(space_list: List[SupportedSpace]) -> spaces.Space:
         )
 
     elif all(isinstance(space, spaces.Box) for space in space_list):
-        # NOTE: For image spaces the concatenation is handled under-the-hood through the
-        # specification of `n_agents` in EvolvableNetwork objects, whereby 3d convolutions
-        # are used. This is why we enforce all image spaces to have the same shape.
+        # NOTE: This should never really happen since shared critics use `EvolvableMultiInput`
+        # which conatenates feature encodings rather than raw observations.
         if all(is_image_space(space) for space in space_list):
-            assert all(space.shape == space_list[0].shape for space in space_list), (
-                "AgileRL only supports multi-agent settings with the same shape for the image "
-                "spaces of different agents."
-            )
+            assert all(
+                space.shape == space_list[0].shape for space in space_list
+            ), "Cannot concatenate image spaces with different CxHxW dimensions."
 
             return space_list[0]
 
@@ -1369,18 +1364,36 @@ def clone_llm(
 ) -> PreTrainedModelType:
     """Clone the actor.
 
-    :param model: Model to clone
-    :type model: PreTrainedModelType
+    :param original_model: Model to clone
+    :type original_model: PreTrainedModelType
     :param state_dict: State dict to load, defaults to None
     :type state_dict: Optional[Dict[str, torch.Tensor]], optional
     :return: Cloned model
     """
-    model_config = original_model.config
-    base_model = original_model.model
-    model = type(base_model)(model_config)
-    if is_peft_model(original_model):
-        peft_config = original_model.peft_config[original_model.active_adapter]
-        model = get_peft_model(model, peft_config)
+    if isinstance(original_model, PeftModel):
+        model_config = original_model.config
+        base_model = original_model.model
+        model = type(base_model)(model_config)
+        # Get all adapter names
+        adapter_names = list(original_model.peft_config.keys())
+
+        if len(adapter_names) > 1:
+            warnings.warn(
+                "Multiple adapters detected. Only the first adapter will be used for RL finetuning."
+            )
+        # Add first adapter using get_peft_model
+        first_adapter = adapter_names[0]
+        first_config = original_model.peft_config[first_adapter]
+        model = get_peft_model(model, first_config, adapter_name=first_adapter)
+
+        # Add remaining adapters using add_adapter
+        for adapter_name in adapter_names[1:]:
+            peft_config = original_model.peft_config[adapter_name]
+            print(f"{adapter_name} config", peft_config)
+            model.add_adapter(peft_config=peft_config, adapter_name=adapter_name)
+        model.disable_adapter()
+    else:
+        model = type(original_model)(original_model.config)
     if state_dict is not None:
         model.load_state_dict(state_dict)
     return model

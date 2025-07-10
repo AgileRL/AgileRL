@@ -69,7 +69,7 @@ class PettingZooVecEnv:
         """
         pass
 
-    def step_async(self, actions: List[List[ActionType]]) -> None:
+    def step_async(self, actions: List[Dict[str, ActionType]]) -> None:
         """
         Tell all the environments to start taking a step
         with the given actions.
@@ -77,8 +77,9 @@ class PettingZooVecEnv:
         You should not call this if a step_async run is
         already pending.
 
-        :param actions: List of lists of length num_envs, each sub list contains actions for each agent in a given environment
-        :type actions: list[list[int | float | np.ndarray]]
+        :param actions: List of dictionaries of length num_envs, each sub dictionary contains
+        actions for each agent in a given environment
+        :type actions: list[dict[str, int | float | np.ndarray]]
         """
         pass
 
@@ -97,18 +98,26 @@ class PettingZooVecEnv:
         :return: Tuple of observations, rewards, terminated, truncated, infos
         :rtype: tuple[dict[str, np.ndarray], dict[str, float], dict[str, bool], dict[str, bool], dict[str, Any]]
         """
-        passed_actions_list = [[] for _ in list(actions.values())[0]]
+        passed_actions_list = []
         for env_idx, _ in enumerate(list(actions.values())[0]):
-            for action in actions.values():
-                action = (
-                    int(action[env_idx])
-                    if np.isscalar(action[env_idx])
-                    else action[env_idx]
+            env_actions = {}
+            for agent_id, action in actions.items():
+                agent_action = action[env_idx]
+
+                # Skip if the action is NaN
+                if np.isnan(agent_action).all():
+                    continue
+
+                agent_action = (
+                    int(agent_action) if np.isscalar(agent_action) else agent_action
                 )
-                passed_actions_list[env_idx].append(action)
+                env_actions[agent_id] = agent_action
+
+            passed_actions_list.append(env_actions)
         assert (
             len(passed_actions_list) == self.num_envs
         ), "Number of actions passed to the step function must be equal to the number of vectorized environments"
+
         self.step_async(passed_actions_list)
         return self.step_wait()
 

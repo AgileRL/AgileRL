@@ -15,16 +15,15 @@ and is registered through a :class:`NetworkGroup <agilerl.algorithms.core.regist
 **evaluation** network (i.e. a network that is optimized during training e.g. the Q-network in DQN) and, optionally, "shared" networks that share
 parameters with the evaluation network in the group but aren't optimized during training directly (e.g. the target network in DQN). An RL algorithm
 must also contain one :class:`NetworkGroup <agilerl.algorithms.core.registry.NetworkGroup>` corresponding to the policy (i.e. the network used to
-select actions), signalled by the ``policy`` attribute in the group.
+select actions), signalled by setting ``policy=True`` in the :class:`NetworkGroup <agilerl.algorithms.core.registry.NetworkGroup>` object.
 
-Example
-~~~~~~~
+PPO Example
+~~~~~~~~~~~
 
 In PPO, we would need to define two network groups, since there are two different networks that are optimized during training. The first network group
-corresponds to the actor network and the second to the critic network. The actor network is responsible for selecting actions, and should therefore be signalled
-as the policy through the ``policy`` argument of :class:`NetworkGroup <agilerl.algorithms.core.registry.NetworkGroup>`. In this case, there are no networks that
-share parameters with the actor or the critic so we can bypass the ``shared`` argument. We can register these groups as follows through the ``register_network_group``
-method of the algorithm:
+corresponds to the actor network and the second to the critic network. The actor network is responsible for selecting actions, and is therefore signalled
+as the policy. In this case, there are no networks that share parameters with the actor or the critic so we can bypass the ``shared`` argument. We can
+register these groups as follows through the ``register_network_group`` method of the algorithm:
 
 .. code-block:: python
 
@@ -44,18 +43,23 @@ method of the algorithm:
 OptimizerWrapper
 ----------------
 
-The last thing users should do when creating a custom algorithm is wrap their optimizers in an :class:`OptimizerWrapper <agilerl.algorithms.core.wrappers.OptimizerWrapper>`,
+The last thing users should do when creating a custom algorithm is wrap their optimizers in an :class:`OptimizerWrapper <agilerl.algorithms.core.optimizer_wrapper.OptimizerWrapper>`,
 specifying the networks that the optimizer is responsible for. Since we are mutating network architectures during training, we need to have knowledge of
 this in order to reinitiliaze the optimizers correctly when we do so. In the example below, we have a single optimizer that optimizes the parameters of both the actor and critic networks,
 so we can wrap it as follows:
 
 .. code-block:: python
 
+    from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
+    from torch.optim import Adam
+
+    # NOTE: We must pass the attributes containing the mutable networks to the OptimizerWrapper
     self.optimizer = OptimizerWrapper(
         optim.Adam,
         networks=[self.actor, self.critic],
         lr=self.lr
     )
+
 
 .. note::
     All of the network groups and optimizers of an algorithm should by convention all be defined in the ``__init__`` method of the algorithm. When initializing

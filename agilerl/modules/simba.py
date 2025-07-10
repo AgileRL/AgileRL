@@ -1,6 +1,5 @@
 from typing import Any, Dict, Optional
 
-import numpy as np
 import torch
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
@@ -12,7 +11,12 @@ class EvolvableSimBa(EvolvableModule):
     """Evolvable module that implements the architecture presented in 'SimBa: Simplicity
     Bias for Scaling Up Parameters in Deep Reinforcement Learning'. Designed to avoid
     overfitting by integrating components that induce a simplicity bias, guiding models toward
-    simple and generalizable solutions.
+    simple and generalizable solutions. Supports the following types of architecture mutations during training:
+
+    * Adding or removing residual blocks
+    * Adding or removing nodes from residual blocks
+    * Changing the activation function between layers
+    * Changing the activation function for the output layer
 
     Paper: https://arxiv.org/abs/2410.09754
 
@@ -40,6 +44,8 @@ class EvolvableSimBa(EvolvableModule):
     :type device: str, optional
     :param name: Name of the network, defaults to 'mlp'
     :type name: str, optional
+    :param random_seed: Random seed to use for the network. Defaults to None.
+    :type random_seed: Optional[int]
     """
 
     def __init__(
@@ -56,8 +62,9 @@ class EvolvableSimBa(EvolvableModule):
         max_mlp_nodes: int = 500,
         device: str = "cpu",
         name: str = "simba",
+        random_seed: Optional[int] = None,
     ) -> None:
-        super().__init__(device=device)
+        super().__init__(device, random_seed)
 
         assert isinstance(scale_factor, int), "Scale factor must be an integer."
 
@@ -161,7 +168,7 @@ class EvolvableSimBa(EvolvableModule):
         :type numb_new_nodes: int, optional
         """
         if numb_new_nodes is None:
-            numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
+            numb_new_nodes = self.rng.choice([16, 32, 64])
 
         if self.hidden_size + numb_new_nodes <= self.max_mlp_nodes:  # HARD LIMIT
             self.hidden_size += numb_new_nodes
@@ -178,7 +185,7 @@ class EvolvableSimBa(EvolvableModule):
         :type numb_new_nodes: int, optional
         """
         if numb_new_nodes is None:
-            numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
+            numb_new_nodes = self.rng.choice([16, 32, 64])
 
         # HARD LIMIT
         if self.hidden_size - numb_new_nodes > self.min_mlp_nodes:

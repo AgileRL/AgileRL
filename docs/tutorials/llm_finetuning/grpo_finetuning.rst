@@ -59,51 +59,53 @@ There are a huge number of models and datasets hosted on Hugging Face, and diffe
 substituted in. In this tutorial, to keep things simple and inexpensive, we will use a 3 billion parameter Qwen
 model, and the Countdown dataset, and initialise them as follows:
 
-.. code-block:: python
+.. collapse:: Create Model and Dataset
 
-    MODEL_PATH = "Qwen/Qwen2.5-3B"
-    DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
+    .. code-block:: python
 
-    def create_model(pretrained_model_name_or_path):
-        model = AutoModelForCausalLM.from_pretrained(
-            pretrained_model_name_or_path=pretrained_model_name_or_path,
-            torch_dtype=torch.bfloat16,
-            attn_implementation="flash_attention_2",
-        )
-        peft_config = LoraConfig(
-            r=16,
-            lora_alpha=64,
-            target_modules=[
-                "q_proj",
-                "k_proj",
-                "v_proj",
-                "o_proj",
-                "up_proj",
-                "down_proj",
-                "gate_proj",
-            ],
-            task_type="CAUSAL_LM",
-            lora_dropout=0.05,
-        )
-        model = get_peft_model(model, peft_config)
-        return model
+        MODEL_PATH = "Qwen/Qwen2.5-3B"
+        DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
-    def make_dataset(dataset_name: str) -> Tuple[Dataset, Dataset]:
-        raw_dataset = (
-            load_dataset(dataset_name, split="train").shuffle(seed=42).select(range(50000))
-        )
-        raw_dataset = raw_dataset.rename_column("target", "answer")
-        raw_dataset = raw_dataset.rename_column("nums", "question")
-        train_test_split = raw_dataset.train_test_split(test_size=0.1)
-        train_dataset = train_test_split["train"]
-        test_dataset = train_test_split["test"]
-        return train_dataset, test_dataset
+        def create_model(pretrained_model_name_or_path):
+            model = AutoModelForCausalLM.from_pretrained(
+                pretrained_model_name_or_path=pretrained_model_name_or_path,
+                torch_dtype=torch.bfloat16,
+                attn_implementation="flash_attention_2",
+            )
+            peft_config = LoraConfig(
+                r=16,
+                lora_alpha=64,
+                target_modules=[
+                    "q_proj",
+                    "k_proj",
+                    "v_proj",
+                    "o_proj",
+                    "up_proj",
+                    "down_proj",
+                    "gate_proj",
+                ],
+                task_type="CAUSAL_LM",
+                lora_dropout=0.05,
+            )
+            model = get_peft_model(model, peft_config)
+            return model
 
-    # Instantiate the model and the associated tokenizer
-    model = create_model(pretrained_model_name_or_path=MODEL_PATH)
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-    tokenizer.pad_token = tokenizer.eos_token
-    train_dataset, test_dataset = make_dataset(DATASET)
+        def make_dataset(dataset_name: str) -> Tuple[Dataset, Dataset]:
+            raw_dataset = (
+                load_dataset(dataset_name, split="train").shuffle(seed=42).select(range(50000))
+            )
+            raw_dataset = raw_dataset.rename_column("target", "answer")
+            raw_dataset = raw_dataset.rename_column("nums", "question")
+            train_test_split = raw_dataset.train_test_split(test_size=0.1)
+            train_dataset = train_test_split["train"]
+            test_dataset = train_test_split["test"]
+            return train_dataset, test_dataset
+
+        # Instantiate the model and the associated tokenizer
+        model = create_model(pretrained_model_name_or_path=MODEL_PATH)
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+        tokenizer.pad_token = tokenizer.eos_token
+        train_dataset, test_dataset = make_dataset(DATASET)
 
 Create the Reasoning Environment
 --------------------------------
@@ -127,76 +129,77 @@ Therefore, the maximum score an agent can receive is 2, if it produces the corre
 key here is that we never tell the agent which answer it should produce or which format it should use. By giving it rewards
 for displaying these behaviours, the agent itself discovers the best way to achieve high rewards and learns the behaviour we desire.
 
+.. collapse:: Reward Functions
 
-.. code-block:: python
+    .. code-block:: python
 
-    def format_reward_func(completions, target, **kwargs):
-        rewards = []
+        def format_reward_func(completions, target, **kwargs):
+            rewards = []
 
-        for completion, gt in zip(completions, target):
-            try:
-                # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
-                completion = "<think>" + completion
-                regex = r"^<think>([^<]*(?:<(?!/?think>)[^<]*)*)<\/think>\n<answer>([\s\S]*?)<\/answer>$"
-                match = re.search(regex, completion, re.DOTALL)
-                if match is None or len(match.groups()) != 2:
+            for completion, gt in zip(completions, target):
+                try:
+                    # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
+                    completion = "<think>" + completion
+                    regex = r"^<think>([^<]*(?:<(?!/?think>)[^<]*)*)<\/think>\n<answer>([\s\S]*?)<\/answer>$"
+                    match = re.search(regex, completion, re.DOTALL)
+                    if match is None or len(match.groups()) != 2:
+                        rewards.append(0.0)
+                    else:
+                        rewards.append(1.0)
+                except Exception:
                     rewards.append(0.0)
-                else:
-                    rewards.append(1.0)
-            except Exception:
-                rewards.append(0.0)
-        return rewards
+            return rewards
 
 
-    def equation_reward_func(completions, target, nums, **kwargs):
-        rewards = []
+        def equation_reward_func(completions, target, nums, **kwargs):
+            rewards = []
 
-        for completion, gt, numbers in zip(completions, target, nums):
-            try:
-                # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
-                completion = "<think>" + completion
-                answer_tags = re.findall(r"<answer>([\s\S]*?)<\/answer>", completion)
+            for completion, gt, numbers in zip(completions, target, nums):
+                try:
+                    # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
+                    completion = "<think>" + completion
+                    answer_tags = re.findall(r"<answer>([\s\S]*?)<\/answer>", completion)
 
-                if len(answer_tags) != 1:
+                    if len(answer_tags) != 1:
+                        rewards.append(0.0)
+                        continue
+
+                    equation = answer_tags[0].strip()
+                    used_numbers = [int(n) for n in re.findall(r"\d+", equation)]
+
+                    if sorted(used_numbers) != sorted(numbers):
+                        rewards.append(0.0)
+                        continue
+
+                    allowed_pattern = r"^[\d+\-*/().\s]+$"
+                    if not re.match(allowed_pattern, equation):
+                        rewards.append(0.0)
+                        continue
+
+                    result = eval(equation, {"__builtins__": None}, {})
+
+                    if abs(float(result) - float(gt)) < 1e-5:
+                        rewards.append(1.0)
+                    else:
+                        rewards.append(0.0)
+                except Exception as e:
                     rewards.append(0.0)
-                    continue
-
-                equation = answer_tags[0].strip()
-                used_numbers = [int(n) for n in re.findall(r"\d+", equation)]
-
-                if sorted(used_numbers) != sorted(numbers):
-                    rewards.append(0.0)
-                    continue
-
-                allowed_pattern = r"^[\d+\-*/().\s]+$"
-                if not re.match(allowed_pattern, equation):
-                    rewards.append(0.0)
-                    continue
-
-                result = eval(equation, {"__builtins__": None}, {})
-
-                if abs(float(result) - float(gt)) < 1e-5:
-                    rewards.append(1.0)
-                else:
-                    rewards.append(0.0)
-            except Exception as e:
-                rewards.append(0.0)
-        return rewards
+            return rewards
 
 
-    def combined_rewards(completion, solution, prompt):
-        reward = (
-            equation_reward_func([completion], [solution], [prompt])[0]
-            + format_reward_func([completion], [solution])[0]
-        )
+        def combined_rewards(completion, solution, prompt):
+            reward = (
+                equation_reward_func([completion], [solution], [prompt])[0]
+                + format_reward_func([completion], [solution])[0]
+            )
 
-        if reward == 2.0:
-            with open("countdown_completions.txt", "a") as text_file:
-                text_file.write(
-                    f"Prompt {prompt}" + "\n" + completion + "\n" + "=" * 50 + "\n"
-                )
+            if reward == 2.0:
+                with open("countdown_completions.txt", "a") as text_file:
+                    text_file.write(
+                        f"Prompt {prompt}" + "\n" + completion + "\n" + "=" * 50 + "\n"
+                    )
 
-        return reward
+            return reward
 
 Now we have defined our reward functions, we must also design our prompt. This forms the input given
 to the agent and provides the context necessary to complete the task. This is a task-specific feature,
@@ -204,55 +207,61 @@ and different reasoning problems will require different chat templates, although
 format. We must also define a function to collate our questions and answers, and standardise their length.
 Combining all these components, we can now initialise the HuggingFaceGym object.
 
-.. code-block:: python
+.. collapse:: Convert HuggingFace Dataset to Gymnasium Environment
 
-    def countdown_chat_template(q, a, tokenizer):
-        conversation = [
-            {
-                "role": "system",
-                "content": "You are a helpful assistant. You first think about the reasoning process in your mind and then provide the user with the answer.",
-            },
-            {
-                "role": "user",
-                "content": f"Using each number in this tensor only once {tuple(i.item() for i in q)}, create an equation that equals {a.item()}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
-            },
-            {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
-        ]
-        updated_prompt = tokenizer.apply_chat_template(
-            conversation, tokenize=False, continue_final_message=True
+    .. code-block:: python
+
+        def countdown_chat_template(q, a, tokenizer):
+            conversation = [
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant. You first think about the reasoning process in your mind and then provide the user with the answer.",
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Using each number in this tensor only once {tuple(i.item() for i in q)}, create an equation that equals {a.item()}. You "
+                        "can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. "
+                        "And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>."
+                    )
+                },
+                {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
+            ]
+            updated_prompt = tokenizer.apply_chat_template(
+                conversation, tokenize=False, continue_final_message=True
+            )
+            tokenized_prompt = tokenizer(
+                [updated_prompt],
+                return_tensors="pt",
+                padding=True,
+                padding_side="left",
+                return_attention_mask=True,
+            )
+            return tokenized_prompt
+
+        def custom_collate_fn(batch):
+            answers = torch.tensor([item["answer"] for item in batch])
+
+            # For questions of variable length, we need to pad them
+            max_len = max(len(item["question"]) for item in batch)
+            questions = torch.zeros(len(batch), max_len, dtype=torch.long)
+            for i, item in enumerate(batch):
+                q_len = len(item["question"])
+                questions[i, :q_len] = torch.tensor(item["question"])
+
+            return {"answer": answers, "question": questions}
+
+        # Convert the HuggingFace dataset into a Gymnasium environment
+        env = HuggingFaceGym(
+            train_dataset=train_dataset,
+            test_dataset=test_dataset,
+            tokenizer=tokenizer,
+            reward_fn=combined_rewards,
+            apply_chat_template_fn=countdown_chat_template,
+            data_batch_size_per_gpu=2,
+            custom_collate_fn=custom_collate_fn,
+            accelerator=accelerator,
         )
-        tokenized_prompt = tokenizer(
-            [updated_prompt],
-            return_tensors="pt",
-            padding=True,
-            padding_side="left",
-            return_attention_mask=True,
-        )
-        return tokenized_prompt
-
-    def custom_collate_fn(batch):
-        answers = torch.tensor([item["answer"] for item in batch])
-
-        # For questions of variable length, we need to pad them
-        max_len = max(len(item["question"]) for item in batch)
-        questions = torch.zeros(len(batch), max_len, dtype=torch.long)
-        for i, item in enumerate(batch):
-            q_len = len(item["question"])
-            questions[i, :q_len] = torch.tensor(item["question"])
-
-        return {"answer": answers, "question": questions}
-
-    # Convert the HuggingFace dataset into a Gymnasium environment
-    env = HuggingFaceGym(
-        train_dataset=train_dataset,
-        test_dataset=test_dataset,
-        tokenizer=tokenizer,
-        reward_fn=combined_rewards,
-        apply_chat_template_fn=countdown_chat_template,
-        data_batch_size_per_gpu=2,
-        custom_collate_fn=custom_collate_fn,
-        accelerator=accelerator,
-    )
 
 Create a GRPO Agent
 -------------------
@@ -283,8 +292,6 @@ training in this tutorial, we use deepspeed and accelerate.
 
 Training and Saving an Agent
 ----------------------------
-Using AgileRL ``finetune_llm`` function
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The simplest way to train an AgileRL agent is to use the :meth:`finetune_llm() <agilerl.training.train_llm.finetune_llm>` function.
 This training function will orchestrate the training process, removing the the need to implement a training loop, and will save
 checkpoints of the trained agent that can be used later for inference. It also uses Weights and Biases for tracking.
@@ -358,112 +365,114 @@ If we wanted to have more control over the training process, it is also possible
 training loop to train our agent. The training loop below can be used alternatively to the above ``finetune_llm``
 function and is an example of how we might choose to train our agent to exhibit reasoning.
 
-.. code-block:: python
+.. collapse:: Custom Training Loop
 
-    from tqdm import trange
-    import torch.distributed as dist
+    .. code-block:: python
 
-    def gather_tensor(tensor: Union[torch.Tensor, float], accelerator: Accelerator) -> torch.Tensor:
-        """Gather tensors from gpus
+        from tqdm import trange
+        import torch.distributed as dist
 
-        :param tensor: Tensor to gather
-        :type tensor: torch.Tensor
-        :param accelerator: Accelerator object
-        :type accelerator: accelerate.Accelerator
-        :return: Stacked tensors
-        :rtype: torch.Tensor
-        """
-        if not isinstance(tensor, torch.Tensor):
-            tensor = torch.tensor(tensor, device=accelerator.device)
-        tensor = tensor.to(accelerator.device)
-        gathered_tensors = accelerator.gather(tensor)
-        return gathered_tensors
+        def gather_tensor(tensor: Union[torch.Tensor, float], accelerator: Accelerator) -> torch.Tensor:
+            """Gather tensors from gpus
+
+            :param tensor: Tensor to gather
+            :type tensor: torch.Tensor
+            :param accelerator: Accelerator object
+            :type accelerator: accelerate.Accelerator
+            :return: Stacked tensors
+            :rtype: torch.Tensor
+            """
+            if not isinstance(tensor, torch.Tensor):
+                tensor = torch.tensor(tensor, device=accelerator.device)
+            tensor = tensor.to(accelerator.device)
+            gathered_tensors = accelerator.gather(tensor)
+            return gathered_tensors
 
 
-    def aggregate_metrics_across_gpus(
-        accelerator: Accelerator, metric_tensor: Union[torch.Tensor, float]
-    ) -> float:
-        """Aggregate gathered tensors
+        def aggregate_metrics_across_gpus(
+            accelerator: Accelerator, metric_tensor: Union[torch.Tensor, float]
+        ) -> float:
+            """Aggregate gathered tensors
 
-        :param accelerator: Accelerator object
-        :type accelerator: accelerate.Accelerator
-        :param metric_tensor: Metrics
-        :type metric_tensor: torch.Tensor
-        :return: Mean metric
-        :rtype: float
-        """
-        all_metrics = gather_tensor(metric_tensor, accelerator)
-        avg_metrics = all_metrics.mean().item()
-        return avg_metrics
+            :param accelerator: Accelerator object
+            :type accelerator: accelerate.Accelerator
+            :param metric_tensor: Metrics
+            :type metric_tensor: torch.Tensor
+            :return: Mean metric
+            :rtype: float
+            """
+            all_metrics = gather_tensor(metric_tensor, accelerator)
+            avg_metrics = all_metrics.mean().item()
+            return avg_metrics
 
-    evaluation_interval = 5
-    max_reward = 2.0
-    checkpoint_path="path/to/model/directory"
+        evaluation_interval = 5
+        max_reward = 2.0
+        checkpoint_path="path/to/model/directory"
 
-    if agent.accelerator.is_main_process:
-        print("\nTraining...")
-
-    bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
-    max_steps = len(env) // env.data_batch_size
-    if agent.accelerator.is_main_process:
-        pbar = trange(
-            max_steps,
-            unit="step",
-            bar_format=bar_format,
-            ascii=True,
-            dynamic_ncols=True,
-        )
-
-    # calling env.reset() supplies the first batch of training data
-    prompts = env.reset(reset_dataloaders=True)
-    for i in range(max_steps):
-        completion_ids, action_masks = agent.get_action(prompts)
-        # Use the reward function stored in env.step to calculate reward of the each answer from the group
-        next_prompts, rewards = env.step(completion_ids)
-        experiences = (
-            completion_ids,
-            action_masks,
-            rewards,
-        )
-        loss, kl = agent.learn(experiences)
-        metrics = [loss, kl, rewards]
-        if max_reward is not None:
-            accuracy = (rewards == max_reward).sum() / len(rewards.squeeze())
-            metrics.append(accuracy)
-        agg_metrics = [aggregate_metrics_across_gpus(agent.accelerator, metric) for metric in metrics]
-        prompts = next_prompts
         if agent.accelerator.is_main_process:
-            metrics = {
-                        "Loss": (agg_metrics[0]),
-                        "KL-divergence": (agg_metrics[1]),
-                        "Mean training reward": (agg_metrics[2]),
-                    }
-            if max_reward is not None:
-                metrics |= {"Accuracy": (agg_metrics[3])}
-            print(
-                metrics
+            print("\nTraining...")
+
+        bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
+        max_steps = len(env) // env.data_batch_size
+        if agent.accelerator.is_main_process:
+            pbar = trange(
+                max_steps,
+                unit="step",
+                bar_format=bar_format,
+                ascii=True,
+                dynamic_ncols=True,
             )
-            pbar.update(1)
-            if wb:
-                wandb.log(
+
+        # calling env.reset() supplies the first batch of training data
+        prompts = env.reset(reset_dataloaders=True)
+        for i in range(max_steps):
+            completion_ids, action_masks = agent.get_action(prompts)
+            # Use the reward function stored in env.step to calculate reward of the each answer from the group
+            next_prompts, rewards = env.step(completion_ids)
+            experiences = (
+                completion_ids,
+                action_masks,
+                rewards,
+            )
+            loss, kl = agent.learn(experiences)
+            metrics = [loss, kl, rewards]
+            if max_reward is not None:
+                accuracy = (rewards == max_reward).sum() / len(rewards.squeeze())
+                metrics.append(accuracy)
+            agg_metrics = [aggregate_metrics_across_gpus(agent.accelerator, metric) for metric in metrics]
+            prompts = next_prompts
+            if agent.accelerator.is_main_process:
+                metrics = {
+                            "Loss": (agg_metrics[0]),
+                            "KL-divergence": (agg_metrics[1]),
+                            "Mean training reward": (agg_metrics[2]),
+                        }
+                if max_reward is not None:
+                    metrics |= {"Accuracy": (agg_metrics[3])}
+                print(
                     metrics
                 )
-            if (i + 1) % evaluation_interval == 0:
-                test_reward = agent.test(env)
-                print(f"Test reward: {test_reward}")
+                pbar.update(1)
                 if wb:
-                    wandb.log({"Test reward": test_reward})
-            if (
-                checkpoint_path is not None
-                and checkpoint_interval is not None
-                and (i + 1) % checkpoint_interval == 0
-            ):
-                if agent.accelerator is not None:
-                    unwrapped_model = agent.accelerator.unwrap_model(agent.actor)
-                    unwrapped_model.save_pretrained(checkpoint_path)
-                    print(f"Saved checkpoint {save_path}")
-                else:
-                    agent.actor.save_pretrained(checkpoint_path)
+                    wandb.log(
+                        metrics
+                    )
+                if (i + 1) % evaluation_interval == 0:
+                    test_reward = agent.test(env)
+                    print(f"Test reward: {test_reward}")
+                    if wb:
+                        wandb.log({"Test reward": test_reward})
+                if (
+                    checkpoint_path is not None
+                    and checkpoint_interval is not None
+                    and (i + 1) % checkpoint_interval == 0
+                ):
+                    if agent.accelerator is not None:
+                        unwrapped_model = agent.accelerator.unwrap_model(agent.actor)
+                        unwrapped_model.save_pretrained(checkpoint_path)
+                        print(f"Saved checkpoint {save_path}")
+                    else:
+                        agent.actor.save_pretrained(checkpoint_path)
 
 
 Loading a Trained Agent for Inference
@@ -489,7 +498,7 @@ Load fine-tuned LLM
     model = PeftModel.from_pretrained(base_model, "path/to/model/directory")
 
 Inference
-~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~
 
 .. code-block:: python
 

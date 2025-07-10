@@ -106,6 +106,10 @@ with `Gymnasium <https://gymnasium.farama.org/>`_.
       <img src="../../_images/agilerl_rainbow_dqn_cartpole.gif" alt="Acrobot gif" class="thumbnail-image">
          <h2>Rainbow DQN - Cart-Pole</h2>
       </a>
+      <a href="../gymnasium/agilerl_recurrent_ppo_tutorial.html" class="tile online">
+      <img src="../../_images/agilerl_ppo_pendulum.gif" alt="Pendulum gif" class="thumbnail-image">
+         <h2>Recurrent PPO - Masked Pendulum</h2>
+      </a>
 
    </div>
 
@@ -117,3 +121,4 @@ with `Gymnasium <https://gymnasium.farama.org/>`_.
    agilerl_ppo_tutorial
    agilerl_td3_tutorial
    agilerl_rainbow_dqn_tutorial
+   agilerl_recurrent_ppo_tutorial

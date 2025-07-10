@@ -1,12 +1,12 @@
 from pathlib import Path
 
-import pytest
 import torch
 
 from agilerl.algorithms.ilql import ILQL, ILQL_Policy
 from agilerl.data.language_environment import Language_Observation
 from agilerl.data.rl_data import ConstantTokenReward, DataPoint, List_RL_Dataset
 from agilerl.data.torch_datasets import GeneralDataset
+from tests.helper_functions import assert_state_dicts_equal
 from tests.test_data import WordleTokenizer
 
 torch.serialization.add_safe_globals(
@@ -19,12 +19,6 @@ torch.serialization.add_safe_globals(
         Language_Observation,
     ]
 )
-
-
-@pytest.fixture(autouse=True)
-def cleanup():
-    yield  # Run the test first
-    torch.cuda.empty_cache()  # Free up GPU memory
 
 
 def test_ilql_init():
@@ -427,9 +421,9 @@ def test_hard_update():
 
     algo.hardUpdate()
 
-    assert str(algo.q.state_dict()) == str(algo.target_q.state_dict())
-    assert str(algo.q2.state_dict()) == str(algo.target_q2.state_dict())
-    assert str(algo.actor_target.state_dict()) == str(algo.model.state_dict())
+    assert_state_dicts_equal(algo.q.state_dict(), algo.target_q.state_dict())
+    assert_state_dicts_equal(algo.q2.state_dict(), algo.target_q2.state_dict())
+    assert_state_dicts_equal(algo.actor_target.state_dict(), algo.model.state_dict())
 
 
 def test_clone():
@@ -481,15 +475,17 @@ def test_clone():
     assert algo.cql_temp == clone.cql_temp
     assert algo.weight_decay == clone.weight_decay
     assert algo.device == clone.device
-    assert str(algo.v.state_dict()) == str(clone.v.state_dict())
-    assert str(algo.pi.state_dict()) == str(clone.pi.state_dict())
-    assert str(algo.q.state_dict()) == str(clone.q.state_dict())
-    assert str(algo.target_q.state_dict()) == str(clone.target_q.state_dict())
-    assert str(algo.q2.state_dict()) == str(clone.q2.state_dict())
-    assert str(algo.target_q2.state_dict()) == str(clone.target_q2.state_dict())
-    assert str(algo.actor.state_dict()) == str(clone.actor.state_dict())
-    assert str(algo.actor_target.state_dict()) == str(clone.actor_target.state_dict())
-    assert str(algo.model.state_dict()) == str(clone.model.state_dict())
+    assert_state_dicts_equal(algo.v.state_dict(), clone.v.state_dict())
+    assert_state_dicts_equal(algo.pi.state_dict(), clone.pi.state_dict())
+    assert_state_dicts_equal(algo.q.state_dict(), clone.q.state_dict())
+    assert_state_dicts_equal(algo.target_q.state_dict(), clone.target_q.state_dict())
+    assert_state_dicts_equal(algo.q2.state_dict(), clone.q2.state_dict())
+    assert_state_dicts_equal(algo.target_q2.state_dict(), clone.target_q2.state_dict())
+    assert_state_dicts_equal(algo.actor.state_dict(), clone.actor.state_dict())
+    assert_state_dicts_equal(
+        algo.actor_target.state_dict(), clone.actor_target.state_dict()
+    )
+    assert_state_dicts_equal(algo.model.state_dict(), clone.model.state_dict())
 
 
 def test_save_load_checkpoint(tmpdir):
