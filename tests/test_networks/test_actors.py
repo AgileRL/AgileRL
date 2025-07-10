@@ -308,23 +308,12 @@ def test_distribution_mutation_methods(
     observation_space = spaces.Box(low=-1, high=1, shape=(2,))
     action_space = spaces.Box(low=-1, high=1, shape=(2,))
 
-    class EvoDummyRNG:
-        rng = np.random.default_rng(seed=42)
-
-        def choice(self, a, size=None, replace=True, p=None):
-            return 1
-
-        def integers(self, low=0, high=None):
-            return self.rng.integers(low, high)
-
     network = StochasticActor(
         observation_space,
         action_space,
         head_config=head_config,
         use_experimental_distribution=use_experimental_distribution,
     )
-
-    network.rng = EvoDummyRNG()
 
     evolvable_dist = network.head_net
     evolvable_dist.rng = dummy_rng
@@ -344,6 +333,8 @@ def test_distribution_mutation_methods(
 
         if new_dist.last_mutation_attr is not None:
             # Check that architecture has changed
+            print(evolvable_dist)
+            print(new_dist.last_mutation_attr)
             assert_not_equal_state_dict(
                 evolvable_dist.state_dict(), new_dist.state_dict()
             )
