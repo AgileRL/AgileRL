@@ -1057,7 +1057,17 @@ def test_ppo_with_rollout_buffer(observation_space, action_space, request):
 # Test PPO learning with rollout buffer
 @pytest.mark.parametrize("observation_space", ["vector_space", "image_space"])
 @pytest.mark.parametrize("action_space", ["discrete_space", "vector_space"])
-def test_ppo_learn_with_rollout_buffer(observation_space, action_space, request):
+@pytest.mark.parametrize(
+    "bptt_sequence_type",
+    [
+        BPTTSequenceType.CHUNKED,
+        BPTTSequenceType.MAXIMUM,
+        BPTTSequenceType.FIFTY_PERCENT_OVERLAP,
+    ],
+)
+def test_ppo_learn_with_rollout_buffer(
+    observation_space, action_space, bptt_sequence_type, request
+):
     observation_space = request.getfixturevalue(observation_space)
     action_space = request.getfixturevalue(action_space)
 
@@ -1070,6 +1080,7 @@ def test_ppo_learn_with_rollout_buffer(observation_space, action_space, request)
         use_rollout_buffer=True,
         learn_step=learn_step,
         batch_size=batch_size,
+        bptt_sequence_type=bptt_sequence_type,
     )
 
     # Fill the buffer manually
