@@ -5,7 +5,7 @@ In online reinforcement learning, an agent is able to gather data by directly in
 update its policy. To enable our agent to interact in this way, the agent needs to act either in the real world, or in a simulation.
 
 AgileRL's online training framework enables agents to learn in environments, using the standard Gym interface, 10x faster than SOTA by using our
-Evolutionary Hyperparameter Optimization algorithm.
+:ref:`Evolutionary Hyperparameter Optimization <evo_hyperparam_opt>` algorithm.
 
 On-policy reinforcement learning involves learning from experiences gathered by following a single policy. In these algorithms, the data collection policy
 and the learning policy are the same, meaning that the agent learns from its own actions and their outcomes in the environment. This approach often leads to
@@ -20,7 +20,7 @@ policy, potentially limiting exploration and the use of past experiences.
    * - **Algorithms**
      - **Tutorials**
    * - :ref:`PPO<ppo>`
-     - :ref:`Acrobot<ppo_tutorial>`
+     - :ref:`Acrobot<ppo_tutorial>`, :ref:`Masked Velocity LunarLander-v3<agilerl_recurrent_ppo_tutorial>`
 
 
 .. _initpop_on_policy:
@@ -32,69 +32,73 @@ To perform evolutionary HPO, we require a population of agents. Individuals in t
 determine the efficacy of certain hyperparameters. Individual agents which learn best are more likely to survive until the next generation, and so their hyperparameters
 are more likely to remain present in the population. The sequence of evolution (tournament selection followed by mutation) is detailed further below.
 
-.. code-block:: python
+.. collapse:: Example Population Creation
+  :open:
 
-    import torch
-    from agilerl.utils.utils import (
-        create_population,
-        make_vect_envs,
-        observation_space_channels_to_first
-    )
+    .. code-block:: python
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        import torch
+        from agilerl.utils.utils import (
+            create_population,
+            make_vect_envs,
+            observation_space_channels_to_first
+        )
 
-    NET_CONFIG = {
-        "encoder_config": {"hidden_size": [32, 32]}  # Actor head hidden size
-    }
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    INIT_HP = {
-        "POP_SIZE": 6,  # Population size
-        "BATCH_SIZE": 128,  # Batch size
-        "LR": 1e-3,  # Learning rate
-        "LEARN_STEP": 128,  # Learning frequency
-        "GAMMA": 0.99,  # Discount factor
-        "GAE_LAMBDA": 0.95,  # Lambda for general advantage estimation
-        "ACTION_STD_INIT": 0.6,  # Initial action standard deviation
-        "CLIP_COEF": 0.2,  # Surrogate clipping coefficient
-        "ENT_COEF": 0.01,  # Entropy coefficient
-        "VF_COEF": 0.5,  # Value function coefficient
-        "MAX_GRAD_NORM": 0.5,  # Maximum norm for gradient clipping
-        "TARGET_KL": None,  # Target KL divergence threshold
-        "UPDATE_EPOCHS": 4,  # Number of policy update epochs
-        # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-        "CHANNELS_LAST": False,
-    }
+        NET_CONFIG = {
+            "encoder_config": {"hidden_size": [32, 32]}  # Actor head hidden size
+        }
 
-    num_envs = 16
-    env = make_vect_envs("LunarLander-v3", num_envs=num_envs)  # Create environment
+        INIT_HP = {
+            "POP_SIZE": 6,  # Population size
+            "BATCH_SIZE": 128,  # Batch size
+            "LR": 1e-3,  # Learning rate
+            "LEARN_STEP": 128,  # Learning frequency
+            "GAMMA": 0.99,  # Discount factor
+            "GAE_LAMBDA": 0.95,  # Lambda for general advantage estimation
+            "ACTION_STD_INIT": 0.6,  # Initial action standard deviation
+            "CLIP_COEF": 0.2,  # Surrogate clipping coefficient
+            "ENT_COEF": 0.01,  # Entropy coefficient
+            "VF_COEF": 0.5,  # Value function coefficient
+            "MAX_GRAD_NORM": 0.5,  # Maximum norm for gradient clipping
+            "TARGET_KL": None,  # Target KL divergence threshold
+            "UPDATE_EPOCHS": 4,  # Number of policy update epochs
+            # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
+            "CHANNELS_LAST": False,
+        }
 
-    observation_space = env.single_observation_space
-    action_space = env.single_action_space
-    if INIT_HP['CHANNELS_LAST']:
-        observation_space = observation_space_channels_to_first(observation_space)
+        num_envs = 16
+        env = make_vect_envs("LunarLander-v3", num_envs=num_envs)  # Create environment
 
-    pop = create_population(
-        algo="PPO",  # RL algorithm
-        observation_space=observation_space,  # State dimension
-        action_space=action_space,  # Action dimension
-        net_config=NET_CONFIG,  # Network configuration
-        INIT_HP=INIT_HP,  # Initial hyperparameters
-        population_size=INIT_HP["POP_SIZE"],  # Population size
-        num_envs=num_envs,  # Number of vectorized envs
-        device=device,
-    )
+        observation_space = env.single_observation_space
+        action_space = env.single_action_space
+        if INIT_HP['CHANNELS_LAST']:
+            observation_space = observation_space_channels_to_first(observation_space)
 
-On-Policy Training Loop
------------------------
+        pop = create_population(
+            algo="PPO",  # RL algorithm
+            observation_space=observation_space,  # State dimension
+            action_space=action_space,  # Action dimension
+            net_config=NET_CONFIG,  # Network configuration
+            INIT_HP=INIT_HP,  # Initial hyperparameters
+            population_size=INIT_HP["POP_SIZE"],  # Population size
+            num_envs=num_envs,  # Number of vectorized envs
+            device=device,
+        )
 
-While off-policy RL algorithms can be considered more efficient than on-policy algorithms, due to their ability to learn from experiences
-collected using a different or previous policy, we have still chosen to include an efficient, evolvable PPO implementation in AgileRL. This
-algorithm can be used in a variety of settings, with both discrete and continuous actions, and is widely popular across domains including
-robotics, games, finance, and RLHF.
+Training Loop
+-------------
 
-The setup for PPO is very similar to the off-policy example above, except it does not require the use of an experience replay buffer. It also requires some different hyperparameters, shown below in the custom loop.
+While off-policy RL algorithms can be considered more sample-efficient than on-policy algorithms, due to their ability to learn from experiences
+collected using a different or previous policy, on-policy algorithms often do better in practice due to the improved stability during training.
+Currently, AgileRL includes an evolvable implementation of :class:`Proximal Policy Optimisation (PPO) <agilerl.algorithms.ppo.PPO>`. This algorithm
+can be used in a variety of settings and is widely popular across domains including robotics, games, finance, and RLHF.
 
-The easiest way to train a population of agents using PPO is to use our online training function:
+The setup for PPO is very similar to the off-policy example above, except it does not require the use of an experience replay buffer. It also requires
+some different hyperparameters, shown below in the custom loop.
+
+The easiest way to train a population of agents using PPO is to use our on-policy training function:
 
 .. code-block:: python
 
@@ -117,7 +121,8 @@ The easiest way to train a population of agents using PPO is to use our online t
 
 .. note::
 
-   Known `Gymnasium issue <https://github.com/Farama-Foundation/Gymnasium/issues/722>`_ - running vectorize environments as top-level code (without ``if __name__ == "__main__":``) may cause multiprocessing errors. To fix, run the above as a method under ``main``, e.g.
+   Known `Gymnasium issue <https://github.com/Farama-Foundation/Gymnasium/issues/722>`_ - running vectorize environments as top-level code (without ``if __name__ == "__main__":``)
+   may cause multiprocessing errors. To fix, run the above as a method under ``main``, e.g.
 
    .. code-block:: python
 
@@ -129,217 +134,281 @@ The easiest way to train a population of agents using PPO is to use our online t
 
 Alternatively, use a custom on-policy training loop:
 
-.. code-block:: python
+.. collapse:: Example Custom Training Loop
 
-    import numpy as np
-    import torch
-    from tqdm import trange
-    from agilerl.hpo.mutation import Mutations
-    from agilerl.hpo.tournament import TournamentSelection
-    from agilerl.utils.utils import create_population, make_vect_envs, observation_space_channels_to_first
+    .. code-block:: python
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        import numpy as np
+        import torch
+        from tqdm import trange
+        from agilerl.hpo.mutation import Mutations
+        from agilerl.hpo.tournament import TournamentSelection
+        from agilerl.utils.utils import create_population, make_vect_envs
 
-    NET_CONFIG = {
-        "encoder_config": {
-            "hidden_size": [32, 32] # Encoder hidden size
-            },
-        "head_config": {
-            "hidden_size": [32, 32]  # Head hidden size
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        NET_CONFIG = {
+            "encoder_config": {
+                "hidden_size": [32, 32], # Encoder hidden size
+                "activation": "ReLU"
+                },
+            "head_config": {
+                "hidden_size": [32]  # Head hidden size
+            }
         }
-    }
 
-    INIT_HP = {
-        "POP_SIZE": 6,  # Population size
-        "BATCH_SIZE": 128,  # Batch size
-        "LR": 1e-3,  # Learning rate
-        "LEARN_STEP": 128,  # Learning frequency
-        "GAMMA": 0.99,  # Discount factor
-        "GAE_LAMBDA": 0.95,  # Lambda for general advantage estimation
-        "ACTION_STD_INIT": 0.6,  # Initial action standard deviation
-        "CLIP_COEF": 0.2,  # Surrogate clipping coefficient
-        "ENT_COEF": 0.01,  # Entropy coefficient
-        "VF_COEF": 0.5,  # Value function coefficient
-        "MAX_GRAD_NORM": 0.5,  # Maximum norm for gradient clipping
-        "TARGET_KL": None,  # Target KL divergence threshold
-        "UPDATE_EPOCHS": 4,  # Number of policy update epochs
-        # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-        "CHANNELS_LAST": False,
-    }
+        INIT_HP = {
+            "POP_SIZE": 6,  # Population size
+            "BATCH_SIZE": 128,  # Batch size
+            "LR": 1e-3,  # Learning rate
+            "LEARN_STEP": 128,  # Learning frequency
+            "GAMMA": 0.99,  # Discount factor
+            "GAE_LAMBDA": 0.95,  # Lambda for general advantage estimation
+            "ACTION_STD_INIT": 0.6,  # Initial action standard deviation
+            "CLIP_COEF": 0.2,  # Surrogate clipping coefficient
+            "ENT_COEF": 0.01,  # Entropy coefficient
+            "VF_COEF": 0.5,  # Value function coefficient
+            "MAX_GRAD_NORM": 0.5,  # Maximum norm for gradient clipping
+            "TARGET_KL": None,  # Target KL divergence threshold
+            "UPDATE_EPOCHS": 4,  # Number of policy update epochs
+        }
 
-    num_envs = 16
-    env = make_vect_envs("LunarLander-v3", num_envs=num_envs)  # Create environment
+        num_envs = 16
+        env = make_vect_envs("LunarLander-v3", num_envs=num_envs)  # Create environment
+        observation_space = env.single_observation_space
+        action_space = env.single_action_space
 
-    observation_space = env.single_observation_space
-    action_space = env.single_action_space
-    if INIT_HP['CHANNELS_LAST']:
-        observation_space = observation_space_channels_to_first(observation_space)
-
-    # RL hyperparameters configuration for mutation during training
-    hp_config = HyperparameterConfig(
-        lr = RLParameter(min=1e-4, max=1e-2),
-        batch_size = RLParameter(
-            min=8, max=1024, dtype=int
-            )
-    )
-
-    pop = create_population(
-        algo="PPO",  # RL algorithm
-        observation_space=observation_space,  # State dimension
-        action_space=action_space,  # Action dimension
-        net_config=NET_CONFIG,  # Network configuration
-        INIT_HP=INIT_HP,  # Initial hyperparameters
-        hp_config=hp_config,  # Hyperparameters configuration
-        population_size=INIT_HP["POP_SIZE"],  # Population size
-        num_envs=num_envs,  # Number of vectorized envs
-        device=device,
-    )
-
-    tournament = TournamentSelection(
-        tournament_size=2,  # Tournament selection size
-        elitism=True,  # Elitism in tournament selection
-        population_size=INIT_HP["POP_SIZE"],  # Population size
-        eval_loop=1,  # Evaluate using last N fitness scores
-    )
-
-    mutations = Mutations(
-        no_mutation=0.4,  # No mutation
-        architecture=0.2,  # Architecture mutation
-        new_layer_prob=0.2,  # New layer mutation
-        parameters=0.2,  # Network parameters mutation
-        activation=0,  # Activation layer mutation
-        rl_hp=0.2,  # Learning HP mutation
-        mutation_sd=0.1,  # Mutation strength  # Network architecture
-        rand_seed=1,  # Random seed
-        device=device,
-    )
-
-    max_steps = 200000  # Max steps
-    evo_steps = 10000  # Evolution frequency
-    eval_steps = None  # Evaluation steps per episode - go until done
-    eval_loop = 1  # Number of evaluation episodes
-
-    total_steps = 0
-
-    # TRAINING LOOP
-    print("Training...")
-    pbar = trange(max_steps, unit="step")
-    while np.less([agent.steps[-1] for agent in pop], max_steps).all():
-        pop_episode_scores = []
-        for agent in pop:  # Loop through population
-            state, info = env.reset()  # Reset environment at start of episode
-            scores = np.zeros(num_envs)
-            completed_episode_scores = []
-            steps = 0
-
-            for _ in range(-(evo_steps // -agent.learn_step)):
-
-                states = []
-                actions = []
-                log_probs = []
-                rewards = []
-                dones = []
-                values = []
-
-                done = np.zeros(num_envs)
-
-                learn_steps = 0
-                for idx_step in range(-(agent.learn_step // -num_envs)):
-                    if INIT_HP["CHANNELS_LAST"]:
-                        state = obs_channels_to_first(state)
-
-                    # Get next action from agent
-                    action, log_prob, _, value = agent.get_action(state)
-
-                    # Clip to action space
-                    if isinstance(agent.action_space, spaces.Box):
-                        if agent.actor.squash_output:
-                            clipped_action = agent.actor.scale_action(action)
-                        else:
-                            clipped_action = np.clip(action, agent.action_space.low, agent.action_space.high)
-                    else:
-                        clipped_action = action
-
-                    # Act in environment
-                    next_state, reward, terminated, truncated, info = env.step(clipped_action)
-                    next_done = np.logical_or(terminated, truncated).astype(np.int8)
-
-                    total_steps += num_envs
-                    steps += num_envs
-                    learn_steps += num_envs
-
-                    states.append(state)
-                    actions.append(action)
-                    log_probs.append(log_prob)
-                    rewards.append(reward)
-                    dones.append(dones)
-                    values.append(value)
-
-                    state = next_state
-                    done = next_done
-                    scores += np.array(reward)
-
-                    for idx, (d, t) in enumerate(zip(terminated, truncated)):
-                        if d or t:
-                            completed_episode_scores.append(scores[idx])
-                            agent.scores.append(scores[idx])
-                            scores[idx] = 0
-
-                pbar.update(learn_steps // len(pop))
-
-                if INIT_HP["CHANNELS_LAST"]:
-                    next_state = obs_channels_to_first(next_state)
-
-                experiences = (
-                    states,
-                    actions,
-                    log_probs,
-                    rewards,
-                    dones,
-                    values,
-                    next_state,
-                    next_done,
+        # RL hyperparameters configuration for mutation during training
+        hp_config = HyperparameterConfig(
+            lr = RLParameter(min=1e-4, max=1e-2),
+            batch_size = RLParameter(
+                min=8, max=1024, dtype=int
                 )
-                # Learn according to agent's RL algorithm
-                agent.learn(experiences)
-
-            agent.steps[-1] += steps
-            pop_episode_scores.append(completed_episode_scores)
-
-        # Evaluate population
-        fitnesses = [
-            agent.test(
-                env,
-                swap_channels=INIT_HP["CHANNELS_LAST"],
-                max_steps=eval_steps,
-                loop=eval_loop,
-            )
-            for agent in pop
-        ]
-        mean_scores = [
-            (
-                np.mean(episode_scores)
-                if len(episode_scores) > 0
-                else "0 completed episodes"
-            )
-            for episode_scores in pop_episode_scores
-        ]
-
-        print(f"--- Global steps {total_steps} ---")
-        print(f"Steps {[agent.steps[-1] for agent in pop]}")
-        print(f"Scores: {mean_scores}")
-        print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-        print(
-            f'5 fitness avgs: {["%.2f"%np.mean(agent.fitness[-5:]) for agent in pop]}'
+            learn_step = RLParameter(min=64, max=1024, dtype=int)
         )
 
-        # Tournament selection and population mutation
-        elite, pop = tournament.select(pop)
-        pop = mutations.mutation(pop)
+        pop = create_population(
+            algo="PPO",  # RL algorithm
+            observation_space=observation_space,  # State dimension
+            action_space=action_space,  # Action dimension
+            net_config=NET_CONFIG,  # Network configuration
+            INIT_HP=INIT_HP,  # Initial hyperparameters
+            hp_config=hp_config,  # Hyperparameters configuration
+            population_size=INIT_HP["POP_SIZE"],  # Population size
+            num_envs=num_envs,  # Number of vectorized envs
+            device=device,
+        )
 
-        # Update step counter
-        for agent in pop:
-            agent.steps.append(agent.steps[-1])
+        tournament = TournamentSelection(
+            tournament_size=2,  # Tournament selection size
+            elitism=True,  # Elitism in tournament selection
+            population_size=INIT_HP["POP_SIZE"],  # Population size
+            eval_loop=1,  # Evaluate using last N fitness scores
+        )
 
-    pbar.close()
-    env.close()
+        mutations = Mutations(
+            no_mutation=0.4,  # No mutation
+            architecture=0.2,  # Architecture mutation
+            new_layer_prob=0.2,  # New layer mutation
+            parameters=0.2,  # Network parameters mutation
+            activation=0,  # Activation layer mutation
+            rl_hp=0.2,  # Learning HP mutation
+            mutation_sd=0.1,  # Mutation strength  # Network architecture
+            rand_seed=1,  # Random seed
+            device=device,
+        )
+
+        max_steps = 200000  # Max steps
+        evo_steps = 10000  # Evolution frequency
+        eval_steps = None  # Evaluation steps per episode - go until done
+        eval_loop = 1  # Number of evaluation episodes
+        total_steps = 0
+
+        # TRAINING LOOP
+        print("Training...")
+        pbar = trange(max_steps, unit="step")
+        while np.less([agent.steps[-1] for agent in pop], max_steps).all():
+            pop_episode_scores = []
+            for agent in pop:  # Loop through population
+                agent.set_training_mode(True)
+
+                obs, info = env.reset()  # Reset environment at start of episode
+                scores = np.zeros(num_envs)
+                completed_episode_scores = []
+                steps = 0
+
+                for _ in range(-(evo_steps // -agent.learn_step)):
+
+                    observations = []
+                    actions = []
+                    log_probs = []
+                    rewards = []
+                    dones = []
+                    values = []
+
+                    done = np.zeros(num_envs)
+
+                    learn_steps = 0
+                    for idx_step in range(-(agent.learn_step // -num_envs)):
+                        # Get next action from agent
+                        action, log_prob, _, value = agent.get_action(obs)
+
+                        # Clip to action space
+                        if isinstance(agent.action_space, spaces.Box):
+                            if agent.actor.squash_output:
+                                clipped_action = agent.actor.scale_action(action)
+                            else:
+                                clipped_action = np.clip(action, agent.action_space.low, agent.action_space.high)
+                        else:
+                            clipped_action = action
+
+                        # Act in environment
+                        next_obs, reward, terminated, truncated, info = env.step(clipped_action)
+                        next_done = np.logical_or(terminated, truncated).astype(np.int8)
+
+                        total_steps += num_envs
+                        steps += num_envs
+                        learn_steps += num_envs
+
+                        observations.append(obs)
+                        actions.append(action)
+                        log_probs.append(log_prob)
+                        rewards.append(reward)
+                        dones.append(dones)
+                        values.append(value)
+                        obs = next_obs
+                        done = next_done
+                        scores += np.array(reward)
+
+                        for idx, (d, t) in enumerate(zip(terminated, truncated)):
+                            if d or t:
+                                completed_episode_scores.append(scores[idx])
+                                agent.scores.append(scores[idx])
+                                scores[idx] = 0
+
+                    pbar.update(learn_steps // len(pop))
+
+                    experiences = (
+                        observations,
+                        actions,
+                        log_probs,
+                        rewards,
+                        dones,
+                        values,
+                        next_obs,
+                        next_done,
+                    )
+                    # Learn according to agent's RL algorithm
+                    agent.learn(experiences)
+
+                agent.steps[-1] += steps
+                pop_episode_scores.append(completed_episode_scores)
+
+            # Evaluate population
+            fitnesses = [
+                agent.test(
+                    env,
+                    swap_channels=INIT_HP["CHANNELS_LAST"],
+                    max_steps=eval_steps,
+                    loop=eval_loop,
+                )
+                for agent in pop
+            ]
+            mean_scores = [
+                (
+                    np.mean(episode_scores)
+                    if len(episode_scores) > 0
+                    else "0 completed episodes"
+                )
+                for episode_scores in pop_episode_scores
+            ]
+
+            print(f"--- Global steps {total_steps} ---")
+            print(f"Steps {[agent.steps[-1] for agent in pop]}")
+            print(f"Scores: {mean_scores}")
+            print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
+            print(
+                f'5 fitness avgs: {["%.2f"%np.mean(agent.fitness[-5:]) for agent in pop]}'
+            )
+
+            # Tournament selection and population mutation
+            elite, pop = tournament.select(pop)
+            pop = mutations.mutation(pop)
+
+            # Update step counter
+            for agent in pop:
+                agent.steps.append(agent.steps[-1])
+
+        pbar.close()
+        env.close()
+
+.. _recurrent_on_policy:
+
+Training Loop for Recurrent On-Policy Algorithms
+-----------------------------------------------
+
+Recurrent on-policy algorithms require a different training loop to the standard on-policy algorithms. This is because the agent needs to maintain a hidden state
+between steps, which is not possible with the standard training loop. AgileRL currently supports recurrent policies to be used with ``PPO``. To use a recurrent policy,
+users must set both ``recurrent`` and ``use_rollout_buffer`` to ``True`` as arguments to the algorithm.
+
+.. collapse:: Example Population Creation
+  :open:
+
+    .. code-block:: python
+
+        import torch
+        from agilerl.utils.utils import (
+            create_population,
+            make_vect_envs,
+            observation_space_channels_to_first
+        )
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        NET_CONFIG = {
+            "encoder_config": {
+                "hidden_state_size": 64,
+                "num_layers": 1,
+                "max_seq_len": 512,
+            },
+            "head_config": {
+                "hidden_size": [64],
+            }
+        }
+
+        INIT_HP = {
+            "POP_SIZE": 6,  # Population size
+            "BATCH_SIZE": 128,  # Batch size
+            "LR": 1e-3,  # Learning rate
+            "LEARN_STEP": 128,  # Learning frequency
+            "GAMMA": 0.99,  # Discount factor
+            "GAE_LAMBDA": 0.95,  # Lambda for general advantage estimation
+            "ACTION_STD_INIT": 0.6,  # Initial action standard deviation
+            "CLIP_COEF": 0.2,  # Surrogate clipping coefficient
+            "ENT_COEF": 0.01,  # Entropy coefficient
+            "VF_COEF": 0.5,  # Value function coefficient
+            "MAX_GRAD_NORM": 0.5,  # Maximum norm for gradient clipping
+            "RECURRENT": True,
+            "USE_ROLLOUT_BUFFER": True,
+            "TARGET_KL": None,  # Target KL divergence threshold
+            "UPDATE_EPOCHS": 4,  # Number of policy update epochs
+        }
+
+        # Create environment
+        num_envs = 16
+        env = make_vect_envs("LunarLander-v3", num_envs=num_envs)
+
+        observation_space = env.single_observation_space
+        action_space = env.single_action_space
+
+        # Create population
+        pop = create_population(
+            algo="PPO",  # RL algorithm
+            observation_space=observation_space,  # State dimension
+            action_space=action_space,  # Action dimension
+            net_config=NET_CONFIG,  # Network configuration
+            INIT_HP=INIT_HP,  # Initial hyperparameters
+            population_size=INIT_HP["POP_SIZE"],  # Population size
+            num_envs=num_envs,  # Number of vectorized envs
+            device=device,
+        )

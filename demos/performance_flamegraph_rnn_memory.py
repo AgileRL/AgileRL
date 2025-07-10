@@ -19,6 +19,7 @@ import torch
 from torch.profiler import ProfilerActivity, profile, record_function
 from tqdm import trange
 
+from agilerl.rollouts.on_policy import collect_rollouts_recurrent
 from agilerl.utils.utils import create_population
 
 
@@ -145,7 +146,8 @@ INIT_HP = {
     "MAX_GRAD_NORM": 0.5,
     "UPDATE_EPOCHS": 2,
     "SHARE_ENCODERS": True,
-    "DISCRETE_ACTIONS": True,
+    "USE_ROLLOUT_BUFFER": True,
+    "RECURRENT": recurrent,
     "ACTION_STD_INIT": 0.6,
     "TARGET_KL": None,
     "CHANNELS_LAST": False,
@@ -174,7 +176,6 @@ pop = create_population(
     population_size=INIT_HP["POP_SIZE"],
     num_envs=num_envs,
     device=device,
-    algo_kwargs={"use_rollout_buffer": True, "recurrent": recurrent},
 )
 
 agent = pop[0]
@@ -185,7 +186,7 @@ agent = pop[0]
 print("\n--- Profiling with cProfile ---")
 pr = cProfile.Profile()
 pr.enable()
-agent.collect_rollouts(env)
+collect_rollouts_recurrent(agent, env)
 pr.disable()
 s = io.StringIO()
 ps = pstats.Stats(pr, stream=s).sort_stats("cumulative")
@@ -219,7 +220,7 @@ if use_profiler:
 print("\n--- Running Training Loop ---")
 pbar = trange(max_steps * num_envs, unit="step")
 while total_steps < max_steps:
-    agent.collect_rollouts(env)
+    collect_rollouts_recurrent(agent, env)
     agent.learn()
     total_steps += INIT_HP["LEARN_STEP"]
     pbar.update(INIT_HP["LEARN_STEP"] * num_envs)
@@ -262,7 +263,7 @@ with profile(
     activities=[ProfilerActivity.CPU], record_shapes=True, with_stack=True
 ) as prof:
     with record_function("training_step"):
-        agent.collect_rollouts(env)
+        collect_rollouts_recurrent(agent, env)
         agent.learn()
 
 prof.export_chrome_trace("pytorch_trace.json")

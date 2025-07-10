@@ -1,15 +1,13 @@
+from typing import List
+
 import numpy as np
 import torch
 from tqdm import trange
 
+from agilerl.algorithms import PPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.utils.algo_utils import obs_channels_to_first
-from agilerl.utils.utils import (
-    create_population,
-    make_vect_envs,
-    observation_space_channels_to_first,
-)
+from agilerl.utils.utils import create_population, make_vect_envs
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -31,7 +29,6 @@ if __name__ == "__main__":
 
     INIT_HP = {
         "POP_SIZE": 6,  # Population size
-        "DISCRETE_ACTIONS": True,  # Discrete action space
         "BATCH_SIZE": 128,  # Batch size
         "LR": 1e-3,  # Learning rate
         "LEARN_STEP": 128,  # Learning frequency
@@ -44,8 +41,6 @@ if __name__ == "__main__":
         "MAX_GRAD_NORM": 0.5,  # Maximum norm for gradient clipping
         "TARGET_KL": None,  # Target KL divergence threshold
         "UPDATE_EPOCHS": 4,  # Number of policy update epochs
-        # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-        "CHANNELS_LAST": False,
     }
 
     num_envs = 16
@@ -53,10 +48,7 @@ if __name__ == "__main__":
 
     observation_space = env.single_observation_space
     action_space = env.single_action_space
-    if INIT_HP["CHANNELS_LAST"]:
-        observation_space = observation_space_channels_to_first(observation_space)
-
-    pop = create_population(
+    pop: List[PPO] = create_population(
         algo="PPO",  # Algorithm
         observation_space=observation_space,  # Observation space
         action_space=action_space,  # Action space
@@ -101,13 +93,13 @@ if __name__ == "__main__":
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         pop_episode_scores = []
         for agent in pop:  # Loop through population
-            state, info = env.reset()  # Reset environment at start of episode
+            obs, info = env.reset()  # Reset environment at start of episode
             scores = np.zeros(num_envs)
             completed_episode_scores = []
             steps = 0
 
             for _ in range(-(evo_steps // -agent.learn_step)):
-                states = []
+                observations = []
                 actions = []
                 log_probs = []
                 rewards = []
@@ -119,28 +111,25 @@ if __name__ == "__main__":
                 learn_steps = 0
 
                 for idx_step in range(-(agent.learn_step // -num_envs)):
-                    if INIT_HP["CHANNELS_LAST"]:
-                        state = obs_channels_to_first(state)
-
                     # Get next action from agent
-                    action, log_prob, _, value = agent.get_action(state)
+                    action, log_prob, _, value = agent.get_action(obs)
 
                     # Act in environment
-                    next_state, reward, terminated, truncated, info = env.step(action)
+                    next_obs, reward, terminated, truncated, info = env.step(action)
                     next_done = np.logical_or(terminated, truncated).astype(np.int8)
 
                     total_steps += num_envs
                     steps += num_envs
                     learn_steps += num_envs
 
-                    states.append(state)
+                    observations.append(obs)
                     actions.append(action)
                     log_probs.append(log_prob)
                     rewards.append(reward)
                     dones.append(done)
                     values.append(value)
 
-                    state = next_state
+                    obs = next_obs
                     done = next_done
                     scores += np.array(reward)
 
@@ -152,17 +141,14 @@ if __name__ == "__main__":
 
                 pbar.update(learn_steps // len(pop))
 
-                if INIT_HP["CHANNELS_LAST"]:
-                    next_state = obs_channels_to_first(next_state)
-
                 experiences = (
-                    states,
+                    observations,
                     actions,
                     log_probs,
                     rewards,
                     dones,
                     values,
-                    next_state,
+                    next_obs,
                     next_done,
                 )
                 # Learn according to agent's RL algorithm
@@ -175,7 +161,6 @@ if __name__ == "__main__":
         fitnesses = [
             agent.test(
                 env,
-                swap_channels=INIT_HP["CHANNELS_LAST"],
                 max_steps=eval_steps,
                 loop=eval_loop,
             )

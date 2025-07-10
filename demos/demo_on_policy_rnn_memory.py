@@ -11,6 +11,7 @@ from tqdm import trange
 
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.rollouts import collect_rollouts, collect_rollouts_recurrent
 from agilerl.utils.utils import create_population
 
 
@@ -136,10 +137,10 @@ def run_demo():
         "MAX_GRAD_NORM": 0.5,
         "UPDATE_EPOCHS": 2,
         "SHARE_ENCODERS": True,
-        "DISCRETE_ACTIONS": True,
+        "RECURRENT": recurrent,
+        "USE_ROLLOUT_BUFFER": True,
         "ACTION_STD_INIT": 0.6,
         "TARGET_KL": None,
-        "CHANNELS_LAST": False,
     }
 
     def make_env():
@@ -163,10 +164,6 @@ def run_demo():
         population_size=INIT_HP["POP_SIZE"],
         num_envs=num_envs,
         device=device,
-        algo_kwargs={
-            "use_rollout_buffer": True,
-            "recurrent": recurrent,
-        },
     )
 
     # --- Setup Evolution Components ---
@@ -208,7 +205,10 @@ def run_demo():
         and not training_complete
     ):
         for agent in pop:
-            agent.collect_rollouts(env)
+            active_collect = (
+                collect_rollouts if not recurrent else collect_rollouts_recurrent
+            )
+            active_collect(agent, env)
             agent.learn()
             total_steps += agent.learn_step * num_envs
             agent.steps[-1] += agent.learn_step
@@ -219,7 +219,6 @@ def run_demo():
             fitnesses = [
                 agent.test(
                     single_test_env,
-                    swap_channels=False,
                     max_steps=eval_steps,
                     loop=eval_loop,
                 )
@@ -259,7 +258,6 @@ def run_demo():
         fitnesses = [
             agent.test(
                 single_test_env,
-                swap_channels=False,
                 max_steps=eval_steps,
                 loop=eval_loop,
                 vectorized=True,

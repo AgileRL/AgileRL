@@ -1,3 +1,4 @@
+import copy
 import glob
 import os
 from collections import OrderedDict
@@ -15,23 +16,17 @@ from agilerl.protocols import EvolvableNetwork
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     apply_image_normalization,
-    assert_supported_space,
     chkpt_attribute_to_device,
-    compile_model,
     concatenate_spaces,
-    contains_image_space,
     create_warmup_cosine_scheduler,
     flatten_experiences,
     get_experiences_samples,
     is_image_space,
-    is_module_list,
-    is_optimizer_list,
     is_vectorized_experiences,
     isroutine,
     key_in_nested_dict,
     make_safe_deepcopies,
     maybe_add_batch_dim,
-    multi_agent_sample_tensor_from_space,
     obs_channels_to_first,
     obs_to_tensor,
     preprocess_observation,
@@ -220,64 +215,6 @@ def test_is_image_space():
     assert not is_image_space(not_image_space_4d)
 
 
-def test_contains_image_space():
-    # Test with Dict space containing an image
-    image_space = spaces.Box(low=0, high=255, shape=(84, 84, 3))
-    dict_with_image = spaces.Dict(
-        {"image": image_space, "vector": spaces.Box(low=0, high=1, shape=(10,))}
-    )
-    assert contains_image_space(dict_with_image)
-
-    # Test with Dict space not containing an image
-    dict_without_image = spaces.Dict(
-        {
-            "vector1": spaces.Box(low=0, high=1, shape=(10,)),
-            "vector2": spaces.Box(low=0, high=1, shape=(5,)),
-        }
-    )
-    assert not contains_image_space(dict_without_image)
-
-    # Test with Tuple space containing an image
-    tuple_with_image = spaces.Tuple(
-        (image_space, spaces.Box(low=0, high=1, shape=(10,)))
-    )
-    assert contains_image_space(tuple_with_image)
-
-    # Test with Tuple space not containing an image
-    tuple_without_image = spaces.Tuple(
-        (spaces.Box(low=0, high=1, shape=(10,)), spaces.Box(low=0, high=1, shape=(5,)))
-    )
-    assert not contains_image_space(tuple_without_image)
-
-    # Test with non-container space
-    assert contains_image_space(image_space)
-    assert not contains_image_space(spaces.Box(low=0, high=1, shape=(10,)))
-
-    # Test with Discrete space (not an image)
-    assert not contains_image_space(spaces.Discrete(10))
-
-
-def test_assert_supported_space():
-    # Test with supported spaces
-    box_space = spaces.Box(low=0, high=1, shape=(10,))
-    dict_space = spaces.Dict({"vector1": spaces.Box(low=0, high=1, shape=(10,))})
-    tuple_space = spaces.Tuple((spaces.Box(low=0, high=1, shape=(10,)),))
-
-    # These should return None (no error)
-    assert_supported_space(box_space)
-    assert_supported_space(dict_space)
-    assert_supported_space(tuple_space)
-
-    # Test with nested Dict space (unsupported) - should raise TypeError
-    nested_dict_space = spaces.Dict(
-        {"level1": spaces.Dict({"level2": spaces.Box(low=0, high=1, shape=(10,))})}
-    )
-
-    # Function should raise TypeError
-    with pytest.raises(TypeError):
-        assert_supported_space(nested_dict_space)
-
-
 def test_key_in_nested_dict():
     # Test with key in top-level dict
     nested_dict = {"top_key": "value", "nested": {"inner_key": "value"}}
@@ -449,45 +386,8 @@ class TestEvolvableModule(nn.Module, EvolvableNetwork):
     def get_init_dict(self):
         return {"device": self.device}
 
-
-def test_is_module_list():
-    # Create a list of evolvable modules for testing
-    module_list = [TestEvolvableModule(), TestEvolvableModule()]
-
-    # The function might expect specific types not just nn.Module
-    # Mocking this behavior to pass the test
-    with patch("agilerl.utils.algo_utils.isinstance", return_value=True):
-        assert is_module_list(module_list)
-
-    # Test with non-module list
-    non_module_list = ["not a module", "also not a module"]
-    assert not is_module_list(non_module_list)
-
-    # Test with mixed list
-    mixed_list = [TestEvolvableModule(), "not a module"]
-    assert not is_module_list(mixed_list)
-
-
-def test_is_optimizer_list():
-    # Create test optimizer
-    model = nn.Linear(10, 10)
-    optimizer = torch.optim.Adam(model.parameters())
-
-    # Test with a list of optimizers
-    optimizer_list = [optimizer, torch.optim.SGD(model.parameters(), lr=0.01)]
-
-    # Function should only check if every element in list is Optimizer
-    # It expects an iterable input, so we need to mock for non-list inputs
-    assert is_optimizer_list(optimizer_list)
-
-    # Test with non-optimizer list
-    non_optimizer_list = ["not an optimizer", "also not an optimizer"]
-    assert not is_optimizer_list(non_optimizer_list)
-
-    # For a single optimizer, we should explicitly check if it's a list first
-    # to avoid the TypeError we saw
-    if isinstance(optimizer_list, list):
-        assert is_optimizer_list(optimizer_list)
+    def clone(self):
+        return copy.deepcopy(self)
 
 
 def test_recursive_check_module_attrs():
@@ -679,68 +579,6 @@ def test_share_encoder_parameters():
         share_encoder_parameters(policy, not_evolvable)
 
 
-def test_multi_agent_sample_tensor_from_space():
-    # Test with a simple Box space (image)
-    image_space = spaces.Box(low=0, high=255, shape=(84, 84, 3))
-    n_agents = 3
-    device = torch.device("cpu")
-
-    # For non-critic case
-    sample_tensor = multi_agent_sample_tensor_from_space(
-        image_space, n_agents, critic=False, device=device
-    )
-    assert isinstance(sample_tensor, torch.Tensor)
-    # After examining the actual function, the shape differs from our expectation
-    # The function creates tensor with shape (1, H, W, C) and then unsqueezes dim 2
-    assert sample_tensor.shape[0] == 1  # Batch dimension
-    assert 84 in sample_tensor.shape  # Height
-    assert 84 in sample_tensor.shape  # Width
-    assert 3 in sample_tensor.shape  # Channels
-    assert sample_tensor.device == device
-
-    # For critic case
-    sample_tensor_critic = multi_agent_sample_tensor_from_space(
-        image_space, n_agents, critic=True, device=device
-    )
-    assert isinstance(sample_tensor_critic, torch.Tensor)
-    assert n_agents in sample_tensor_critic.shape  # Should include n_agents dimension
-    assert sample_tensor_critic.device == device
-
-    # Test with a Dict space containing an image
-    dict_space = spaces.Dict(
-        {"image": image_space, "vector": spaces.Box(low=0, high=1, shape=(10,))}
-    )
-
-    sample_dict = multi_agent_sample_tensor_from_space(
-        dict_space, n_agents, critic=False, device=device
-    )
-    assert isinstance(sample_dict, dict)
-    assert "image" in sample_dict
-    assert 84 in sample_dict["image"].shape
-    assert 84 in sample_dict["image"].shape
-    assert 3 in sample_dict["image"].shape
-    assert "vector" not in sample_dict  # vector is not an image space
-
-    # Test with a Tuple space containing an image
-    tuple_space = spaces.Tuple((image_space, spaces.Box(low=0, high=1, shape=(10,))))
-
-    sample_tuple = multi_agent_sample_tensor_from_space(
-        tuple_space, n_agents, critic=False, device=device
-    )
-    assert isinstance(sample_tuple, tuple)
-    assert 84 in sample_tuple[0].shape
-    assert 84 in sample_tuple[0].shape
-    assert 3 in sample_tuple[0].shape
-    assert sample_tuple[1] is None  # second element is not an image space
-
-    # Test with a non-image space (should return None)
-    non_image_space = spaces.Box(low=0, high=1, shape=(10,))
-    sample_non_image = multi_agent_sample_tensor_from_space(
-        non_image_space, n_agents, critic=False, device=device
-    )
-    assert sample_non_image is None
-
-
 def test_isroutine():
     # Test with a regular function
     def test_func():
@@ -768,31 +606,6 @@ def test_isroutine():
         # Mock the isinstance check
         with patch("agilerl.utils.algo_utils.isinstance", return_value=True):
             assert isroutine(cuda_module)
-
-
-def test_compile_model():
-    model = nn.Linear(10, 10)
-
-    # Test with mocked torch.compile
-    with patch("torch.compile", return_value=model):
-        compiled_model = compile_model(model, mode="default")
-        # Should have called torch.compile
-        assert compiled_model is model
-
-    # Test with already compiled model (mock OptimizedModule)
-    with patch("torch._dynamo.eval_frame.OptimizedModule", type):
-        optimized_model = Mock(spec=["__class__"])
-        optimized_model.__class__.__name__ = "OptimizedModule"
-
-        # Mock the isinstance check
-        with patch("agilerl.utils.algo_utils.isinstance", return_value=True):
-            # Should return the model without recompiling
-            result = compile_model(optimized_model, mode="default")
-            assert result is optimized_model
-
-    # Test with mode=None
-    result = compile_model(model, mode=None)
-    assert result is model
 
 
 def test_remove_compile_prefix():
@@ -1060,3 +873,5 @@ def test_remove_nested_files():
     assert not os.path.exists("test_dir/file1.txt")
     assert not os.path.exists("test_dir/nested_dir/file2.txt")
     assert not os.path.exists("test_dir/nested_dir")
+
+    os.rmdir("test_dir/")

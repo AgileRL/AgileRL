@@ -5,9 +5,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from tqdm.auto import tqdm
-from wordle.wordle_env import WordleEnvironment, WordleObservation
-from wordle.wordle_game import Vocabulary, WordleGame, WordleState
-from wordle.wordle_tokenizer import WordleTokenizer
 
 from agilerl.data.language_environment import Policy, interact_environment
 from agilerl.data.rl_data import (
@@ -18,6 +15,9 @@ from agilerl.data.rl_data import (
     TokenReward,
 )
 from agilerl.utils.ilql_utils import convert_path
+from wordle.wordle_env import WordleEnvironment, WordleObservation
+from wordle.wordle_game import Vocabulary, WordleGame, WordleState
+from wordle.wordle_tokenizer import WordleTokenizer
 
 
 class WordleListDataset(List_RL_Dataset):

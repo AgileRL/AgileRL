@@ -1,16 +1,16 @@
 ---
 # Define initial hyperparameters
 INIT_HP:
-    ENV_NAME: ALE/Assault-v5   # Gym environment name
+    ENV_NAME: Pendulum-v1   # Gym environment name
     ALGO: PPO                  # Algorithm
     # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-    CHANNELS_LAST: true
+    CHANNELS_LAST: false
     NUM_ENVS: 16               # No. parallel environments for training
     BATCH_SIZE: 256            # Batch size
     LR: 0.001                  # Learning rate
-    LEARN_STEP: 2048           # Learning frequency
+    LEARN_STEP: 1024           # Learning frequency
     MAX_STEPS: 1_000_000       # Max no. steps
-    TARGET_SCORE: 190.         # Early training stop at avg score of last 100 episodes
+    TARGET_SCORE: 2000.         # Early training stop at avg score of last 100 episodes
     GAMMA: 0.99                # Discount factor
     GAE_LAMBDA: 0.95           # Lambda for general advantage estimation
     ACTION_STD_INIT: 0.6       # Initial action standard deviation
@@ -23,8 +23,11 @@ INIT_HP:
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
     POP_SIZE: 4                # Population size
-    EVO_STEPS: 20_480          # Evolution frequency
+    EVO_STEPS: 10_190          # Evolution frequency
     EVAL_STEPS:                # Evaluation steps
+    SHARE_ENCODERS: true       # Share encoders between actor and critic
+    USE_ROLLOUT_BUFFER: true   # Use rollout buffer
+    RECURRENT: true            # Use recurrent network
     EVAL_LOOP: 1               # Evaluation episodes
     WANDB: false                # Log with Weights and Biases
 
@@ -39,30 +42,23 @@ MUTATION_PARAMS:
     RAND_SEED: 42                          # Random seed
     MIN_LR: 0.0001                         # Define max and min limits for mutating RL hyperparams
     MAX_LR: 0.01
-    MIN_BATCH_SIZE: 126
+    MIN_BATCH_SIZE: 8
     MAX_BATCH_SIZE: 1024
     MIN_LEARN_STEP: 256
     MAX_LEARN_STEP: 8192
 
 NET_CONFIG:
     latent_dim: 64
-    encoder_cls: ResNet
 
     encoder_config:
-        input_shape: [3, 210, 160]
-        num_outputs: 32
-        channel_size: 16
-        kernel_size: 3
-        stride_size: 1
-        num_blocks: 1
-        output_activation: ReLU
-        min_channel_size: 16
-        max_channel_size: 128
+        hidden_state_size: 64
+        num_layers: 1
+        max_seq_len: 4
 
     head_config:
         hidden_size: [64]
-        activation: Tanh
+        activation: ReLU
         min_hidden_layers: 1
         max_hidden_layers: 2
-        min_mlp_nodes: 64
+        min_mlp_nodes: 128
         max_mlp_nodes: 500

@@ -17,6 +17,7 @@ from IPython.display import Video, display
 from torch.profiler import ProfilerActivity, profile, record_function
 from tqdm import trange
 
+from agilerl.rollouts.on_policy import collect_rollouts
 from agilerl.utils.utils import create_population, make_vect_envs
 
 # !Note: If you are running this demo without having installed agilerl,
@@ -52,8 +53,8 @@ INIT_HP = {
     "MAX_GRAD_NORM": 0.5,
     "UPDATE_EPOCHS": 4,
     "SHARE_ENCODERS": True,
+    "USE_ROLLOUT_BUFFER": True,
     # PPO Specific
-    "DISCRETE_ACTIONS": True,
     "ACTION_STD_INIT": 0.6,  # Only used for continuous actions
     "TARGET_KL": None,
     "CHANNELS_LAST": False,  # CartPole obs are 1D
@@ -79,9 +80,6 @@ pop = create_population(
     population_size=INIT_HP["POP_SIZE"],
     num_envs=num_envs,
     device=device,
-    algo_kwargs={
-        "use_rollout_buffer": True,
-    },
 )
 
 # Get the agent from the population
@@ -96,7 +94,7 @@ pr = cProfile.Profile()
 pr.enable()
 
 # Run the function to profile
-agent.collect_rollouts(env)
+collect_rollouts(agent, env)
 
 pr.disable()
 
@@ -140,7 +138,7 @@ print("\n--- Running Training Loop ---")
 pbar = trange(max_steps * num_envs, unit="step")
 while total_steps < max_steps:
     # Collect rollouts and learn
-    agent.collect_rollouts(env)  # Collect rollouts for each environment
+    collect_rollouts(agent, env)  # Collect rollouts for each environment
     agent.learn()
     # Update counters
     total_steps += INIT_HP["LEARN_STEP"]
@@ -214,7 +212,7 @@ with profile(
     activities=[ProfilerActivity.CPU], record_shapes=True, with_stack=True
 ) as prof:
     with record_function("training_step"):
-        agent.collect_rollouts(env)
+        collect_rollouts(agent, env)
         agent.learn()
 
 # Export trace that can be loaded in chrome://tracing

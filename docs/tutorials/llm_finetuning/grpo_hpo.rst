@@ -9,7 +9,7 @@ as referenced in the :ref:`evo_hyperparam_opt` section, we can select GRPO hyper
 
 
 Dependencies
---------------
+------------
 
 .. code-block:: python
 
@@ -37,43 +37,45 @@ mutations we want to happen, to what extent we want these mutations to occur, an
 Additionally, we also define our upper and lower limits for these hyperparameters to define search spaces. It is worth noting,
 unlike the rest of the AgileRL framework, we can only tune the RL hyperparameters and not architecture hyperparameters.
 
-.. code-block:: python
+.. collapse:: Hyperparameter Config
 
-    MUTATION_PARAMS = {
-            "NO_MUT": 0.1,
-            "RL_HP_MUT": 0.6,
-            "MUT_SD": 0.1,
-            "RAND_SEED": 42,
-            "MIN_LR": 0.0000001,
-            "MAX_LR": 0.00001,
-            "MIN_BETA": 0.0001,
-            "MAX_BETA": 0.01,
-            "MIN_GROUP_SIZE": 4,
-            "MAX_GROUP_SIZE": 12
+    .. code-block:: python
+
+        MUTATION_PARAMS = {
+                "NO_MUT": 0.1,
+                "RL_HP_MUT": 0.6,
+                "MUT_SD": 0.1,
+                "RAND_SEED": 42,
+                "MIN_LR": 0.0000001,
+                "MAX_LR": 0.00001,
+                "MIN_BETA": 0.0001,
+                "MAX_BETA": 0.01,
+                "MIN_GROUP_SIZE": 4,
+                "MAX_GROUP_SIZE": 12
+            }
+
+        INIT_HP = {
+            "ALGO": "GRPO",
+            "BATCH_SIZE_PER_GPU": 1,
+            "REDUCE_MEMORY_PEAK": True,
+            "BETA": 0.001,
+            "LR": 0.000005,
+            "CLIP_COEF": 0.2,
+            "MAX_GRAD_NORM": 0.1,
+            "UPDATE_EPOCHS": 1,
+            "GROUP_SIZE": 8,
+            "TEMPERATURE": 0.9,
+            "CALC_POSITION_EMBEDDINGS": True,
+            "MIN_OUTPUT_TOKENS": None,
+            "MAX_OUTPUT_TOKENS": 1024,
+            "COSINE_lR_SCHEDULER": None,
+            "TOURN_SIZE": 2,
+            "ELITISM": True,
+            "POP_SIZE": 4,
+            "EVAL_LOOP": 1
         }
 
-    INIT_HP = {
-        "ALGO": "GRPO",
-        "BATCH_SIZE_PER_GPU": 1,
-        "REDUCE_MEMORY_PEAK": True,
-        "BETA": 0.001,
-        "LR": 0.000005,
-        "CLIP_COEF": 0.2,
-        "MAX_GRAD_NORM": 0.1,
-        "UPDATE_EPOCHS": 1,
-        "GROUP_SIZE": 8,
-        "TEMPERATURE": 0.9,
-        "CALC_POSITION_EMBEDDINGS": True,
-        "MIN_OUTPUT_TOKENS": None,
-        "MAX_OUTPUT_TOKENS": 1024,
-        "COSINE_lR_SCHEDULER": None,
-        "TOURN_SIZE": 2,
-        "ELITISM": True,
-        "POP_SIZE": 4,
-        "EVAL_LOOP": 1
-    }
-
-Defining our base model and dataset
+Defining our Base Model and Dataset
 -----------------------------------
 
 In this tutorial, we use the open-source transformers and datasets libraries from
@@ -82,52 +84,54 @@ There are a huge number of models and datasets hosted on Hugging Face, and diffe
 substituted in. In this tutorial, to keep things simple, we will use a 1.5 billion parameter Qwen
 model, and the Countdown dataset, and initialise them as follows:
 
-.. code-block:: python
+.. collapse:: Model and Dataset Initialisation
 
-    MODEL_PATH = "Qwen/Qwen2.5-1.5B"
-    DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
+    .. code-block:: python
 
-    def create_model(pretrained_model_name_or_path):
-        model = AutoModelForCausalLM.from_pretrained(
-            pretrained_model_name_or_path=pretrained_model_name_or_path,
-            torch_dtype=torch.bfloat16,
-            attn_implementation="flash_attention_2",
-        )
-        peft_config = LoraConfig(
-            r=16,
-            lora_alpha=64,
-            target_modules=[
-                "q_proj",
-                "k_proj",
-                "v_proj",
-                "o_proj",
-                "up_proj",
-                "down_proj",
-                "gate_proj",
-            ],
-            task_type="CAUSAL_LM",
-            lora_dropout=0.05,
-        )
-        model = get_peft_model(model, peft_config)
-        return model
+        MODEL_PATH = "Qwen/Qwen2.5-1.5B"
+        DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
-    def make_dataset(dataset_name: str) -> Tuple[Dataset, Dataset]:
-        raw_dataset = (
-            load_dataset(dataset_name, split="train").shuffle(seed=42).select(range(50000))
-        )
-        raw_dataset = raw_dataset.rename_column("target", "answer")
-        raw_dataset = raw_dataset.rename_column("nums", "question")
-        train_test_split = raw_dataset.train_test_split(test_size=0.1)
-        train_dataset = train_test_split["train"]
-        test_dataset = train_test_split["test"]
-        return train_dataset, test_dataset
+        def create_model(pretrained_model_name_or_path):
+            model = AutoModelForCausalLM.from_pretrained(
+                pretrained_model_name_or_path=pretrained_model_name_or_path,
+                torch_dtype=torch.bfloat16,
+                attn_implementation="flash_attention_2",
+            )
+            peft_config = LoraConfig(
+                r=16,
+                lora_alpha=64,
+                target_modules=[
+                    "q_proj",
+                    "k_proj",
+                    "v_proj",
+                    "o_proj",
+                    "up_proj",
+                    "down_proj",
+                    "gate_proj",
+                ],
+                task_type="CAUSAL_LM",
+                lora_dropout=0.05,
+            )
+            model = get_peft_model(model, peft_config)
+            return model
 
-    # Instantiate the model and the associated tokenizer
-    model = create_model(pretrained_model_name_or_path=MODEL_PATH)
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-    tokenizer.pad_token_id = tokenizer.eos_token_id
-    train_dataset, test_dataset = make_dataset(DATASET)
-    INIT_HP["PAD_TOKEN_ID"] = tokenizer.pad_token_id
+        def make_dataset(dataset_name: str) -> Tuple[Dataset, Dataset]:
+            raw_dataset = (
+                load_dataset(dataset_name, split="train").shuffle(seed=42).select(range(50000))
+            )
+            raw_dataset = raw_dataset.rename_column("target", "answer")
+            raw_dataset = raw_dataset.rename_column("nums", "question")
+            train_test_split = raw_dataset.train_test_split(test_size=0.1)
+            train_dataset = train_test_split["train"]
+            test_dataset = train_test_split["test"]
+            return train_dataset, test_dataset
+
+        # Instantiate the model and the associated tokenizer
+        model = create_model(pretrained_model_name_or_path=MODEL_PATH)
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+        train_dataset, test_dataset = make_dataset(DATASET)
+        INIT_HP["PAD_TOKEN_ID"] = tokenizer.pad_token_id
 
 Create the Reasoning Environment
 --------------------------------
@@ -151,144 +155,146 @@ Therefore, the maximum score an agent can receive is 2, if it produces the corre
 key here is that we never tell the agent which answer it should produce or which format it should use. By giving it rewards
 for displaying these behaviours, the agent itself discovers the best way to achieve high rewards and learns the behaviour we desire.
 
+.. collapse:: Reward Functions
 
-.. code-block:: python
+    .. code-block:: python
 
-    def format_reward_func(completions, target, **kwargs):
-        rewards = []
+        def format_reward_func(completions, target, **kwargs):
+            rewards = []
 
-        for completion, gt in zip(completions, target):
-            try:
-                # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
-                completion = "<think>" + completion
-                regex = r"^<think>([^<]*(?:<(?!/?think>)[^<]*)*)<\/think>\n<answer>([\s\S]*?)<\/answer>$"
-                match = re.search(regex, completion, re.DOTALL)
-                if match is None or len(match.groups()) != 2:
+            for completion, gt in zip(completions, target):
+                try:
+                    # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
+                    completion = "<think>" + completion
+                    regex = r"^<think>([^<]*(?:<(?!/?think>)[^<]*)*)<\/think>\n<answer>([\s\S]*?)<\/answer>$"
+                    match = re.search(regex, completion, re.DOTALL)
+                    if match is None or len(match.groups()) != 2:
+                        rewards.append(0.0)
+                    else:
+                        rewards.append(1.0)
+                except Exception:
                     rewards.append(0.0)
-                else:
-                    rewards.append(1.0)
-            except Exception:
-                rewards.append(0.0)
-        return rewards
+            return rewards
 
 
-    def equation_reward_func(completions, target, nums, **kwargs):
-        rewards = []
+        def equation_reward_func(completions, target, nums, **kwargs):
+            rewards = []
 
-        for completion, gt, numbers in zip(completions, target, nums):
-            try:
-                # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
-                completion = "<think>" + completion
-                answer_tags = re.findall(r"<answer>([\s\S]*?)<\/answer>", completion)
+            for completion, gt, numbers in zip(completions, target, nums):
+                try:
+                    # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
+                    completion = "<think>" + completion
+                    answer_tags = re.findall(r"<answer>([\s\S]*?)<\/answer>", completion)
 
-                if len(answer_tags) != 1:
+                    if len(answer_tags) != 1:
+                        rewards.append(0.0)
+                        continue
+
+                    equation = answer_tags[0].strip()
+                    used_numbers = [int(n) for n in re.findall(r"\d+", equation)]
+
+                    if sorted(used_numbers) != sorted(numbers.flatten().tolist()):
+                        rewards.append(0.0)
+                        continue
+
+                    allowed_pattern = r"^[\d+\-*/().\s]+$"
+                    if not re.match(allowed_pattern, equation):
+                        rewards.append(0.0)
+                        continue
+
+                    result = eval(equation, {"__builtins__": None}, {})
+
+                    if abs(float(result) - float(gt)) < 1e-5:
+                        rewards.append(1.0)
+                    else:
+                        rewards.append(0.0)
+                except Exception:
                     rewards.append(0.0)
-                    continue
-
-                equation = answer_tags[0].strip()
-                used_numbers = [int(n) for n in re.findall(r"\d+", equation)]
-
-                if sorted(used_numbers) != sorted(numbers.flatten().tolist()):
-                    rewards.append(0.0)
-                    continue
-
-                allowed_pattern = r"^[\d+\-*/().\s]+$"
-                if not re.match(allowed_pattern, equation):
-                    rewards.append(0.0)
-                    continue
-
-                result = eval(equation, {"__builtins__": None}, {})
-
-                if abs(float(result) - float(gt)) < 1e-5:
-                    rewards.append(1.0)
-                else:
-                    rewards.append(0.0)
-            except Exception:
-                rewards.append(0.0)
-        return rewards
+            return rewards
 
 
-    def combined_rewards(completion, solution, prompt):
-        reward = (
-            equation_reward_func([completion], [solution], [prompt])[0]
-            + format_reward_func([completion], [solution])[0]
-        )
+        def combined_rewards(completion, solution, prompt):
+            reward = (
+                equation_reward_func([completion], [solution], [prompt])[0]
+                + format_reward_func([completion], [solution])[0]
+            )
 
-        if reward == 2.0:
-            with open("countdown_completions.txt", "a") as text_file:
-                text_file.write(
-                    f"Prompt {prompt}" + "\n" + completion + "\n" + "=" * 50 + "\n"
-                )
+            if reward == 2.0:
+                with open("countdown_completions.txt", "a") as text_file:
+                    text_file.write(
+                        f"Prompt {prompt}" + "\n" + completion + "\n" + "=" * 50 + "\n"
+                    )
 
-        return reward
+            return reward
 
 Now we have defined our reward functions, we must also design our prompt. This forms the input given
 to the agent and provides the context necessary to complete the task. This is a task-specific feature,
 and different reasoning problems will require different chat templates, although they can follow a similar
-format. We must also define a function to collate our questions and answers, and standardise their length.
-Combining all these components, we can now initialise the HuggingFaceGym object.
+format. Combining all these components, we can now initialise the HuggingFaceGym object.
 
-.. code-block:: python
+.. collapse:: Convert HuggingFace Dataset to Gymnasium Environment
 
-    def countdown_chat_template(q, a, tokenizer):
-        conversation = [
-            {
-                "role": "system",
-                "content": "You are a helpful assistant. You first think about the reasoning process in your mind and then provide the user with the answer.",
-            },
-            {
-                "role": "user",
-                "content": f"Using each number in this tensor only once {tuple(i.item() for i in q)}, create an equation that equals {a.item()}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
-            },
-            {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
-        ]
-        updated_prompt = tokenizer.apply_chat_template(
-            conversation, tokenize=False, continue_final_message=True
+    .. code-block:: python
+
+        def countdown_chat_template(q, a, tokenizer):
+            conversation = [
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant. You first think about the reasoning process in your mind and then provide the user with the answer.",
+                },
+                {
+                    "role": "user",
+                    "content": f"Using each number in this tensor only once {tuple(i.item() for i in q)}, create an equation that equals {a.item()}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
+                },
+                {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
+            ]
+            updated_prompt = tokenizer.apply_chat_template(
+                conversation, tokenize=False, continue_final_message=True
+            )
+            tokenized_prompt = tokenizer(
+                [updated_prompt],
+                return_tensors="pt",
+                padding=True,
+                padding_side="left",
+                return_attention_mask=True,
+            )
+            return tokenized_prompt
+
+        def custom_collate_fn(batch):
+            # Extract answers and questions
+            answers = torch.tensor([item["answer"] for item in batch])
+
+            # For questions of variable length, we need to pad them
+            # First, find the maximum length
+            max_len = max(len(item["question"]) for item in batch)
+
+            # Create padded tensor
+            questions = torch.zeros(len(batch), max_len, dtype=torch.long)
+            for i, item in enumerate(batch):
+                q_len = len(item["question"])
+                questions[i, :q_len] = torch.tensor(item["question"])
+
+            return {"answer": answers, "question": questions}
+
+
+        # Define accelerators for distributed training
+        accelerator = Accelerator()
+
+        # Convert the HuggingFace dataset into a Gymnasium environment
+        env = HuggingFaceGym(
+            train_dataset=train_dataset,
+            test_dataset=test_dataset,
+            tokenizer=tokenizer,
+            reward_fn=combined_rewards,
+            apply_chat_template_fn=countdown_chat_template,
+            data_batch_size=8,
+            custom_collate_fn=custom_collate_fn,
+            accelerator=accelerator,
         )
-        tokenized_prompt = tokenizer(
-            [updated_prompt],
-            return_tensors="pt",
-            padding=True,
-            padding_side="left",
-            return_attention_mask=True,
-        )
-        return tokenized_prompt
-
-    def custom_collate_fn(batch):
-        # Extract answers and questions
-        answers = torch.tensor([item["answer"] for item in batch])
-
-        # For questions of variable length, we need to pad them
-        # First, find the maximum length
-        max_len = max(len(item["question"]) for item in batch)
-
-        # Create padded tensor
-        questions = torch.zeros(len(batch), max_len, dtype=torch.long)
-        for i, item in enumerate(batch):
-            q_len = len(item["question"])
-            questions[i, :q_len] = torch.tensor(item["question"])
-
-        return {"answer": answers, "question": questions}
-
-
-    # Define accelerators for distributed training
-    accelerator = Accelerator()
-
-    # Convert the HuggingFace dataset into a Gymnasium environment
-    env = HuggingFaceGym(
-        train_dataset=train_dataset,
-        test_dataset=test_dataset,
-        tokenizer=tokenizer,
-        reward_fn=combined_rewards,
-        apply_chat_template_fn=countdown_chat_template,
-        data_batch_size=8,
-        custom_collate_fn=custom_collate_fn,
-        accelerator=accelerator,
-    )
 
 
 Create a population of GRPO Agents
--------------------
+----------------------------------
 To allow our model to become an agent and learn through reinforcement learning, we can use the
 :class:`GRPO <agilerl.algorithms.GRPO>` class. This class follows the same structure as the other
 reinforcement learning algorithms in the AgileRL library. We also define a initialisation dictionaries
@@ -322,7 +328,7 @@ training in this tutorial, we use deepspeed and accelerate.
         accelerator=accelerator,
     )
 
-Creating Mutations and Tournament objects
+Creating Mutations and Tournament Objects
 -----------------------------------------
 Tournament selection is used to select the agents from a population which will make up the next generation of agents. If
 elitism is used, the best agent from a population is automatically preserved and becomes a member of the next generation.
@@ -438,160 +444,161 @@ Example config file:
     use_cpu: false
 
 
-Using a custom training loop
+Using a Custom Training Loop
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 If we wanted to have more control over the training process, it is also possible to write our own custom
 training loops to train our agents. The training loop below can be used alternatively to the above ``finetune_llm``
 function and is an example of how we might choose to make use of a population of AgileRL agents in our own training loop.
 
-.. code-block:: python
+.. collapse:: Custom Training Loop
 
-    def gather_tensor(tensor: Union[torch.Tensor, float], accelerator: Accelerator) -> torch.Tensor:
-        """Gather tensors from gpus
+    .. code-block:: python
 
-        :param tensor: Tensor to gather
-        :type tensor: torch.Tensor
-        :param accelerator: Accelerator object
-        :type accelerator: accelerate.Accelerator
-        :return: Stacked tensors
-        :rtype: torch.Tensor
-        """
-        if not isinstance(tensor, torch.Tensor):
-            tensor = torch.tensor(tensor, device=accelerator.device)
-        tensor = tensor.to(accelerator.device)
-        gathered_tensors = accelerator.gather(tensor)
-        return gathered_tensors
+        def gather_tensor(tensor: Union[torch.Tensor, float], accelerator: Accelerator) -> torch.Tensor:
+            """Gather tensors from gpus
 
-
-    def aggregate_metrics_across_gpus(
-        accelerator: Accelerator, metric_tensor: Union[torch.Tensor, float]
-    ) -> float:
-        """Aggregate gathered tensors
-
-        :param accelerator: Accelerator object
-        :type accelerator: accelerate.Accelerator
-        :param metric_tensor: Metrics
-        :type metric_tensor: torch.Tensor
-        :return: Mean metric
-        :rtype: float
-        """
-        all_metrics = gather_tensor(metric_tensor, accelerator)
-        avg_metrics = all_metrics.mean().item()
-        return avg_metrics
+            :param tensor: Tensor to gather
+            :type tensor: torch.Tensor
+            :param accelerator: Accelerator object
+            :type accelerator: accelerate.Accelerator
+            :return: Stacked tensors
+            :rtype: torch.Tensor
+            """
+            if not isinstance(tensor, torch.Tensor):
+                tensor = torch.tensor(tensor, device=accelerator.device)
+            tensor = tensor.to(accelerator.device)
+            gathered_tensors = accelerator.gather(tensor)
+            return gathered_tensors
 
 
-    accelerator = Accelerator()
-    if accelerator is None or accelerator.is_main_process:
-        print("\nTraining...")
+        def aggregate_metrics_across_gpus(
+            accelerator: Accelerator, metric_tensor: Union[torch.Tensor, float]
+        ) -> float:
+            """Aggregate gathered tensors
 
-    bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
-    max_steps = len(env) // effective_data_batch_size
-    pbar = trange(
-        max_steps,
-        unit="step",
-        bar_format=bar_format,
-        ascii=True,
-        dynamic_ncols=True,
-    )
+            :param accelerator: Accelerator object
+            :type accelerator: accelerate.Accelerator
+            :param metric_tensor: Metrics
+            :type metric_tensor: torch.Tensor
+            :return: Mean metric
+            :rtype: float
+            """
+            all_metrics = gather_tensor(metric_tensor, accelerator)
+            avg_metrics = all_metrics.mean().item()
+            return avg_metrics
 
-    total_steps = 0
-    # calling env.reset() supplies the first batch of training data
-    prompts = env.reset(reset_dataloaders=True)
-    for i in range(max_steps):
-        agent_metrics_dict = {}
-        for agent_idx, agent in enumerate(pop):
-            completion_ids, action_masks = agent.get_action(prompts)
-            completion_lengths = np.mean([x.shape[1] for x in completion_ids])
 
-            # Use the reward function stored in env.step to calculate reward of the each answer from the group
-            next_prompts, rewards = env.step(completion_ids)
-            experiences = (
-                completion_ids,
-                action_masks,
-                rewards,
-            )
-            loss, kl = agent.learn(experiences)
-            metrics = [loss, kl, rewards, completion_lengths]
-            if max_reward is not None:
-                accuracy = (rewards == max_reward).sum() / len(rewards.flatten())
-                metrics.append(accuracy)
-            agg_metrics = [
-                aggregate_metrics_across_gpus(accelerator, metric) for metric in metrics
-            ]
-            prompts = next_prompts
-            agg_test_metrics = None
-            if (i + 1) % evaluation_interval == 0:
-                test_reward = agent.test(env)
-                test_metrics = [test_reward]
-                if max_reward is not None:
-                    test_accuracy = (test_reward == max_reward).sum() / len(
-                        rewards.flatten()
-                    )
-                    test_metrics.append(test_accuracy)
-                agg_test_metrics = [
-                    aggregate_metrics_across_gpus(accelerator, metric)
-                    for metric in test_metrics
-                ]
-                if verbose and (accelerator is None or accelerator.is_main_process):
-                    fitness = [str(round(agent.fitness[-1], 2)) for agent in pop]
-                    avg_fitness = [
-                        "%.2f" % np.mean(agent.fitness[-5:]) for agent in pop
-                    ]
-                    avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
-                    agents = [agent.index for agent in pop]
-                    num_steps = [agent.steps[-1] for agent in pop]
-                    muts = [agent.mut for agent in pop]
-                    print(
-                        f"""
-                        --- Global Steps {total_steps} ---
-                        Fitness:\t\t{fitness}
-                        Score:\t\t{mean_scores}
-                        5 fitness avgs:\t{avg_fitness}
-                        10 score avgs:\t{avg_score}
-                        Agents:\t\t{agents}
-                        Steps:\t\t{num_steps}
-                        Mutations:\t\t{muts}
-                        """,
-                        end="\r",
-                    )
-            if accelerator is None or accelerator.is_main_process:
-                metrics_dict = {
-                    "Train/Loss": agg_metrics[0],
-                    "Train/KL-divergence": agg_metrics[1],
-                    "Train/Mean reward": (mean_scores := agg_metrics[2]),
-                    "Train/Average completion length": int(agg_metrics[3]),
-                }
-                if max_reward is not None:
-                    metrics_dict |= {"Train/Accuracy": agg_metrics[4]}
-                agent_metrics_dict[f"agent_{agent_idx}/train_metrics"] = metrics_dict
-                if agg_test_metrics is not None:
-                    test_metrics_dict = {"Eval/Mean reward": agg_test_metrics[0]}
-                    if max_reward is not None:
-                        test_metrics_dict |= {"Eval/Accuracy": agg_test_metrics[1]}
-                    agent_metrics_dict[f"agent_{agent_idx}/test_metrics"] = (
-                        test_metrics_dict
-                    )
-                pbar.update(effective_data_batch_size)
-                agent.steps.append(effective_data_batch_size)
-                agent.scores.append(mean_scores)
-                total_steps += effective_data_batch_size
+        accelerator = Accelerator()
+        if accelerator is None or accelerator.is_main_process:
+            print("\nTraining...")
 
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
-        if tournament and mutation is not None:
-            if (i + 1) % evo_steps == 0:
-                pop = tournament_selection_and_mutation(
-                    population=pop,
-                    tournament=tournament,
-                    mutation=mutations,
-                    env_name=env.name,
-                    accelerator=None,  # Set as None for LLM finetuning as it does not require the same accelerator handling as standard RL models
-                    language_model=True,
-                    elite_path=elite_path,
-                    save_elite=save_elite
+        bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
+        max_steps = len(env) // effective_data_batch_size
+        pbar = trange(
+            max_steps,
+            unit="step",
+            bar_format=bar_format,
+            ascii=True,
+            dynamic_ncols=True,
+        )
+
+        total_steps = 0
+        # calling env.reset() supplies the first batch of training data
+        prompts = env.reset(reset_dataloaders=True)
+        for i in range(max_steps):
+            agent_metrics_dict = {}
+            for agent_idx, agent in enumerate(pop):
+                completion_ids, action_masks = agent.get_action(prompts)
+                completion_lengths = np.mean([x.shape[1] for x in completion_ids])
+
+                # Use the reward function stored in env.step to calculate reward of the each answer from the group
+                next_prompts, rewards = env.step(completion_ids)
+                experiences = (
+                    completion_ids,
+                    action_masks,
+                    rewards,
                 )
-    pbar.close()
+                loss, kl = agent.learn(experiences)
+                metrics = [loss, kl, rewards, completion_lengths]
+                if max_reward is not None:
+                    accuracy = (rewards == max_reward).sum() / len(rewards.flatten())
+                    metrics.append(accuracy)
+                agg_metrics = [
+                    aggregate_metrics_across_gpus(accelerator, metric) for metric in metrics
+                ]
+                prompts = next_prompts
+                agg_test_metrics = None
+                if (i + 1) % evaluation_interval == 0:
+                    test_reward = agent.test(env)
+                    test_metrics = [test_reward]
+                    if max_reward is not None:
+                        test_accuracy = (test_reward == max_reward).sum() / len(
+                            rewards.flatten()
+                        )
+                        test_metrics.append(test_accuracy)
+                    agg_test_metrics = [
+                        aggregate_metrics_across_gpus(accelerator, metric)
+                        for metric in test_metrics
+                    ]
+                    if verbose and (accelerator is None or accelerator.is_main_process):
+                        fitness = [str(round(agent.fitness[-1], 2)) for agent in pop]
+                        avg_fitness = [
+                            "%.2f" % np.mean(agent.fitness[-5:]) for agent in pop
+                        ]
+                        avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
+                        agents = [agent.index for agent in pop]
+                        num_steps = [agent.steps[-1] for agent in pop]
+                        muts = [agent.mut for agent in pop]
+                        print(
+                            f"""
+                            --- Global Steps {total_steps} ---
+                            Fitness:\t\t{fitness}
+                            Score:\t\t{mean_scores}
+                            5 fitness avgs:\t{avg_fitness}
+                            10 score avgs:\t{avg_score}
+                            Agents:\t\t{agents}
+                            Steps:\t\t{num_steps}
+                            Mutations:\t\t{muts}
+                            """,
+                            end="\r",
+                        )
+                if accelerator is None or accelerator.is_main_process:
+                    metrics_dict = {
+                        "Train/Loss": agg_metrics[0],
+                        "Train/KL-divergence": agg_metrics[1],
+                        "Train/Mean reward": (mean_scores := agg_metrics[2]),
+                        "Train/Average completion length": int(agg_metrics[3]),
+                    }
+                    if max_reward is not None:
+                        metrics_dict |= {"Train/Accuracy": agg_metrics[4]}
+                    agent_metrics_dict[f"agent_{agent_idx}/train_metrics"] = metrics_dict
+                    if agg_test_metrics is not None:
+                        test_metrics_dict = {"Eval/Mean reward": agg_test_metrics[0]}
+                        if max_reward is not None:
+                            test_metrics_dict |= {"Eval/Accuracy": agg_test_metrics[1]}
+                        agent_metrics_dict[f"agent_{agent_idx}/test_metrics"] = (
+                            test_metrics_dict
+                        )
+                    pbar.update(effective_data_batch_size)
+                    agent.steps.append(effective_data_batch_size)
+                    agent.scores.append(mean_scores)
+                    total_steps += effective_data_batch_size
 
+            if accelerator is not None:
+                accelerator.wait_for_everyone()
+            if tournament and mutation is not None:
+                if (i + 1) % evo_steps == 0:
+                    pop = tournament_selection_and_mutation(
+                        population=pop,
+                        tournament=tournament,
+                        mutation=mutations,
+                        env_name=env.name,
+                        accelerator=None,  # Set as None for LLM finetuning as it does not require the same accelerator handling as standard RL models
+                        language_model=True,
+                        elite_path=elite_path,
+                        save_elite=save_elite
+                    )
+        pbar.close()
 
 
 Loading a Trained Agent for Inference
@@ -600,7 +607,7 @@ Once we have finetuned our LLM, we may want to use it for inference. Below outli
 in this tutorial, this `forum <https://discuss.huggingface.co/t/save-load-and-do-inference-with-fine-tuned-model/76291/2>`_
 provides more info for loading finetuned models.
 
-Load fine-tuned LLM
+Load Fine-tuned LLM
 ~~~~~~~~~~~~~~~~~~~
 .. code-block:: python
 
@@ -617,7 +624,7 @@ Load fine-tuned LLM
     model = PeftModel.from_pretrained(base_model, "path/to/model/directory")
 
 Inference
-~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~
 
 .. code-block:: python
 

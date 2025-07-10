@@ -1,6 +1,7 @@
+import copy
+
 import pytest
 import torch
-from gymnasium import spaces
 
 from agilerl.modules.simba import EvolvableSimBa
 from agilerl.networks import (
@@ -10,6 +11,15 @@ from agilerl.networks import (
     StochasticActor,
     ValueNetwork,
 )
+from tests.helper_functions import assert_state_dicts_equal
+
+
+@pytest.fixture(scope="module")
+def encoder_simba_config():
+    return {
+        "hidden_size": 64,
+        "num_blocks": 3,
+    }
 
 
 def test_correct_initialization():
@@ -60,22 +70,24 @@ def test_remove_block():
     assert model.num_blocks == initial_blocks - 1
 
 
-def test_add_node():
+@pytest.mark.parametrize("numb_new_nodes", [16, None])
+def test_add_node(numb_new_nodes):
     model = EvolvableSimBa(
         num_inputs=10, num_outputs=2, hidden_size=64, num_blocks=3, device="cpu"
     )
     initial_hidden_size = model.hidden_size
-    model.add_node(numb_new_nodes=16)
-    assert model.hidden_size == initial_hidden_size + 16
+    mut_dict = model.add_node(numb_new_nodes=numb_new_nodes)
+    assert model.hidden_size == initial_hidden_size + mut_dict["numb_new_nodes"]
 
 
-def test_remove_node():
+@pytest.mark.parametrize("numb_new_nodes", [16, None])
+def test_remove_node(numb_new_nodes):
     model = EvolvableSimBa(
-        num_inputs=10, num_outputs=2, hidden_size=64, num_blocks=3, device="cpu"
+        num_inputs=10, num_outputs=2, hidden_size=124, num_blocks=3, device="cpu"
     )
     initial_hidden_size = model.hidden_size
-    model.remove_node(numb_new_nodes=16)
-    assert model.hidden_size == initial_hidden_size - 16
+    mut_dict = model.remove_node(numb_new_nodes=numb_new_nodes)
+    assert model.hidden_size == initial_hidden_size - mut_dict["numb_new_nodes"]
 
 
 def test_recreate_network():
@@ -97,38 +109,13 @@ def test_clone():
     assert clone.num_outputs == model.num_outputs
     assert clone.hidden_size == model.hidden_size
     assert clone.num_blocks == model.num_blocks
-    assert str(clone.state_dict()) == str(model.state_dict())
+    assert_state_dicts_equal(clone.state_dict(), model.state_dict())
 
 
-@pytest.fixture
-def observation_space():
-    return spaces.Box(low=-1.0, high=1.0, shape=(10,))
-
-
-@pytest.fixture
-def action_space_discrete():
-    return spaces.Discrete(4)
-
-
-@pytest.fixture
-def action_space_continuous():
-    return spaces.Box(low=-1.0, high=1.0, shape=(2,))
-
-
-@pytest.fixture
-def encoder_simba_config():
-    return {
-        "hidden_size": 64,
-        "num_blocks": 3,
-    }
-
-
-def test_deterministic_actor_simba(
-    observation_space, action_space_continuous, encoder_simba_config
-):
+def test_deterministic_actor_simba(vector_space, encoder_simba_config):
     model = DeterministicActor(
-        observation_space=observation_space,
-        action_space=action_space_continuous,
+        observation_space=vector_space,
+        action_space=copy.deepcopy(vector_space),
         encoder_config=encoder_simba_config,
         simba=True,
         device="cpu",
@@ -136,12 +123,10 @@ def test_deterministic_actor_simba(
     assert isinstance(model.encoder, EvolvableSimBa)
 
 
-def test_stochastic_actor_simba(
-    observation_space, action_space_discrete, encoder_simba_config
-):
+def test_stochastic_actor_simba(vector_space, discrete_space, encoder_simba_config):
     model = StochasticActor(
-        observation_space=observation_space,
-        action_space=action_space_discrete,
+        observation_space=vector_space,
+        action_space=discrete_space,
         encoder_config=encoder_simba_config,
         simba=True,
         device="cpu",
@@ -149,12 +134,10 @@ def test_stochastic_actor_simba(
     assert isinstance(model.encoder, EvolvableSimBa)
 
 
-def test_q_network_simba(
-    observation_space, action_space_discrete, encoder_simba_config
-):
+def test_q_network_simba(vector_space, discrete_space, encoder_simba_config):
     model = QNetwork(
-        observation_space=observation_space,
-        action_space=action_space_discrete,
+        observation_space=vector_space,
+        action_space=discrete_space,
         encoder_config=encoder_simba_config,
         simba=True,
         device="cpu",
@@ -162,12 +145,10 @@ def test_q_network_simba(
     assert isinstance(model.encoder, EvolvableSimBa)
 
 
-def test_continuous_q_network_simba(
-    observation_space, action_space_continuous, encoder_simba_config
-):
+def test_continuous_q_network_simba(vector_space, encoder_simba_config):
     model = ContinuousQNetwork(
-        observation_space=observation_space,
-        action_space=action_space_continuous,
+        observation_space=vector_space,
+        action_space=copy.deepcopy(vector_space),
         encoder_config=encoder_simba_config,
         simba=True,
         device="cpu",
@@ -175,9 +156,9 @@ def test_continuous_q_network_simba(
     assert isinstance(model.encoder, EvolvableSimBa)
 
 
-def test_value_network_simba(observation_space, encoder_simba_config):
+def test_value_network_simba(vector_space, encoder_simba_config):
     model = ValueNetwork(
-        observation_space=observation_space,
+        observation_space=vector_space,
         encoder_config=encoder_simba_config,
         simba=True,
         device="cpu",

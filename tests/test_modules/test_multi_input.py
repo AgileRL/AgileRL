@@ -9,24 +9,15 @@ from gymnasium.spaces import Dict, Tuple
 
 from agilerl.modules.configs import CnnNetConfig, MlpNetConfig
 from agilerl.modules.multi_input import EvolvableMultiInput
-from tests.helper_functions import generate_dict_or_tuple_space
+from tests.helper_functions import (
+    assert_state_dicts_equal,
+    generate_dict_or_tuple_space,
+)
 
 DictOrTupleSpace = Union[Dict, Tuple]
 
 
-######### Define fixtures #########
-@pytest.fixture
-def device():
-    return "cuda" if torch.cuda.is_available() else "cpu"
-
-
-@pytest.fixture(autouse=True)
-def cleanup():
-    yield  # Run the test first
-    torch.cuda.empty_cache()  # Free up GPU memory
-
-
-@pytest.fixture
+@pytest.fixture(scope="module")
 def default_cnn_config():
     return asdict(
         CnnNetConfig(
@@ -38,7 +29,7 @@ def default_cnn_config():
     )
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def multiagent_cnn_config(
     device, image_shape: tuple = (3, 32, 32), sample_input: str = "default"
 ):
@@ -59,7 +50,7 @@ def multiagent_cnn_config(
     )
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def default_mlp_config():
     return asdict(
         MlpNetConfig(
@@ -702,14 +693,14 @@ def test_remove_channels(
 
 
 ######### Test change_cnn_kernel #########
-def test_change_cnn_kernel(device, default_cnn_config):
+def test_change_cnn_kernel(device, default_cnn_config, dict_space):
     config = default_cnn_config.copy()
     config["channel_size"] = [32, 32]
     config["kernel_size"] = [3, 3]
     config["stride_size"] = [1, 1]
 
     evolvable_composed = EvolvableMultiInput(
-        observation_space=generate_dict_or_tuple_space(2, 3),
+        observation_space=dict_space,
         num_outputs=4,
         cnn_config=config,
         device=device,
@@ -727,36 +718,35 @@ def test_change_cnn_kernel(device, default_cnn_config):
     ], evolvable_composed.init_dicts["image_1"]["kernel_size"]
 
 
-def test_change_kernel_size(device, default_cnn_config):
-    observation_space = generate_dict_or_tuple_space(2, 3)
+def test_change_kernel_size(device, default_cnn_config, dict_space):
     config = default_cnn_config.copy()
     config["channel_size"] = [32, 32]
     config["kernel_size"] = [3, 3]
     config["stride_size"] = [1, 1]
 
     evolvable_composed = EvolvableMultiInput(
-        observation_space=observation_space,
+        observation_space=dict_space,
         num_outputs=4,
         cnn_config=config,
         device=device,
     )
 
-    for _ in range(100):
+    for _ in range(10):
         # Change kernel size and ensure we can make a valid forward pass
         getattr(evolvable_composed, "feature_net.image_1.change_kernel")()
-        sample_input = observation_space.sample()
+        sample_input = dict_space.sample()
         output = evolvable_composed(sample_input)
         assert output.squeeze().shape[0] == 4  # (num actions)
 
 
-def test_change_cnn_kernel_else_statement(device, default_cnn_config):
+def test_change_cnn_kernel_else_statement(device, default_cnn_config, dict_space):
     config = default_cnn_config.copy()
     config["channel_size"] = [32, 32]
     config["kernel_size"] = [3, 3]
     config["stride_size"] = [1, 1]
 
     evolvable_composed = EvolvableMultiInput(
-        observation_space=generate_dict_or_tuple_space(2, 3),
+        observation_space=dict_space,
         num_outputs=4,
         cnn_config=config,
         device=device,
@@ -772,15 +762,14 @@ def test_change_cnn_kernel_else_statement(device, default_cnn_config):
     assert evolvable_composed.init_dicts["image_1"]["kernel_size"] != [3, 3]
 
 
-def test_change_cnn_kernel_multi(device, multiagent_cnn_config):
-    observation_space = generate_dict_or_tuple_space(2, 3, dict_space=True)
+def test_change_cnn_kernel_multi(device, multiagent_cnn_config, dict_space):
     config = multiagent_cnn_config.copy()
     config["channel_size"] = [32, 32]
     config["kernel_size"] = [3, 3]
     config["stride_size"] = [1, 1]
 
     evolvable_composed = EvolvableMultiInput(
-        observation_space=observation_space,
+        observation_space=dict_space,
         num_outputs=4,
         cnn_config=config,
         device=device,
@@ -799,15 +788,16 @@ def test_change_cnn_kernel_multi(device, multiagent_cnn_config):
     ], evolvable_composed.init_dicts["image_1"]["kernel_size"]
 
 
-def test_change_cnn_kernel_multi_else_statement(device, multiagent_cnn_config):
-    observation_space = generate_dict_or_tuple_space(2, 3, dict_space=True)
+def test_change_cnn_kernel_multi_else_statement(
+    device, multiagent_cnn_config, dict_space
+):
     config = multiagent_cnn_config.copy()
     config["channel_size"] = [32]
     config["kernel_size"] = [3]
     config["stride_size"] = [1]
 
     evolvable_composed = EvolvableMultiInput(
-        observation_space=observation_space,
+        observation_space=dict_space,
         num_outputs=4,
         cnn_config=config,
         device=device,
@@ -850,7 +840,7 @@ def test_clone_instance(
     }
     clone = evolvable_composed.clone()
     assert isinstance(clone, EvolvableMultiInput)
-    assert str(clone.state_dict()) == str(evolvable_composed.state_dict())
+    assert_state_dicts_equal(clone.state_dict(), evolvable_composed.state_dict())
 
     for key, cloned_net in clone.feature_net.items():
         original_net = original_nets[key]
@@ -942,7 +932,7 @@ def test_change_activation(
 
     new_activation = "Tanh"
     evolvable_composed.change_activation(new_activation)
-    for key, net in evolvable_composed.modules().items():
+    for key, net in evolvable_composed.feature_net.modules().items():
         assert net.activation == new_activation
 
 

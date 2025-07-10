@@ -5,12 +5,10 @@ import pytest
 import torch
 
 from agilerl.modules.cnn import EvolvableCNN
-
+from tests.helper_functions import assert_state_dicts_equal
 
 ######### Define fixtures #########
-@pytest.fixture
-def device():
-    return "cuda" if torch.cuda.is_available() else "cpu"
+# Device fixture moved to conftest.py
 
 
 @pytest.fixture(autouse=True)
@@ -743,6 +741,6 @@ def test_clone_instance(
     clone = evolvable_cnn.clone()
     clone_net = clone.model
     assert isinstance(clone, EvolvableCNN)
-    assert str(clone.state_dict()) == str(evolvable_cnn.state_dict())
+    assert_state_dicts_equal(clone.state_dict(), evolvable_cnn.state_dict())
     for key, param in clone_net.named_parameters():
         torch.testing.assert_close(param, original_feature_net_dict[key])

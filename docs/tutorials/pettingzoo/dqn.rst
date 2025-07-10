@@ -12,11 +12,21 @@ Self-play Connect4 with DQN + curriculum learning
 
 This tutorial shows how to train a :ref:`DQN<dqn>` agent on the `connect four <https://pettingzoo.farama.org/environments/classic/connect_four/>`_ classic environment.
 
-This tutorial focuses on two techniques used in reinforcement learning - **curriculum learning** and **self-play**. Curriculum learning refers to training an agent on tasks of increasing difficulty in separate 'lessons'. Imagine you were trying to become a chess world champion. You would not decide to learn to play chess by immediately taking on a grand master - it would be too difficult. Instead, you would practice against people of the same ability as you, improve slowly, and increasingly play against harder opponents until you were ready to compete with the best. The same concept applies to reinforcement learning models. Sometimes, tasks are too difficult to learn in one go, and so we must create a curriculum to guide an agent and teach it to solve our ultimate hard environment.
+This tutorial focuses on two techniques used in reinforcement learning - **curriculum learning** and **self-play**. Curriculum learning refers to training an agent on tasks of
+increasing difficulty in separate 'lessons'. Imagine you were trying to become a chess world champion. You would not decide to learn to play chess by immediately taking on a grand
+master - it would be too difficult. Instead, you would practice against people of the same ability as you, improve slowly, and increasingly play against harder opponents until you
+were ready to compete with the best. The same concept applies to reinforcement learning models. Sometimes, tasks are too difficult to learn in one go, and so we must create a curriculum
+to guide an agent and teach it to solve our ultimate hard environment.
 
-This tutorial also uses self-play. Self-play is a technique used in competitive reinforcement learning environments. An agent trains by playing against a copy of itself - the opponent - and learns to beat this opponent. The opponent is then updated to a copy of this better version of the agent, and the agent must then learn to beat itself again. This is done repeatedly, and the agent iteratively improves by exploiting its own weaknesses and discovering new strategies.
+This tutorial also uses self-play. Self-play is a technique used in competitive reinforcement learning environments. An agent trains by playing against a copy of itself - the opponent -
+and learns to beat this opponent. The opponent is then updated to a copy of this better version of the agent, and the agent must then learn to beat itself again. This is done repeatedly,
+and the agent iteratively improves by exploiting its own weaknesses and discovering new strategies.
 
-In this tutorial, self-play is treated as the final lesson in the curriculum. However, these two techniques can be used independently of each other, and with unlimited resources, self-play can beat agents trained with human-crafted lessons through curriculum learning. `The Bitter Lesson <http://incompleteideas.net/IncIdeas/BitterLesson.html>`_ by Richard Sutton provides an interesting take on curriculum learning and is definitely worth consideration from any engineer undertaking such a task. However, unlike Sutton, we do not all have the resources available to us that Deepmind and top institutions provide, and so one must be pragmatic when deciding how they will solve their own reinforcement learning problem. If you would like to discuss this exciting area of research further, please join the AgileRL `Discord server <https://discord.com/invite/eB8HyTA2ux>`_ and let us know what you think!
+In this tutorial, self-play is treated as the final lesson in the curriculum. However, these two techniques can be used independently of each other, and with unlimited resources, self-play
+can beat agents trained with human-crafted lessons through curriculum learning. `The Bitter Lesson <http://incompleteideas.net/IncIdeas/BitterLesson.html>`_ by Richard Sutton provides an
+interesting take on curriculum learning and is definitely worth consideration from any engineer undertaking such a task. However, unlike Sutton, we do not all have the resources available
+to us that Deepmind and top institutions provide, and so one must be pragmatic when deciding how they will solve their own reinforcement learning problem. If you would like to discuss this
+exciting area of research further, please join the AgileRL `Discord server <https://discord.com/invite/eB8HyTA2ux>`_ and let us know what you think!
 
 
 What is DQN?
@@ -24,36 +34,32 @@ What is DQN?
 
 :ref:`DQN<dqn>` (Deep Q-Network) is an extension of Q-learning that makes use of a replay buffer and target network to improve learning stability. For further information on DQN, check out the AgileRL :ref:`documentation<dqn>`.
 
-Can I use it?
-^^^^^^^^^^^^^
+Compatible Action Spaces
+------------------------
 
 .. list-table::
-   :widths: 20 20 20
+   :widths: 20 20 20 20
    :header-rows: 1
 
-   * -
-     - Action
-     - Observation
-   * - Discrete
-     - ✔️
-     - ✔️
-   * - Continuous
+   * - ``Discrete``
+     - ``Box``
+     - ``MultiDiscrete``
+     - ``MultiBinary``
+   * - ✔️
      - ❌
-     - ✔️
+     - ❌
+     - ❌
 
 
-Code
-----
-
-Curriculum learning and self-play using DQN on Connect Four
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Curriculum learning and Self-play Using DQN on Connect Four
+---------------------------------------------------------
 
 The following code should run without any issues. The comments are designed to help you understand how to use PettingZoo with AgileRL. If you have any questions, please feel free to ask in the `Discord server <https://discord.com/invite/eB8HyTA2ux>`_.
 
 This is a complicated tutorial, and so we will go through it in stages. The :ref:`full code<full-training-code>` can be found at the end of this section. Although much of this tutorial contains content specific to the Connect Four environment, it serves to demonstrate how techniques can be applied more generally to other problems.
 
 Imports
-^^^^^^^
+~~~~~~~
 
 Importing the following packages, functions and classes will enable us to run the tutorial.
 
@@ -72,13 +78,13 @@ Importing the following packages, functions and classes will enable us to run th
       import torch
       import wandb
       import yaml
+      from tqdm import tqdm
+      from pettingzoo.classic import connect_four_v3
+
       from agilerl.components.replay_buffer import ReplayBuffer
       from agilerl.hpo.mutation import Mutations
       from agilerl.hpo.tournament import TournamentSelection
       from agilerl.utils.utils import create_population
-      from tqdm import tqdm, trange
-
-      from pettingzoo.classic import connect_four_v3
 
 Curriculum Learning
 ^^^^^^^^^^^^^^^^^^^
@@ -111,20 +117,17 @@ It is best to use YAML config files to define the lessons in our curriculum and 
 curriculum can be defined as follows:
 
 .. collapse:: Lesson 1
-   :open:
 
    .. literalinclude:: ../../../tutorials/PettingZoo/curriculums/connect_four/lesson1.yaml
       :language: yaml
 
 
 .. collapse:: Lesson 2
-   :open:
 
    .. literalinclude:: ../../../tutorials/PettingZoo/curriculums/connect_four/lesson2.yaml
       :language: yaml
 
 .. collapse:: Lesson 3
-   :open:
 
    .. literalinclude:: ../../../tutorials/PettingZoo/curriculums/connect_four/lesson3.yaml
       :language: yaml
@@ -133,7 +136,6 @@ To implement our curriculum, we create a ``CurriculumEnv`` class that acts as a 
 to alter the reward to guide the training of our agent. This uses the configs that we set up to define the lesson.
 
 .. collapse:: CurriculumEnv
-   :open:
 
    .. code-block:: python
 
@@ -459,7 +461,6 @@ random agent and now wish to train against a harder opponent. In this tutorial, 
 levels of difficulty for training our agent.
 
 .. collapse:: Opponent
-   :open:
 
    .. code-block:: python
 
@@ -643,13 +644,12 @@ levels of difficulty for training our agent.
             return (True, reward, ended) + ((lengths,) if return_length else ())
 
 
-General setup
+General Setup
 ^^^^^^^^^^^^^
 
 Before we go any further in this tutorial, it would be helpful to define and set up everything remaining we need for training.
 
 .. collapse:: Setup code
-   :open:
 
    .. code-block:: python
 
@@ -777,8 +777,7 @@ Before we go any further in this tutorial, it would be helpful to define and set
 
 As part of the curriculum, we may also choose to fill the replay buffer with random experiences, and also train on these offline.
 
-.. collapse:: Fill replay buffer
-   :open:
+.. collapse:: Fill Replay Buffer
 
    .. code-block:: python
 
@@ -805,8 +804,7 @@ The observation space of Connect Four is (6, 7, 2), where the first two dimensio
 As PyTorch uses channels-first by default, we need to preprocess the observation. Moreover, we need to flip and swap the planes of the observation to
 account for the fact that the agent will play as both player 0 and player 1. We can define a function to do this as follows:
 
-.. collapse:: Transform and flip
-   :open:
+.. collapse:: Transform and Flip
 
    .. code-block:: python
 
@@ -836,8 +834,7 @@ In this tutorial, we use self-play as the final lesson in our curriculum. By ite
 itself, we can allow it to discover new strategies and achieve higher performance. The weights of our pretrained agent from an earlier lesson
 can be loaded to the population as follows:
 
-.. collapse:: Load pretrained weights
-   :open:
+.. collapse:: Load Pretrained Weights
 
    .. code-block:: python
 
@@ -862,8 +859,7 @@ To train against an old version of our agent, we create a pool of opponents. At 
 regular intervals, we update the opponent pool by removing the oldest opponent and adding a copy of the latest version of our agent. This provides
 a balance between training against an increasingly difficult opponent and providing variety in the moves an opponent might make.
 
-.. collapse:: Create opponent pool
-   :open:
+.. collapse:: Create Opponent Pool
 
    .. code-block:: python
 
@@ -880,7 +876,6 @@ a balance between training against an increasingly difficult opponent and provid
 A sample lesson config for self-play training could be defined as follows:
 
 .. collapse:: Lesson 4
-   :open:
 
    .. literalinclude:: ../../../tutorials/PettingZoo/curriculums/connect_four/lesson4.yaml
       :language: yaml
@@ -889,8 +884,8 @@ It could also be possible to train an agent through self-play only, without usin
 training time, but could ultimately result in better performance than other methods, and could avoid some of the mistakes discussed in
 `The Bitter Lesson <http://incompleteideas.net/IncIdeas/BitterLesson.html>`_.
 
-Training loop
-^^^^^^^^^^^^^^
+Training Loop
+^^^^^^^^^^^^^
 
 The Connect Four training loop must take into account that the agent only takes an action every other interaction with the environment (the opponent takes
 alternating turns). This must be considered when saving transitions to the replay buffer. Equally, we must wait for the outcome of the next player's turn
@@ -901,8 +896,7 @@ At regular intervals, we evaluate the performance, or 'fitness',  of the agents 
 likely to become members of the next generation, and the hyperparameters and neural architectures of agents in the population are mutated. This evolution allows us
 to optimize hyperparameters and maximise the performance of our agents in a single training run.
 
-.. collapse:: Training loop
-   :open:
+.. collapse:: Training Loop
 
    .. code-block:: python
 
@@ -1288,19 +1282,18 @@ to optimize hyperparameters and maximise the performance of our agents in a sing
 
       pbar.close()
 
-Trained model weights
+Trained Model Weights
 ^^^^^^^^^^^^^^^^^^^^^
 
 Trained model weights are provided at ``AgileRL/tutorials/PettingZoo/models``. Take a look, train against these models, and see if you can beat them!
 
 
-Watch the trained agents play
+Watch the Trained Agents Play
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The following code allows you to load your saved DQN agent from the previous training block, test the agent's performance, and then visualise a number of episodes as a gif.
 
-.. collapse:: Render trained agents
-   :open:
+.. collapse:: Render Trained Agents
 
    .. literalinclude:: ../../../tutorials/PettingZoo/render_agilerl_dqn.py
       :language: python
@@ -1308,7 +1301,7 @@ The following code allows you to load your saved DQN agent from the previous tra
 
 .. _full-training-code:
 
-Full training code
+Full Training Code
 ^^^^^^^^^^^^^^^^^^
 
 .. collapse:: Full code

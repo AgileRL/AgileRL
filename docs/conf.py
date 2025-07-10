@@ -23,6 +23,7 @@ extensions = [
     "sphinx.ext.autosummary",
     "sphinx.ext.intersphinx",
     "sphinx_toolbox.collapse",
+    "sphinx_github_changelog",
     "notfound.extension",
     "sphinxcontrib.googleanalytics",
 ]

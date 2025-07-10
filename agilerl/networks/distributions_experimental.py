@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from gymnasium import spaces
 
 from agilerl.modules.base import EvolvableModule, EvolvableWrapper
-from agilerl.typing import ArrayOrTensor, ConfigType, DeviceType
+from agilerl.typing import ArrayOrTensor, DeviceType, NetConfigType
 
 # NOTE: we still import Normal / Bernoulli solely for continuous & binary helpers,
 #       but no Categorical objects are ever instantiated any more.
@@ -34,6 +34,18 @@ class TorchDistribution:
     *   keeps only **raw tensors** (``logits`` or ``mu``/``log_std``)
     *   implements ``sample``, ``log_prob`` and ``entropy`` with pure tensor ops
         → no Python allocations per call, all kernels run on GPU.
+
+    :param action_space: Action space of the environment.
+    :type action_space: spaces.Space
+    :param logits: Logits.
+    :type logits: torch.Tensor
+    :param mu: Mean.
+    :type mu: torch.Tensor
+    :param log_std: Log standard deviation.
+    :type log_std: torch.Tensor
+    :param squash_output: Whether to squash the output to the action space.
+    :type squash_output: bool
+
     """
 
     def __init__(
@@ -247,11 +259,11 @@ class EvolvableDistribution(EvolvableWrapper):
             )
 
     @property
-    def net_config(self) -> ConfigType:
+    def net_config(self) -> NetConfigType:
         """Configuration of the network.
 
         :return: Configuration of the network.
-        :rtype: ConfigType
+        :rtype: NetConfigType
         """
         return self.wrapped.net_config
 
@@ -446,10 +458,12 @@ class EvolvableDistribution(EvolvableWrapper):
         :return: Cloned distribution.
         :rtype: EvolvableDistribution
         """
-        return EvolvableDistribution(
+        clone = EvolvableDistribution(
             action_space=self.action_space,
             network=self.wrapped.clone(),
             action_std_init=self.action_std_init,
             squash_output=self.squash_output,
             device=self.device,
         )
+        clone.rng = self.rng
+        return clone
