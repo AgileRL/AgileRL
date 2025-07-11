@@ -576,7 +576,12 @@ class GRPO(LLMAlgorithm):
         """
         if self.accelerator is not None:
             self.accelerator.backward(loss)
-            if isinstance(self.optimizer.optimizer, optim.AdamW):
+            if (
+                self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
+                    "optimizer", None
+                )
+                is None
+            ):
                 # Accelerate handles optimizer step and zero grad if optimizer is defined in deepspeed config
                 self.optimizer.step()
                 self.optimizer.zero_grad()

@@ -119,24 +119,40 @@ class _RegistryMeta(type):
 class RegistryMeta(_RegistryMeta, ABCMeta): ...
 
 
-def get_checkpoint_dict(agent: SelfEvolvableAlgorithm) -> Dict[str, Any]:
+def get_checkpoint_dict(
+    agent: SelfEvolvableAlgorithm, using_deepspeed: bool = False
+) -> Dict[str, Any]:
     """Returns a dictionary of the agent's attributes to save in a checkpoint.
+
+    Note: Accelerator is always excluded from the checkpoint as it cannot be serialized.
 
     :param agent: The agent to save.
     :type agent: EvolvableAlgorithm
+    :param using_deepspeed: Whether the agent is using deepspeed.
+    :type using_deepspeed: bool, optional
 
     :return: A dictionary of the agent's attributes.
     :rtype: dict[str, Any]
     """
     attribute_dict = EvolvableAlgorithm.inspect_attributes(agent)
+    attribute_dict["agilerl_version"] = version("agilerl")
+    attribute_dict.pop("accelerator", None)
+
+    if attribute_dict.pop("lr_scheduler", None) is not None:
+        attribute_dict["lr_scheduler"] = agent.lr_scheduler.state_dict()
+
+    if using_deepspeed:
+        attribute_dict.pop("actor", None)
+        return attribute_dict
 
     # Get checkpoint dictionaries for evolvable modules and optimizers
     network_info: Dict[str, Dict[str, Any]] = {"modules": {}, "optimizers": {}}
     for attr in agent.evolvable_attributes():
         evolvable_obj: EvolvableAttributeType = getattr(agent, attr)
         if isinstance(evolvable_obj, OptimizerWrapper):
-            optimizer_chkpt = evolvable_obj.checkpoint_dict(attr)
-            network_info["optimizers"].update(optimizer_chkpt)
+            if not using_deepspeed:
+                optimizer_chkpt = evolvable_obj.checkpoint_dict(attr)
+                network_info["optimizers"].update(optimizer_chkpt)
 
         elif isinstance(evolvable_obj, (OptimizedModule, EvolvableModule)):
             module_chkpt = module_checkpoint_dict(evolvable_obj, attr)
@@ -147,7 +163,6 @@ def get_checkpoint_dict(agent: SelfEvolvableAlgorithm) -> Dict[str, Any]:
                 f"Something went wrong. Identified '{attr}' as an evolvable module or "
                 f"optimizer when it is of type {type(evolvable_obj)}."
             )
-
     network_attr_names = [
         name for name in agent.evolvable_attributes(networks_only=True)
     ]
@@ -160,11 +175,6 @@ def get_checkpoint_dict(agent: SelfEvolvableAlgorithm) -> Dict[str, Any]:
     network_info["network_names"] = network_attr_names
     network_info["optimizer_names"] = optimizer_attr_names
     attribute_dict["network_info"] = network_info
-    attribute_dict["agilerl_version"] = version("agilerl")
-    attribute_dict.pop("accelerator", None)
-
-    if attribute_dict.pop("lr_scheduler", None) is not None:
-        attribute_dict["lr_scheduler"] = agent.lr_scheduler.state_dict()
 
     return attribute_dict
 
@@ -851,6 +861,10 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 "Loaded registry does not match the algorithm's registry. Please make "
                 "sure you are loading the checkpoint with the correct algorithm."
             )
+
+        if "lr_scheduler" in checkpoint.keys():
+            self.lr_scheduler.load_state_dict(state_dict=checkpoint["lr_scheduler"])
+            checkpoint.pop("lr_scheduler")
 
         # Load other attributes
         checkpoint.pop("network_info")
@@ -1756,17 +1770,24 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """
         return cast(TorchObsType, observation)
 
+    # TODO: This could hopefully be abstracted into EvolvableAlgorithm with a decorator to
+    # handle _save_distributed_actor if deepspeed is used.
     def save_checkpoint(self, path: str) -> None:
         """
         Override the save_checkpoint method to provide guidance on the correct method to use.
         :param path: Location to save checkpoint at
         :type path: string
         """
-        self._save_distributed_actor(path, tag="save_checkpoint")
-        attribute_dict = get_checkpoint_dict(self)
-        attribute_dict.pop("actor")
-        torch.save(attribute_dict, path + "/attributes.pt")
+        if self.accelerator is not None:
+            self._save_distributed_actor(path, tag="save_checkpoint")
+        torch.save(
+            get_checkpoint_dict(self, using_deepspeed=self.accelerator is not None),
+            path + "/attributes.pt",
+            pickle_module=dill,
+        )
 
+    # TODO: This could hopefully be abstracted into EvolvableAlgorithm with a decorator to
+    # handle _load_distributed_actor if deepspeed is used.
     def load_checkpoint(self, path: str) -> None:
         """
         Override the load_checkpoint method to provide guidance on the correct method to use.
@@ -1774,24 +1795,54 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :param path: Location to load checkpoint from
         :type path: string
         """
+        if self.accelerator is not None:
+            self._load_distributed_actor(path, tag="save_checkpoint")
+            checkpoint = torch.load(path + "/attributes.pt", weights_only=False)
+            checkpoint["accelerator"] = (
+                Accelerator() if self.accelerator is not None else None
+            )
+            self.accelerator = None
+            for attr, value in checkpoint.items():
+                setattr(self, attr, value)
 
-        self._load_distributed_actor(path, tag="save_checkpoint")
+            print("This is the accelerator after setting attr", self.accelerator)
 
-        attribute_dict = torch.load(path + "/attributes.pt", weights_only=False)
+            self.optimizer = None
+            self.optimizer = OptimizerWrapper(
+                optimizer_cls=self._select_optim_class(),
+                networks=[self.actor],
+                network_names=["actor"],
+                lr=self.lr,
+                lr_name="lr",
+            )
+            self.wrap_models()
+        else:
+            super().load_checkpoint(path + "/attributes.pt")
 
-        for attr, value in attribute_dict.items():
-            setattr(self, attr, value)
+    # TODO: Look at incorporating this into the next AgileRL release
+    # by no means essential, but would be nice to have.
+    @classmethod
+    def load(
+        cls,
+        path: str,
+        device: DeviceType = "cpu",
+        accelerator: Optional[Accelerator] = None,
+    ) -> None:
+        raise NotImplementedError(
+            "The load class method is not supported for this algorithm class."
+            """
+            To load a saved LLM, please load the model as follows, and then re-instantiate the GRPO
+            class, using the pre-trained model.
 
-        self.optimizer, self.accelerator = None, None
-        self.accelerator = Accelerator()
-        self.optimizer = OptimizerWrapper(
-            optimizer_cls=self._select_optim_class(),
-            networks=[self.actor],
-            network_names=["actor"],
-            lr=self.lr,
-            lr_name="lr",
+            base_model = AutoModelForCausalLM.from_pretrained(
+                "Qwen/Qwen2.5-3B",
+                torch_dtype=torch.bfloat16,
+                device_map="auto"
+            )
+            tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B")
+            model = PeftModel.from_pretrained(base_model, path)
+            """
         )
-        self.wrap_models()
 
     def _select_optim_class(self) -> Union[Type[OptimizerType], Type[DummyOptimizer]]:
         """Select the optimizer class based on the accelerator and deepspeed config.
@@ -1822,6 +1873,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """
         if self.accelerator is not None:
             os.makedirs(path, exist_ok=True)
+            assert (
+                self.actor is not None
+            ), "Actor is not defined, please check that the actor is defined."
             self.actor.save_checkpoint(path, tag=tag)
             self.actor.set_adapter("actor")
         else:
@@ -1864,32 +1918,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 "Distributed actor load not supported for non-distributed training."
             )
 
-    @classmethod
-    def load(
-        cls,
-        path: str,
-        device: DeviceType = "cpu",
-        accelerator: Optional[Accelerator] = None,
-    ) -> None:
-        raise NotImplementedError(
-            "The load class method is not supported for this algorithm class."
-            """
-            To load a saved LLM, please load the model as follows, and then re-instantiate the GRPO
-            class, using the pre-trained model.
-
-            base_model = AutoModelForCausalLM.from_pretrained(
-                "Qwen/Qwen2.5-3B",
-                torch_dtype=torch.bfloat16,
-                device_map="auto"
-            )
-            tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B")
-            model = PeftModel.from_pretrained(base_model, "/path/to/adapter/folder")
-            """
-        )
-
     def wrap_models(self) -> None:
         """Wrap the models in the accelerator, DeepSpeed objects must be wrapped at the same time,
         not individually."""
+        print("Accelerator in wrap_models: ", self.accelerator)
         if self.accelerator is not None:
             assert (
                 self.optimizer is not None
