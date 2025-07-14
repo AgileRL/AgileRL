@@ -42,7 +42,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
     print(f"DEVICE: {device}")
 
     def create_env(**kwargs):
-        env = importlib.import_module(f"{INIT_HP['ENV_NAME']}").AirbusEnv(**kwargs)
+        env = importlib.import_module(f"{INIT_HP['ENV_NAME']}").parallel_env(**kwargs)
 
         if INIT_HP["CHANNELS_LAST"]:
             # Environment processing for image based observations
@@ -54,8 +54,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
 
         return env
 
-    # env_kwargs = dict(max_cycles=25, continuous_actions=False)
-    env_kwargs = {}
+    env_kwargs = dict(max_cycles=25, continuous_actions=False)
     env = make_multi_agent_vect_envs(
         create_env, num_envs=INIT_HP["NUM_ENVS"], **env_kwargs
     )
@@ -157,8 +156,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
 
 
 if __name__ == "__main__":
-    # config = "configs/training/multi_agent/ippo.yaml"
-    config = "airbus/ippo_airbus.yaml"
+    config = "configs/training/multi_agent/ippo.yaml"
     with open(config) as file:
         config = yaml.safe_load(file)
     INIT_HP = config["INIT_HP"]

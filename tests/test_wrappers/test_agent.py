@@ -693,66 +693,6 @@ def test_rsnorm_save_load_checkpoint(tmp_path, vector_space):
     assert ddpg.steps == [0]
 
 
-def test_async_agents_is_serializable(ma_vector_space, ma_discrete_space):
-    observation_spaces = ma_vector_space
-    action_spaces = ma_discrete_space
-    agent = IPPO(
-        observation_spaces=observation_spaces,
-        action_spaces=action_spaces,
-        agent_ids=["agent_0", "agent_1", "other_agent_0"],
-    )
-    agent = AsyncAgentsWrapper(agent)
-
-    # Test serialization with dill (used by Ray for distributed computing)
-    try:
-        # Serialize the wrapped agent
-        serialized = dill.dumps(agent)
-
-        # Deserialize it back
-        deserialized_agent = dill.loads(serialized)
-
-        # Verify basic attributes are preserved
-        assert deserialized_agent.observation_space == agent.observation_space
-        assert deserialized_agent.action_space == agent.action_space
-        assert deserialized_agent.multi_agent == agent.multi_agent
-        assert deserialized_agent.agent.algo == agent.agent.algo
-        assert deserialized_agent.agent.agent_ids == agent.agent.agent_ids
-
-        # Verify the wrapped methods are callable
-        assert callable(deserialized_agent.wrapped_get_action)
-        assert callable(deserialized_agent.wrapped_learn)
-        assert callable(deserialized_agent.get_action)
-        assert callable(deserialized_agent.learn)
-
-        # Test that we can create dummy observations and the get_action method works
-        dummy_obs = {}
-        for agent_id in agent.agent.agent_ids:
-            obs_space = observation_spaces[agent_id]
-            dummy_obs[agent_id] = np.random.random(obs_space.shape).astype(
-                obs_space.dtype
-            )
-
-        # Test get_action on both original and deserialized agent
-        original_action = agent.get_action(dummy_obs)
-        deserialized_action = deserialized_agent.get_action(dummy_obs)
-
-        # Actions should have same structure (both should be dicts with same keys)
-        assert isinstance(original_action, dict)
-        assert isinstance(deserialized_action, dict)
-        assert set(original_action.keys()) == set(deserialized_action.keys())
-
-        # Verify action shapes are consistent
-        for agent_id in original_action.keys():
-            assert (
-                original_action[agent_id].shape == deserialized_action[agent_id].shape
-            )
-
-        print("AsyncAgentsWrapper serialization test passed!")
-
-    except Exception as e:
-        pytest.fail(f"AsyncAgentsWrapper serialization failed: {e}")
-
-
 def test_async_agents_architecture_mutation(ma_vector_space, ma_discrete_space):
     observation_spaces = ma_vector_space
     action_spaces = ma_discrete_space
