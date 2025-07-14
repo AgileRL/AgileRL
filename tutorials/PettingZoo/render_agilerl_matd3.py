@@ -6,7 +6,7 @@ import torch
 from pettingzoo.mpe import simple_speaker_listener_v4
 from PIL import Image, ImageDraw
 
-from agilerl.algorithms.matd3 import MATD3
+from agilerl.algorithms import MATD3
 
 
 # Define function to return image
@@ -61,19 +61,19 @@ if __name__ == "__main__":
 
     # Test loop for inference
     for ep in range(episodes):
-        state, info = env.reset()
+        obs, info = env.reset()
         agent_reward = {agent_id: 0 for agent_id in agent_ids}
         score = 0
         for _ in range(max_steps):
             # Get next action from agent
-            action, _ = matd3.get_action(state, training=False, infos=info)
+            action, _ = matd3.get_action(obs, infos=info)
 
             # Save the frame for this step and append to frames list
             frame = env.render()
             frames.append(_label_with_episode_number(frame, episode_num=ep))
 
             # Take action in environment
-            state, reward, termination, truncation, info = env.step(
+            obs, reward, termination, truncation, info = env.step(
                 {agent: a.squeeze() for agent, a in action.items()}
             )
 
