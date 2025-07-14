@@ -1,5 +1,7 @@
 import copy
+import gc
 import os
+from typing import List
 from unittest.mock import MagicMock
 
 import dill
@@ -11,7 +13,12 @@ from gymnasium import spaces
 from pettingzoo import ParallelEnv
 
 from agilerl.algorithms import DDPG, IPPO
-from agilerl.algorithms.core import MultiAgentRLAlgorithm, RLAlgorithm
+from agilerl.algorithms.core import (
+    EvolvableAlgorithm,
+    MultiAgentRLAlgorithm,
+    RLAlgorithm,
+)
+from agilerl.hpo.mutation import Mutations
 from agilerl.modules import EvolvableMLP
 from agilerl.utils.utils import make_multi_agent_vect_envs
 from agilerl.wrappers.agent import AsyncAgentsWrapper, RSNorm
@@ -406,6 +413,74 @@ def test_rsnorm_learn(observation_space, vector_space, request, accelerator):
     assert critic_pre_learn_sd != str(ddpg.critic.state_dict())
 
 
+def test_rsnorm_architecture_mutation(vector_space):
+    observation_space = vector_space
+    action_space = copy.deepcopy(vector_space)
+    agent = DDPG(observation_space=observation_space, action_space=action_space)
+
+    # Change EvolvableModule random number generator to test mutation methods
+    class EvoDummyRNG:
+        rng = np.random.default_rng(seed=42)
+
+        def choice(self, a, size=None, replace=True, p=None):
+            return 1
+
+        def integers(self, low=0, high=None):
+            return self.rng.integers(low, high)
+
+    for name, network in agent.evolvable_attributes(networks_only=True).items():
+        network.rng = EvoDummyRNG()
+
+    agent = RSNorm(agent)
+
+    population: List[EvolvableAlgorithm] = [agent]
+    mutations = Mutations(
+        no_mutation=0.0,
+        architecture=1.0,
+        new_layer_prob=0.0,
+        rl_hp=0.0,
+        parameters=0.0,
+        activation=0.0,
+    )
+    mut_methods = population[0].actor.mutation_methods
+
+    for mut_method in mut_methods:
+
+        class DummyRNG:
+            def choice(self, a, size=None, replace=True, p=None):
+                return [mut_method]
+
+        mutations.rng = DummyRNG()
+
+        new_population = [agent.clone(wrap=False) for agent in population]
+        mutated_population = [
+            mutations.architecture_mutate(agent) for agent in new_population
+        ]
+        for individual in mutated_population:
+            individual.mutation_hook()
+
+        assert len(mutated_population) == len(population)
+        for old, individual in zip(population, mutated_population):
+            policy_name = old.registry.policy()
+            policy = getattr(individual, policy_name)
+            # old_policy = getattr(old, policy_name)
+            assert individual.mut == (policy.last_mutation_attr or "None")
+
+            if policy.last_mutation_attr is not None:
+                # assert str(old_policy.state_dict()) != str(policy.state_dict())
+                for group in old.registry.groups:
+                    if group.eval_network != policy_name:
+                        eval_module = getattr(individual, group.eval_network)
+                        # old_eval_module = getattr(old, group.eval_network)
+                        assert eval_module.last_mutation_attr is not None
+                        assert (
+                            eval_module.last_mutation_attr == policy.last_mutation_attr
+                        )
+                        # assert str(old_eval_module.state_dict()) != str(eval_module.state_dict())
+
+            assert old.index == individual.index
+
+
 # Clones the agent and returns an identical agent.
 def test_rsnorm_clone_returns_identical_agent(vector_space):
     observation_space = vector_space
@@ -616,6 +691,148 @@ def test_rsnorm_save_load_checkpoint(tmp_path, vector_space):
     assert ddpg.scores == []
     assert ddpg.fitness == []
     assert ddpg.steps == [0]
+
+
+def test_async_agents_is_serializable(ma_vector_space, ma_discrete_space):
+    observation_spaces = ma_vector_space
+    action_spaces = ma_discrete_space
+    agent = IPPO(
+        observation_spaces=observation_spaces,
+        action_spaces=action_spaces,
+        agent_ids=["agent_0", "agent_1", "other_agent_0"],
+    )
+    agent = AsyncAgentsWrapper(agent)
+
+    # Test serialization with dill (used by Ray for distributed computing)
+    try:
+        # Serialize the wrapped agent
+        serialized = dill.dumps(agent)
+
+        # Deserialize it back
+        deserialized_agent = dill.loads(serialized)
+
+        # Verify basic attributes are preserved
+        assert deserialized_agent.observation_space == agent.observation_space
+        assert deserialized_agent.action_space == agent.action_space
+        assert deserialized_agent.multi_agent == agent.multi_agent
+        assert deserialized_agent.agent.algo == agent.agent.algo
+        assert deserialized_agent.agent.agent_ids == agent.agent.agent_ids
+
+        # Verify the wrapped methods are callable
+        assert callable(deserialized_agent.wrapped_get_action)
+        assert callable(deserialized_agent.wrapped_learn)
+        assert callable(deserialized_agent.get_action)
+        assert callable(deserialized_agent.learn)
+
+        # Test that we can create dummy observations and the get_action method works
+        dummy_obs = {}
+        for agent_id in agent.agent.agent_ids:
+            obs_space = observation_spaces[agent_id]
+            dummy_obs[agent_id] = np.random.random(obs_space.shape).astype(
+                obs_space.dtype
+            )
+
+        # Test get_action on both original and deserialized agent
+        original_action = agent.get_action(dummy_obs)
+        deserialized_action = deserialized_agent.get_action(dummy_obs)
+
+        # Actions should have same structure (both should be dicts with same keys)
+        assert isinstance(original_action, dict)
+        assert isinstance(deserialized_action, dict)
+        assert set(original_action.keys()) == set(deserialized_action.keys())
+
+        # Verify action shapes are consistent
+        for agent_id in original_action.keys():
+            assert (
+                original_action[agent_id].shape == deserialized_action[agent_id].shape
+            )
+
+        print("AsyncAgentsWrapper serialization test passed!")
+
+    except Exception as e:
+        pytest.fail(f"AsyncAgentsWrapper serialization failed: {e}")
+
+
+def test_async_agents_architecture_mutation(ma_vector_space, ma_discrete_space):
+    observation_spaces = ma_vector_space
+    action_spaces = ma_discrete_space
+    agent = IPPO(
+        observation_spaces=observation_spaces,
+        action_spaces=action_spaces,
+        agent_ids=["agent_0", "agent_1", "other_agent_0"],
+    )
+
+    # Change EvolvableModule random number generator to test mutation methods
+    class EvoDummyRNG:
+        rng = np.random.default_rng(seed=42)
+
+        def choice(self, a, size=None, replace=True, p=None):
+            return 1
+
+        def integers(self, low=0, high=None):
+            return self.rng.integers(low, high)
+
+    for name, network in agent.evolvable_attributes(networks_only=True).items():
+        network.rng = EvoDummyRNG()
+
+    agent = AsyncAgentsWrapper(agent)
+
+    population: List[EvolvableAlgorithm] = [agent]
+    mutations = Mutations(
+        0,
+        1,
+        0.5,
+        0,
+        0,
+        0,
+        0.5,
+    )
+
+    test_agent = "agent"
+    mut_methods = population[0].actors[test_agent].mutation_methods
+    for mut_method in mut_methods:
+
+        class DummyRNG:
+            def choice(self, a, size=None, replace=True, p=None):
+                return [".".join([test_agent, mut_method])]
+
+        mutations.rng = DummyRNG()
+
+        new_population = [agent.clone(wrap=False) for agent in population]
+        mutated_population = [
+            mutations.architecture_mutate(agent) for agent in new_population
+        ]
+
+        assert len(mutated_population) == len(population)
+        for old, individual in zip(population, mutated_population):
+            policy_name = individual.registry.policy()
+            policy = getattr(individual, policy_name)
+            # old_policy = getattr(old, policy_name)
+            if policy.last_mutation_attr is not None:
+                sampled_mutation = ".".join(policy.last_mutation_attr.split(".")[1:])
+            else:
+                sampled_mutation = None
+
+            assert individual.mut == sampled_mutation or "None"
+
+            if sampled_mutation is not None:
+                for group in old.registry.groups:
+                    if group.eval_network != policy_name:
+                        eval_module = getattr(individual, group.eval_network)
+                        # old_eval_module = getattr(old, group.eval_network)
+                        for _, module in eval_module.items():
+                            bottom_eval_mut = module.last_mutation_attr.split(".")[-1]
+                            bottom_policy_mut = policy.last_mutation_attr.split(".")[-1]
+                            assert module.last_mutation_attr is not None
+                            assert bottom_eval_mut == bottom_policy_mut
+
+            assert old.index == individual.index
+
+        del new_population, mutated_population
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    del mutations
 
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])

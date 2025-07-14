@@ -12,6 +12,7 @@ import torch.nn as nn
 from accelerate import Accelerator
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 
+from agilerl.algorithms import NeuralTS, NeuralUCB
 from agilerl.algorithms.core import (
     EvolvableAlgorithm,
     LLMAlgorithm,
@@ -19,8 +20,6 @@ from agilerl.algorithms.core import (
     OptimizerWrapper,
     RLAlgorithm,
 )
-from agilerl.algorithms.neural_ts_bandit import NeuralTS
-from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
 from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.protocols import OptimizerConfig
 from agilerl.typing import (
@@ -31,6 +30,7 @@ from agilerl.typing import (
 from agilerl.utils.algo_utils import remove_compile_prefix
 from agilerl.utils.evolvable_networks import compile_model
 from agilerl.utils.llm_utils import _DummyOptimizer
+from agilerl.wrappers.agent import AgentWrapper
 
 IndividualType = TypeVar("IndividualType", bound=EvolvableAlgorithm)
 MutationsType = TypeVar("MutationsType", bound="Mutations")
@@ -353,14 +353,14 @@ class Mutations:
         given the nested nature of the networks in the latter.
 
         * **Single-agent:** A mutation method is sampled from the policy network and then applied to the rest of the evaluation
-        modules (e.g. critics). This can be done generally because all of the networks in a single-agent algorithm share the same
-        architecture (given there is only one observation space).
+            modules (e.g. critics). This can be done generally because all of the networks in a single-agent algorithm share the same
+            architecture (given there is only one observation space).
 
         * **Multi-agent:** A sub-agent is sampled to perform the mutation on for the policy. We then iterate over the rest of the
-        sub-agent policies and perform the same mutation if they share the same observation space. For the rest of the evaluation
-        networks (e.g. critics) there is a possibility they are centralized, in which case their underlying architecture
-        will differ from the policy and therefore the mutation methods won't exactly match. In such cases, we try to find an analogous
-        mutation method to apply.
+            sub-agent policies and perform the same mutation if they share the same observation space. For the rest of the evaluation
+            networks (e.g. critics) there is a possibility they are centralized, in which case their underlying architecture
+            will differ from the policy and therefore the mutation methods won't exactly match. In such cases, we try to find an analogous
+            mutation method to apply.
 
         .. note::
             This is currently not supported for :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` agents.
@@ -371,15 +371,23 @@ class Mutations:
         :return: Individual from population with network architecture mutation
         :rtype: RLAlgorithm or MultiAgentRLAlgorithm
         """
-        if isinstance(individual, RLAlgorithm):
-            individual = self._architecture_mutate_single(individual)
-        elif isinstance(individual, MultiAgentRLAlgorithm):
-            individual = self._architecture_mutate_multi(individual)
+        wrapped_ind = isinstance(individual, AgentWrapper)
+        agent = individual.agent if wrapped_ind else individual
+
+        if isinstance(agent, RLAlgorithm):
+            agent = self._architecture_mutate_single(agent)
+        elif isinstance(agent, MultiAgentRLAlgorithm):
+            agent = self._architecture_mutate_multi(agent)
         else:
             raise MutationError(
                 f"Architecture mutations are not supported for {individual.__class__.__name__}. "
                 "Please make sure your algorithm inherits from 'RLAlgorithm' or 'MultiAgentRLAlgorithm'."
             )
+
+        if wrapped_ind:
+            individual.agent = agent
+        else:
+            individual = agent
 
         return individual
 

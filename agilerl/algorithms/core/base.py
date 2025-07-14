@@ -1187,15 +1187,12 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
                 f"Observation spaces must be a list or dictionary of spaces.Space objects. Got {type(observation_spaces)}."
             )
 
-        self.agent_ids = agent_ids or list(self.possible_observation_spaces.keys())
+        self.agent_ids = list(self.possible_observation_spaces.keys())
         self.n_agents = len(self.agent_ids)
         self.placeholder_value = placeholder_value
         self.normalize_images = normalize_images
-
-        # These attributes are deprecated and will be removed in the future
         self.observation_spaces = list(self.possible_observation_spaces.values())
         self.action_spaces = list(self.possible_action_spaces.values())
-
         self.action_dims = get_output_size_from_space(self.possible_action_spaces)
 
         # Determine groups of agents from their IDs
