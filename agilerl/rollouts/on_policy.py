@@ -48,6 +48,7 @@ def _collect_rollouts(
                 obs, action_mask=info.get("action_mask", None)
             )
 
+        # NOTE: Should we scale the action here before passing to the environment?
         next_obs, reward, done, truncated, next_info = env.step(action)
 
         if isinstance(done, (list, np.ndarray)):

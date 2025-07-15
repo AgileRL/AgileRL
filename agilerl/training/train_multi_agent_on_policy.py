@@ -5,15 +5,16 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from gymnasium import spaces
 from pettingzoo import ParallelEnv
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import IPPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.networks import StochasticActor
 from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
     init_wandb,
@@ -258,11 +259,15 @@ def train_multi_agent_on_policy(
                             else agent.get_group_id(agent_id)
                         )
                         agent_space = agent.possible_action_spaces[agent_id]
-                        if isinstance(agent_space, spaces.Box):
-                            if agent.actors[network_id].squash_output:
-                                clipped_agent_action = agent.actors[
-                                    network_id
-                                ].scale_action(agent_action)
+                        policy = getattr(agent, agent.registry.policy())
+                        agent_policy = policy[network_id]
+                        if isinstance(agent_policy, StochasticActor) and isinstance(
+                            agent_space, spaces.Box
+                        ):
+                            if agent_policy.squash_output:
+                                clipped_agent_action = agent_policy.scale_action(
+                                    agent_action
+                                )
                             else:
                                 clipped_agent_action = np.clip(
                                     agent_action, agent_space.low, agent_space.high

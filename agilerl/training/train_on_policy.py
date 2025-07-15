@@ -5,14 +5,15 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import gymnasium as gym
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from gymnasium import spaces
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import PPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.networks import StochasticActor
 from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
     init_wandb,
@@ -294,9 +295,13 @@ def train_on_policy(
 
                         pop_entropy[agent_idx].append(entropy)
 
-                        if isinstance(agent.action_space, spaces.Box):
-                            if agent.actor.squash_output:
-                                clipped_action = agent.actor.scale_action(action)
+                        # Clip action to action space
+                        policy = getattr(agent, agent.registry.policy())
+                        if isinstance(policy, StochasticActor) and isinstance(
+                            agent.action_space, spaces.Box
+                        ):
+                            if policy.squash_output:
+                                clipped_action = policy.scale_action(action)
                             else:
                                 clipped_action = np.clip(
                                     action,

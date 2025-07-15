@@ -42,9 +42,7 @@ from agilerl.algorithms.core.registry import (
     NetworkGroup,
     OptimizerConfig,
 )
-from agilerl.modules.configs import (
-    MlpNetConfig,
-)
+from agilerl.modules.configs import MlpNetConfig
 from agilerl.protocols import (
     AgentWrapper,
     EvolvableAttributeDict,
@@ -87,6 +85,7 @@ from agilerl.utils.evolvable_networks import (
     is_image_space,
     is_vector_space,
 )
+from agilerl.utils.llm_utils import _DummyOptimizer
 
 __all__ = ["EvolvableAlgorithm", "RLAlgorithm", "MultiAgentRLAlgorithm"]
 
@@ -549,6 +548,55 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         # Only wrap the model if its part of the computation graph
         return self.accelerator.prepare(attr) if attr.state_dict() else attr
 
+    def _reinit_opt_from_config(
+        self: SelfEvolvableAlgorithm, config: OptimizerConfig
+    ) -> None:
+        """Reinitializes an optimizer from its configuration.
+
+        :param config: The optimizer configuration.
+        :type config: OptimizerConfig
+        """
+        opt: Optional[Union[OptimizerWrapper, DeepSpeedOptimizerWrapper]] = getattr(
+            self, config.name
+        )
+        optimizer = opt.optimizer if hasattr(opt, "optimizer") else None
+
+        if isinstance(opt, DeepSpeedOptimizerWrapper):
+            if isinstance(opt.optimizer, _DummyOptimizer):
+                opt = getattr(
+                    getattr(self, "actor"), "optimizer"
+                )  # If the optimizer is defined in the deepspeed config, we do this
+
+            self.accelerator, self.lr_scheduler = LLMAlgorithm.update_lr(
+                opt,
+                lr=getattr(self, config.lr),
+                accelerator=self.accelerator,
+                scheduler_config=self.cosine_lr_schedule_config,
+            )
+        else:
+            # Multiple optimizers in a single attribute (i.e. multi-agent)
+            # or one module optimized by a single optimizer
+            if isinstance(optimizer, dict) or len(opt.network_names) == 1:
+                opt_nets = getattr(self, opt.network_names[0])
+
+            # Multiple modules optimized by a single optimizer (e.g. PPO)
+            else:
+                opt_nets = [getattr(self, net) for net in opt.network_names]
+
+            # Reinitialize optimizer with mutated nets
+            # NOTE: We need to do this since there is a chance the network parameters have changed
+            # due to architecture mutations
+            offspring_opt = OptimizerWrapper(
+                optimizer_cls=config.get_optimizer_cls(),
+                networks=opt_nets,
+                lr=getattr(self, opt.lr_name),
+                optimizer_kwargs=opt.optimizer_kwargs,
+                network_names=opt.network_names,
+                lr_name=opt.lr_name,
+            )
+
+            setattr(self, config.name, offspring_opt)
+
     def set_training_mode(self, training: bool) -> None:
         """Sets the training mode of the algorithm.
 
@@ -592,6 +640,23 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         raise AttributeError(
             "No policy network has been registered with the algorithm."
         )
+
+    def reinit_optimizers(
+        self,
+        optimizer: Optional[OptimizerConfig] = None,
+    ) -> None:
+        """Reinitialize the optimizers of an algorithm. If no optimizer is passed, all optimizers are reinitialized.
+
+        :param optimizer: The optimizer to reinitialize, defaults to None, in which case
+            all optimizers are reinitialized.
+        :type optimizer: Optional[OptimizerConfig], optional
+        """
+        if optimizer is not None:
+            self._reinit_opt_from_config(optimizer)
+        else:
+            optimizer_configs = self.registry.optimizers
+            for opt_config in optimizer_configs:
+                self._reinit_opt_from_config(opt_config)
 
     def recompile(self) -> None:
         """Recompiles the evolvable modules in the algorithm with the specified torch compiler."""

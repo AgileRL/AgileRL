@@ -1361,51 +1361,6 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
     del mutations, population
 
 
-@pytest.mark.parametrize(
-    "algo, action_space",
-    [
-        ("DQN", "discrete_space"),
-        ("Rainbow DQN", "discrete_space"),
-        ("DDPG", "vector_space"),
-        ("TD3", "vector_space"),
-        ("PPO", "discrete_space"),
-        ("CQN", "discrete_space"),
-        ("NeuralUCB", "discrete_space"),
-        ("NeuralTS", "discrete_space"),
-    ],
-)
-@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
-@pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
-@pytest.mark.parametrize(
-    "observation_space, net_config", [("vector_space", "encoder_mlp_config")]
-)
-@pytest.mark.parametrize("torch_compiler", [None])
-@pytest.mark.parametrize("hp_config", [None])
-@pytest.mark.parametrize("population_size", [1])
-def test_reinit_opt(algo, init_pop):
-    population = init_pop
-    mutations = Mutations(
-        1,
-        1,
-        1,
-        1,
-        1,
-        1,
-        0.5,
-    )
-
-    new_population = [agent.clone() for agent in population]
-    mutations._reinit_opt(new_population[0])
-
-    opt_attr = new_population[0].registry.optimizers[0].name
-    new_opt = getattr(new_population[0], opt_attr)
-    old_opt = getattr(population[0], opt_attr)
-
-    assert_state_dicts_equal(new_opt.state_dict(), old_opt.state_dict())
-
-    del mutations, new_population
-
-
 @pytest.mark.parametrize("use_accelerator", [True, False])
 def test_mutation_applies_rl_hp_mutation_llm_algorithm(
     request, grpo_hp_config, vector_space, monkeypatch, use_accelerator
@@ -1492,7 +1447,8 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
             for agent in mutated_population:
                 for param_group in agent.optimizer.optimizer.param_groups:
                     assert param_group["lr"] == agent.lr
-
+        except Exception as e:
+            raise e
         finally:
             # Cleanup
             if use_accelerator:

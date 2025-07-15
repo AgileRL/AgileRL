@@ -48,6 +48,8 @@ class OptimizerConfig:
     :type name: str
     :param networks: The list of network attribute names that the optimizer will update.
     :type networks: List[str]
+    :param lr: The learning rate of the optimizer.
+    :type lr: str
     :param optimizer_cls: The optimizer class to be used.
     :type optimizer_cls: Type[Optimizer]
     :param optimizer_kwargs: The keyword arguments to be passed to the optimizer.
