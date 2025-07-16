@@ -882,7 +882,7 @@ class PPO(RLAlgorithm):
             if self.target_kl is not None and np.mean(approx_kl_divs) > self.target_kl:
                 break  # Early stopping for the epoch if KL divergence target is exceeded
 
-        mean_loss = mean_loss / max(1e-8, total_minibatch_updates_this_run)
+        mean_loss /= num_samples * self.update_epochs
         return mean_loss
 
     def _learn_from_rollout_buffer_bptt(self) -> float:
