@@ -5,11 +5,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import gymnasium as gym
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from gymnasium import spaces
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import PPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -342,7 +342,7 @@ def train_on_policy(
             agent.steps[-1] += steps
             fps = steps / (time.time() - start_time)
             pop_fps.append(fps)
-            pbar.update(steps)
+            pbar.update(steps // len(pop))
             pop_episode_scores.append(completed_episode_scores)
 
         # Evaluate population
