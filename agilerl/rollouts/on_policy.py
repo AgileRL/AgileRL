@@ -1,11 +1,13 @@
 """Functions for collecting rollouts for on-policy algorithms."""
 
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
 import torch
+from gymnasium import spaces
 
 from agilerl.algorithms import PPO
+from agilerl.networks import StochasticActor
 from agilerl.typing import GymEnvType
 
 SupportedOnPolicy = PPO
@@ -17,7 +19,7 @@ def _collect_rollouts(
     n_steps: Optional[int] = None,
     *,
     recurrent: bool,
-) -> None:
+) -> List[float]:
     if not getattr(agent, "use_rollout_buffer", False):
         raise RuntimeError(
             "collect_rollouts can only be used when use_rollout_buffer=True"
@@ -33,6 +35,8 @@ def _collect_rollouts(
     )
     current_hidden_state_for_actor = agent.hidden_state
 
+    completed_episode_scores = []
+    scores = np.zeros(agent.num_envs)
     for _ in range(n_steps):
         current_hidden_state_for_buffer = current_hidden_state_for_actor
 
@@ -48,8 +52,23 @@ def _collect_rollouts(
                 obs, action_mask=info.get("action_mask", None)
             )
 
-        # NOTE: Should we scale the action here before passing to the environment?
-        next_obs, reward, done, truncated, next_info = env.step(action)
+        # Clip action to action space
+        policy = getattr(agent, agent.registry.policy())
+        if isinstance(policy, StochasticActor) and isinstance(
+            agent.action_space, spaces.Box
+        ):
+            if policy.squash_output:
+                clipped_action = policy.scale_action(action)
+            else:
+                clipped_action = np.clip(
+                    action,
+                    agent.action_space.low,
+                    agent.action_space.high,
+                )
+        else:
+            clipped_action = action
+
+        next_obs, reward, done, truncated, next_info = env.step(clipped_action)
 
         if isinstance(done, (list, np.ndarray)):
             is_terminal = (
@@ -64,6 +83,8 @@ def _collect_rollouts(
         is_terminal_np = np.atleast_1d(is_terminal)
         value_np = np.atleast_1d(value)
         log_prob_np = np.atleast_1d(log_prob)
+
+        scores += reward_np
 
         agent.rollout_buffer.add(
             obs=obs,
@@ -97,6 +118,13 @@ def _collect_rollouts(
         obs = next_obs
         info = next_info
 
+        for idx, env_done in enumerate(is_terminal_np):
+            if env_done:
+                completed_episode_scores.append(scores[idx])
+                agent.scores.append(scores[idx])
+                scores[idx] = 0
+
+    # Calculate last value to compute returns and advantages properly
     with torch.no_grad():
         if recurrent:
             _, _, _, last_value, _ = agent._get_action_and_values(
@@ -115,10 +143,12 @@ def _collect_rollouts(
         last_value=last_value, last_done=last_done
     )
 
+    return completed_episode_scores
+
 
 def collect_rollouts(
     agent: SupportedOnPolicy, env: GymEnvType, n_steps: Optional[int] = None
-) -> None:
+) -> List[float]:
     """Collect rollouts for non-recurrent on-policy algorithms.
 
     :param agent: The agent to collect rollouts for.
@@ -127,6 +157,9 @@ def collect_rollouts(
     :type env: GymEnvType
     :param n_steps: The number of steps to collect rollouts for.
     :type n_steps: Optional[int]
+
+    :return: The list of scores for the episodes completed in the rollouts
+    :rtype: List[float]
     """
 
     return _collect_rollouts(agent, env, n_steps, recurrent=False)
@@ -134,7 +167,7 @@ def collect_rollouts(
 
 def collect_rollouts_recurrent(
     agent: SupportedOnPolicy, env: GymEnvType, n_steps: Optional[int] = None
-) -> None:
+) -> List[float]:
     """Collect rollouts for recurrent on-policy algorithms.
 
     :param agent: The agent to collect rollouts for.
@@ -143,6 +176,9 @@ def collect_rollouts_recurrent(
     :type env: GymEnvType
     :param n_steps: The number of steps to collect rollouts for.
     :type n_steps: Optional[int]
+
+    :return: The list of scores for the episodes completed in the rollouts
+    :rtype: List[float]
     """
 
     return _collect_rollouts(agent, env, n_steps, recurrent=True)

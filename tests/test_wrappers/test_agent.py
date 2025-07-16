@@ -1,7 +1,5 @@
 import copy
-import gc
 import os
-from typing import List
 from unittest.mock import MagicMock
 
 import dill
@@ -13,12 +11,7 @@ from gymnasium import spaces
 from pettingzoo import ParallelEnv
 
 from agilerl.algorithms import DDPG, IPPO
-from agilerl.algorithms.core import (
-    EvolvableAlgorithm,
-    MultiAgentRLAlgorithm,
-    RLAlgorithm,
-)
-from agilerl.hpo.mutation import Mutations
+from agilerl.algorithms.core import MultiAgentRLAlgorithm, RLAlgorithm
 from agilerl.modules import EvolvableMLP
 from agilerl.utils.utils import make_multi_agent_vect_envs
 from agilerl.wrappers.agent import AsyncAgentsWrapper, RSNorm

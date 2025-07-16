@@ -222,8 +222,8 @@ def train_on_policy(
             completed_episode_scores = []
             steps = 0
             start_time = time.time()
-
             active_collect = collect_rollouts_fn
+            n_steps = agent.learn_step // num_envs
             if active_collect is None and getattr(agent, "use_rollout_buffer", False):
                 if getattr(agent, "recurrent", False):
                     from agilerl.rollouts import (
@@ -237,34 +237,19 @@ def train_on_policy(
                 and active_collect is not None
             ):
                 for _ in range(-(evo_steps // -agent.learn_step)):
-                    active_collect(agent, env, n_steps=agent.learn_step)
+                    # Collect rollouts and save in buffer
+                    episode_scores = active_collect(agent, env, n_steps=n_steps)
 
-                    buffer_size = agent.rollout_buffer.pos
-                    rewards_np = (
-                        agent.rollout_buffer.buffer["rewards"][:buffer_size]
-                        .cpu()
-                        .numpy()
-                    )
-                    dones_np = (
-                        agent.rollout_buffer.buffer["dones"][:buffer_size].cpu().numpy()
-                    )
-                else:
-                    from agilerl.rollouts import collect_rollouts as active_collect
-
-                    for r_step, d_step in zip(rewards_np, dones_np):
-                        scores += np.array(r_step)
-                        finished = np.array(d_step, dtype=bool)
-                        for idx, fin in enumerate(finished):
-                            if fin:
-                                completed_episode_scores.append(scores[idx])
-                                agent.scores.append(scores[idx])
-                                scores[idx] = 0
-
-                    steps += buffer_size * num_envs
-                    total_steps += buffer_size * num_envs
+                    # Learn from rollout buffer
                     loss = agent.learn()
                     pop_loss[agent_idx].append(loss)
 
+                    # Update step counter and scores
+                    steps += n_steps * num_envs
+                    total_steps += n_steps * num_envs
+                    completed_episode_scores.extend(episode_scores)
+
+            # Collect rollouts explicitly without saving to rollout buffer
             else:
                 obs, info = env.reset()
                 for _ in range(-(evo_steps // -agent.learn_step)):
@@ -357,7 +342,7 @@ def train_on_policy(
             agent.steps[-1] += steps
             fps = steps / (time.time() - start_time)
             pop_fps.append(fps)
-            pbar.update(evo_steps // len(pop))
+            pbar.update(steps)
             pop_episode_scores.append(completed_episode_scores)
 
         # Evaluate population
@@ -460,6 +445,10 @@ def train_on_policy(
             fitness = ["%.2f" % fitness for fitness in fitnesses]
             avg_fitness = ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
             avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
+            mean_scores = [
+                "%.2f" % mean_score if not isinstance(mean_score, str) else mean_score
+                for mean_score in mean_scores
+            ]
             agents = [agent.index for agent in pop]
             num_steps = [agent.steps[-1] for agent in pop]
             muts = [agent.mut for agent in pop]
@@ -468,13 +457,13 @@ def train_on_policy(
             print(
                 f"""
                 --- Global Steps {total_steps} ---
-                Fitness:\t\t{fitness}
+                Fitness:\t{fitness}
                 Score:\t\t{mean_scores}
                 5 fitness avgs:\t{avg_fitness}
                 10 score avgs:\t{avg_score}
                 Agents:\t\t{agents}
                 Steps:\t\t{num_steps}
-                Mutations:\t\t{muts}
+                Mutations:\t{muts}
                 """,
                 end="\r",
             )

@@ -590,7 +590,6 @@ class PPO(RLAlgorithm):
             # NOTE: we are still allowing experiences to be passed in for backwards compatibility
             # but we will remove this in a future releases.
             # i.e. it's possible to do one learn with rollouts, then another with experiences on the same agent
-
             if experiences is None:
                 # Learn from the internal rollout buffer
                 if (
@@ -601,6 +600,7 @@ class PPO(RLAlgorithm):
                     return self._learn_from_rollout_buffer_bptt()
                 else:
                     return self._learn_from_rollout_buffer_flat()
+
         return self._deprecated_learn_from_experiences(experiences)
 
     def _deprecated_learn_from_experiences(self, experiences: ExperiencesType) -> float:
@@ -773,9 +773,6 @@ class PPO(RLAlgorithm):
         observations = buffer_td["observations"]
         advantages = buffer_td["advantages"]
 
-        # Normalize advantages
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
         batch_size = self.batch_size
         num_samples = observations.size(0)  # Total number of samples in the buffer
 
@@ -783,7 +780,6 @@ class PPO(RLAlgorithm):
         mean_loss = 0.0
         approx_kl_divs = []
         total_minibatch_updates_this_run = 0
-
         for epoch in range(self.update_epochs):
             np.random.shuffle(indices)
             num_minibatches_this_epoch = 0
@@ -802,6 +798,7 @@ class PPO(RLAlgorithm):
                     minibatch_indices
                 ]  # Use globally normalized advantages
                 mb_returns = minibatch_td["returns"]
+                mb_old_values = minibatch_td["values"]
 
                 eval_hidden_state = None
                 if self.recurrent:
@@ -810,7 +807,9 @@ class PPO(RLAlgorithm):
                     # minibatch_td["hidden_states"] will be {key: tensor_shape_(len(minibatch_indices), layers, size)}
                     # _get_action_and_values expects dict {key: (layers, batch, size)}
                     if "hidden_states" in minibatch_td.keys(include_nested=True):
-                        mb_hidden_states_td = minibatch_td.get("hidden_states")
+                        mb_hidden_states_td: TensorDict = minibatch_td.get(
+                            "hidden_states"
+                        )
                         eval_hidden_state = {
                             # v has shape (minibatch_size, layers, size), permute to (layers, minibatch_size, size)
                             k: v.permute(1, 0, 2).contiguous()
@@ -832,6 +831,13 @@ class PPO(RLAlgorithm):
                 if entropy_t is None:  # For continuous squashed actions
                     entropy_t = -new_log_prob_t
 
+                # Normalize advantages
+                if len(minibatch_indices) > 1:
+                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (
+                        mb_advantages.std() + 1e-8
+                    )
+
+                # Policy loss
                 ratio = torch.exp(new_log_prob_t - mb_old_log_probs)
                 policy_loss1 = -mb_advantages * ratio
                 policy_loss2 = -mb_advantages * torch.clamp(
@@ -839,13 +845,23 @@ class PPO(RLAlgorithm):
                 )
                 policy_loss = torch.max(policy_loss1, policy_loss2).mean()
 
-                value_loss = 0.5 * ((new_value_t - mb_returns) ** 2).mean()
+                # Value loss
+                value = new_value_t.view(-1)
+                v_loss_unclipped = (value - mb_returns) ** 2
+                v_clipped = mb_old_values + torch.clamp(
+                    value - mb_old_values, -self.clip_coef, self.clip_coef
+                )
+
+                v_loss_clipped = (v_clipped - mb_returns) ** 2
+                v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
+                v_loss = 0.5 * v_loss_max.mean()
+
+                # Entropy loss
                 entropy_loss = -entropy_t.mean()
 
+                # Total loss
                 loss = (
-                    policy_loss
-                    + self.vf_coef * value_loss
-                    + self.ent_coef * entropy_loss
+                    policy_loss + self.vf_coef * v_loss + self.ent_coef * entropy_loss
                 )
 
                 with torch.no_grad():
@@ -885,9 +901,9 @@ class PPO(RLAlgorithm):
             return 0.0
 
         # Normalize advantages globally once before epochs
-        valid_advantages_tensor = self.rollout_buffer.buffer["advantages"][
-            :buffer_actual_size
-        ]
+        valid_advantages_tensor: torch.Tensor = self.rollout_buffer.buffer[
+            "advantages"
+        ][:buffer_actual_size]
         if valid_advantages_tensor.numel() > 0:
             original_shape = valid_advantages_tensor.shape
             flat_adv = valid_advantages_tensor.reshape(-1)
