@@ -204,7 +204,7 @@ class HyperparameterConfig:
         """Sample a hyperparameter from the configuration.
 
         :return: The name of the hyperparameter and its configuration.
-        :rtype: Tuple[str, RLHyperparameter]
+        :rtype: Tuple[str, RLParameter]
         """
         key = torch.randperm(len(self.config))[0]
         return list(self.config.keys())[key], list(self.config.values())[key]
@@ -221,7 +221,7 @@ class NetworkGroup:
     :param eval_network: The evaluation network.
     :type eval_network: NetworkType
     :param shared_networks: The list of shared networks.
-    :type shared_networks: NetworkType
+    :type shared_networks: Optional[NetworkType]
     :param policy: Whether the network is a policy (e.g. the network used to get the actions
         of the agent). There must be one network group in an algorithm which sets this to True.
         Default is False.
@@ -266,6 +266,7 @@ class NetworkGroup:
         Infer the parent container dynamically using the stack frame.
 
         :return: The parent container object
+        :rtype: EvolvableAlgorithm
         """
         # NOTE: Here the assumption is that NetworkGroup is used inside the __init__
         # method of the implemented algorithm, such that we can access the defined locals
@@ -279,7 +280,13 @@ class NetworkGroup:
         """
         Infer attribute names of the networks being optimized.
 
+        :param container: The container object to inspect.
+        :type container: object
+        :param objects: The objects to match.
+        :type objects: Union[object, List[object]]
+
         :return: List of attribute names for the networks
+        :rtype: List[str]
         """
 
         def _match_condition(attr_value: Any) -> bool:
@@ -306,7 +313,7 @@ def make_network_group(
     :param eval_network: The evaluation network.
     :type eval_network: str
     :param shared_networks: The list of shared networks.
-    :type shared_networks: str, List[str]
+    :type shared_networks: Optional[Union[str, List[str]]]
     :param policy: Whether the network is a policy (e.g. the network used to get the actions
     of the agent). There must be one network group in an algorithm which sets this to True.
     Default is False.
@@ -323,13 +330,13 @@ def make_network_group(
 @dataclass
 class MutationRegistry:
     """Registry to keep track of the components of an algorithms that may evolve during training
-    in a structured way to be interpreted by a `Mutations` object when performing evolutionary
-    hyperparameter optimization. This includes:
+    in a structured way to be interpreted by a :class:`Mutations <agilerl.hpo.mutations.Mutations>` object
+    when performing evolutionary hyperparameter optimization. This includes:
 
     1. The hyperparameter configuration of the algorithm.
     2. The network groups of the algorithm.
     3. The optimizers of the algorithm.
-    4. The mutation hooks of the algorithm (i.e. functions that are called when a mutation is performed).
+    4. The mutation hooks of the algorithm (i.e. functions that are called after a mutation is performed).
 
     :param hp_config: The hyperparameter configuration of the algorithm.
     :type hp_config: HyperparameterConfig
@@ -384,8 +391,11 @@ class MutationRegistry:
     def policy(self, return_group: bool = False) -> Optional[Union[str, NetworkGroup]]:
         """Get the name of the policy network in the registry.
 
+        :param return_group: Whether to return the network group instead of just the name.
+        :type return_group: bool
+
         :return: The name of the policy network in the registry.
-        :rtype: Optional[str]
+        :rtype: Optional[Union[str, NetworkGroup]]
         """
         for group in self.groups:
             if group.policy:
@@ -393,7 +403,11 @@ class MutationRegistry:
         return
 
     def all_registered(self) -> List[str]:
-        """Returns all of the members in the registry."""
+        """Returns all of the members in the registry.
+
+        :return: A list of all the members in the registry.
+        :rtype: List[str]
+        """
         all_registered = {group.eval_network for group in self.groups}
         all_registered.update(
             shared
@@ -411,7 +425,8 @@ class MutationRegistry:
     def networks(self) -> List[NetworkConfig]:
         """Get a list of network configurations in the registry.
 
-        :return: A list of network configurations in the registry.
+        :return: A list of network configurations in the registry. This includes the evaluation
+        and shared networks.
         :rtype: List[NetworkConfig]
         """
         # Match with optimizers (only eval networks can have optimizers by definition)
@@ -445,21 +460,22 @@ class MutationRegistry:
     def register_group(self, group: NetworkGroup) -> None:
         """Register a network configuration in the registry.
 
-        :param config: The network configuration to be registered.
-        :type config: NetworkConfig
+        :param group: The network group to be registered.
+        :type group: NetworkGroup
         """
         self.groups.append(group)
 
     def register_optimizer(self, optimizer: OptimizerConfig) -> None:
         """Register an optimizer configuration in the registry.
 
-        :param config: The optimizer configuration to be registered.
-        :type config: OptimizerConfig
+        :param optimizer: The optimizer configuration to be registered.
+        :type optimizer: OptimizerConfig
         """
         self.optimizers.append(optimizer)
 
     def register_hook(self, hook: Callable) -> None:
-        """Register a hook in the registry as its name.
+        """Register a hook in the registry as its name. This is used to store the names of the
+        mutation hooks that will be applied after a mutation is performed.
 
         :param hook: The hook to be registered.
         :type hook: Callable

@@ -15,7 +15,6 @@ from agilerl.utils.utils import (
     make_multi_agent_vect_envs,
     observation_space_channels_to_first,
 )
-from agilerl.wrappers.agent import AsyncAgentsWrapper
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:

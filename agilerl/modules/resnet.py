@@ -45,6 +45,8 @@ class EvolvableResNet(EvolvableModule):
     :type device: str, optional
     :param name: Name of the network, defaults to 'resnet'
     :type name: str, optional
+    :param random_seed: Random seed to use for the network. Defaults to None.
+    :type random_seed: Optional[int]
     """
 
     def __init__(
@@ -63,8 +65,9 @@ class EvolvableResNet(EvolvableModule):
         max_channel_size: int = 256,
         device: DeviceType = "cpu",
         name: str = "resnet",
+        random_seed: Optional[int] = None,
     ) -> None:
-        super().__init__(device=device)
+        super().__init__(device, random_seed)
 
         assert isinstance(scale_factor, int), "Scale factor must be an integer."
         assert isinstance(num_blocks, int), "Number of blocks must be an integer."
@@ -222,7 +225,7 @@ class EvolvableResNet(EvolvableModule):
         :rtype: Dict[str, Union[int, None]]
         """
         if numb_new_channels is None:
-            numb_new_channels = np.random.choice([8, 16, 32], 1)[0]
+            numb_new_channels = self.rng.choice([8, 16, 32])
 
         # HARD LIMIT
         if self.channel_size + numb_new_channels < self.max_channel_size:
@@ -243,7 +246,7 @@ class EvolvableResNet(EvolvableModule):
         :rtype: Dict[str, Union[int, None]]
         """
         if numb_new_channels is None:
-            numb_new_channels = np.random.choice([8, 16, 32], 1)[0]
+            numb_new_channels = self.rng.choice([8, 16, 32])
 
         # HARD LIMIT
         if self.channel_size - numb_new_channels > self.min_channel_size:

@@ -75,6 +75,26 @@ class AgentWrapper(ABC, Generic[AgentType]):
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}({self.agent})"
 
+    def __getstate__(self) -> Dict[str, Any]:
+        return {
+            "agent": self.agent,
+            "observation_space": self.observation_space,
+            "action_space": self.action_space,
+            "multi_agent": self.multi_agent,
+        }
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        self.agent: AgentType = state["agent"]
+        self.observation_space = state["observation_space"]
+        self.action_space = state["action_space"]
+        self.multi_agent = state["multi_agent"]
+
+        self.wrapped_get_action = self.agent.get_action
+        self.wrapped_learn = self.agent.learn
+
+        self.agent.get_action = partial(self.get_action)
+        self.agent.learn = partial(self.learn)
+
     def __getattr__(self, name: str) -> Any:
         """Get attribute of the wrapper.
 
@@ -88,10 +108,10 @@ class AgentWrapper(ABC, Generic[AgentType]):
         except AttributeError:
             return getattr(self.agent, name)
 
-    def __setattr__(self, name: str, value: Any) -> None:
+    def __setattr__(self, name: str, value: Union[Any, AgentType]) -> None:
         if name == "agent" or not hasattr(self, "agent"):
             super().__setattr__(name, value)
-        elif hasattr(self.agent, name):
+        if hasattr(self.agent, name):
             object.__setattr__(self.agent, name, value)
         else:
             super().__setattr__(name, value)
