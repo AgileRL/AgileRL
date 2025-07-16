@@ -5,12 +5,12 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+import wandb
 from accelerate import Accelerator
 from gymnasium import spaces
 from pettingzoo import ParallelEnv
 from tqdm import trange
 
-import wandb
 from agilerl.algorithms import IPPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
