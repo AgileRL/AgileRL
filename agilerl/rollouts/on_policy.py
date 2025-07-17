@@ -1,6 +1,6 @@
 """Functions for collecting rollouts for on-policy algorithms."""
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -17,18 +17,49 @@ def _collect_rollouts(
     agent: SupportedOnPolicy,
     env: GymEnvType,
     n_steps: Optional[int] = None,
+    obs: Optional[np.ndarray] = None,
+    done: Optional[np.ndarray] = None,
+    scores: Optional[np.ndarray] = None,
+    info: Optional[Dict[str, Any]] = None,
     *,
     recurrent: bool,
-) -> List[float]:
+) -> Tuple[List[float], np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
+    """Collect rollouts for on-policy algorithms.
+
+    :param agent: The agent to collect rollouts for.
+    :type agent: SupportedOnPolicy
+    :param env: The environment to collect rollouts from.
+    :type env: GymEnvType
+    :param n_steps: The number of steps to collect rollouts for. Defaults to agent.learn_step if not provided.
+    :type n_steps: Optional[int]
+    :param obs: The observation for the current step.
+    :type obs: Optional[np.ndarray]
+    :param done: The done flag for the current step.
+    :type done: Optional[np.ndarray]
+    :param scores: The scores for the current step.
+    :type scores: Optional[np.ndarray]
+    :param info: The info for the current step.
+    :type info: Optional[Dict[str, Any]]
+    :param recurrent: Whether the agent is recurrent.
+    :type recurrent: bool
+
+    :return: The list of scores for the episodes completed in the rollouts
+    :rtype: List[float]
+    :return: The observation, done flag, scores, and info for the current step.
+    :rtype: Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]
+    """
     if not getattr(agent, "use_rollout_buffer", False):
         raise RuntimeError(
             "collect_rollouts can only be used when use_rollout_buffer=True"
         )
 
+    if obs is None or done is None or scores is None or info is None:
+        obs, info = env.reset()
+        scores = np.zeros(agent.num_envs)
+        done = np.zeros(agent.num_envs)
+
     n_steps = n_steps or agent.learn_step
     agent.rollout_buffer.reset()
-
-    obs, info = env.reset()
 
     agent.hidden_state = (
         agent.get_initial_hidden_state(agent.num_envs) if recurrent else None
@@ -36,10 +67,10 @@ def _collect_rollouts(
     current_hidden_state_for_actor = agent.hidden_state
 
     completed_episode_scores = []
-    scores = np.zeros(agent.num_envs)
     for _ in range(n_steps):
         current_hidden_state_for_buffer = current_hidden_state_for_actor
 
+        # Get action, statistics and (maybe) recurrent hidden state from agent
         if recurrent:
             action, log_prob, _, value, next_hidden_for_actor = agent.get_action(
                 obs,
@@ -68,34 +99,37 @@ def _collect_rollouts(
         else:
             clipped_action = action
 
-        next_obs, reward, done, truncated, next_info = env.step(clipped_action)
+        next_obs, reward, term, trunc, next_info = env.step(clipped_action)
 
-        if isinstance(done, (list, np.ndarray)):
+        # Check if termination condition is met
+        if isinstance(term, (list, np.ndarray)):
             is_terminal = (
-                np.logical_or(done, truncated)
-                if isinstance(truncated, (list, np.ndarray))
-                else done
+                np.logical_or(term, trunc)
+                if isinstance(trunc, (list, np.ndarray))
+                else term
             )
         else:
-            is_terminal = done or truncated
+            is_terminal = term or trunc
 
         reward_np = np.atleast_1d(reward)
         is_terminal_np = np.atleast_1d(is_terminal)
         value_np = np.atleast_1d(value)
         log_prob_np = np.atleast_1d(log_prob)
 
-        scores += reward_np
-
         agent.rollout_buffer.add(
             obs=obs,
             action=action,
             reward=reward_np,
-            done=is_terminal_np,
+            done=done,
             value=value_np,
             log_prob=log_prob_np,
             next_obs=next_obs,
             hidden_state=current_hidden_state_for_buffer,
+            episode_start=is_terminal_np,
         )
+
+        scores += reward_np
+        done = is_terminal_np
 
         if recurrent and np.any(is_terminal_np):
             finished_mask = is_terminal_np.astype(bool)
@@ -137,17 +171,17 @@ def _collect_rollouts(
             )
 
         last_value = last_value.cpu().numpy()
-        last_done = np.atleast_1d(done)
+        last_done = np.atleast_1d(term)
 
     agent.rollout_buffer.compute_returns_and_advantages(
         last_value=last_value, last_done=last_done
     )
 
-    return completed_episode_scores
+    return completed_episode_scores, obs, done, scores, info
 
 
 def collect_rollouts(
-    agent: SupportedOnPolicy, env: GymEnvType, n_steps: Optional[int] = None
+    agent: SupportedOnPolicy, env: GymEnvType, n_steps: Optional[int] = None, **kwargs
 ) -> List[float]:
     """Collect rollouts for non-recurrent on-policy algorithms.
 
@@ -162,11 +196,11 @@ def collect_rollouts(
     :rtype: List[float]
     """
 
-    return _collect_rollouts(agent, env, n_steps, recurrent=False)
+    return _collect_rollouts(agent, env, n_steps, recurrent=False, **kwargs)
 
 
 def collect_rollouts_recurrent(
-    agent: SupportedOnPolicy, env: GymEnvType, n_steps: Optional[int] = None
+    agent: SupportedOnPolicy, env: GymEnvType, n_steps: Optional[int] = None, **kwargs
 ) -> List[float]:
     """Collect rollouts for recurrent on-policy algorithms.
 
@@ -181,4 +215,4 @@ def collect_rollouts_recurrent(
     :rtype: List[float]
     """
 
-    return _collect_rollouts(agent, env, n_steps, recurrent=True)
+    return _collect_rollouts(agent, env, n_steps, recurrent=True, **kwargs)

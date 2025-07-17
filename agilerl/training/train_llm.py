@@ -3,10 +3,10 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch.distributed as dist
-import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import GRPO
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.hpo.mutation import Mutations
@@ -366,18 +366,22 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE_PER_GPU"]
         agents = [agent.index for agent in pop]
         num_steps = [agent.steps[-1] for agent in pop]
         muts = [agent.mut for agent in pop]
-        print(
-            f"""
-            --- Global Steps {total_steps} ---
-            Fitness:\t\t{fitness}
-            Score:\t\t{agg_metrics[2]}
-            5 fitness avgs:\t{avg_fitness}
-            10 score avgs:\t{avg_score}
-            Agents:\t\t{agents}
-            Steps:\t\t{num_steps}
-            Mutations:\t\t{muts}
-            """,
-            end="\r",
+
+        banner_text = f"Global Steps {total_steps}"
+        banner_width = max(len(banner_text) + 8, 35)
+        border = "=" * banner_width
+        centered_text = f"{banner_text}".center(banner_width)
+        pbar.write(
+            f"{border}\n"
+            f"{centered_text}\n"
+            f"{border}\n"
+            f"Fitness:\t\t{fitness}\n"
+            f"Score:\t\t{agg_metrics[2]}\n"
+            f"5 fitness avgs:\t{avg_fitness}\n"
+            f"10 score avgs:\t{avg_score}\n"
+            f"Agents:\t\t{agents}\n"
+            f"Steps:\t\t{num_steps}\n"
+            f"Mutations:\t\t{muts}"
         )
 
     if accelerator is not None:

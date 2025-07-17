@@ -5,12 +5,11 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import gymnasium as gym
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from tensordict import TensorDictBase
 from torch.utils.data import DataLoader
-from tqdm import trange
 
+import wandb
 from agilerl.algorithms import DDPG, DQN, TD3, RainbowDQN
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.components import (
@@ -24,6 +23,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
+    default_progress_bar,
     init_wandb,
     save_population_checkpoint,
     tournament_selection_and_mutation,
@@ -215,17 +215,8 @@ def train_off_policy(
     else:
         print("\nTraining...")
 
-    bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
-    if accelerator is not None:
-        pbar = trange(
-            max_steps,
-            unit="step",
-            bar_format=bar_format,
-            ascii=True,
-            disable=not accelerator.is_local_main_process,
-        )
-    else:
-        pbar = trange(max_steps, unit="step", bar_format=bar_format, ascii=True)
+    # Format progress bar
+    pbar = default_progress_bar(max_steps, accelerator)
 
     pop_loss = [[] for _ in pop]
     pop_fitnesses = []
@@ -546,20 +537,22 @@ def train_off_policy(
             agents = [agent.index for agent in pop]
             num_steps = [agent.steps[-1] for agent in pop]
             muts = [agent.mut for agent in pop]
-            pbar.update(0)
 
-            print(
-                f"""
-                --- Global Steps {total_steps} ---
-                Fitness:\t\t{fitness}
-                Score:\t\t{mean_scores}
-                5 fitness avgs:\t{avg_fitness}
-                10 score avgs:\t{avg_score}
-                Agents:\t\t{agents}
-                Steps:\t\t{num_steps}
-                Mutations:\t\t{muts}
-                """,
-                end="\r",
+            banner_text = f"Global Steps {total_steps}"
+            banner_width = max(len(banner_text) + 8, 35)
+            border = "=" * banner_width
+            centered_text = f"{banner_text}".center(banner_width)
+            pbar.write(
+                f"{border}\n"
+                f"{centered_text}\n"
+                f"{border}\n"
+                f"Fitness:\t\t{fitness}\n"
+                f"Score:\t\t{mean_scores}\n"
+                f"5 fitness avgs:\t{avg_fitness}\n"
+                f"10 score avgs:\t{avg_score}\n"
+                f"Agents:\t\t{agents}\n"
+                f"Steps:\t\t{num_steps}\n"
+                f"Mutations:\t\t{muts}"
             )
 
         # Save model checkpoint

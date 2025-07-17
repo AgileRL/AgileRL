@@ -311,7 +311,9 @@ class RolloutBuffer:
                     < len(self.observation_space.spaces[key].shape) + 1
                 ):
                     obs_tensor = obs_tensor.unsqueeze(0)
+
                 obs_dict[key] = obs_tensor
+
             current_step_data["observations"] = obs_dict
         else:
             obs_tensor = torch.as_tensor(obs, device="cpu")
@@ -320,14 +322,14 @@ class RolloutBuffer:
                 and obs_tensor.ndim < len(self.observation_space.shape) + 1
             ):  # Add batch dim for single env
                 obs_tensor = obs_tensor.unsqueeze(0)
+
             current_step_data["observations"] = obs_tensor
 
         # Actions
         action_tensor = torch.as_tensor(action, device="cpu")
-        if (
-            self.num_envs == 1 and action_tensor.ndim < len(self.action_space.shape) + 1
-        ):  # Add batch dim
+        if self.num_envs == 1 and action_tensor.ndim < len(self.action_space.shape) + 1:
             action_tensor = action_tensor.unsqueeze(0)
+
         current_step_data["actions"] = action_tensor
 
         # Rewards
