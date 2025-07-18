@@ -17,10 +17,10 @@ def _collect_rollouts(
     agent: SupportedOnPolicy,
     env: GymEnvType,
     n_steps: Optional[int] = None,
-    obs: Optional[np.ndarray] = None,
-    done: Optional[np.ndarray] = None,
-    scores: Optional[np.ndarray] = None,
-    info: Optional[Dict[str, Any]] = None,
+    last_obs: Optional[np.ndarray] = None,
+    last_done: Optional[np.ndarray] = None,
+    last_scores: Optional[np.ndarray] = None,
+    last_info: Optional[Dict[str, Any]] = None,
     *,
     recurrent: bool,
 ) -> Tuple[List[float], np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
@@ -32,14 +32,14 @@ def _collect_rollouts(
     :type env: GymEnvType
     :param n_steps: The number of steps to collect rollouts for. Defaults to agent.learn_step if not provided.
     :type n_steps: Optional[int]
-    :param obs: The observation for the current step.
-    :type obs: Optional[np.ndarray]
-    :param done: The done flag for the current step.
-    :type done: Optional[np.ndarray]
-    :param scores: The scores for the current step.
-    :type scores: Optional[np.ndarray]
-    :param info: The info for the current step.
-    :type info: Optional[Dict[str, Any]]
+    :param last_obs: The observation to use for the first step. Defaults to None, where the environment is reset.
+    :type last_obs: Optional[np.ndarray]
+    :param last_done: The done flag to use for the first step. Defaults to None, where the environment is reset.
+    :type last_done: Optional[np.ndarray]
+    :param last_scores: The scores to use for the first step. Defaults to None, where the environment is reset.
+    :type last_scores: Optional[np.ndarray]
+    :param last_info: The info for the current step. Defaults to None, where the environment is reset.
+    :type last_info: Optional[Dict[str, Any]]
     :param recurrent: Whether the agent is recurrent.
     :type recurrent: bool
 
@@ -53,12 +53,22 @@ def _collect_rollouts(
             "collect_rollouts can only be used when use_rollout_buffer=True"
         )
 
-    if obs is None or done is None or scores is None or info is None:
+    if (
+        last_obs is None
+        or last_done is None
+        or last_scores is None
+        or last_info is None
+    ):
         obs, info = env.reset()
         scores = np.zeros(agent.num_envs)
         done = np.zeros(agent.num_envs)
+    else:
+        obs = last_obs
+        done = last_done
+        scores = last_scores
+        info = last_info
 
-    n_steps = n_steps or agent.learn_step
+    n_steps = n_steps or -(agent.learn_step // -agent.num_envs)
     agent.rollout_buffer.reset()
 
     agent.hidden_state = (

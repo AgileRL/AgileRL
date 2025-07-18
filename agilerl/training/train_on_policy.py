@@ -219,17 +219,19 @@ def train_on_policy(
                 getattr(agent, "use_rollout_buffer", False)
                 and active_collect is not None
             ):
-                obs, done, scores, info = None, None, None, None
+                last_obs, last_done, last_scores, last_info = None, None, None, None
                 for _ in range(-(evo_steps // -agent.learn_step)):
                     # Collect rollouts and save in buffer
-                    episode_scores, obs, done, scores, info = active_collect(
-                        agent,
-                        env,
-                        n_steps=n_steps,
-                        obs=obs,
-                        done=done,
-                        scores=scores,
-                        info=info,
+                    episode_scores, last_obs, last_done, last_scores, last_info = (
+                        active_collect(
+                            agent,
+                            env,
+                            n_steps=n_steps,
+                            last_obs=last_obs,
+                            last_done=last_done,
+                            last_scores=last_scores,
+                            last_info=last_info,
+                        )
                     )
 
                     loss = agent.learn()  # Learn from rollout buffer

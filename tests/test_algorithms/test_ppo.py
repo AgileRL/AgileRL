@@ -1259,7 +1259,7 @@ def test_ppo_with_hidden_states_multiple_envs_collect_rollouts():
     )
 
     # Collect rollouts with recurrent network
-    collect_rollouts_recurrent(ppo, env, n_steps=5)
+    collect_rollouts_recurrent(ppo, env)
 
     # Check buffer contents
     assert ppo.rollout_buffer.pos == 5
@@ -1327,7 +1327,7 @@ def test_ppo_with_hidden_states_multiple_envs_collect_rollouts_and_test():
     )
 
     # Collect rollouts with recurrent network
-    collect_rollouts_recurrent(ppo, env, n_steps=5)
+    collect_rollouts_recurrent(ppo, env)
 
     # Check buffer contents
     assert ppo.rollout_buffer.pos == 5
