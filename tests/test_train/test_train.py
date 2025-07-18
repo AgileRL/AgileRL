@@ -152,7 +152,12 @@ class DummyAgentOnPolicy(DummyAgentOffPolicy):
         self.actor.action_space = self.action_space
 
         self.registry = MagicMock()
+        self.rollout_buffer = MagicMock()
+        self.rollout_buffer.reset.side_effect = lambda: None
+        self.rollout_buffer.add.side_effect = lambda *args, **kwargs: None
         self.registry.policy.side_effect = lambda: "actor"
+        self.use_rollout_buffer = False
+        self.num_envs = 2
 
     def learn(self, *args, **kwargs):
         return random.random()
@@ -160,8 +165,14 @@ class DummyAgentOnPolicy(DummyAgentOffPolicy):
     def get_action(self, *args, **kwargs):
         return tuple(np.random.randn(self.action_size) for _ in range(4))
 
+    def _get_action_and_values(self, *args, **kwargs):
+        return tuple(torch.randn(self.action_size) for _ in range(5))
+
     def test(self, env, swap_channels, max_steps, loop):
         return super().test(env, swap_channels, max_steps, loop)
+
+    def preprocess_observation(self, obs):
+        return obs
 
     def save_checkpoint(self, path):
         return super().save_checkpoint(path)
@@ -2233,9 +2244,16 @@ def test_train_on_policy_tourn_mut_calls(
 
 
 @pytest.mark.parametrize(
-    "state_size, action_size, vect", [((6,), 2, True), ((6,), 2, False)]
+    "state_size, action_size, vect, use_rollout_buffer",
+    [((6,), 2, True, True), ((6,), 2, False, False)],
 )
-def test_train_on_policy(env, population_on_policy, tournament, mutations):
+def test_train_on_policy(
+    env, population_on_policy, tournament, mutations, use_rollout_buffer
+):
+    if use_rollout_buffer:
+        for agent in population_on_policy:
+            agent.use_rollout_buffer = True
+
     pop, pop_fitnesses = train_on_policy(
         env,
         "env_name",

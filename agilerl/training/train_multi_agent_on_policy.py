@@ -5,11 +5,11 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from gymnasium import spaces
 from pettingzoo import ParallelEnv
 
+import wandb
 from agilerl.algorithms import IPPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -525,6 +525,14 @@ def train_multi_agent_on_policy(
                 fitness = ["%.2f" % fitness for fitness in fitnesses]
                 avg_fitness = ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
                 avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
+                mean_scores = [
+                    (
+                        "%.2f" % mean_score
+                        if not isinstance(mean_score, str)
+                        else mean_score
+                    )
+                    for mean_score in mean_scores
+                ]
             else:
                 fitness_arr = np.array([fitness for fitness in fitnesses])
                 avg_fitness_arr = np.array(
