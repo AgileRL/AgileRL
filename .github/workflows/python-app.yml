@@ -14,7 +14,7 @@ jobs:
     build:
         runs-on: gha-runner-scale-set
         container:
-            image: 761296822462.dkr.ecr.us-east-1.amazonaws.com/containers/ray/ray-worker:py310-cu128-runner-b1
+            image: europe-west4-docker.pkg.dev/arena-gke-02/gke-arena-europe-west4-repo/ray-worker:py310-cu128-runner-b1
             options: --user root
 
         steps:
