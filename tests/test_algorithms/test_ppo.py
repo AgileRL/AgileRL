@@ -1114,22 +1114,34 @@ def test_ppo_learn_with_rollout_buffer(
 
 
 # Test PPO with hidden states
-def test_ppo_with_hidden_states(vector_space, discrete_space):
+@pytest.mark.parametrize("use_rollout_buffer", [True, False])
+def test_ppo_with_hidden_states(vector_space, discrete_space, use_rollout_buffer):
     observation_space = vector_space
     action_space = discrete_space
 
-    ppo = PPO(
-        observation_space=observation_space,
-        action_space=action_space,
-        use_rollout_buffer=True,
-        recurrent=True,
-        net_config={
-            "encoder_config": {
-                "hidden_state_size": 64,
-                "max_seq_len": 10,
-            }
-        },
-    )
+    if use_rollout_buffer:
+        ppo = PPO(
+            observation_space=observation_space,
+            action_space=action_space,
+            use_rollout_buffer=use_rollout_buffer,
+            recurrent=True,
+            net_config={
+                "encoder_config": {
+                    "hidden_state_size": 64,
+                    "max_seq_len": 10,
+                }
+            },
+        )
+    else:
+        with pytest.raises(ValueError):
+            ppo = PPO(
+                observation_space=observation_space,
+                action_space=action_space,
+                use_rollout_buffer=use_rollout_buffer,
+                recurrent=True,
+            )
+
+        return
 
     # Get action with hidden state
     obs = np.random.rand(1, *observation_space.shape).astype(
