@@ -35,7 +35,6 @@ from agilerl.algorithms.core.base import (
     OptimizerWrapper,
 )
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, clone_llm
-from agilerl.utils.utils import DummyOptimizer
 
 dist_env = dict(
     ACCELERATE_USE_DEEPSPEED="true",
