@@ -1262,7 +1262,7 @@ def test_ppo_with_hidden_states_multiple_envs_collect_rollouts():
     collect_rollouts_recurrent(ppo, env)
 
     # Check buffer contents
-    assert ppo.rollout_buffer.pos == 5
+    assert ppo.rollout_buffer.pos == -(ppo.learn_step // -ppo.num_envs)
     assert ppo.rollout_buffer.recurrent is True
     # Check observation for the first env at the first timestep
     assert not np.array_equal(
@@ -1330,7 +1330,7 @@ def test_ppo_with_hidden_states_multiple_envs_collect_rollouts_and_test():
     collect_rollouts_recurrent(ppo, env)
 
     # Check buffer contents
-    assert ppo.rollout_buffer.pos == 5
+    assert ppo.rollout_buffer.pos == -(ppo.learn_step // -ppo.num_envs)
     assert ppo.rollout_buffer.recurrent is True
     assert not np.array_equal(
         ppo.rollout_buffer.buffer.get("observations")[0, 0].cpu().numpy(),
