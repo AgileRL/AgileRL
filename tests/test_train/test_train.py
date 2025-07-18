@@ -151,14 +151,28 @@ class DummyAgentOnPolicy(DummyAgentOffPolicy):
         self.actor.scale_action = lambda x: x
         self.actor.action_space = self.action_space
 
+        self.registry = MagicMock()
+        self.rollout_buffer = MagicMock()
+        self.rollout_buffer.reset.side_effect = lambda: None
+        self.rollout_buffer.add.side_effect = lambda *args, **kwargs: None
+        self.registry.policy.side_effect = lambda: "actor"
+        self.use_rollout_buffer = False
+        self.num_envs = 2
+
     def learn(self, *args, **kwargs):
         return random.random()
 
     def get_action(self, *args, **kwargs):
         return tuple(np.random.randn(self.action_size) for _ in range(4))
 
+    def _get_action_and_values(self, *args, **kwargs):
+        return tuple(torch.randn(self.action_size) for _ in range(5))
+
     def test(self, env, swap_channels, max_steps, loop):
         return super().test(env, swap_channels, max_steps, loop)
+
+    def preprocess_observation(self, obs):
+        return obs
 
     def save_checkpoint(self, path):
         return super().save_checkpoint(path)
@@ -286,6 +300,9 @@ class DummyMultiAgent(DummyAgentOffPolicy):
         )
         self.action_space = deepcopy(self.possible_action_spaces)
         self.observation_space = deepcopy(self.possible_observation_spaces)
+
+        self.registry = MagicMock()
+        self.registry.policy.side_effect = lambda: "actors"
 
     def get_group_id(self, agent_id: str) -> str:
         return agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
@@ -712,6 +729,11 @@ def mocked_agent_on_policy(env, algo):
     mock_agent.unwrap_models.side_effect = lambda *args, **kwargs: None
     mock_agent.algo = "PPO"
 
+    mock_agent.registry = MagicMock()
+    mock_agent.registry.policy = lambda: "actor"
+    mock_agent.actor = MagicMock()
+    mock_agent.actor.squash_output = False
+
     return mock_agent
 
 
@@ -776,6 +798,8 @@ def mocked_multi_agent(multi_env, algo):
     mock_agent.get_group_id.side_effect = lambda x: (
         x.rsplit("_", 1)[0] if isinstance(x, str) else x
     )
+    mock_agent.registry = MagicMock()
+    mock_agent.registry.policy.side_effect = lambda: "actors"
     mock_agent.has_grouped_agents.side_effect = lambda: algo == IPPO
     mock_agent.actors = {agent_id: MagicMock() for agent_id in mock_agent.agent_ids}
 
@@ -2220,9 +2244,16 @@ def test_train_on_policy_tourn_mut_calls(
 
 
 @pytest.mark.parametrize(
-    "state_size, action_size, vect", [((6,), 2, True), ((6,), 2, False)]
+    "state_size, action_size, vect, use_rollout_buffer",
+    [((6,), 2, True, True), ((6,), 2, False, False)],
 )
-def test_train_on_policy(env, population_on_policy, tournament, mutations):
+def test_train_on_policy(
+    env, population_on_policy, tournament, mutations, use_rollout_buffer
+):
+    if use_rollout_buffer:
+        for agent in population_on_policy:
+            agent.use_rollout_buffer = True
+
     pop, pop_fitnesses = train_on_policy(
         env,
         "env_name",
@@ -2231,8 +2262,8 @@ def test_train_on_policy(env, population_on_policy, tournament, mutations):
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
+        max_steps=256,
+        evo_steps=256,
         eval_loop=1,
         tournament=tournament,
         mutation=mutations,

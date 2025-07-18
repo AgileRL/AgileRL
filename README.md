@@ -49,6 +49,12 @@ git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
 pip install -e .
 ```
 
+To install the ``nightly`` version of AgileRL with the latest features, use:
+
+```bash
+pip install git+https://github.com/AgileRL/AgileRL.git@nightly
+```
+
 ## Benchmarks
 
 Reinforcement learning algorithms and libraries are usually benchmarked once the optimal hyperparameters for training are known, but it often takes hundreds or thousands of experiments to discover these. This is unrealistic and does not reflect the true, total time taken for training. What if we could remove the need to conduct all these prior experiments?

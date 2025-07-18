@@ -247,11 +247,16 @@ class ModuleMeta(type):
 
 
 class EvolvableModule(nn.Module, metaclass=ModuleMeta):
-    """Base class for evolvable neural networks.
+    """Base class for evolvable neural networks. Inheriting from this class allows us to dynamically keep
+    track of the available mutation methods of the network and its nested evolvable modules. During initialization,
+    registered mutation methods are wrapped to use a context manager that automatically calls the ``recreate_network``
+    method of the network after the outermost mutation method has been called. This avoids redundant recreations of the
+    network when multiple mutation methods are applied in sequence.
 
     :param device: The device to run the network on.
     :type device: str
-    :param random_seed: The random seed to use for the network.
+    :param random_seed: The random seed to use for the network. Determines the random number generator
+        stored in ``self.rng`` that can be used to sample random numbers in e.g. mutation methods.
     :type random_seed: Optional[int]
     """
 
@@ -261,10 +266,10 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
     def __init__(self, device: str, random_seed: Optional[int] = None) -> None:
         nn.Module.__init__(self)
         self._init_surface_methods()
-        self.device = device
         self.random_seed = random_seed
 
         self._rng = np.random.default_rng(seed=random_seed)
+        self._device = device
         self._last_mutation = None
         self._last_mutation_attr = None
         self._mutation_depth = 0
@@ -321,6 +326,16 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         self._rng = value
         for module in self.modules().values():
             module.rng = value
+
+    @property
+    def device(self) -> str:
+        return self._device
+
+    @device.setter
+    def device(self, value: str) -> None:
+        self._device = value
+        for module in self.modules().values():
+            module.device = value
 
     def recreate_network(self, **kwargs) -> None:
         """Recreate the network after a mutation has been applied. If the mutation methods of
@@ -414,7 +429,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
 
     def __getattr__(self, name: str) -> Any:
         """Get attribute of the network. If the attribute is a mutation method, return the
-        method (also one from a nested module). Otherwise, raise an AttributeError.
+        method (including one from a nested module). Otherwise, raise an AttributeError.
 
         :param name: The name of the attribute.
         :type name: str

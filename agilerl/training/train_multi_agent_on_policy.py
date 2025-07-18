@@ -9,13 +9,14 @@ import wandb
 from accelerate import Accelerator
 from gymnasium import spaces
 from pettingzoo import ParallelEnv
-from tqdm import trange
 
 from agilerl.algorithms import IPPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.networks import StochasticActor
 from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
+    default_progress_bar,
     init_wandb,
     save_population_checkpoint,
     tournament_selection_and_mutation,
@@ -167,24 +168,8 @@ def train_multi_agent_on_policy(
     else:
         print("\nTraining...")
 
-    bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
-    if accelerator is not None:
-        pbar = trange(
-            max_steps,
-            unit="step",
-            bar_format=bar_format,
-            ascii=True,
-            dynamic_ncols=True,
-            disable=not accelerator.is_local_main_process,
-        )
-    else:
-        pbar = trange(
-            max_steps,
-            unit="step",
-            bar_format=bar_format,
-            ascii=True,
-            dynamic_ncols=True,
-        )
+    # Format progress bar
+    pbar = default_progress_bar(max_steps, accelerator)
 
     sample_ind = pop[0]
     agent_ids = deepcopy(list(sample_ind.observation_space.keys()))
@@ -258,11 +243,15 @@ def train_multi_agent_on_policy(
                             else agent.get_group_id(agent_id)
                         )
                         agent_space = agent.possible_action_spaces[agent_id]
-                        if isinstance(agent_space, spaces.Box):
-                            if agent.actors[network_id].squash_output:
-                                clipped_agent_action = agent.actors[
-                                    network_id
-                                ].scale_action(agent_action)
+                        policy = getattr(agent, agent.registry.policy())
+                        agent_policy = policy[network_id]
+                        if isinstance(agent_policy, StochasticActor) and isinstance(
+                            agent_space, spaces.Box
+                        ):
+                            if agent_policy.squash_output:
+                                clipped_agent_action = agent_policy.scale_action(
+                                    agent_action
+                                )
                             else:
                                 clipped_agent_action = np.clip(
                                     agent_action, agent_space.low, agent_space.high
@@ -536,6 +525,14 @@ def train_multi_agent_on_policy(
                 fitness = ["%.2f" % fitness for fitness in fitnesses]
                 avg_fitness = ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
                 avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
+                mean_scores = [
+                    (
+                        "%.2f" % mean_score
+                        if not isinstance(mean_score, str)
+                        else mean_score
+                    )
+                    for mean_score in mean_scores
+                ]
             else:
                 fitness_arr = np.array([fitness for fitness in fitnesses])
                 avg_fitness_arr = np.array(
@@ -556,42 +553,26 @@ def train_multi_agent_on_policy(
                 mean_scores = {
                     agent: mean_scores[:, idx] for idx, agent in enumerate(agent_ids)
                 }
+
             agents = [agent.index for agent in pop]
             num_steps = [agent.steps[-1] for agent in pop]
             muts = [agent.mut for agent in pop]
-            pbar.update(0)
 
-            print()
-            print(
-                "DateTime, now, H:m:s-u",
-                datetime.now().hour,
-                ":",
-                datetime.now().minute,
-                ":",
-                datetime.now().second,
-                "-",
-                datetime.now().microsecond,
-            )
-            total_time = time.time() - start_time
-            print(
-                "Steps",
-                total_steps / total_time,
-                "per sec,",
-                total_steps / (total_time / 60),
-                "per min.",
-            )
-            print(
-                f"""
-                --- Global Steps {total_steps} ---
-                Fitness:\t{fitness}
-                Score:\t\t{mean_scores}
-                5 fitness avgs:\t{avg_fitness}
-                10 score avgs:\t{avg_score}
-                Agents:\t\t{agents}
-                Steps:\t\t{num_steps}
-                Mutations:\t{muts}
-                """,
-                end="\r",
+            banner_text = f"Global Steps {total_steps}"
+            banner_width = max(len(banner_text) + 8, 35)
+            border = "=" * banner_width
+            centered_text = f"{banner_text}".center(banner_width)
+            pbar.write(
+                f"{border}\n"
+                f"{centered_text}\n"
+                f"{border}\n"
+                f"Fitness:\t{fitness}\n"
+                f"Score:\t\t{mean_scores}\n"
+                f"5 fitness avgs:\t{avg_fitness}\n"
+                f"10 score avgs:\t{avg_score}\n"
+                f"Agents:\t\t{agents}\n"
+                f"Steps:\t\t{num_steps}\n"
+                f"Mutations:\t{muts}"
             )
 
         # Save model checkpoint

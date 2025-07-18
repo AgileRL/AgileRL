@@ -3,7 +3,6 @@ import warnings
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
 import torch
 import torch.nn as nn
 
@@ -53,6 +52,8 @@ class EvolvableBERT(EvolvableModule):
     :type max_decoder_layers: int, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
+    :param random_seed: Random seed to use for the network. Defaults to None.
+    :type random_seed: Optional[int]
     """
 
     def __init__(
@@ -75,8 +76,9 @@ class EvolvableBERT(EvolvableModule):
         max_decoder_layers: int = 12,
         device: str = "cpu",
         name: str = "bert",
+        random_seed: Optional[int] = None,
     ) -> None:
-        super().__init__(device)
+        super().__init__(device, random_seed)
 
         self.encoder_layers = encoder_layers
         self.decoder_layers = decoder_layers
@@ -544,21 +546,21 @@ class EvolvableBERT(EvolvableModule):
         :rtype: Dict[str, Any]
         """
         if network is None:
-            network = np.random.choice(["encoder", "decoder"], 1)[0]
+            network = self.rng.choice(["encoder", "decoder"])
 
         if numb_new_nodes is None:
-            numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
+            numb_new_nodes = self.rng.choice([16, 32, 64])
 
         if network == "encoder":
             if hidden_layer is None:
-                hidden_layer = np.random.randint(0, len(self.encoder_layers), 1)[0]
+                hidden_layer = self.rng.integers(0, len(self.encoder_layers))
             else:
                 hidden_layer = min(hidden_layer, len(self.encoder_layers) - 1)
 
             self.encoder_layers[hidden_layer] += numb_new_nodes
         else:
             if hidden_layer is None:
-                hidden_layer = np.random.randint(0, len(self.decoder_layers), 1)[0]
+                hidden_layer = self.rng.integers(0, len(self.decoder_layers))
             else:
                 hidden_layer = min(hidden_layer, len(self.decoder_layers) - 1)
 
@@ -590,14 +592,14 @@ class EvolvableBERT(EvolvableModule):
         :rtype: Dict[str, Any]
         """
         if network is None:
-            network = np.random.choice(["encoder", "decoder"], 1)[0]
+            network = self.rng.choice(["encoder", "decoder"])
 
         if numb_new_nodes is None:
-            numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
+            numb_new_nodes = self.rng.choice([16, 32, 64])
 
         if network == "encoder":
             if hidden_layer is None:
-                hidden_layer = np.random.randint(0, len(self.encoder_layers), 1)[0]
+                hidden_layer = self.rng.integers(0, len(self.encoder_layers))
 
             else:
                 hidden_layer = min(hidden_layer, len(self.encoder_layers) - 1)
@@ -605,7 +607,7 @@ class EvolvableBERT(EvolvableModule):
                 self.encoder_layers[hidden_layer] -= numb_new_nodes
         else:
             if hidden_layer is None:
-                hidden_layer = np.random.randint(0, len(self.decoder_layers), 1)[0]
+                hidden_layer = self.rng.integers(0, len(self.decoder_layers))
             else:
                 hidden_layer = min(hidden_layer, len(self.decoder_layers) - 1)
 

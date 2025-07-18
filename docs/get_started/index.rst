@@ -214,6 +214,7 @@ faster hyperparameter optimization. Please see the available tutorials below.
      - `PPO - Acrobot <../tutorials/gymnasium/agilerl_ppo_tutorial.html>`_ |br|
        `TD3 - Lunar Lander <../tutorials/gymnasium/agilerl_td3_tutorial.html>`_ |br|
        `Rainbow DQN - CartPole <../tutorials/gymnasium/agilerl_rainbow_dqn_tutorial.html>`_
+       `Recurrent PPO - Masked Pendulum <../tutorials/gymnasium/agilerl_recurrent_ppo_tutorial.html>`_
    * - `Multi-agent tasks <../tutorials/pettingzoo/index.html>`_
      - Use of PettingZoo environments such as training DQN to play Connect Four with curriculum learning and self-play, and for multi-agent tasks in MPE environments.
      - `DQN - Connect Four <../tutorials/pettingzoo/dqn.html>`_ |br|

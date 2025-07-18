@@ -9,7 +9,6 @@ import wandb
 from accelerate import Accelerator
 from tensordict import TensorDict
 from torch.utils.data import DataLoader
-from tqdm import trange
 
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.components.data import ReplayDataset
@@ -19,6 +18,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
+    default_progress_bar,
     init_wandb,
     save_population_checkpoint,
     tournament_selection_and_mutation,
@@ -175,17 +175,8 @@ def train_bandits(
     else:
         print("\nTraining...")
 
-    bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
-    if accelerator is not None:
-        pbar = trange(
-            max_steps,
-            unit="step",
-            bar_format=bar_format,
-            ascii=True,
-            disable=not accelerator.is_local_main_process,
-        )
-    else:
-        pbar = trange(max_steps, unit="step", bar_format=bar_format, ascii=True)
+    # Format progress bar
+    pbar = default_progress_bar(max_steps, accelerator)
 
     pop_loss = [[] for _ in pop]
     pop_fitnesses = []
@@ -321,21 +312,23 @@ def train_bandits(
             agents = [agent.index for agent in pop]
             num_steps = [agent.steps[-1] for agent in pop]
             muts = [agent.mut for agent in pop]
-            pbar.update(0)
 
-            print(
-                f"""
-                --- Global Steps {total_steps} ---
-                Regret:\t\t{regret}
-                Mean regret:\t{avg_regret}
-                Fitness:\t\t{fitness}
-                5 fitness avgs:\t{avg_fitness}
-                10 score avgs:\t{avg_score}
-                Agents:\t\t{agents}
-                Steps:\t\t{num_steps}
-                Mutations:\t\t{muts}
-                """,
-                end="\r",
+            banner_text = f"Global Steps {total_steps}"
+            banner_width = max(len(banner_text) + 8, 35)
+            border = "=" * banner_width
+            centered_text = f"{banner_text}".center(banner_width)
+            pbar.write(
+                f"{border}\n"
+                f"{centered_text}\n"
+                f"{border}\n"
+                f"Regret:\t\t{regret}\n"
+                f"Mean regret:\t{avg_regret}\n"
+                f"Fitness:\t\t{fitness}\n"
+                f"5 fitness avgs:\t{avg_fitness}\n"
+                f"10 score avgs:\t{avg_score}\n"
+                f"Agents:\t\t{agents}\n"
+                f"Steps:\t\t{num_steps}\n"
+                f"Mutations:\t\t{muts}"
             )
 
         # Save model checkpoint

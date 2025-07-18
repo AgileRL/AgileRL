@@ -6,13 +6,13 @@ Rainbow DQN
 `Rainbow DQN <https://arxiv.org/abs/1710.02298>`_ is an extension of :ref:`DQN <dqn>` that integrates multiple improvements and techniques to achieve state-of-the-art performance.
 These improvements include:
 
-* Double DQN (DDQN): Addresses the overestimation bias of Q-values by using two networks to decouple the selection and evaluation of the action in the Q-learning target.
-* Prioritized Experience Replay: Instead of uniformly sampling from the replay buffer, it samples more important transitions more frequently based on the magnitude of their temporal difference (TD) error.
-* Dueling Networks: Splits the Q-network into two separate streams — one for estimating the state value function and another for estimating the advantages for each action. They are then combined to produce Q-values.
-* Multi-step Learning (n-step returns): Instead of using just the immediate reward for learning, it uses multi-step returns which consider a sequence of future rewards.
-* Distributional RL: Instead of estimating the expected value of the cumulative future reward, it predicts the entire distribution of the cumulative future reward.
-* Noisy Nets: Adds noise directly to the weights of the network, providing a way to explore the environment without the need for epsilon-greedy exploration.
-* Categorical DQN (C51): A specific form of distributional RL where the continuous range of possible cumulative future rewards is discretized into a fixed set of categories.
+  * **Double DQN (DDQN)**: Addresses the overestimation bias of Q-values by using two networks to decouple the selection and evaluation of the action in the Q-learning target.
+  * **Prioritized Experience Replay**: Instead of uniformly sampling from the replay buffer, it samples more important transitions more frequently based on the magnitude of their temporal difference (TD) error.
+  * **Dueling Networks**: Splits the Q-network into two separate streams — one for estimating the state value function and another for estimating the advantages for each action. They are then combined to produce Q-values.
+  * **Multi-step Learning (n-step returns)**: Instead of using just the immediate reward for learning, it uses multi-step returns which consider a sequence of future rewards.
+  * **Distributional RL**: Instead of estimating the expected value of the cumulative future reward, it predicts the entire distribution of the cumulative future reward.
+  * **Noisy Nets**: Adds noise directly to the weights of the network, providing a way to explore the environment without the need for epsilon-greedy exploration.
+  * **Categorical DQN (C51)**: A specific form of distributional RL where the continuous range of possible cumulative future rewards is discretized into a fixed set of categories.
 
 Compatible Action Spaces
 ------------------------

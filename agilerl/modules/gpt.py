@@ -42,11 +42,9 @@ class EvolvableGPT(EvolvableModule):
     :type bias: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
+    :param random_seed: Random seed to use for the network. Defaults to None.
+    :type random_seed: Optional[int]
     """
-
-    arch: str = "gpt"
 
     def __init__(
         self,
@@ -63,8 +61,9 @@ class EvolvableGPT(EvolvableModule):
         max_layers: int = 16,
         bias: bool = True,
         device: str = "cpu",
+        random_seed: Optional[int] = None,
     ):
-        super().__init__(device)
+        super().__init__(device, random_seed)
 
         assert isinstance(n_layer, int), "Number of layers must be an integer."
         assert n_layer >= 1, "Number of layers must be greater than or equal to one."
@@ -608,7 +607,7 @@ class EvolvableGPT(EvolvableModule):
         :type numb_new_nodes: int, optional
         """
         if numb_new_nodes is None:
-            numb_new_nodes = np.random.choice([32, 64, 128], 1)[0]
+            numb_new_nodes = self.rng.choice([32, 64, 128], 1)[0]
         self.dim_feedfwd += numb_new_nodes
 
         return {"numb_new_nodes": numb_new_nodes}
@@ -621,7 +620,7 @@ class EvolvableGPT(EvolvableModule):
         :type numb_new_nodes: int, optional
         """
         if numb_new_nodes is None:
-            numb_new_nodes = np.random.choice([32, 64, 128], 1)[0]
+            numb_new_nodes = self.rng.choice([32, 64, 128], 1)[0]
 
         self.dim_feedfwd -= numb_new_nodes
 

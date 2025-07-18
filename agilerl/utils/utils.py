@@ -7,6 +7,7 @@ import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import tqdm
 import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
@@ -150,6 +151,42 @@ def observation_space_channels_to_first(
         )
 
     return observation_space
+
+
+def default_progress_bar(
+    max_steps: int,
+    accelerator: Optional[Accelerator] = None,
+) -> tqdm.tqdm:
+    """Returns a default progress bar.
+
+    :param max_steps: Maximum number of steps
+    :type max_steps: int
+    :param accelerator: Accelerator for distributed computing, defaults to None
+    :type accelerator: accelerate.Accelerator(), optional
+    :return: Progress bar
+    :rtype: tqdm.tqdm
+    """
+    bar_format = (
+        "🚀 Training Progress │ "
+        "{percentage:3.0f}% │ "
+        "{bar:20} │ "
+        "{n_fmt}/{total_fmt} steps │ "
+        "⏱️ {elapsed} │ "
+        "⏳ {remaining} │ "
+        "{rate_fmt}"
+        "{postfix}"
+    )
+    disable = (
+        not accelerator.is_local_main_process if accelerator is not None else False
+    )
+    return tqdm.trange(
+        max_steps,
+        unit="step",
+        bar_format=bar_format,
+        ascii=False,
+        dynamic_ncols=True,
+        disable=disable,
+    )
 
 
 def create_population(

@@ -217,8 +217,10 @@ class StochasticActor(EvolvableNetwork):
     :type action_std_init: float
     :param squash_output: Whether to squash the output to the action space.
     :type squash_output: bool
-    :param use_experimental_distribution: Whether to use the experimental distribution implementation.
-    :type use_experimental_distribution: bool
+    :param min_latent_dim: Minimum dimension of the latent space representation.
+    :type min_latent_dim: int
+    :param max_latent_dim: Maximum dimension of the latent space representation.
+    :type max_latent_dim: int
     :param latent_dim: Dimension of the latent space representation.
     :type latent_dim: int
     :param simba: Whether to use the SimBa architecture for training the network.
@@ -227,6 +229,9 @@ class StochasticActor(EvolvableNetwork):
     :type recurrent: bool
     :param device: Device to use for the network.
     :type device: str
+    :param use_experimental_distribution: Whether to use the experimental distribution implementation, which
+        includes several optimizations related to using torch primitives for statistics calculations. Defaults to False.
+    :type use_experimental_distribution: bool
     :param random_seed: Random seed to use for the network. Defaults to None.
     :type random_seed: Optional[int]
     :param encoder_name: Name of the encoder network.
@@ -250,13 +255,13 @@ class StochasticActor(EvolvableNetwork):
         head_config: Optional[NetConfigType] = None,
         action_std_init: float = 0.0,
         squash_output: bool = False,
-        use_experimental_distribution: bool = False,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
         latent_dim: int = 32,
         simba: bool = False,
         recurrent: bool = False,
         device: str = "cpu",
+        use_experimental_distribution: bool = False,
         random_seed: Optional[int] = None,
         encoder_name: str = "encoder",
     ):

@@ -22,24 +22,24 @@ Partially Observable Markov Decision Processes (POMDPs)
 The Markov assumption states that the future depends only on the current state, not on the history of how we got there. However, in
 many real-world applications, agents need information about the past to predict the future effectively. For example:
 
-- A robot navigating a maze needs to remember which paths it has already tried, not just its current position
-- A trading agent must track price trends over time, not just the current price point
-- A self-driving car has to remember the recent trajectory of other vehicles to predict where they might go next
+    - A robot navigating a maze needs to remember which paths it has already tried, not just its current position
+    - A trading agent must track price trends over time, not just the current price point
+    - A self-driving car has to remember the recent trajectory of other vehicles to predict where they might go next
 
 These scenarios are examples of Partially Observable Markov Decision Processes (POMDPs), where the agent only receives incomplete or noisy
 observations of the true environment state. This partial observability makes the learning task significantly more challenging than fully
 observable MDPs, since the agent needs to:
 
-1. Remember important information from past observations
-2. Infer hidden state information from incomplete observations
-3. Deal with uncertainty about the true state of the environment
+    1. Remember important information from past observations
+    2. Infer hidden state information from incomplete observations
+    3. Deal with uncertainty about the true state of the environment
 
 This is where recurrent neural networks (RNNs) become particularly valuable. Unlike standard feedforward networks, RNNs maintain an internal
 memory state that can help the agent:
 
-- Track important features over time
-- Identify temporal patterns in the observation sequence
-- Make better decisions with incomplete information
+    - Track important features over time
+    - Identify temporal patterns in the observation sequence
+    - Make better decisions with incomplete information
 
 The Pendulum-v1 environment we'll be using demonstrates this concept by masking velocity information - forcing the agent to infer angular velocity
 from position changes over time rather than receiving it directly. This creates a POMDP that requires temporal reasoning to solve effectively.
