@@ -239,9 +239,9 @@ class HuggingFaceGym(gym.Env):
         return collate_fn
 
 
-class _DummyOptimizer:
+class DummyOptimizer:
     """
-    Sentinel class to use for the optimizer when the optimizer is defined in the deepspeed config.
+    Placeholder optimizer class to pass to the OptimizerWrapper when the optimizer is defined in the deepspeed config.
     """
 
     def __init__(self, params: List[torch.Tensor], lr: float, **kwargs) -> None:
@@ -254,3 +254,27 @@ class _DummyOptimizer:
         :type lr: float
         """
         pass
+
+    def step(self, closure=None):
+        raise RuntimeError(
+            "DummyOptimizer is a placeholder optimizer and should not be used."
+            "Please ensure you are calling accelerator.prepare() on the optimizer."
+        )
+
+    def zero_grad(self):
+        raise RuntimeError(
+            "DummyOptimizer is a placeholder optimizer and should not be used."
+            "Please ensure you are calling accelerator.prepare() on the optimizer."
+        )
+
+    def state_dict(self):
+        raise RuntimeError(
+            "DummyOptimizer is a placeholder optimizer and should not be used."
+            "Please ensure you are calling accelerator.prepare() on the optimizer."
+        )
+
+    def load_state_dict(self, state_dict):
+        raise RuntimeError(
+            "DummyOptimizer is a placeholder optimizer and should not be used."
+            "Please ensure you are calling accelerator.prepare() on the optimizer."
+        )

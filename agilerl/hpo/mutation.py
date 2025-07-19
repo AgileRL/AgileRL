@@ -10,7 +10,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 from accelerate import Accelerator
-from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 
 from agilerl.algorithms.core import (
     EvolvableAlgorithm,
@@ -30,7 +29,7 @@ from agilerl.typing import (
 )
 from agilerl.utils.algo_utils import remove_compile_prefix
 from agilerl.utils.evolvable_networks import compile_model
-from agilerl.utils.llm_utils import _DummyOptimizer
+from agilerl.utils.llm_utils import DummyOptimizer
 
 IndividualType = TypeVar("IndividualType", bound=EvolvableAlgorithm)
 MutationsType = TypeVar("MutationsType", bound="Mutations")
@@ -582,21 +581,16 @@ class Mutations:
         """
 
         def _reinit_individual(config: OptimizerConfig) -> None:
-            opt: Optional[Union[OptimizerWrapper, DeepSpeedOptimizerWrapper]] = getattr(
-                individual, config.name
-            )
-            optimizer = opt.optimizer if hasattr(opt, "optimizer") else None
+            opt: OptimizerWrapper = getattr(individual, config.name)
+            optimizer = opt.optimizer
 
             # Multiple optimizers in a single attribute (i.e. multi-agent)
             # or one module optimized by a single optimizer
-            if isinstance(opt, DeepSpeedOptimizerWrapper):
-                if isinstance(opt.optimizer, _DummyOptimizer):
-                    opt = getattr(
-                        getattr(individual, "actor"), "optimizer"
-                    )  # If the optimizer is defined in the deepspeed config, we do this
+            if isinstance(config.get_optimizer_cls(), DummyOptimizer):
+
                 individual.accelerator, individual.lr_scheduler = (
                     LLMAlgorithm.update_lr(
-                        opt,
+                        optimizer,
                         individual.lr,
                         individual.accelerator,
                         individual.cosine_lr_schedule_config,
@@ -610,7 +604,7 @@ class Mutations:
                 else:
                     opt_nets = [getattr(individual, net) for net in opt.network_names]
 
-                # Reinitialize optimizer with mutated nets
+                # Reinitialize optim    izer with mutated nets
                 # NOTE: We need to do this since there is a chance the network parameters have changed
                 # due to architecture mutations
                 offspring_opt = OptimizerWrapper(

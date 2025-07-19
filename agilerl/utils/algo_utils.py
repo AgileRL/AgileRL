@@ -13,7 +13,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from accelerate.optimizer import AcceleratedOptimizer
-from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from gymnasium import spaces
 from peft import PeftModel, get_peft_model
 from tensordict import TensorDict, from_module
@@ -191,7 +190,7 @@ def recursive_check_module_attrs(obj: Any, networks_only: bool = False) -> bool:
     """
     check_types = (OptimizedModule, EvolvableModule)
     if not networks_only:
-        check_types += (OptimizerWrapper, DeepSpeedOptimizerWrapper)
+        check_types += (OptimizerWrapper,)
 
     if isinstance(obj, check_types):
         return True
@@ -1100,7 +1099,7 @@ class CosineLRScheduleConfig:
 
 
 def create_warmup_cosine_scheduler(
-    optimizer: Union[DeepSpeedOptimizerWrapper, OptimizerWrapper],
+    optimizer: torch.optim.Optimizer,
     config: CosineLRScheduleConfig,
     min_lr: float,
     max_lr: float,
@@ -1108,7 +1107,7 @@ def create_warmup_cosine_scheduler(
     """Helper function to create cosine annealing lr scheduler with warm-up
 
     :param optimizer: Optimizer
-    :type optimizer: Union[DeepSpeedOptimizerWrapper, OptimizerWrapper]
+    :type optimizer: torch.optim.Optimizer
     :param config: LR scheduler config
     :type config: CosineLRScheduleConfig
     :param min_lr: Minimum learning rate

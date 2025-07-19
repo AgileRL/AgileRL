@@ -4,8 +4,8 @@ debug: false
 deepspeed_config:
     gradient_accumulation_steps: 4
     gradient_clipping: 1.5
-    offload_optimizer_device: cpu
-    offload_param_device: cpu
+    # offload_optimizer_device: cpu
+    # offload_param_device: cpu
     zero3_init_flag: false
     zero_stage: 2
 mixed_precision: bf16
