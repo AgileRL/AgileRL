@@ -604,7 +604,7 @@ class Mutations:
                 else:
                     opt_nets = [getattr(individual, net) for net in opt.network_names]
 
-                # Reinitialize optim    izer with mutated nets
+                # Reinitialize optimizer with mutated nets
                 # NOTE: We need to do this since there is a chance the network parameters have changed
                 # due to architecture mutations
                 offspring_opt = OptimizerWrapper(

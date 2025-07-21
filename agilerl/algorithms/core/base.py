@@ -1805,8 +1805,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             for attr, value in checkpoint.items():
                 setattr(self, attr, value)
 
-            print("This is the accelerator after setting attr", self.accelerator)
-
             self.optimizer = None
             self.optimizer = OptimizerWrapper(
                 optimizer_cls=self._select_optim_class(),
@@ -1819,8 +1817,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         else:
             super().load_checkpoint(path + "/attributes.pt")
 
-    # TODO: Look at incorporating this into the next AgileRL release
-    # by no means essential, but would be nice to have.
     @classmethod
     def load(
         cls,

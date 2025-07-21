@@ -408,7 +408,7 @@ class GRPO(LLMAlgorithm):
         if self.use_separate_reference_adapter and add_adapters:
             self.actor.add_adapter(
                 adapter_name="reference", peft_config=self.lora_config  # type: ignore
-            )  # type: ignore
+            )
         self.actor.set_adapter("actor")
 
         optim_class = self._select_optim_class()
