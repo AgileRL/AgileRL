@@ -528,7 +528,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 hp_value = getattr(self, hp)
                 hp_spec = self.registry.hp_config[hp]
                 dtype = type(hp_value)
-                if not dtype in [int, float]:
+                if dtype not in [int, float]:
                     raise TypeError(
                         f"Can't mutate hyperparameter {hp} of type {dtype}. AgileRL only supports "
                         "mutating integer or float hyperparameters."
