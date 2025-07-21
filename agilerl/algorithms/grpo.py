@@ -1,12 +1,11 @@
 import gc
 import os
 import warnings
-from typing import Dict, List, Optional, Tuple, Type, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-import torch.optim as optim
 from accelerate import Accelerator
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
@@ -18,14 +17,14 @@ from transformers.modeling_utils import PreTrainedModel
 
 from agilerl.algorithms.core import LLMAlgorithm, OptimizerWrapper
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.typing import ExperiencesType, OptimizerType
+from agilerl.typing import ExperiencesType
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     create_warmup_cosine_scheduler,
     get_experiences_samples,
     stack_and_pad_experiences,
 )
-from agilerl.utils.llm_utils import HuggingFaceGym, _DummyOptimizer
+from agilerl.utils.llm_utils import DummyOptimizer, HuggingFaceGym
 
 DeepSpeedOptimizerType = Union[
     DeepSpeedZeroOptimizer,  # ZeRO Stage 1 & 2 optimizer
@@ -210,7 +209,6 @@ class GRPO(LLMAlgorithm):
             min_new_tokens=min_output_tokens,
             pad_token_id=pad_token_id,
         )
-        self.optimizer = None  # Initialize optimizer to None, will be set in _initialize_actors if not defined in deepspeed config
         if lora_config is None:
             warnings.warn(
                 "No LoRA config provided. Using default LoRA configuration for RL finetuning."
@@ -401,7 +399,7 @@ class GRPO(LLMAlgorithm):
                 base_model.delete_adapter(adapter)
             base_model = base_model.model
 
-        self.actor = (
+        self.actor: PeftModel = (
             get_peft_model(base_model, self.lora_config, adapter_name="actor")
             if add_adapters
             else base_model
@@ -409,7 +407,7 @@ class GRPO(LLMAlgorithm):
 
         if self.use_separate_reference_adapter and add_adapters:
             self.actor.add_adapter(
-                adapter_name="reference", peft_config=self.lora_config
+                adapter_name="reference", peft_config=self.lora_config  # type: ignore
             )
         self.actor.set_adapter("actor")
 
@@ -421,7 +419,7 @@ class GRPO(LLMAlgorithm):
             create_warmup_cosine_scheduler(
                 (
                     self.optimizer.optimizer
-                    if self.optimizer.optimizer_cls != _DummyOptimizer
+                    if self.optimizer.optimizer_cls != DummyOptimizer
                     else self.actor.optimizer
                 ),
                 self.cosine_lr_schedule_config,
@@ -577,7 +575,12 @@ class GRPO(LLMAlgorithm):
         """
         if self.accelerator is not None:
             self.accelerator.backward(loss)
-            if not isinstance(self.optimizer.optimizer, _DummyOptimizer):
+            if (
+                self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
+                    "optimizer", None
+                )
+                is None
+            ):
                 # Accelerate handles optimizer step and zero grad if optimizer is defined in deepspeed config
                 self.optimizer.step()
                 self.optimizer.zero_grad()
@@ -589,23 +592,6 @@ class GRPO(LLMAlgorithm):
         if self.lr_scheduler is not None:
             self.lr_scheduler.step()
             self.lr = self.lr_scheduler.get_last_lr()[0]
-
-    def _select_optim_class(self) -> Union[Type[OptimizerType], Type[_DummyOptimizer]]:
-        """Select the optimizer class based on the accelerator and deepspeed config.
-
-        :return: Optimizer class
-        :rtype: Union[Type[torch.optim.Optimizer], Type[_DummyOptimizer]]
-        """
-        if self.accelerator is None:
-            return optim.AdamW
-        if (
-            self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
-                "optimizer", None
-            )
-            is not None
-        ):
-            return _DummyOptimizer
-        return optim.AdamW
 
     def set_reference_policy(self, reference_update_tracker: int) -> None:
         """Update the reference policy when the reference policy update tracker is greater than the current reference policy update tracker.
