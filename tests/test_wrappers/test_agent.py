@@ -181,6 +181,16 @@ def setup_rs_norm_multi_agent():
     return wrapper, mock_agent
 
 
+def test_set_get_state(setup_rs_norm):
+    wrapper, mock_agent = setup_rs_norm
+    state = wrapper.__getstate__()
+    wrapper_2 = RSNorm(mock_agent)
+    wrapper_2.__setstate__(state)
+    assert torch.allclose(wrapper.obs_rms.mean, wrapper_2.obs_rms.mean, atol=1e-2)
+    assert torch.allclose(wrapper.obs_rms.var, wrapper_2.obs_rms.var, atol=1e-2)
+    assert wrapper.obs_rms.epsilon == wrapper_2.obs_rms.epsilon
+
+
 def test_normalize_observation(setup_rs_norm):
     wrapper, _ = setup_rs_norm
     obs = torch.tensor([1.0, 2.0, 3.0])

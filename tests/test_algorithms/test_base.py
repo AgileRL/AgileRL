@@ -168,6 +168,7 @@ class DummyRLAlgorithm(RLAlgorithm):
     def __init__(
         self, observation_space, action_space, index, lr=True, device="cpu", **kwargs
     ):
+        kwargs.pop("wrap", None)
         super().__init__(
             observation_space, action_space, index, device=device, **kwargs
         )
@@ -245,6 +246,7 @@ class DummyMARLAlgorithm(MultiAgentRLAlgorithm):
         device="cpu",
         **kwargs,
     ):
+        kwargs.pop("wrap", None)
         super().__init__(
             observation_spaces, action_spaces, index, agent_ids, device=device, **kwargs
         )
@@ -394,6 +396,33 @@ def test_preprocess_observation(observation_space, discrete_space, request):
     agent = DummyRLAlgorithm(obs_space, discrete_space, index=0)
     observation = agent.preprocess_observation(obs_space.sample())
     assert is_processed_observation(observation, obs_space)
+
+
+def test_reinit_optimizers_single_agent(vector_space, discrete_space):
+    agent = DummyRLAlgorithm(vector_space, discrete_space, index=0)
+    clone_agent = agent.clone()
+    clone_agent.reinit_optimizers()
+    opt_attr = clone_agent.registry.optimizers[0].name
+    new_opt = getattr(clone_agent, opt_attr)
+    old_opt = getattr(agent, opt_attr)
+
+    assert_state_dicts_equal(new_opt.state_dict(), old_opt.state_dict())
+
+
+def test_reinit_optimizers_multi_agent(ma_vector_space, ma_discrete_space):
+    agent = DummyMARLAlgorithm(
+        ma_vector_space,
+        ma_discrete_space,
+        index=0,
+        agent_ids=["agent_0", "agent_1", "agent_2"],
+    )
+    clone_agent = agent.clone()
+    clone_agent.reinit_optimizers()
+    opt_attr = clone_agent.registry.optimizers[0].name
+    new_opt = getattr(clone_agent, opt_attr)
+    old_opt = getattr(agent, opt_attr)
+
+    assert_state_dicts_equal(new_opt.state_dict(), old_opt.state_dict())
 
 
 def test_incorrect_hp_config(vector_space, discrete_space):

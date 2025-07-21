@@ -28,6 +28,7 @@ import numpy as np
 import torch
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
+from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 from gymnasium import spaces
 from numpy.typing import ArrayLike
@@ -44,9 +45,7 @@ from agilerl.algorithms.core.registry import (
     NetworkGroup,
     OptimizerConfig,
 )
-from agilerl.modules.configs import (
-    MlpNetConfig,
-)
+from agilerl.modules.configs import MlpNetConfig
 from agilerl.protocols import (
     AgentWrapper,
     EvolvableAttributeDict,
@@ -539,6 +538,17 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                         "not been set as an attribute in the algorithm."
                     )
 
+                # Assign dtype to hyperparameter spec
+                hp_value = getattr(self, hp)
+                hp_spec = self.registry.hp_config[hp]
+                dtype = type(hp_value)
+                if dtype not in [int, float]:
+                    raise TypeError(
+                        f"Can't mutate hyperparameter {hp} of type {dtype}. AgileRL only supports "
+                        "mutating integer or float hyperparameters."
+                    )
+                hp_spec.dtype = dtype
+
     def _wrap_attr(self, attr: EvolvableAttributeType) -> EvolvableAttributeType:
         """Wraps the model with the accelerator.
 
@@ -562,6 +572,55 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         # Only wrap the model if its part of the computation graph
         return self.accelerator.prepare(attr) if attr.state_dict() else attr
+
+    def _reinit_opt_from_config(
+        self: SelfEvolvableAlgorithm, config: OptimizerConfig
+    ) -> None:
+        """Reinitializes an optimizer from its configuration.
+
+        :param config: The optimizer configuration.
+        :type config: OptimizerConfig
+        """
+        opt: Optional[Union[OptimizerWrapper, DeepSpeedOptimizerWrapper]] = getattr(
+            self, config.name
+        )
+        optimizer = opt.optimizer if hasattr(opt, "optimizer") else None
+
+        if isinstance(opt, DeepSpeedOptimizerWrapper):
+            if isinstance(opt.optimizer, DummyOptimizer):
+                opt = getattr(
+                    getattr(self, "actor"), "optimizer"
+                )  # If the optimizer is defined in the deepspeed config, we do this
+
+            self.accelerator, self.lr_scheduler = LLMAlgorithm.update_lr(
+                opt,
+                lr=getattr(self, config.lr),
+                accelerator=self.accelerator,
+                scheduler_config=self.cosine_lr_schedule_config,
+            )
+        else:
+            # Multiple optimizers in a single attribute (i.e. multi-agent)
+            # or one module optimized by a single optimizer
+            if isinstance(optimizer, dict) or len(opt.network_names) == 1:
+                opt_nets = getattr(self, opt.network_names[0])
+
+            # Multiple modules optimized by a single optimizer (e.g. PPO)
+            else:
+                opt_nets = [getattr(self, net) for net in opt.network_names]
+
+            # Reinitialize optimizer with mutated nets
+            # NOTE: We need to do this since there is a chance the network parameters have changed
+            # due to architecture mutations
+            offspring_opt = OptimizerWrapper(
+                optimizer_cls=config.get_optimizer_cls(),
+                networks=opt_nets,
+                lr=getattr(self, opt.lr_name),
+                optimizer_kwargs=opt.optimizer_kwargs,
+                network_names=opt.network_names,
+                lr_name=opt.lr_name,
+            )
+
+            setattr(self, config.name, offspring_opt)
 
     def set_training_mode(self, training: bool) -> None:
         """Sets the training mode of the algorithm.
@@ -606,6 +665,23 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         raise AttributeError(
             "No policy network has been registered with the algorithm."
         )
+
+    def reinit_optimizers(
+        self,
+        optimizer: Optional[OptimizerConfig] = None,
+    ) -> None:
+        """Reinitialize the optimizers of an algorithm. If no optimizer is passed, all optimizers are reinitialized.
+
+        :param optimizer: The optimizer to reinitialize, defaults to None, in which case
+            all optimizers are reinitialized.
+        :type optimizer: Optional[OptimizerConfig], optional
+        """
+        if optimizer is not None:
+            self._reinit_opt_from_config(optimizer)
+        else:
+            optimizer_configs = self.registry.optimizers
+            for opt_config in optimizer_configs:
+                self._reinit_opt_from_config(opt_config)
 
     def recompile(self) -> None:
         """Recompiles the evolvable modules in the algorithm with the specified torch compiler."""
@@ -1205,15 +1281,12 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
                 f"Observation spaces must be a list or dictionary of spaces.Space objects. Got {type(observation_spaces)}."
             )
 
-        self.agent_ids = agent_ids or list(self.possible_observation_spaces.keys())
+        self.agent_ids = list(self.possible_observation_spaces.keys())
         self.n_agents = len(self.agent_ids)
         self.placeholder_value = placeholder_value
         self.normalize_images = normalize_images
-
-        # These attributes are deprecated and will be removed in the future
         self.observation_spaces = list(self.possible_observation_spaces.values())
         self.action_spaces = list(self.possible_action_spaces.values())
-
         self.action_dims = get_output_size_from_space(self.possible_action_spaces)
 
         # Determine groups of agents from their IDs

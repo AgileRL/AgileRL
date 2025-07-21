@@ -19,7 +19,7 @@ Compatible Action Spaces
      - MultiDiscrete
      - MultiBinary
    * - ✔️
-     - ✔️
+     - ❌
      - ❌
      - ❌
 
