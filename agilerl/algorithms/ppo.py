@@ -233,11 +233,6 @@ class PPO(RLAlgorithm):
                 raise ValueError(
                     "max_seq_len must be provided in net_config['encoder_config'] if recurrent=True."
                 )
-            if isinstance(self.observation_space, (spaces.Dict, spaces.Tuple)):
-                raise ValueError(
-                    "recurrent=True is not supported for Dict or Tuple observation spaces."
-                )
-
         else:
             self.max_seq_len = None
 
@@ -451,11 +446,6 @@ class PPO(RLAlgorithm):
         :return: Initial hidden state dictionary
         :rtype: Dict[str, ArrayOrTensor]
         """
-        if not self.recurrent:
-            raise ValueError(
-                "Cannot get initial hidden state for non-recurrent networks."
-            )
-
         # Return a batch of initial hidden states
         # Flat map them into "actor_*" and "critic_*" (if not sharing encoders)
         flat_hidden = {}
@@ -474,7 +464,6 @@ class PPO(RLAlgorithm):
         self,
         obs: ArrayOrTensor,
         actions: ArrayOrTensor,
-        hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Evaluates the actions.
 
@@ -482,24 +471,13 @@ class PPO(RLAlgorithm):
         :type obs: ArrayOrTensor
         :param actions: Actions to evaluate
         :type actions: ArrayOrTensor
-        :param hidden_state: Hidden state for recurrent policies, defaults to None. Expected shape: dict with tensors of shape (batch_size, 1, hidden_size).
-        :type hidden_state: Optional[Dict[str, ArrayOrTensor]]
         :return: Log probability, entropy, and state values
         :rtype: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         """
         obs = self.preprocess_observation(obs)
 
-        eval_hidden_state = None
-        if self.recurrent and hidden_state is not None:
-            # Reshape hidden state for RNN: (batch_size, 1, hidden_size) -> (1, batch_size, hidden_size)
-            eval_hidden_state = {
-                key: val.permute(1, 0, 2) for key, val in hidden_state.items()
-            }
-
         # Get values from actor-critic
-        _, _, entropy, values, _ = self._get_action_and_values(
-            obs, hidden_state=eval_hidden_state, sample=False  # No need to sample here
-        )
+        _, _, entropy, values, _ = self._get_action_and_values(obs, sample=False)
 
         log_prob = self.actor.action_log_prob(actions)
 
@@ -790,9 +768,6 @@ class PPO(RLAlgorithm):
             for start_idx in range(0, num_samples, batch_size):
                 end_idx = min(start_idx + batch_size, num_samples)
                 minibatch_indices = indices[start_idx:end_idx]
-
-                if len(minibatch_indices) == 1:
-                    continue
 
                 # Slice the TensorDict to get the minibatch
                 minibatch_td = buffer_td[minibatch_indices]

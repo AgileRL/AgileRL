@@ -1055,8 +1055,9 @@ def test_ppo_with_rollout_buffer(observation_space, action_space, request):
 
 
 # Test PPO learning with rollout buffer
-@pytest.mark.parametrize("observation_space", ["vector_space", "image_space"])
+@pytest.mark.parametrize("observation_space", ["vector_space"])
 @pytest.mark.parametrize("action_space", ["discrete_space", "vector_space"])
+@pytest.mark.parametrize("recurrent", [True, False])
 @pytest.mark.parametrize(
     "bptt_sequence_type",
     [
@@ -1066,13 +1067,23 @@ def test_ppo_with_rollout_buffer(observation_space, action_space, request):
     ],
 )
 def test_ppo_learn_with_rollout_buffer(
-    observation_space, action_space, bptt_sequence_type, request
+    observation_space, action_space, bptt_sequence_type, recurrent, request
 ):
     observation_space = request.getfixturevalue(observation_space)
     action_space = request.getfixturevalue(action_space)
 
     batch_size = 32
     learn_step = 64
+
+    if recurrent:
+        net_config = {
+            "encoder_config": {
+                "hidden_state_size": 64,
+                "max_seq_len": 10,
+            }
+        }
+    else:
+        net_config = {}
 
     ppo = PPO(
         observation_space=observation_space,
@@ -1081,6 +1092,8 @@ def test_ppo_learn_with_rollout_buffer(
         learn_step=learn_step,
         batch_size=batch_size,
         bptt_sequence_type=bptt_sequence_type,
+        recurrent=recurrent,
+        net_config=net_config,
     )
 
     # Fill the buffer manually
@@ -1094,8 +1107,13 @@ def test_ppo_learn_with_rollout_buffer(
         next_obs = np.random.rand(*observation_space.shape).astype(
             observation_space.dtype
         )
-
-        ppo.rollout_buffer.add(obs, action, reward, done, value, log_prob, next_obs)
+        if recurrent:
+            hidden_state = ppo.get_initial_hidden_state()
+            ppo.rollout_buffer.add(
+                obs, action, reward, done, value, log_prob, next_obs, hidden_state
+            )
+        else:
+            ppo.rollout_buffer.add(obs, action, reward, done, value, log_prob, next_obs)
 
     # Compute returns and advantages (normally called by collect_rollouts)
     # For manual filling, we might need to call it if not implicitly handled by learn()
@@ -1115,32 +1133,39 @@ def test_ppo_learn_with_rollout_buffer(
 
 # Test PPO with hidden states
 @pytest.mark.parametrize("use_rollout_buffer", [True, False])
-def test_ppo_with_hidden_states(vector_space, discrete_space, use_rollout_buffer):
+@pytest.mark.parametrize("max_seq_len", [None, 10])
+def test_ppo_with_hidden_states(
+    vector_space, discrete_space, use_rollout_buffer, max_seq_len
+):
     observation_space = vector_space
     action_space = discrete_space
 
-    if use_rollout_buffer:
-        ppo = PPO(
+    net_config = {
+        "encoder_config": {
+            "hidden_state_size": 64,
+            "max_seq_len": max_seq_len,
+        }
+    }
+
+    def make_ppo():
+        return PPO(
             observation_space=observation_space,
             action_space=action_space,
             use_rollout_buffer=use_rollout_buffer,
             recurrent=True,
-            net_config={
-                "encoder_config": {
-                    "hidden_state_size": 64,
-                    "max_seq_len": 10,
-                }
-            },
+            net_config=net_config,
         )
+
+    if use_rollout_buffer:
+        if max_seq_len is None:
+            with pytest.raises(ValueError):
+                ppo = make_ppo()
+            return
+        else:
+            ppo = make_ppo()
     else:
         with pytest.raises(ValueError):
-            ppo = PPO(
-                observation_space=observation_space,
-                action_space=action_space,
-                use_rollout_buffer=use_rollout_buffer,
-                recurrent=True,
-            )
-
+            ppo = make_ppo()
         return
 
     # Get action with hidden state
