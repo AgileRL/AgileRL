@@ -7,6 +7,7 @@ import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import tqdm
 import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
@@ -34,7 +35,7 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules import EvolvableModule
 from agilerl.typing import GymSpaceType, PopulationType
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, clone_llm
-from agilerl.utils.llm_utils import _DummyOptimizer
+from agilerl.utils.llm_utils import DummyOptimizer
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 SupportedObservationSpace = Union[
@@ -150,6 +151,42 @@ def observation_space_channels_to_first(
         )
 
     return observation_space
+
+
+def default_progress_bar(
+    max_steps: int,
+    accelerator: Optional[Accelerator] = None,
+) -> tqdm.tqdm:
+    """Returns a default progress bar.
+
+    :param max_steps: Maximum number of steps
+    :type max_steps: int
+    :param accelerator: Accelerator for distributed computing, defaults to None
+    :type accelerator: accelerate.Accelerator(), optional
+    :return: Progress bar
+    :rtype: tqdm.tqdm
+    """
+    bar_format = (
+        "🚀 Training Progress │ "
+        "{percentage:3.0f}% │ "
+        "{bar:20} │ "
+        "{n_fmt}/{total_fmt} steps │ "
+        "⏱️ {elapsed} │ "
+        "⏳ {remaining} │ "
+        "{rate_fmt}"
+        "{postfix}"
+    )
+    disable = (
+        not accelerator.is_local_main_process if accelerator is not None else False
+    )
+    return tqdm.trange(
+        max_steps,
+        unit="step",
+        bar_format=bar_format,
+        ascii=False,
+        dynamic_ncols=True,
+        disable=disable,
+    )
 
 
 def create_population(
@@ -895,6 +932,7 @@ def save_llm_checkpoint(agent: LLMAlgorithm, checkpoint_path: str | None) -> Non
     :param checkpoint_path: Checkpoint path
     :type checkpoint_path: str
     """
+    assert agent.actor is not None, "Actor is not initialized"
     base_path = "./saved_checkpoints" if checkpoint_path is None else checkpoint_path
     path = base_path + f"/{agent.algo}"
     os.makedirs(path, exist_ok=True)
@@ -906,7 +944,7 @@ def save_llm_checkpoint(agent: LLMAlgorithm, checkpoint_path: str | None) -> Non
         agent.actor.save_pretrained(path)
 
 
-def consolidate_mutations(population: PopulationType) -> None:
+def consolidate_mutations(population: list[LLMAlgorithm]) -> None:
     """Consolidate mutations across processes during LLM fintuning
 
     :param population: Population of agents
@@ -916,6 +954,7 @@ def consolidate_mutations(population: PopulationType) -> None:
         warnings.warn("Consolidate mutations is only supported for LLMAlgorithm.")
         return
     for agent in population:
+        assert agent.actor is not None, "Actor is not initialized"
         index, mut, mut_value = broadcast_object_list(
             [
                 agent.index,
@@ -930,7 +969,7 @@ def consolidate_mutations(population: PopulationType) -> None:
         if mut == "lr":
             opt = (
                 agent.optimizer
-                if not isinstance(agent.optimizer.optimizer, _DummyOptimizer)
+                if not isinstance(agent.optimizer.optimizer, DummyOptimizer)
                 else agent.actor.optimizer
             )
             agent.accelerator, agent.lr_scheduler = LLMAlgorithm.update_lr(

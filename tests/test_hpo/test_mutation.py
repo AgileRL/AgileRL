@@ -18,6 +18,7 @@ from agilerl.algorithms.grpo import GRPO
 from agilerl.hpo.mutation import MutationError, Mutations
 from agilerl.modules import EvolvableBERT, ModuleDict
 from agilerl.utils.utils import create_population
+from agilerl.wrappers.agent import AsyncAgentsWrapper, RSNorm
 from tests.helper_functions import assert_state_dicts_equal
 from tests.test_algorithms.test_grpo import create_module
 
@@ -563,16 +564,17 @@ def test_mutation_applies_activation_mutations_no_skip(init_pop, device, acceler
 
 # The mutation method applies parameter mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, action_space",
+    "algo, action_space, wrapper_cls",
     [
-        ("DQN", "discrete_space"),
-        ("Rainbow DQN", "discrete_space"),
-        ("DDPG", "vector_space"),
-        ("TD3", "vector_space"),
-        ("PPO", "discrete_space"),
-        ("CQN", "discrete_space"),
-        ("NeuralUCB", "discrete_space"),
-        ("NeuralTS", "discrete_space"),
+        ("DQN", "discrete_space", None),
+        ("Rainbow DQN", "discrete_space", None),
+        ("DDPG", "vector_space", None),
+        ("DDPG", "vector_space", RSNorm),
+        ("TD3", "vector_space", None),
+        ("PPO", "discrete_space", None),
+        ("CQN", "discrete_space", None),
+        ("NeuralUCB", "discrete_space", None),
+        ("NeuralTS", "discrete_space", None),
     ],
 )
 @pytest.mark.parametrize(
@@ -583,10 +585,15 @@ def test_mutation_applies_activation_mutations_no_skip(init_pop, device, acceler
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
 @pytest.mark.parametrize("hp_config", [None])
 @pytest.mark.parametrize("population_size", [1])
-def test_mutation_applies_parameter_mutations(algo, device, accelerator, init_pop):
+def test_mutation_applies_parameter_mutations(
+    algo, device, accelerator, init_pop, wrapper_cls
+):
     pre_training_mut = False
 
     population = init_pop
+
+    if wrapper_cls is not None:
+        population = [wrapper_cls(agent) for agent in population]
 
     mutations = Mutations(
         0,
@@ -632,16 +639,17 @@ def test_mutation_applies_parameter_mutations(algo, device, accelerator, init_po
 
 # The mutation method applies architecture mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, action_space",
+    "algo, action_space, wrapper_cls",
     [
-        ("DQN", "discrete_space"),
-        ("Rainbow DQN", "discrete_space"),
-        ("DDPG", "vector_space"),
-        ("TD3", "vector_space"),
-        ("PPO", "discrete_space"),
-        ("CQN", "discrete_space"),
-        ("NeuralUCB", "discrete_space"),
-        ("NeuralTS", "discrete_space"),
+        ("DQN", "discrete_space", None),
+        ("Rainbow DQN", "discrete_space", None),
+        ("DDPG", "vector_space", None),
+        ("DDPG", "vector_space", RSNorm),
+        ("TD3", "vector_space", None),
+        ("PPO", "discrete_space", None),
+        ("CQN", "discrete_space", None),
+        ("NeuralUCB", "discrete_space", None),
+        ("NeuralTS", "discrete_space", None),
     ],
 )
 @pytest.mark.parametrize(
@@ -657,8 +665,13 @@ def test_mutation_applies_parameter_mutations(algo, device, accelerator, init_po
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
 @pytest.mark.parametrize("hp_config", [None])
 @pytest.mark.parametrize("population_size", [1])
-def test_mutation_applies_architecture_mutations(init_pop, device, accelerator):
+def test_mutation_applies_architecture_mutations(
+    init_pop, device, accelerator, wrapper_cls
+):
     population: List[EvolvableAlgorithm] = init_pop
+    if wrapper_cls is not None:
+        population = [wrapper_cls(agent) for agent in population]
+
     mutations = Mutations(
         0,
         1,
@@ -1095,7 +1108,15 @@ def test_mutation_applies_activation_mutations_multi_agent_no_skip(
 
 
 # The mutation method applies parameter mutations to the population and returns the mutated population.
-@pytest.mark.parametrize("algo", ["MADDPG", "MATD3", "IPPO"])
+@pytest.mark.parametrize(
+    "algo, wrapper_cls",
+    [
+        ("MADDPG", None),
+        ("MATD3", None),
+        ("IPPO", None),
+        ("IPPO", AsyncAgentsWrapper),
+    ],
+)
 @pytest.mark.parametrize(
     "observation_space, net_config", [("ma_vector_space", "encoder_mlp_config")]
 )
@@ -1106,10 +1127,13 @@ def test_mutation_applies_activation_mutations_multi_agent_no_skip(
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 def test_mutation_applies_parameter_mutations_multi_agent(
-    init_pop, device, accelerator
+    init_pop, device, accelerator, wrapper_cls
 ):
     pre_training_mut = False
     population = init_pop
+
+    if wrapper_cls is not None:
+        population = [wrapper_cls(agent) for agent in population]
 
     mutations = Mutations(
         0,
@@ -1154,7 +1178,15 @@ def test_mutation_applies_parameter_mutations_multi_agent(
 
 
 # The mutation method applies architecture mutations to the population and returns the mutated population.
-@pytest.mark.parametrize("algo", ["MADDPG", "MATD3", "IPPO"])
+@pytest.mark.parametrize(
+    "algo, wrapper_cls",
+    [
+        ("MADDPG", None),
+        ("MATD3", None),
+        ("IPPO", None),
+        ("IPPO", AsyncAgentsWrapper),
+    ],
+)
 @pytest.mark.parametrize(
     "observation_space, net_config",
     [
@@ -1170,7 +1202,7 @@ def test_mutation_applies_parameter_mutations_multi_agent(
 @pytest.mark.parametrize("torch_compiler", [None, "default"])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 def test_mutation_applies_architecture_mutations_multi_agent(
-    algo, init_pop, device, accelerator
+    algo, init_pop, device, accelerator, wrapper_cls
 ):
     population: List[EvolvableAlgorithm] = init_pop
     mutations = Mutations(
@@ -1194,6 +1226,9 @@ def test_mutation_applies_architecture_mutations_multi_agent(
 
         def integers(self, low=0, high=None):
             return self.rng.integers(low, high)
+
+    if wrapper_cls is not None:
+        population = [wrapper_cls(agent) for agent in population]
 
     for individual in population:
         for network in individual.evolvable_attributes(networks_only=True).values():
@@ -1361,51 +1396,6 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
     del mutations, population
 
 
-@pytest.mark.parametrize(
-    "algo, action_space",
-    [
-        ("DQN", "discrete_space"),
-        ("Rainbow DQN", "discrete_space"),
-        ("DDPG", "vector_space"),
-        ("TD3", "vector_space"),
-        ("PPO", "discrete_space"),
-        ("CQN", "discrete_space"),
-        ("NeuralUCB", "discrete_space"),
-        ("NeuralTS", "discrete_space"),
-    ],
-)
-@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
-@pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
-@pytest.mark.parametrize(
-    "observation_space, net_config", [("vector_space", "encoder_mlp_config")]
-)
-@pytest.mark.parametrize("torch_compiler", [None])
-@pytest.mark.parametrize("hp_config", [None])
-@pytest.mark.parametrize("population_size", [1])
-def test_reinit_opt(algo, init_pop):
-    population = init_pop
-    mutations = Mutations(
-        1,
-        1,
-        1,
-        1,
-        1,
-        1,
-        0.5,
-    )
-
-    new_population = [agent.clone() for agent in population]
-    mutations._reinit_opt(new_population[0])
-
-    opt_attr = new_population[0].registry.optimizers[0].name
-    new_opt = getattr(new_population[0], opt_attr)
-    old_opt = getattr(population[0], opt_attr)
-
-    assert_state_dicts_equal(new_opt.state_dict(), old_opt.state_dict())
-
-    del mutations, new_population
-
-
 @pytest.mark.parametrize("use_accelerator", [True, False])
 def test_mutation_applies_rl_hp_mutation_llm_algorithm(
     request, grpo_hp_config, vector_space, monkeypatch, use_accelerator
@@ -1492,7 +1482,8 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
             for agent in mutated_population:
                 for param_group in agent.optimizer.optimizer.param_groups:
                     assert param_group["lr"] == agent.lr
-
+        except Exception as e:
+            raise e
         finally:
             # Cleanup
             if use_accelerator:

@@ -116,21 +116,27 @@ of the hyperparameters and evolvable networks registered for mutation. Specifica
 
     .. code-block:: python
 
+        from agilerl.algorithms.core.base import EvolvableAlgorithm
         from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
-        from torch.optim import Adam
+        import torch.optim as optim
 
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
+        class CustomAlgorithm(EvolvableAlgorithm):
 
-            ... # Define the algorithm's attributes / networks
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
 
-            # NOTE: We must pass the attributes containing
-            # the mutable networks to the OptimizerWrapper
-            self.optimizer = OptimizerWrapper(
-                optim.Adam,
-                networks=[self.actor, self.critic],
-                lr=self.lr
-            )
+                # Define the algorithm's attributes / networks
+                self.lr = 1e-4
+                self.actor = ... # EvolvableModule instance
+                self.critic = ... # EvolvableModule instance
+
+                # NOTE: We must pass the attributes containing
+                # the mutable networks to the OptimizerWrapper
+                self.optimizer = OptimizerWrapper(
+                    optim.Adam,
+                    networks=[self.actor, self.critic],
+                    lr=self.lr
+                )
 
     .. note::
         AgileRL expects ``OptimizerWrapper`` and ``NetworkGroup`` objects to be defined and registered in the ``__init__`` method of an algorithm.
@@ -187,7 +193,7 @@ In :ref:`multi-agent settings <multiagenttraining>`, we can't make the previous 
   the policies in ``MADDPG`` and ``MATD3`` are decentralized, while the critics are centralized. In these cases, we can't necessarily apply the same mutation to different networks corresponding to the
   same agent. What we can do, however, is try to apply an analogous mutation across the board. For centralized networks in the aforementioned algorithms we employ
   :class:`EvolvableMultiInput <agilerl.modules.multi_input.EvolvableMultiInput>` as an encoder, which allows us to process observations from all agents into a single output. What we do then is look at
-  the executed mutations for the policies and try to apply an equivalent mutation to the feature extractor of the mutated agents in the multi-input encoder.
+  the executed mutations for the policies and try to apply an equivalent mutation to the rest of the evaluation networks..
 
 Summarising the above considerations, the procedure to perform an architecture mutation in multi-agent settings is as follows:
 
@@ -205,7 +211,9 @@ RL Hyperparameter Mutations
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Mutations on algorithm-specific hyperparameters can be configured through the ``hp_config`` argument of the algorithm. This is done by instantiating a
 :class:`HyperparameterConfig <agilerl.algorithms.core.registry.HyperparameterConfig>` dataclass with the :class:`RLParameter <agilerl.algorithms.core.registry.RLParameter>`'s
-you wish to mutate, which should be available as attributes of the algorithm. If we wanted to mutate the learning rate, batch size, and learning step in e.g. ``DQN``:
+you wish to mutate, which should be available as attributes of the algorithm (will raise an error if not). This configuration is automatically registered with the algorithms
+``MutationRegistry`` and used by ``Mutations`` to perform mutations through the :func:`Mutations.rl_hyperparam_mutation() <agilerl.hpo.mutation.Mutations.rl_hyperparam_mutation>`
+method. If we wanted to mutate the learning rate, batch size, and learning step in e.g. ``DQN``:
 
 .. code-block:: python
 

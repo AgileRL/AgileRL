@@ -8,13 +8,14 @@ import numpy as np
 import wandb
 from accelerate import Accelerator
 from gymnasium import spaces
-from tqdm import trange
 
 from agilerl.algorithms import PPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.networks import StochasticActor
 from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
+    default_progress_bar,
     init_wandb,
     save_population_checkpoint,
     tournament_selection_and_mutation,
@@ -153,6 +154,7 @@ def train_on_policy(
         }
         if wandb_kwargs is not None:
             init_wandb_kwargs.update(wandb_kwargs)
+
         init_wandb(**init_wandb_kwargs)
 
     # Detect if environment is vectorised
@@ -176,26 +178,11 @@ def train_on_policy(
     else:
         print("\nTraining...")
 
-    bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
-    if accelerator is not None:
-        pbar = trange(
-            max_steps,
-            unit="step",
-            bar_format=bar_format,
-            ascii=True,
-            dynamic_ncols=True,
-            disable=not accelerator.is_local_main_process,
-        )
-    else:
-        pbar = trange(
-            max_steps,
-            unit="step",
-            bar_format=bar_format,
-            ascii=True,
-            dynamic_ncols=True,
-        )
+    # Format progress bar
+    pbar = default_progress_bar(max_steps, accelerator)
 
     pop_loss = [[] for _ in pop]
+    pop_entropy = [[] for _ in pop]
     pop_fitnesses = []
     total_steps = 0
     loss = None
@@ -205,10 +192,8 @@ def train_on_policy(
     if accelerator is None and mutation is not None:
         pop = mutation.mutation(pop, pre_training_mut=True)
 
-    # Initialize list to store entropy values for each agent
-    pop_entropy = [[] for _ in pop]
-
     # RL training loop
+    active_collect = collect_rollouts_fn
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         if accelerator is not None:
             accelerator.wait_for_everyone()
@@ -217,12 +202,11 @@ def train_on_policy(
         for agent_idx, agent in enumerate(pop):  # Loop through population
             agent.set_training_mode(True)
 
-            scores = np.zeros(num_envs)
             completed_episode_scores = []
             steps = 0
             start_time = time.time()
 
-            active_collect = collect_rollouts_fn
+            n_steps = -(agent.learn_step // -num_envs)
             if active_collect is None and getattr(agent, "use_rollout_buffer", False):
                 if getattr(agent, "recurrent", False):
                     from agilerl.rollouts import (
@@ -235,38 +219,35 @@ def train_on_policy(
                 getattr(agent, "use_rollout_buffer", False)
                 and active_collect is not None
             ):
+                last_obs, last_done, last_scores, last_info = None, None, None, None
                 for _ in range(-(evo_steps // -agent.learn_step)):
-                    active_collect(agent, env, n_steps=agent.learn_step)
-
-                    buffer_size = agent.rollout_buffer.pos
-                    rewards_np = (
-                        agent.rollout_buffer.buffer["rewards"][:buffer_size]
-                        .cpu()
-                        .numpy()
+                    # Collect rollouts and save in buffer
+                    episode_scores, last_obs, last_done, last_scores, last_info = (
+                        active_collect(
+                            agent,
+                            env,
+                            n_steps=n_steps,
+                            last_obs=last_obs,
+                            last_done=last_done,
+                            last_scores=last_scores,
+                            last_info=last_info,
+                        )
                     )
-                    dones_np = (
-                        agent.rollout_buffer.buffer["dones"][:buffer_size].cpu().numpy()
-                    )
-                else:
-                    from agilerl.rollouts import collect_rollouts as active_collect
 
-                    for r_step, d_step in zip(rewards_np, dones_np):
-                        scores += np.array(r_step)
-                        finished = np.array(d_step, dtype=bool)
-                        for idx, fin in enumerate(finished):
-                            if fin:
-                                completed_episode_scores.append(scores[idx])
-                                agent.scores.append(scores[idx])
-                                scores[idx] = 0
-
-                    steps += buffer_size * num_envs
-                    total_steps += buffer_size * num_envs
-                    loss = agent.learn()
+                    loss = agent.learn()  # Learn from rollout buffer
                     pop_loss[agent_idx].append(loss)
 
+                    # Update step counter and scores
+                    steps += n_steps * num_envs
+                    total_steps += n_steps * num_envs
+                    completed_episode_scores += episode_scores
+
+            # Collect rollouts explicitly without saving to rollout buffer
             else:
                 obs, info = env.reset()
+                scores = np.zeros(num_envs)
                 for _ in range(-(evo_steps // -agent.learn_step)):
+
                     observations = []
                     actions = []
                     log_probs = []
@@ -275,7 +256,7 @@ def train_on_policy(
                     values = []
 
                     done = np.zeros(num_envs)
-                    for idx_step in range(-(agent.learn_step // -num_envs)):
+                    for _ in range(-(agent.learn_step // -num_envs)):
                         if swap_channels:
                             obs = obs_channels_to_first(obs)
 
@@ -294,9 +275,13 @@ def train_on_policy(
 
                         pop_entropy[agent_idx].append(entropy)
 
-                        if isinstance(agent.action_space, spaces.Box):
-                            if agent.actor.squash_output:
-                                clipped_action = agent.actor.scale_action(action)
+                        # Clip action to action space
+                        policy = getattr(agent, agent.registry.policy())
+                        if isinstance(policy, StochasticActor) and isinstance(
+                            agent.action_space, spaces.Box
+                        ):
+                            if policy.squash_output:
+                                clipped_action = policy.scale_action(action)
                             else:
                                 clipped_action = np.clip(
                                     action,
@@ -307,28 +292,38 @@ def train_on_policy(
                             clipped_action = action
 
                         next_obs, reward, term, trunc, info = env.step(clipped_action)
-                        next_done = np.logical_or(term, trunc).astype(np.int8)
 
-                        total_steps += num_envs
-                        steps += num_envs
+                        # Check if termination condition is met
+                        if isinstance(term, (list, np.ndarray)):
+                            next_done = (
+                                np.logical_or(term, trunc).astype(np.int8)
+                                if isinstance(trunc, (list, np.ndarray))
+                                else term
+                            )
+                        else:
+                            next_done = term or trunc
+
+                        reward_np = np.atleast_1d(reward)
+                        next_done_np = np.atleast_1d(next_done)
+                        value_np = np.atleast_1d(value)
+                        log_prob_np = np.atleast_1d(log_prob)
 
                         observations.append(obs)
                         actions.append(action)
-                        log_probs.append(log_prob)
-                        rewards.append(reward)
+                        log_probs.append(log_prob_np)
+                        rewards.append(reward_np)
                         dones.append(done)
-                        values.append(value)
+                        values.append(value_np)
 
                         obs = next_obs
                         done = next_done
-                        scores += np.array(reward)
 
-                        if not is_vectorised:
-                            term = [term]
-                            trunc = [trunc]
+                        scores += reward_np
+                        total_steps += num_envs
+                        steps += num_envs
 
-                        for idx, (d, t) in enumerate(zip(term, trunc)):
-                            if d or t:
+                        for idx, env_done in enumerate(next_done_np):
+                            if env_done:
                                 completed_episode_scores.append(scores[idx])
                                 agent.scores.append(scores[idx])
                                 scores[idx] = 0
@@ -352,7 +347,7 @@ def train_on_policy(
             agent.steps[-1] += steps
             fps = steps / (time.time() - start_time)
             pop_fps.append(fps)
-            pbar.update(evo_steps // len(pop))
+            pbar.update(steps // len(pop))
             pop_episode_scores.append(completed_episode_scores)
 
         # Evaluate population
@@ -455,23 +450,29 @@ def train_on_policy(
             fitness = ["%.2f" % fitness for fitness in fitnesses]
             avg_fitness = ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
             avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
+            mean_scores = [
+                "%.2f" % mean_score if not isinstance(mean_score, str) else mean_score
+                for mean_score in mean_scores
+            ]
             agents = [agent.index for agent in pop]
             num_steps = [agent.steps[-1] for agent in pop]
             muts = [agent.mut for agent in pop]
-            pbar.update(0)
 
-            print(
-                f"""
-                --- Global Steps {total_steps} ---
-                Fitness:\t\t{fitness}
-                Score:\t\t{mean_scores}
-                5 fitness avgs:\t{avg_fitness}
-                10 score avgs:\t{avg_score}
-                Agents:\t\t{agents}
-                Steps:\t\t{num_steps}
-                Mutations:\t\t{muts}
-                """,
-                end="\r",
+            banner_text = f"Global Steps {total_steps}"
+            banner_width = max(len(banner_text) + 8, 35)
+            border = "=" * banner_width
+            centered_text = f"{banner_text}".center(banner_width)
+            pbar.write(
+                f"{border}\n"
+                f"{centered_text}\n"
+                f"{border}\n"
+                f"Fitness:\t{fitness}\n"
+                f"Score:\t\t{mean_scores}\n"
+                f"5 fitness avgs:\t{avg_fitness}\n"
+                f"10 score avgs:\t{avg_score}\n"
+                f"Agents:\t\t{agents}\n"
+                f"Steps:\t\t{num_steps}\n"
+                f"Mutations:\t{muts}"
             )
 
         # Save model checkpoint

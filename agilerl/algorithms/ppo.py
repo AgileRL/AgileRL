@@ -224,6 +224,7 @@ class PPO(RLAlgorithm):
         if self.recurrent:
             if not self.use_rollout_buffer:
                 raise ValueError("use_rollout_buffer must be True if recurrent=True.")
+
             net_config_dict = self.net_config if self.net_config is not None else {}
             self.max_seq_len = net_config_dict.get("encoder_config", {}).get(
                 "max_seq_len", None
@@ -325,8 +326,10 @@ class PPO(RLAlgorithm):
         self.register_network_group(NetworkGroup(eval_network=self.critic))
 
         self.hidden_state = None
-
-        self.hidden_state = None
+        self._last_obs = None
+        self._last_done = None
+        self._last_scores = None
+        self._last_info = None
 
     def share_encoder_parameters(self) -> None:
         """Shares the encoder parameters between the actor and critic."""
@@ -340,7 +343,7 @@ class PPO(RLAlgorithm):
     def create_rollout_buffer(self) -> None:
         """Creates a rollout buffer with the current configuration."""
         self.rollout_buffer = RolloutBuffer(
-            capacity=self.learn_step,
+            capacity=-(self.learn_step // -self.num_envs),
             observation_space=self.observation_space,
             action_space=self.action_space,
             device=self.device,
@@ -394,10 +397,8 @@ class PPO(RLAlgorithm):
                 latent_pi, action_mask=action_mask, sample=sample
             )
 
-            next_hidden_combined = (
-                next_hidden_actor  # Start with actor's next hidden state
-            )
-
+            # Start with actor's next hidden state
+            next_hidden_combined: Dict[str, torch.Tensor] = next_hidden_actor
             if self.share_encoders:
                 values = self.critic.forward_head(latent_pi).squeeze(-1)
             else:
@@ -406,9 +407,9 @@ class PPO(RLAlgorithm):
                     obs, hidden_state=hidden_state
                 )  # Pass original hidden_state
                 values = values.squeeze(-1)
-                if (
-                    next_hidden_critic is not None
-                ):  # Merge if critic returns its own next_hidden
+
+                # Merge if critic returns its own next_hidden
+                if next_hidden_critic is not None:
                     next_hidden_combined.update(next_hidden_critic)
 
             return action, log_prob, entropy, values, next_hidden_combined
@@ -445,11 +446,6 @@ class PPO(RLAlgorithm):
         :return: Initial hidden state dictionary
         :rtype: Dict[str, ArrayOrTensor]
         """
-        if not self.recurrent:
-            raise ValueError(
-                "Cannot get initial hidden state for non-recurrent networks."
-            )
-
         # Return a batch of initial hidden states
         # Flat map them into "actor_*" and "critic_*" (if not sharing encoders)
         flat_hidden = {}
@@ -468,7 +464,6 @@ class PPO(RLAlgorithm):
         self,
         obs: ArrayOrTensor,
         actions: ArrayOrTensor,
-        hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Evaluates the actions.
 
@@ -476,24 +471,13 @@ class PPO(RLAlgorithm):
         :type obs: ArrayOrTensor
         :param actions: Actions to evaluate
         :type actions: ArrayOrTensor
-        :param hidden_state: Hidden state for recurrent policies, defaults to None. Expected shape: dict with tensors of shape (batch_size, 1, hidden_size).
-        :type hidden_state: Optional[Dict[str, ArrayOrTensor]]
         :return: Log probability, entropy, and state values
         :rtype: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         """
         obs = self.preprocess_observation(obs)
 
-        eval_hidden_state = None
-        if self.recurrent and hidden_state is not None:
-            # Reshape hidden state for RNN: (batch_size, 1, hidden_size) -> (1, batch_size, hidden_size)
-            eval_hidden_state = {
-                key: val.permute(1, 0, 2) for key, val in hidden_state.items()
-            }
-
         # Get values from actor-critic
-        _, _, entropy, values, _ = self._get_action_and_values(
-            obs, hidden_state=eval_hidden_state, sample=False  # No need to sample here
-        )
+        _, _, entropy, values, _ = self._get_action_and_values(obs, sample=False)
 
         log_prob = self.actor.action_log_prob(actions)
 
@@ -590,7 +574,6 @@ class PPO(RLAlgorithm):
             # NOTE: we are still allowing experiences to be passed in for backwards compatibility
             # but we will remove this in a future releases.
             # i.e. it's possible to do one learn with rollouts, then another with experiences on the same agent
-
             if experiences is None:
                 # Learn from the internal rollout buffer
                 if (
@@ -601,6 +584,7 @@ class PPO(RLAlgorithm):
                     return self._learn_from_rollout_buffer_bptt()
                 else:
                     return self._learn_from_rollout_buffer_flat()
+
         return self._deprecated_learn_from_experiences(experiences)
 
     def _deprecated_learn_from_experiences(self, experiences: ExperiencesType) -> float:
@@ -773,21 +757,14 @@ class PPO(RLAlgorithm):
         observations = buffer_td["observations"]
         advantages = buffer_td["advantages"]
 
-        # Normalize advantages
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
         batch_size = self.batch_size
         num_samples = observations.size(0)  # Total number of samples in the buffer
 
         indices = np.arange(num_samples)
         mean_loss = 0.0
         approx_kl_divs = []
-        total_minibatch_updates_this_run = 0
-
-        for epoch in range(self.update_epochs):
+        for _ in range(self.update_epochs):
             np.random.shuffle(indices)
-            num_minibatches_this_epoch = 0
-
             for start_idx in range(0, num_samples, batch_size):
                 end_idx = min(start_idx + batch_size, num_samples)
                 minibatch_indices = indices[start_idx:end_idx]
@@ -797,11 +774,10 @@ class PPO(RLAlgorithm):
 
                 mb_obs = minibatch_td["observations"]
                 mb_actions = minibatch_td["actions"]
-                mb_old_log_probs = minibatch_td["log_probs"]
-                mb_advantages = advantages[
-                    minibatch_indices
-                ]  # Use globally normalized advantages
+                mb_log_probs = minibatch_td["log_probs"]
+                mb_advantages = advantages[minibatch_indices]
                 mb_returns = minibatch_td["returns"]
+                mb_old_values = minibatch_td["values"]
 
                 eval_hidden_state = None
                 if self.recurrent:
@@ -810,7 +786,9 @@ class PPO(RLAlgorithm):
                     # minibatch_td["hidden_states"] will be {key: tensor_shape_(len(minibatch_indices), layers, size)}
                     # _get_action_and_values expects dict {key: (layers, batch, size)}
                     if "hidden_states" in minibatch_td.keys(include_nested=True):
-                        mb_hidden_states_td = minibatch_td.get("hidden_states")
+                        mb_hidden_states_td: TensorDict = minibatch_td.get(
+                            "hidden_states"
+                        )
                         eval_hidden_state = {
                             # v has shape (minibatch_size, layers, size), permute to (layers, minibatch_size, size)
                             k: v.permute(1, 0, 2).contiguous()
@@ -821,52 +799,71 @@ class PPO(RLAlgorithm):
                             "Recurrent policy, but no hidden_states found in minibatch_td for flat learning."
                         )
 
-                _, _, entropy_t, new_value_t, _ = self._get_action_and_values(
+                _, _, entropy, values, _ = self._get_action_and_values(
                     mb_obs,
                     hidden_state=eval_hidden_state,
                     sample=False,  # No sampling during evaluation for loss calculation
                 )
 
-                new_log_prob_t = self.actor.action_log_prob(mb_actions)
+                log_probs = self.actor.action_log_prob(mb_actions)
 
-                if entropy_t is None:  # For continuous squashed actions
-                    entropy_t = -new_log_prob_t
+                if entropy is None:  # For continuous squashed actions
+                    entropy = -log_probs
 
-                ratio = torch.exp(new_log_prob_t - mb_old_log_probs)
+                # Normalize advantages
+                mb_advantages = (mb_advantages - mb_advantages.mean()) / (
+                    mb_advantages.std() + 1e-8
+                )
+
+                # Policy loss
+                ratio = torch.exp(log_probs - mb_log_probs)
                 policy_loss1 = -mb_advantages * ratio
                 policy_loss2 = -mb_advantages * torch.clamp(
                     ratio, 1 - self.clip_coef, 1 + self.clip_coef
                 )
                 policy_loss = torch.max(policy_loss1, policy_loss2).mean()
 
-                value_loss = 0.5 * ((new_value_t - mb_returns) ** 2).mean()
-                entropy_loss = -entropy_t.mean()
+                # Value loss
+                value = values.view(-1)
+                v_loss_unclipped = (value - mb_returns) ** 2
+                v_clipped = mb_old_values + torch.clamp(
+                    value - mb_old_values, -self.clip_coef, self.clip_coef
+                )
 
+                v_loss_clipped = (v_clipped - mb_returns) ** 2
+                v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
+                v_loss = 0.5 * v_loss_max.mean()
+
+                # Entropy loss
+                entropy_loss = -entropy.mean()
+
+                # Total loss
                 loss = (
-                    policy_loss
-                    + self.vf_coef * value_loss
-                    + self.ent_coef * entropy_loss
+                    policy_loss + self.vf_coef * v_loss + self.ent_coef * entropy_loss
                 )
 
                 with torch.no_grad():
-                    log_ratio = new_log_prob_t - mb_old_log_probs
-                    approx_kl = ((torch.exp(log_ratio) - 1) - log_ratio).mean().item()
+                    log_ratio = log_probs - mb_log_probs
+                    approx_kl = ((ratio - 1) - log_ratio).mean().item()
                     approx_kl_divs.append(approx_kl)
 
                 self.optimizer.zero_grad()
-                loss.backward()
+                if self.accelerator is not None:
+                    self.accelerator.backward(loss)
+                else:
+                    loss.backward()
+
                 clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
                 clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+
                 self.optimizer.step()
 
                 mean_loss += loss.item()
-                num_minibatches_this_epoch += 1
 
-            total_minibatch_updates_this_run += num_minibatches_this_epoch
             if self.target_kl is not None and np.mean(approx_kl_divs) > self.target_kl:
                 break  # Early stopping for the epoch if KL divergence target is exceeded
 
-        mean_loss = mean_loss / max(1e-8, total_minibatch_updates_this_run)
+        mean_loss /= num_samples * self.update_epochs
         return mean_loss
 
     def _learn_from_rollout_buffer_bptt(self) -> float:
@@ -885,9 +882,9 @@ class PPO(RLAlgorithm):
             return 0.0
 
         # Normalize advantages globally once before epochs
-        valid_advantages_tensor = self.rollout_buffer.buffer["advantages"][
-            :buffer_actual_size
-        ]
+        valid_advantages_tensor: torch.Tensor = self.rollout_buffer.buffer[
+            "advantages"
+        ][:buffer_actual_size]
         if valid_advantages_tensor.numel() > 0:
             original_shape = valid_advantages_tensor.shape
             flat_adv = valid_advantages_tensor.reshape(-1)
@@ -1078,7 +1075,11 @@ class PPO(RLAlgorithm):
                 )
 
                 self.optimizer.zero_grad()
-                loss.backward()
+                if self.accelerator is not None:
+                    self.accelerator.backward(loss)
+                else:
+                    loss.backward()
+
                 clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
                 clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
                 self.optimizer.step()
