@@ -524,6 +524,17 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                         "not been set as an attribute in the algorithm."
                     )
 
+                # Assign dtype to hyperparameter spec
+                hp_value = getattr(self, hp)
+                hp_spec = self.registry.hp_config[hp]
+                dtype = type(hp_value)
+                if not dtype in [int, float]:
+                    raise TypeError(
+                        f"Can't mutate hyperparameter {hp} of type {dtype}. AgileRL only supports "
+                        "mutating integer or float hyperparameters."
+                    )
+                hp_spec.dtype = dtype
+
     def _wrap_attr(self, attr: EvolvableAttributeType) -> EvolvableAttributeType:
         """Wraps the model with the accelerator.
 

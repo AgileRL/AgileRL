@@ -169,6 +169,7 @@ def _collect_rollouts(
                 scores[idx] = 0
 
     # Calculate last value to compute returns and advantages properly
+    # TODO: We shouldn't access a hidden method here...
     with torch.no_grad():
         if recurrent:
             _, _, _, last_value, _ = agent._get_action_and_values(
