@@ -13,6 +13,7 @@ from agilerl.algorithms import (
     CQN,
     DDPG,
     DQN,
+    GRPO,
     IPPO,
     MADDPG,
     MATD3,
@@ -462,7 +463,7 @@ def test_consolidate_mutations_warning_if_not_llm_algorithm():
 
 
 def test_consolidate_mutations():
-    population = [MagicMock(spec=LLMAlgorithm) for _ in range(3)]
+    population = [MagicMock(spec=GRPO) for _ in range(3)]
     for agent in population:
         agent.mut = "lr"
         agent.lr = 0.01
@@ -475,6 +476,7 @@ def test_consolidate_mutations():
         agent.accelerator.state = MagicMock()
         agent.accelerator.state.deepspeed_plugin = MagicMock(spec=DeepSpeedPlugin)
         agent.accelerator.state.deepspeed_plugin.deepspeed_config = {}
+        agent.actor = MagicMock()
     consolidate_mutations(population)
     for agent in population:
         assert agent.mut == "lr"

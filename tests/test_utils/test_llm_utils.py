@@ -6,7 +6,7 @@ import pytest
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from agilerl.utils.llm_utils import HuggingFaceGym
+from agilerl.utils.llm_utils import DummyOptimizer, HuggingFaceGym
 
 
 class DummyTokenizer:
@@ -175,8 +175,6 @@ def test_hugging_face_gym_reset_dataloaders(dataset, num_samples, reset_dataload
         env.test_dataloader_iter
     )  # use test_dataloader_iter as it is not shuffled
     env._reset_dataloaders()
-
-    # assert False
     first_data_point_reset = next(env.test_dataloader_iter)
     for key1, key2 in zip(first_data_point.keys(), first_data_point_reset.keys()):
         if key1 == "tokenized_prompts":
@@ -188,7 +186,6 @@ def test_hugging_face_gym_reset_dataloaders(dataset, num_samples, reset_dataload
                     assert torch.equal(item1[key3], item2[key4])
         else:
             assert first_data_point[key1] == first_data_point_reset[key1]
-    # assert False
 
 
 @pytest.mark.parametrize("num_samples", [200])
@@ -290,3 +287,75 @@ def test_reset_dataloaders_when_dataloader_exhausted(
         total_sampled += data_batch_size
 
     assert env.num_dataset_passes == 1
+
+
+def test_dummy_optimizer_init():
+    """Test DummyOptimizer initialization."""
+    params = [torch.tensor([1.0, 2.0, 3.0])]
+    lr = 0.001
+    optimizer = DummyOptimizer(params, lr)
+    assert optimizer is not None
+
+
+def test_dummy_optimizer_step():
+    """Test DummyOptimizer step method raises RuntimeError."""
+    params = [torch.tensor([1.0, 2.0, 3.0])]
+    lr = 0.001
+    optimizer = DummyOptimizer(params, lr)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        optimizer.step()
+
+    expected_message = (
+        "DummyOptimizer is a placeholder optimizer and should not be used."
+        "Please ensure you are calling accelerator.prepare() on the optimizer."
+    )
+    assert str(exc_info.value) == expected_message
+
+
+def test_dummy_optimizer_zero_grad():
+    """Test DummyOptimizer zero_grad method raises RuntimeError."""
+    params = [torch.tensor([1.0, 2.0, 3.0])]
+    lr = 0.001
+    optimizer = DummyOptimizer(params, lr)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        optimizer.zero_grad()
+
+    expected_message = (
+        "DummyOptimizer is a placeholder optimizer and should not be used."
+        "Please ensure you are calling accelerator.prepare() on the optimizer."
+    )
+    assert str(exc_info.value) == expected_message
+
+
+def test_dummy_optimizer_state_dict():
+    """Test DummyOptimizer state_dict method raises RuntimeError."""
+    params = [torch.tensor([1.0, 2.0, 3.0])]
+    lr = 0.001
+    optimizer = DummyOptimizer(params, lr)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        optimizer.state_dict()
+
+    expected_message = (
+        "DummyOptimizer is a placeholder optimizer and should not be used."
+        "Please ensure you are calling accelerator.prepare() on the optimizer."
+    )
+    assert str(exc_info.value) == expected_message
+
+
+def test_dummy_optimizer_load_state_dict():
+    """Test DummyOptimizer load_state_dict method raises RuntimeError."""
+    params = [torch.tensor([1.0, 2.0, 3.0])]
+    lr = 0.001
+    optimizer = DummyOptimizer(params, lr)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        optimizer.load_state_dict({})
+
+    expected_message = (
+        "DummyOptimizer is a placeholder optimizer and should not be used."
+        "Please ensure you are calling accelerator.prepare() on the optimizer."
+    )
+    assert str(exc_info.value) == expected_message
