@@ -7,7 +7,8 @@ import torch
 from pettingzoo.atari import space_invaders_v2
 from PIL import Image, ImageDraw
 
-from agilerl.algorithms.maddpg import MADDPG
+from agilerl.algorithms import MADDPG
+from agilerl.utils.algo_utils import obs_channels_to_first
 
 
 # Define function to return image
@@ -63,24 +64,24 @@ if __name__ == "__main__":
 
     # Test loop for inference
     for ep in range(episodes):
-        state, info = env.reset()
+        obs, info = env.reset()
         agent_reward = {agent_id: 0 for agent_id in agent_ids}
         score = 0
         for _ in range(max_steps):
             if channels_last:
-                state = {
-                    agent_id: np.moveaxis(np.expand_dims(s, 0), [3], [1])
-                    for agent_id, s in state.items()
+                obs = {
+                    agent_id: obs_channels_to_first(s) for agent_id, s in obs.items()
                 }
+
             # Get next action from agent
-            action, _ = maddpg.get_action(state, training=False, infos=info)
+            action, _ = maddpg.get_action(obs, infos=info)
 
             # Save the frame for this step and append to frames list
             frame = env.render()
             frames.append(_label_with_episode_number(frame, episode_num=ep))
 
             # Take action in environment
-            state, reward, termination, truncation, info = env.step(
+            obs, reward, termination, truncation, info = env.step(
                 {agent: a.squeeze() for agent, a in action.items()}
             )
 
