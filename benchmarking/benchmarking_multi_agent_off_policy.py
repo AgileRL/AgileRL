@@ -194,8 +194,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Tru
         eval_loop=INIT_HP["EVAL_LOOP"],
         learning_delay=INIT_HP["LEARNING_DELAY"],
         target=INIT_HP["TARGET_SCORE"],
-        tournament=tournament,
-        mutation=mutations,
+        # tournament=tournament,
+        # mutation=mutations,
         wb=INIT_HP["WANDB"],
         accelerator=accelerator,
     )

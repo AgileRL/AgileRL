@@ -161,7 +161,8 @@ class MADDPG(MultiAgentRLAlgorithm):
         ), "Wrap models flag must be boolean value True or False."
         if (actor_networks is not None) != (critic_networks is not None):
             warnings.warn(
-                "Actor and critic network must both be supplied to use custom networks. Defaulting to net config."
+                "Actor and critic network must both be supplied to use custom networks. "
+                "Defaulting to net config."
             )
 
         self.batch_size = batch_size
