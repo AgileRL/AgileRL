@@ -3,10 +3,10 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch.distributed as dist
-import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import GRPO
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.hpo.mutation import Mutations
@@ -218,8 +218,6 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE_PER_GPU"]
                     )
                 pbar.update(effective_data_batch_size)
                 agent.scores.append(agg_metrics[2])
-        agent.save_checkpoint("saved_checkpoint")
-        agent.load_checkpoint("saved_checkpoint")
 
         if accelerator is not None:
             accelerator.wait_for_everyone()
