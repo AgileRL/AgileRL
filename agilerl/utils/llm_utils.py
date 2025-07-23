@@ -230,6 +230,7 @@ class HuggingFaceGym(gym.Env):
                 apply_chat_template_fn(q, a, tokenizer)
                 for q, a in zip(questions, answers)
             ]
+
             return {
                 "question": questions,
                 "answer": answers,
