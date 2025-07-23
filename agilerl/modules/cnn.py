@@ -168,6 +168,11 @@ class MutableKernelSizes:
             if self.tuple_sizes:
                 assert isinstance(kernel_size, tuple), "Kernel size must be a tuple."
             else:
+                kernel_size = (
+                    int(kernel_size)
+                    if not isinstance(kernel_size, int)
+                    else kernel_size
+                )
                 assert isinstance(kernel_size, int), "Kernel size must be an integer."
 
             new_kernel_size = kernel_size

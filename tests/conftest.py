@@ -224,9 +224,9 @@ def encoder_cnn_config():
         "latent_dim": 8,
         "min_latent_dim": 1,
         "encoder_config": {
-            "channel_size": [5],
-            "kernel_size": [3],
-            "stride_size": [1],
+            "channel_size": [5, 5],
+            "kernel_size": [3, 3],
+            "stride_size": [1, 1],
             "min_channel_size": 1,
             "max_channel_size": 10,
         },
