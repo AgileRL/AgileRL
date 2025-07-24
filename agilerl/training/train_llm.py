@@ -152,13 +152,13 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE_PER_GPU"]
         )
 
     total_steps = 0
-    # calling env.reset() supplies the first batch of training data
 
+    # calling env.reset() supplies the first batch of training data
     prompts = env.reset(reset_dataloaders=True)
     for i in range(training_steps):
         agent_metrics_dict = {}
         for agent_idx, agent in enumerate(pop):
-            agent.set_reference_policy(env.num_dataset_passes + 1)
+            agent.set_reference_policy(env.num_dataset_passes)
             completion_ids, action_masks = agent.get_action(prompts)
             completion_lengths = np.mean([x.shape[1] for x in completion_ids])
 
@@ -218,8 +218,6 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE_PER_GPU"]
                     )
                 pbar.update(effective_data_batch_size)
                 agent.scores.append(agg_metrics[2])
-        agent.save_checkpoint("saved_checkpoint")
-        agent.load_checkpoint("saved_checkpoint")
 
         if accelerator is not None:
             accelerator.wait_for_everyone()

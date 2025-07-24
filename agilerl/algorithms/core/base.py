@@ -1990,7 +1990,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def wrap_models(self) -> None:
         """Wrap the models in the accelerator, DeepSpeed objects must be wrapped at the same time,
         not individually."""
-        print("Accelerator in wrap_models: ", self.accelerator)
         if self.accelerator is not None:
             assert (
                 self.optimizer is not None

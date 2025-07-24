@@ -116,6 +116,9 @@ class HuggingFaceGym(gym.Env):
         """
         if reset_dataloaders:
             self._reset_dataloaders()
+            warnings.warn(
+                "env.reset() called with reset_dataloaders=True, this will reset the dataloaders to the beginning of the dataset, proceed with caution."
+            )
         if self.reset_called:
             warnings.warn(
                 "env.reset() called more than once sequentially, it should typically follow with env.step()."
@@ -230,6 +233,7 @@ class HuggingFaceGym(gym.Env):
                 apply_chat_template_fn(q, a, tokenizer)
                 for q, a in zip(questions, answers)
             ]
+
             return {
                 "question": questions,
                 "answer": answers,

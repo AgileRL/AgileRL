@@ -112,12 +112,14 @@ def compile_model(
     :rtype: OptimizedModule | ModuleDict[OptimizedModule]
     """
     if isinstance(model, ModuleDict):
-        return ModuleDict(
+        compiled_model = ModuleDict(
             {
                 agent_id: compile_model(module, mode)
                 for agent_id, module in model.items()
             }
         )
+        compiled_model.last_mutation_attr = model.last_mutation_attr
+        return compiled_model
 
     if not isinstance(model, OptimizedModule) and mode is not None:
         compiled_model = torch.compile(model, mode=mode, dynamic=True)
