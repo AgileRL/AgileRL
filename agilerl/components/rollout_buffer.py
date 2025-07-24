@@ -102,27 +102,20 @@ class RolloutBuffer:
         # Determine shapes and dtypes for all expected fields
         if isinstance(self.observation_space, spaces.Discrete):
             obs_shape = (1,)
-            obs_dtype = (
-                torch.float32
-            )  # Or torch.float32 if directly using torch tensors
+        elif isinstance(self.observation_space, spaces.MultiDiscrete):
+            obs_shape = (len(self.observation_space.nvec),)
         elif isinstance(self.observation_space, spaces.Box):
             obs_shape = self.observation_space.shape
-            obs_dtype = convert_np_to_torch_dtype(
-                self.observation_space.dtype
-            )  # Convert numpy dtype to torch dtype
         elif isinstance(self.observation_space, spaces.Dict):
             # For Dict observation spaces, we'll create a nested structure
             # The observations will be stored as nested TensorDicts
             obs_shape = None  # Will be handled as nested TensorDict
-            obs_dtype = None  # Will be handled per key
         elif isinstance(self.observation_space, spaces.Tuple):
             # For Tuple, we'll flatten or handle as multiple entries
             # For now, let's assume we'll pre-allocate based on flattened structure
             obs_shape = ()  # Placeholder, will be determined by actual data
-            obs_dtype = torch.float32  # Placeholder
         else:
             obs_shape = self.observation_space.shape
-            obs_dtype = torch.float32  # Default
 
         if isinstance(self.action_space, spaces.Discrete):
             action_shape = ()
@@ -160,16 +153,13 @@ class RolloutBuffer:
             for key, subspace in self.observation_space.spaces.items():
                 if isinstance(subspace, spaces.Discrete):
                     sub_shape = (1,)
-                    sub_dtype = torch.float32
                 elif isinstance(subspace, spaces.Box):
                     sub_shape = subspace.shape
-                    sub_dtype = convert_np_to_torch_dtype(subspace.dtype)
                 else:
                     sub_shape = subspace.shape if hasattr(subspace, "shape") else ()
-                    sub_dtype = torch.float32
 
                 obs_dict[key] = torch.zeros(
-                    (self.capacity, self.num_envs, *sub_shape), dtype=sub_dtype
+                    (self.capacity, self.num_envs, *sub_shape), dtype=torch.float32
                 )
 
             source_dict["observations"] = obs_dict
@@ -179,10 +169,10 @@ class RolloutBuffer:
         else:
             # For non-Dict spaces, use regular tensor allocation
             source_dict["observations"] = torch.zeros(
-                (self.capacity, self.num_envs, *obs_shape), dtype=obs_dtype
+                (self.capacity, self.num_envs, *obs_shape), dtype=torch.float32
             )
             source_dict["next_observations"] = torch.zeros(
-                (self.capacity, self.num_envs, *obs_shape), dtype=obs_dtype
+                (self.capacity, self.num_envs, *obs_shape), dtype=torch.float32
             )
 
         # Add other standard fields
