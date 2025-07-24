@@ -28,5 +28,5 @@ ucimlrepo==0.0.3
 wandb==0.17.6
 huggingface
 datasets==3.3.2
-transformers==4.50.0
+transformers==4.52.1
 peft==0.15.2
