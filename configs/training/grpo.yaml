@@ -14,8 +14,8 @@ MUTATION_PARAMS:
 
 INIT_HP:
     ALGO: GRPO
-    BATCH_SIZE_PER_GPU: 4 # This is batch size per GPU
-    REDUCE_MEMORY_PEAK: true
+    BATCH_SIZE_PER_GPU: 32 # This is batch size per GPU
+    REDUCE_MEMORY_PEAK: false
     BETA: 0.001
     LR: 0.000005
     CLIP_COEF: 0.2

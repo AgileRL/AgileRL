@@ -5,6 +5,7 @@ from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 
 import gymnasium as gym
 import torch
+import torch.nn.functional as F
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
@@ -138,13 +139,11 @@ class HuggingFaceGym(gym.Env):
         """
         # This is for a batch of completions (prompt_batch x group_size), List of tensors of length batch size, each tensor is a group of answers
         total_rewards = []
-        for idx, (group_completion, answer, question) in enumerate(
-            zip(completions, self.answers, self.questions)
+        for group_completion, answer, question in zip(
+            completions, self.answers, self.questions
         ):  # Vectorize this in the future
             decoded_group_completion = self.tokenizer.batch_decode(
-                group_completion[
-                    :, self.last_tokenized_prompts[idx]["input_ids"].shape[1] :
-                ],
+                group_completion,
                 skip_special_tokens=True,
             )
             rewards = [
@@ -282,3 +281,43 @@ class DummyOptimizer:
             "DummyOptimizer is a placeholder optimizer and should not be used."
             "Please ensure you are calling accelerator.prepare() on the optimizer."
         )
+
+
+# Using Hugging Face TRL (https://github.com/huggingface/trl)
+# Licensed under Apache License 2.0
+def selective_log_softmax(logits, index) -> torch.Tensor:
+    """
+    Memory-efficient implementation of log_softmax followed by gather.
+
+    :param logits: Logits tensor of shape (..., num_classes).
+    :type logits: torch.Tensor
+    :param index: Index tensor of shape (...), specifying the positions to gather from the log-softmax output.
+    :type index: torch.Tensor
+    :return: Gathered log probabilities with the same shape as index.
+    :rtype: torch.Tensor
+
+    Equivalent to:
+        logps = torch.gather(logits.log_softmax(-1), dim=-1, index=index.unsqueeze(-1)).squeeze(-1)
+    """
+    if logits.dtype in [torch.float32, torch.float64]:
+        selected_logits = torch.gather(
+            logits, dim=-1, index=index.unsqueeze(-1)
+        ).squeeze(-1)
+        # loop to reduce peak mem consumption
+        logsumexp_values = torch.stack([torch.logsumexp(lg, dim=-1) for lg in logits])
+        per_token_logps = (
+            selected_logits - logsumexp_values
+        )  # log_softmax(x_i) = x_i - logsumexp(x)
+    else:
+        # logsumexp approach is unstable with bfloat16, fall back to slightly less efficient approach
+        per_token_logps = []
+        for row_logits, row_labels in zip(
+            logits, index
+        ):  # loop to reduce peak mem consumption
+            row_logps = F.log_softmax(row_logits, dim=-1)
+            row_per_token_logps = row_logps.gather(
+                dim=-1, index=row_labels.unsqueeze(-1)
+            ).squeeze(-1)
+            per_token_logps.append(row_per_token_logps)
+        per_token_logps = torch.stack(per_token_logps)
+    return per_token_logps

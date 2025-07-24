@@ -24,7 +24,11 @@ from agilerl.utils.algo_utils import (
     get_experiences_samples,
     stack_and_pad_experiences,
 )
-from agilerl.utils.llm_utils import DummyOptimizer, HuggingFaceGym
+from agilerl.utils.llm_utils import (
+    DummyOptimizer,
+    HuggingFaceGym,
+    selective_log_softmax,
+)
 
 DeepSpeedOptimizerType = Union[
     DeepSpeedZeroOptimizer,  # ZeRO Stage 1 & 2 optimizer
@@ -113,6 +117,7 @@ class GRPO(LLMAlgorithm):
         clone: bool = False,
         use_separate_reference_adapter: bool = False,
     ) -> None:
+
         device = (
             f"cuda:{os.getenv('LOCAL_RANK', '0')}"
             if accelerator is not None and torch.cuda.is_available()
@@ -157,7 +162,7 @@ class GRPO(LLMAlgorithm):
             )
             cosine_lr_schedule_config = None
         if self.accelerator is not None and not clone:
-            self.batch_size = 1
+            self.batch_size = 16  # FIXME remove
             if (
                 self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
                     "train_micro_batch_size_per_gpu", "auto"
@@ -263,7 +268,6 @@ class GRPO(LLMAlgorithm):
         group_size = self.group_size if training else 1
         self.actor.eval()
         with torch.no_grad():
-            action_masks = []
             completion_ids = []
             for state in states:
                 state["input_ids"] = (
@@ -276,15 +280,8 @@ class GRPO(LLMAlgorithm):
                     **state,
                     generation_config=self.generation_config,
                 )
-                completion_ids.append(completion_id)
-                action_mask = torch.zeros_like(
-                    completion_id, dtype=torch.bool, device=self.device
-                )
-                action_mask[:, state["input_ids"].shape[1] :] = True
-                action_mask[completion_id == self.pad_token_id] = False
-                action_mask = action_mask[:, 1:]
-                action_masks.append(action_mask)
-        return completion_ids, action_masks
+                completion_ids.append(completion_id[:, state["input_ids"].shape[1] :])
+        return completion_ids  # , action_masks
 
     def learn(self, experiences: ExperiencesType) -> Tuple[float, float]:
         """Updates agent network parameters to learn from experiences.
@@ -294,8 +291,8 @@ class GRPO(LLMAlgorithm):
         """
         gc.collect()
         torch.cuda.empty_cache()
-        completion_ids, action_masks, rewards = stack_and_pad_experiences(
-            *experiences, padding_values=[self.pad_token_id, False, None]
+        completion_ids, rewards = stack_and_pad_experiences(
+            *experiences, padding_values=[self.pad_token_id, None]
         )
         advantages = self._calculate_advantage(rewards).to(self.device)
         with torch.no_grad():
@@ -309,7 +306,7 @@ class GRPO(LLMAlgorithm):
             )
         experiences = (
             completion_ids,
-            action_masks,
+            # action_masks,
             advantages,
             old_log_probs,
             reference_log_probs,
@@ -326,7 +323,7 @@ class GRPO(LLMAlgorithm):
                 ]
                 (
                     batch_ids,
-                    batch_action_mask,
+                    # batch_action_mask,
                     batch_advantages,
                     batch_old_log_probs,
                     batch_reference_log_probs,
@@ -335,7 +332,7 @@ class GRPO(LLMAlgorithm):
                     batch_ids, use_reference=False, eval_mode=False
                 )
                 loss, kl = self._grpo_loss(
-                    batch_action_mask,
+                    # batch_action_mask,
                     batch_log_probs,
                     batch_old_log_probs,
                     batch_reference_log_probs,
@@ -469,7 +466,7 @@ class GRPO(LLMAlgorithm):
 
     def _grpo_loss(
         self,
-        mask: torch.Tensor,
+        # mask: torch.Tensor,
         log_probs: torch.Tensor,
         old_log_probs: torch.Tensor,
         reference_log_probs: torch.Tensor,
@@ -498,11 +495,11 @@ class GRPO(LLMAlgorithm):
         surrogate = log_probs_ratio * advantages
         clipped_surrogate = clipped_log_probs_ratio * advantages
         loss = -torch.min(surrogate, clipped_surrogate) + self.beta * kl
-        denominator = mask.sum(dim=-1)
-        denominator = torch.where(
-            denominator > 0, denominator, torch.ones_like(denominator)
-        )
-        loss = (loss * mask).sum(dim=-1) / denominator
+        # denominator = mask.sum(dim=-1)
+        # denominator = torch.where(
+        #     denominator > 0, denominator, torch.ones_like(denominator)
+        # )
+        # loss = (loss * mask).sum(dim=-1) / denominator
         log_probs_ratio, clipped_log_probs_ratio, surrogate, clipped_surrogate = (
             None,
             None,
@@ -530,6 +527,7 @@ class GRPO(LLMAlgorithm):
 
         self.actor.train(mode=not eval_mode)
         attention_mask = ids != self.pad_token_id
+        print("ID SHAPE", ids.shape)
         model_kwargs = {
             "input_ids": ids,
             "attention_mask": attention_mask,
@@ -539,7 +537,9 @@ class GRPO(LLMAlgorithm):
             position_ids = attention_mask.long().cumsum(dim=-1) - 1
             position_ids.masked_fill_(mask=(attention_mask == 0), value=1)
             model_kwargs |= {"position_ids": position_ids}
+
         if self.reduce_memory_peak:
+
             log_probs_list = []
             for input_id, mask in zip(ids, attention_mask):
                 input_id = input_id.reshape(1, -1)
@@ -550,20 +550,21 @@ class GRPO(LLMAlgorithm):
                     "use_cache": False,
                 }
                 logit = self.actor.forward(**kwargs).logits
-                log_prob = (
-                    F.log_softmax(logit[:, :-1], dim=-1)
-                    .gather(dim=-1, index=input_id[:, 1:].unsqueeze(-1))
-                    .squeeze(-1)
-                )
+                logit /= self.temperature
+                log_prob = selective_log_softmax(logit[:, :-1], input_id[:, 1:])
                 log_probs_list.append(log_prob)
             log_probs = torch.cat(log_probs_list)
+
         else:
             logits = self.actor.forward(**model_kwargs).logits
-            log_probs = (
-                F.log_softmax(logits[:, :-1], dim=-1)
-                .gather(dim=-1, index=ids[:, 1:].unsqueeze(-1))
-                .squeeze(-1)
-            )
+            logits /= self.temperature
+            log_probs = selective_log_softmax(logits[:, :-1], ids[:, 1:])
+            # log_probs = (
+            #     F.log_softmax(logits[:, :-1], dim=-1)
+            #     .gather(dim=-1, index=ids[:, 1:].unsqueeze(-1))
+            #     .squeeze(-1)
+            # )
+
         self._use_policy()
         return log_probs
 
