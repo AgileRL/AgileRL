@@ -39,6 +39,7 @@ class HuggingFaceGym(gym.Env):
         data_batch_size_per_gpu: int = 8,
         custom_collate_fn: Optional[Callable] = None,
         accelerator: Optional[Accelerator] = None,
+        return_raw_completions: bool = False,
     ) -> None:
         assert {"question", "answer"}.issubset(
             set(train_dataset.features.keys())
@@ -87,6 +88,7 @@ class HuggingFaceGym(gym.Env):
         )
         self.evaluation_mode = False
         self.num_dataset_passes = 0
+        self.return_raw_completions = return_raw_completions
 
     def step(
         self, completions: torch.Tensor
@@ -142,9 +144,13 @@ class HuggingFaceGym(gym.Env):
         for group_completion, answer, question in zip(
             completions, self.answers, self.questions
         ):  # Vectorize this in the future
-            decoded_group_completion = self.tokenizer.batch_decode(
-                group_completion,
-                skip_special_tokens=True,
+            decoded_group_completion = (
+                self.tokenizer.batch_decode(
+                    group_completion,
+                    skip_special_tokens=True,
+                )
+                if not self.return_raw_completions
+                else group_completion
             )
             rewards = [
                 self.reward_fn(completion, answer, question)
@@ -153,13 +159,21 @@ class HuggingFaceGym(gym.Env):
             total_rewards.append(rewards)
         return torch.tensor(total_rewards)
 
-    def _get_next_batch(self) -> List[BatchEncoding]:
+    def _get_next_batch(self) -> List[BatchEncoding] | List[str]:
         """Get the next batch of tokenized prompts."""
         try:
             batch = next(self.dataloader)
             self.questions = batch["question"]
             self.answers = batch["answer"]
-            tokenized_prompts = batch["tokenized_prompts"]
+            returned_prompts = batch["tokenized_prompts"]
+            if self.return_raw_completions:
+                returned_prompts = [
+                    self.tokenizer.batch_decode(
+                        returned_prompt["input_ids"], skip_special_tokens=True
+                    )
+                    for returned_prompt in returned_prompts
+                ]
+            print("RETURNED PROMPTS", returned_prompts)
         except StopIteration:
             self._reset_dataloaders(
                 reset_train=not self.evaluation_mode,
@@ -167,7 +181,7 @@ class HuggingFaceGym(gym.Env):
             )
             self.num_dataset_passes += 1
             return self._get_next_batch()
-        return tokenized_prompts
+        return returned_prompts
 
     @contextmanager
     def eval_mode(self) -> Generator[None, None, None]:

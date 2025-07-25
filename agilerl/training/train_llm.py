@@ -160,14 +160,14 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE_PER_GPU"]
         agent_metrics_dict = {}
         for agent_idx, agent in enumerate(pop):
             agent.set_reference_policy(env.num_dataset_passes)
-            completion_ids = agent.get_action(prompts)
+            completion_ids, action_masks = agent.get_action(prompts)
             completion_lengths = np.mean([x.shape[1] for x in completion_ids])
 
             # Use the reward function stored in env.step to calculate reward of the each answer from the group
             next_prompts, rewards = env.step(completion_ids)
             experiences = (
                 completion_ids,
-                # action_masks,
+                action_masks,
                 rewards,
             )
             loss, kl = agent.learn(experiences)

@@ -31,3 +31,9 @@ INIT_HP:
     ELITISM: true
     POP_SIZE: 1
     EVAL_LOOP: 1
+    VLLM_CONFIG:
+        base_url: http://34.12.60.83:8000
+        host: 34.12.60.83
+        server_port: 8000
+        group_port: 51216
+        connection_timeout: 0.0

@@ -8,12 +8,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import tqdm
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl.algorithms import (
     CQN,
     DDPG,
@@ -34,7 +34,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules import EvolvableModule
 from agilerl.typing import GymSpaceType, PopulationType
-from agilerl.utils.algo_utils import CosineLRScheduleConfig, clone_llm
+from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig, clone_llm
 from agilerl.utils.llm_utils import DummyOptimizer
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
@@ -571,6 +571,12 @@ def create_population(
                 ),
                 accelerator=Accelerator() if accelerator else None,
                 device=device,
+                use_separate_reference_adapter=True,
+                vllm_config=(
+                    VLLMConfig(**INIT_HP.get("VLLM_CONFIG"))
+                    if INIT_HP.get("VLLM_CONFIG", None) is not None
+                    else None
+                ),
                 **algo_kwargs,
             )
             population.append(agent)

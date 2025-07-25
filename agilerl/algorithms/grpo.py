@@ -1,12 +1,15 @@
 import gc
 import os
 import warnings
+from contextlib import nullcontext
 from typing import Dict, List, Optional, Tuple, Union
 
+import deepspeed
 import numpy as np
 import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
+from accelerate.utils import broadcast_object_list, gather_object
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from gymnasium import spaces
@@ -14,12 +17,14 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from torch.nn.utils import clip_grad_norm_
 from transformers import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
+from trl.extras.vllm_client import VLLMClient
 
 from agilerl.algorithms.core import LLMAlgorithm, OptimizerWrapper
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.typing import ExperiencesType
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
+    VLLMConfig,
     create_warmup_cosine_scheduler,
     get_experiences_samples,
     stack_and_pad_experiences,
@@ -87,6 +92,8 @@ class GRPO(LLMAlgorithm):
     :type clone: bool, optional
     :param use_separate_reference_adapter: Flag to indicate if the reference policy should have a separate adapter, defaults to False
     :type use_separate_reference_adapter: bool, optional
+    :param vllm_config: Config for VLLM, provide a VLLMConfig object to use VLLM server for generation, defaults to None
+    :type vllm_config: VLLMConfig, optional
     """
 
     def __init__(
@@ -105,6 +112,10 @@ class GRPO(LLMAlgorithm):
         update_epochs: int = 1,
         group_size: int = 8,
         temperature: float = 0.9,
+        repetition_penalty: float = 1.0,
+        top_p: float = 0.95,
+        top_k: Optional[int] = None,
+        min_p: float = 0.0,
         calc_position_embeddings: bool = True,
         reduce_memory_peak: bool = False,
         max_output_tokens: int = 1024,
@@ -116,6 +127,7 @@ class GRPO(LLMAlgorithm):
         wrap: bool = True,
         clone: bool = False,
         use_separate_reference_adapter: bool = False,
+        vllm_config: Optional[VLLMConfig] = None,
     ) -> None:
 
         device = (
@@ -204,6 +216,10 @@ class GRPO(LLMAlgorithm):
         self.beta = beta
         self.calc_position_embeddings = calc_position_embeddings
         self.temperature = temperature
+        self.repetition_penalty = repetition_penalty
+        self.top_p = top_p
+        self.top_k = top_k
+        self.min_p = min_p
         self.max_output_tokens = max_output_tokens
         self.min_output_tokens = min_output_tokens
         self.pad_token_id = pad_token_id
@@ -213,6 +229,10 @@ class GRPO(LLMAlgorithm):
             max_new_tokens=max_output_tokens,
             min_new_tokens=min_output_tokens,
             pad_token_id=pad_token_id,
+            repetition_penalty=repetition_penalty,
+            top_p=top_p,
+            top_k=top_k,
+            min_p=min_p,
         )
         if lora_config is None:
             warnings.warn(
@@ -249,6 +269,22 @@ class GRPO(LLMAlgorithm):
             "0" if self.accelerator is None else self.accelerator.local_process_index
         )
         self._initialize_actors(actor_network, not clone)
+        self.use_vllm = vllm_config is not None
+        if (
+            self.use_vllm
+            and self.accelerator is not None
+            and self.accelerator.is_main_process
+        ):
+            self.vllm_client = VLLMClient(
+                base_url=vllm_config.base_url,
+                host=vllm_config.host,
+                server_port=vllm_config.server_port,
+                group_port=vllm_config.group_port,
+                connection_timeout=vllm_config.connection_timeout,
+            )
+            print("INITIALIZING VLLM CLIENT")
+            self.vllm_client.init_communicator()
+            print("VLLM CLIENT INITIALIZED")
 
         # Register network groups for mutations
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
@@ -256,7 +292,7 @@ class GRPO(LLMAlgorithm):
             self.wrap_models()
 
     def get_action(
-        self, states: List[Dict[str, torch.Tensor]], training: bool = True
+        self, prompts: List[Dict[str, torch.Tensor]], training: bool = True
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
         """Returns the next action to take in the environment.
 
@@ -267,21 +303,67 @@ class GRPO(LLMAlgorithm):
         """
         group_size = self.group_size if training else 1
         self.actor.eval()
-        with torch.no_grad():
-            completion_ids = []
-            for state in states:
-                state["input_ids"] = (
-                    state["input_ids"].repeat(group_size, 1).to(self.actor.device)
+        if not self.use_vllm:
+            with torch.no_grad():
+                completion_ids = []
+                action_masks = []
+                for prompt in prompts:
+                    prompt["input_ids"] = (
+                        prompt["input_ids"].repeat(group_size, 1).to(self.actor.device)
+                    )
+                    prompt["attention_mask"] = (
+                        prompt["attention_mask"]
+                        .repeat(group_size, 1)
+                        .to(self.actor.device)
+                    )
+                    completion_id = self.actor.generate(
+                        **prompt,
+                        generation_config=self.generation_config,
+                    )
+                    completion_ids.append(completion_id)
+                    action_mask = torch.zeros_like(
+                        completion_id, dtype=torch.bool, device=self.device
+                    )
+                action_mask[:, prompt["input_ids"].shape[1] :] = True
+                action_mask[completion_id == self.pad_token_id] = False
+                action_mask = action_mask[:, 1:]
+                action_masks.append(action_mask)
+        else:
+            if isinstance(prompts, dict):
+                raise ValueError(
+                    "VLLM client only accepts prompts as text, not tokens, please ensure"
+                    "'return_raw_completions' is set to True in the HuggingFaceGym"
+                    "instance."
                 )
-                state["attention_mask"] = (
-                    state["attention_mask"].repeat(group_size, 1).to(self.actor.device)
+            # Move model to vllm
+            print("MOVING MODEL TO VLLM")
+            self._move_model_to_vllm()
+
+            # Gather prompts to single device
+            all_prompts = gather_object(prompts)
+            print("ALL PROMPTS", all_prompts)
+            completion_ids = [None] * len(all_prompts)
+            if self.accelerator.is_main_process:
+                print("GENERATING")
+                completion_ids = self.vllm_client.generate(
+                    prompts=all_prompts,
+                    n=group_size,
+                    repetition_penalty=self.repetition_penalty,
+                    temperature=self.temperature,
+                    top_p=self.top_p,
+                    top_k=-1 if self.top_k is None else self.top_k,
+                    min_p=0.0 if self.min_p is None else self.min_p,
+                    max_tokens=self.max_completion_length,
                 )
-                completion_id = self.actor.generate(
-                    **state,
-                    generation_config=self.generation_config,
-                )
-                completion_ids.append(completion_id[:, state["input_ids"].shape[1] :])
-        return completion_ids  # , action_masks
+                print("GENERATION COMPLETE")
+
+            completion_ids = broadcast_object_list(completion_ids, from_process=0)
+            process_slice = slice(
+                self.accelerator.process_index * len(prompts),
+                (self.accelerator.process_index + 1) * len(prompts),
+            )
+            completion_ids = completion_ids[process_slice]
+        return completion_ids, action_masks
 
     def learn(self, experiences: ExperiencesType) -> Tuple[float, float]:
         """Updates agent network parameters to learn from experiences.
@@ -291,8 +373,8 @@ class GRPO(LLMAlgorithm):
         """
         gc.collect()
         torch.cuda.empty_cache()
-        completion_ids, rewards = stack_and_pad_experiences(
-            *experiences, padding_values=[self.pad_token_id, None]
+        completion_ids, action_masks, rewards = stack_and_pad_experiences(
+            *experiences, padding_values=[self.pad_token_id, False, None]
         )
         advantages = self._calculate_advantage(rewards).to(self.device)
         with torch.no_grad():
@@ -306,7 +388,7 @@ class GRPO(LLMAlgorithm):
             )
         experiences = (
             completion_ids,
-            # action_masks,
+            action_masks,
             advantages,
             old_log_probs,
             reference_log_probs,
@@ -323,7 +405,7 @@ class GRPO(LLMAlgorithm):
                 ]
                 (
                     batch_ids,
-                    # batch_action_mask,
+                    batch_action_mask,
                     batch_advantages,
                     batch_old_log_probs,
                     batch_reference_log_probs,
@@ -332,7 +414,7 @@ class GRPO(LLMAlgorithm):
                     batch_ids, use_reference=False, eval_mode=False
                 )
                 loss, kl = self._grpo_loss(
-                    # batch_action_mask,
+                    batch_action_mask,
                     batch_log_probs,
                     batch_old_log_probs,
                     batch_reference_log_probs,
@@ -346,6 +428,63 @@ class GRPO(LLMAlgorithm):
         mean_loss /= len(completion_ids)
         mean_kl /= len(completion_ids)
         return mean_loss, mean_kl
+
+    def set_reference_policy(self, reference_update_tracker: int) -> None:
+        """Update the reference policy when the reference policy update tracker is greater than the current reference policy update tracker.
+
+        :param reference_update_tracker: The reference policy update tracker
+        :type reference_update_tracker: int
+        """
+        assert (
+            reference_update_tracker >= self.reference_update_tracker
+        ), "Reference policy update tracker should be greater than or equal to the current reference policy update tracker."
+        if reference_update_tracker > self.reference_update_tracker:
+
+            if self.accelerator is not None:
+                self.accelerator.wait_for_everyone()
+            # Merge adapter into base model
+            # Update the reference update tracker
+            if self.use_separate_reference_adapter:
+                # Activate both adapters
+                # Iterate over the parame
+                ref_param = None
+                actor_param = None
+                for name, param in self.actor.named_parameters():
+                    if "lora" in name:
+                        if "reference" in name:
+                            ref_param = param
+                        elif "actor" in name:
+                            actor_param = param
+                        else:
+                            raise ValueError(
+                                f"Only adapter names 'actor' and 'reference' are allowed, nether was found in {name}"
+                            )
+                    if ref_param is not None and actor_param is not None:
+                        ref_param.data.copy_(actor_param.data)
+                        ref_param = None
+                        actor_param = None
+            else:
+                if self.accelerator is not None:
+                    merged_base_model = self.accelerator.unwrap_model(
+                        self.actor
+                    ).merge_and_unload()
+                else:
+                    merged_base_model = self.actor.merge_and_unload()
+                self.actor = None  # De-reference the old actor base model
+                self.actor = get_peft_model(
+                    merged_base_model, self.lora_config, adapter_name="actor"
+                )
+                if self.accelerator is not None:
+                    self.accelerator.wait_for_everyone()
+                self.actor.set_adapter("actor")
+
+                # Reinit optimizer
+                optim_class = self._select_optim_class()
+                self.optimizer = OptimizerWrapper(
+                    optim_class, networks=[self.actor], lr=self.lr
+                )
+                self.wrap_models()
+            self.reference_update_tracker += 1
 
     def test(
         self,
@@ -365,7 +504,7 @@ class GRPO(LLMAlgorithm):
             prompts = env.reset()
             rewards = []
             for _ in range(loop):
-                completion_ids, _ = self.get_action(prompts, training=False)
+                completion_ids = self.get_action(prompts, training=False)
                 next_prompts, reward = env.step(completion_ids)
                 prompts = next_prompts
                 rewards.append(reward)
@@ -466,7 +605,7 @@ class GRPO(LLMAlgorithm):
 
     def _grpo_loss(
         self,
-        # mask: torch.Tensor,
+        mask: torch.Tensor,
         log_probs: torch.Tensor,
         old_log_probs: torch.Tensor,
         reference_log_probs: torch.Tensor,
@@ -495,11 +634,11 @@ class GRPO(LLMAlgorithm):
         surrogate = log_probs_ratio * advantages
         clipped_surrogate = clipped_log_probs_ratio * advantages
         loss = -torch.min(surrogate, clipped_surrogate) + self.beta * kl
-        # denominator = mask.sum(dim=-1)
-        # denominator = torch.where(
-        #     denominator > 0, denominator, torch.ones_like(denominator)
-        # )
-        # loss = (loss * mask).sum(dim=-1) / denominator
+        denominator = mask.sum(dim=-1)
+        denominator = torch.where(
+            denominator > 0, denominator, torch.ones_like(denominator)
+        )
+        loss = (loss * mask).sum(dim=-1) / denominator
         log_probs_ratio, clipped_log_probs_ratio, surrogate, clipped_surrogate = (
             None,
             None,
@@ -527,7 +666,6 @@ class GRPO(LLMAlgorithm):
 
         self.actor.train(mode=not eval_mode)
         attention_mask = ids != self.pad_token_id
-        print("ID SHAPE", ids.shape)
         model_kwargs = {
             "input_ids": ids,
             "attention_mask": attention_mask,
@@ -539,7 +677,6 @@ class GRPO(LLMAlgorithm):
             model_kwargs |= {"position_ids": position_ids}
 
         if self.reduce_memory_peak:
-
             log_probs_list = []
             for input_id, mask in zip(ids, attention_mask):
                 input_id = input_id.reshape(1, -1)
@@ -559,12 +696,6 @@ class GRPO(LLMAlgorithm):
             logits = self.actor.forward(**model_kwargs).logits
             logits /= self.temperature
             log_probs = selective_log_softmax(logits[:, :-1], ids[:, 1:])
-            # log_probs = (
-            #     F.log_softmax(logits[:, :-1], dim=-1)
-            #     .gather(dim=-1, index=ids[:, 1:].unsqueeze(-1))
-            #     .squeeze(-1)
-            # )
-
         self._use_policy()
         return log_probs
 
@@ -594,63 +725,6 @@ class GRPO(LLMAlgorithm):
             self.lr_scheduler.step()
             self.lr = self.lr_scheduler.get_last_lr()[0]
 
-    def set_reference_policy(self, reference_update_tracker: int) -> None:
-        """Update the reference policy when the reference policy update tracker is greater than the current reference policy update tracker.
-
-        :param reference_update_tracker: The reference policy update tracker
-        :type reference_update_tracker: int
-        """
-        assert (
-            reference_update_tracker >= self.reference_update_tracker
-        ), "Reference policy update tracker should be greater than or equal to the current reference policy update tracker."
-        if reference_update_tracker > self.reference_update_tracker:
-
-            if self.accelerator is not None:
-                self.accelerator.wait_for_everyone()
-            # Merge adapter into base model
-            # Update the reference update tracker
-            if self.use_separate_reference_adapter:
-                # Activate both adapters
-                # Iterate over the parame
-                ref_param = None
-                actor_param = None
-                for name, param in self.actor.named_parameters():
-                    if "lora" in name:
-                        if "reference" in name:
-                            ref_param = param
-                        elif "actor" in name:
-                            actor_param = param
-                        else:
-                            raise ValueError(
-                                f"Only adapter names 'actor' and 'reference' are allowed, nether was found in {name}"
-                            )
-                    if ref_param is not None and actor_param is not None:
-                        ref_param.data.copy_(actor_param.data)
-                        ref_param = None
-                        actor_param = None
-            else:
-                if self.accelerator is not None:
-                    merged_base_model = self.accelerator.unwrap_model(
-                        self.actor
-                    ).merge_and_unload()
-                else:
-                    merged_base_model = self.actor.merge_and_unload()
-                self.actor = None  # De-reference the old actor base model
-                self.actor = get_peft_model(
-                    merged_base_model, self.lora_config, adapter_name="actor"
-                )
-                if self.accelerator is not None:
-                    self.accelerator.wait_for_everyone()
-                self.actor.set_adapter("actor")
-
-                # Reinit optimizer
-                optim_class = self._select_optim_class()
-                self.optimizer = OptimizerWrapper(
-                    optim_class, networks=[self.actor], lr=self.lr
-                )
-                self.wrap_models()
-            self.reference_update_tracker += 1
-
     def _use_reference_policy(self) -> None:
         """Use the reference policy."""
         if self.use_separate_reference_adapter:
@@ -667,3 +741,26 @@ class GRPO(LLMAlgorithm):
             self.actor.set_adapter("actor")
         else:
             self.actor.base_model.enable_adapter_layers()
+
+    def _move_model_to_vllm(self) -> None:
+        """Move the model to the vllm server."""
+        if self.zero_stage == 3:
+            gather_if_zero3 = deepspeed.zero.GatheredParameters
+        else:
+            gather_if_zero3 = nullcontext
+        model_ref = self.accelerator.unwrap_model(self.actor)
+        model_ref.set_adapter("actor")
+        with gather_if_zero3(list(model_ref.parameters())):
+            model_ref.merge_adapter()
+            for name, param in model_ref.named_parameters():
+                name = name.removeprefix("base_model.model.").replace(".base_layer", "")
+                if model_ref.prefix in name:
+                    continue
+
+                if "original_module" in name:
+                    continue
+
+                self.vllm_client.update_named_param(name, param.data)
+            model_ref.unmerge_adapter()  # De-reference the old model
+            model_ref = None
+        self.vllm_client.reset_prefix_cache()

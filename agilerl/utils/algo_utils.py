@@ -1098,6 +1098,29 @@ class CosineLRScheduleConfig:
     warmup_proportion: float
 
 
+@dataclass
+class VLLMConfig:
+    """Data class to configure a VLLM client.
+
+    Note: has the same defaults as the VLLMClient class from trl library.
+
+    :param base_url: Base URL of the VLLM server, defaults to None
+    :type base_url: Optional[str], optional
+    :param host: Host of the VLLM server, defaults to "0.0.0.0"
+    :type host: str, optional
+    :param server_port: Server port of the VLLM server, defaults to 8000
+    :type server_port: int, optional
+    :param group_port: Group port of the VLLM server, defaults to 51216
+    :type group_port: int, optional
+    """
+
+    base_url: Optional[str] = None
+    host: str = "0.0.0.0"
+    server_port: int = 8000
+    group_port: int = 51216
+    connection_timeout: float = 0.0
+
+
 def create_warmup_cosine_scheduler(
     optimizer: torch.optim.Optimizer,
     config: CosineLRScheduleConfig,

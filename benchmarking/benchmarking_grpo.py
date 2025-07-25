@@ -13,6 +13,7 @@ from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_llm import finetune_llm
+from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
@@ -170,6 +171,7 @@ def main(init_hp, mut_p):
         apply_chat_template_fn=countdown_chat_template,
         data_batch_size_per_gpu=2,
         accelerator=accelerator,
+        return_raw_completions=init_hp.get("VLLM_CONFIG", None) is not None,
     )
 
     init_hp["PAD_TOKEN_ID"] = tokenizer.eos_token_id

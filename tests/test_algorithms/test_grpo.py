@@ -802,12 +802,10 @@ def test_get_action_grpo(grpo, accelerator, request, training, data_batch_size):
         }
         for _ in range(data_batch_size)
     ]
-    completion_ids, action_masks = grpo.get_action(states, training)
+    completion_ids = grpo.get_action(states, training)
     group_size = 1 if not training else group_size
     for ids in completion_ids:
-        assert ids.shape == (group_size, input_size + max_tokens)
-    for masks in action_masks:
-        assert masks.shape == (group_size, input_size + max_tokens - 1)
+        assert ids.shape == (group_size, max_tokens)
     if grpo.accelerator is None:
         assert not grpo.actor.training
     AcceleratorState._reset_state(True)
@@ -1109,11 +1107,8 @@ def test_grpo_loss(grpo, accelerator, request):
     reference_log_probs = normal_dist.log_prob(torch.randn(200)).reshape(10, -1)
     old_log_probs = normal_dist.log_prob(torch.randn(200)).reshape(10, -1)
     log_probs = normal_dist.log_prob(torch.randn(200)).reshape(10, -1)
-    mask = torch.ones_like(log_probs)
-    mask[:, -3:] = 0
-    mask = mask.to(torch.bool)
     loss, kl = grpo._grpo_loss(
-        mask, log_probs, old_log_probs, reference_log_probs, advantages
+        log_probs, old_log_probs, reference_log_probs, advantages
     )
     assert loss != 0
     assert kl != 0
@@ -1259,12 +1254,6 @@ def test_grpo_learn(grpo, accelerator, request, batch_size):
         )
         for _ in range(batch_size)
     ]
-    action_masks = [
-        torch.randint(
-            0, 2, (group_size, input_size + max_tokens - 1), device=grpo.device
-        )
-        for _ in range(batch_size)
-    ]
     rewards = torch.stack(
         [
             torch.tensor([0.1, 0.2, 0.3, 0.4, 0.5], dtype=torch.float32)
@@ -1278,7 +1267,7 @@ def test_grpo_learn(grpo, accelerator, request, batch_size):
         get_peft_model_state_dict(grpo.actor, adapter_name="actor")
     )
     pre_learn_actor_state_dict = copy.deepcopy(grpo.actor.state_dict())
-    mean_loss, mean_kl = grpo.learn((completions, action_masks, rewards))
+    mean_loss, mean_kl = grpo.learn((completions, rewards))
     assert isinstance(mean_loss, float)
     assert isinstance(mean_kl, float)
 
@@ -1489,12 +1478,6 @@ def test_grpo_value_error_with_nan_loss(grpo, accelerator, request, batch_size):
         )
         for _ in range(batch_size)
     ]
-    action_masks = [
-        torch.randint(
-            0, 2, (group_size, input_size + max_tokens - 1), device=grpo.device
-        ).bool()
-        for _ in range(batch_size)
-    ]
     rewards = torch.stack([torch.ones(group_size) for _ in range(batch_size)], dim=0)
 
     def mock_grpo_loss(*args, **kwargs):
@@ -1503,7 +1486,7 @@ def test_grpo_value_error_with_nan_loss(grpo, accelerator, request, batch_size):
     with patch.object(grpo, "_grpo_loss", side_effect=mock_grpo_loss), pytest.raises(
         ValueError
     ):
-        mean_loss, mean_kl = grpo.learn((completions, action_masks, rewards))
+        grpo.learn((completions, rewards))
 
 
 def test_grpo_load():
@@ -2644,11 +2627,9 @@ def test_init_grpo_multiple_adapters(accelerator, request):
         test_state = {"input_ids": test_input, "attention_mask": test_attention_mask}
 
         # Test get_action
-        completion_ids, action_masks = grpo.get_action([test_state], training=True)
+        completion_ids = grpo.get_action([test_state], training=True)
         assert isinstance(completion_ids, list)
-        assert isinstance(action_masks, list)
         assert len(completion_ids) == 1
-        assert len(action_masks) == 1
 
         # Clean up
         gc.collect()
