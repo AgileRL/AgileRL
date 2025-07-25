@@ -144,6 +144,9 @@ def get_checkpoint_dict(
         attribute_dict.pop("actor", None)
         return attribute_dict
 
+    if "rollout_buffer" in attribute_dict:
+        attribute_dict.pop("rollout_buffer")
+
     # Get checkpoint dictionaries for evolvable modules and optimizers
     network_info: Dict[str, Dict[str, Any]] = {"modules": {}, "optimizers": {}}
     for attr in agent.evolvable_attributes():
