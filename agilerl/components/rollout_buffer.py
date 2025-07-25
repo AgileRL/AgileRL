@@ -1,34 +1,15 @@
 import random  # Added to support random sequence sampling for BPTT
 import warnings
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
 from gymnasium import spaces
-from tensordict import TensorDict  # Add import
+from tensordict import TensorDict
 
-from agilerl.typing import ArrayOrTensor, ObservationType
-
-
-# Define the utility function locally to avoid circular import
-def convert_np_to_torch_dtype(np_dtype):
-    """Converts a numpy dtype to a torch dtype."""
-    if np_dtype == np.float32:
-        return torch.float32
-    elif np_dtype == np.float64:
-        return torch.float64
-    elif np_dtype == np.int32:
-        return torch.int32
-    elif np_dtype == np.int64:
-        return torch.int64
-    elif np_dtype == np.uint8:
-        return torch.uint8
-    elif np_dtype == np.bool_:
-        return torch.bool
-    else:
-        # Fallback or raise error for unhandled dtypes
-        warnings.warn(f"Unhandled numpy dtype {np_dtype}, defaulting to torch.float32")
-        return torch.float32
+from agilerl.typing import ArrayOrTensor, ObservationType, TorchObsType
+from agilerl.utils.algo_utils import get_num_actions, get_obs_shape, maybe_add_batch_dim
 
 
 class RolloutBuffer:
@@ -97,69 +78,39 @@ class RolloutBuffer:
         self.full = False
         self._initialize_buffers()
 
+    def _maybe_reshape_obs(
+        self, obs: TorchObsType, space: spaces.Space
+    ) -> TorchObsType:
+        """Reshape observation to the correct shape.
+
+        :param obs: Observation to reshape.
+        :type obs: TorchObsType
+        :param space: Observation space.
+        :type space: spaces.Space
+        :return: Reshaped observation.
+        :rtype: TorchObsType
+        """
+        if isinstance(space, spaces.Discrete) and obs.ndim < 2:
+            obs = obs.unsqueeze(-1)
+
+        return maybe_add_batch_dim(obs, space)
+
     def _initialize_buffers(self) -> None:
         """Initialize buffer arrays with correct shapes for vectorized environments."""
         # Determine shapes and dtypes for all expected fields
-        if isinstance(self.observation_space, spaces.Discrete):
-            obs_shape = (1,)
-        elif isinstance(self.observation_space, spaces.MultiDiscrete):
-            obs_shape = (len(self.observation_space.nvec),)
-        elif isinstance(self.observation_space, spaces.Box):
-            obs_shape = self.observation_space.shape
-        elif isinstance(self.observation_space, spaces.Dict):
-            # For Dict observation spaces, we'll create a nested structure
-            # The observations will be stored as nested TensorDicts
-            obs_shape = None  # Will be handled as nested TensorDict
-        elif isinstance(self.observation_space, spaces.Tuple):
-            # For Tuple, we'll flatten or handle as multiple entries
-            # For now, let's assume we'll pre-allocate based on flattened structure
-            obs_shape = ()  # Placeholder, will be determined by actual data
-        else:
-            obs_shape = self.observation_space.shape
-
-        if isinstance(self.action_space, spaces.Discrete):
-            action_shape = ()
-            action_dtype = torch.int64
-        elif isinstance(self.action_space, spaces.Box):
-            action_shape = self.action_space.shape
-            action_dtype = convert_np_to_torch_dtype(
-                self.action_space.dtype
-            )  # Convert numpy dtype to torch dtype
-        elif isinstance(self.action_space, spaces.MultiDiscrete):
-            action_shape = (len(self.action_space.nvec),)
-            action_dtype = torch.int64
-        elif isinstance(self.action_space, spaces.MultiBinary):
-            action_shape = (self.action_space.n,)
-            action_dtype = torch.int64
-        else:
-            try:
-                action_shape = self.action_space.shape
-                action_dtype = convert_np_to_torch_dtype(
-                    getattr(self.action_space, "dtype", np.float32)
-                )  # Convert numpy dtype to torch dtype
-            except AttributeError:
-                raise TypeError(
-                    f"Unsupported action space type without shape: {type(self.action_space)}"
-                )
+        obs_shape = get_obs_shape(self.observation_space)
+        num_actions = get_num_actions(self.action_space)
 
         # Create a source TensorDict with appropriately sized tensors
         # The tensors will be on the CPU by default, can be moved to device later if needed.
-        source_dict = {}
-
-        # Handle observations based on space type
-        if isinstance(self.observation_space, spaces.Dict):
-            # For Dict spaces, create nested structure
-            obs_dict = {}
-            for key, subspace in self.observation_space.spaces.items():
-                if isinstance(subspace, spaces.Discrete):
-                    sub_shape = (1,)
-                elif isinstance(subspace, spaces.Box):
-                    sub_shape = subspace.shape
-                else:
-                    sub_shape = subspace.shape if hasattr(subspace, "shape") else ()
-
+        source_dict = OrderedDict()
+        if isinstance(
+            self.observation_space, spaces.Dict
+        ):  # Nested structure for Dict spaces
+            obs_dict = OrderedDict()
+            for key, shape in obs_shape.items():
                 obs_dict[key] = torch.zeros(
-                    (self.capacity, self.num_envs, *sub_shape), dtype=torch.float32
+                    (self.capacity, self.num_envs, *shape), dtype=torch.float32
                 )
 
             source_dict["observations"] = obs_dict
@@ -179,7 +130,7 @@ class RolloutBuffer:
         source_dict.update(
             {
                 "actions": torch.zeros(
-                    (self.capacity, self.num_envs, *action_shape), dtype=action_dtype
+                    (self.capacity, self.num_envs, num_actions), dtype=torch.float32
                 ),
                 "rewards": torch.zeros(
                     (self.capacity, self.num_envs), dtype=torch.float32
@@ -283,44 +234,27 @@ class RolloutBuffer:
                 )
 
         # Prepare data as a dictionary of tensors for the current time step
-        current_step_data = {}
+        current_step_data = OrderedDict()
 
         # Convert inputs to tensors and ensure correct device (CPU for buffer storage)
         # Also ensure they have the (num_envs, ...) shape
-
-        # Observations
-        if isinstance(obs, dict):  # Dict observation space
-            obs_dict = {}
+        if isinstance(self.observation_space, spaces.Dict):
+            obs_dict = OrderedDict()
             for key, item in obs.items():
+                sub_space = self.observation_space.spaces[key]
                 obs_tensor = torch.as_tensor(item, device="cpu")
-                if self.num_envs == 1 and obs_tensor.ndim == 0:
-                    obs_tensor = obs_tensor.unsqueeze(0)
-                elif (
-                    self.num_envs == 1
-                    and len(obs_tensor.shape)
-                    < len(self.observation_space.spaces[key].shape) + 1
-                ):
-                    obs_tensor = obs_tensor.unsqueeze(0)
-
-                obs_dict[key] = obs_tensor
+                obs_dict[key] = self._maybe_reshape_obs(obs_tensor, sub_space)
 
             current_step_data["observations"] = obs_dict
         else:
             obs_tensor = torch.as_tensor(obs, device="cpu")
-            if (
-                self.num_envs == 1
-                and obs_tensor.ndim < len(self.observation_space.shape) + 1
-            ):  # Add batch dim for single env
-                obs_tensor = obs_tensor.unsqueeze(0)
-
-            current_step_data["observations"] = obs_tensor
+            current_step_data["observations"] = self._maybe_reshape_obs(
+                obs_tensor, self.observation_space
+            )
 
         # Actions
         action_tensor = torch.as_tensor(action, device="cpu")
-        if self.num_envs == 1 and action_tensor.ndim < len(self.action_space.shape) + 1:
-            action_tensor = action_tensor.unsqueeze(0)
-
-        current_step_data["actions"] = action_tensor
+        current_step_data["actions"] = action_tensor.reshape(self.num_envs, -1)
 
         # Rewards
         reward_tensor = torch.as_tensor(reward, dtype=torch.float32, device="cpu")
@@ -340,28 +274,21 @@ class RolloutBuffer:
 
         # Next Observations
         if next_obs is not None:
-            if isinstance(next_obs, dict):  # Dict observation space
-                next_obs_dict = {}
+            if isinstance(self.observation_space, spaces.Dict):
+                next_obs_dict = OrderedDict()
                 for key, item in next_obs.items():
+                    sub_space = self.observation_space.spaces[key]
                     next_obs_tensor = torch.as_tensor(item, device="cpu")
-                    if self.num_envs == 1 and next_obs_tensor.ndim == 0:
-                        next_obs_tensor = next_obs_tensor.unsqueeze(0)
-                    elif (
-                        self.num_envs == 1
-                        and len(next_obs_tensor.shape)
-                        < len(self.observation_space.spaces[key].shape) + 1
-                    ):
-                        next_obs_tensor = next_obs_tensor.unsqueeze(0)
-                    next_obs_dict[key] = next_obs_tensor
+                    next_obs_dict[key] = self._maybe_reshape_obs(
+                        next_obs_tensor, sub_space
+                    )
+
                 current_step_data["next_observations"] = next_obs_dict
             else:
                 next_obs_tensor = torch.as_tensor(next_obs, device="cpu")
-                if (
-                    self.num_envs == 1
-                    and next_obs_tensor.ndim < len(self.observation_space.shape) + 1
-                ):  # Add batch dim
-                    next_obs_tensor = next_obs_tensor.unsqueeze(0)
-                current_step_data["next_observations"] = next_obs_tensor
+                current_step_data["next_observations"] = self._maybe_reshape_obs(
+                    next_obs_tensor, self.observation_space
+                )
 
         # Episode Starts
         if episode_start is not None:

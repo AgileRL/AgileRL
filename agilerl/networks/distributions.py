@@ -7,6 +7,7 @@ from torch.distributions import Bernoulli, Categorical, Distribution, Normal
 
 from agilerl.modules.base import EvolvableModule, EvolvableWrapper
 from agilerl.typing import ArrayOrTensor, DeviceType, NetConfigType
+from agilerl.utils.evolvable_networks import get_output_size_from_space
 
 DistributionType = Union[Distribution, List[Distribution]]
 
@@ -328,7 +329,7 @@ class EvolvableDistribution(EvolvableWrapper):
         super().__init__(network)
 
         self.action_space = action_space
-        self.action_dim = spaces.flatdim(action_space)
+        self.action_dim = get_output_size_from_space(action_space)
         self.action_std_init = action_std_init
         self.device = device
         self.squash_output = squash_output and isinstance(action_space, spaces.Box)

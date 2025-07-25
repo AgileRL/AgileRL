@@ -42,6 +42,7 @@ from agilerl.typing import (
     SupportedObsSpaces,
     TorchObsType,
 )
+from agilerl.utils.evolvable_networks import get_input_size_from_space
 
 PreTrainedModelType = Union[PeftModel, PreTrainedModel]
 
@@ -78,13 +79,10 @@ def get_hidden_states_shape_from_model(model: nn.Module) -> Dict[str, int]:
 
     :param model: The model to get the hidden states from.
     :type model: nn.Module
-    :param x: The input to the model.
-    :type x: TorchObsType
     :return: The hidden states shape from the model.
-    :rtype: torch.Tensor
+    :rtype: Dict[str, int]
     """
     hidden_state_architecture = {}
-
     for name, module in model.named_modules():
         if hasattr(module, "hidden_state_architecture"):
             hidden_state_architecture.update(
@@ -108,6 +106,52 @@ def is_image_space(space: spaces.Space) -> bool:
     :rtype: bool
     """
     return isinstance(space, spaces.Box) and len(space.shape) == 3
+
+
+def get_obs_shape(space: spaces.Space) -> Tuple[int, ...] | Dict[str, Tuple[int, ...]]:
+    """Returns the shape of the observation space.
+
+    :param space: Observation space
+    :type space: spaces.Space
+    :return: Shape of the observation space
+    :rtype: Tuple[int, ...] | Dict[str, Tuple[int, ...]]
+    """
+    if isinstance(space, spaces.Box):
+        return space.shape
+    elif isinstance(space, spaces.Discrete):
+        return (1,)
+    elif isinstance(space, spaces.MultiDiscrete):
+        return (len(space.nvec),)
+    elif isinstance(space, spaces.MultiBinary):
+        return space.shape
+    elif isinstance(space, spaces.Dict):
+        return {
+            key: get_obs_shape(subspace) for (key, subspace) in space.spaces.items()
+        }
+    elif isinstance(space, spaces.Tuple):
+        return tuple(get_obs_shape(subspace) for subspace in space)
+    else:
+        raise NotImplementedError(f"{space} observation space is not supported")
+
+
+def get_num_actions(space: spaces.Space) -> int:
+    """Returns the number of actions.
+
+    :param space: Action space
+    :type space: spaces.Space
+    :return: Number of actions
+    :rtype: int
+    """
+    if isinstance(space, spaces.Box):
+        return spaces.flatdim(space)
+    elif isinstance(space, spaces.Discrete):
+        return 1
+    elif isinstance(space, spaces.MultiDiscrete):
+        return len(space.nvec)
+    elif isinstance(space, spaces.MultiBinary):
+        return space.n
+    else:
+        raise NotImplementedError(f"{space} action space is not supported by AgileRL.")
 
 
 def make_safe_deepcopies(
@@ -521,36 +565,6 @@ def obs_to_tensor(
         raise Exception(f"Unrecognized type of observation {type(obs)}")
 
 
-def maybe_add_batch_dim(
-    obs: ObservationType, space_shape: Tuple[int, ...]
-) -> ObservationType:
-    """Adds batch dimension if necessary.
-
-    :param obs: Observation tensor
-    :type obs: ObservationType
-    :param space_shape: Observation space shape
-    :type space_shape: Tuple[int, ...]
-    :return: Observation tensor with batch dimension
-    :rtype: ObservationType
-    """
-    if len(obs.shape) == len(space_shape):
-        if isinstance(obs, np.ndarray):
-            obs = np.expand_dims(obs, 0)
-        else:
-            obs = obs.unsqueeze(0)
-    elif len(obs.shape) == len(space_shape) + 2:
-        if isinstance(obs, np.ndarray):
-            obs = obs.reshape(-1, *space_shape)
-        else:
-            obs = obs.view(-1, *space_shape)
-    elif len(obs.shape) != len(space_shape) + 1:
-        raise ValueError(
-            f"Expected observation to have {len(space_shape) + 1} dimensions, got {len(obs.shape)}."
-        )
-
-    return obs
-
-
 def get_vect_dim(observation: NumpyObsType, observation_space: spaces.Space) -> int:
     """Returns the number of vectorized environments given an observation and
     its corresponding space.
@@ -585,6 +599,50 @@ def get_vect_dim(observation: NumpyObsType, observation_space: spaces.Space) -> 
         )
         array_shape = observation.shape
         return array_shape[0] if len(array_shape) > len(observation_space.shape) else 1
+
+
+@singledispatch
+def maybe_add_batch_dim(obs: ObservationType, space: spaces.Space) -> ObservationType:
+    """Adds batch dimension if necessary.
+
+    :param obs: Observation tensor
+    :type obs: ObservationType
+    :param space: Observation space
+    :type space: spaces.Space
+    :return: Observation tensor with batch dimension
+    :rtype: ObservationType
+    """
+    raise TypeError(f"Cannot add batch dimension for {type(obs)} observations.")
+
+
+@maybe_add_batch_dim.register(np.ndarray)
+def maybe_add_batch_dim_np(obs: np.ndarray, space: spaces.Space) -> np.ndarray:
+    space_shape = get_input_size_from_space(space)
+    if len(obs.shape) == len(space_shape):
+        obs = np.expand_dims(obs, 0)
+    elif len(obs.shape) == len(space_shape) + 2:
+        obs = obs.reshape(-1, *space_shape)
+    elif len(obs.shape) != len(space_shape) + 1:
+        raise ValueError(
+            f"Expected observation to have {len(space_shape) + 1} dimensions, got {len(obs.shape)}."
+        )
+
+    return obs
+
+
+@maybe_add_batch_dim.register(torch.Tensor)
+def maybe_add_batch_dim_torch(obs: torch.Tensor, space: spaces.Space) -> torch.Tensor:
+    space_shape = get_input_size_from_space(space)
+    if obs.ndim == len(space_shape):
+        obs = obs.unsqueeze(0)
+    elif obs.ndim == len(space_shape) + 2:
+        obs = obs.view(-1, *space_shape)
+    elif obs.ndim != len(space_shape) + 1:
+        raise ValueError(
+            f"Expected observation to have {len(space_shape) + 1} dimensions, got {len(obs.shape)}."
+        )
+
+    return obs
 
 
 @singledispatch
@@ -637,7 +695,7 @@ def preprocess_dict_observation(
         observation, (dict, TensorDict)
     ), f"Expected dict, got {type(observation)}"
 
-    preprocessed_obs = {}
+    preprocessed_obs = OrderedDict()
     for key, _obs in observation.items():
         preprocessed_obs[key] = preprocess_observation(
             observation_space[key],
@@ -669,11 +727,13 @@ def preprocess_tuple_observation(
     """
     if isinstance(observation, TensorDict):
         # Convert to tuple with values ordered by index at the end of key
-        dict_keys = list(observation.keys())
+        dict_keys: List[str] = list(observation.keys())
         dict_keys.sort(key=lambda x: int(x.split("_")[-1]))
         observation = tuple(observation[key] for key in dict_keys)
 
-    assert isinstance(observation, tuple), f"Expected tuple, got {type(observation)}"
+    assert isinstance(
+        observation, tuple
+    ), f"Expected tuple observation, got {type(observation)}"
 
     return tuple(
         preprocess_observation(
@@ -690,7 +750,7 @@ def preprocess_tuple_observation(
 @preprocess_observation.register(spaces.Box)
 def preprocess_box_observation(
     observation_space: spaces.Box,
-    observation: NumpyObsType,
+    observation: np.ndarray | torch.Tensor,
     device: Union[str, torch.device] = "cpu",
     normalize_images: bool = True,
     placeholder_value: Optional[Any] = None,
@@ -719,10 +779,8 @@ def preprocess_box_observation(
     if len(observation_space.shape) == 3 and normalize_images:
         observation = apply_image_normalization(observation, observation_space)
 
-    space_shape = observation_space.shape
-
     # Check add batch dimension if necessary
-    observation = maybe_add_batch_dim(observation, space_shape)
+    observation = maybe_add_batch_dim(observation, observation_space)
 
     return observation
 
@@ -730,7 +788,7 @@ def preprocess_box_observation(
 @preprocess_observation.register(spaces.Discrete)
 def preprocess_discrete_observation(
     observation_space: spaces.Discrete,
-    observation: NumpyObsType,
+    observation: np.ndarray | torch.Tensor,
     device: Union[str, torch.device] = "cpu",
     normalize_images: bool = True,
     placeholder_value: Optional[Any] = None,
@@ -763,10 +821,8 @@ def preprocess_discrete_observation(
     if observation_space.n > 1:
         observation = observation.squeeze()  # If n == 1 then squeeze removes obs dim
 
-    space_shape = (observation_space.n,)
-
     # Check add batch dimension if necessary
-    observation = maybe_add_batch_dim(observation, space_shape)
+    observation = maybe_add_batch_dim(observation, observation_space)
 
     return observation
 
@@ -774,7 +830,7 @@ def preprocess_discrete_observation(
 @preprocess_observation.register(spaces.MultiDiscrete)
 def preprocess_multidiscrete_observation(
     observation_space: spaces.MultiDiscrete,
-    observation: NumpyObsType,
+    observation: np.ndarray | torch.Tensor,
     device: Union[str, torch.device] = "cpu",
     normalize_images: bool = True,
     placeholder_value: Optional[Any] = None,
@@ -799,10 +855,6 @@ def preprocess_multidiscrete_observation(
             observation,
         ).to(torch.float32)
 
-    # Need to add batch dimension prior to splitting
-    space_shape = (sum(observation_space.nvec),)
-    observation: torch.Tensor = maybe_add_batch_dim(observation, space_shape)
-
     # Tensor concatenation of one hot encodings of each Categorical sub-space
     observation = torch.cat(
         [
@@ -812,8 +864,8 @@ def preprocess_multidiscrete_observation(
         dim=-1,
     )
 
-    # Check add batch dimension if necessary
-    observation = maybe_add_batch_dim(observation, space_shape)
+    # Need to add batch dimension prior to splitting
+    observation = maybe_add_batch_dim(observation, observation_space)
 
     return observation
 
@@ -821,7 +873,7 @@ def preprocess_multidiscrete_observation(
 @preprocess_observation.register(spaces.MultiBinary)
 def preprocess_multibinary_observation(
     observation_space: spaces.MultiBinary,
-    observation: NumpyObsType,
+    observation: np.ndarray | torch.Tensor,
     device: Union[str, torch.device] = "cpu",
     normalize_images: bool = True,
     placeholder_value: Optional[Any] = None,
@@ -847,10 +899,9 @@ def preprocess_multibinary_observation(
         ).to(torch.float32)
 
     observation = observation.float()
-    space_shape = (observation_space.n,)
 
     # Check add batch dimension if necessary
-    observation = maybe_add_batch_dim(observation, space_shape)
+    observation = maybe_add_batch_dim(observation, observation_space)
 
     return observation
 
