@@ -464,6 +464,7 @@ class PPO(RLAlgorithm):
         self,
         obs: ArrayOrTensor,
         actions: ArrayOrTensor,
+        hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Evaluates the actions.
 
@@ -471,13 +472,17 @@ class PPO(RLAlgorithm):
         :type obs: ArrayOrTensor
         :param actions: Actions to evaluate
         :type actions: ArrayOrTensor
+        :param hidden_state: Hidden state for recurrent policies, defaults to None. Expected shape: dict with tensors of shape (batch_size, 1, hidden_size).
+        :type hidden_state: Optional[Dict[str, ArrayOrTensor]]
         :return: Log probability, entropy, and state values
         :rtype: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         """
         obs = self.preprocess_observation(obs)
 
         # Get values from actor-critic
-        _, _, entropy, values, _ = self._get_action_and_values(obs, sample=False)
+        _, _, entropy, values, _ = self._get_action_and_values(
+            obs, hidden_state=hidden_state, sample=False
+        )
 
         log_prob = self.actor.action_log_prob(actions)
 
