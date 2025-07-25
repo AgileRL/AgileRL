@@ -480,7 +480,9 @@ class PPO(RLAlgorithm):
         obs = self.preprocess_observation(obs)
 
         # Get values from actor-critic
-        _, _, entropy, values, _ = self._get_action_and_values(obs, hidden_state=hidden_state, sample=False)
+        _, _, entropy, values, _ = self._get_action_and_values(
+            obs, hidden_state=hidden_state, sample=False
+        )
 
         log_prob = self.actor.action_log_prob(actions)
 
