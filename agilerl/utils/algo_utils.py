@@ -178,7 +178,8 @@ def unwrap_optimizer(
 
 
 def recursive_check_module_attrs(obj: Any, networks_only: bool = False) -> bool:
-    """Recursively check if the object has any attributes that are EvolvableModule objects or Optimizer's.
+    """Recursively check if the object has any attributes that are EvolvableModule objects or Optimizer's,
+    excluding metaclasses.
 
     :param obj: The object to check for EvolvableModule objects or Optimizer's.
     :type obj: Any
@@ -191,6 +192,10 @@ def recursive_check_module_attrs(obj: Any, networks_only: bool = False) -> bool:
     check_types = (OptimizedModule, EvolvableModule)
     if not networks_only:
         check_types += (OptimizerWrapper,)
+
+    # Exclude metaclasses
+    if isinstance(obj, type):
+        return False
 
     if isinstance(obj, check_types):
         return True
