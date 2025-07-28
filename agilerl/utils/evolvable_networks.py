@@ -669,8 +669,31 @@ def create_resnet(
     scale_factor: int = 4,
     device: str = "cpu",
     name: str = "resnet",
-):
-    """Creates a number of residual blocks for image-based inputs."""
+) -> Dict[str, nn.Module]:
+    """Creates a number of residual blocks for image-based inputs.
+
+    Paper: https://arxiv.org/abs/1512.03385.
+
+    :param input_channels: Number of input channels.
+    :type input_channels: int
+    :param channel_size: Number of output channels.
+    :type channel_size: int
+    :param kernel_size: Kernel size of the convolutional layer.
+    :type kernel_size: int
+    :param stride_size: Stride size of the convolutional layer.
+    :type stride_size: int
+    :param num_blocks: Number of residual blocks.
+    :type num_blocks: int
+    :param scale_factor: Scale factor for the hidden layer.
+    :type scale_factor: int, optional
+    :param device: Device to use. Defaults to "cpu".
+    :type device: DeviceType, optional
+    :param name: Name of the network.
+    :type name: str, default "resnet"
+
+    :return: Residual block.
+    :rtype: nn.Sequential
+    """
     net_dict = OrderedDict()
 
     # Initial convolutional layer
