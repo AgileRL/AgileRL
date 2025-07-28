@@ -308,6 +308,8 @@ class DummyMARLAlgorithm(MultiAgentRLAlgorithm):
         elif self.torch_compiler:
             self.recompile()
 
+        self.rollout_buffer = "dummy"
+
     def get_action(self, *args, **kwargs):
         return
 

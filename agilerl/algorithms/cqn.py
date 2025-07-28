@@ -196,7 +196,6 @@ class CQN(RLAlgorithm):
                     ),
                     axis=1,
                 )
-
         else:
             self.actor.eval()
             with torch.no_grad():

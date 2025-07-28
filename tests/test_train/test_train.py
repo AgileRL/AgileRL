@@ -278,6 +278,7 @@ class DummyMultiAgent(DummyAgentOffPolicy):
         self.lr = 0.01
         self.num_envs = 1
         self.on_policy = on_policy
+        self.torch_compiler = None
         self.actors = {
             "agent_0": MagicMock(),
             "other_agent_0": MagicMock(),
@@ -778,6 +779,7 @@ def mocked_multi_agent(multi_env, algo):
     mock_agent.scores = []
     mock_agent.steps = [0]
     mock_agent.fitness = []
+    mock_agent.torch_compiler = None
     mock_agent.mut = "mutation"
     mock_agent.index = 1
     mock_agent.possible_action_spaces = Dict(

@@ -12,7 +12,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules import EvolvableMLP
 from agilerl.training.train_multi_agent_off_policy import train_multi_agent_off_policy
-from agilerl.utils.evolvable_networks import (
+from agilerl.utils.algo_utils import (
     get_input_size_from_space,
     get_output_size_from_space,
 )

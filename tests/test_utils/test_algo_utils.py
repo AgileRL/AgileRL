@@ -8,11 +8,11 @@ import numpy as np
 import pytest
 import torch
 import torch.nn as nn
-from accelerate import Accelerator
 from gymnasium import spaces
 from torch.optim.lr_scheduler import SequentialLR
 
-from agilerl.protocols import EvolvableNetwork
+from agilerl.modules import EvolvableModule
+from agilerl.networks import EvolvableNetwork
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     apply_image_normalization,
@@ -36,39 +36,7 @@ from agilerl.utils.algo_utils import (
     share_encoder_parameters,
     stack_and_pad_experiences,
     stack_experiences,
-    unwrap_optimizer,
 )
-
-
-@pytest.mark.parametrize("distributed", [(True), (False)])
-def test_algo_utils_single_net(distributed):
-    simple_net = nn.Sequential(nn.Linear(2, 3), nn.ReLU())
-    lr = 0.01
-    optimizer = torch.optim.Adam(simple_net.parameters(), lr=lr)
-    if distributed:
-        accelerator = Accelerator(device_placement=False)
-        optimizer = accelerator.prepare(optimizer)
-    else:
-        accelerator = None
-
-    unwrapped_optimizer = unwrap_optimizer(optimizer, simple_net, lr)
-    assert isinstance(unwrapped_optimizer, torch.optim.Adam)
-
-
-def test_algo_utils_multi_nets():
-    simple_net = nn.Sequential(nn.Linear(2, 3), nn.ReLU())
-    simple_net_two = nn.Sequential(nn.Linear(4, 3), nn.ReLU())
-    lr = 0.01
-    optimizer = torch.optim.Adam(
-        [
-            {"params": simple_net.parameters(), "lr": lr},
-            {"params": simple_net_two.parameters(), "lr": lr},
-        ]
-    )
-    accelerator = Accelerator(device_placement=False)
-    optimizer = accelerator.prepare(optimizer)
-    unwrapped_optimizer = unwrap_optimizer(optimizer, [simple_net, simple_net_two], lr)
-    assert isinstance(unwrapped_optimizer, torch.optim.Adam)
 
 
 def test_stack_and_pad_experiences_with_padding():
@@ -87,54 +55,10 @@ def test_stack_and_pad_experiences_with_padding():
         stacked_tensor,
         torch.tensor(
             [
-                [
-                    1,
-                    2,
-                    3,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                ],
-                [
-                    4,
-                    5,
-                    6,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                ],
-                [
-                    8,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                ],
-                [
-                    1,
-                    2,
-                    3,
-                    4,
-                    5,
-                    6,
-                    7,
-                    8,
-                    9,
-                    10,
-                ],
+                [1, 2, 3, 0, 0, 0, 0, 0, 0, 0],
+                [4, 5, 6, 0, 0, 0, 0, 0, 0, 0],
+                [8, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
             ]
         ),
     )
@@ -340,35 +264,36 @@ def test_obs_to_tensor():
 def test_maybe_add_batch_dim():
     # Test adding batch dim to unbatched observation
     obs = torch.ones((10,))
-    space_shape = (10,)
-    batched_obs = maybe_add_batch_dim(obs, space_shape)
+    space = spaces.Box(low=0, high=1, shape=(10,))
+    batched_obs = maybe_add_batch_dim(obs, space)
     assert batched_obs.shape == (1, 10)
 
     # Test not adding batch dim to already batched observation
     obs = torch.ones((5, 10))
-    space_shape = (10,)
-    batched_obs = maybe_add_batch_dim(obs, space_shape)
+    space = spaces.Box(low=0, high=1, shape=(10,))
+    batched_obs = maybe_add_batch_dim(obs, space)
     assert batched_obs.shape == (5, 10)
 
     # Test with larger multi-dimensional observation
     obs = torch.ones((5, 3, 84, 84))
-    space_shape = (3, 84, 84)
-    batched_obs = maybe_add_batch_dim(obs, space_shape)
+    space = spaces.Box(low=0, high=1, shape=(3, 84, 84))
+    batched_obs = maybe_add_batch_dim(obs, space)
     assert batched_obs.shape == (5, 3, 84, 84)
 
     # After examining the code, the maybe_add_batch_dim function may handle
     # higher dimensions in a different way than expected originally.
     # Let's just check that it returns a tensor without raising an error
     obs = torch.ones((5, 5, 3, 84, 84))
-    space_shape = (3, 84, 84)
-    batched_obs = maybe_add_batch_dim(obs, space_shape)
+    space = spaces.Box(low=0, high=1, shape=(3, 84, 84))
+    batched_obs = maybe_add_batch_dim(obs, space)
     assert isinstance(batched_obs, torch.Tensor)
 
 
 # Create a custom evolvable module class for testing
-class TestEvolvableModule(nn.Module, EvolvableNetwork):
+class TestEvolvableModule(EvolvableNetwork):
     def __init__(self):
-        super().__init__()
+        test_space = spaces.Box(low=0, high=1, shape=(10,))
+        super().__init__(test_space)
         self.layer = nn.Linear(10, 10)
         self.device = "cpu"
 
@@ -396,18 +321,15 @@ def test_recursive_check_module_attrs():
 
     # The function has complex logic that depends on many aspects
     # Use mocking to make the test pass
-    with patch("agilerl.utils.algo_utils.isinstance", return_value=True):
-        assert recursive_check_module_attrs(module, networks_only=True)
+    assert recursive_check_module_attrs(module, networks_only=True)
 
     # Test with dict containing module
     dict_with_module = {"module": module}
-    with patch("agilerl.utils.algo_utils.isinstance", return_value=True):
-        assert recursive_check_module_attrs(dict_with_module, networks_only=True)
+    assert recursive_check_module_attrs(dict_with_module, networks_only=True)
 
     # Test with list containing module
     list_with_module = [module]
-    with patch("agilerl.utils.algo_utils.isinstance", return_value=True):
-        assert recursive_check_module_attrs(list_with_module, networks_only=True)
+    assert recursive_check_module_attrs(list_with_module, networks_only=True)
 
     # Test with non-module structure
     non_module = {"a": 1, "b": 2}
@@ -499,9 +421,9 @@ def test_is_vectorized_experiences():
 
 
 # Create a mock EvolvableNetwork class with an encoder module
-class MockEncoder(nn.Module):
+class MockEncoder(EvolvableModule):
     def __init__(self):
-        super().__init__()
+        super().__init__(device="cpu")
         self.linear = nn.Linear(
             10, 10
         )  # Use consistent attribute name 'linear' instead of 'layer'
@@ -513,14 +435,15 @@ class MockEncoder(nn.Module):
         pass
 
 
-class MockEvolvableNetwork(nn.Module, EvolvableNetwork):
+class MockEvolvableNetwork(EvolvableNetwork):
     def __init__(self):
-        super().__init__()
-        self.encoder = MockEncoder()
+        test_space = spaces.Box(low=0, high=1, shape=(10,))
+        super().__init__(test_space, latent_dim=10)
+        self.head_net = nn.Linear(10, 10)
         self.device = "cpu"
 
     def forward(self, x):
-        return self.encoder(x)
+        return self.head_net(self.encoder(x))
 
     def cpu(self):
         self.device = "cpu"

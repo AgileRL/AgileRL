@@ -13,7 +13,7 @@ from agilerl.modules.mlp import EvolvableMLP
 from agilerl.training.train_multi_agent_off_policy import train_multi_agent_off_policy
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_on_policy import train_on_policy
-from agilerl.utils.evolvable_networks import (
+from agilerl.utils.algo_utils import (
     get_input_size_from_space,
     get_output_size_from_space,
 )
