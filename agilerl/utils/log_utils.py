@@ -1,10 +1,9 @@
 import json
 
 import torch
+import wandb
 from accelerate import Accelerator
 from flatten_dict import flatten, unflatten
-
-import wandb
 
 
 class DistributeCombineLogs:
