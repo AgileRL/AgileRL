@@ -274,7 +274,6 @@ def recursive_check_module_attrs(obj: Any, networks_only: bool = False) -> bool:
         check_types += (OptimizerWrapper,)
 
     # Exclude metaclasses
-    object
     if isinstance(obj, type):
         return False
 
