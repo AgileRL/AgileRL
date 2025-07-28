@@ -7,7 +7,7 @@ from torch.distributions import Bernoulli, Categorical, Distribution, Normal
 
 from agilerl.modules.base import EvolvableModule, EvolvableWrapper
 from agilerl.typing import ArrayOrTensor, DeviceType, NetConfigType
-from agilerl.utils.evolvable_networks import get_output_size_from_space
+from agilerl.utils.algo_utils import get_output_size_from_space
 
 DistributionType = Union[Distribution, List[Distribution]]
 

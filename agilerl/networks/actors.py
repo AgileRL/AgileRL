@@ -8,7 +8,7 @@ from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.distributions import EvolvableDistribution
 from agilerl.typing import ArrayOrTensor, NetConfigType, TorchObsType
-from agilerl.utils.evolvable_networks import get_output_size_from_space
+from agilerl.utils.algo_utils import get_output_size_from_space
 
 
 class DeterministicActor(EvolvableNetwork):

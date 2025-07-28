@@ -761,12 +761,8 @@ class PPO(RLAlgorithm):
             warnings.warn("Buffer data is empty. Skipping learning step.")
             return 0.0
 
-        observations = buffer_td["observations"]
-        advantages = buffer_td["advantages"]
-
         batch_size = self.batch_size
-        num_samples = observations.size(0)  # Total number of samples in the buffer
-
+        num_samples = self.rollout_buffer.size()
         indices = np.arange(num_samples)
         mean_loss = 0.0
         approx_kl_divs = []
@@ -782,7 +778,7 @@ class PPO(RLAlgorithm):
                 mb_obs = minibatch_td["observations"]
                 mb_actions = minibatch_td["actions"]
                 mb_log_probs = minibatch_td["log_probs"]
-                mb_advantages = advantages[minibatch_indices]
+                mb_advantages = minibatch_td["advantages"]
                 mb_returns = minibatch_td["returns"]
                 mb_old_values = minibatch_td["values"]
 
@@ -806,6 +802,9 @@ class PPO(RLAlgorithm):
                             "Recurrent policy, but no hidden_states found in minibatch_td for flat learning."
                         )
 
+                if isinstance(self.action_space, spaces.Discrete):
+                    mb_actions = mb_actions.squeeze(-1)
+
                 log_probs, entropy, values, _ = self.evaluate_actions(
                     obs=mb_obs, actions=mb_actions, hidden_state=eval_hidden_state
                 )
@@ -815,7 +814,7 @@ class PPO(RLAlgorithm):
                     mb_advantages.std() + 1e-8
                 )
 
-                # Policy loss
+                # Policy los
                 ratio = torch.exp(log_probs - mb_log_probs)
                 policy_loss1 = -mb_advantages * ratio
                 policy_loss2 = -mb_advantages * torch.clamp(
@@ -943,12 +942,10 @@ class PPO(RLAlgorithm):
             warnings.warn("No BPTT sequences to sample. Skipping learning.")
             return 0.0
 
-        sequences_per_minibatch = (
-            self.batch_size
-        )  # Here, batch_size means number of sequences per minibatch
+        # Here, batch_size means number of sequences per minibatch
+        sequences_per_minibatch = self.batch_size
         mean_loss = 0.0
         total_minibatch_updates_total = 0
-
         for epoch in range(self.update_epochs):
             approx_kl_divs_epoch = []  # KL divergences for this epoch's minibatches
             np.random.shuffle(all_start_coords)
@@ -982,23 +979,15 @@ class PPO(RLAlgorithm):
                     warnings.warn("Skipping empty or invalid minibatch of sequences.")
                     continue
 
-                mb_obs_seq = current_minibatch_td[
-                    "observations"
-                ]  # Shape: (batch_seq, seq_len, *obs_dims) or nested TD
-                mb_actions_seq = current_minibatch_td[
-                    "actions"
-                ]  # Shape: (batch_seq, seq_len, *act_dims)
-                mb_old_log_probs_seq = current_minibatch_td[
-                    "log_probs"
-                ]  # Shape: (batch_seq, seq_len)
-                mb_advantages_seq = current_minibatch_td[
-                    "advantages"
-                ]  # Shape: (batch_seq, seq_len) (already normalized)
-                mb_returns_seq = current_minibatch_td[
-                    "returns"
-                ]  # Shape: (batch_seq, seq_len)
-
-                mb_initial_hidden_states_dict: Optional[Dict[str, torch.Tensor]] = (
+                # Obs shape: (batch_seq, seq_len, *obs_dims) or nested TD
+                # Actions shape: (batch_seq, seq_len, *act_dims)
+                # Other tensors shape: (batch_seq, seq_len)
+                mb_obs_seq = current_minibatch_td["observations"]
+                mb_actions_seq = current_minibatch_td["actions"]
+                mb_old_log_probs_seq = current_minibatch_td["log_probs"]
+                mb_advantages_seq = current_minibatch_td["advantages"]
+                mb_returns_seq = current_minibatch_td["returns"]
+                mb_initial_hidden_states_dict: Optional[TensorDict] = (
                     current_minibatch_td.get_non_tensor(
                         "initial_hidden_states", default=None
                     )

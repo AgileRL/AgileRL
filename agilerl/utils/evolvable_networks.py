@@ -1,14 +1,12 @@
 from collections import OrderedDict
 from dataclasses import asdict
-from typing import Dict, Iterable, List, Literal, Optional, Tuple, Union
+from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import numpy as np
 import torch
 import torch.nn as nn
-from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 from torch._dynamo.eval_frame import OptimizedModule
-from torch.optim import Optimizer
 
 from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.modules.configs import (
@@ -26,76 +24,9 @@ from agilerl.modules.custom_components import (
     ResidualBlock,
     SimbaResidualBlock,
 )
-from agilerl.typing import DeviceType, GymSpaceType, NetConfigType
+from agilerl.typing import DeviceType, NetConfigType
 
 TupleorInt = Union[Tuple[int, ...], int]
-
-
-def get_input_size_from_space(
-    observation_space: GymSpaceType,
-) -> Union[int, Dict[str, int], Tuple[int, ...]]:
-    """Returns the dimension of the state space as it pertains to the underlying
-    networks (i.e. the input size of the networks).
-
-    :param observation_space: The observation space of the environment.
-    :type observation_space: spaces.Space or List[spaces.Space] or Dict[str, spaces.Space].
-
-    :return: The dimension of the state space.
-    :rtype: Union[int, Dict[str, int], Tuple[int, ...]]
-    """
-    if isinstance(observation_space, (list, tuple, spaces.Tuple)):
-        return tuple(get_input_size_from_space(space) for space in observation_space)
-    elif isinstance(observation_space, (spaces.Dict, dict)):
-        return {
-            key: get_input_size_from_space(subspace)
-            for key, subspace in observation_space.items()
-        }
-    elif isinstance(observation_space, spaces.Discrete):
-        return (observation_space.n,)
-    elif isinstance(observation_space, spaces.MultiDiscrete):
-        return (sum(observation_space.nvec),)
-    elif isinstance(observation_space, spaces.Box):
-        return observation_space.shape
-    elif isinstance(observation_space, spaces.MultiBinary):
-        return (observation_space.n,)
-    else:
-        raise AttributeError(
-            f"Can't access state dimensions for {type(observation_space)} spaces."
-        )
-
-
-def get_output_size_from_space(
-    action_space: GymSpaceType,
-) -> Union[int, Dict[str, int], Tuple[int, ...]]:
-    """Returns the dimension of the action space as it pertains to the underlying
-    networks (i.e. the output size of the networks).
-
-    :param action_space: The action space of the environment.
-    :type action_space: spaces.Space or list[spaces.Space] or Dict[str, spaces.Space].
-
-    :return: The dimension of the action space.
-    :rtype: Union[int, Dict[str, int], Tuple[int, ...]]
-    """
-    if isinstance(action_space, (list, tuple)):
-        return tuple(get_output_size_from_space(space) for space in action_space)
-    elif isinstance(action_space, (spaces.Dict, dict)):
-        return {
-            key: get_output_size_from_space(subspace)
-            for key, subspace in action_space.items()
-        }
-    elif isinstance(action_space, spaces.MultiBinary):
-        return action_space.n
-    elif isinstance(action_space, spaces.Discrete):
-        return action_space.n
-    elif isinstance(action_space, spaces.MultiDiscrete):
-        return sum(action_space.nvec)
-    elif isinstance(action_space, spaces.Box):
-        # NOTE: Assume continuous actions are always one-dimensional
-        return action_space.shape[0]
-    else:
-        raise AttributeError(
-            f"Can't access action dimensions for {type(action_space)} spaces."
-        )
 
 
 def compile_model(
@@ -260,38 +191,6 @@ def get_default_encoder_config(
         )
 
     return asdict(config)
-
-
-def unwrap_optimizer(
-    optimizer: Union[Optimizer, AcceleratedOptimizer],
-    network: Union[nn.Module, Iterable[nn.Module]],
-    lr: int,
-):
-    """Unwrap the optimizer.
-
-    :param optimizer: Optimizer to unwrap
-    :type optimizer: Union[Optimizer, AcceleratedOptimizer]
-    :param network: Network to unwrap
-    :type network: Union[nn.Module, Iterable[nn.Module]]
-    :param lr: Learning rate
-    :type lr: int
-
-    :return: Unwrapped optimizer
-    :rtype: Optimizer
-    """
-    if isinstance(optimizer, AcceleratedOptimizer):
-        if isinstance(network, (list, tuple)):
-            optim_arg = [{"params": net.parameters(), "lr": lr} for net in network]
-            unwrapped_optimizer: Optimizer = type(optimizer.optimizer)(optim_arg)
-        else:
-            unwrapped_optimizer: Optimizer = type(optimizer.optimizer)(
-                network.parameters(), lr=lr
-            )
-
-        unwrapped_optimizer.load_state_dict(optimizer.state_dict())
-        return unwrapped_optimizer
-    else:
-        return optimizer
 
 
 def contains_moduledict(module: nn.Module) -> bool:

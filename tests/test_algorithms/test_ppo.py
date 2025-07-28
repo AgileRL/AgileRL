@@ -435,7 +435,10 @@ def test_learns_from_experiences(
 
 
 # Runs algorithm test loop
-@pytest.mark.parametrize("observation_space", ["vector_space", "image_space"])
+@pytest.mark.parametrize(
+    "observation_space",
+    ["vector_space", "discrete_space", "image_space"],
+)
 @pytest.mark.parametrize("num_envs", [1, 3])
 def test_algorithm_test_loop(observation_space, discrete_space, num_envs, request):
     observation_space = request.getfixturevalue(observation_space)

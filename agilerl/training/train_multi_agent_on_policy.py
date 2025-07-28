@@ -5,15 +5,16 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from gymnasium import spaces
 from pettingzoo import ParallelEnv
 
+import wandb
 from agilerl.algorithms import IPPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks import StochasticActor
+from agilerl.typing import SingleAgentModule
 from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
     default_progress_bar,
@@ -192,6 +193,7 @@ def train_multi_agent_on_policy(
         pop_episode_scores = []
         pop_fps = []
         for agent_idx, agent in enumerate(pop):  # Loop through population
+            compiled_agent = agent.torch_compiler is not None
             agent.set_training_mode(True)
 
             obs, info = env.reset()  # Reset environment at start of episode
@@ -244,7 +246,11 @@ def train_multi_agent_on_policy(
                         )
                         agent_space = agent.possible_action_spaces[agent_id]
                         policy = getattr(agent, agent.registry.policy())
-                        agent_policy = policy[network_id]
+                        agent_policy: SingleAgentModule = policy[network_id]
+
+                        if compiled_agent:
+                            agent_policy = agent_policy._orig_mod
+
                         if isinstance(agent_policy, StochasticActor) and isinstance(
                             agent_space, spaces.Box
                         ):

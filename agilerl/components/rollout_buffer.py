@@ -420,7 +420,7 @@ class RolloutBuffer:
 
         # Get a view of the buffer up to the current position and for all envs
         # This slice will have batch_size [buffer_size, num_envs]
-        valid_buffer_data = self.buffer[:buffer_size]
+        valid_buffer_data: TensorDict = self.buffer[:buffer_size]
 
         # Reshape to flatten the num_envs dimension into the first batch dimension
         # New batch_size will be [buffer_size * num_envs]
