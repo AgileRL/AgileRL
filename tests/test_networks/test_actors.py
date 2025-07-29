@@ -333,8 +333,6 @@ def test_distribution_mutation_methods(
 
         if new_dist.last_mutation_attr is not None:
             # Check that architecture has changed
-            print(evolvable_dist)
-            print(new_dist.last_mutation_attr)
             assert_not_equal_state_dict(
                 evolvable_dist.state_dict(), new_dist.state_dict()
             )
@@ -342,11 +340,6 @@ def test_distribution_mutation_methods(
             # Checks that parameters that are not mutated are the same
             check_equal_params_ind(evolvable_dist, new_dist)
         else:
-            print(method)
-            print(new_dist.last_mutation_attr)
-            print(new_dist.wrapped.last_mutation_attr)
-            print(evolvable_dist)
-            print(new_dist)
             raise ValueError(
                 f"Last mutation attribute is None. Expected {method} to be applied."
             )

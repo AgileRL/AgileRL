@@ -73,6 +73,8 @@ from agilerl.utils.algo_utils import (
     chkpt_attribute_to_device,
     clone_llm,
     create_warmup_cosine_scheduler,
+    get_input_size_from_space,
+    get_output_size_from_space,
     isroutine,
     key_in_nested_dict,
     module_checkpoint_dict,
@@ -84,8 +86,6 @@ from agilerl.utils.evolvable_networks import (
     compile_model,
     config_from_dict,
     get_default_encoder_config,
-    get_input_size_from_space,
-    get_output_size_from_space,
     is_image_space,
     is_vector_space,
 )
@@ -143,6 +143,9 @@ def get_checkpoint_dict(
     if using_deepspeed:
         attribute_dict.pop("actor", None)
         return attribute_dict
+
+    if "rollout_buffer" in attribute_dict:
+        attribute_dict.pop("rollout_buffer")
 
     # Get checkpoint dictionaries for evolvable modules and optimizers
     network_info: Dict[str, Dict[str, Any]] = {"modules": {}, "optimizers": {}}

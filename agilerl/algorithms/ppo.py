@@ -464,20 +464,27 @@ class PPO(RLAlgorithm):
         self,
         obs: ArrayOrTensor,
         actions: ArrayOrTensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
+    ) -> Tuple[
+        torch.Tensor, torch.Tensor, torch.Tensor, Optional[Dict[str, ArrayOrTensor]]
+    ]:
         """Evaluates the actions.
 
         :param obs: Environment observation, or multiple observations in a batch
         :type obs: ArrayOrTensor
         :param actions: Actions to evaluate
         :type actions: ArrayOrTensor
-        :return: Log probability, entropy, and state values
-        :rtype: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        :param hidden_state: Hidden state for recurrent policies, defaults to None. Expected shape: dict with tensors of shape (batch_size, 1, hidden_size).
+        :type hidden_state: Optional[Dict[str, ArrayOrTensor]]
+        :return: Log probability, entropy, state values, and next hidden state
+        :rtype: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[Dict[str, ArrayOrTensor]]]
         """
         obs = self.preprocess_observation(obs)
 
         # Get values from actor-critic
-        _, _, entropy, values, _ = self._get_action_and_values(obs, sample=False)
+        _, _, entropy, values, next_hidden_state = self._get_action_and_values(
+            obs, hidden_state=hidden_state, sample=False
+        )
 
         log_prob = self.actor.action_log_prob(actions)
 
@@ -485,7 +492,7 @@ class PPO(RLAlgorithm):
         if entropy is None:
             entropy = -log_prob.mean()
 
-        return log_prob, entropy, values
+        return log_prob, entropy, values, next_hidden_state
 
     def get_action(
         self,
@@ -659,7 +666,7 @@ class PPO(RLAlgorithm):
         num_samples = experiences[4].size(0)
         batch_idxs = np.arange(num_samples)
         mean_loss = 0
-        for epoch in range(self.update_epochs):
+        for _ in range(self.update_epochs):
             np.random.shuffle(batch_idxs)
             for start in range(0, num_samples, self.batch_size):
                 minibatch_idxs = batch_idxs[start : start + self.batch_size]
@@ -679,8 +686,8 @@ class PPO(RLAlgorithm):
                 batch_values = batch_values.squeeze()
 
                 if len(minibatch_idxs) > 1:
-                    log_prob, entropy, value = self.evaluate_actions(
-                        obs=batch_observations, actions=batch_actions
+                    log_prob, entropy, value, _ = self.evaluate_actions(
+                        obs=batch_observations, actions=batch_actions, hidden_state=None
                     )
 
                     logratio = log_prob - batch_log_probs
@@ -754,12 +761,8 @@ class PPO(RLAlgorithm):
             warnings.warn("Buffer data is empty. Skipping learning step.")
             return 0.0
 
-        observations = buffer_td["observations"]
-        advantages = buffer_td["advantages"]
-
         batch_size = self.batch_size
-        num_samples = observations.size(0)  # Total number of samples in the buffer
-
+        num_samples = self.rollout_buffer.size()
         indices = np.arange(num_samples)
         mean_loss = 0.0
         approx_kl_divs = []
@@ -775,7 +778,7 @@ class PPO(RLAlgorithm):
                 mb_obs = minibatch_td["observations"]
                 mb_actions = minibatch_td["actions"]
                 mb_log_probs = minibatch_td["log_probs"]
-                mb_advantages = advantages[minibatch_indices]
+                mb_advantages = minibatch_td["advantages"]
                 mb_returns = minibatch_td["returns"]
                 mb_old_values = minibatch_td["values"]
 
@@ -799,23 +802,19 @@ class PPO(RLAlgorithm):
                             "Recurrent policy, but no hidden_states found in minibatch_td for flat learning."
                         )
 
-                _, _, entropy, values, _ = self._get_action_and_values(
-                    mb_obs,
-                    hidden_state=eval_hidden_state,
-                    sample=False,  # No sampling during evaluation for loss calculation
+                if isinstance(self.action_space, spaces.Discrete):
+                    mb_actions = mb_actions.squeeze(-1)
+
+                log_probs, entropy, values, _ = self.evaluate_actions(
+                    obs=mb_obs, actions=mb_actions, hidden_state=eval_hidden_state
                 )
-
-                log_probs = self.actor.action_log_prob(mb_actions)
-
-                if entropy is None:  # For continuous squashed actions
-                    entropy = -log_probs
 
                 # Normalize advantages
                 mb_advantages = (mb_advantages - mb_advantages.mean()) / (
                     mb_advantages.std() + 1e-8
                 )
 
-                # Policy loss
+                # Policy los
                 ratio = torch.exp(log_probs - mb_log_probs)
                 policy_loss1 = -mb_advantages * ratio
                 policy_loss2 = -mb_advantages * torch.clamp(
@@ -943,12 +942,10 @@ class PPO(RLAlgorithm):
             warnings.warn("No BPTT sequences to sample. Skipping learning.")
             return 0.0
 
-        sequences_per_minibatch = (
-            self.batch_size
-        )  # Here, batch_size means number of sequences per minibatch
+        # Here, batch_size means number of sequences per minibatch
+        sequences_per_minibatch = self.batch_size
         mean_loss = 0.0
         total_minibatch_updates_total = 0
-
         for epoch in range(self.update_epochs):
             approx_kl_divs_epoch = []  # KL divergences for this epoch's minibatches
             np.random.shuffle(all_start_coords)
@@ -982,24 +979,18 @@ class PPO(RLAlgorithm):
                     warnings.warn("Skipping empty or invalid minibatch of sequences.")
                     continue
 
-                mb_obs_seq = current_minibatch_td[
-                    "observations"
-                ]  # Shape: (batch_seq, seq_len, *obs_dims) or nested TD
-                mb_actions_seq = current_minibatch_td[
-                    "actions"
-                ]  # Shape: (batch_seq, seq_len, *act_dims)
-                mb_old_log_probs_seq = current_minibatch_td[
-                    "log_probs"
-                ]  # Shape: (batch_seq, seq_len)
-                mb_advantages_seq = current_minibatch_td[
-                    "advantages"
-                ]  # Shape: (batch_seq, seq_len) (already normalized)
-                mb_returns_seq = current_minibatch_td[
-                    "returns"
-                ]  # Shape: (batch_seq, seq_len)
-
-                mb_initial_hidden_states_dict = current_minibatch_td.get_non_tensor(
-                    "initial_hidden_states", default=None
+                # Obs shape: (batch_seq, seq_len, *obs_dims) or nested TD
+                # Actions shape: (batch_seq, seq_len, *act_dims)
+                # Other tensors shape: (batch_seq, seq_len)
+                mb_obs_seq = current_minibatch_td["observations"]
+                mb_actions_seq = current_minibatch_td["actions"]
+                mb_old_log_probs_seq = current_minibatch_td["log_probs"]
+                mb_advantages_seq = current_minibatch_td["advantages"]
+                mb_returns_seq = current_minibatch_td["returns"]
+                mb_initial_hidden_states_dict: Optional[TensorDict] = (
+                    current_minibatch_td.get_non_tensor(
+                        "initial_hidden_states", default=None
+                    )
                 )
 
                 policy_loss_total, value_loss_total, entropy_loss_total = 0.0, 0.0, 0.0
@@ -1027,26 +1018,19 @@ class PPO(RLAlgorithm):
                     )
                     adv_t, return_t = mb_advantages_seq[:, t], mb_returns_seq[:, t]
 
+                    # new_value_t: (batch_seq,), entropy_t: (batch_seq,) or scalar, log_prob_t: (batch_seq,)
                     (
-                        _,
-                        _,
+                        new_log_prob_t,
                         entropy_t,
                         new_value_t,
                         next_hidden_state_for_actor_step,
-                    ) = self._get_action_and_values(
-                        obs_t,
+                    ) = self.evaluate_actions(
+                        obs=obs_t,
+                        actions=actions_t,
                         hidden_state=current_step_hidden_state_actor,
-                        sample=False,
-                    )  # new_value_t: (batch_seq,), entropy_t: (batch_seq,) or scalar
-
-                    new_log_prob_t = self.actor.action_log_prob(
-                        actions_t
-                    )  # Shape: (batch_seq,)
-                    entropy_t = (
-                        (-new_log_prob_t.mean())
-                        if entropy_t is None
-                        else entropy_t.mean()
-                    )  # Ensure scalar
+                    )
+                    if isinstance(entropy_t, torch.Tensor):
+                        entropy_t = entropy_t.mean()
 
                     ratio = torch.exp(new_log_prob_t - old_log_prob_t)
                     policy_loss1 = -adv_t * ratio

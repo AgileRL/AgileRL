@@ -7,7 +7,7 @@ from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_offline import train_offline
-from agilerl.utils.evolvable_networks import (
+from agilerl.utils.algo_utils import (
     get_input_size_from_space,
     get_output_size_from_space,
 )

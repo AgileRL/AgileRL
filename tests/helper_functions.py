@@ -272,7 +272,6 @@ def get_sample_from_space(
 
 def is_processed_observation(observation: TorchObsType, space: spaces.Space) -> bool:
     if isinstance(space, spaces.Box):
-        print(observation.shape, space.shape)
         return (
             isinstance(observation, torch.Tensor)
             and observation.shape[1:] == space.shape
