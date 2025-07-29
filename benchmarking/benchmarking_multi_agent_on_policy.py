@@ -53,7 +53,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
 
         return env
 
-    env_kwargs = dict(max_cycles=25, continuous_actions=False)
+    env_kwargs = dict(max_cycles=25, continuous_actions=True)
     env = make_multi_agent_vect_envs(
         create_env, num_envs=INIT_HP["NUM_ENVS"], **env_kwargs
     )

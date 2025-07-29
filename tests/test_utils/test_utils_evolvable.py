@@ -8,13 +8,15 @@ from gymnasium import spaces
 from torch._dynamo.eval_frame import OptimizedModule
 
 from agilerl.modules.cnn import MutableKernelSizes
+from agilerl.utils.algo_utils import (
+    get_input_size_from_space,
+    get_output_size_from_space,
+)
 from agilerl.utils.evolvable_networks import (
     compile_model,
     create_cnn,
     create_mlp,
     get_activation,
-    get_input_size_from_space,
-    get_output_size_from_space,
 )
 
 

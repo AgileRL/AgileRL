@@ -722,7 +722,9 @@ class IPPO(MultiAgentRLAlgorithm):
             returns = advantages + values
 
         states = concatenate_experiences_into_batches(states, obs_space)
-        actions = concatenate_experiences_into_batches(actions, action_space)
+        actions = concatenate_experiences_into_batches(
+            actions, action_space, actions=True
+        )
         log_probs = log_probs.reshape((-1,))
         experiences = (states, actions, log_probs, advantages, returns, values)
 

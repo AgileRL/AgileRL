@@ -8,6 +8,7 @@ from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.distributions import EvolvableDistribution
 from agilerl.typing import ArrayOrTensor, NetConfigType, TorchObsType
+from agilerl.utils.algo_utils import get_output_size_from_space
 
 
 class DeterministicActor(EvolvableNetwork):
@@ -105,6 +106,8 @@ class DeterministicActor(EvolvableNetwork):
         else:
             head_config["output_activation"] = output_activation
 
+        self.output_size = get_output_size_from_space(self.action_space)
+
         self.build_network_head(head_config)
         self.output_activation = head_config.get("output_activation", output_activation)
 
@@ -155,7 +158,7 @@ class DeterministicActor(EvolvableNetwork):
         """
         self.head_net = self.create_mlp(
             num_inputs=self.latent_dim,
-            num_outputs=spaces.flatdim(self.action_space),
+            num_outputs=self.output_size,
             name="actor",
             net_config=net_config,
         )
@@ -188,7 +191,7 @@ class DeterministicActor(EvolvableNetwork):
 
         head_net = self.create_mlp(
             num_inputs=self.latent_dim,
-            num_outputs=spaces.flatdim(self.action_space),
+            num_outputs=self.output_size,
             name="actor",
             net_config=self.head_net.net_config,
         )
@@ -290,6 +293,7 @@ class StochasticActor(EvolvableNetwork):
         self.squash_output = squash_output
         self.action_space = action_space
         self.use_experimental_distribution = use_experimental_distribution
+        self.output_size = get_output_size_from_space(self.action_space)
 
         self.build_network_head(head_config)
         self.output_activation = None
@@ -327,7 +331,7 @@ class StochasticActor(EvolvableNetwork):
         """
         self.head_net = self.create_mlp(
             num_inputs=self.latent_dim,
-            num_outputs=spaces.flatdim(self.action_space),
+            num_outputs=self.output_size,
             name="actor",
             net_config=net_config,
         )
@@ -389,7 +393,7 @@ class StochasticActor(EvolvableNetwork):
 
         head_net = self.create_mlp(
             num_inputs=self.latent_dim,
-            num_outputs=spaces.flatdim(self.action_space),
+            num_outputs=self.output_size,
             name="actor",
             net_config=self.head_net.net_config,
         )
