@@ -700,7 +700,6 @@ def test_ippo_custom_training_with_async_env(
 
             # Store experiences for active agents
             for agent_id in observations:
-                print("Actions ", action_dict[agent_id].shape)
                 states[agent_id].append(observations[agent_id])
                 actions[agent_id].append(action_dict[agent_id])
                 log_probs[agent_id].append(logprob_dict[agent_id])

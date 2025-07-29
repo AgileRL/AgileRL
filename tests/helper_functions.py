@@ -272,7 +272,6 @@ def get_sample_from_space(
 
 def is_processed_observation(observation: TorchObsType, space: spaces.Space) -> bool:
     if isinstance(space, spaces.Box):
-        print(observation.shape, space.shape)
         return (
             isinstance(observation, torch.Tensor)
             and observation.shape[1:] == space.shape
@@ -319,9 +318,6 @@ def get_experiences_batch(
     """
     device = device if device is not None else "cpu"
     states = get_sample_from_space(observation_space, batch_size)
-    if isinstance(observation_space, spaces.MultiDiscrete):
-        print("States shape: ", states.shape)
-
     actions = get_sample_from_space(action_space, batch_size)
     rewards = torch.randn((batch_size, 1))
     next_states = get_sample_from_space(observation_space, batch_size)
