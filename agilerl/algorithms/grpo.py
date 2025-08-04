@@ -275,16 +275,21 @@ class GRPO(LLMAlgorithm):
             and self.accelerator is not None
             and self.accelerator.is_main_process
         ):
+            base_url = (
+                vllm_config.base_url
+                if vllm_config.base_url is not None
+                else f"http://{vllm_config.host}:{vllm_config.server_port}"
+            )
             self.vllm_client = VLLMClient(
-                base_url=vllm_config.base_url,
-                host=vllm_config.host,
-                server_port=vllm_config.server_port,
-                group_port=vllm_config.group_port,
+                base_url=base_url,
                 connection_timeout=vllm_config.connection_timeout,
             )
             print("INITIALIZING VLLM CLIENT")
             self.vllm_client.init_communicator()
             print("VLLM CLIENT INITIALIZED")
+
+        if self.accelerator is not None:
+            self.accelerator.wait_for_everyone()
 
         # Register network groups for mutations
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))

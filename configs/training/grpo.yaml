@@ -32,8 +32,17 @@ INIT_HP:
     POP_SIZE: 1
     EVAL_LOOP: 1
     VLLM_CONFIG:
-        base_url: http://34.12.60.83:8000
-        host: 34.12.60.83
+        host: 34.141.170.128
         server_port: 8000
         group_port: 51216
-        connection_timeout: 0.0
+        connection_timeout: 240.0
+
+
+# MASTER_ADDR=34.13.155.70 \
+# MASTER_PORT=51216 \
+# WORLD_SIZE=2 \
+# RANK=1 \
+# NCCL_IB_DISABLE=1 \
+# NCCL_SOCKET_IFNAME=wlan0 \
+# accelerate launch --config_file ./configs/accelerate/grpo_accelerate_config.yaml \
+#     benchmarking/benchmarking_grpo.py
