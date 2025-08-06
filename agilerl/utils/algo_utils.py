@@ -1024,7 +1024,9 @@ def stack_and_pad_experiences(
     return tuple(stacked_experiences)
 
 
-def _stack_and_pad_tensor_list(exp: List[torch.Tensor], padding: int, padding_side: str = "right") -> torch.Tensor:
+def _stack_and_pad_tensor_list(
+    exp: List[torch.Tensor], padding: int, padding_side: str = "right"
+) -> torch.Tensor:
     """
     Stack and pad a list of tensors.
 
@@ -1041,17 +1043,12 @@ def _stack_and_pad_tensor_list(exp: List[torch.Tensor], padding: int, padding_si
         exp = [
             F.pad(
                 e,
-                (
-                    (0, padding_size)
-                    if padding_side == "right"
-                    else (padding_size, 0)
-                ),
+                ((0, padding_size) if padding_side == "right" else (padding_size, 0)),
                 value=padding,
             )
             for e, padding_size in zip(exp, padding_sizes)
         ]
-    return torch.cat(exp, dim=0) 
-
+    return torch.cat(exp, dim=0)
 
 
 def flatten_experiences(*experiences: ObservationType) -> Tuple[ArrayOrTensor, ...]:

@@ -347,12 +347,13 @@ class GRPO(LLMAlgorithm):
 
             num_input_tokens = [prompt[1] for prompt in prompts]
             raw_prompts = [prompt[0] for prompt in prompts]
-        
 
             # Gather prompts to single device
             all_prompts = gather_object(raw_prompts)
             all_num_input_tokens = gather_object(num_input_tokens)
-            print("ALL PROMPTS", all_prompts, "all_num_input_tokens", all_num_input_tokens)
+            print(
+                "ALL PROMPTS", all_prompts, "all_num_input_tokens", all_num_input_tokens
+            )
             completion_ids = [None] * len(all_prompts)
             if self.accelerator.is_main_process:
                 print("GENERATING")
@@ -370,8 +371,8 @@ class GRPO(LLMAlgorithm):
             print("COMPLETION IDS", len(completion_ids))
             completion_ids = broadcast_object_list(completion_ids, from_process=0)
             process_slice = slice(
-                self.accelerator.process_index * len(raw_prompts)*group_size,
-                (self.accelerator.process_index + 1) * len(raw_prompts)*group_size,
+                self.accelerator.process_index * len(raw_prompts) * group_size,
+                (self.accelerator.process_index + 1) * len(raw_prompts) * group_size,
             )
             completion_ids = completion_ids[process_slice]
             num_input_tokens = num_input_tokens[process_slice]
@@ -380,26 +381,41 @@ class GRPO(LLMAlgorithm):
             print("LEN COMPLETION IDS", len(completion_ids))
             print("RAW PROMPTS", len(raw_prompts))
             print([i for i, _ in enumerate(raw_prompts)])
-            print([(i * group_size, group_size * (i + 1)) for i, _ in enumerate(raw_prompts)])
-
+            print(
+                [
+                    (i * group_size, group_size * (i + 1))
+                    for i, _ in enumerate(raw_prompts)
+                ]
+            )
 
             list[list[int]]
 
-
             # completion_ids = [torch.tensor(completion_ids[group_size * i : group_size * (i + 1)], device=self.device) for i, _ in enumerate(raw_prompts)]
-            completion_ids = [stack_and_pad_experiences(completion_ids[group_size * i : group_size * (i + 1)], padding_values=[self.pad_token_id], device=self.device)[0] for i, _ in enumerate(raw_prompts)]
+            completion_ids = [
+                stack_and_pad_experiences(
+                    completion_ids[group_size * i : group_size * (i + 1)],
+                    padding_values=[self.pad_token_id],
+                    device=self.device,
+                )[0]
+                for i, _ in enumerate(raw_prompts)
+            ]
 
-            print("COMPLETION IDS SHAPES", [completion_id.shape for completion_id in completion_ids])
-            action_masks = [torch.zeros_like(completion_id, device=self.device) for completion_id in completion_ids]
+            print(
+                "COMPLETION IDS SHAPES",
+                [completion_id.shape for completion_id in completion_ids],
+            )
+            action_masks = [
+                torch.zeros_like(completion_id, device=self.device)
+                for completion_id in completion_ids
+            ]
 
             print("NUM INPUT TOKENS", num_input_tokens)
 
             for i, completion_id in enumerate(completion_ids):
                 print("AM SHAPE", action_masks[i].shape)
-                action_masks[i][:, num_input_tokens[i]:] = True
+                action_masks[i][:, num_input_tokens[i] :] = True
                 action_masks[i][completion_id == self.pad_token_id] = False
                 action_masks[i] = action_masks[i][:, 1:]
-
 
         print("COMPLETION IDS", completion_ids)
 
