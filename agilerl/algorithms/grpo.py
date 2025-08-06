@@ -280,6 +280,7 @@ class GRPO(LLMAlgorithm):
                 if vllm_config.base_url is not None
                 else f"http://{vllm_config.host}:{vllm_config.server_port}"
             )
+            print("Setting up vllm client")
             self.vllm_client = VLLMClient(
                 base_url=base_url,
                 connection_timeout=vllm_config.connection_timeout,
@@ -340,13 +341,18 @@ class GRPO(LLMAlgorithm):
                     "'return_raw_completions' is set to True in the HuggingFaceGym"
                     "instance."
                 )
+
             # Move model to vllm
-            print("MOVING MODEL TO VLLM")
             self._move_model_to_vllm()
 
+            num_input_tokens = [prompt[1] for prompt in prompts]
+            raw_prompts = [prompt[0] for prompt in prompts]
+        
+
             # Gather prompts to single device
-            all_prompts = gather_object(prompts)
-            print("ALL PROMPTS", all_prompts)
+            all_prompts = gather_object(raw_prompts)
+            all_num_input_tokens = gather_object(num_input_tokens)
+            print("ALL PROMPTS", all_prompts, "all_num_input_tokens", all_num_input_tokens)
             completion_ids = [None] * len(all_prompts)
             if self.accelerator.is_main_process:
                 print("GENERATING")
@@ -358,16 +364,45 @@ class GRPO(LLMAlgorithm):
                     top_p=self.top_p,
                     top_k=-1 if self.top_k is None else self.top_k,
                     min_p=0.0 if self.min_p is None else self.min_p,
-                    max_tokens=self.max_completion_length,
+                    max_tokens=self.max_output_tokens,
                 )
                 print("GENERATION COMPLETE")
-
+            print("COMPLETION IDS", len(completion_ids))
             completion_ids = broadcast_object_list(completion_ids, from_process=0)
             process_slice = slice(
-                self.accelerator.process_index * len(prompts),
-                (self.accelerator.process_index + 1) * len(prompts),
+                self.accelerator.process_index * len(raw_prompts)*group_size,
+                (self.accelerator.process_index + 1) * len(raw_prompts)*group_size,
             )
             completion_ids = completion_ids[process_slice]
+            num_input_tokens = num_input_tokens[process_slice]
+
+            print("COMPLETION IDS", completion_ids)
+            print("LEN COMPLETION IDS", len(completion_ids))
+            print("RAW PROMPTS", len(raw_prompts))
+            print([i for i, _ in enumerate(raw_prompts)])
+            print([(i * group_size, group_size * (i + 1)) for i, _ in enumerate(raw_prompts)])
+
+
+            list[list[int]]
+
+
+            # completion_ids = [torch.tensor(completion_ids[group_size * i : group_size * (i + 1)], device=self.device) for i, _ in enumerate(raw_prompts)]
+            completion_ids = [stack_and_pad_experiences(completion_ids[group_size * i : group_size * (i + 1)], padding_values=[self.pad_token_id], device=self.device)[0] for i, _ in enumerate(raw_prompts)]
+
+            print("COMPLETION IDS SHAPES", [completion_id.shape for completion_id in completion_ids])
+            action_masks = [torch.zeros_like(completion_id, device=self.device) for completion_id in completion_ids]
+
+            print("NUM INPUT TOKENS", num_input_tokens)
+
+            for i, completion_id in enumerate(completion_ids):
+                print("AM SHAPE", action_masks[i].shape)
+                action_masks[i][:, num_input_tokens[i]:] = True
+                action_masks[i][completion_id == self.pad_token_id] = False
+                action_masks[i] = action_masks[i][:, 1:]
+
+
+        print("COMPLETION IDS", completion_ids)
+
         return completion_ids, action_masks
 
     def learn(self, experiences: ExperiencesType) -> Tuple[float, float]:
@@ -378,6 +413,7 @@ class GRPO(LLMAlgorithm):
         """
         gc.collect()
         torch.cuda.empty_cache()
+        print("REWARDS", experiences[2], "REWARDS SHAPE", experiences[2].shape)
         completion_ids, action_masks, rewards = stack_and_pad_experiences(
             *experiences, padding_values=[self.pad_token_id, False, None]
         )
@@ -585,6 +621,8 @@ class GRPO(LLMAlgorithm):
         """
         if len(rewards.shape) == 1:
             rewards = rewards.unsqueeze(0)
+
+        print("REWARDS", rewards, "REWARDS SHAPE", rewards.shape)
         advantage = (rewards - rewards.mean(dim=1).unsqueeze(1)) / (
             rewards.std(dim=1).unsqueeze(1) + eps
         )
@@ -691,6 +729,8 @@ class GRPO(LLMAlgorithm):
                     "attention_mask": mask,
                     "use_cache": False,
                 }
+                print("KWARGS IN THE FOWARD PASS", kwargs["input_ids"].shape)
+                assert False
                 logit = self.actor.forward(**kwargs).logits
                 logit /= self.temperature
                 log_prob = selective_log_softmax(logit[:, :-1], input_id[:, 1:])

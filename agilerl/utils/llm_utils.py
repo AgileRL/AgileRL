@@ -152,6 +152,7 @@ class HuggingFaceGym(gym.Env):
                 if not self.return_raw_completions
                 else group_completion
             )
+            print("DECODED GROUP COMPLETION", decoded_group_completion)
             rewards = [
                 self.reward_fn(completion, answer, question)
                 for completion in decoded_group_completion
@@ -159,7 +160,7 @@ class HuggingFaceGym(gym.Env):
             total_rewards.append(rewards)
         return torch.tensor(total_rewards)
 
-    def _get_next_batch(self) -> List[BatchEncoding] | List[str]:
+    def _get_next_batch(self) -> List[BatchEncoding] | List[Tuple[str, int]]:
         """Get the next batch of tokenized prompts."""
         try:
             batch = next(self.dataloader)
@@ -168,12 +169,14 @@ class HuggingFaceGym(gym.Env):
             returned_prompts = batch["tokenized_prompts"]
             if self.return_raw_completions:
                 returned_prompts = [
-                    self.tokenizer.batch_decode(
-                        returned_prompt["input_ids"], skip_special_tokens=True
-                    )
+                    (
+                        self.tokenizer.batch_decode(
+                            returned_prompt["input_ids"], skip_special_tokens=True
+                        )[0],
+                        returned_prompt["input_ids"].shape[1],
+                    )  # FIXME what about batches here
                     for returned_prompt in returned_prompts
                 ]
-            print("RETURNED PROMPTS", returned_prompts)
         except StopIteration:
             self._reset_dataloaders(
                 reset_train=not self.evaluation_mode,

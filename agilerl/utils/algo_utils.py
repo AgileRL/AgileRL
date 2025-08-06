@@ -992,6 +992,7 @@ def stack_and_pad_experiences(
     *experiences: MaybeObsList,
     padding_values: List[Union[int, float, bool]],
     padding_side: str = "right",
+    device: Optional[str] = None,
 ) -> Tuple[ArrayOrTensor, ...]:
     """Stacks experiences into a single tensor, padding them to the maximum length.
 
@@ -1006,30 +1007,51 @@ def stack_and_pad_experiences(
     :rtype: Tuple[ArrayOrTensor, ...]
     """
     stacked_experiences = []
+    print("EXPERIENCES", experiences)
     for exp, padding in zip(experiences, padding_values):
         if not isinstance(exp, list):
             stacked_exp = exp
         elif isinstance(exp[0], torch.Tensor):
-            max_size = max(e.shape[-1] for e in exp)
-            padding_sizes = [(max_size - e.shape[-1]) for e in exp]
-            if sum(padding_sizes) != 0:
-                exp = [
-                    F.pad(
-                        e,
-                        (
-                            (0, padding_size)
-                            if padding_side == "right"
-                            else (padding_size, 0)
-                        ),
-                        value=padding,
-                    )
-                    for e, padding_size in zip(exp, padding_sizes)
-                ]
-            stacked_exp = torch.cat(exp, dim=0)
+            stacked_exp = _stack_and_pad_tensor_list(exp, padding, padding_side)
+        elif isinstance(exp[0], list):
+            exp = [torch.tensor(e).unsqueeze(0) for e in exp]
+            stacked_exp = _stack_and_pad_tensor_list(exp, padding, padding_side)
         else:
             raise TypeError(f"Unsupported experience type: {type(exp[0])}")
+        if device is not None:
+            stacked_exp = stacked_exp.to(device)
         stacked_experiences.append(stacked_exp)
     return tuple(stacked_experiences)
+
+
+def _stack_and_pad_tensor_list(exp: List[torch.Tensor], padding: int, padding_side: str = "right") -> torch.Tensor:
+    """
+    Stack and pad a list of tensors.
+
+    :param exp: List of tensors to stack and pad
+    :type exp: List[torch.Tensor]
+    :param padding_value: Value to pad with
+    :type padding_value: int
+    :param padding_side: Side to pad on, defaults to "right"
+    :type padding_side: str, optional
+    """
+    max_size = max(e.shape[-1] for e in exp)
+    padding_sizes = [(max_size - e.shape[-1]) for e in exp]
+    if sum(padding_sizes) != 0:
+        exp = [
+            F.pad(
+                e,
+                (
+                    (0, padding_size)
+                    if padding_side == "right"
+                    else (padding_size, 0)
+                ),
+                value=padding,
+            )
+            for e, padding_size in zip(exp, padding_sizes)
+        ]
+    return torch.cat(exp, dim=0) 
+
 
 
 def flatten_experiences(*experiences: ObservationType) -> Tuple[ArrayOrTensor, ...]:

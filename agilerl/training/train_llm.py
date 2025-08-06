@@ -164,6 +164,7 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE_PER_GPU"]
             completion_lengths = np.mean([x.shape[1] for x in completion_ids])
 
             # Use the reward function stored in env.step to calculate reward of the each answer from the group
+            print("completion id length", len(completion_ids))
             next_prompts, rewards = env.step(completion_ids)
             experiences = (
                 completion_ids,

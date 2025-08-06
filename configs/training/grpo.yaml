@@ -14,14 +14,14 @@ MUTATION_PARAMS:
 
 INIT_HP:
     ALGO: GRPO
-    BATCH_SIZE_PER_GPU: 32 # This is batch size per GPU
-    REDUCE_MEMORY_PEAK: false
+    BATCH_SIZE_PER_GPU: 2 # This is batch size per GPU
+    REDUCE_MEMORY_PEAK: true
     BETA: 0.001
     LR: 0.000005
     CLIP_COEF: 0.2
     MAX_GRAD_NORM: 0.1
     UPDATE_EPOCHS: 1
-    GROUP_SIZE: 8
+    GROUP_SIZE: 2
     TEMPERATURE: 0.9
     CALC_POSITION_EMBEDDINGS: true
     MIN_OUTPUT_TOKENS:
@@ -31,11 +31,11 @@ INIT_HP:
     ELITISM: true
     POP_SIZE: 1
     EVAL_LOOP: 1
-    VLLM_CONFIG:
-        host: 34.141.170.128
-        server_port: 8000
-        group_port: 51216
-        connection_timeout: 240.0
+    # VLLM_CONFIG:
+    #     host: localhost
+    #     server_port: 8000
+    #     group_port: 51216
+    #     connection_timeout: 240.0
 
 
 # MASTER_ADDR=34.13.155.70 \
