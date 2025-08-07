@@ -14,7 +14,7 @@ MUTATION_PARAMS:
 
 INIT_HP:
     ALGO: GRPO
-    BATCH_SIZE_PER_GPU: 1 # This is batch size per GPU
+    BATCH_SIZE: 4
     REDUCE_MEMORY_PEAK: true
     BETA: 0.001
     LR: 0.000005
@@ -31,8 +31,9 @@ INIT_HP:
     ELITISM: true
     POP_SIZE: 1
     EVAL_LOOP: 1
-    VLLM_CONFIG:
-        tensor_parallel_size: 2
+    USE_VLLM: false
+    # VLLM_CONFIG:
+    #     tensor_parallel_size: 2
     #     mo
     #     host: localhost
     #     server_port: 8000

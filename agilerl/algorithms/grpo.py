@@ -55,7 +55,7 @@ class GRPO(LLMAlgorithm):
     :type hp_config: HyperparameterConfig, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
-    :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
+    :param batch_size: Mini-batch size for learning, defaults to 64
     :type batch_size: int, optional
     :param beta: Beta coefficient, controls the strength of the KL divergence penalty, defaults to 0.001
     :type beta: float, optional
@@ -109,7 +109,7 @@ class GRPO(LLMAlgorithm):
         pad_token_id: int,
         hp_config: Optional[HyperparameterConfig] = None,
         index: int = 0,
-        batch_size: int = 1,
+        batch_size: int = 4,
         beta: float = 0.001,
         lr: float = 5e-7,
         clip_coef: float = 0.2,
@@ -180,8 +180,32 @@ class GRPO(LLMAlgorithm):
             please specify in the deepspeed config. Setting LR scheduler to None."
             )
             cosine_lr_schedule_config = None
+
         if self.accelerator is not None and not clone:
-            self.batch_size = 1  # FIXME remove
+            if batch_size % self.accelerator.num_processes != 0:
+                raise ValueError(
+                    f"Batch size must be divisible by the number of processes."
+                )
+            self.learning_batch_size = batch_size / self.accelerator.num_processes
+
+            if (
+                self.learning_batch_size
+                % self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
+                    "gradient_accumulation_steps", 1
+                )
+                != 0
+            ):
+                raise ValueError(
+                    f"Batch size must be divisible by the product of the number of processes and gradient accumulation steps."
+                    "Gradient accumulation steps can be updated in the deepspeed config by changing the 'gradient_accumulation_steps' parameter."
+                )
+            self.batch_size_per_gpu = (
+                self.learning_batch_size
+                / self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
+                    "gradient_accumulation_steps", 1
+                )
+            )
+
             if (
                 self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
                     "train_micro_batch_size_per_gpu", "auto"
@@ -190,16 +214,11 @@ class GRPO(LLMAlgorithm):
             ):
                 self.accelerator.state.deepspeed_plugin.deepspeed_config[
                     "train_micro_batch_size_per_gpu"
-                ] = batch_size
-            else:
-                warnings.warn(
-                    "Argument 'batch_size' will be overwritten by the 'train_micro_batch_size_per_gpu' value set in the deepspeed config."
-                )
-                self.accelerator.state.deepspeed_plugin.deepspeed_config[
-                    "train_micro_batch_size_per_gpu"
-                ] = batch_size
+                ] = self.batch_size_per_gpu
+
         else:
-            self.batch_size = batch_size
+            self.learning_batch_size = batch_size
+
         if self.accelerator is not None:
             if (
                 self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
@@ -282,15 +301,17 @@ class GRPO(LLMAlgorithm):
 
         set_seed(seed, device_specific=True)
 
-        if (
-            self.use_vllm
-        ):
+        if self.use_vllm:
             if self.vllm_config is None:
                 warnings.warn(
                     "No VLLM config provided. Using default VLLM configuration for generation."
                 )
                 self.vllm_config = VLLMConfig()
-            if self.vllm_config.mode == "server" and self.accelerator is not None and self.accelerator.is_main_process:
+            if (
+                self.vllm_config.mode == "server"
+                and self.accelerator is not None
+                and self.accelerator.is_main_process
+            ):
                 base_url = (
                     self.vllm_config.base_url
                     if vllm_config.base_url is not None
@@ -303,7 +324,8 @@ class GRPO(LLMAlgorithm):
                 self.vllm_client.init_communicator()
             else:
                 if (
-                    self.accelerator.num_processes % self.vllm_config.tensor_parallel_size
+                    self.accelerator.num_processes
+                    % self.vllm_config.tensor_parallel_size
                     != 0
                 ):
                     raise ValueError(
@@ -335,14 +357,11 @@ class GRPO(LLMAlgorithm):
                 os.environ["MASTER_ADDR"] = os.environ.get("MASTER_ADDR", "localhost")
                 os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "12345")
 
-
-                print("PRETRAINED MODEL NAME OR PATH", self.pretrained_model_name_or_path)
-
                 self.llm = LLM(
                     model=self.pretrained_model_name_or_path,
                     tensor_parallel_size=self.vllm_config.tensor_parallel_size,
                     gpu_memory_utilization=self.vllm_config.gpu_memory_utilization,
-                    max_num_seqs=batch_size
+                    max_num_seqs=batch_size_per_gpu
                     * self.vllm_config.tensor_parallel_size
                     * getattr(self.actor, "gradient_accumulation_steps", lambda: 1)(),
                     max_model_len=self.max_output_tokens,
@@ -455,7 +474,7 @@ class GRPO(LLMAlgorithm):
         num_samples = advantages.shape[0]
         batch_idxs = np.arange(num_samples)
         mean_loss, mean_kl = 0, 0
-        batch_size = min(num_samples, self.batch_size)
+        batch_size = min(num_samples, self.learning_batch_size)
         for _ in range(self.update_epochs):
             self.rng.shuffle(batch_idxs)
             for start in range(0, num_samples, batch_size):
@@ -563,7 +582,7 @@ class GRPO(LLMAlgorithm):
             prompts = env.reset()
             rewards = []
             for _ in range(loop):
-                completion_ids = self.get_action(prompts, training=False)
+                completion_ids, _ = self.get_action(prompts, training=False)
                 next_prompts, reward = env.step(completion_ids)
                 prompts = next_prompts
                 rewards.append(reward)
@@ -958,7 +977,11 @@ class GRPO(LLMAlgorithm):
         ]
         print("TIME TAKEN", time.time() - t)
         # print("completion_ids", completion_ids)
-        print("lengths", len(completion_ids), [len(completion_id) for completion_id in completion_ids])
+        print(
+            "lengths",
+            len(completion_ids),
+            [len(completion_id) for completion_id in completion_ids],
+        )
         # assert False
 
         if self.vllm_config.tensor_parallel_size > 1:
@@ -974,7 +997,6 @@ class GRPO(LLMAlgorithm):
             print("COMPLETION IDS AFTER SLICING", [len(id) for id in completion_ids])
             print("NUM INPUT TOKENS AFTER SLICING", num_input_tokens)
 
-
         completion_ids = [
             stack_and_pad_experiences(
                 completion_ids[group_size * i : group_size * (i + 1)],
@@ -983,7 +1005,6 @@ class GRPO(LLMAlgorithm):
             )[0]
             for i, _ in enumerate(prompts)
         ]
-        
 
         action_masks = [
             torch.zeros_like(completion_id, device=self.device)

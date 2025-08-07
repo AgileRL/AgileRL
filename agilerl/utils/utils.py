@@ -552,7 +552,7 @@ def create_population(
                 pad_token_id=INIT_HP.get("PAD_TOKEN_ID"),
                 hp_config=hp_config,
                 index=idx,
-                batch_size=INIT_HP.get("BATCH_SIZE_PER_GPU", 1),
+                batch_size=INIT_HP.get("BATCH_SIZE", 2),
                 beta=INIT_HP.get("BETA", 0.001),
                 lr=INIT_HP.get("LR", 5e-7),
                 clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
@@ -572,12 +572,12 @@ def create_population(
                 accelerator=Accelerator() if accelerator else None,
                 device=device,
                 use_separate_reference_adapter=True,
-                # use_vllm=True,
-                # vllm_config=(
-                #     VLLMConfig(**INIT_HP.get("VLLM_CONFIG"))
-                #     if INIT_HP.get("VLLM_CONFIG", None) is not None
-                #     else None
-                # ),
+                use_vllm=INIT_HP.get("USE_VLLM", False),
+                vllm_config=(
+                    VLLMConfig(**INIT_HP.get("VLLM_CONFIG"))
+                    if INIT_HP.get("VLLM_CONFIG", None) is not None
+                    else None
+                ),
                 **algo_kwargs,
             )
             population.append(agent)
