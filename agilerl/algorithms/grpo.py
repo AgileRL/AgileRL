@@ -372,6 +372,8 @@ class GRPO(LLMAlgorithm):
         :param training: Flag to indicate training mode, defaults to True
         :type training: bool, optional
         """
+        print("IN GET ACTION")
+        print("ARE WE USING VLLM?", self.use_vllm)
         group_size = self.group_size if training else 1
         self.actor.eval()
         if not self.use_vllm:
@@ -885,7 +887,6 @@ class GRPO(LLMAlgorithm):
         ]
 
         for i, completion_id in enumerate(completion_ids):
-            print("AM SHAPE", action_masks[i].shape)
             action_masks[i][:, num_input_tokens[i] :] = True
             action_masks[i][completion_id == self.pad_token_id] = False
             action_masks[i] = action_masks[i][:, 1:]
@@ -955,6 +956,8 @@ class GRPO(LLMAlgorithm):
                 local_rank_in_group * orig_size, (local_rank_in_group + 1) * orig_size
             )
             completion_ids = completion_ids[tp_slice]
-            all_num_input_tokens = all_num_input_tokens[tp_slice]
+            num_input_tokens = all_num_input_tokens[tp_slice]
+
+        # action_masks =
 
         return completion_ids, action_masks
