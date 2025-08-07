@@ -910,28 +910,14 @@ def get_experiences_samples(
     :rtype: Tuple[torch.Tensor[float], ...]
     """
     sampled_experiences = []
-    for i, exp in enumerate(experiences):
+    for exp in experiences:
         if isinstance(exp, dict):
-            # Validate indices for each tensor in the dict
-            for key, value in exp.items():
-                if isinstance(value, torch.Tensor):
-                    max_idx = value.shape[0] - 1
-                    if minibatch_indices.max() > max_idx:
-                        raise ValueError(f"Index {minibatch_indices.max()} out of bounds for tensor {key} with shape {value.shape}")
             sampled_exp = {key: value[minibatch_indices] for key, value in exp.items()}
         elif isinstance(exp, tuple):
-            # Validate indices for each tensor in the tuple
-            for j, value in enumerate(exp):
-                if isinstance(value, torch.Tensor):
-                    max_idx = value.shape[0] - 1
-                    if minibatch_indices.max() > max_idx:
-                        raise ValueError(f"Index {minibatch_indices.max()} out of bounds for tensor {j} in tuple with shape {value.shape}")
             sampled_exp = tuple(value[minibatch_indices] for value in exp)
         elif isinstance(exp, torch.Tensor):
-            # Validate indices for the tensor
-            max_idx = exp.shape[0] - 1
-            if minibatch_indices.max() > max_idx:
-                raise ValueError(f"Index {minibatch_indices.max()} out of bounds for tensor {i} with shape {exp.shape}")
+            print("EXP", exp.shape)
+            print("MINIBATCH INDICES", minibatch_indices)
             sampled_exp = exp[minibatch_indices]
         else:
             raise TypeError(f"Unsupported experience type: {type(exp)}")

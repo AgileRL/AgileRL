@@ -186,7 +186,7 @@ class GRPO(LLMAlgorithm):
                 raise ValueError(
                     f"Batch size must be divisible by the number of processes."
                 )
-            self.learning_batch_size = batch_size / self.accelerator.num_processes
+            self.learning_batch_size = int(batch_size / self.accelerator.num_processes)
 
             if (
                 self.learning_batch_size
@@ -199,7 +199,7 @@ class GRPO(LLMAlgorithm):
                     f"Batch size must be divisible by the product of the number of processes and gradient accumulation steps."
                     "Gradient accumulation steps can be updated in the deepspeed config by changing the 'gradient_accumulation_steps' parameter."
                 )
-            self.batch_size_per_gpu = (
+            self.batch_size_per_gpu = int(
                 self.learning_batch_size
                 / self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
                     "gradient_accumulation_steps", 1
@@ -357,11 +357,13 @@ class GRPO(LLMAlgorithm):
                 os.environ["MASTER_ADDR"] = os.environ.get("MASTER_ADDR", "localhost")
                 os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "12345")
 
+                self.model_ref = None
+
                 self.llm = LLM(
                     model=self.pretrained_model_name_or_path,
                     tensor_parallel_size=self.vllm_config.tensor_parallel_size,
                     gpu_memory_utilization=self.vllm_config.gpu_memory_utilization,
-                    max_num_seqs=batch_size_per_gpu
+                    max_num_seqs=self.batch_size_per_gpu
                     * self.vllm_config.tensor_parallel_size
                     * getattr(self.actor, "gradient_accumulation_steps", lambda: 1)(),
                     max_model_len=self.max_output_tokens,
@@ -416,10 +418,10 @@ class GRPO(LLMAlgorithm):
                     action_mask = torch.zeros_like(
                         completion_id, dtype=torch.bool, device=self.device
                     )
-                action_mask[:, prompt["input_ids"].shape[1] :] = True
-                action_mask[completion_id == self.pad_token_id] = False
-                action_mask = action_mask[:, 1:]
-                action_masks.append(action_mask)
+                    action_mask[:, prompt["input_ids"].shape[1] :] = True
+                    action_mask[completion_id == self.pad_token_id] = False
+                    action_mask = action_mask[:, 1:]
+                    action_masks.append(action_mask)
         else:
             if isinstance(prompts, dict):
                 raise ValueError(
@@ -471,6 +473,7 @@ class GRPO(LLMAlgorithm):
             old_log_probs,
             reference_log_probs,
         )
+
         num_samples = advantages.shape[0]
         batch_idxs = np.arange(num_samples)
         mean_loss, mean_kl = 0, 0
@@ -659,7 +662,6 @@ class GRPO(LLMAlgorithm):
         if len(rewards.shape) == 1:
             rewards = rewards.unsqueeze(0)
 
-        print("REWARDS", rewards, "REWARDS SHAPE", rewards.shape)
         advantage = (rewards - rewards.mean(dim=1).unsqueeze(1)) / (
             rewards.std(dim=1).unsqueeze(1) + eps
         )
@@ -833,13 +835,14 @@ class GRPO(LLMAlgorithm):
         #     gather_if_zero3 = deepspeed.zero.GatheredParameters
         # else:
         gather_if_zero3 = nullcontext
-        model_ref = self.accelerator.unwrap_model(self.actor)
-        model_ref.set_adapter("actor")
-        with gather_if_zero3(list(model_ref.parameters())):
-            model_ref.merge_adapter()
-            for name, param in model_ref.named_parameters():
+        if self.model_ref is None:
+            self.model_ref = self.accelerator.unwrap_model(self.actor)
+        self.model_ref.set_adapter("actor")
+        with gather_if_zero3(list(self.model_ref.parameters())):
+            self.model_ref.merge_adapter()
+            for name, param in self.model_ref.named_parameters():
                 name = name.removeprefix("base_model.model.").replace(".base_layer", "")
-                if model_ref.prefix in name:
+                if self.model_ref.prefix in name:
                     continue
 
                 if "original_module" in name:
@@ -851,8 +854,7 @@ class GRPO(LLMAlgorithm):
                         self.llm.llm_engine.model_executor.driver_worker.model_runner.model
                     )
                     llm_model.load_weights([(name, param.data)])
-            model_ref.unmerge_adapter()  # De-reference the old model
-            model_ref = None
+            self.model_ref.unmerge_adapter()  # De-reference the old model
 
         if (
             self.accelerator is not None

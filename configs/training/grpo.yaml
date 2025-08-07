@@ -14,14 +14,14 @@ MUTATION_PARAMS:
 
 INIT_HP:
     ALGO: GRPO
-    BATCH_SIZE: 4
-    REDUCE_MEMORY_PEAK: true
+    BATCH_SIZE: 16
+    REDUCE_MEMORY_PEAK: false
     BETA: 0.001
     LR: 0.000005
     CLIP_COEF: 0.2
     MAX_GRAD_NORM: 0.1
     UPDATE_EPOCHS: 1
-    GROUP_SIZE: 2
+    GROUP_SIZE: 8
     TEMPERATURE: 0.9
     CALC_POSITION_EMBEDDINGS: true
     MIN_OUTPUT_TOKENS:
@@ -31,7 +31,7 @@ INIT_HP:
     ELITISM: true
     POP_SIZE: 1
     EVAL_LOOP: 1
-    USE_VLLM: false
+    USE_VLLM: true
     # VLLM_CONFIG:
     #     tensor_parallel_size: 2
     #     mo

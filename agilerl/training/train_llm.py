@@ -107,28 +107,11 @@ def finetune_llm(
     data_increment = (
         getattr(dist, "get_world_size", lambda: 1)() if dist.is_initialized() else 1
     )
-    grad_accum = getattr(pop[0].actor, "gradient_accumulation_steps", lambda: 1)()
     effective_data_batch_size = data_increment * env.data_batch_size_per_gpu
-    effective_learning_batch_size = (
-        data_increment * init_hp["BATCH_SIZE_PER_GPU"] * grad_accum
-    )
-    if accelerator is None or accelerator.is_main_process:
-        print(
-            f"""
-=========================================================================
-Commencing RL finetuning
 
-Data batch size per gpu: {env.data_batch_size_per_gpu}
-Number of GPUs: {data_increment}
-Gradient accumulation: {grad_accum}
-Effective data batch size: {data_increment} * {env.data_batch_size_per_gpu} = {effective_data_batch_size}
-Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE_PER_GPU"]} * {grad_accum} = {effective_learning_batch_size}
-=========================================================================
-        """
-        )
     if wb and (accelerator is None or accelerator.is_main_process):
         init_hp["effective_data_batch_size"] = effective_data_batch_size
-        init_hp["effective_learning_batch_size"] = effective_learning_batch_size
+        init_hp["batch_size"] = init_hp.get("BATCH_SIZE", 1)
         init_hp["distributed_training"] = True if accelerator is not None else False
         init_wandb(
             algo=init_hp["ALGO"],
