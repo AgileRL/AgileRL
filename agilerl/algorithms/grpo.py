@@ -181,7 +181,7 @@ class GRPO(LLMAlgorithm):
             )
             cosine_lr_schedule_config = None
         if self.accelerator is not None and not clone:
-            self.batch_size = 16  # FIXME remove
+            self.batch_size = 1  # FIXME remove
             if (
                 self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
                     "train_micro_batch_size_per_gpu", "auto"
@@ -284,15 +284,13 @@ class GRPO(LLMAlgorithm):
 
         if (
             self.use_vllm
-            and self.accelerator is not None
-            and self.accelerator.is_main_process
         ):
             if self.vllm_config is None:
                 warnings.warn(
                     "No VLLM config provided. Using default VLLM configuration for generation."
                 )
                 self.vllm_config = VLLMConfig()
-            if self.vllm_config.mode == "server":
+            if self.vllm_config.mode == "server" and self.accelerator is not None and self.accelerator.is_main_process:
                 base_url = (
                     self.vllm_config.base_url
                     if vllm_config.base_url is not None
@@ -305,9 +303,8 @@ class GRPO(LLMAlgorithm):
                 self.vllm_client.init_communicator()
             else:
                 if (
-                    not self.accelerator.is_main_process
-                    % self.vllm_config.tensor_parallel_size
-                    == 0
+                    self.accelerator.num_processes % self.vllm_config.tensor_parallel_size
+                    != 0
                 ):
                     raise ValueError(
                         f"Tensor parallel size {self.vllm_config.tensor_parallel_size} must be a multiple of the number of processes {self.accelerator.num_processes}."
@@ -337,6 +334,9 @@ class GRPO(LLMAlgorithm):
                 os.environ["WORLD_SIZE"] = str(self.accelerator.num_processes)
                 os.environ["MASTER_ADDR"] = os.environ.get("MASTER_ADDR", "localhost")
                 os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "12345")
+
+
+                print("PRETRAINED MODEL NAME OR PATH", self.pretrained_model_name_or_path)
 
                 self.llm = LLM(
                     model=self.pretrained_model_name_or_path,
@@ -747,6 +747,10 @@ class GRPO(LLMAlgorithm):
                     "attention_mask": mask,
                     "use_cache": False,
                 }
+                # print("INPUT ID SHAPE", input_id.shape)
+                # print("MASK SHAPE", mask.shape)
+                # print("INPUT ID", input_id)
+                # print("MASK", mask)
                 logit = self.actor.forward(**kwargs).logits
                 logit /= self.temperature
                 log_prob = selective_log_softmax(logit[:, :-1], input_id[:, 1:])
@@ -900,12 +904,17 @@ class GRPO(LLMAlgorithm):
         # I need to make the following happen
         # prompts = [prompt1, prompt1, ..., prompt1 (group_size times), prompt2, prompt2, ..., prompt2 (group_size times), ...]
 
-        prompts = [prompt for prompt in prompts for _ in range(group_size)]
-        num_input_tokens = [prompt[1] for prompt in prompts]
-        raw_prompts = [prompt[0] for prompt in prompts]
+        import time
 
-        # print("LEN RAW PROMPTS", len(raw_prompts))
-        # print("LEN NUM INPUT TOKENS", len(num_input_tokens))
+        t = time.time()
+
+        group_prompts = [prompt for prompt in prompts for _ in range(group_size)]
+        num_input_tokens = [prompt[1] for prompt in group_prompts]
+        raw_group_prompts = [prompt[0] for prompt in group_prompts]
+
+        print("LEN RAW PROMPTS", len(raw_group_prompts))
+        print("LEN NUM INPUT TOKENS", len(num_input_tokens))
+        print("input tokens", num_input_tokens)
         # assert False
 
         generation_kwargs = {
@@ -920,7 +929,7 @@ class GRPO(LLMAlgorithm):
         sampling_params = SamplingParams(**generation_kwargs)
 
         if self.vllm_config.tensor_parallel_size > 1:
-            orig_size = len(raw_prompts)
+            orig_size = len(raw_group_prompts)
             gathered_prompts = [
                 None for _ in range(self.vllm_config.tensor_parallel_size)
             ]
@@ -928,7 +937,7 @@ class GRPO(LLMAlgorithm):
                 None for _ in range(self.vllm_config.tensor_parallel_size)
             ]
             torch.distributed.all_gather_object(
-                gathered_prompts, raw_prompts, group=self.tp_group
+                gathered_prompts, raw_group_prompts, group=self.tp_group
             )
             torch.distributed.all_gather_object(
                 gathered_num_input_tokens, num_input_tokens, group=self.tp_group
@@ -940,13 +949,17 @@ class GRPO(LLMAlgorithm):
                 for num_input_token in sublist
             ]
         else:
-            all_prompts = raw_prompts
+            all_prompts = raw_group_prompts
             all_num_input_tokens = num_input_tokens
 
         all_outputs = self.llm.generate(all_prompts, sampling_params=sampling_params)
         completion_ids = [
             output.token_ids for outputs in all_outputs for output in outputs.outputs
         ]
+        print("TIME TAKEN", time.time() - t)
+        # print("completion_ids", completion_ids)
+        print("lengths", len(completion_ids), [len(completion_id) for completion_id in completion_ids])
+        # assert False
 
         if self.vllm_config.tensor_parallel_size > 1:
             # Slice completions for this rank within its TP group.
@@ -958,6 +971,28 @@ class GRPO(LLMAlgorithm):
             completion_ids = completion_ids[tp_slice]
             num_input_tokens = all_num_input_tokens[tp_slice]
 
-        # action_masks =
+            print("COMPLETION IDS AFTER SLICING", [len(id) for id in completion_ids])
+            print("NUM INPUT TOKENS AFTER SLICING", num_input_tokens)
+
+
+        completion_ids = [
+            stack_and_pad_experiences(
+                completion_ids[group_size * i : group_size * (i + 1)],
+                padding_values=[self.pad_token_id],
+                device=self.device,
+            )[0]
+            for i, _ in enumerate(prompts)
+        ]
+        
+
+        action_masks = [
+            torch.zeros_like(completion_id, device=self.device)
+            for completion_id in completion_ids
+        ]
+
+        for i, completion_id in enumerate(completion_ids):
+            action_masks[i][:, num_input_tokens[i] :] = True
+            action_masks[i][completion_id == self.pad_token_id] = False
+            action_masks[i] = action_masks[i][:, 1:]
 
         return completion_ids, action_masks

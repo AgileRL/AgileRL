@@ -572,12 +572,12 @@ def create_population(
                 accelerator=Accelerator() if accelerator else None,
                 device=device,
                 use_separate_reference_adapter=True,
-                use_vllm=True,
-                vllm_config=(
-                    VLLMConfig(**INIT_HP.get("VLLM_CONFIG"))
-                    if INIT_HP.get("VLLM_CONFIG", None) is not None
-                    else None
-                ),
+                # use_vllm=True,
+                # vllm_config=(
+                #     VLLMConfig(**INIT_HP.get("VLLM_CONFIG"))
+                #     if INIT_HP.get("VLLM_CONFIG", None) is not None
+                #     else None
+                # ),
                 **algo_kwargs,
             )
             population.append(agent)
