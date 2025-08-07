@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
-from accelerate.utils import broadcast_object_list, gather_object
+from accelerate.utils import broadcast_object_list, gather_object, set_seed
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from gymnasium import spaces
@@ -18,6 +18,7 @@ from torch.nn.utils import clip_grad_norm_
 from transformers import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
 from trl.extras.vllm_client import VLLMClient
+from vllm import LLM, SamplingParams
 
 from agilerl.algorithms.core import LLMAlgorithm, OptimizerWrapper
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
@@ -92,8 +93,12 @@ class GRPO(LLMAlgorithm):
     :type clone: bool, optional
     :param use_separate_reference_adapter: Flag to indicate if the reference policy should have a separate adapter, defaults to False
     :type use_separate_reference_adapter: bool, optional
+    :param use_vllm: Flag to indicate if the model should use vllm for generation, defaults to False
+    :type use_vllm: bool, optional
     :param vllm_config: Config for VLLM, provide a VLLMConfig object to use VLLM server for generation, defaults to None
     :type vllm_config: VLLMConfig, optional
+    :param seed: Seed for the random number generator, defaults to 42
+    :type seed: int, optional
     """
 
     def __init__(
@@ -127,7 +132,9 @@ class GRPO(LLMAlgorithm):
         wrap: bool = True,
         clone: bool = False,
         use_separate_reference_adapter: bool = False,
+        use_vllm: bool = False,
         vllm_config: Optional[VLLMConfig] = None,
+        seed: int = 42,
     ) -> None:
 
         device = (
@@ -268,26 +275,84 @@ class GRPO(LLMAlgorithm):
         self.local_rank = (
             "0" if self.accelerator is None else self.accelerator.local_process_index
         )
+        self.pretrained_model_name_or_path = actor_network.name_or_path
         self._initialize_actors(actor_network, not clone)
-        self.use_vllm = vllm_config is not None
+        self.use_vllm = use_vllm
+        self.vllm_config = vllm_config
+
+        set_seed(seed, device_specific=True)
+
         if (
             self.use_vllm
             and self.accelerator is not None
             and self.accelerator.is_main_process
         ):
-            base_url = (
-                vllm_config.base_url
-                if vllm_config.base_url is not None
-                else f"http://{vllm_config.host}:{vllm_config.server_port}"
-            )
-            print("Setting up vllm client")
-            self.vllm_client = VLLMClient(
-                base_url=base_url,
-                connection_timeout=vllm_config.connection_timeout,
-            )
-            print("INITIALIZING VLLM CLIENT")
-            self.vllm_client.init_communicator()
-            print("VLLM CLIENT INITIALIZED")
+            if self.vllm_config is None:
+                warnings.warn(
+                    "No VLLM config provided. Using default VLLM configuration for generation."
+                )
+                self.vllm_config = VLLMConfig()
+            if self.vllm_config.mode == "server":
+                base_url = (
+                    self.vllm_config.base_url
+                    if vllm_config.base_url is not None
+                    else f"http://{self.vllm_config.host}:{self.vllm_config.server_port}"
+                )
+                self.vllm_client = VLLMClient(
+                    base_url=base_url,
+                    connection_timeout=self.vllm_config.connection_timeout,
+                )
+                self.vllm_client.init_communicator()
+            else:
+                if (
+                    not self.accelerator.is_main_process
+                    % self.vllm_config.tensor_parallel_size
+                    == 0
+                ):
+                    raise ValueError(
+                        f"Tensor parallel size {self.vllm_config.tensor_parallel_size} must be a multiple of the number of processes {self.accelerator.num_processes}."
+                    )
+
+                if self.vllm_config.tensor_parallel_size > 1:
+                    # Create subgroups of ranks for TP, each group with `vllm_tensor_parallel_size` ranks.
+                    # For example, if world_size=8 and vllm_tensor_parallel_size=2 → groups: [0,1], [2,3], [4,5], [6,7]
+                    self.tp_group, _ = torch.distributed.new_subgroups_by_enumeration(
+                        [
+                            list(
+                                range(
+                                    i * self.vllm_config.tensor_parallel_size,
+                                    (i + 1) * self.vllm_config.tensor_parallel_size,
+                                )
+                            )
+                            for i in range(
+                                self.accelerator.num_processes
+                                // self.vllm_config.tensor_parallel_size
+                            )
+                        ]
+                    )
+
+                # vLLM requires the environment variables to be set for distributed training.
+                os.environ["RANK"] = str(self.accelerator.process_index)
+                os.environ["LOCAL_RANK"] = str(self.accelerator.local_process_index)
+                os.environ["WORLD_SIZE"] = str(self.accelerator.num_processes)
+                os.environ["MASTER_ADDR"] = os.environ.get("MASTER_ADDR", "localhost")
+                os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "12345")
+
+                self.llm = LLM(
+                    model=self.pretrained_model_name_or_path,
+                    tensor_parallel_size=self.vllm_config.tensor_parallel_size,
+                    gpu_memory_utilization=self.vllm_config.gpu_memory_utilization,
+                    max_num_seqs=batch_size
+                    * self.vllm_config.tensor_parallel_size
+                    * getattr(self.actor, "gradient_accumulation_steps", lambda: 1)(),
+                    max_model_len=self.max_output_tokens,
+                    distributed_executor_backend="external_launcher",
+                    # Feed identical seed for tp groups to ensure sampling results are the same across workers
+                    seed=self.accelerator.process_index
+                    // self.vllm_config.tensor_parallel_size,
+                    # Latest vLLM v1 memory profiler is misled by the high default value (i.e., 32768) - thinking there's not enough memory
+                    max_num_batched_tokens=self.vllm_config.max_num_batched_tokens,
+                )
 
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
@@ -345,79 +410,14 @@ class GRPO(LLMAlgorithm):
             # Move model to vllm
             self._move_model_to_vllm()
 
-            num_input_tokens = [prompt[1] for prompt in prompts]
-            raw_prompts = [prompt[0] for prompt in prompts]
-
-            # Gather prompts to single device
-            all_prompts = gather_object(raw_prompts)
-            all_num_input_tokens = gather_object(num_input_tokens)
-            print(
-                "ALL PROMPTS", all_prompts, "all_num_input_tokens", all_num_input_tokens
-            )
-            completion_ids = [None] * len(all_prompts)
-            if self.accelerator.is_main_process:
-                print("GENERATING")
-                completion_ids = self.vllm_client.generate(
-                    prompts=all_prompts,
-                    n=group_size,
-                    repetition_penalty=self.repetition_penalty,
-                    temperature=self.temperature,
-                    top_p=self.top_p,
-                    top_k=-1 if self.top_k is None else self.top_k,
-                    min_p=0.0 if self.min_p is None else self.min_p,
-                    max_tokens=self.max_output_tokens,
+            if self.vllm_config.mode == "server":
+                completion_ids, action_masks = self._generate_with_vllm_server(
+                    prompts, group_size
                 )
-                print("GENERATION COMPLETE")
-            print("COMPLETION IDS", len(completion_ids))
-            completion_ids = broadcast_object_list(completion_ids, from_process=0)
-            process_slice = slice(
-                self.accelerator.process_index * len(raw_prompts) * group_size,
-                (self.accelerator.process_index + 1) * len(raw_prompts) * group_size,
-            )
-            completion_ids = completion_ids[process_slice]
-            num_input_tokens = num_input_tokens[process_slice]
-
-            print("COMPLETION IDS", completion_ids)
-            print("LEN COMPLETION IDS", len(completion_ids))
-            print("RAW PROMPTS", len(raw_prompts))
-            print([i for i, _ in enumerate(raw_prompts)])
-            print(
-                [
-                    (i * group_size, group_size * (i + 1))
-                    for i, _ in enumerate(raw_prompts)
-                ]
-            )
-
-            list[list[int]]
-
-            # completion_ids = [torch.tensor(completion_ids[group_size * i : group_size * (i + 1)], device=self.device) for i, _ in enumerate(raw_prompts)]
-            completion_ids = [
-                stack_and_pad_experiences(
-                    completion_ids[group_size * i : group_size * (i + 1)],
-                    padding_values=[self.pad_token_id],
-                    device=self.device,
-                )[0]
-                for i, _ in enumerate(raw_prompts)
-            ]
-
-            print(
-                "COMPLETION IDS SHAPES",
-                [completion_id.shape for completion_id in completion_ids],
-            )
-            action_masks = [
-                torch.zeros_like(completion_id, device=self.device)
-                for completion_id in completion_ids
-            ]
-
-            print("NUM INPUT TOKENS", num_input_tokens)
-
-            for i, completion_id in enumerate(completion_ids):
-                print("AM SHAPE", action_masks[i].shape)
-                action_masks[i][:, num_input_tokens[i] :] = True
-                action_masks[i][completion_id == self.pad_token_id] = False
-                action_masks[i] = action_masks[i][:, 1:]
-
-        print("COMPLETION IDS", completion_ids)
+            else:
+                completion_ids, action_masks = self._generate_with_vllm_colocate(
+                    prompts, group_size
+                )
 
         return completion_ids, action_masks
 
@@ -745,8 +745,6 @@ class GRPO(LLMAlgorithm):
                     "attention_mask": mask,
                     "use_cache": False,
                 }
-                print("KWARGS IN THE FOWARD PASS", kwargs["input_ids"].shape)
-                assert False
                 logit = self.actor.forward(**kwargs).logits
                 logit /= self.temperature
                 log_prob = selective_log_softmax(logit[:, :-1], input_id[:, 1:])
@@ -805,10 +803,11 @@ class GRPO(LLMAlgorithm):
 
     def _move_model_to_vllm(self) -> None:
         """Move the model to the vllm server."""
-        if self.zero_stage == 3:
-            gather_if_zero3 = deepspeed.zero.GatheredParameters
-        else:
-            gather_if_zero3 = nullcontext
+        # TODO: Add support for ZeRO Stage 3
+        # if self.zero_stage == 3:
+        #     gather_if_zero3 = deepspeed.zero.GatheredParameters
+        # else:
+        gather_if_zero3 = nullcontext
         model_ref = self.accelerator.unwrap_model(self.actor)
         model_ref.set_adapter("actor")
         with gather_if_zero3(list(model_ref.parameters())):
@@ -820,8 +819,142 @@ class GRPO(LLMAlgorithm):
 
                 if "original_module" in name:
                     continue
-
-                self.vllm_client.update_named_param(name, param.data)
+                if self.vllm_config.mode == "server":
+                    self.vllm_client.update_named_param(name, param.data)
+                else:
+                    llm_model = (
+                        self.llm.llm_engine.model_executor.driver_worker.model_runner.model
+                    )
+                    llm_model.load_weights([(name, param.data)])
             model_ref.unmerge_adapter()  # De-reference the old model
             model_ref = None
-        self.vllm_client.reset_prefix_cache()
+
+        if (
+            self.accelerator is not None
+            and self.accelerator.is_main_process
+            and self.vllm_config.mode == "server"
+        ):
+            self.vllm_client.reset_prefix_cache()
+        elif self.vllm_config.mode == "colocate":
+            self.llm.reset_prefix_cache()
+
+    def _generate_with_vllm_server(
+        self, prompts: List[Tuple[str, int]], group_size: int
+    ) -> List[torch.Tensor]:
+        num_input_tokens = [prompt[1] for prompt in prompts]
+        raw_prompts = [prompt[0] for prompt in prompts]
+
+        # Gather prompts to single device
+        all_prompts = gather_object(raw_prompts)
+        all_num_input_tokens = gather_object(num_input_tokens)
+        completion_ids = [None] * len(all_prompts)
+
+        if self.accelerator.is_main_process:
+            print("GENERATING")
+            completion_ids = self.vllm_client.generate(
+                prompts=all_prompts,
+                n=group_size,
+                repetition_penalty=self.repetition_penalty,
+                temperature=self.temperature,
+                top_p=self.top_p,
+                top_k=-1 if self.top_k is None else self.top_k,
+                min_p=0.0 if self.min_p is None else self.min_p,
+                max_tokens=self.max_output_tokens,
+            )
+
+        completion_ids = broadcast_object_list(completion_ids, from_process=0)
+        process_slice = slice(
+            self.accelerator.process_index * len(raw_prompts) * group_size,
+            (self.accelerator.process_index + 1) * len(raw_prompts) * group_size,
+        )
+        completion_ids = completion_ids[process_slice]
+        num_input_tokens = all_num_input_tokens[process_slice]
+
+        completion_ids = [
+            stack_and_pad_experiences(
+                completion_ids[group_size * i : group_size * (i + 1)],
+                padding_values=[self.pad_token_id],
+                device=self.device,
+            )[0]
+            for i, _ in enumerate(raw_prompts)
+        ]
+
+        action_masks = [
+            torch.zeros_like(completion_id, device=self.device)
+            for completion_id in completion_ids
+        ]
+
+        for i, completion_id in enumerate(completion_ids):
+            print("AM SHAPE", action_masks[i].shape)
+            action_masks[i][:, num_input_tokens[i] :] = True
+            action_masks[i][completion_id == self.pad_token_id] = False
+            action_masks[i] = action_masks[i][:, 1:]
+
+        return completion_ids, action_masks
+
+    def _generate_with_vllm_colocate(
+        self, prompts: List[Tuple[str, int]], group_size: int
+    ) -> List[torch.Tensor]:
+
+        # I need to make the following happen
+        # prompts = [prompt1, prompt1, ..., prompt1 (group_size times), prompt2, prompt2, ..., prompt2 (group_size times), ...]
+
+        prompts = [prompt for prompt in prompts for _ in range(group_size)]
+        num_input_tokens = [prompt[1] for prompt in prompts]
+        raw_prompts = [prompt[0] for prompt in prompts]
+
+        # print("LEN RAW PROMPTS", len(raw_prompts))
+        # print("LEN NUM INPUT TOKENS", len(num_input_tokens))
+        # assert False
+
+        generation_kwargs = {
+            "n": 1,
+            "repetition_penalty": self.repetition_penalty,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "top_k": -1 if self.top_k is None else self.top_k,
+            "min_p": 0.0 if self.min_p is None else self.min_p,
+            "max_tokens": self.max_output_tokens,
+        }
+        sampling_params = SamplingParams(**generation_kwargs)
+
+        if self.vllm_config.tensor_parallel_size > 1:
+            orig_size = len(raw_prompts)
+            gathered_prompts = [
+                None for _ in range(self.vllm_config.tensor_parallel_size)
+            ]
+            gathered_num_input_tokens = [
+                None for _ in range(self.vllm_config.tensor_parallel_size)
+            ]
+            torch.distributed.all_gather_object(
+                gathered_prompts, raw_prompts, group=self.tp_group
+            )
+            torch.distributed.all_gather_object(
+                gathered_num_input_tokens, num_input_tokens, group=self.tp_group
+            )
+            all_prompts = [prompt for sublist in gathered_prompts for prompt in sublist]
+            all_num_input_tokens = [
+                num_input_token
+                for sublist in gathered_num_input_tokens
+                for num_input_token in sublist
+            ]
+        else:
+            all_prompts = raw_prompts
+            all_num_input_tokens = num_input_tokens
+
+        all_outputs = self.llm.generate(all_prompts, sampling_params=sampling_params)
+        completion_ids = [
+            output.token_ids for outputs in all_outputs for output in outputs.outputs
+        ]
+
+        if self.vllm_config.tensor_parallel_size > 1:
+            # Slice completions for this rank within its TP group.
+            # Each rank generates all outputs — we keep only our share.
+            local_rank_in_group = torch.distributed.get_rank(group=self.tp_group)
+            tp_slice = slice(
+                local_rank_in_group * orig_size, (local_rank_in_group + 1) * orig_size
+            )
+            completion_ids = completion_ids[tp_slice]
+            all_num_input_tokens = all_num_input_tokens[tp_slice]
+
+        return completion_ids, action_masks

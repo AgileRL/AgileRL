@@ -3,11 +3,11 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch.distributed as dist
-import wandb
 from accelerate import Accelerator
 from tensordict import TensorDict
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import GRPO
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.hpo.mutation import Mutations
@@ -159,12 +159,14 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE_PER_GPU"]
     for i in range(training_steps):
         agent_metrics_dict = {}
         for agent_idx, agent in enumerate(pop):
+            agent.save_checkpoint(f"agent_{agent_idx}_checkpoint", weights_only=True)
+            agent.load_checkpoint(f"agent_{agent_idx}_checkpoint")
             agent.set_reference_policy(env.num_dataset_passes)
             completion_ids, action_masks = agent.get_action(prompts)
             completion_lengths = np.mean([x.shape[1] for x in completion_ids])
 
             # Use the reward function stored in env.step to calculate reward of the each answer from the group
-            print("completion id length", len(completion_ids))
+
             next_prompts, rewards = env.step(completion_ids)
             experiences = (
                 completion_ids,

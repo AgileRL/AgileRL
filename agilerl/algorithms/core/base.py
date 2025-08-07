@@ -37,6 +37,7 @@ from tensordict import TensorDict
 from torch._dynamo import OptimizedModule
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import SequentialLR
+from transformers import AutoModelForCausalLM
 
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import (
@@ -1820,8 +1821,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 and self.zero_stage > 2
                 and self.accelerator.is_main_process
             ):
-                warnings.warn(
-                    "Zero stage 3 support is nascent and has not been thoroughly tested. It may be unstable or subject to change. We recommend caution in production environments."
+                raise NotImplementedError(
+                    "DeepSpeed ZeRO Stage 3 is not yet supported in AgileRL. This feature is under development and will be available in a future release."
                 )
 
         seed = 42
@@ -1845,16 +1846,35 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     # TODO: This could hopefully be abstracted into EvolvableAlgorithm with a decorator to
     # handle _save_distributed_actor if deepspeed is used.
-    def save_checkpoint(self, path: str) -> None:
+    def save_checkpoint(self, path: str, weights_only: bool = False) -> None:
         """
         Override the save_checkpoint method to provide guidance on the correct method to use.
         :param path: Location to save checkpoint at
         :type path: string
+        :param weights_only: If True, only save the weights of the model, defaults to False
+        :type weights_only: bool, optional
         """
+
+        warnings.warn("weights_only default will be changed to True in the future.")
+
         if self.accelerator is not None:
-            self._save_distributed_actor(path, tag="save_checkpoint")
+            if not weights_only:
+                self._save_distributed_actor(path, tag="save_checkpoint")
+            else:
+                self.actor.save_pretrained(
+                    save_directory=path,
+                    selected_adapters=["actor", "reference"],
+                    is_main_process=self.accelerator.is_main_process,
+                )
+
+        checkpoint_dict = get_checkpoint_dict(
+            self, using_deepspeed=self.accelerator is not None
+        )
+        checkpoint_dict["_weights_only"] = weights_only
+        checkpoint_dict.pop("llm", None)
+
         torch.save(
-            get_checkpoint_dict(self, using_deepspeed=self.accelerator is not None),
+            checkpoint_dict,
             path + "/attributes.pt",
             pickle_module=dill,
         )
@@ -1869,8 +1889,29 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :type path: string
         """
         if self.accelerator is not None:
-            self._load_distributed_actor(path, tag="save_checkpoint")
             checkpoint = torch.load(path + "/attributes.pt", weights_only=False)
+            weights_only = checkpoint.get("_weights_only", False)
+
+            if weights_only:
+                base_model = AutoModelForCausalLM.from_pretrained(
+                    self.pretrained_model_name_or_path,
+                    device_map="cpu",
+                    torch_dtype=torch.bfloat16,
+                )
+                self.actor = PeftModel.from_pretrained(
+                    base_model,
+                    os.path.join(path, f"actor"),
+                    is_trainable=True,
+                    adapter_name="actor",
+                )
+                self.actor.load_adapter(
+                    os.path.join(path, f"reference"),
+                    is_trainable=False,
+                    adapter_name="reference",
+                )
+            else:
+                self._load_distributed_actor(path, tag="save_checkpoint")
+
             checkpoint["accelerator"] = (
                 Accelerator() if self.accelerator is not None else None
             )

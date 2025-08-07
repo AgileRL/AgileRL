@@ -8,12 +8,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import tqdm
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl.algorithms import (
     CQN,
     DDPG,
@@ -572,6 +572,7 @@ def create_population(
                 accelerator=Accelerator() if accelerator else None,
                 device=device,
                 use_separate_reference_adapter=True,
+                use_vllm=True,
                 vllm_config=(
                     VLLMConfig(**INIT_HP.get("VLLM_CONFIG"))
                     if INIT_HP.get("VLLM_CONFIG", None) is not None

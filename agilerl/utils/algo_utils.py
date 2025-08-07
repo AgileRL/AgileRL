@@ -1133,11 +1133,24 @@ class VLLMConfig:
     :type group_port: int, optional
     """
 
+    # Mode configuration
+    mode: str = "colocate"
+
+    # Server mode parameters
     base_url: Optional[str] = None
     host: str = "0.0.0.0"
     server_port: int = 8000
     group_port: int = 51216
-    connection_timeout: float = 0.0
+    connection_timeout: float = 30.0
+
+    # Colocate mode parameters
+    model_name: Optional[str] = None
+    tensor_parallel_size: int = 1
+    gpu_memory_utilization: float = 0.9
+    max_num_seqs: int = 256
+    max_model_len: int = 2048
+    max_num_batched_tokens: int = 4096
+    model_impl: str = "auto"
 
 
 def create_warmup_cosine_scheduler(
