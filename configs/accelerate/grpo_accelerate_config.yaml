@@ -4,10 +4,17 @@ debug: false
 deepspeed_config:
     gradient_accumulation_steps: 4
     gradient_clipping: 1.5
-    # offload_optimizer_device: cpu
-    # offload_param_device: cpu
+    offload_optimizer_device: cpu
+    offload_param_device: cpu
     zero3_init_flag: false
     zero_stage: 2
+    gradient_checkpointing: true
+    activation_checkpointing:
+        partition_activations: true
+        cpu_checkpointing: true
+        contiguous_memory_optimization: false
+        number_checkpoints: null
+        synchronize_checkpoint_boundary: false
 mixed_precision: bf16
 distributed_type: DEEPSPEED
 downcast_bf16: no

@@ -14,8 +14,8 @@ MUTATION_PARAMS:
 
 INIT_HP:
     ALGO: GRPO
-    BATCH_SIZE: 16
-    REDUCE_MEMORY_PEAK: false
+    BATCH_SIZE: 4
+    REDUCE_MEMORY_PEAK: true
     BETA: 0.001
     LR: 0.000005
     CLIP_COEF: 0.2
@@ -25,7 +25,7 @@ INIT_HP:
     TEMPERATURE: 0.9
     CALC_POSITION_EMBEDDINGS: true
     MIN_OUTPUT_TOKENS:
-    MAX_OUTPUT_TOKENS: 300
+    MAX_OUTPUT_TOKENS: 1024
     COSINE_lR_SCHEDULER:
     TOURN_SIZE: 2
     ELITISM: true
@@ -34,11 +34,7 @@ INIT_HP:
     USE_VLLM: true
     # VLLM_CONFIG:
     #     tensor_parallel_size: 2
-    #     mo
-    #     host: localhost
-    #     server_port: 8000
-    #     group_port: 51216
-    #     connection_timeout: 240.0
+    #     gpu_memory_utilization: 0.3
 
 
 # MASTER_ADDR=34.13.155.70 \

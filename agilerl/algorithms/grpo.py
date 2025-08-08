@@ -98,6 +98,8 @@ class GRPO(LLMAlgorithm):
     :type wrap: bool, optional
     :param clone: Flag to indicate if the instantiation is a cloning, defaults to False
     :type clone: bool, optional
+    :param gradient_checkpointing: Flag to indicate if the model should use gradient checkpointing, defaults to False
+    :type gradient_checkpointing: bool, optional
     :param use_separate_reference_adapter: Flag to indicate if the reference policy should have a separate adapter, defaults to False
     :type use_separate_reference_adapter: bool, optional
     :param use_vllm: Flag to indicate if the model should use vllm for generation, defaults to False
@@ -138,6 +140,7 @@ class GRPO(LLMAlgorithm):
         device: str = "cpu",
         wrap: bool = True,
         clone: bool = False,
+        gradient_checkpointing: bool = False,
         use_separate_reference_adapter: bool = False,
         use_vllm: bool = False,
         vllm_config: Optional[VLLMConfig] = None,
@@ -290,6 +293,7 @@ class GRPO(LLMAlgorithm):
         self.cosine_lr_schedule_config = cosine_lr_schedule_config
         self.wrap = wrap
         self.use_separate_reference_adapter = use_separate_reference_adapter
+        self.gradient_checkpointing = gradient_checkpointing
         if max_grad_norm and (accelerator is not None) and accelerator.is_main_process:
             warnings.warn(
                 "Argument 'max_grad_norm' will be overwritten by the 'gradient_clipping' value set in the deepspeed config."
@@ -367,8 +371,9 @@ class GRPO(LLMAlgorithm):
 
                 self.model_ref = None
 
-                self.llm = LLM(
-                    model=self.pretrained_model_name_or_path,
+                print("VLLM ARGs")
+
+                print(dict(model=self.pretrained_model_name_or_path,
                     tensor_parallel_size=self.vllm_config.tensor_parallel_size,
                     gpu_memory_utilization=self.vllm_config.gpu_memory_utilization,
                     max_num_seqs=self.batch_size_per_gpu
@@ -381,8 +386,29 @@ class GRPO(LLMAlgorithm):
                     // self.vllm_config.tensor_parallel_size,
                     # Latest vLLM v1 memory profiler is misled by the high default value (i.e., 32768) - thinking there's not enough memory
                     max_num_batched_tokens=self.vllm_config.max_num_batched_tokens,
+                    model_impl='vllm'))
+
+
+                max_num_seqs = self.batch_size_per_gpu * self.vllm_config.tensor_parallel_size * self.accelerator.state.deepspeed_plugin.deepspeed_config["gradient_accumulation_steps"]
+                max_model_len = self.max_output_tokens
+
+                self.llm = LLM(
+                    model=self.pretrained_model_name_or_path,
+                    tensor_parallel_size=self.vllm_config.tensor_parallel_size,
+                    gpu_memory_utilization=self.vllm_config.gpu_memory_utilization,
+                    max_num_seqs=max_num_seqs,
+                    max_model_len=max_model_len,
+                    distributed_executor_backend="external_launcher",
+                    seed=self.accelerator.process_index
+                    // self.vllm_config.tensor_parallel_size,
+                    max_num_batched_tokens=max_model_len * max_num_seqs,
                     model_impl='vllm'
                 )
+                
+                print(f"vLLM GPU memory: {torch.cuda.memory_allocated()/1e9:.2f}GB")
+                print(f"vLLM reserved: {torch.cuda.memory_reserved()/1e9:.2f}GB")
+                # assert False
+
 
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
@@ -611,6 +637,8 @@ class GRPO(LLMAlgorithm):
         :param add_adapters: Flag to indicate if adapters should be added to the model, defaults to True
         :type add_adapters: bool, optional
         """
+            
+
         if isinstance(base_model, PeftModel) and add_adapters:
             # Handles backwards compatibility with user providing a peft model as the actor network
             adapter_name = list(base_model.peft_config.keys())
@@ -653,6 +681,8 @@ class GRPO(LLMAlgorithm):
             if self.cosine_lr_schedule_config is not None
             else None
         )
+        if self.gradient_checkpointing:
+            self.actor.base_model.gradient_checkpointing_enable()
 
     def _calculate_advantage(
         self, rewards: torch.Tensor, eps: float = 1e-8
@@ -941,10 +971,9 @@ class GRPO(LLMAlgorithm):
         num_input_tokens = [prompt[1] for prompt in group_prompts]
         raw_group_prompts = [prompt[0] for prompt in group_prompts]
 
-        print("LEN RAW PROMPTS", len(raw_group_prompts))
-        print("LEN NUM INPUT TOKENS", len(num_input_tokens))
-        print("input tokens", num_input_tokens)
-        # assert False
+        # print("LEN RAW PROMPTS", len(raw_group_prompts))
+        # print("LEN NUM INPUT TOKENS", len(num_input_tokens))
+        # print("input tokens", num_input_tokens)
 
         generation_kwargs = {
             "n": 1,
@@ -981,18 +1010,20 @@ class GRPO(LLMAlgorithm):
             all_prompts = raw_group_prompts
             all_num_input_tokens = num_input_tokens
 
+        print("ALL PROMPTS", all_prompts)
+        print("Prompt lengths", [len(prompt) for prompt in all_prompts])
+
         all_outputs = self.llm.generate(all_prompts, sampling_params=sampling_params)
         completion_ids = [
             output.token_ids for outputs in all_outputs for output in outputs.outputs
         ]
-        print("TIME TAKEN", time.time() - t)
-        # print("completion_ids", completion_ids)
-        print(
-            "lengths",
-            len(completion_ids),
-            [len(completion_id) for completion_id in completion_ids],
-        )
-        # assert False
+        # print("TIME TAKEN", time.time() - t)
+        # # print("completion_ids", completion_ids)
+        # print(
+        #     "lengths",
+        #     len(completion_ids),
+        #     [len(completion_id) for completion_id in completion_ids],
+        # )
 
         if self.vllm_config.tensor_parallel_size > 1:
             # Slice completions for this rank within its TP group.

@@ -17,7 +17,7 @@ from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
-MODEL_PATH = "Qwen/Qwen2.5-0.5B"
+MODEL_PATH = "Qwen/Qwen2.5-3B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
 
