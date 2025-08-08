@@ -30,3 +30,4 @@ huggingface
 datasets==3.3.2
 transformers==4.50.0
 peft==0.15.2
+vllm>=0.10.0
