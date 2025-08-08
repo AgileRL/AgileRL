@@ -17,7 +17,7 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from torch.nn.utils import clip_grad_norm_
 from transformers import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
-from trl.extras.vllm_client import VLLMClient
+# from trl.extras.vllm_client import VLLMClient
 from vllm import LLM, SamplingParams
 
 from agilerl.algorithms.core import LLMAlgorithm, OptimizerWrapper
@@ -40,6 +40,13 @@ DeepSpeedOptimizerType = Union[
     DeepSpeedZeroOptimizer,  # ZeRO Stage 1 & 2 optimizer
     DeepSpeedZeroOptimizer_Stage3,  # ZeRO Stage 3 optimizer
 ]
+
+
+
+# Dummy to avoid installing trl
+class VLLMClient:
+    def __init__(self, *args, **kwargs):
+        pass
 
 
 class GRPO(LLMAlgorithm):
