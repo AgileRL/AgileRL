@@ -916,8 +916,6 @@ def get_experiences_samples(
         elif isinstance(exp, tuple):
             sampled_exp = tuple(value[minibatch_indices] for value in exp)
         elif isinstance(exp, torch.Tensor):
-            print("EXP", exp.shape)
-            print("MINIBATCH INDICES", minibatch_indices)
             sampled_exp = exp[minibatch_indices]
         else:
             raise TypeError(f"Unsupported experience type: {type(exp)}")
@@ -1009,7 +1007,6 @@ def stack_and_pad_experiences(
     :rtype: Tuple[ArrayOrTensor, ...]
     """
     stacked_experiences = []
-    print("EXPERIENCES", experiences)
     for exp, padding in zip(experiences, padding_values):
         if not isinstance(exp, list):
             stacked_exp = exp

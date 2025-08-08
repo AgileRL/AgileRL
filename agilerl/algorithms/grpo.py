@@ -192,7 +192,7 @@ class GRPO(LLMAlgorithm):
             cosine_lr_schedule_config = None
 
         if self.accelerator is not None and not clone:
-            if reduce_memory_peak:
+            if reduce_memory_peak: 
                 self.learning_batch_size = 1
                 self.batch_size_per_gpu = 1
                 self.accelerator.state.deepspeed_plugin.deepspeed_config["train_micro_batch_size_per_gpu"] = self.batch_size_per_gpu
@@ -945,11 +945,7 @@ class GRPO(LLMAlgorithm):
 
         # I need to make the following happen
         # prompts = [prompt1, prompt1, ..., prompt1 (group_size times), prompt2, prompt2, ..., prompt2 (group_size times), ...]
-
-        import time
-
-        t = time.time()
-
+        
         group_prompts = [prompt for prompt in prompts for _ in range(group_size)]
         num_input_tokens = [prompt[1] for prompt in group_prompts]
         raw_group_prompts = [prompt[0] for prompt in group_prompts]

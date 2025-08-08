@@ -149,10 +149,7 @@ class HuggingFaceGym(gym.Env):
                     group_completion,
                     skip_special_tokens=True,
                 )
-                if not self.return_raw_completions
-                else group_completion
             )
-            print("DECODED GROUP COMPLETION", decoded_group_completion)
             rewards = [
                 self.reward_fn(completion, answer, question)
                 for completion in decoded_group_completion
