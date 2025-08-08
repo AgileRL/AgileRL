@@ -302,6 +302,7 @@ class GRPO(LLMAlgorithm):
         set_seed(seed, device_specific=True)
 
         if self.use_vllm:
+            os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn" # FIXME is this needed??
             if self.vllm_config is None:
                 warnings.warn(
                     "No VLLM config provided. Using default VLLM configuration for generation."
@@ -373,6 +374,7 @@ class GRPO(LLMAlgorithm):
                     // self.vllm_config.tensor_parallel_size,
                     # Latest vLLM v1 memory profiler is misled by the high default value (i.e., 32768) - thinking there's not enough memory
                     max_num_batched_tokens=self.vllm_config.max_num_batched_tokens,
+                    model_impl='vllm'
                 )
 
         if self.accelerator is not None:
@@ -393,8 +395,6 @@ class GRPO(LLMAlgorithm):
         :param training: Flag to indicate training mode, defaults to True
         :type training: bool, optional
         """
-        print("IN GET ACTION")
-        print("ARE WE USING VLLM?", self.use_vllm)
         group_size = self.group_size if training else 1
         self.actor.eval()
         if not self.use_vllm:
@@ -768,10 +768,11 @@ class GRPO(LLMAlgorithm):
                     "attention_mask": mask,
                     "use_cache": False,
                 }
-                # print("INPUT ID SHAPE", input_id.shape)
-                # print("MASK SHAPE", mask.shape)
-                # print("INPUT ID", input_id)
-                # print("MASK", mask)
+                print("INPUT ID SHAPE", input_id.shape)
+                print("MASK SHAPE", mask.shape)
+                print("INPUT ID", input_id)
+                print("MASK", mask)
+
                 logit = self.actor.forward(**kwargs).logits
                 logit /= self.temperature
                 log_prob = selective_log_softmax(logit[:, :-1], input_id[:, 1:])
