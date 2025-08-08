@@ -192,39 +192,51 @@ class GRPO(LLMAlgorithm):
             cosine_lr_schedule_config = None
 
         if self.accelerator is not None and not clone:
-            if batch_size % self.accelerator.num_processes != 0:
-                raise ValueError(
-                    f"Batch size must be divisible by the number of processes."
-                )
-            self.learning_batch_size = int(batch_size / self.accelerator.num_processes)
+            if reduce_memory_peak:
+                self.learning_batch_size = 1
+                self.batch_size_per_gpu = 1
+                self.accelerator.state.deepspeed_plugin.deepspeed_config["train_micro_batch_size_per_gpu"] = self.batch_size_per_gpu
+                if batch_size % self.accelerator.num_processes != 0:
+                    raise ValueError(
+                        f"Batch size must be divisible by the number of processes."
+                    )
+                gradient_accumulation_steps = batch_size / self.accelerator.num_processes
+                self.accelerator.state.deepspeed_plugin.deepspeed_config["gradient_accumulation_steps"] = int(gradient_accumulation_steps)
+            
+            else:
+                if batch_size % self.accelerator.num_processes != 0:
+                    raise ValueError(
+                        f"Batch size must be divisible by the number of processes."
+                    )
+                self.learning_batch_size = int(batch_size / self.accelerator.num_processes)
 
-            if (
-                self.learning_batch_size
-                % self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
-                    "gradient_accumulation_steps", 1
+                if (
+                    self.learning_batch_size
+                    % self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
+                        "gradient_accumulation_steps", 1
+                    )
+                    != 0
+                ):
+                    raise ValueError(
+                        f"Batch size must be divisible by the product of the number of processes and gradient accumulation steps."
+                        "Gradient accumulation steps can be updated in the deepspeed config by changing the 'gradient_accumulation_steps' parameter."
+                    )
+                self.batch_size_per_gpu = int(
+                    self.learning_batch_size
+                    / self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
+                        "gradient_accumulation_steps", 1
+                    )
                 )
-                != 0
-            ):
-                raise ValueError(
-                    f"Batch size must be divisible by the product of the number of processes and gradient accumulation steps."
-                    "Gradient accumulation steps can be updated in the deepspeed config by changing the 'gradient_accumulation_steps' parameter."
-                )
-            self.batch_size_per_gpu = int(
-                self.learning_batch_size
-                / self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
-                    "gradient_accumulation_steps", 1
-                )
-            )
 
-            if (
-                self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
-                    "train_micro_batch_size_per_gpu", "auto"
-                )
-                == "auto"
-            ):
-                self.accelerator.state.deepspeed_plugin.deepspeed_config[
-                    "train_micro_batch_size_per_gpu"
-                ] = self.batch_size_per_gpu
+                if (
+                    self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
+                        "train_micro_batch_size_per_gpu", "auto"
+                    )
+                    == "auto"
+                ):
+                    self.accelerator.state.deepspeed_plugin.deepspeed_config[
+                        "train_micro_batch_size_per_gpu"
+                    ] = self.batch_size_per_gpu
 
         else:
             self.learning_batch_size = batch_size
@@ -371,24 +383,6 @@ class GRPO(LLMAlgorithm):
 
                 self.model_ref = None
 
-                print("VLLM ARGs")
-
-                print(dict(model=self.pretrained_model_name_or_path,
-                    tensor_parallel_size=self.vllm_config.tensor_parallel_size,
-                    gpu_memory_utilization=self.vllm_config.gpu_memory_utilization,
-                    max_num_seqs=self.batch_size_per_gpu
-                    * self.vllm_config.tensor_parallel_size
-                    * getattr(self.actor, "gradient_accumulation_steps", lambda: 1)(),
-                    max_model_len=self.max_output_tokens,
-                    distributed_executor_backend="external_launcher",
-                    # Feed identical seed for tp groups to ensure sampling results are the same across workers
-                    seed=self.accelerator.process_index
-                    // self.vllm_config.tensor_parallel_size,
-                    # Latest vLLM v1 memory profiler is misled by the high default value (i.e., 32768) - thinking there's not enough memory
-                    max_num_batched_tokens=self.vllm_config.max_num_batched_tokens,
-                    model_impl='vllm'))
-
-
                 max_num_seqs = self.batch_size_per_gpu * self.vllm_config.tensor_parallel_size * self.accelerator.state.deepspeed_plugin.deepspeed_config["gradient_accumulation_steps"]
                 max_model_len = self.max_output_tokens
 
@@ -404,11 +398,6 @@ class GRPO(LLMAlgorithm):
                     max_num_batched_tokens=max_model_len * max_num_seqs,
                     model_impl='vllm'
                 )
-                
-                print(f"vLLM GPU memory: {torch.cuda.memory_allocated()/1e9:.2f}GB")
-                print(f"vLLM reserved: {torch.cuda.memory_reserved()/1e9:.2f}GB")
-                # assert False
-
 
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
@@ -485,7 +474,6 @@ class GRPO(LLMAlgorithm):
         """
         gc.collect()
         torch.cuda.empty_cache()
-        print("REWARDS", experiences[2], "REWARDS SHAPE", experiences[2].shape)
         completion_ids, action_masks, rewards = stack_and_pad_experiences(
             *experiences, padding_values=[self.pad_token_id, False, None]
         )
@@ -805,10 +793,6 @@ class GRPO(LLMAlgorithm):
                     "attention_mask": mask,
                     "use_cache": False,
                 }
-                print("INPUT ID SHAPE", input_id.shape)
-                print("MASK SHAPE", mask.shape)
-                print("INPUT ID", input_id)
-                print("MASK", mask)
 
                 logit = self.actor.forward(**kwargs).logits
                 logit /= self.temperature
@@ -915,7 +899,6 @@ class GRPO(LLMAlgorithm):
         completion_ids = [None] * len(all_prompts)
 
         if self.accelerator.is_main_process:
-            print("GENERATING")
             completion_ids = self.vllm_client.generate(
                 prompts=all_prompts,
                 n=group_size,
@@ -971,10 +954,6 @@ class GRPO(LLMAlgorithm):
         num_input_tokens = [prompt[1] for prompt in group_prompts]
         raw_group_prompts = [prompt[0] for prompt in group_prompts]
 
-        # print("LEN RAW PROMPTS", len(raw_group_prompts))
-        # print("LEN NUM INPUT TOKENS", len(num_input_tokens))
-        # print("input tokens", num_input_tokens)
-
         generation_kwargs = {
             "n": 1,
             "repetition_penalty": self.repetition_penalty,
@@ -1010,20 +989,10 @@ class GRPO(LLMAlgorithm):
             all_prompts = raw_group_prompts
             all_num_input_tokens = num_input_tokens
 
-        print("ALL PROMPTS", all_prompts)
-        print("Prompt lengths", [len(prompt) for prompt in all_prompts])
-
         all_outputs = self.llm.generate(all_prompts, sampling_params=sampling_params)
         completion_ids = [
             output.token_ids for outputs in all_outputs for output in outputs.outputs
         ]
-        # print("TIME TAKEN", time.time() - t)
-        # # print("completion_ids", completion_ids)
-        # print(
-        #     "lengths",
-        #     len(completion_ids),
-        #     [len(completion_id) for completion_id in completion_ids],
-        # )
 
         if self.vllm_config.tensor_parallel_size > 1:
             # Slice completions for this rank within its TP group.
@@ -1035,8 +1004,6 @@ class GRPO(LLMAlgorithm):
             completion_ids = completion_ids[tp_slice]
             num_input_tokens = all_num_input_tokens[tp_slice]
 
-            print("COMPLETION IDS AFTER SLICING", [len(id) for id in completion_ids])
-            print("NUM INPUT TOKENS AFTER SLICING", num_input_tokens)
 
         completion_ids = [
             stack_and_pad_experiences(
