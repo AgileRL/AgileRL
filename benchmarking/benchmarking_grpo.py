@@ -50,7 +50,7 @@ def countdown_chat_template(q, a, tokenizer):
         },
         {
             "role": "user",
-            "content": f"Using each number in this tensor only once {tuple(i for i in q)}, create an equation that equals {a}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
+            "content": f"Using each number in this list only once {q}, create an equation that equals {a}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
         },
         {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
     ]
@@ -133,11 +133,15 @@ def equation_reward_func(completions, target, nums, **kwargs):
 
 
 def combined_rewards(completion, solution, prompt):
+    print("COMPLETION", completion)
+    print("SOLUTION", solution)
+    print("PROMPT", prompt)
     reward = (
         equation_reward_func([completion], [solution], [prompt])[0]
         + format_reward_func([completion], [solution])[0]
     )
 
+    print("REWARD", reward)
     if reward == 2.0:
         with open("countdown_completions.txt", "a") as text_file:
             text_file.write(
