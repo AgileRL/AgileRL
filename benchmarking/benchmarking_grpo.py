@@ -133,15 +133,18 @@ def equation_reward_func(completions, target, nums, **kwargs):
 
 
 def combined_rewards(completion, solution, prompt):
-    print("COMPLETION", completion)
-    print("SOLUTION", solution)
-    print("PROMPT", prompt)
+    import torch.distributed as dist
+    if dist.get_rank() == 1:
+        print("COMPLETION", completion)
+        print("SOLUTION", solution)
+        print("PROMPT", prompt)
     reward = (
         equation_reward_func([completion], [solution], [prompt])[0]
         + format_reward_func([completion], [solution])[0]
     )
 
-    print("REWARD", reward)
+    if dist.get_rank() == 1:
+        print("REWARD", reward)
     if reward == 2.0:
         with open("countdown_completions.txt", "a") as text_file:
             text_file.write(
@@ -181,6 +184,7 @@ def main(init_hp, mut_p):
     )
 
     init_hp["PAD_TOKEN_ID"] = tokenizer.eos_token_id
+    init_hp["PAD_TOKEN"] = tokenizer.eos_token
 
     hp_config = HyperparameterConfig(
         beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),

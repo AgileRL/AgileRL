@@ -14,18 +14,18 @@ MUTATION_PARAMS:
 
 INIT_HP:
     ALGO: GRPO
-    BATCH_SIZE: 16
+    BATCH_SIZE: 8
     REDUCE_MEMORY_PEAK: true
     BETA: 0.001
     LR: 0.000005
     CLIP_COEF: 0.2
     MAX_GRAD_NORM: 0.1
     UPDATE_EPOCHS: 1
-    GROUP_SIZE: 2
+    GROUP_SIZE: 8
     TEMPERATURE: 0.9
     CALC_POSITION_EMBEDDINGS: true
     MIN_OUTPUT_TOKENS:
-    MAX_OUTPUT_TOKENS: 300
+    MAX_OUTPUT_TOKENS: 1024
     COSINE_lR_SCHEDULER:
     TOURN_SIZE: 2
     ELITISM: true
@@ -33,8 +33,8 @@ INIT_HP:
     EVAL_LOOP: 1
     USE_VLLM: true
     VLLM_CONFIG:
-        tensor_parallel_size: 2
-        gpu_memory_utilization: 0.3
+        tensor_parallel_size: 1
+        gpu_memory_utilization: 0.4
 
 
 # MASTER_ADDR=34.13.155.70 \

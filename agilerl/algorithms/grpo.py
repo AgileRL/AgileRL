@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import deepspeed
 import numpy as np
+import re
 import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
@@ -116,6 +117,7 @@ class GRPO(LLMAlgorithm):
         action_space: spaces.Space,
         actor_network: PreTrainedModel,
         pad_token_id: int,
+        pad_token: str,
         hp_config: Optional[HyperparameterConfig] = None,
         index: int = 0,
         batch_size: int = 4,
@@ -271,6 +273,7 @@ class GRPO(LLMAlgorithm):
         self.max_output_tokens = max_output_tokens
         self.min_output_tokens = min_output_tokens
         self.pad_token_id = pad_token_id
+        self.pad_token = pad_token
         self.generation_config = GenerationConfig(
             do_sample=True,
             temperature=temperature,
@@ -856,6 +859,8 @@ class GRPO(LLMAlgorithm):
         # if self.zero_stage == 3:
         #     gather_if_zero3 = deepspeed.zero.GatheredParameters
         # else:
+        if self.accelerator is not None:
+            self.accelerator.wait_for_everyone()
         gather_if_zero3 = nullcontext
         if self.model_ref is None:
             self.model_ref = self.accelerator.unwrap_model(self.actor)
@@ -949,6 +954,7 @@ class GRPO(LLMAlgorithm):
         group_prompts = [prompt for prompt in prompts for _ in range(group_size)] # returns a list: [prompt1 * group_size, ..., promptN * group_size], where N is the data batch size, list length is group_size * N
         prompts_ids = [prompt[1] for prompt in group_prompts] 
         prompts_text = [prompt[0] for prompt in group_prompts]
+        prompts_text = [re.sub(rf"^({re.escape(str(self.pad_token))})+", "", text) for text in prompts_text]
 
         generation_kwargs = {
             "n": 1,
@@ -993,20 +999,16 @@ class GRPO(LLMAlgorithm):
             all_prompts_text = prompts_text
             all_prompts_ids = prompts_ids
 
-        all_outputs = self.llm.generate(all_prompts_text, sampling_params=sampling_params)
+        if self.accelerator is not None:
+            self.accelerator.wait_for_everyone()
+
+        all_outputs = self.llm.generate(all_prompts_text, sampling_params=sampling_params, use_tqdm=True) # Change this to False
 
 
         # print("All outputs: ", all_outputs)
         completion_ids = [
             output.token_ids for outputs in all_outputs for output in outputs.outputs
         ]
-        # if self.accelerator.is_main_process:
-        #     print("Final Completion IDs length: ", len(completion_ids))
-        #     print("Final Completion IDs sub-lengths: ", [len(completion_id) for completion_id in completion_ids])
-        #     print("Decoded completion ids: ", [temp_tokenizer.decode(completion_id) for completion_id in completion_ids])
-
-        #     print("Are completion ids equal", [completion_id == completion_ids[0] for completion_id in completion_ids])
-        # print("Final Completion IDs: ", completion_ids)
 
         if self.vllm_config.tensor_parallel_size > 1:
             # Slice completions for this rank within its TP group.
@@ -1015,32 +1017,33 @@ class GRPO(LLMAlgorithm):
             tp_slice = slice(
                 local_rank_in_group * orig_size, (local_rank_in_group + 1) * orig_size
             )
-            completion_ids_tp = completion_ids[tp_slice]
-            prompts_ids_tp = all_prompts_ids[tp_slice]
+            completion_ids = completion_ids[tp_slice]
+            prompts_ids = all_prompts_ids[tp_slice]
 
         completion_ids = [
             torch.cat(
                 [
-                    torch.cat(prompts_ids_tp[group_size * i : group_size * (i + 1)], dim=0), 
+                    torch.cat(prompts_ids[group_size * i : group_size * (i + 1)], dim=0),
                     stack_and_pad_experiences(
-                        completion_ids_tp[group_size * i : group_size * (i + 1)],
+                        completion_ids[group_size * i : group_size * (i + 1)],
                         padding_values=[self.pad_token_id],
                         device=self.device,
                     )[0]
-                ], dim=1
+                ], 
+                dim=1
             )
             for i, _ in enumerate(prompts)
         ]
 
-        num_input_tokens = [prompt_ids.shape[1] for prompt_ids in prompts_ids_tp]
-        action_masks = [
-            torch.zeros_like(completion_id, device=self.device)
-            for completion_id in completion_ids
-        ]
+        num_input_tokens = [prompt_ids.shape[1] for prompt_ids in prompts_ids]
+
+        action_masks = []
 
         for i, completion_id in enumerate(completion_ids):
-            action_masks[i][:, num_input_tokens[i] :] = True
-            action_masks[i][completion_id == self.pad_token_id] = False
-            action_masks[i] = action_masks[i][:, 1:]
+            action_mask = torch.zeros_like(completion_id, device=self.device)
+            action_mask[:, num_input_tokens[i] :] = True
+            action_mask[completion_id == self.pad_token_id] = False
+            action_mask = action_mask[:, 1:]
+            action_masks.append(action_mask)
 
         return completion_ids, action_masks

@@ -550,6 +550,7 @@ def create_population(
                 action_space=action_space,
                 actor_network=clone_llm(actor_network, actor_network.state_dict()),
                 pad_token_id=INIT_HP.get("PAD_TOKEN_ID"),
+                pad_token=INIT_HP.get("PAD_TOKEN"),
                 hp_config=hp_config,
                 index=idx,
                 batch_size=INIT_HP.get("BATCH_SIZE", 2),

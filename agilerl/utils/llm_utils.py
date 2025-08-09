@@ -179,7 +179,7 @@ class HuggingFaceGym(gym.Env):
                 returned_prompts = [
                     (
                         self.tokenizer.batch_decode(
-                            returned_prompt["input_ids"], skip_special_tokens=True
+                            returned_prompt["input_ids"], skip_special_tokens=False, clean_up_tokenization_spaces=False
                         )[0],
                         returned_prompt["input_ids"],
                     )  # FIXME what about batches here
