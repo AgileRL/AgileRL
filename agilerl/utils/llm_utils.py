@@ -128,7 +128,7 @@ class HuggingFaceGym(gym.Env):
             )
         self.reset_called = True
         new_tokenized_prompts = self._get_next_batch()
-        self.last_tokenized_prompts = new_tokenized_prompts
+        self.last_tokenized_prompts = new_tokenized_prompts 
         return new_tokenized_prompts
 
     def _decode_and_evaluate(self, completions: List[torch.Tensor]) -> torch.Tensor:
@@ -141,12 +141,23 @@ class HuggingFaceGym(gym.Env):
         """
         # This is for a batch of completions (prompt_batch x group_size), List of tensors of length batch size, each tensor is a group of answers
         total_rewards = []
-        for group_completion, answer, question in zip(
+        for idx, (group_completion, answer, question) in enumerate(zip(
             completions, self.answers, self.questions
-        ):  # Vectorize this in the future
+        )):
+
+            if self.return_raw_completions: 
+                completion_to_decode = group_completion[
+                    :, self.last_tokenized_prompts[idx][1].shape[1]:
+                ]
+            else:
+                completion_to_decode = group_completion[
+                    :, self.last_tokenized_prompts[idx]["input_ids"].shape[1]:
+                ]
+
+            # Vectorize this in the future
             decoded_group_completion = (
                 self.tokenizer.batch_decode(
-                    group_completion,
+                    completion_to_decode,
                     skip_special_tokens=True,
                 )
             )
@@ -157,7 +168,7 @@ class HuggingFaceGym(gym.Env):
             total_rewards.append(rewards)
         return torch.tensor(total_rewards)
 
-    def _get_next_batch(self) -> List[BatchEncoding] | List[Tuple[str, int]]:
+    def _get_next_batch(self) -> List[BatchEncoding] | List[Tuple[str, torch.Tensor]]:
         """Get the next batch of tokenized prompts."""
         try:
             batch = next(self.dataloader)
