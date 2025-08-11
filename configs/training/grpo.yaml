@@ -14,7 +14,7 @@ MUTATION_PARAMS:
 
 INIT_HP:
     ALGO: GRPO
-    BATCH_SIZE: 8
+    BATCH_SIZE: 16
     REDUCE_MEMORY_PEAK: true
     BETA: 0.001
     LR: 0.000005
@@ -31,10 +31,10 @@ INIT_HP:
     ELITISM: true
     POP_SIZE: 1
     EVAL_LOOP: 1
-    USE_VLLM: true
-    VLLM_CONFIG:
-        tensor_parallel_size: 1
-        gpu_memory_utilization: 0.4
+    USE_VLLM: false
+    # VLLM_CONFIG:
+    #     tensor_parallel_size: 1
+    #     gpu_memory_utilization: 0.4
 
 
 # MASTER_ADDR=34.13.155.70 \

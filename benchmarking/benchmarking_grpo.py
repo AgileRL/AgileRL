@@ -1,6 +1,7 @@
 import re
 from typing import Tuple
 
+from sympy.logic import false
 import torch
 import yaml
 from accelerate import Accelerator
@@ -26,9 +27,9 @@ def create_model(pretrained_model_name_or_path):
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         torch_dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
-        device_map="cpu",
+        device_map="auto",
     )
-
+    
     lora_config = LoraConfig(
         r=16,
         lora_alpha=64,
@@ -134,17 +135,30 @@ def equation_reward_func(completions, target, nums, **kwargs):
 
 def combined_rewards(completion, solution, prompt):
     import torch.distributed as dist
-    if dist.get_rank() == 1:
-        print("COMPLETION", completion)
-        print("SOLUTION", solution)
-        print("PROMPT", prompt)
+    # if dist.get_rank() == 1:
+    #     print("LLM completion, solution, prompt, and reward for rank 1")
+    #     print("COMPLETION", completion)
+    #     print("SOLUTION", solution)
+    #     print("PROMPT", prompt)
     reward = (
         equation_reward_func([completion], [solution], [prompt])[0]
         + format_reward_func([completion], [solution])[0]
     )
 
-    if dist.get_rank() == 1:
+    # if dist.get_rank() == 1:
+    #     print("REWARD", reward)
+
+    # import time
+    # time.sleep(0.1)
+
+    if dist.get_rank() == 0:
+        print("LLM completion, solution, prompt, and reward for rank 0")
+        print("COMPLETION", completion)
+        print("SOLUTION", solution)
+        print("PROMPT", prompt)
         print("REWARD", reward)
+        print("*"*50)
+
     if reward == 2.0:
         with open("countdown_completions.txt", "a") as text_file:
             text_file.write(
@@ -176,7 +190,7 @@ def main(init_hp, mut_p):
         tokenizer=tokenizer,
         reward_fn=combined_rewards,
         apply_chat_template_fn=countdown_chat_template,
-        data_batch_size_per_gpu=2,
+        data_batch_size_per_gpu=4,
         accelerator=accelerator,
         return_raw_completions=init_hp.get(
             "USE_VLLM", False

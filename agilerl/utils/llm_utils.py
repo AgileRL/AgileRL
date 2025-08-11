@@ -324,6 +324,7 @@ def selective_log_softmax(logits, index) -> torch.Tensor:
     Equivalent to:
         logps = torch.gather(logits.log_softmax(-1), dim=-1, index=index.unsqueeze(-1)).squeeze(-1)
     """
+
     if logits.dtype in [torch.float32, torch.float64]:
         selected_logits = torch.gather(
             logits, dim=-1, index=index.unsqueeze(-1)
@@ -334,6 +335,7 @@ def selective_log_softmax(logits, index) -> torch.Tensor:
             selected_logits - logsumexp_values
         )  # log_softmax(x_i) = x_i - logsumexp(x)
     else:
+        
         # logsumexp approach is unstable with bfloat16, fall back to slightly less efficient approach
         per_token_logps = []
         for row_logits, row_labels in zip(
