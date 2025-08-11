@@ -2,7 +2,6 @@ from typing import List
 
 import numpy as np
 import torch
-from tqdm import trange
 
 from agilerl.algorithms import PPO
 from agilerl.hpo.mutation import Mutations

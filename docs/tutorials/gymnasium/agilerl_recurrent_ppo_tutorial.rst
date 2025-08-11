@@ -90,6 +90,7 @@ Additionally, we also define our upper and lower limits for these hyperparameter
             "ENT_COEF": 0.0,  # Entropy coefficient
             "VF_COEF": 0.5,  # Value function coefficient
             "MAX_GRAD_NORM": 0.5,  # Maximum norm for gradient clipping
+            "SHARE_ENCODERS": False, # Flag to signal that we want to share encoders between agents
             "RECURRENT": True # Flag to signal that we want a recurrent policy
             "USE_ROLLOUT_BUFFER ": True # Use a rollout buffer for data collection
             "TARGET_KL": None,  # Target KL divergence threshold

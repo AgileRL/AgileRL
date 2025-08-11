@@ -14,7 +14,7 @@ from agilerl.algorithms import PPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.rollouts import collect_rollouts, collect_rollouts_recurrent
-from agilerl.utils.utils import create_population, default_progress_bar, make_vect_envs
+from agilerl.utils.utils import create_population, default_progress_bar
 
 
 # --- Define the Memory Game Environment ---

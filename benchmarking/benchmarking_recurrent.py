@@ -140,8 +140,8 @@ def main_recurrent(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         eval_steps=INIT_HP["EVAL_STEPS"],
         eval_loop=INIT_HP["EVAL_LOOP"],
         target=INIT_HP["TARGET_SCORE"],
-        # tournament=tournament,
-        # mutation=mutations,
+        tournament=tournament,
+        mutation=mutations,
         wb=INIT_HP["WANDB"],
     )
 

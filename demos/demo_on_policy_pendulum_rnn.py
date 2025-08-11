@@ -57,7 +57,7 @@ def run_demo():
         "VF_COEF": 1.0,
         "MAX_GRAD_NORM": 0.5,
         "UPDATE_EPOCHS": 4,
-        "SHARE_ENCODERS": True,
+        "SHARE_ENCODERS": False,
         "USE_ROLLOUT_BUFFER": True,
         "RECURRENT": recurrent,
         "ACTION_STD_INIT": 0.6,

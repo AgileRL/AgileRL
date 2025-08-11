@@ -10,7 +10,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import gymnasium as gym
 import imageio
-import minigrid
 import numpy as np
 import torch
 
@@ -18,7 +17,7 @@ from agilerl.algorithms import PPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.rollouts.on_policy import collect_rollouts, collect_rollouts_recurrent
-from agilerl.utils.utils import create_population, default_progress_bar, make_vect_envs
+from agilerl.utils.utils import create_population, default_progress_bar
 
 
 # --- Define the MiniGrid Observation Wrapper ---
@@ -91,7 +90,7 @@ def run_demo():
         "MAX_GRAD_NORM": 0.5,
         "UPDATE_EPOCHS": 4,
         "HIDDEN_STATE_SIZE": 128,
-        "SHARE_ENCODERS": True,
+        "SHARE_ENCODERS": False,
         "USE_ROLLOUT_BUFFER": True,
         "RECURRENT": recurrent,
         "ACTION_STD_INIT": 0.6,
@@ -217,8 +216,8 @@ def run_demo():
             training_complete = True
             break
 
-        # elite, pop = tournament.select(pop)
-        # pop = mutations.mutation(pop)
+        elite, pop = tournament.select(pop)
+        pop = mutations.mutation(pop)
         for agent in pop:
             agent.steps.append(agent.steps[-1])
 
