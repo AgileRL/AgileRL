@@ -124,7 +124,7 @@ class PPO(RLAlgorithm):
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
-        bptt_sequence_type: BPTTSequenceType = BPTTSequenceType.MAXIMUM,
+        bptt_sequence_type: BPTTSequenceType = BPTTSequenceType.CHUNKED,
     ) -> None:
         super().__init__(
             observation_space,
