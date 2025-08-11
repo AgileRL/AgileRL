@@ -1,15 +1,20 @@
+from typing import List
+
 import numpy as np
 import torch
 import torch.nn as nn
 from gymnasium import spaces
-from tqdm import trange
 
+from agilerl.algorithms import DQN
 from agilerl.components.data import Transition
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.utils.algo_utils import obs_channels_to_first
-from agilerl.utils.utils import create_population, make_vect_envs
+from agilerl.utils.utils import (
+    create_population,
+    default_progress_bar,
+    make_vect_envs,
+)
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
@@ -50,7 +55,6 @@ if __name__ == "__main__":
         "GAMMA": 0.99,  # Discount factor
         "LEARN_STEP": 1,  # Learning frequency
         "TAU": 1e-3,  # For soft update of target network parameters
-        "CHANNELS_LAST": False,  # Swap image channels dimension last to first [H, W, C] -> [C, H, W]
         "POP_SIZE": 4,  # Population size
     }
 
@@ -70,7 +74,7 @@ if __name__ == "__main__":
     )
 
     # Create a population of DQN agents
-    pop = create_population(
+    pop: List[DQN] = create_population(
         algo="DQN",  # Algorithm
         observation_space=env.observation_space,  # Observation space
         action_space=env.action_space,  # Action space
@@ -122,27 +126,24 @@ if __name__ == "__main__":
 
     # TRAINING LOOP
     print("Training...")
-    pbar = trange(max_steps, unit="step")
+    pbar = default_progress_bar(max_steps)
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         pop_episode_scores = []
         for agent in pop:  # Loop through population
-            state, info = env.reset()  # Reset environment at start of episode
+            obs, info = env.reset()  # Reset environment at start of episode
             scores = np.zeros(num_envs)
             completed_episode_scores, losses = [], []
             steps = 0
             epsilon = eps_start
 
             for idx_step in range(evo_steps // num_envs):
-                if INIT_HP["CHANNELS_LAST"]:
-                    state = obs_channels_to_first(state)
-
-                action = agent.get_action(state, epsilon)  # Get next action from agent
+                action = agent.get_action(obs, epsilon)  # Get next action from agent
                 epsilon = max(
                     eps_end, epsilon * eps_decay
                 )  # Decay epsilon for exploration
 
                 # Act in environment
-                next_state, reward, terminated, truncated, info = env.step(action)
+                next_obs, reward, terminated, truncated, info = env.step(action)
                 scores += np.array(reward)
                 steps += num_envs
                 total_steps += num_envs
@@ -155,16 +156,11 @@ if __name__ == "__main__":
                         scores[idx] = 0
 
                 # Save experience to replay buffer
-                next_state = (
-                    obs_channels_to_first(next_state)
-                    if INIT_HP["CHANNELS_LAST"]
-                    else next_state
-                )
                 transition = Transition(
-                    obs=state,
+                    obs=obs,
                     action=action,
                     reward=reward,
-                    next_obs=next_state,
+                    next_obs=next_obs,
                     done=terminated,
                     batch_size=[num_envs],
                 )
@@ -180,7 +176,7 @@ if __name__ == "__main__":
                             experiences
                         )  # Learn according to agent's RL algorithm
 
-                state = next_state
+                obs = next_obs
 
             pbar.update(evo_steps // len(pop))
             agent.steps[-1] += steps
@@ -193,7 +189,6 @@ if __name__ == "__main__":
         fitnesses = [
             agent.test(
                 env,
-                swap_channels=INIT_HP["CHANNELS_LAST"],
                 max_steps=eval_steps,
                 loop=eval_loop,
             )
@@ -208,12 +203,12 @@ if __name__ == "__main__":
             for episode_scores in pop_episode_scores
         ]
 
-        print(f"--- Global steps {total_steps} ---")
-        print(f"Steps {[agent.steps[-1] for agent in pop]}")
-        print(f"Scores: {mean_scores}")
-        print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-        print(
-            f'5 fitness avgs: {["%.2f"%np.mean(agent.fitness[-5:]) for agent in pop]}'
+        pbar.write(
+            f"--- Global steps {total_steps} ---\n"
+            f"Steps: {[agent.steps[-1] for agent in pop]}\n"
+            f"Scores: {mean_scores}\n"
+            f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
+            f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
         )
 
         # Tournament selection and population mutation

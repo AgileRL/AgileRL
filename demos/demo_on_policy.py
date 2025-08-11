@@ -7,14 +7,14 @@ from tqdm import trange
 from agilerl.algorithms import PPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.utils.utils import create_population, make_vect_envs
+from agilerl.rollouts.on_policy import collect_rollouts
+from agilerl.utils.utils import create_population, default_progress_bar, make_vect_envs
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
 
 # import sys
 # sys.path.append('../')
-
 
 if __name__ == "__main__":
     print("===== AgileRL On-policy Demo =====")
@@ -41,6 +41,7 @@ if __name__ == "__main__":
         "MAX_GRAD_NORM": 0.5,  # Maximum norm for gradient clipping
         "TARGET_KL": None,  # Target KL divergence threshold
         "UPDATE_EPOCHS": 4,  # Number of policy update epochs
+        "USE_ROLLOUT_BUFFER": True,  # Use rollout buffer
     }
 
     num_envs = 16
@@ -67,14 +68,12 @@ if __name__ == "__main__":
     )
 
     mutations = Mutations(
-        algo="PPO",  # Algorithm
         no_mutation=0.4,  # No mutation
         architecture=0.2,  # Architecture mutation
         new_layer_prob=0.2,  # New layer mutation
         parameters=0.2,  # Network parameters mutation
         activation=0,  # Activation layer mutation
         rl_hp=0.2,  # Learning HP mutation
-        rl_hp_selection=["lr", "batch_size", "learn_step"],  # RL HPs to choose from
         mutation_sd=0.1,  # Mutation strength  # Network architecture
         rand_seed=1,  # Random seed
         device=device,
@@ -89,73 +88,40 @@ if __name__ == "__main__":
 
     # TRAINING LOOP
     print("Training...")
-    pbar = trange(max_steps, unit="step")
+    pbar = default_progress_bar(max_steps)
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         pop_episode_scores = []
         for agent in pop:  # Loop through population
-            obs, info = env.reset()  # Reset environment at start of episode
-            scores = np.zeros(num_envs)
-            completed_episode_scores = []
+            last_obs, last_done, last_scores, last_info = None, None, None, None
             steps = 0
-
+            completed_episodes = []
             for _ in range(-(evo_steps // -agent.learn_step)):
-                observations = []
-                actions = []
-                log_probs = []
-                rewards = []
-                dones = []
-                values = []
-
-                done = np.zeros(num_envs)
-
-                learn_steps = 0
-
-                for idx_step in range(-(agent.learn_step // -num_envs)):
-                    # Get next action from agent
-                    action, log_prob, _, value = agent.get_action(obs)
-
-                    # Act in environment
-                    next_obs, reward, terminated, truncated, info = env.step(action)
-                    next_done = np.logical_or(terminated, truncated).astype(np.int8)
-
-                    total_steps += num_envs
-                    steps += num_envs
-                    learn_steps += num_envs
-
-                    observations.append(obs)
-                    actions.append(action)
-                    log_probs.append(log_prob)
-                    rewards.append(reward)
-                    dones.append(done)
-                    values.append(value)
-
-                    obs = next_obs
-                    done = next_done
-                    scores += np.array(reward)
-
-                    for idx, (d, t) in enumerate(zip(terminated, truncated)):
-                        if d or t:
-                            completed_episode_scores.append(scores[idx])
-                            agent.scores.append(scores[idx])
-                            scores[idx] = 0
-
-                pbar.update(learn_steps // len(pop))
-
-                experiences = (
-                    observations,
-                    actions,
-                    log_probs,
-                    rewards,
-                    dones,
-                    values,
-                    next_obs,
-                    next_done,
+                # Collect rollouts and save in buffer
+                episode_scores, last_obs, last_done, last_scores, last_info = (
+                    collect_rollouts(
+                        agent,
+                        env,
+                        last_obs=last_obs,
+                        last_done=last_done,
+                        last_scores=last_scores,
+                        last_info=last_info,
+                    )
                 )
-                # Learn according to agent's RL algorithm
-                agent.learn(experiences)
 
-            agent.steps[-1] += steps
-            pop_episode_scores.append(completed_episode_scores)
+                loss = agent.learn()  # Learn from rollout buffer
+
+                # Update step counter and scores
+                total_steps += agent.learn_step
+                steps += agent.learn_step
+                agent.steps[-1] += agent.learn_step
+                completed_episodes += episode_scores
+
+            pop_episode_scores.append(
+                np.mean(completed_episodes)
+                if len(completed_episodes) > 0
+                else "0 completed episodes"
+            )
+            pbar.update(steps // len(pop))
 
         # Evaluate population
         fitnesses = [
@@ -166,26 +132,18 @@ if __name__ == "__main__":
             )
             for agent in pop
         ]
-        mean_scores = [
-            (
-                np.mean(episode_scores)
-                if len(episode_scores) > 0
-                else "0 completed episodes"
-            )
-            for episode_scores in pop_episode_scores
-        ]
 
-        print(f"--- Global steps {total_steps} ---")
-        print(f"Steps {[agent.steps[-1] for agent in pop]}")
-        print(f"Scores: {mean_scores}")
-        print(f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}")
-        print(
-            f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}"
+        pbar.write(
+            f"--- Global steps {total_steps} ---\n"
+            f"Steps: {[agent.steps[-1] for agent in pop]}\n"
+            f"Scores: {pop_episode_scores}\n"
+            f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
+            f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
         )
 
         # Tournament selection and population mutation
-        elite, pop = tournament.select(pop)
-        pop = mutations.mutation(pop)
+        # elite, pop = tournament.select(pop)
+        # pop = mutations.mutation(pop)
 
         # Update step counter
         for agent in pop:

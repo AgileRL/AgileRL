@@ -1,21 +1,22 @@
 import os
+from typing import List
 
 import h5py
 import numpy as np
 from accelerate import Accelerator
+from tensordict import TensorDictBase
 from torch.utils.data import DataLoader
-from tqdm import trange
 
-from agilerl.components.data import ReplayDataset
+from agilerl.algorithms import CQN
+from agilerl.components.data import ReplayDataset, Transition
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
     create_population,
+    default_progress_bar,
     make_vect_envs,
-    observation_space_channels_to_first,
 )
 
 # !Note: If you are running this demo without having installed agilerl,
@@ -46,8 +47,6 @@ if __name__ == "__main__":
         "GAMMA": 0.99,  # Discount factor
         "LEARN_STEP": 1,  # Learning frequency
         "TAU": 1e-3,  # For soft update of target network parameters
-        # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-        "CHANNELS_LAST": False,
         "POP_SIZE": 4,  # Population size
     }
 
@@ -57,10 +56,8 @@ if __name__ == "__main__":
 
     observation_space = env.single_observation_space
     action_space = env.single_action_space
-    if INIT_HP["CHANNELS_LAST"]:
-        observation_space = observation_space_channels_to_first(observation_space)
 
-    pop = create_population(
+    pop: List[CQN] = create_population(
         algo="CQN",  # Algorithm
         observation_space=observation_space,  # Observation space
         action_space=action_space,  # Action space
@@ -84,17 +81,17 @@ if __name__ == "__main__":
     # Save transitions to replay buffer
     dataset_length = dataset["rewards"].shape[0]
 
-    for i in trange(dataset_length - 1):
-        state = dataset["observations"][i]
-        next_state = dataset["observations"][i + 1]
-        if INIT_HP["CHANNELS_LAST"]:
-            state = obs_channels_to_first(state)
-            next_state = obs_channels_to_first(next_state)
+    for i in range(dataset_length - 1):
+        obs = dataset["observations"][i]
+        next_obs = dataset["observations"][i + 1]
         action = dataset["actions"][i]
         reward = dataset["rewards"][i]
         done = bool(dataset["terminals"][i])
         # Save experience to replay buffer
-        memory.save_to_memory(state, action, reward, next_state, done)
+        transition: TensorDictBase = Transition(obs, action, reward, next_obs, done)
+        transition = transition.to_tensordict()
+        transition.batch_size = [1]
+        memory.add(transition)
 
     # Create dataloader from replay buffer
     replay_dataset = ReplayDataset(memory, INIT_HP["BATCH_SIZE"])
@@ -142,7 +139,7 @@ if __name__ == "__main__":
 
     # TRAINING LOOP
     print("Training...")
-    pbar = trange(max_steps, unit="step")
+    pbar = default_progress_bar(max_steps, accelerator=accelerator)
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         if accelerator is not None:
             accelerator.wait_for_everyone()
@@ -160,7 +157,6 @@ if __name__ == "__main__":
         fitnesses = [
             agent.test(
                 env,
-                swap_channels=INIT_HP["CHANNELS_LAST"],
                 max_steps=eval_steps,
                 loop=eval_loop,
             )
@@ -168,11 +164,11 @@ if __name__ == "__main__":
         ]
 
         if accelerator.is_main_process:
-            print(f"--- Global Steps {total_steps} ---")
-            print(f"Steps {[agent.steps[-1] for agent in pop]}")
-            print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-            print(
-                f'5 fitness avgs: {["%.2f"%np.mean(agent.fitness[-5:]) for agent in pop]}'
+            pbar.write(
+                f"--- Global steps {total_steps} ---\n"
+                f"Steps: {[agent.steps[-1] for agent in pop]}\n"
+                f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
+                f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
             )
 
         # Tournament selection and population mutation

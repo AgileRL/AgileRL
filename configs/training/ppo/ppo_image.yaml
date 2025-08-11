@@ -1,15 +1,15 @@
 ---
 # Define initial hyperparameters
 INIT_HP:
-    ENV_NAME: Pendulum-v1   # Gym environment name
+    ENV_NAME: ALE/Breakout-v5   # Gym environment name
     ALGO: PPO                  # Algorithm
     # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     CHANNELS_LAST: false
-    NUM_ENVS: 16               # No. parallel environments for training
+    NUM_ENVS: 6               # No. parallel environments for training
     BATCH_SIZE: 128            # Batch size
     LR: 0.001                  # Learning rate
-    LEARN_STEP: 2048           # Learning frequency
-    MAX_STEPS: 6_000_000       # Max no. steps
+    LEARN_STEP: 250           # Learning frequency
+    MAX_STEPS: 2_000_000       # Max no. steps
     TARGET_SCORE: 250.         # Early training stop at avg score of last 100 episodes
     GAMMA: 0.99                # Discount factor
     GAE_LAMBDA: 0.95           # Lambda for general advantage estimation
@@ -23,12 +23,12 @@ INIT_HP:
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
     POP_SIZE: 4                # Population size
-    EVO_STEPS: 10_240          # Evolution frequency
+    EVO_STEPS: 1000          # Evolution frequency
     EVAL_STEPS:            # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
     SHARE_ENCODERS: true       # Share encoders between actor and critic
     USE_ROLLOUT_BUFFER: true   # Use rollout buffer
-    WANDB: true                # Log with Weights and Biases
+    WANDB: false                # Log with Weights and Biases
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation
@@ -51,23 +51,35 @@ MUTATION_PARAMS:
     MAX_UPDATE_EPOCHS: 10
 
 NET_CONFIG:
-    latent_dim: 64
-    squash_output: false
-
+    latent_dim: 256
+    min_latent_dim: 128
+    max_latent_dim: 512
     encoder_config:
-        hidden_size: [64]
-        activation: Tanh
-        min_mlp_nodes: 64
-        max_mlp_nodes: 500
-        layer_norm: true
-
+        min_channel_size: 32
+        max_channel_size: 256
+        activation: ReLU
+        layer_norm: false
+        init_layers: true
+        channel_size:
+            - 32
+            - 64
+            - 128
+        kernel_size:
+            - 8
+            - 4
+            - 3
+        stride_size:
+            - 4
+            - 2
+            - 1
     head_config:
-        hidden_size: [64]
-        activation: Tanh
-        output_activation:
         min_hidden_layers: 1
         max_hidden_layers: 3
-        min_mlp_nodes: 64
-        max_mlp_nodes: 500
-        output_vanish: true
-        layer_norm: true
+        min_mlp_nodes: 128
+        max_mlp_nodes: 512
+        hidden_size:
+            - 256
+        activation: ReLU
+        output_activation:
+        layer_norm: false
+        init_layers: true

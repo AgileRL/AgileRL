@@ -148,7 +148,7 @@ class DeterministicActor(EvolvableNetwork):
                 prescaled_max - prescaled_min
             )
 
-        return rescaled_action
+        return rescaled_action.to(action.dtype)
 
     def build_network_head(self, net_config: Optional[NetConfigType] = None) -> None:
         """Builds the head of the network.
@@ -299,9 +299,11 @@ class StochasticActor(EvolvableNetwork):
         self.output_activation = None
 
         if isinstance(self.action_space, spaces.Box):
-            self.action_low = torch.as_tensor(self.action_space.low, device=self.device)
+            self.action_low = torch.as_tensor(
+                self.action_space.low, device=self.device, dtype=torch.float32
+            )
             self.action_high = torch.as_tensor(
-                self.action_space.high, device=self.device
+                self.action_space.high, device=self.device, dtype=torch.float32
             )
         else:
             self.action_low = None

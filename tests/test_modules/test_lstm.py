@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from agilerl.modules.lstm import EvolvableLSTM
+from agilerl.typing import BatchDimension
 from tests.helper_functions import assert_state_dicts_equal
 
 ######### Define fixtures #########
@@ -190,6 +191,10 @@ def test_add_nodes(
     if numb_new_nodes is None:
         numb_new_nodes = result["numb_new_nodes"]
     assert lstm.hidden_state_size == original_hidden_size + numb_new_nodes
+    assert lstm.hidden_state_architecture == {
+        "h": (lstm.num_layers, BatchDimension, original_hidden_size + numb_new_nodes),
+        "c": (lstm.num_layers, BatchDimension, original_hidden_size + numb_new_nodes),
+    }
 
 
 ######### Test remove_lstm_node #########
@@ -217,6 +222,10 @@ def test_remove_nodes(
     if numb_new_nodes is None:
         numb_new_nodes = result["numb_new_nodes"]
     assert lstm.hidden_state_size == original_hidden_size - numb_new_nodes
+    assert lstm.hidden_state_architecture == {
+        "h": (lstm.num_layers, BatchDimension, original_hidden_size - numb_new_nodes),
+        "c": (lstm.num_layers, BatchDimension, original_hidden_size - numb_new_nodes),
+    }
 
 
 ######### Test activation change #########
