@@ -5,7 +5,7 @@ INIT_HP:
     ALGO: PPO                  # Algorithm
     # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     CHANNELS_LAST: false
-    NUM_ENVS: 16               # No. parallel environments for training
+    NUM_ENVS: 8               # No. parallel environments for training
     BATCH_SIZE: 256            # Batch size
     LR: 0.001                  # Learning rate
     LEARN_STEP: 8192           # Learning frequency
@@ -25,7 +25,7 @@ INIT_HP:
     POP_SIZE: 1                # Population size
     EVO_STEPS: 8192           # Evolution frequency
     EVAL_STEPS:                # Evaluation steps
-    SHARE_ENCODERS: true       # Share encoders between actor and critic
+    SHARE_ENCODERS: false       # Share encoders between actor and critic
     USE_ROLLOUT_BUFFER: true   # Use rollout buffer
     RECURRENT: true            # Use recurrent network
     EVAL_LOOP: 1               # Evaluation episodes
