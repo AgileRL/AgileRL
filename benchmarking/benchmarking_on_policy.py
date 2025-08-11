@@ -1,4 +1,3 @@
-import ale_py
 import gymnasium as gym
 import torch
 import yaml
