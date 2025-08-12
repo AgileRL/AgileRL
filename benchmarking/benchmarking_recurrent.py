@@ -31,6 +31,7 @@ class MaskVelocityWrapper(gym.ObservationWrapper):
     Taken from https://github.com/DLR-RM/rl-baselines3-zoo/blob/master/rl_zoo3/wrappers.py#L299.
 
     :param env: Gym environment
+    :type env: gym.Env
     """
 
     # Supported envs
@@ -59,7 +60,6 @@ class MaskVelocityWrapper(gym.ObservationWrapper):
             ) from e
 
     def observation(self, observation: np.ndarray) -> np.ndarray:
-        observation = np.squeeze(observation)
         return observation * self.mask
 
 
@@ -124,10 +124,12 @@ def main_recurrent(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         device=device,
     )
 
-    print(agent_pop[0].actor)
+    env_name_prefix = INIT_HP["ENV_NAME"].split("-")[0]
+    env_name_prefix = env_name_prefix + "NoVel"
+    env_name = env_name_prefix + "-" + INIT_HP["ENV_NAME"].split("-")[1]
     trained_pop, pop_fitnesses = train_on_policy(
         env,
-        INIT_HP["ENV_NAME"],
+        env_name,
         INIT_HP["ALGO"],
         agent_pop,
         INIT_HP=INIT_HP,

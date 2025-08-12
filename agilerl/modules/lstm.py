@@ -89,15 +89,18 @@ class EvolvableLSTM(EvolvableModule):
         self.dropout = dropout
         self.max_seq_len = max_seq_len
 
+        # Create the network
+        self.model = self.create_lstm()
+
+    @property
+    def hidden_state_architecture(self) -> Dict[str, Tuple[int, ...]]:
+        """Returns the hidden state architecture."""
         # For LSTM, hidden state and cell state have shape (num_layers * num_directions, batch_size, hidden_size)
         # Assuming unidirectional LSTM (num_directions=1) !TODO: SHOULD WE HAVE A DIRECTIONAL LSTM IN THE FUTURE?
-        self.hidden_state_architecture = {
+        return {
             "h": (self.num_layers, BatchDimension, self.hidden_state_size),
             "c": (self.num_layers, BatchDimension, self.hidden_state_size),
         }
-
-        # Create the network
-        self.model = self.create_lstm()
 
     def create_lstm(self) -> nn.ModuleDict:
         """Creates and returns an LSTM network with the current configuration.
