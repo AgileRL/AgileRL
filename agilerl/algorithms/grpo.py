@@ -205,7 +205,7 @@ class GRPO(LLMAlgorithm):
                 gradient_accumulation_steps = batch_size / self.accelerator.num_processes
                 self.accelerator.state.deepspeed_plugin.deepspeed_config["gradient_accumulation_steps"] = int(gradient_accumulation_steps)
              
-              else:
+            else:
                 if batch_size % self.accelerator.num_processes != 0:
                     raise ValueError(
                         f"Batch size must be divisible by the number of processes."
