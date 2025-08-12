@@ -10,7 +10,6 @@ from torch.utils.data import DataLoader, Dataset
 from agilerl.utils.llm_utils import (
     DummyOptimizer,
     HuggingFaceGym,
-    selective_log_softmax,
 )
 
 
@@ -366,52 +365,52 @@ def test_dummy_optimizer_load_state_dict():
     assert str(exc_info.value) == expected_message
 
 
-def test_selective_log_softmax_float32():
-    """Test selective_log_softmax with float32 tensors."""
-    # Create test data
-    batch_size, seq_len, vocab_size = 2, 3, 10
-    logits = torch.randn(batch_size, seq_len, vocab_size, dtype=torch.float32)
-    index = torch.randint(0, vocab_size, (batch_size, seq_len), dtype=torch.long)
+# def test_selective_log_softmax_float32():
+#     """Test selective_log_softmax with float32 tensors."""
+#     # Create test data
+#     batch_size, seq_len, vocab_size = 2, 3, 10
+#     logits = torch.randn(batch_size, seq_len, vocab_size, dtype=torch.float32)
+#     index = torch.randint(0, vocab_size, (batch_size, seq_len), dtype=torch.long)
 
-    # Test selective_log_softmax
-    result = selective_log_softmax(logits, index)
+#     # Test selective_log_softmax
+#     result = selective_log_softmax(logits, index)
 
-    # Verify shape
-    assert result.shape == (batch_size, seq_len)
+#     # Verify shape
+#     assert result.shape == (batch_size, seq_len)
 
-    # Verify values are finite
-    assert torch.isfinite(result).all()
+#     # Verify values are finite
+#     assert torch.isfinite(result).all()
 
-    # Verify values are reasonable (log probabilities should be negative)
-    assert (result <= 0).all()
+#     # Verify values are reasonable (log probabilities should be negative)
+#     assert (result <= 0).all()
 
-    # Test against manual computation for a single element
-    manual_log_softmax = F.log_softmax(logits[0, 0], dim=-1)
-    manual_gather = manual_log_softmax[index[0, 0]]
-    assert torch.allclose(result[0, 0], manual_gather, atol=1e-6)
+#     # Test against manual computation for a single element
+#     manual_log_softmax = F.log_softmax(logits[0, 0], dim=-1)
+#     manual_gather = manual_log_softmax[index[0, 0]]
+#     assert torch.allclose(result[0, 0], manual_gather, atol=1e-6)
 
 
-def test_selective_log_softmax_bfloat16():
-    """Test selective_log_softmax with bfloat16 tensors (fallback path)."""
-    # Create test data with bfloat16
-    batch_size, seq_len, vocab_size = 2, 3, 10
-    logits = torch.randn(batch_size, seq_len, vocab_size, dtype=torch.bfloat16)
-    index = torch.randint(0, vocab_size, (batch_size, seq_len), dtype=torch.long)
+# def test_selective_log_softmax_bfloat16():
+#     """Test selective_log_softmax with bfloat16 tensors (fallback path)."""
+#     # Create test data with bfloat16
+#     batch_size, seq_len, vocab_size = 2, 3, 10
+#     logits = torch.randn(batch_size, seq_len, vocab_size, dtype=torch.bfloat16)
+#     index = torch.randint(0, vocab_size, (batch_size, seq_len), dtype=torch.long)
 
-    # Test selective_log_softmax
-    result = selective_log_softmax(logits, index)
+#     # Test selective_log_softmax
+#     result = selective_log_softmax(logits, index)
 
-    # Verify shape
-    assert result.shape == (batch_size, seq_len)
+#     # Verify shape
+#     assert result.shape == (batch_size, seq_len)
 
-    # Verify values are finite
-    assert torch.isfinite(result).all()
+#     # Verify values are finite
+#     assert torch.isfinite(result).all()
 
-    # Verify values are reasonable (log probabilities should be negative)
-    assert (result <= 0).all()
+#     # Verify values are reasonable (log probabilities should be negative)
+#     assert (result <= 0).all()
 
-    # Test against manual computation for a single element
-    manual_log_softmax = F.log_softmax(logits[0, 0].float(), dim=-1)
-    manual_gather = manual_log_softmax[index[0, 0]]
-    # Use larger tolerance for bfloat16
-    assert torch.allclose(result[0, 0].float(), manual_gather, atol=1e-3)
+#     # Test against manual computation for a single element
+#     manual_log_softmax = F.log_softmax(logits[0, 0].float(), dim=-1)
+#     manual_gather = manual_log_softmax[index[0, 0]]
+#     # Use larger tolerance for bfloat16
+#     assert torch.allclose(result[0, 0].float(), manual_gather, atol=1e-3)

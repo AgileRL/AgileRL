@@ -34,7 +34,6 @@ from agilerl.utils.algo_utils import (
 from agilerl.utils.llm_utils import (
     DummyOptimizer,
     HuggingFaceGym,
-    selective_log_softmax,
 )
 
 DeepSpeedOptimizerType = Union[
