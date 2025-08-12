@@ -1,18 +1,18 @@
 from datetime import datetime
+from typing import List
 
 import numpy as np
 import torch
 import wandb
 from gymnasium import spaces
 from tensordict import TensorDict
-from tqdm import trange
 from ucimlrepo import fetch_ucirepo
 
+from agilerl.algorithms import NeuralUCB
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.utils.algo_utils import obs_channels_to_first
-from agilerl.utils.utils import create_population
+from agilerl.utils.utils import create_population, default_progress_bar
 from agilerl.wrappers.learning import BanditEnv
 
 # !Note: If you are running this demo without having installed agilerl,
@@ -40,8 +40,6 @@ if __name__ == "__main__":
         "LAMBDA": 1.0,  # Regularization factor
         "REG": 0.000625,  # Loss regularization factor
         "LEARN_STEP": 2,  # Learning frequency
-        # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-        "CHANNELS_LAST": False,
         "POP_SIZE": 4,  # Population size
     }
 
@@ -58,7 +56,7 @@ if __name__ == "__main__":
         low=features.values.min(), high=features.values.max()
     )
     action_space = spaces.Discrete(env.arms)
-    pop = create_population(
+    pop: List[NeuralUCB] = create_population(
         algo="NeuralUCB",  # Algorithm
         observation_space=observation_space,  # State dimension
         action_space=action_space,  # Action dimension
@@ -111,7 +109,7 @@ if __name__ == "__main__":
 
     # TRAINING LOOP
     print("Training...")
-    pbar = trange(max_steps, unit="step")
+    pbar = default_progress_bar(max_steps)
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         pop_episode_scores = []
         for agent_idx, agent in enumerate(pop):  # Loop through population
@@ -119,8 +117,6 @@ if __name__ == "__main__":
             losses = []
             context = env.reset()  # Reset environment at start of episode
             for idx_step in range(episode_steps):
-                if INIT_HP["CHANNELS_LAST"]:
-                    context = obs_channels_to_first(context)
                 # Get next action from agent
                 action = agent.get_action(context)
                 next_context, reward = env.step(action)  # Act in environment
@@ -166,19 +162,18 @@ if __name__ == "__main__":
         fitnesses = [
             agent.test(
                 env,
-                swap_channels=INIT_HP["CHANNELS_LAST"],
                 max_steps=eval_steps,
                 loop=eval_loop,
             )
             for agent in pop
         ]
 
-        print(f"--- Global steps {total_steps} ---")
-        print(f"Steps {[agent.steps[-1] for agent in pop]}")
-        print(f"Regret: {[agent.regret[-1] for agent in pop]}")
-        print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-        print(
-            f'5 fitness avgs: {["%.2f"%np.mean(agent.fitness[-5:]) for agent in pop]}'
+        pbar.write(
+            f"--- Global steps {total_steps} ---\n"
+            f"Steps: {[agent.steps[-1] for agent in pop]}\n"
+            f"Regret: {[agent.regret[-1] for agent in pop]}\n"
+            f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
+            f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
         )
 
         if pop[0].steps[-1] // evo_steps > evo_count:

@@ -76,11 +76,13 @@ Additionally, we also define our upper and lower limits for these hyperparameter
     .. code-block:: python
 
         # Initial hyperparameters
+        num_envs = 8
+        max_seq_length = 1024
         INIT_HP = {
             "POP_SIZE": 4,  # Population size
             "BATCH_SIZE": 256,  # Batch size
             "LR": 0.001,  # Learning rate
-            "LEARN_STEP": 1024,  # Learning frequency
+            "LEARN_STEP": max_seq_length * num_envs,  # Learning frequency
             "GAMMA": 0.9,  # Discount factor
             "GAE_LAMBDA": 0.95,  # Lambda for general advantage estimation
             "ACTION_STD_INIT": 0.6,  # Initial action standard deviation
@@ -88,6 +90,7 @@ Additionally, we also define our upper and lower limits for these hyperparameter
             "ENT_COEF": 0.0,  # Entropy coefficient
             "VF_COEF": 0.5,  # Value function coefficient
             "MAX_GRAD_NORM": 0.5,  # Maximum norm for gradient clipping
+            "SHARE_ENCODERS": False, # Flag to signal that we want to share encoders between agents
             "RECURRENT": True # Flag to signal that we want a recurrent policy
             "USE_ROLLOUT_BUFFER ": True # Use a rollout buffer for data collection
             "TARGET_KL": None,  # Target KL divergence threshold
@@ -164,7 +167,6 @@ latter, we can define a wrapper to modify the observations after they have been 
                 raise NotImplementedError(f"Velocity masking not implemented for {env_id}") from e
 
         def observation(self, observation: np.ndarray) -> np.ndarray:
-            observation = np.squeeze(observation)
             return observation * self.mask
 
 
@@ -196,9 +198,9 @@ followed by mutations) is detailed further below.
     # Define the network configuration of a simple mlp with two hidden layers, each with 64 nodes
     net_config = {
         "encoder_config": {
-            "hidden_state_size": 64,  # LSTM hidden state size
+            "hidden_state_size": 128,  # LSTM hidden state size
             "num_layers": 1,
-            "max_seq_len": 1024,
+            "max_seq_len": max_seq_length,
         },
     }
 
@@ -321,62 +323,89 @@ function and is an example of how we might choose to make use of a population of
 
     .. code-block:: python
 
+        from agilerl.rollouts import collect_rollouts_recurrent
+        from agilerl.utils.utils import default_progress_bar
 
-        # --- Training Loop (Performance-Flamegraph Style) ---
-        max_steps = 1_000_000 // len(pop)
+        # --- Training Loop ---
+        max_steps = 5_000_000 // len(pop)
         required_score = 0.95
-        evo_steps = num_envs * INIT_HP["LEARN_STEP"] * 1
+        evo_steps = INIT_HP["LEARN_STEP"] * 5
         eval_steps = None
 
         total_steps = 0
         training_complete = False
 
         print("Training...")
-        pbar = trange(max_steps * len(pop), unit="step")
+        pbar = default_progress_bar(max_steps * len(pop))
         while (
             np.less([agent.steps[-1] for agent in pop], max_steps).all()
             and not training_complete
         ):
+            pop_episode_scores = []
             for agent in pop:
-                collect_rollouts_recurrent(agent, env)
-                agent.learn()
-                total_steps += agent.learn_step * num_envs
-                agent.steps[-1] += agent.learn_step * num_envs
-                pbar.update(agent.learn_step * num_envs // len(pop))
-
-            # Evaluate and evolve
-            if total_steps % evo_steps == 0:
-                fitnesses = [
-                    agent.test(
-                        single_test_env,
-                        max_steps=eval_steps,
-                        loop=eval_loop,
+                steps = 0
+                completed_episodes = []
+                last_obs, last_done, last_scores, last_info = None, None, None, None
+                for _ in range(-(evo_steps // -agent.learn_step)):
+                    # Collect rollouts and save in buffer
+                    episode_scores, last_obs, last_done, last_scores, last_info = (
+                        collect_rollouts_recurrent(
+                            agent,
+                            env,
+                            last_obs=last_obs,
+                            last_done=last_done,
+                            last_scores=last_scores,
+                            last_info=last_info,
+                        )
                     )
-                    for agent in pop
-                ]
-                mean_scores = [
-                    round(np.mean(agent.fitness[-eval_loop:]), 1) for agent in pop
-                ]
-                print(f"--- Global steps {total_steps} ---")
-                print(f"Steps {[agent.steps[-1] for agent in pop]}")
-                print(f"Scores: {mean_scores}")
-                print(f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}")
-                print(
-                    f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}"
+
+                    agent.learn() # Learn from rollout buffer
+
+                    total_steps += agent.learn_step
+                    steps += agent.learn_step
+                    agent.steps[-1] += agent.learn_step
+                    completed_episodes += episode_scores
+
+                # Update step counter and scores
+                pop_episode_scores.append(
+                    np.mean(completed_episodes)
+                    if len(completed_episodes) > 0
+                    else "0 completed episodes"
                 )
 
-                if any(score >= required_score for score in mean_scores):
-                    print(
-                        f"\nAgent achieved required score {required_score}. Stopping training."
-                    )
-                    elite, _ = tournament.select(pop)
-                    training_complete = True
-                    break
+                pbar.update(steps // len(pop))
 
-                elite, pop = tournament.select(pop)
-                pop = mutations.mutation(pop)
-                for agent in pop:
-                    agent.steps.append(agent.steps[-1])
+            # Evaluate and evolve
+            fitnesses = [
+                agent.test(
+                    single_test_env,
+                    max_steps=eval_steps,
+                    loop=eval_loop,
+                )
+                for agent in pop
+            ]
+
+
+            pbar.write(
+                f"--- Global steps {total_steps} ---\n"
+                f"Steps: {[agent.steps[-1] for agent in pop]}\n"
+                f"Scores: {pop_episode_scores}\n"
+                f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
+                f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
+            )
+
+            if any(score >= required_score for score in pop_episode_scores):
+                print(
+                    f"\nAgent achieved required score {required_score}. Stopping training."
+                )
+                elite, _ = tournament.select(pop)
+                training_complete = True
+                break
+
+            elite, pop = tournament.select(pop)
+            pop = mutations.mutation(pop)
+            for agent in pop:
+                agent.steps.append(agent.steps[-1])
 
         pbar.close()
         env.close()

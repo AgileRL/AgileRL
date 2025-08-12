@@ -130,12 +130,11 @@ def _collect_rollouts(
             obs=obs,
             action=action,
             reward=reward_np,
-            done=done,
+            done=is_terminal_np,
             value=value_np,
             log_prob=log_prob_np,
             next_obs=next_obs,
             hidden_state=current_hidden_state_for_buffer,
-            episode_start=is_terminal_np,
         )
 
         scores += reward_np
