@@ -4,15 +4,17 @@
 # The agent is shown a random symbol (one-hot) at the start, then receives blank observations for N steps, and is then asked to output the same symbol.
 # This is a minimal memory challenge for RL agents.
 
+from typing import List
+
 import gymnasium as gym
 import numpy as np
 import torch
-from tqdm import trange
 
+from agilerl.algorithms import PPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.rollouts import collect_rollouts, collect_rollouts_recurrent
-from agilerl.utils.utils import create_population
+from agilerl.utils.utils import create_population, default_progress_bar
 
 
 # --- Define the Memory Game Environment ---
@@ -103,23 +105,25 @@ def run_demo():
 
     # Toggle this to True for RNN (LSTM), False for MLP
     recurrent = True  # <--- CHANGE THIS TO ENABLE/DISABLE RECURRENT
+    active_collect = collect_rollouts if not recurrent else collect_rollouts_recurrent
 
     # --- Create Environment and Population ---
-    n_symbols = 5
-    delay_steps = 5
-    num_envs = 64  # Can be higher for faster training
+    n_symbols = 10
+    delay_steps = 10
+    num_envs = 16  # Can be higher for faster training
 
     if recurrent:
         NET_CONFIG = {
             "encoder_config": {
-                "hidden_state_size": 64,  # LSTM hidden state size
+                "hidden_state_size": 128,  # LSTM hidden state size
                 "max_seq_len": delay_steps + 2,  # Match episode length
+                "num_layers": 2,
             },
         }
     else:
         NET_CONFIG = {
             "encoder_config": {
-                "hidden_size": [64],
+                "hidden_size": [128],
             },
         }
 
@@ -127,7 +131,8 @@ def run_demo():
     INIT_HP = {
         "POP_SIZE": 2,  # Population size
         "BATCH_SIZE": 256,
-        "LEARN_STEP": (delay_steps + 2),  # Match episode length (delay_steps + 2)
+        "LEARN_STEP": (delay_steps + 2)
+        * num_envs,  # Match episode length (delay_steps + 2)
         "LR": 1e-4,
         "GAMMA": 0.99,
         "GAE_LAMBDA": 1.0,
@@ -144,18 +149,15 @@ def run_demo():
     }
 
     def make_env():
-        def thunk():
-            return MemoryGameEnv(n_symbols=n_symbols, delay_steps=delay_steps)
+        return MemoryGameEnv(n_symbols=n_symbols, delay_steps=delay_steps)
 
-        return thunk
-
-    env = gym.vector.SyncVectorEnv([make_env() for _ in range(num_envs)])
-    single_test_env = gym.vector.SyncVectorEnv([make_env()])
+    env = gym.vector.SyncVectorEnv([make_env for _ in range(num_envs)])
+    single_test_env = gym.vector.SyncVectorEnv([make_env])
 
     observation_space = env.single_observation_space
     action_space = env.single_action_space
 
-    pop = create_population(
+    pop: List[PPO] = create_population(
         algo="PPO",
         observation_space=observation_space,
         action_space=action_space,
@@ -189,64 +191,84 @@ def run_demo():
         device=device,
     )
 
-    # --- Training Loop (Performance-Flamegraph Style) ---
-    max_steps = 5_000_000 // num_envs
+    # --- Training Loop ---
+    max_steps = 5_000_000
     required_score = 0.95
-    evo_steps = num_envs * INIT_HP["LEARN_STEP"] * 100
+    evo_steps = INIT_HP["LEARN_STEP"] * 100
     eval_steps = None
 
     total_steps = 0
     training_complete = False
 
     print("Training...")
-    pbar = trange(max_steps * num_envs, unit="step")
+    pbar = default_progress_bar(max_steps)
     while (
         np.less([agent.steps[-1] for agent in pop], max_steps).all()
         and not training_complete
     ):
+        pop_episode_scores = []
         for agent in pop:
-            active_collect = (
-                collect_rollouts if not recurrent else collect_rollouts_recurrent
+            steps = 0
+            completed_episodes = []
+            last_obs, last_done, last_scores, last_info = None, None, None, None
+            for _ in range(-(evo_steps // -agent.learn_step)):
+                # Collect rollouts and save in buffer
+                episode_scores, last_obs, last_done, last_scores, last_info = (
+                    active_collect(
+                        agent,
+                        env,
+                        last_obs=last_obs,
+                        last_done=last_done,
+                        last_scores=last_scores,
+                        last_info=last_info,
+                    )
+                )
+
+                agent.learn()  # Learn from rollout buffer
+
+                # Update step counter and scores
+                total_steps += agent.learn_step
+                steps += agent.learn_step
+                agent.steps[-1] += agent.learn_step
+                completed_episodes += episode_scores
+
+            pop_episode_scores.append(
+                np.mean(completed_episodes)
+                if len(completed_episodes) > 0
+                else "0 completed episodes"
             )
-            active_collect(agent, env)
-            agent.learn()
-            total_steps += agent.learn_step * num_envs
-            agent.steps[-1] += agent.learn_step
-            pbar.update(agent.learn_step * num_envs // len(pop))
+            pbar.update(steps // len(pop))
 
         # Evaluate and evolve
-        if total_steps % evo_steps == 0:
-            fitnesses = [
-                agent.test(
-                    single_test_env,
-                    max_steps=eval_steps,
-                    loop=eval_loop,
-                )
-                for agent in pop
-            ]
-            mean_scores = [
-                round(np.mean(agent.fitness[-eval_loop:]), 1) for agent in pop
-            ]
-            print(f"--- Global steps {total_steps} ---")
-            print(f"Steps {[agent.steps[-1] for agent in pop]}")
-            print(f"Scores: {mean_scores}")
-            print(f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}")
-            print(
-                f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}"
+        fitnesses = [
+            agent.test(
+                single_test_env,
+                max_steps=eval_steps,
+                loop=eval_loop,
             )
+            for agent in pop
+        ]
 
-            if any(score >= required_score for score in mean_scores):
-                print(
-                    f"\nAgent achieved required score {required_score}. Stopping training."
-                )
-                elite, _ = tournament.select(pop)
-                training_complete = True
-                break
+        pbar.write(
+            f"--- Global steps {total_steps} ---\n"
+            f"Steps: {[agent.steps[-1] for agent in pop]}\n"
+            f"Scores: {pop_episode_scores}\n"
+            f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
+            f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
+        )
 
-            elite, pop = tournament.select(pop)
-            pop = mutations.mutation(pop)
-            for agent in pop:
-                agent.steps.append(agent.steps[-1])
+        if any(score >= required_score for score in pop_episode_scores):
+            print(
+                f"\nAgent achieved required score {required_score}. Stopping training."
+            )
+            elite, _ = tournament.select(pop)
+            training_complete = True
+            break
+
+        elite, pop = tournament.select(pop)
+        pop = mutations.mutation(pop)
+        for agent in pop:
+            agent.steps.append(agent.steps[-1])
 
     pbar.close()
     env.close()

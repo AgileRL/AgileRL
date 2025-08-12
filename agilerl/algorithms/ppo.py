@@ -987,18 +987,15 @@ class PPO(RLAlgorithm):
                 mb_old_log_probs_seq = current_minibatch_td["log_probs"]
                 mb_advantages_seq = current_minibatch_td["advantages"]
                 mb_returns_seq = current_minibatch_td["returns"]
-                mb_initial_hidden_states_dict: Optional[TensorDict] = (
-                    current_minibatch_td.get_non_tensor(
-                        "initial_hidden_states", default=None
-                    )
+                mb_initial_hidden_states_dict = current_minibatch_td.get_non_tensor(
+                    "initial_hidden_states", default=None
                 )
 
                 policy_loss_total, value_loss_total, entropy_loss_total = 0.0, 0.0, 0.0
-                current_step_hidden_state_actor = (
-                    None  # For actor: {key: (layers, batch_seq_size, hidden_size)}
-                )
                 approx_kl_divs_minibatch_timesteps = []
 
+                # For actor: {key: (layers, batch_seq_size, hidden_size)}
+                current_step_hidden_state_actor = None
                 if self.recurrent and mb_initial_hidden_states_dict is not None:
                     current_step_hidden_state_actor = {
                         # val is (batch_seq_size, layers, size), permute to (layers, batch_seq_size, size)
@@ -1007,18 +1004,19 @@ class PPO(RLAlgorithm):
                     }
 
                 for t in range(seq_len):
-                    obs_t = (
-                        mb_obs_seq[:, t]
-                        if not isinstance(mb_obs_seq, TensorDict)
-                        else mb_obs_seq[:, t]
-                    )
-                    actions_t, old_log_prob_t = (
-                        mb_actions_seq[:, t],
-                        mb_old_log_probs_seq[:, t],
-                    )
-                    adv_t, return_t = mb_advantages_seq[:, t], mb_returns_seq[:, t]
+                    obs_t = mb_obs_seq[:, t]
+                    old_log_prob_t = mb_old_log_probs_seq[:, t]
+                    adv_t = mb_advantages_seq[:, t]
+                    return_t = mb_returns_seq[:, t]
 
-                    # new_value_t: (batch_seq,), entropy_t: (batch_seq,) or scalar, log_prob_t: (batch_seq,)
+                    # Need to flatten action dimension for Discrete action spaces
+                    actions_t: torch.Tensor = mb_actions_seq[:, t]
+                    if isinstance(self.action_space, spaces.Discrete):
+                        actions_t = actions_t.squeeze(-1)
+
+                    # new_value_t: (batch_seq,),
+                    # entropy_t: (batch_seq,) or scalar,
+                    # log_prob_t: (batch_seq,)
                     (
                         new_log_prob_t,
                         entropy_t,
