@@ -8,13 +8,12 @@ from typing import List
 import gymnasium as gym
 import numpy as np
 import torch
-from tqdm import trange
 
 from agilerl.algorithms import PPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.rollouts.on_policy import collect_rollouts_recurrent
-from agilerl.utils.utils import create_population, make_vect_envs
+from agilerl.rollouts.on_policy import collect_rollouts, collect_rollouts_recurrent
+from agilerl.utils.utils import create_population, default_progress_bar, make_vect_envs
 from benchmarking.benchmarking_recurrent import MaskVelocityWrapper
 
 
@@ -25,6 +24,7 @@ def run_demo():
 
     # Toggle this to True for RNN (LSTM), False for MLP
     recurrent = True  # <--- CHANGE THIS TO ENABLE/DISABLE RECURRENT
+    active_collect = collect_rollouts if not recurrent else collect_rollouts_recurrent
 
     # --- Create Environment and Population ---
     num_envs = 4  # Can be higher for faster training
@@ -57,7 +57,7 @@ def run_demo():
         "VF_COEF": 1.0,
         "MAX_GRAD_NORM": 0.5,
         "UPDATE_EPOCHS": 4,
-        "SHARE_ENCODERS": True,
+        "SHARE_ENCODERS": False,
         "USE_ROLLOUT_BUFFER": True,
         "RECURRENT": recurrent,
         "ACTION_STD_INIT": 0.6,
@@ -110,7 +110,7 @@ def run_demo():
     )
 
     # --- Training Loop (Performance-Flamegraph Style) ---
-    max_steps = 1_000_000 // len(pop)
+    max_steps = 5_000_000 // len(pop)
     required_score = 0.95
     evo_steps = num_envs * INIT_HP["LEARN_STEP"] * 1
     eval_steps = None
@@ -119,20 +119,44 @@ def run_demo():
     training_complete = False
 
     print("Training...")
-    pbar = trange(max_steps * len(pop), unit="step")
+    pbar = default_progress_bar(max_steps * len(pop))
     while (
         np.less([agent.steps[-1] for agent in pop], max_steps).all()
         and not training_complete
     ):
+        pop_episode_scores = []
         for agent in pop:
-            collect_rollouts_recurrent(agent, env)
-            agent.learn()
-            total_steps += agent.learn_step * num_envs
-            agent.steps[-1] += agent.learn_step * num_envs
-            pbar.update(agent.learn_step * num_envs // len(pop))
+            steps = 0
+            completed_episodes = []
+            last_obs, last_done, last_scores, last_info = None, None, None, None
+            for _ in range(-(evo_steps // -agent.learn_step)):
+                # Collect rollouts and save in buffer
+                episode_scores, last_obs, last_done, last_scores, last_info = (
+                    active_collect(
+                        agent,
+                        env,
+                        last_obs=last_obs,
+                        last_done=last_done,
+                        last_scores=last_scores,
+                        last_info=last_info,
+                    )
+                )
 
-        # Evaluate and evolve
-        if total_steps % evo_steps == 0:
+                agent.learn()  # Learn from rollout buffer
+
+                # Update step counter and scores
+                total_steps += agent.learn_step
+                steps += agent.learn_step
+                agent.steps[-1] += agent.learn_step
+                completed_episodes += episode_scores
+
+            pop_episode_scores.append(
+                np.mean(completed_episodes)
+                if len(completed_episodes) > 0
+                else "0 completed episodes"
+            )
+            pbar.update(steps // len(pop))
+
             fitnesses = [
                 agent.test(
                     single_test_env,
@@ -141,18 +165,16 @@ def run_demo():
                 )
                 for agent in pop
             ]
-            mean_scores = [
-                round(np.mean(agent.fitness[-eval_loop:]), 1) for agent in pop
-            ]
-            print(f"--- Global steps {total_steps} ---")
-            print(f"Steps {[agent.steps[-1] for agent in pop]}")
-            print(f"Scores: {mean_scores}")
-            print(f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}")
-            print(
-                f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}"
+
+            pbar.write(
+                f"--- Global steps {total_steps} ---\n"
+                f"Steps: {[agent.steps[-1] for agent in pop]}\n"
+                f"Scores: {pop_episode_scores}\n"
+                f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
+                f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
             )
 
-            if any(score >= required_score for score in mean_scores):
+            if any(score >= required_score for score in pop_episode_scores):
                 print(
                     f"\nAgent achieved required score {required_score}. Stopping training."
                 )

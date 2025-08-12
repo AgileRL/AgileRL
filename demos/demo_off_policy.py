@@ -1,15 +1,18 @@
+from typing import List
+
 import numpy as np
 import torch
-from tqdm import trange
+from tensordict import TensorDictBase
 
+from agilerl.algorithms import DQN
+from agilerl.components.data import Transition
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
     create_population,
+    default_progress_bar,
     make_vect_envs,
-    observation_space_channels_to_first,
 )
 
 # !Note: If you are running this demo without having installed agilerl,
@@ -37,7 +40,6 @@ if __name__ == "__main__":
         "GAMMA": 0.99,  # Discount factor
         "LEARN_STEP": 1,  # Learning frequency
         "TAU": 1e-3,  # For soft update of target network parameters
-        "CHANNELS_LAST": False,  # Swap image channels dimension last to first [H, W, C] -> [C, H, W]
         "POP_SIZE": 4,  # Population size
     }
 
@@ -45,10 +47,8 @@ if __name__ == "__main__":
     env = make_vect_envs("LunarLander-v3", num_envs=num_envs)  # Create environment
     observation_space = env.single_observation_space
     action_space = env.single_action_space
-    if INIT_HP["CHANNELS_LAST"]:
-        observation_space = observation_space_channels_to_first(observation_space)
 
-    pop = create_population(
+    pop: List[DQN] = create_population(
         algo="DQN",  # Algorithm
         observation_space=observation_space,  # Observation space
         action_space=action_space,  # Action space
@@ -59,10 +59,8 @@ if __name__ == "__main__":
         device=device,
     )
 
-    field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
-        memory_size=10000,  # Max replay buffer size
-        field_names=field_names,  # Field names to store in memory
+        max_size=10000,  # Max replay buffer size
         device=device,
     )
 
@@ -104,27 +102,23 @@ if __name__ == "__main__":
 
     # TRAINING LOOP
     print("Training...")
-    pbar = trange(max_steps, unit="step")
+    pbar = default_progress_bar(max_steps)
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         pop_episode_scores = []
         for agent in pop:  # Loop through population
-            state, info = env.reset()  # Reset environment at start of episode
+            obs, info = env.reset()  # Reset environment at start of episode
             scores = np.zeros(num_envs)
             completed_episode_scores = []
             steps = 0
             epsilon = eps_start
-
             for idx_step in range(evo_steps // num_envs):
-                if INIT_HP["CHANNELS_LAST"]:
-                    state = obs_channels_to_first(state)
-
-                action = agent.get_action(state, epsilon)  # Get next action from agent
+                action = agent.get_action(obs, epsilon)  # Get next action from agent
                 epsilon = max(
                     eps_end, epsilon * eps_decay
                 )  # Decay epsilon for exploration
 
                 # Act in environment
-                next_state, reward, terminated, truncated, info = env.step(action)
+                next_obs, reward, terminated, truncated, info = env.step(action)
                 scores += np.array(reward)
                 steps += num_envs
                 total_steps += num_envs
@@ -136,28 +130,20 @@ if __name__ == "__main__":
                         agent.scores.append(scores[idx])
                         scores[idx] = 0
 
+                transition: TensorDictBase = Transition(
+                    obs,
+                    action,
+                    reward,
+                    next_obs,
+                    terminated,
+                )
+                transition = transition.to_tensordict()
+                transition.batch_size = [num_envs]
                 # Save experience to replay buffer
-                if INIT_HP["CHANNELS_LAST"]:
-                    memory.save_to_memory(
-                        state,
-                        action,
-                        reward,
-                        obs_channels_to_first(next_state),
-                        terminated,
-                        is_vectorised=True,
-                    )
-                else:
-                    memory.save_to_memory(
-                        state,
-                        action,
-                        reward,
-                        next_state,
-                        terminated,
-                        is_vectorised=True,
-                    )
+                memory.add(transition)
 
                 # Learn according to learning frequency
-                if memory.counter > learning_delay and len(memory) >= agent.batch_size:
+                if memory.size > learning_delay and len(memory) >= agent.batch_size:
                     for _ in range(num_envs // agent.learn_step):
                         experiences = memory.sample(
                             agent.batch_size
@@ -166,7 +152,7 @@ if __name__ == "__main__":
                             experiences
                         )  # Learn according to agent's RL algorithm
 
-                state = next_state
+                obs = next_obs
 
             pbar.update(evo_steps // len(pop))
             agent.steps[-1] += steps
@@ -179,7 +165,6 @@ if __name__ == "__main__":
         fitnesses = [
             agent.test(
                 env,
-                swap_channels=INIT_HP["CHANNELS_LAST"],
                 max_steps=eval_steps,
                 loop=eval_loop,
             )
@@ -194,12 +179,12 @@ if __name__ == "__main__":
             for episode_scores in pop_episode_scores
         ]
 
-        print(f"--- Global steps {total_steps} ---")
-        print(f"Steps {[agent.steps[-1] for agent in pop]}")
-        print(f"Scores: {mean_scores}")
-        print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-        print(
-            f'5 fitness avgs: {["%.2f"%np.mean(agent.fitness[-5:]) for agent in pop]}'
+        pbar.write(
+            f"--- Global steps {total_steps} ---\n"
+            f"Steps: {[agent.steps[-1] for agent in pop]}\n"
+            f"Scores: {mean_scores}\n"
+            f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
+            f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
         )
 
         # Tournament selection and population mutation
