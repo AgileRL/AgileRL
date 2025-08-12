@@ -31,7 +31,7 @@ INIT_HP:
     ELITISM: true
     POP_SIZE: 1
     EVAL_LOOP: 1
-    USE_VLLM: false
+    USE_VLLM: true
     # VLLM_CONFIG:
     #     tensor_parallel_size: 1
     #     gpu_memory_utilization: 0.4

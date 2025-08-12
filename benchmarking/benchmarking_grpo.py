@@ -87,8 +87,8 @@ def format_reward_func(completions, target, **kwargs):
             # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
             completion = "<think>" + completion
             regex = r"^<think>([^<]*(?:<(?!/?think>)[^<]*)*)<\/think>\n<answer>([\s\S]*?)<\/answer>$"
-            match = re.search(regex, completion, re.DOTALL)
-            if match is None or len(match.groups()) != 2:
+            matches = re.search(regex, completion, re.DOTALL)
+            if matches is None or len(matches.groups()) != 2:
                 rewards.append(0.0)
             else:
                 rewards.append(1.0)
@@ -105,20 +105,24 @@ def equation_reward_func(completions, target, nums, **kwargs):
             # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
             completion = "<think>" + completion
             answer_tags = re.findall(r"<answer>([\s\S]*?)<\/answer>", completion)
+            print("answer tags", answer_tags)
 
             if len(answer_tags) != 1:
+                print("in here 1")
                 rewards.append(0.0)
                 continue
 
             equation = answer_tags[0].strip()
             used_numbers = [int(n) for n in re.findall(r"\d+", equation)]
 
-            if sorted(used_numbers) != sorted(numbers.flatten().tolist()):
+            if sorted(used_numbers) != sorted(numbers):
+                print("in here 2")
                 rewards.append(0.0)
                 continue
 
             allowed_pattern = r"^[\d+\-*/().\s]+$"
             if not re.match(allowed_pattern, equation):
+                print("in here 3")
                 rewards.append(0.0)
                 continue
 
@@ -127,11 +131,11 @@ def equation_reward_func(completions, target, nums, **kwargs):
             if abs(float(result) - float(gt)) < 1e-5:
                 rewards.append(1.0)
             else:
+                print("in here 4")
                 rewards.append(0.0)
         except Exception:
             rewards.append(0.0)
     return rewards
-
 
 def combined_rewards(completion, solution, prompt):
     import torch.distributed as dist
@@ -190,7 +194,7 @@ def main(init_hp, mut_p):
         tokenizer=tokenizer,
         reward_fn=combined_rewards,
         apply_chat_template_fn=countdown_chat_template,
-        data_batch_size_per_gpu=4,
+        data_batch_size_per_gpu=10,
         accelerator=accelerator,
         return_raw_completions=init_hp.get(
             "USE_VLLM", False

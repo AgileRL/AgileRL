@@ -105,7 +105,7 @@ class GRPO(LLMAlgorithm):
     :type use_separate_reference_adapter: bool, optional
     :param use_vllm: Flag to indicate if the model should use vllm for generation, defaults to False
     :type use_vllm: bool, optional
-    :param vllm_config: Config for VLLM, provide a VLLMConfig object to use VLLM server for generation, defaults to None
+    :param vllm_config: Config for VLLM generation, defaults to None
     :type vllm_config: VLLMConfig, optional
     :param seed: Seed for the random number generator, defaults to 42
     :type seed: int, optional
@@ -195,28 +195,25 @@ class GRPO(LLMAlgorithm):
 
         if self.accelerator is not None and not clone:
             if reduce_memory_peak:
-                # FIXME experimenting here 
-                self.learning_batch_size = 1
-                self.batch_size_per_gpu = 1
-                self.accelerator.state.deepspeed_plugin.deepspeed_config["train_micro_batch_size_per_gpu"] = self.batch_size_per_gpu
+                self.batch_size_per_process = 1
+                self.micro_batch_size_per_gpu = 1
+                self.accelerator.state.deepspeed_plugin.deepspeed_config["train_micro_batch_size_per_gpu"] = self.micro_batch_size_per_gpu
                 if batch_size % self.accelerator.num_processes != 0:
                     raise ValueError(
                         f"Batch size must be divisible by the number of processes."
                     )
                 gradient_accumulation_steps = batch_size / self.accelerator.num_processes
                 self.accelerator.state.deepspeed_plugin.deepspeed_config["gradient_accumulation_steps"] = int(gradient_accumulation_steps)
-                # self.learning_batch_size = int(batch_size / self.accelerator.num_processes)
-                # self.batch_size_per_gpu = int(self.learning_batch_size / (self.accelerator.state.deepspeed_plugin.deepspeed_config.get("gradient_accumulation_steps", 1)))
-                # self.accelerator.state.deepspeed_plugin.deepspeed_config["train_micro_batch_size_per_gpu"] = self.batch_size_per_gpu
-            else:
+             
+              else:
                 if batch_size % self.accelerator.num_processes != 0:
                     raise ValueError(
                         f"Batch size must be divisible by the number of processes."
                     )
-                self.learning_batch_size = int(batch_size / self.accelerator.num_processes)
+                self.batch_size_per_process = int(batch_size / self.accelerator.num_processes)
 
                 if (
-                    self.learning_batch_size
+                    self.batch_size_per_process
                     % self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
                         "gradient_accumulation_steps", 1
                     )
@@ -226,8 +223,8 @@ class GRPO(LLMAlgorithm):
                         f"Batch size must be divisible by the product of the number of processes and gradient accumulation steps."
                         "Gradient accumulation steps can be updated in the deepspeed config by changing the 'gradient_accumulation_steps' parameter."
                     )
-                self.batch_size_per_gpu = int(
-                    self.learning_batch_size
+                self.micro_batch_size_per_gpu = int(
+                    self.batch_size_per_process
                     / self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
                         "gradient_accumulation_steps", 1
                     )
@@ -241,10 +238,10 @@ class GRPO(LLMAlgorithm):
                 ):
                     self.accelerator.state.deepspeed_plugin.deepspeed_config[
                         "train_micro_batch_size_per_gpu"
-                    ] = self.batch_size_per_gpu
+                    ] = self.micro_batch_size_per_gpu
 
         else:
-            self.learning_batch_size = batch_size
+            self.batch_size_per_process = batch_size
 
         if self.accelerator is not None:
             if (
@@ -327,7 +324,6 @@ class GRPO(LLMAlgorithm):
         self._initialize_actors(actor_network, not clone)
         self.use_vllm = use_vllm
         self.vllm_config = vllm_config
-        # self.dtype = actor_network.torch_dtype
 
         set_seed(seed, device_specific=True)
 
@@ -339,21 +335,10 @@ class GRPO(LLMAlgorithm):
                 )
                 self.vllm_config = VLLMConfig()
             if (
-                self.vllm_config.mode == "server"
+                self.vllm_config.mode == "colocate"
                 and self.accelerator is not None
                 and self.accelerator.is_main_process
             ):
-                base_url = (
-                    self.vllm_config.base_url
-                    if vllm_config.base_url is not None
-                    else f"http://{self.vllm_config.host}:{self.vllm_config.server_port}"
-                )
-                self.vllm_client = VLLMClient(
-                    base_url=base_url,
-                    connection_timeout=self.vllm_config.connection_timeout,
-                )
-                self.vllm_client.init_communicator()
-            else:
                 if (
                     self.accelerator.num_processes
                     % self.vllm_config.tensor_parallel_size
@@ -390,12 +375,10 @@ class GRPO(LLMAlgorithm):
 
                 self.model_ref = None
 
-                max_num_seqs = self.batch_size_per_gpu * self.vllm_config.tensor_parallel_size * \
+                max_num_seqs = self.batch_size_per_process * self.vllm_config.tensor_parallel_size * \
                     self.accelerator.state.deepspeed_plugin.deepspeed_config["gradient_accumulation_steps"]
                 max_model_len = self.max_output_tokens
 
-                for param in self.actor.parameters():
-                    param = param.to(torch.bfloat16)
 
                 self.llm = LLM(
                     model=self.pretrained_model_name_or_path,
@@ -467,14 +450,9 @@ class GRPO(LLMAlgorithm):
             # Move model to vllm
             self._move_model_to_vllm()
 
-            if self.vllm_config.mode == "server":
-                completion_ids, action_masks = self._generate_with_vllm_server(
-                    prompts, group_size
-                )
-            else:
-                completion_ids, action_masks = self._generate_with_vllm_colocate(
-                    prompts, group_size
-                )
+            completion_ids, action_masks = self._generate_with_vllm_colocate(
+                prompts, group_size
+            )
 
         return completion_ids, action_masks
 
@@ -511,7 +489,7 @@ class GRPO(LLMAlgorithm):
         num_samples = advantages.shape[0]
         batch_idxs = np.arange(num_samples)
         mean_loss, mean_kl = 0, 0
-        batch_size = min(num_samples, self.learning_batch_size)
+        batch_size = min(num_samples, self.batch_size_per_process)
         for _ in range(self.update_epochs):
             self.rng.shuffle(batch_idxs)
             for start in range(0, num_samples, batch_size):
@@ -809,19 +787,23 @@ class GRPO(LLMAlgorithm):
                 }
 
                 logit = self.actor.forward(**kwargs).logits
-                # print("OUTPUT LOGIT  SHAPE", logit.shape)
                 logit /= self.temperature
-                log_prob = selective_log_softmax(logit[:, :-1], input_id[:, 1:])
-                # print("LOG PROB SHAPE", log_prob.shape)
+                log_prob = (
+                    F.log_softmax(logit[:, :-1], dim=-1)
+                    .gather(dim=-1, index=input_id[:, 1:].unsqueeze(-1))
+                    .squeeze(-1)
+                )
                 log_probs_list.append(log_prob)
             log_probs = torch.cat(log_probs_list)
-            # print("Final log_probs shape", log_probs.shape)
-            # assert False
 
         else:
             logits = self.actor.forward(**model_kwargs).logits
             logits /= self.temperature
-            log_probs = selective_log_softmax(logits[:, :-1], ids[:, 1:])
+            log_probs = (
+                F.log_softmax(logits[:, :-1], dim=-1)
+                .gather(dim=-1, index=ids[:, 1:].unsqueeze(-1))
+                .squeeze(-1)
+            )
         self._use_policy()
         return log_probs
 
@@ -869,11 +851,9 @@ class GRPO(LLMAlgorithm):
             self.actor.base_model.enable_adapter_layers()
 
     def _move_model_to_vllm(self) -> None:
-        """Move the model to the vllm server."""
+        """Move the deepspeed model to vllm."""
+        
         # TODO: Add support for ZeRO Stage 3
-        # if self.zero_stage == 3:
-        #     gather_if_zero3 = deepspeed.zero.GatheredParameters
-        # else:
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
         gather_if_zero3 = nullcontext
@@ -898,66 +878,9 @@ class GRPO(LLMAlgorithm):
                     )
                     llm_model.load_weights([(name, param.data)])
             self.model_ref.unmerge_adapter()
-        if (
-            self.accelerator is not None
-            and self.accelerator.is_main_process
-            and self.vllm_config.mode == "server"
-        ):
-            self.vllm_client.reset_prefix_cache()
-        elif self.vllm_config.mode == "colocate":
-            self.llm.reset_prefix_cache()
+        
+        self.llm.reset_prefix_cache()
 
-    def _generate_with_vllm_server(
-        self, prompts: List[Tuple[str, int]], group_size: int
-    ) -> List[torch.Tensor]:
-        num_input_tokens = [prompt[1] for prompt in prompts]
-        raw_prompts = [prompt[0] for prompt in prompts]
-
-        # Gather prompts to single device
-        all_prompts = gather_object(raw_prompts)
-        all_num_input_tokens = gather_object(num_input_tokens)
-        completion_ids = [None] * len(all_prompts)
-
-        if self.accelerator.is_main_process:
-            completion_ids = self.vllm_client.generate(
-                prompts=all_prompts,
-                n=group_size,
-                repetition_penalty=self.repetition_penalty,
-                temperature=self.temperature,
-                top_p=self.top_p,
-                top_k=-1 if self.top_k is None else self.top_k,
-                min_p=0.0 if self.min_p is None else self.min_p,
-                max_tokens=self.max_output_tokens,
-            )
-
-        completion_ids = broadcast_object_list(completion_ids, from_process=0)
-        process_slice = slice(
-            self.accelerator.process_index * len(raw_prompts) * group_size,
-            (self.accelerator.process_index + 1) * len(raw_prompts) * group_size,
-        )
-        completion_ids = completion_ids[process_slice]
-        num_input_tokens = all_num_input_tokens[process_slice]
-
-        completion_ids = [
-            stack_and_pad_experiences(
-                completion_ids[group_size * i : group_size * (i + 1)],
-                padding_values=[self.pad_token_id],
-                device=self.device,
-            )[0]
-            for i, _ in enumerate(raw_prompts)
-        ]
-
-        action_masks = [
-            torch.zeros_like(completion_id, device=self.device)
-            for completion_id in completion_ids
-        ]
-
-        for i, completion_id in enumerate(completion_ids):
-            action_masks[i][:, num_input_tokens[i] :] = True
-            action_masks[i][completion_id == self.pad_token_id] = False
-            action_masks[i] = action_masks[i][:, 1:]
-
-        return completion_ids, action_masks
 
     def _generate_with_vllm_colocate(
         self, prompts: List[Tuple[str, int]], group_size: int
@@ -1064,8 +987,5 @@ class GRPO(LLMAlgorithm):
             action_mask[completion_id == self.pad_token_id] = False
             action_mask = action_mask[:, 1:]
             action_masks.append(action_mask)
-
-
-
-
+            
         return completion_ids, action_masks
