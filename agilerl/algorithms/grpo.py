@@ -335,9 +335,9 @@ class GRPO(LLMAlgorithm):
         set_seed(seed, device_specific=True)
 
         if self.use_vllm:
-            os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = (
-                "spawn"  # FIXME is this needed??
-            )
+            # os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = (
+            #     "spawn"  # FIXME is this needed??
+            # )
             if self.vllm_config is None:
                 warnings.warn(
                     "No VLLM config provided. Using default VLLM configuration for generation."
@@ -357,6 +357,8 @@ class GRPO(LLMAlgorithm):
                         f"Tensor parallel size {self.vllm_config.tensor_parallel_size} must be a multiple of the number of processes {self.accelerator.num_processes}."
                     )
 
+                print("BEFORE TP GROUP CREATED")
+
                 if self.vllm_config.tensor_parallel_size > 1:
                     # Create subgroups of ranks for TP, each group with `vllm_tensor_parallel_size` ranks.
                     # For example, if world_size=8 and vllm_tensor_parallel_size=2 → groups: [0,1], [2,3], [4,5], [6,7]
@@ -374,6 +376,8 @@ class GRPO(LLMAlgorithm):
                             )
                         ]
                     )
+
+                print("AFTER TP GROUP CREATED")
 
                 # vLLM requires the environment variables to be set for distributed training.
                 os.environ["RANK"] = str(self.accelerator.process_index)
