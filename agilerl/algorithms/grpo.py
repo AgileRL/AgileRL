@@ -958,7 +958,7 @@ class GRPO(LLMAlgorithm):
         all_outputs = self.llm.generate(
             all_prompts_text,
             sampling_params=sampling_params,
-            use_tqdm=False,
+            use_tqdm=True,
         )  # Change this to False
 
         completion_ids = [
