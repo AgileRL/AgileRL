@@ -413,6 +413,8 @@ class GRPO(LLMAlgorithm):
                     model_impl="vllm",
                 )
 
+                print(f"VLLM created for process {self.accelerator.process_index}")
+
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
 
@@ -969,11 +971,6 @@ class GRPO(LLMAlgorithm):
         completion_ids = [
             output.token_ids for outputs in all_outputs for output in outputs.outputs
         ]
-        print(
-            "COMPLETION ID TYPES",
-            [type(completion_id) for completion_id in completion_ids],
-        )
-
         if self.vllm_config.tensor_parallel_size > 1:
             # Slice completions for this rank within its TP group.
             # Each rank generates all outputs — we keep only our share.
@@ -983,11 +980,6 @@ class GRPO(LLMAlgorithm):
             )
             completion_ids = completion_ids[tp_slice]
             prompts_ids = all_prompts_ids[tp_slice]
-
-        print("PROMPT IDs:")
-        print(prompts_ids)
-        print("COMPLETION IDs:")
-        print(completion_ids)
 
         completion_ids = [
             torch.cat(
