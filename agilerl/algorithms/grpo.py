@@ -382,6 +382,13 @@ class GRPO(LLMAlgorithm):
                 os.environ["MASTER_ADDR"] = os.environ.get("MASTER_ADDR", "localhost")
                 os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "12345")
 
+                print("VLLM ENV VARS:")
+                print(os.environ["RANK"])
+                print(os.environ["LOCAL_RANK"])
+                print(os.environ["WORLD_SIZE"])
+                print(os.environ["MASTER_ADDR"])
+                print(os.environ["MASTER_PORT"])
+
                 self.model_ref = None
 
                 max_num_seqs = (
@@ -974,6 +981,11 @@ class GRPO(LLMAlgorithm):
             )
             completion_ids = completion_ids[tp_slice]
             prompts_ids = all_prompts_ids[tp_slice]
+
+        print("PROMPT IDs:")
+        print(prompts_ids)
+        print("COMPLETION IDs:")
+        print(completion_ids)
 
         completion_ids = [
             torch.cat(
