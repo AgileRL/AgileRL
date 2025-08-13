@@ -971,6 +971,10 @@ class GRPO(LLMAlgorithm):
         completion_ids = [
             output.token_ids for outputs in all_outputs for output in outputs.outputs
         ]
+        print(
+            "COMPLETION ID TYPES",
+            [type(completion_id) for completion_id in completion_ids],
+        )
 
         if self.vllm_config.tensor_parallel_size > 1:
             # Slice completions for this rank within its TP group.
