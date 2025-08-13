@@ -890,13 +890,11 @@ class GRPO(LLMAlgorithm):
 
                 if "original_module" in name:
                     continue
-                if self.vllm_config.mode == "server":
-                    self.vllm_client.update_named_param(name, param.data)
-                else:
-                    llm_model = (
-                        self.llm.llm_engine.model_executor.driver_worker.model_runner.model
-                    )
-                    llm_model.load_weights([(name, param.data)])
+
+                llm_model = (
+                    self.llm.llm_engine.model_executor.driver_worker.model_runner.model
+                )
+                llm_model.load_weights([(name, param.data)])
             self.model_ref.unmerge_adapter()
 
         self.llm.reset_prefix_cache()
