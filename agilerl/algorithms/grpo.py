@@ -1,12 +1,12 @@
 import gc
 import os
+import re
 import warnings
 from contextlib import nullcontext
 from typing import Dict, List, Optional, Tuple, Union
 
 import deepspeed
 import numpy as np
-import re
 import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
@@ -18,6 +18,7 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from torch.nn.utils import clip_grad_norm_
 from transformers import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
+
 # from trl.extras.vllm_client import VLLMClient
 from vllm import LLM, SamplingParams
 
@@ -40,7 +41,6 @@ DeepSpeedOptimizerType = Union[
     DeepSpeedZeroOptimizer,  # ZeRO Stage 1 & 2 optimizer
     DeepSpeedZeroOptimizer_Stage3,  # ZeRO Stage 3 optimizer
 ]
-
 
 
 # Dummy to avoid installing trl
@@ -196,20 +196,28 @@ class GRPO(LLMAlgorithm):
             if reduce_memory_peak:
                 self.batch_size_per_process = 1
                 self.micro_batch_size_per_gpu = 1
-                self.accelerator.state.deepspeed_plugin.deepspeed_config["train_micro_batch_size_per_gpu"] = self.micro_batch_size_per_gpu
+                self.accelerator.state.deepspeed_plugin.deepspeed_config[
+                    "train_micro_batch_size_per_gpu"
+                ] = self.micro_batch_size_per_gpu
                 if batch_size % self.accelerator.num_processes != 0:
                     raise ValueError(
                         f"Batch size must be divisible by the number of processes."
                     )
-                gradient_accumulation_steps = batch_size / self.accelerator.num_processes
-                self.accelerator.state.deepspeed_plugin.deepspeed_config["gradient_accumulation_steps"] = int(gradient_accumulation_steps)
-             
+                gradient_accumulation_steps = (
+                    batch_size / self.accelerator.num_processes
+                )
+                self.accelerator.state.deepspeed_plugin.deepspeed_config[
+                    "gradient_accumulation_steps"
+                ] = int(gradient_accumulation_steps)
+
             else:
                 if batch_size % self.accelerator.num_processes != 0:
                     raise ValueError(
                         f"Batch size must be divisible by the number of processes."
                     )
-                self.batch_size_per_process = int(batch_size / self.accelerator.num_processes)
+                self.batch_size_per_process = int(
+                    batch_size / self.accelerator.num_processes
+                )
 
                 if (
                     self.batch_size_per_process
@@ -327,14 +335,16 @@ class GRPO(LLMAlgorithm):
         set_seed(seed, device_specific=True)
 
         if self.use_vllm:
-            os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn" # FIXME is this needed??
+            os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = (
+                "spawn"  # FIXME is this needed??
+            )
             if self.vllm_config is None:
                 warnings.warn(
                     "No VLLM config provided. Using default VLLM configuration for generation."
                 )
                 self.vllm_config = VLLMConfig()
             if (
-                self.vllm_config.mode == "colocate"
+                self.use_vllm
                 and self.accelerator is not None
                 and self.accelerator.is_main_process
             ):
@@ -374,10 +384,14 @@ class GRPO(LLMAlgorithm):
 
                 self.model_ref = None
 
-                max_num_seqs = self.batch_size_per_process * self.vllm_config.tensor_parallel_size * \
-                    self.accelerator.state.deepspeed_plugin.deepspeed_config["gradient_accumulation_steps"]
+                max_num_seqs = (
+                    self.batch_size_per_process
+                    * self.vllm_config.tensor_parallel_size
+                    * self.accelerator.state.deepspeed_plugin.deepspeed_config[
+                        "gradient_accumulation_steps"
+                    ]
+                )
                 max_model_len = self.max_output_tokens
-
 
                 self.llm = LLM(
                     model=self.pretrained_model_name_or_path,
@@ -389,7 +403,7 @@ class GRPO(LLMAlgorithm):
                     seed=self.accelerator.process_index
                     // self.vllm_config.tensor_parallel_size,
                     max_num_batched_tokens=max_model_len * max_num_seqs,
-                    model_impl='vllm'
+                    model_impl="vllm",
                 )
 
         if self.accelerator is not None:
@@ -399,7 +413,6 @@ class GRPO(LLMAlgorithm):
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
         if self.wrap:
             self.wrap_models()
-
 
     def get_action(
         self, prompts: List[Dict[str, torch.Tensor]], training: bool = True
@@ -615,7 +628,6 @@ class GRPO(LLMAlgorithm):
         :param add_adapters: Flag to indicate if adapters should be added to the model, defaults to True
         :type add_adapters: bool, optional
         """
-            
 
         if isinstance(base_model, PeftModel) and add_adapters:
             # Handles backwards compatibility with user providing a peft model as the actor network
@@ -851,7 +863,7 @@ class GRPO(LLMAlgorithm):
 
     def _move_model_to_vllm(self) -> None:
         """Move the deepspeed model to vllm."""
-        
+
         # TODO: Add support for ZeRO Stage 3
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
@@ -862,7 +874,9 @@ class GRPO(LLMAlgorithm):
         with gather_if_zero3(list(self.model_ref.parameters())):
             self.model_ref.merge_adapter()
             for name, param in self.model_ref.named_parameters():
-                assert param.dtype == torch.bfloat16, "INCORRECT DATA TYPE" # FIXME remove
+                assert (
+                    param.dtype == torch.bfloat16
+                ), "INCORRECT DATA TYPE"  # FIXME remove
                 name = name.removeprefix("base_model.model.").replace(".base_layer", "")
                 if self.model_ref.prefix in name:
                     continue
@@ -877,9 +891,8 @@ class GRPO(LLMAlgorithm):
                     )
                     llm_model.load_weights([(name, param.data)])
             self.model_ref.unmerge_adapter()
-        
-        self.llm.reset_prefix_cache()
 
+        self.llm.reset_prefix_cache()
 
     def _generate_with_vllm_colocate(
         self, prompts: List[Tuple[str, int]], group_size: int
@@ -887,13 +900,16 @@ class GRPO(LLMAlgorithm):
 
         # I need to make the following happen
         # prompts = [prompt1, prompt1, ..., prompt1 (group_size times), prompt2, prompt2, ..., prompt2 (group_size times), ...]
-        
-        # The below line returns a list: [prompt1 * group_size, ..., promptN * group_size], 
+
+        # The below line returns a list: [prompt1 * group_size, ..., promptN * group_size],
         # where N is the data batch size, list length is group_size * N
-        group_prompts = [prompt for prompt in prompts for _ in range(group_size)] 
-        prompts_ids = [prompt[1] for prompt in group_prompts] 
+        group_prompts = [prompt for prompt in prompts for _ in range(group_size)]
+        prompts_ids = [prompt[1] for prompt in group_prompts]
         prompts_text = [prompt[0] for prompt in group_prompts]
-        prompts_text = [re.sub(rf"^({re.escape(str(self.pad_token))})+", "", text) for text in prompts_text]
+        prompts_text = [
+            re.sub(rf"^({re.escape(str(self.pad_token))})+", "", text)
+            for text in prompts_text
+        ]
 
         generation_kwargs = {
             "n": 1,  # vLLM on each GPU generates only 1 in colocate mode
@@ -925,9 +941,7 @@ class GRPO(LLMAlgorithm):
             )
 
             all_prompts_ids = [
-                prompt_id
-                for sublist in gathered_prompts_ids
-                for prompt_id in sublist
+                prompt_id for sublist in gathered_prompts_ids for prompt_id in sublist
             ]
             all_prompts_text = [
                 prompt_text
@@ -945,9 +959,9 @@ class GRPO(LLMAlgorithm):
             all_prompts_text,
             sampling_params=sampling_params,
             use_tqdm=False,
-        ) # Change this to False
+        )  # Change this to False
 
-        completion_ids = [  
+        completion_ids = [
             output.token_ids for outputs in all_outputs for output in outputs.outputs
         ]
 
@@ -964,21 +978,24 @@ class GRPO(LLMAlgorithm):
         completion_ids = [
             torch.cat(
                 [
-                    torch.cat(prompts_ids[group_size * i : group_size * (i + 1)], dim=0),
+                    torch.cat(
+                        prompts_ids[group_size * i : group_size * (i + 1)], dim=0
+                    ),
                     stack_and_pad_experiences(
                         completion_ids[group_size * i : group_size * (i + 1)],
                         padding_values=[self.pad_token_id],
                         device=self.device,
-                    )[0]
-                ], 
-                dim=1
+                    )[0],
+                ],
+                dim=1,
             )
             for i, _ in enumerate(prompts)
         ]
 
-        num_input_tokens = [prompt_ids.shape[1] for prompt_ids in prompts_ids][:: group_size]
+        num_input_tokens = [prompt_ids.shape[1] for prompt_ids in prompts_ids][
+            ::group_size
+        ]
         action_masks = []
-
 
         for i, completion_id in enumerate(completion_ids):
             action_mask = torch.zeros_like(completion_id, device=self.device)
@@ -986,5 +1003,5 @@ class GRPO(LLMAlgorithm):
             action_mask[completion_id == self.pad_token_id] = False
             action_mask = action_mask[:, 1:]
             action_masks.append(action_mask)
-            
+
         return completion_ids, action_masks

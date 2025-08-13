@@ -1895,7 +1895,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if weights_only:
                 base_model = AutoModelForCausalLM.from_pretrained(
                     self.pretrained_model_name_or_path,
-                    device_map="cpu",
+                    device_map="auto",
                     torch_dtype=torch.bfloat16,
                 )
                 self.actor = PeftModel.from_pretrained(
