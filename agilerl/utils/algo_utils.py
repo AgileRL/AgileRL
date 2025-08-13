@@ -1012,7 +1012,7 @@ def stack_and_pad_experiences(
             stacked_exp = exp
         elif isinstance(exp[0], torch.Tensor):
             stacked_exp = _stack_and_pad_tensor_list(exp, padding, padding_side)
-        elif isinstance(exp[0], list):
+        elif isinstance(exp[0], (list, tuple)):
             exp = [torch.tensor(e).unsqueeze(0) for e in exp]
             stacked_exp = _stack_and_pad_tensor_list(exp, padding, padding_side)
         else:
@@ -1131,16 +1131,6 @@ class VLLMConfig:
     :param group_port: Group port of the VLLM server, defaults to 51216
     :type group_port: int, optional
     """
-
-    # Mode configuration
-    mode: str = "colocate"
-
-    # Server mode parameters
-    base_url: Optional[str] = None
-    host: str = "0.0.0.0"
-    server_port: int = 8000
-    group_port: int = 51216
-    connection_timeout: float = 30.0
 
     # Colocate mode parameters
     model_name: Optional[str] = None
