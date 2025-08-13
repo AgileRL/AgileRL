@@ -343,11 +343,7 @@ class GRPO(LLMAlgorithm):
                     "No VLLM config provided. Using default VLLM configuration for generation."
                 )
                 self.vllm_config = VLLMConfig()
-            if (
-                self.use_vllm
-                and self.accelerator is not None
-                and self.accelerator.is_main_process
-            ):
+            if self.use_vllm and self.accelerator is not None:
                 if (
                     self.accelerator.num_processes
                     % self.vllm_config.tensor_parallel_size
