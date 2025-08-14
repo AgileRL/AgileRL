@@ -27,14 +27,15 @@ def run_demo():
     active_collect = collect_rollouts if not recurrent else collect_rollouts_recurrent
 
     # --- Create Environment and Population ---
-    num_envs = 4  # Can be higher for faster training
+    num_envs = 16  # Can be higher for faster training
+    max_seq_len = 1024
 
     if recurrent:
         NET_CONFIG = {
             "encoder_config": {
                 "hidden_state_size": 64,  # LSTM hidden state size
                 "num_layers": 1,
-                "max_seq_len": 1024,
+                "max_seq_len": max_seq_len,
             },
         }
     else:
@@ -47,8 +48,8 @@ def run_demo():
     # Hyperparameters
     INIT_HP = {
         "POP_SIZE": 1,  # Population size
-        "BATCH_SIZE": 256,
-        "LEARN_STEP": 1024,
+        "BATCH_SIZE": 128,
+        "LEARN_STEP": 1024 * num_envs,
         "LR": 1e-3,
         "GAMMA": 0.9,
         "GAE_LAMBDA": 0.95,
@@ -67,9 +68,7 @@ def run_demo():
     def make_env():
         return MaskVelocityWrapper(gym.make("Pendulum-v1"))
 
-    env = make_vect_envs(
-        make_env=make_env, num_envs=num_envs, should_async_vector=False
-    )
+    env = make_vect_envs(make_env=make_env, num_envs=num_envs, should_async_vector=True)
     single_test_env = gym.vector.SyncVectorEnv([make_env])
 
     observation_space = env.single_observation_space
@@ -112,7 +111,7 @@ def run_demo():
     # --- Training Loop (Performance-Flamegraph Style) ---
     max_steps = 5_000_000 // len(pop)
     required_score = 0.95
-    evo_steps = num_envs * INIT_HP["LEARN_STEP"] * 1
+    evo_steps = INIT_HP["LEARN_STEP"] * 3
     eval_steps = None
 
     total_steps = 0
@@ -150,12 +149,13 @@ def run_demo():
                 agent.steps[-1] += agent.learn_step
                 completed_episodes += episode_scores
 
+                pbar.update(agent.learn_step // len(pop))
+
             pop_episode_scores.append(
                 np.mean(completed_episodes)
                 if len(completed_episodes) > 0
                 else "0 completed episodes"
             )
-            pbar.update(steps // len(pop))
 
             fitnesses = [
                 agent.test(
