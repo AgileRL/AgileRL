@@ -94,7 +94,7 @@ class DeterministicActor(EvolvableNetwork):
         elif isinstance(action_space, spaces.Box):
             output_activation = "Tanh"
         elif isinstance(action_space, spaces.Discrete):
-            output_activation = "Softmax"
+            output_activation = "GumbelSoftmax"
         else:
             output_activation = None
 
