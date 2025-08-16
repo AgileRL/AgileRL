@@ -402,8 +402,6 @@ class GRPO(LLMAlgorithm):
                     model_impl="vllm",
                 )
 
-                print(f"VLLM created for process {self.accelerator.process_index}")
-
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
 
