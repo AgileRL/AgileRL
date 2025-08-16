@@ -380,20 +380,20 @@ class GRPO(LLMAlgorithm):
 
                 self.model_ref = None
 
-                max_num_seqs = (
-                    self.batch_size_per_process
-                    * self.vllm_config.tensor_parallel_size
-                    * self.accelerator.state.deepspeed_plugin.deepspeed_config[
-                        "gradient_accumulation_steps"
-                    ]
-                )
+                # max_num_seqs = (
+                #     self.batch_size_per_process
+                #     * self.vllm_config.tensor_parallel_size
+                #     * self.accelerator.state.deepspeed_plugin.deepspeed_config[
+                #         "gradient_accumulation_steps"
+                #     ]
+                # )
                 max_model_len = self.max_output_tokens
 
                 self.llm = LLM(
                     model=self.pretrained_model_name_or_path,
                     tensor_parallel_size=self.vllm_config.tensor_parallel_size,
                     gpu_memory_utilization=self.vllm_config.gpu_memory_utilization,
-                    max_num_seqs=max_num_seqs,
+                    max_num_seqs=self.vllm_config.max_num_seqs,
                     max_model_len=max_model_len,
                     distributed_executor_backend="external_launcher",
                     seed=self.accelerator.process_index
