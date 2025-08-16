@@ -353,8 +353,6 @@ class GRPO(LLMAlgorithm):
                         f"Tensor parallel size {self.vllm_config.tensor_parallel_size} must be a multiple of the number of processes {self.accelerator.num_processes}."
                     )
 
-                print("BEFORE TP GROUP CREATED")
-
                 if self.vllm_config.tensor_parallel_size > 1:
                     # Create subgroups of ranks for TP, each group with `vllm_tensor_parallel_size` ranks.
                     # For example, if world_size=8 and vllm_tensor_parallel_size=2 → groups: [0,1], [2,3], [4,5], [6,7]
@@ -373,21 +371,12 @@ class GRPO(LLMAlgorithm):
                         ]
                     )
 
-                print("AFTER TP GROUP CREATED")
-
                 # vLLM requires the environment variables to be set for distributed training.
                 os.environ["RANK"] = str(self.accelerator.process_index)
                 os.environ["LOCAL_RANK"] = str(self.accelerator.local_process_index)
                 os.environ["WORLD_SIZE"] = str(self.accelerator.num_processes)
                 os.environ["MASTER_ADDR"] = os.environ.get("MASTER_ADDR", "localhost")
                 os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "12345")
-
-                print("VLLM ENV VARS:")
-                print(os.environ["RANK"])
-                print(os.environ["LOCAL_RANK"])
-                print(os.environ["WORLD_SIZE"])
-                print(os.environ["MASTER_ADDR"])
-                print(os.environ["MASTER_PORT"])
 
                 self.model_ref = None
 
