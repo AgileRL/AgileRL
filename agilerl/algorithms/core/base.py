@@ -1872,6 +1872,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         )
         checkpoint_dict["_weights_only"] = weights_only
         checkpoint_dict.pop("llm", None)
+        checkpoint_dict.pop("model_ref", None)
 
         torch.save(
             checkpoint_dict,
