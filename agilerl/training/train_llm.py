@@ -32,6 +32,7 @@ def finetune_llm(
     elite_path: Optional[str] = None,
     wb: bool = False,
     evo_steps: Optional[int] = 20,
+    checkpoint_steps: Optional[int] = None, # FIXME added in on GCP, should we delete?
     tournament: Optional[TournamentSelection] = None,
     mutation: Optional[Mutations] = None,
     wandb_api_key: Optional[str] = None,
@@ -223,8 +224,12 @@ def finetune_llm(
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
         else:
-            if (i + 1) % max_steps == 0:
-                save_llm_checkpoint(agent, elite_path)
+            if (i + 1)*effective_data_batch_size % max_steps == 0 or (i + 1)*effective_data_batch_size % checkpoint_steps == 0:
+                # save_llm_checkpoint(agent, elite_path)
+                # FIXME done for single agent saving
+                print(f"Saving checkpoint {(i+1)*effective_data_batch_size}")
+                agent.save_checkpoint(f"round2_gsm8k_checkpoint_{(i+1)*effective_data_batch_size}", weights_only=True)
+                print(f"Checkpoint saved {(i+1)*effective_data_batch_size}")
 
         if wb and (accelerator is None or accelerator.is_main_process):
             wandb_dict = {

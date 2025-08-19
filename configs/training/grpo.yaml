@@ -34,7 +34,7 @@ INIT_HP:
     USE_VLLM: true
     # VLLM_CONFIG:
     #     tensor_parallel_size: 1
-    #     gpu_memory_utilization: 0.4
+    #     gpu_memory_utilization: 0.4   
 
 
 # MASTER_ADDR=34.13.155.70 \
