@@ -48,7 +48,7 @@ def _collect_rollouts(
     :return: The observation, done flag, scores, and info for the current step.
     :rtype: Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]
     """
-    if not getattr(agent, "use_rollout_buffer", False):
+    if not agent.use_rollout_buffer:
         raise RuntimeError(
             "collect_rollouts can only be used when use_rollout_buffer=True"
         )

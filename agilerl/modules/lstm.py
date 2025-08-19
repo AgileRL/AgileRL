@@ -180,7 +180,7 @@ class EvolvableLSTM(EvolvableModule):
 
         # If input is 2D (batch_size, features), add sequence length dimension
         if x.dim() == 2:
-            # Reshape to (batch_size, seq_len=1, features)
+            x_shape = x.shape
             x = x.unsqueeze(1)
         elif x.dim() != 3:
             raise ValueError(
@@ -192,12 +192,28 @@ class EvolvableLSTM(EvolvableModule):
             h0 = hidden_state.get(f"{self.name}_h", None)
             c0 = hidden_state.get(f"{self.name}_c", None)
 
+            # Reshape to (batch_seq_size, seq_len, features)
+            sequence_input = False
+            if h0.shape[1] != x_shape[0]:
+                sequence_input = True
+                x = x.reshape(h0.shape[1], -1, x_shape[1])
+
             lstm_output, (h_n, c_n) = self.model[f"{self.name}_lstm"](x, (h0, c0))
+
+            # Reshape back to original shape
+            lstm_output: torch.Tensor = lstm_output
+            if sequence_input:
+                out_shape = lstm_output.shape
+                lstm_output = lstm_output.reshape(
+                    out_shape[0] * out_shape[1], out_shape[2]
+                )
+            else:
+                lstm_output = lstm_output.squeeze(1)
         else:
             raise ValueError("Hidden state is required for LSTM forward pass.")
 
         # Process output
-        lstm_output = self.model[f"{self.name}_lstm_output"](lstm_output[:, -1, :])
+        lstm_output = self.model[f"{self.name}_lstm_output"](lstm_output)
         lstm_output = self.model[f"{self.name}_output_activation"](lstm_output)
 
         # Return output and new hidden state

@@ -131,7 +131,6 @@ def share_encoder_parameters(
     param_vals: TensorDict = from_module(policy.encoder).detach()
     for other in others:
         target_params: TensorDict = param_vals.clone().lock_()
-
         target_params.to_module(other.encoder)
 
 

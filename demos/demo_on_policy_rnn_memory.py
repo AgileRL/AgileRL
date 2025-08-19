@@ -116,7 +116,7 @@ def run_demo():
         NET_CONFIG = {
             "encoder_config": {
                 "hidden_state_size": 128,  # LSTM hidden state size
-                "max_seq_len": delay_steps + 2,  # Match episode length
+                "max_seq_len": None,  # delay_steps + 1,  # Match episode length
                 "num_layers": 2,
             },
         }
@@ -131,8 +131,9 @@ def run_demo():
     INIT_HP = {
         "POP_SIZE": 2,  # Population size
         "BATCH_SIZE": 256,
-        "LEARN_STEP": (delay_steps + 2)
-        * num_envs,  # Match episode length (delay_steps + 2)
+        "LEARN_STEP": 16
+        * (delay_steps + 1)
+        * num_envs,  # Match episode length (delay_steps + 1)
         "LR": 1e-4,
         "GAMMA": 0.99,
         "GAE_LAMBDA": 1.0,
