@@ -52,6 +52,7 @@ class RolloutBuffer:
 
     padded_data: TensorDict
     unpadded_data: TensorDict
+    unpadded_slices: List[torch.Tensor]
 
     def __init__(
         self,
@@ -571,44 +572,32 @@ class RolloutBuffer:
         return np_dict
 
     @staticmethod
-    def _pad_sequence(
-        sequence: Union[torch.Tensor, TensorDict], target_length: int
+    def _pad_sequences(
+        sequences: List[Union[torch.Tensor, TensorDict]],
     ) -> Union[torch.Tensor, TensorDict]:
         """Pads a sequence to the target length using zeros. Results in a tensor of shape (target_length, *sequence.shape[1:]).
 
-        :param sequence: The sequence to be padded to the target length.
-        :type sequence: Union[torch.Tensor, TensorDict]
-        :param target_length: The desired length of the sequence.
-        :type target_length: int
+        :param sequences: The sequences to be padded.
+        :type sequences: List[Union[torch.Tensor, TensorDict]]
         :return: The padded sequence.
         :rtype: Union[torch.Tensor, TensorDict]
         """
-        if is_tensor_collection(sequence):
+        # Handle nested tensors
+        if is_tensor_collection(sequences[0]):
+            sequences_T = {
+                key: [nested_seq[key] for nested_seq in sequences]
+                for key in sequences[0].keys()
+            }
             return TensorDict(
                 {
-                    key: RolloutBuffer._pad_sequence(sequence[key], target_length)
-                    for key in sequence.keys()
+                    key: RolloutBuffer._pad_sequences(sequences_T[key])
+                    for key in sequences_T.keys()
                 }
             )
 
-        current_length = sequence.size(0)
-        if current_length >= target_length:
-            return sequence
-
-        # Use torch.nn.functional.pad for efficient padding
-        # pad format: (pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back)
-        # We want to pad only the first dimension (sequence length), so pad at the end
-        pad_amount = target_length - current_length
-        if sequence.dim() == 1:
-            # 1D tensor: pad only the last dimension
-            return torch.nn.functional.pad(
-                sequence, (0, pad_amount), mode="constant", value=0
-            )
-        else:
-            # Multi-dimensional tensor: pad the first dimension (sequence length)
-            # For N-dimensional tensor, we need (2*N) pad values, working backwards from last dim
-            pad_spec = [0, 0] * (sequence.dim() - 1) + [0, pad_amount]
-            return torch.nn.functional.pad(sequence, pad_spec, mode="constant", value=0)
+        return torch.nn.utils.rnn.pad_sequence(
+            sequences, batch_first=True, padding_value=0
+        )
 
     def _get_complete_sequences(
         self,
@@ -622,14 +611,12 @@ class RolloutBuffer:
         :type data: torch.Tensor
         :param episode_done_indices: The indices of done signals.
         :type episode_done_indices: List[List[int]]
-        :param max_seq_len: The maximum sequence length. If None, use the entire episode as a sequence.
-        :type max_seq_len: Optional[int]
         :return: A list of sequences and the length of the longest sequence.
         :rtype: Tuple[List[torch.Tensor], int]
         """
         max_seq_len = self.max_seq_len
         sequences = []
-        max_length = 1
+        max_length = max_seq_len or 1
         for env_idx in range(self.num_envs):
             start_index = 0
             for done_index in episode_done_indices[env_idx]:
@@ -639,16 +626,9 @@ class RolloutBuffer:
                 # Split episodes into sequences for truncated BPTT
                 # If max_seq_len is not set, use the entire episode as a sequence
                 if max_seq_len is not None:
-                    if max_seq_len > len(episode):
-                        warnings.warn(
-                            "Specified maximum sequence length is greater than length of an episode, "
-                            "using episode length as fallback."
-                        )
-                        max_seq_len = len(episode)
-
                     # Gather unique sequences in the episode
                     if self.bptt_sequence_type == BPTTSequenceType.CHUNKED:
-                        num_chunks = len(episode) // max_seq_len
+                        num_chunks = max(1, len(episode) // max_seq_len)
                         for chunk_i in range(num_chunks):
                             sequences.append(
                                 episode[
@@ -676,8 +656,10 @@ class RolloutBuffer:
                             )
                 else:
                     sequences.append(episode)
+                    max_length = (
+                        len(episode) if len(episode) > max_length else max_length
+                    )
 
-                max_length = len(episode) if len(episode) > max_length else max_length
                 start_index = done_index + 1
 
         return sequences, max_length
@@ -702,9 +684,7 @@ class RolloutBuffer:
         # Retrieve the indices of dones as these are the last step of a whole episode
         episode_done_indices: List[List[int]] = []
         for env_idx in range(self.num_envs):
-            env_dones: torch.Tensor = valid_buffer_data_view["dones"][
-                :, env_idx
-            ].clone()
+            env_dones: torch.Tensor = valid_buffer_data_view["dones"][:, env_idx]
             env_dones_list = env_dones.nonzero().squeeze(-1).tolist()
             episode_done_indices.append(env_dones_list)
 
@@ -719,9 +699,10 @@ class RolloutBuffer:
         flat_timesteps = torch.arange(buffer_size * self.num_envs).reshape(
             buffer_size, self.num_envs
         )
-        unpadded_slices, max_sequence_length = self._get_complete_sequences(
+        unpadded_slices, _ = self._get_complete_sequences(
             flat_timesteps, episode_done_indices
         )
+
         self.unpadded_slices = unpadded_slices
 
         # Need to pad observations and actions for batch processing
@@ -733,7 +714,7 @@ class RolloutBuffer:
             valid_data_to_pad.batch_size, dtype=torch.bool
         )
 
-        # Create a TensorDict with all of the possible sequences
+        # Create a TensorDict with all of the possible sequences, padded to the same length
         padded_data_source = OrderedDict()
         for key, value in valid_data_to_pad.items():
             # Split data into episodes or sequences
@@ -742,50 +723,38 @@ class RolloutBuffer:
             )
 
             # Apply zero-padding to ensure that each episode has the same length
-            for i, sequence in enumerate(sequences):
-                sequences[i] = RolloutBuffer._pad_sequence(
-                    sequence, max_sequence_length
-                )
+            padded_data_source[key] = RolloutBuffer._pad_sequences(sequences)
 
-            # Stack sequences
-            padded_data_source[key] = torch.stack(sequences, dim=0)
-
-        self.num_sequences = len(sequences)
         self.max_sequence_length = max_sequence_length
+        self.num_sequences = len(sequences)
 
         padded_td = TensorDict(
-            padded_data_source, batch_size=[self.num_sequences, max_sequence_length]
+            source=padded_data_source,
+            batch_size=[self.num_sequences, max_sequence_length],
         )
 
         # Now, create the "initial_hidden_states" part for the output TensorDict
         # This will be a nested TensorDict with batch_size [actual_batch_size]
-        # Its keys will be the hidden state keys (e.g. "h_actor"), and values will be tensors
-        # of shape (actual_batch_size, num_layers, hidden_size)
         if self.recurrent and padded_td.get("hidden_states", None) is not None:
-            initial_hidden_states_source = {}
+            initial_hidden_states = OrderedDict()
             full_hidden_sequences: TensorDict = padded_td.get("hidden_states")
             for h_key, h_val_tensor_sequences in full_hidden_sequences.items():
-                initial_hidden_states_source[h_key] = h_val_tensor_sequences[
-                    :, 0
-                ].clone()
+                initial_hidden_states[h_key] = h_val_tensor_sequences[:, 0].clone()
 
             # Use set_non_tensor for the dictionary of initial hidden state tensors
-            padded_td.set_non_tensor(
-                "initial_hidden_states", initial_hidden_states_source
-            )
+            padded_td.set_non_tensor("initial_hidden_states", initial_hidden_states)
 
             # Exclude original full hidden_states sequence
             padded_td = padded_td.exclude("hidden_states")
 
+        # Select unpadded data for training
+        unpadded_data_source: TensorDict = valid_buffer_data_view.select(
+            "log_probs", "advantages", "values", "returns"
+        )
+
         # Flatten the TensorDict's and move to the target device
         self.padded_data = padded_td.view(-1).to(target_device)
-        self.unpadded_data = (
-            valid_buffer_data_view.select(
-                "log_probs", "advantages", "values", "returns"
-            )
-            .view(-1)
-            .to(target_device)
-        )
+        self.unpadded_data = unpadded_data_source.view(-1).to(target_device)
 
     def get_minibatch_sequences(
         self,
@@ -798,20 +767,29 @@ class RolloutBuffer:
         :return: A TensorDict containing the minibatch of sequences.
         :rtype: Generator[Tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]], None, None]
         """
+        if self.unpadded_slices is None:
+            raise ValueError(
+                "Attempting to fetch minibatches before preparing sequences. "
+                "Call prepare_sequence_tensors() first."
+            )
+
         # Determine the number of sequences per mini batch
-        if batch_size < self.num_sequences:
+        if batch_size > self.num_sequences:
             warnings.warn(
-                f"Batch size {batch_size} is smaller than the number of sequences {self.num_sequences}. "
-                "Using batch_size = self.num_sequences."
+                f"Batch size {batch_size} is larger than the number of sequences "
+                f"({self.num_sequences}), using batch_size = {self.num_sequences}."
             )
             batch_size = self.num_sequences
 
         num_batches = self.num_sequences // batch_size
         num_sequences_per_batch = [batch_size] * num_batches
         remainder = self.num_sequences % batch_size
-        num_sequences_per_batch.append(remainder)
 
-        # Prepare indices, but only shuffle the sequence indices and not the entire batch to ensure that sequences are maintained as a whole.
+        if remainder > 0:
+            num_sequences_per_batch.append(remainder)
+
+        # Prepare indices, but only shuffle the sequence indices and not the
+        # entire batch to ensure that sequences are maintained as a whole.
         indices = torch.arange(
             start=0,
             end=self.num_sequences * self.max_sequence_length,
@@ -823,10 +801,11 @@ class RolloutBuffer:
         start = 0
         for num_sequences in num_sequences_per_batch:
             end = start + num_sequences
-            padded_indices = indices[sequence_indices[start:end]].view(-1)
+            sequences_samples = sequence_indices[start:end]
+            padded_indices = indices[sequences_samples].view(-1)
 
             # Unpadded and flat indices are used to sample unpadded training data
-            minibatch_seq_indices = sequence_indices[start:end].tolist()
+            minibatch_seq_indices: List[int] = sequences_samples.tolist()
             unpadded_indices = [
                 self.unpadded_slices[idx].tolist() for idx in minibatch_seq_indices
             ]
@@ -834,9 +813,19 @@ class RolloutBuffer:
                 item for sublist in unpadded_indices for item in sublist
             ]
 
-            start = end
-            padded = self.padded_data[padded_indices]
+            padded: TensorDict = self.padded_data[padded_indices]
+            if self.recurrent and padded.get("initial_hidden_states", None) is not None:
+                batch_hidden_states = {}
+                initial_hidden_states: TensorDict = padded.get_non_tensor(
+                    "initial_hidden_states"
+                )
+                for key, value in initial_hidden_states.items():
+                    batch_hidden_states[key] = value[sequences_samples].clone()
+
+                padded.set_non_tensor("initial_hidden_states", batch_hidden_states)
+
             unpadded = self.unpadded_data[unpadded_indices]
+            start = end
             yield padded, unpadded
 
     def __getstate__(self) -> Dict[str, Any]:
@@ -857,7 +846,6 @@ class RolloutBuffer:
 
         # Let's assume self.buffer is correctly loaded by `self.__dict__.update(state)`.
         # We should verify its integrity or re-initialize if it's somehow corrupted/not present.
-
         if not hasattr(self, "buffer") or not isinstance(self.buffer, TensorDict):
             warnings.warn(
                 "TensorDict buffer not found or invalid during unpickling. Re-initializing."
@@ -881,6 +869,5 @@ class RolloutBuffer:
                 )
                 self._initialize_buffers()
 
-            self.buffer = self.buffer.to(
-                "cpu"
-            )  # Ensure the loaded buffer is on the correct device (CPU) as expected by internal logic
+            # Ensure the loaded buffer is on the correct device (CPU) as expected by internal logic
+            self.buffer = self.buffer.to("cpu")

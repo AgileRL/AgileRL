@@ -10,9 +10,11 @@ import numpy as np
 import torch
 
 from agilerl.algorithms import PPO
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.rollouts.on_policy import collect_rollouts, collect_rollouts_recurrent
+from agilerl.typing import BPTTSequenceType
 from agilerl.utils.utils import create_population, default_progress_bar, make_vect_envs
 from benchmarking.benchmarking_recurrent import MaskVelocityWrapper
 
@@ -28,14 +30,17 @@ def run_demo():
 
     # --- Create Environment and Population ---
     num_envs = 16  # Can be higher for faster training
-    max_seq_len = 1024
+    learn_step = 1024 * num_envs
 
     if recurrent:
         NET_CONFIG = {
             "encoder_config": {
                 "hidden_state_size": 64,  # LSTM hidden state size
                 "num_layers": 1,
-                "max_seq_len": max_seq_len,
+                "max_seq_len": 16,
+            },
+            "head_config": {
+                "hidden_size": [128],
             },
         }
     else:
@@ -43,41 +48,56 @@ def run_demo():
             "encoder_config": {
                 "hidden_size": [64],
             },
+            "head_config": {
+                "hidden_size": [128],
+            },
         }
 
     # Hyperparameters
     INIT_HP = {
-        "POP_SIZE": 1,  # Population size
+        "POP_SIZE": 3,  # Population size
         "BATCH_SIZE": 128,
-        "LEARN_STEP": 1024 * num_envs,
+        "LEARN_STEP": learn_step,
         "LR": 1e-3,
         "GAMMA": 0.9,
         "GAE_LAMBDA": 0.95,
         "CLIP_COEF": 0.2,
-        "ENT_COEF": 0.0,
+        "ENT_COEF": 0.001,
         "VF_COEF": 1.0,
         "MAX_GRAD_NORM": 0.5,
         "UPDATE_EPOCHS": 4,
-        "SHARE_ENCODERS": False,
+        "SHARE_ENCODERS": True,  # Use same LSTM for actor and critic
         "USE_ROLLOUT_BUFFER": True,
         "RECURRENT": recurrent,
         "ACTION_STD_INIT": 0.6,
         "TARGET_KL": None,
+        "BPTT_SEQUENCE_TYPE": BPTTSequenceType.CHUNKED,
     }
 
     def make_env():
         return MaskVelocityWrapper(gym.make("Pendulum-v1"))
 
-    env = make_vect_envs(make_env=make_env, num_envs=num_envs, should_async_vector=True)
+    env = make_vect_envs(
+        make_env=make_env, num_envs=num_envs, should_async_vector=False
+    )
     single_test_env = gym.vector.SyncVectorEnv([make_env])
 
     observation_space = env.single_observation_space
     action_space = env.single_action_space
 
+    hp_config = HyperparameterConfig(
+        lr=RLParameter(min=1e-4, max=1e-2),
+        batch_size=RLParameter(min=128, max=1024),
+        learn_step=RLParameter(min=learn_step // 2, max=learn_step * 5),
+        # In general we want the entropy to decay over time
+        ent_coef=RLParameter(min=0.0001, max=0.001, grow_factor=1.0, shrink_factor=0.9),
+    )
+
     pop: List[PPO] = create_population(
         algo="PPO",
         observation_space=observation_space,
         action_space=action_space,
+        hp_config=hp_config,
         net_config=NET_CONFIG,
         INIT_HP=INIT_HP,
         population_size=INIT_HP["POP_SIZE"],
@@ -86,7 +106,7 @@ def run_demo():
     )
 
     # --- Setup Evolution Components ---
-    eval_loop = 3
+    eval_loop = 10
     tournament = TournamentSelection(
         tournament_size=2,
         elitism=True,
@@ -110,7 +130,7 @@ def run_demo():
 
     # --- Training Loop (Performance-Flamegraph Style) ---
     max_steps = 5_000_000 // len(pop)
-    required_score = 0.95
+    required_score = 500
     evo_steps = INIT_HP["LEARN_STEP"] * 3
     eval_steps = None
 
@@ -149,43 +169,44 @@ def run_demo():
                 agent.steps[-1] += agent.learn_step
                 completed_episodes += episode_scores
 
-                pbar.update(agent.learn_step // len(pop))
-
             pop_episode_scores.append(
-                np.mean(completed_episodes)
+                round(np.mean(completed_episodes), 2)
                 if len(completed_episodes) > 0
                 else "0 completed episodes"
             )
 
-            fitnesses = [
-                agent.test(
-                    single_test_env,
-                    max_steps=eval_steps,
-                    loop=eval_loop,
-                )
-                for agent in pop
-            ]
+            pbar.update(steps // len(pop))
 
-            pbar.write(
-                f"--- Global steps {total_steps} ---\n"
-                f"Steps: {[agent.steps[-1] for agent in pop]}\n"
-                f"Scores: {pop_episode_scores}\n"
-                f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
-                f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
+        fitnesses = [
+            agent.test(
+                single_test_env,
+                max_steps=eval_steps,
+                loop=eval_loop,
             )
+            for agent in pop
+        ]
 
-            if any(score >= required_score for score in pop_episode_scores):
-                print(
-                    f"\nAgent achieved required score {required_score}. Stopping training."
-                )
-                elite, _ = tournament.select(pop)
-                training_complete = True
-                break
+        pbar.write(
+            f"--- Global steps {total_steps} ---\n"
+            f"Steps: {[agent.steps[-1] for agent in pop]}\n"
+            f"Scores: {pop_episode_scores}\n"
+            f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
+            f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
+            f"Mutations: {[agent.mut for agent in pop]}\n"
+        )
 
-            elite, pop = tournament.select(pop)
-            pop = mutations.mutation(pop)
-            for agent in pop:
-                agent.steps.append(agent.steps[-1])
+        if any(score >= required_score for score in pop_episode_scores):
+            print(
+                f"\nAgent achieved required score {required_score}. Stopping training."
+            )
+            elite, _ = tournament.select(pop)
+            training_complete = True
+            break
+
+        elite, pop = tournament.select(pop)
+        pop = mutations.mutation(pop)
+        for agent in pop:
+            agent.steps.append(agent.steps[-1])
 
     pbar.close()
     env.close()

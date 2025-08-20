@@ -305,7 +305,7 @@ class PPO(RLAlgorithm):
             self.register_mutation_hook(self.share_encoder_parameters)
 
         self.optimizer = OptimizerWrapper(
-            optim.Adam, networks=[self.actor, self.critic], lr=self.lr
+            optim.AdamW, networks=[self.actor, self.critic], lr=self.lr
         )
 
         # Initialize rollout buffer if enabled
@@ -862,26 +862,6 @@ class PPO(RLAlgorithm):
         :return: Mean loss over the epochs
         :rtype: float
         """
-        buffer_actual_size = (
-            self.rollout_buffer.capacity
-            if self.rollout_buffer.full
-            else self.rollout_buffer.pos
-        )
-
-        # Normalize advantages globally once before epochs
-        valid_advantages_tensor = self.rollout_buffer.buffer.get("advantages")[
-            :buffer_actual_size
-        ]
-        if valid_advantages_tensor.numel() > 0:
-            original_shape = valid_advantages_tensor.shape
-            flat_adv = valid_advantages_tensor.reshape(-1)
-            normalized_flat_adv = (flat_adv - flat_adv.mean()) / (flat_adv.std() + 1e-8)
-            self.rollout_buffer.buffer["advantages"][:buffer_actual_size] = (
-                normalized_flat_adv.reshape(original_shape)
-            )
-        else:
-            warnings.warn("No advantages to normalize in BPTT pre-normalization step.")
-
         # Form padded sequences to perform BPTT on
         self.rollout_buffer.prepare_sequence_tensors(device=self.device)
 
@@ -897,24 +877,21 @@ class PPO(RLAlgorithm):
                 batch_size=self.batch_size,
             )
             for minibatch_padded, minibatch_unpadded in minibatch_gen:
-                # Obs shape: (batch_seq, seq_len, *obs_dims) or nested TD
-                # Actions shape: (batch_seq, seq_len, *act_dims)
+                # Obs shape: (batch_seq * seq_len, *obs_dims) or nested TD
+                # Actions shape: (batch_seq * seq_len, *act_dims)
                 # Other tensors shape: (batch_seq * seq_len, )
                 mb_obs_seq = minibatch_padded["observations"]
                 mb_actions_seq = minibatch_padded["actions"]
                 mb_pad_mask = minibatch_padded["pad_mask"]
                 mb_old_log_probs = minibatch_unpadded["log_probs"]
                 mb_advantages = minibatch_unpadded["advantages"]
+                mb_values = minibatch_unpadded["values"]
                 mb_returns = minibatch_unpadded["returns"]
                 mb_initial_hidden_states_dict: Dict[str, torch.Tensor] = (
                     minibatch_padded.get_non_tensor(
                         "initial_hidden_states", default=None
                     )
                 )
-
-                # Flatten actions and padding mask
-                mb_actions_seq = mb_actions_seq.reshape(-1, mb_actions_seq.shape[-1])
-                mb_pad_mask = mb_pad_mask.reshape(-1)
 
                 policy_loss_total, value_loss_total, entropy_loss_total = 0.0, 0.0, 0.0
                 approx_kl_divs_minibatch_timesteps = []
@@ -931,9 +908,9 @@ class PPO(RLAlgorithm):
                 if isinstance(self.action_space, spaces.Discrete):
                     mb_actions_seq = mb_actions_seq.squeeze(-1)
 
-                # new_value_t: (batch_seq,),
-                # entropy_t: (batch_seq,) or scalar,
-                # log_prob_t: (batch_seq,)
+                # new_value: (batch_seq,),
+                # entropy: (batch_seq,) or scalar,
+                # log_prob: (batch_seq,)
                 (
                     new_log_probs,
                     entropies,
@@ -944,6 +921,11 @@ class PPO(RLAlgorithm):
                     hidden_state=mb_initial_hidden_states_dict,
                 )
 
+                # Normalize advantages
+                mb_advantages = (mb_advantages - mb_advantages.mean()) / (
+                    mb_advantages.std() + 1e-8
+                )
+
                 # Mask out padded values
                 new_values = new_values[mb_pad_mask]
                 new_log_probs = new_log_probs[mb_pad_mask]
@@ -952,12 +934,15 @@ class PPO(RLAlgorithm):
                 if isinstance(entropies, torch.Tensor):
                     entropies = entropies.mean()
 
+                # Policy loss
                 ratio = torch.exp(new_log_probs - mb_old_log_probs)
                 policy_loss1 = -mb_advantages * ratio
                 policy_loss2 = -mb_advantages * torch.clamp(
                     ratio, 1 - self.clip_coef, 1 + self.clip_coef
                 )
                 policy_loss_total += torch.max(policy_loss1, policy_loss2).mean()
+
+                # Value loss
                 value_loss_total += 0.5 * ((new_values - mb_returns) ** 2).mean()
                 entropy_loss_total += -entropies  # entropy_t is already mean
 

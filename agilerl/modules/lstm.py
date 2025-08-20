@@ -108,11 +108,13 @@ class EvolvableLSTM(EvolvableModule):
         :return: LSTM network
         :rtype: nn.ModuleDict
         """
+        features_dim = int(self.hidden_state_size)
+
         # Define network components
         model_dict = nn.ModuleDict()
         model_dict[f"{self.name}_lstm"] = nn.LSTM(
             input_size=self.input_size,
-            hidden_size=int(self.hidden_state_size),
+            hidden_size=features_dim,
             num_layers=self.num_layers,
             batch_first=True,
             dropout=self.dropout if self.num_layers > 1 else 0,
@@ -121,7 +123,7 @@ class EvolvableLSTM(EvolvableModule):
 
         # Add activation if specified
         model_dict[f"{self.name}_lstm_output"] = nn.Linear(
-            self.hidden_state_size, self.num_outputs, device=self.device
+            features_dim, self.num_outputs, device=self.device
         )
         model_dict[f"{self.name}_output_activation"] = get_activation(
             self.output_activation
@@ -179,12 +181,13 @@ class EvolvableLSTM(EvolvableModule):
             x = torch.tensor(x, dtype=torch.float32, device=self.device)
 
         # If input is 2D (batch_size, features), add sequence length dimension
+        x_shape = x.shape
         if x.dim() == 2:
-            x_shape = x.shape
             x = x.unsqueeze(1)
         elif x.dim() != 3:
             raise ValueError(
-                f"Expected 2D (batch_size, features) or 3D (batch_size, seq_len, features) input, but got {x.dim()}D"
+                f"Expected 2D (batch_size, features) or 3D "
+                f"(batch_size, seq_len, features) input, but got {x.dim()}D"
             )
 
         # Use provided hidden state if available
@@ -196,7 +199,7 @@ class EvolvableLSTM(EvolvableModule):
             sequence_input = False
             if h0.shape[1] != x_shape[0]:
                 sequence_input = True
-                x = x.reshape(h0.shape[1], -1, x_shape[1])
+                x = x.view(h0.shape[1], -1, x_shape[1])
 
             lstm_output, (h_n, c_n) = self.model[f"{self.name}_lstm"](x, (h0, c0))
 

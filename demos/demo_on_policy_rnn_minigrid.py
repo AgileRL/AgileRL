@@ -206,6 +206,7 @@ def run_demo():
             f"Scores: {pop_episode_scores}\n"
             f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
             f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
+            f"Mutations: {[agent.mut for agent in pop]}\n"
         )
 
         if any(score >= required_score for score in pop_episode_scores):
@@ -257,8 +258,8 @@ def run_demo():
         episode_steps = 0
         if recurrent:
             hidden_state = elite.get_initial_hidden_state(1)
-        episode_frames = []
 
+        episode_frames = []
         while not done:
             frame = render_env.render()
             episode_frames.append(frame)
