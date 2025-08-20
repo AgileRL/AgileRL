@@ -1876,7 +1876,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         checkpoint_dict.pop("tp_group", None)
 
         if self.accelerator is not None and self.accelerator.is_main_process:
-            print("This is the checkpoint dict", checkpoint_dict)
             torch.save(
                 checkpoint_dict,
                 path + "/attributes.pt",
