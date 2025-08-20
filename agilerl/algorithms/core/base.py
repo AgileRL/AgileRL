@@ -1873,6 +1873,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         checkpoint_dict["_weights_only"] = weights_only
         checkpoint_dict.pop("llm", None)
         checkpoint_dict.pop("model_ref", None)
+        checkpoint_dict.pop("tp_group", None)
 
         if self.accelerator is not None and self.accelerator.is_main_process:
             print("This is the checkpoint dict", checkpoint_dict)
