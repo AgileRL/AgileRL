@@ -400,7 +400,8 @@ class GRPO(LLMAlgorithm):
                     distributed_executor_backend="external_launcher",
                     seed=self.accelerator.process_index
                     // self.vllm_config.tensor_parallel_size,
-                    max_num_batched_tokens=self.vllm_config.max_num_batched_tokens,
+                    max_num_batched_tokens=self.vllm_config.max_num_seqs
+                    * max_model_len,
                     model_impl="vllm",
                 )
 
