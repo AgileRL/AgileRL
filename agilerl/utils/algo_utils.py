@@ -1133,7 +1133,6 @@ class VLLMConfig:
     """
 
     # Colocate mode parameters
-    model_name: Optional[str] = None
     tensor_parallel_size: int = 1
     gpu_memory_utilization: float = 0.3
     max_num_seqs: int = 8
@@ -1430,7 +1429,6 @@ def clone_llm(
         # Add remaining adapters using add_adapter
         for adapter_name in adapter_names[1:]:
             peft_config = original_model.peft_config[adapter_name]
-            print(f"{adapter_name} config", peft_config)
             model.add_adapter(peft_config=peft_config, adapter_name=adapter_name)
         model.disable_adapter()
     else:

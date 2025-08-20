@@ -237,6 +237,8 @@ class GRPO(LLMAlgorithm):
                     )
                 )
 
+                # train_batch == micro_batch * grad_acc * self.world_size
+
                 if (
                     self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
                         "train_micro_batch_size_per_gpu", "auto"
@@ -398,8 +400,7 @@ class GRPO(LLMAlgorithm):
                     distributed_executor_backend="external_launcher",
                     seed=self.accelerator.process_index
                     // self.vllm_config.tensor_parallel_size,
-                    max_num_batched_tokens=max_model_len
-                    * self.vllm_config.max_num_seqs,
+                    max_num_batched_tokens=self.vllm_config.max_num_batched_tokens,
                     model_impl="vllm",
                 )
 

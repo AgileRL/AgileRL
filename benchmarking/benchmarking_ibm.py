@@ -1,12 +1,12 @@
 import re
 from typing import Tuple
 
-from sympy.logic import false
 import torch
 import yaml
 from accelerate import Accelerator
 from datasets import load_dataset
 from peft import LoraConfig, get_peft_model
+from sympy.logic import false
 from torch.utils.data import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -29,7 +29,7 @@ def create_model(pretrained_model_name_or_path):
         attn_implementation="flash_attention_2",
         device_map="auto",
     )
-    
+
     lora_config = LoraConfig(
         r=16,
         lora_alpha=64,
@@ -43,17 +43,17 @@ def create_model(pretrained_model_name_or_path):
     return model
 
 
-def countdown_chat_template(q, a, tokenizer):
+def chat_template(q, a, tokenizer):
     conversation = [
         {
             "role": "system",
             "content": "\nRespond in the following format:\n<reasoning>\n...\n</reasoning>\n<answer>\n...\n</answer>",
         },
+        {"role": "user", "content": f"{q}"},
         {
-            "role": "user",
-            "content": f"{q}"        
+            "role": "assistant",
+            "content": "Let me solve this step by step.",
         },
-        {"role": "assistant", "content": "Let me solve this step by step.",}
     ]
     updated_prompt = tokenizer.apply_chat_template(
         conversation, tokenize=False, continue_final_message=True
@@ -69,8 +69,14 @@ def countdown_chat_template(q, a, tokenizer):
 
 
 def make_dataset(dataset_name: str) -> Tuple[Dataset, Dataset]:
+    """
+
+    Ensure there's only two columns: question and answer.
+    """
     raw_dataset = (
-        load_dataset(dataset_name, 'main', split="train").shuffle(seed=42).select(range(7473))
+        load_dataset(dataset_name, "main", split="train")
+        .shuffle(seed=42)
+        .select(range(7473))
     )
     # raw_dataset = raw_dataset.rename_column("target", "answer")
     # raw_dataset = raw_dataset.rename_column("nums", "question")
@@ -78,9 +84,6 @@ def make_dataset(dataset_name: str) -> Tuple[Dataset, Dataset]:
     train_dataset = train_test_split["train"]
     test_dataset = train_test_split["test"]
     return train_dataset, test_dataset
-
-
-
 
 
 XML_COT_FORMAT = """\
@@ -92,6 +95,7 @@ XML_COT_FORMAT = """\
 </answer>
 """
 
+
 def extract_xml_answer(text: str) -> str:
     answer = text.split("<answer>")[-1]
     answer = answer.split("</answer>")[0]
@@ -99,10 +103,12 @@ def extract_xml_answer(text: str) -> str:
         answer = answer.split("####")[1].strip().replace(",", "").replace("$", "")
     return answer
 
+
 def extract_hash_answer(text: str) -> str | None:
     if "####" not in text:
         return None
     return text.split("####")[1].strip().replace(",", "").replace("$", "")
+
 
 # Reward functions
 def correctness_reward_func(completions, prompts, answer, **kwargs) -> list[float]:
@@ -117,11 +123,12 @@ def int_reward_func(completions, **kwargs) -> list[float]:
     extracted_responses = [extract_xml_answer(r) for r in responses]
     return [0.5 if r.isdigit() else 0.0 for r in extracted_responses]
 
+
 def strict_format_reward_func(completions, **kwargs) -> list[float]:
     """Reward function that checks if the completion has a specific format."""
     pattern = r"^<reasoning>\n.*?\n</reasoning>\n<answer>\n.*?\n</answer>\n$"
     responses = [completion for completion in completions]
-    matches = [re.match(pattern, r, flags=re.DOTALL) for r in responses] 
+    matches = [re.match(pattern, r, flags=re.DOTALL) for r in responses]
     return [0.5 if match else 0.0 for match in matches]
 
 
@@ -129,8 +136,9 @@ def soft_format_reward_func(completions, **kwargs) -> list[float]:
     """Reward function that checks if the completion has a specific format."""
     pattern = r"<reasoning>.*?</reasoning>\s*<answer>.*?</answer>"
     responses = [completion for completion in completions]
-    matches = [re.match(pattern, r, flags=re.DOTALL) for r in responses] 
+    matches = [re.match(pattern, r, flags=re.DOTALL) for r in responses]
     return [0.5 if match else 0.0 for match in matches]
+
 
 def count_xml(text) -> float:
     count = 0.0
@@ -140,11 +148,12 @@ def count_xml(text) -> float:
         count += 0.125
     if text.count("\n<answer>\n") == 1:
         count += 0.125
-        count -= len(text.split("\n</answer>\n")[-1])*0.001
+        count -= len(text.split("\n</answer>\n")[-1]) * 0.001
     if text.count("\n</answer>") == 1:
         count += 0.125
-        count -= (len(text.split("\n</answer>")[-1]) - 1)*0.001
+        count -= (len(text.split("\n</answer>")[-1]) - 1) * 0.001
     return count
+
 
 def xmlcount_reward_func(completions, **kwargs) -> list[float]:
     contents = [completion for completion in completions]
@@ -170,6 +179,7 @@ def reward_fn(completion, answer, question):
 
     return correctness + int_r + strict_format_r + soft_format_r + xmlcount_r
 
+
 def main(init_hp, mut_p):
     # Instantiate the model and the associated tokenizer
     model = create_model(pretrained_model_name_or_path=MODEL_PATH)
@@ -179,19 +189,13 @@ def main(init_hp, mut_p):
 
     # Convert the HuggingFace dataset into a Gymnasium environment
     accelerator = Accelerator()
-    accelerator.state.deepspeed_plugin.deepspeed_config["activation_checkpointing"] = {
-        "partition_activations": True,
-        "cpu_checkpointing": True,
-        "synchronize_checkpoint_boundary": True,
-        "number_checkpoints": 2,
-    }
 
     env = HuggingFaceGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
         reward_fn=reward_fn,
-        apply_chat_template_fn=countdown_chat_template,
+        apply_chat_template_fn=chat_template,
         data_batch_size_per_gpu=10,
         accelerator=accelerator,
         return_raw_completions=init_hp.get(
