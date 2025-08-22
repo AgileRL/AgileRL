@@ -595,7 +595,6 @@ def test_clone_after_learning(
         net_config = {
             "encoder_config": {
                 "hidden_state_size": 64,
-                "max_seq_len": None,  # Use entire episodes
             }
         }
     else:
@@ -610,6 +609,7 @@ def test_clone_after_learning(
         net_config=net_config,
         num_envs=num_vec_envs,
         share_encoders=share_encoders,
+        max_seq_len=None,
     )
 
     if use_rollout_buffer:
@@ -739,7 +739,6 @@ def test_ppo_with_rollout_buffer(observation_space, action_space, request):
         base_net_config = {
             "encoder_config": {
                 "hidden_state_size": 64,
-                "max_seq_len": 10,
             }
         }
         expected_shared = {
@@ -760,6 +759,7 @@ def test_ppo_with_rollout_buffer(observation_space, action_space, request):
         action_space=action_space,
         recurrent=recurrent_flag,
         use_rollout_buffer=True,
+        max_seq_len=10,
         net_config=base_net_config,
     )
 
@@ -776,6 +776,7 @@ def test_ppo_with_rollout_buffer(observation_space, action_space, request):
             recurrent=True,
             use_rollout_buffer=True,
             share_encoders=False,
+            max_seq_len=10,
             net_config=base_net_config_share,
         )
 
@@ -791,6 +792,7 @@ def test_ppo_with_rollout_buffer(observation_space, action_space, request):
             recurrent=True,
             use_rollout_buffer=True,
             share_encoders=False,
+            max_seq_len=10,
             net_config=base_net_config_share,
         )
 
@@ -842,7 +844,6 @@ def test_ppo_learn_with_rollout_buffer(
         net_config = {
             "encoder_config": {
                 "hidden_state_size": 64,
-                "max_seq_len": max_seq_len,
             }
         }
     else:
@@ -856,6 +857,7 @@ def test_ppo_learn_with_rollout_buffer(
         batch_size=batch_size,
         bptt_sequence_type=bptt_sequence_type,
         recurrent=recurrent,
+        max_seq_len=max_seq_len,
         net_config=net_config,
     )
 
@@ -903,7 +905,6 @@ def test_ppo_with_hidden_states(
     net_config = {
         "encoder_config": {
             "hidden_state_size": 64,
-            "max_seq_len": max_seq_len,
         }
     }
 
@@ -913,6 +914,7 @@ def test_ppo_with_hidden_states(
             action_space=action_space,
             use_rollout_buffer=use_rollout_buffer,
             recurrent=True,
+            max_seq_len=max_seq_len,
             net_config=net_config,
         )
 
@@ -961,7 +963,6 @@ def test_ppo_with_hidden_states_multiple_obs(vector_space, discrete_space):
         net_config={
             "encoder_config": {
                 "hidden_state_size": 64,
-                "max_seq_len": 10,
             }
         },
     )
@@ -999,10 +1000,10 @@ def test_ppo_with_hidden_states_multiple_envs():
         use_rollout_buffer=True,
         recurrent=True,
         num_envs=num_envs,
+        max_seq_len=10,
         net_config={
             "encoder_config": {
                 "hidden_state_size": 64,
-                "max_seq_len": 10,
             }
         },
     )
@@ -1042,10 +1043,10 @@ def test_ppo_with_hidden_states_multiple_envs_collect_rollouts():
         recurrent=True,
         num_envs=num_envs,
         learn_step=5,
+        max_seq_len=5,
         net_config={
             "encoder_config": {
                 "hidden_state_size": 64,
-                "max_seq_len": 5,
             }
         },
     )
@@ -1110,10 +1111,10 @@ def test_ppo_with_hidden_states_multiple_envs_collect_rollouts_and_test():
         recurrent=True,
         num_envs=num_envs,
         learn_step=5,
+        max_seq_len=5,
         net_config={
             "encoder_config": {
                 "hidden_state_size": 64,
-                "max_seq_len": 5,
             }
         },
     )
