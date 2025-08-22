@@ -712,6 +712,11 @@ def test_mutation_applies_architecture_mutations(
         mutations.rng = DummyRNG()
 
         new_population = [agent.clone(wrap=False) for agent in population]
+
+        # Apply architecture mutations to the population
+        if isinstance(population[0], RSNorm):
+            new_population = [agent.agent for agent in new_population]
+
         mutated_population = [
             mutations.architecture_mutate(agent) for agent in new_population
         ]
