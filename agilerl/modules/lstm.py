@@ -48,7 +48,6 @@ class EvolvableLSTM(EvolvableModule):
         output_activation: str = None,
         min_hidden_state_size: int = 32,
         max_hidden_state_size: int = 512,
-        max_seq_len: int = None,
         min_layers: int = 1,
         max_layers: int = 3,
         dropout: float = 0.0,
@@ -87,7 +86,6 @@ class EvolvableLSTM(EvolvableModule):
         self.min_layers = min_layers
         self.max_layers = max_layers
         self.dropout = dropout
-        self.max_seq_len = max_seq_len
 
         # Create the network
         self.model = self.create_lstm()

@@ -91,6 +91,9 @@ class PPO(RLAlgorithm):
     :type wrap: bool, optional
     :param bptt_sequence_type: Type of sequence for BPTT learning, defaults to BPTTSequenceType.CHUNKED
     :type bptt_sequence_type: BPTTSequenceType, optional
+    :param max_seq_len: Maximum sequence length for truncated BPTT, defaults to None, where complete episodes
+    are used as sequences.
+    :type max_seq_len: int, optional
     """
 
     def __init__(
@@ -125,6 +128,7 @@ class PPO(RLAlgorithm):
         accelerator: Optional[Any] = None,
         wrap: bool = True,
         bptt_sequence_type: BPTTSequenceType = BPTTSequenceType.CHUNKED,
+        max_seq_len: Optional[int] = None,
     ) -> None:
         super().__init__(
             observation_space,
@@ -221,17 +225,10 @@ class PPO(RLAlgorithm):
         self.use_rollout_buffer = use_rollout_buffer
         self.net_config = net_config
 
-        if self.recurrent:
-            if not self.use_rollout_buffer:
-                raise ValueError("use_rollout_buffer must be True if recurrent=True.")
+        if self.recurrent and not self.use_rollout_buffer:
+            raise ValueError("use_rollout_buffer must be True if recurrent=True.")
 
-            net_config_dict = self.net_config if self.net_config is not None else {}
-            self.max_seq_len = net_config_dict.get("encoder_config", {}).get(
-                "max_seq_len", None
-            )
-        else:
-            self.max_seq_len = None
-
+        self.max_seq_len = max_seq_len
         self.batch_size = batch_size
         self.lr = lr
         self.gamma = gamma
