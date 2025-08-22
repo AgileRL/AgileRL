@@ -1257,6 +1257,10 @@ def test_mutation_applies_architecture_mutations_multi_agent(
         mutations.rng = DummyRNG()
 
         new_population = [agent.clone(wrap=False) for agent in population]
+
+        if isinstance(new_population[0], AsyncAgentsWrapper):
+            new_population = [agent.agent for agent in new_population]
+
         mutated_population = [
             mutations.architecture_mutate(agent) for agent in new_population
         ]
