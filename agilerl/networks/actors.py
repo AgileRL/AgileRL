@@ -92,10 +92,9 @@ class DeterministicActor(EvolvableNetwork):
         if head_config is not None and "output_activation" in head_config:
             output_activation = head_config["output_activation"]
         elif isinstance(action_space, spaces.Box):
-            # Squash output by default if continuous action space
             output_activation = "Tanh"
         elif isinstance(action_space, spaces.Discrete):
-            output_activation = "Softmax"
+            output_activation = "GumbelSoftmax"
         else:
             output_activation = None
 

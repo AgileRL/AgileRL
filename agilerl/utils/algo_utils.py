@@ -30,6 +30,7 @@ from agilerl.protocols import (
 )
 from agilerl.typing import (
     ArrayOrTensor,
+    BPTTSequenceType,
     ExperiencesType,
     GymSpaceType,
     MaybeObsList,
@@ -131,7 +132,6 @@ def share_encoder_parameters(
     param_vals: TensorDict = from_module(policy.encoder).detach()
     for other in others:
         target_params: TensorDict = param_vals.clone().lock_()
-
         target_params.to_module(other.encoder)
 
 
@@ -157,6 +157,59 @@ def get_hidden_states_shape_from_model(model: nn.Module) -> Dict[str, int]:
             )
 
     return hidden_state_architecture
+
+
+def extract_sequences_from_episode(
+    episode: torch.Tensor,
+    max_seq_len: int,
+    sequence_type: BPTTSequenceType = BPTTSequenceType.CHUNKED,
+) -> List[torch.Tensor]:
+    """Extract sequences from an episode.
+
+    - `BPTTSequenceType.CHUNKED`: Extracts sequences by chunking the episode into unique
+        chunks of size `max_seq_len`. This is the most memory efficient and default option.
+    - `BPTTSequenceType.MAXIMUM`: Extracts all possible sequences in an episode by taking a
+        maximum of `max_seq_len` steps at a time. This is the most memory-intensive option.
+    - `BPTTSequenceType.FIFTY_PERCENT_OVERLAP`: Extracts sequences by taking a maximum of
+        `max_seq_len` steps at a time, with 50% overlap between sequences.
+
+    :param episode: The episode to extract sequences from.
+    :type episode: torch.Tensor
+    :param max_seq_len: The maximum sequence length.
+    :type max_seq_len: int
+    :param sequence_type: The type of sequence to extract.
+    :type sequence_type: BPTTSequenceType
+    :return: The sequences extracted from the episode.
+    :rtype: List[torch.Tensor]
+    """
+    assert max_seq_len > 0, "max_seq_len must be greater than 0"
+    assert len(episode) > 0, "episode must be non-empty"
+    assert max_seq_len <= len(
+        episode
+    ), "max_seq_len must be less than or equal to the length of the episode"
+
+    if sequence_type == BPTTSequenceType.CHUNKED:
+        num_chunks = max(1, len(episode) // max_seq_len)
+        sequences = [
+            episode[chunk_i * max_seq_len : (chunk_i + 1) * max_seq_len]
+            for chunk_i in range(num_chunks)
+        ]
+    elif sequence_type == BPTTSequenceType.MAXIMUM:
+        sequences = [
+            episode[start : start + max_seq_len]
+            for start in range(0, len(episode) - max_seq_len + 1)
+        ]
+    elif sequence_type == BPTTSequenceType.FIFTY_PERCENT_OVERLAP:
+        step_size = max_seq_len // 2
+        sequences = [
+            episode[start : start + max_seq_len]
+            for start in range(0, len(episode) - max_seq_len + 1, step_size)
+        ]
+    else:
+        raise NotImplementedError(
+            f"Received unrecognized sequence type: {sequence_type}"
+        )
+    return sequences
 
 
 def is_image_space(space: spaces.Space) -> bool:

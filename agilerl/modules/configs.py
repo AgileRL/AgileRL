@@ -135,7 +135,6 @@ class LstmNetConfig(NetConfig):
     max_hidden_state_size: int = field(default=500)
     min_layers: int = field(default=1)
     max_layers: int = field(default=4)
-    max_seq_len: int = field(default=None)
     output_activation: Optional[str] = field(default=None)
     dropout: float = field(default=0.0)
 
