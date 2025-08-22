@@ -79,8 +79,8 @@ be imported and used for training with the Python package ``ucimlrepo``, and to 
         # Mutation config for RL hyperparameters
         hp_config = HyperparameterConfig(
             lr = RLParameter(min=6.25e-5, max=1e-2),
-            batch_size = RLParameter(min=8, max=512, dtype=int),
-            learn_step = RLParameter(min=1, max=10, dtype=int, grow_factor=1.5, shrink_factor=0.75)
+            batch_size = RLParameter(min=8, max=512),
+            learn_step = RLParameter(min=1, max=10, grow_factor=1.5, shrink_factor=0.75)
         )
 
         obs_space = spaces.Box(low=features.values.min(), high=features.values.max())

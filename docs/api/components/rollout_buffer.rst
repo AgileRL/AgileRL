@@ -26,6 +26,33 @@ to sample minibatches for policy optimization.
         gamma=0.99,  # Discount factor
     )
 
+The ``RolloutBuffer`` can also collect experiences for POMDPs and sample sequences for truncated BPTT. To do this, users can
+specify ``recurrent=True``.
+
+.. code-block:: python
+
+    from agilerl.typing import BPTTSequenceType
+
+    buffer = RolloutBuffer(
+        capacity=2048,  # Number of steps to collect per environment
+        observation_space=env.observation_space,
+        action_space=env.action_space,
+        num_envs=8,  # Number of parallel environments
+        device=device,
+        gae_lambda=0.95,  # GAE lambda parameter
+        gamma=0.99,  # Discount factor
+        recurrent=True,
+        hidden_state_architecture=hidden_state_architecture,
+        bptt_sequence_type=BPTTSequenceType.MAXIMUM,
+    )
+
+.. note::
+    The ``bptt_sequence_type`` parameter determines how sequences are sampled from the buffer.
+    - ``BPTTSequenceType.CHUNKED``: Samples as many unique sequences of length ``max_seq_len``as possible from the buffer.
+    - ``BPTTSequenceType.MAXIMUM``: Samples as many (overlapping) sequences of length ``max_seq_len`` as possible from the buffer.
+    - ``BPTTSequenceType.FIFTY_PERCENT_OVERLAPPING``: Samples as many (overlapping) sequences of length ``max_seq_len`` as possible from the buffer, with up
+        to 50% overlap between sequences.
+
 Parameters
 ------------
 

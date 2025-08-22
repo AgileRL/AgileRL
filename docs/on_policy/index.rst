@@ -178,10 +178,8 @@ Alternatively, use a custom on-policy training loop:
         # RL hyperparameters configuration for mutation during training
         hp_config = HyperparameterConfig(
             lr = RLParameter(min=1e-4, max=1e-2),
-            batch_size = RLParameter(
-                min=8, max=1024, dtype=int
-                )
-            learn_step = RLParameter(min=64, max=1024, dtype=int)
+            batch_size = RLParameter(min=8, max=1024),
+            learn_step = RLParameter(min=64, max=1024)
         )
 
         pop = create_population(

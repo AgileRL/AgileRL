@@ -56,7 +56,9 @@ Dependencies
     from typing import List
     from tqdm import trange
 
+    from agilerl.typing import BPTTSequenceType
     from agilerl.algorithms import PPO
+    from agilerl.wrappers.agent import RSNorm
     from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
@@ -77,12 +79,11 @@ Additionally, we also define our upper and lower limits for these hyperparameter
 
         # Initial hyperparameters
         num_envs = 8
-        max_seq_length = 1024
         INIT_HP = {
             "POP_SIZE": 4,  # Population size
             "BATCH_SIZE": 256,  # Batch size
             "LR": 0.001,  # Learning rate
-            "LEARN_STEP": max_seq_length * num_envs,  # Learning frequency
+            "LEARN_STEP": 1024 * num_envs,  # Learning frequency (global steps)
             "GAMMA": 0.9,  # Discount factor
             "GAE_LAMBDA": 0.95,  # Lambda for general advantage estimation
             "ACTION_STD_INIT": 0.6,  # Initial action standard deviation
@@ -90,18 +91,19 @@ Additionally, we also define our upper and lower limits for these hyperparameter
             "ENT_COEF": 0.0,  # Entropy coefficient
             "VF_COEF": 0.5,  # Value function coefficient
             "MAX_GRAD_NORM": 0.5,  # Maximum norm for gradient clipping
-            "SHARE_ENCODERS": False, # Flag to signal that we want to share encoders between agents
+            "SHARE_ENCODERS": True, # Flag to signal that we want to share encoders between agents
             "RECURRENT": True # Flag to signal that we want a recurrent policy
             "USE_ROLLOUT_BUFFER ": True # Use a rollout buffer for data collection
             "TARGET_KL": None,  # Target KL divergence threshold
             "UPDATE_EPOCHS": 4,  # Number of policy update epochs
-            "TARGET_SCORE": 200.0,  # Target score that will beat the environment
+            "TARGET_SCORE": -200.0,  # Target score that will beat the environment
             "MAX_STEPS": 150000,  # Maximum number of steps an agent takes in an environment
             "EVO_STEPS": 10000,  # Evolution frequency
             "EVAL_STEPS": None,  # Number of evaluation steps per episode
             "EVAL_LOOP": 3,  # Number of evaluation episodes
             "TOURN_SIZE": 2,  # Tournament size
             "ELITISM": True,  # Elitism in tournament selection
+            "BPTT_SEQUENCE_TYPE": BPTTSequenceType.CHUNKED, # Type of BPTT sequences to use
         }
 
         # Mutation parameters
@@ -111,7 +113,7 @@ Additionally, we also define our upper and lower limits for these hyperparameter
             "ARCH_MUT": 0.2,  # Architecture mutation
             "NEW_LAYER": 0.2,  # New layer mutation
             "PARAMS_MUT": 0.2,  # Network parameters mutation
-            "ACT_MUT": 0.2,  # Activation layer mutation
+            "ACT_MUT": 0.0,  # Activation layer mutation
             "RL_HP_MUT": 0.2,  # Learning HP mutation
             "MUT_SD": 0.1,  # Mutation strength
             "RAND_SEED": 42,  # Random seed
@@ -119,11 +121,12 @@ Additionally, we also define our upper and lower limits for these hyperparameter
 
         # RL hyperparameters configuration for mutation during training
         hp_config = HyperparameterConfig(
-            lr = RLParameter(min=1e-4, max=1e-2),
-            batch_size = RLParameter(
-                min=8, max=1024, dtype=int
-                )
+            lr=RLParameter(min=1e-4, max=1e-2),
+            batch_size=RLParameter(min=128, max=1024),
+            # In general we want the entropy to decay over time
+            ent_coef=RLParameter(min=0.0001, max=0.001, grow_factor=1.0, shrink_factor=0.9),
         )
+
 
 Create the Environment
 ----------------------
@@ -175,7 +178,7 @@ latter, we can define a wrapper to modify the observations after they have been 
     def make_env():
         return MaskVelocityWrapper(gym.make("Pendulum-v1"))
 
-    num_envs = 8
+    num_envs = 16
     env = make_vect_envs(make_env=make_env, num_envs=num_envs, should_async_vector=False)
 
     observation_space = env.single_observation_space
@@ -197,10 +200,14 @@ followed by mutations) is detailed further below.
 
     # Define the network configuration of a simple mlp with two hidden layers, each with 64 nodes
     net_config = {
+        "latent_dim": 64,
         "encoder_config": {
-            "hidden_state_size": 128,  # LSTM hidden state size
+            "hidden_state_size": 64,  # LSTM hidden state size
             "num_layers": 1,
-            "max_seq_len": max_seq_length,
+            "max_seq_len": 16, # Maximum sequence length for truncated BPTT
+        },
+        "head_config": {
+            "hidden_size": [128],
         },
     }
 
@@ -216,6 +223,10 @@ followed by mutations) is detailed further below.
         num_envs=num_envs,
         device=device,
     )
+
+    # Wrap the population with the RSNorm wrapper to
+    # normalize observations using running statistics
+    pop = [RSNorm(agent) for agent in pop]
 
 Creating Mutations and Tournament Objects
 -----------------------------------------
@@ -327,8 +338,8 @@ function and is an example of how we might choose to make use of a population of
         from agilerl.utils.utils import default_progress_bar
 
         # --- Training Loop ---
-        max_steps = 5_000_000 // len(pop)
-        required_score = 0.95
+        max_steps = 1_000_000
+        required_score = -200
         evo_steps = INIT_HP["LEARN_STEP"] * 5
         eval_steps = None
 
@@ -336,7 +347,7 @@ function and is an example of how we might choose to make use of a population of
         training_complete = False
 
         print("Training...")
-        pbar = default_progress_bar(max_steps * len(pop))
+        pbar = default_progress_bar(max_steps)
         while (
             np.less([agent.steps[-1] for agent in pop], max_steps).all()
             and not training_complete
@@ -368,7 +379,7 @@ function and is an example of how we might choose to make use of a population of
 
                 # Update step counter and scores
                 pop_episode_scores.append(
-                    np.mean(completed_episodes)
+                    round(np.mean(completed_episodes), 2)
                     if len(completed_episodes) > 0
                     else "0 completed episodes"
                 )
@@ -385,13 +396,13 @@ function and is an example of how we might choose to make use of a population of
                 for agent in pop
             ]
 
-
             pbar.write(
                 f"--- Global steps {total_steps} ---\n"
                 f"Steps: {[agent.steps[-1] for agent in pop]}\n"
                 f"Scores: {pop_episode_scores}\n"
                 f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
                 f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
+                f"Mutations: {[agent.mut for agent in pop]}\n"
             )
 
             if any(score >= required_score for score in pop_episode_scores):

@@ -1,6 +1,7 @@
 import copy
 import warnings
 from collections import OrderedDict
+from dataclasses import asdict
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -260,22 +261,14 @@ class MADDPG(MultiAgentRLAlgorithm):
             )
 
             # Iterate over actor configs and modify accordingly
-            for agent_id, space in self.possible_action_spaces.items():
+            for agent_id in self.agent_ids:
                 agent_config = agent_configs[agent_id]
                 head_config = agent_config.get("head_config", None)
 
                 # Determine actor output activation from action space
-                discrete_actions = isinstance(space, spaces.Discrete)
-                if head_config is not None:
-                    if discrete_actions:
-                        head_config["output_activation"] = "GumbelSoftmax"
-                else:
-                    output_activation = "GumbelSoftmax" if discrete_actions else None
-                    head_config = MlpNetConfig(
-                        hidden_size=[64], output_activation=output_activation
-                    )
-                    if head_config.output_activation is None:
-                        head_config.pop("output_activation")
+                if head_config is None:
+                    head_config = asdict(MlpNetConfig(hidden_size=[64]))
+                    head_config.pop("output_activation", None)
 
                 agent_config["head_config"] = head_config
                 agent_configs[agent_id] = agent_config

@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import pytest
 import torch
@@ -5,6 +7,7 @@ from gymnasium import spaces
 from tensordict import TensorDict
 
 from agilerl.components.rollout_buffer import RolloutBuffer
+from agilerl.typing import BPTTSequenceType
 
 
 class TestRolloutBufferInitialization:
@@ -771,8 +774,8 @@ class TestRolloutBufferDataRetrieval:
 class TestRolloutBufferSequences:
     """Test sequence methods for BPTT."""
 
-    def test_get_sequences_basic(self):
-        """Test basic sequence retrieval."""
+    def test_prepare_sequence_tensors_basic(self):
+        """Test basic sequence tensor preparation."""
         obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
         action_space = spaces.Discrete(2)
         hidden_state_arch = {
@@ -790,12 +793,12 @@ class TestRolloutBufferSequences:
             max_seq_len=3,
         )
 
-        # Add multiple timesteps
+        # Add multiple timesteps with episodes ending
         for i in range(5):
             obs = np.array([[i, i + 1], [i + 2, i + 3]])
             action = np.array([i % 2, (i + 1) % 2])
             reward = np.array([1.0, -1.0])
-            done = np.array([False, False])
+            done = np.array([i == 4, i == 2])  # Episodes end at different times
             value = np.array([0.5, -0.5])
             log_prob = np.array([0.1, 0.2])
             hidden_state = {"h_actor": torch.randn(1, 2, 4)}
@@ -806,19 +809,101 @@ class TestRolloutBufferSequences:
 
         # Compute returns
         last_value = np.array([0.8, 0.0])
-        last_done = np.array([False, False])
+        last_done = np.array([True, True])
         buffer.compute_returns_and_advantages(last_value, last_done)
 
-        # Test sequence methods
-        sequences = buffer.get_sequences(seq_len=3, batch_size=2)
-        assert isinstance(sequences, dict)
+        # Prepare sequence tensors
+        buffer.prepare_sequence_tensors()
 
-        if sequences:  # If there are sequences
-            assert "observations" in sequences
-            assert "actions" in sequences
+        # Check that sequence data was prepared
+        assert buffer.padded_data is not None
+        assert buffer.unpadded_data is not None
+        assert buffer.unpadded_slices is not None
+        assert buffer.num_sequences is not None
+        assert buffer.max_sequence_length is not None
 
-    def test_get_sequence_tensor_batch(self):
-        """Test getting sequence tensor batch."""
+        # Check that padded data contains expected keys
+        assert "observations" in buffer.padded_data
+        assert "actions" in buffer.padded_data
+        assert "pad_mask" in buffer.padded_data
+
+        # Check that unpadded data contains expected keys
+        assert "log_probs" in buffer.unpadded_data
+        assert "advantages" in buffer.unpadded_data
+        assert "values" in buffer.unpadded_data
+        assert "returns" in buffer.unpadded_data
+
+    @pytest.mark.parametrize("recurrent", [True, False])
+    def test_prepare_sequence_tensors_with_hidden_states(self, recurrent):
+        """Test sequence tensor preparation with hidden states."""
+        obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        action_space = spaces.Discrete(2)
+        hidden_state_arch = {
+            "h_actor": (1, 2, 4),
+            "h_critic": (2, 2, 8),
+        }
+
+        buffer = RolloutBuffer(
+            capacity=10,
+            observation_space=obs_space,
+            action_space=action_space,
+            num_envs=2,
+            device="cpu",
+            recurrent=recurrent,
+            hidden_state_architecture=hidden_state_arch,
+            max_seq_len=4,
+        )
+
+        # Add multiple timesteps
+        for i in range(6):
+            obs = np.array([[i, i + 1], [i + 2, i + 3]])
+            action = np.array([i % 2, (i + 1) % 2])
+            reward = np.array([1.0, -1.0])
+            done = np.array([i == 5, i == 3])  # Episodes end at different times
+            value = np.array([0.5, -0.5])
+            log_prob = np.array([0.1, 0.2])
+            hidden_state = {
+                "h_actor": torch.randn(1, 2, 4),
+                "h_critic": torch.randn(2, 2, 8),
+            }
+
+            buffer.add(
+                obs, action, reward, done, value, log_prob, hidden_state=hidden_state
+            )
+
+        # Compute returns
+        last_value = np.array([0.8, 0.0])
+        last_done = np.array([True, True])
+        buffer.compute_returns_and_advantages(last_value, last_done)
+
+        # Prepare sequence tensors
+        if recurrent:
+            buffer.prepare_sequence_tensors()
+        else:
+            with pytest.raises(ValueError):
+                buffer.prepare_sequence_tensors()
+            return
+
+        # Check that initial hidden states are prepared
+        try:
+            initial_hidden_states = buffer.padded_data.get_non_tensor(
+                "initial_hidden_states"
+            )
+            assert "h_actor" in initial_hidden_states
+            assert "h_critic" in initial_hidden_states
+
+            # Check shapes of initial hidden states
+            assert initial_hidden_states["h_actor"].shape[1:] == (
+                1,
+                4,
+            )  # (batch, layers, hidden_size)
+            assert initial_hidden_states["h_critic"].shape[1:] == (2, 8)
+        except KeyError:
+            # If initial_hidden_states is not found, the test should fail
+            assert False, "initial_hidden_states should be present for recurrent buffer"
+
+    def test_get_minibatch_sequences(self):
+        """Test getting minibatch sequences."""
         obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
         action_space = spaces.Discrete(2)
         hidden_state_arch = {
@@ -826,7 +911,7 @@ class TestRolloutBufferSequences:
         }
 
         buffer = RolloutBuffer(
-            capacity=10,
+            capacity=15,
             observation_space=obs_space,
             action_space=action_space,
             num_envs=2,
@@ -836,12 +921,13 @@ class TestRolloutBufferSequences:
             max_seq_len=3,
         )
 
-        # Add multiple timesteps
-        for i in range(5):
+        # Add multiple episodes
+        for i in range(10):
             obs = np.array([[i, i + 1], [i + 2, i + 3]])
             action = np.array([i % 2, (i + 1) % 2])
             reward = np.array([1.0, -1.0])
-            done = np.array([False, False])
+            # Create episodes of different lengths
+            done = np.array([i % 4 == 3, i % 5 == 4])
             value = np.array([0.5, -0.5])
             log_prob = np.array([0.1, 0.2])
             hidden_state = {"h_actor": torch.randn(1, 2, 4)}
@@ -852,24 +938,173 @@ class TestRolloutBufferSequences:
 
         # Compute returns
         last_value = np.array([0.8, 0.0])
-        last_done = np.array([False, False])
+        last_done = np.array([True, True])
         buffer.compute_returns_and_advantages(last_value, last_done)
 
-        # Get sequence tensor batch
-        tensor_sequences = buffer.get_sequence_tensor_batch(seq_len=3, batch_size=2)
+        # Prepare sequence tensors
+        buffer.prepare_sequence_tensors()
 
-        # Check if we got sequences (don't use boolean conversion on TensorDict)
-        assert isinstance(tensor_sequences, (TensorDict, dict))
+        # Get minibatch sequences
+        batch_size = 2
+        minibatch_generator = buffer.get_minibatch_sequences(batch_size)
 
-        if (
-            isinstance(tensor_sequences, TensorDict)
-            and len(tensor_sequences.keys()) > 0
+        # Test that we can iterate through minibatches
+        minibatch_count = 0
+        for padded_batch, unpadded_batch in minibatch_generator:
+            minibatch_count += 1
+
+            # Check that batches are TensorDicts
+            assert isinstance(padded_batch, TensorDict)
+            assert isinstance(unpadded_batch, TensorDict)
+
+            # Check that padded batch contains expected keys
+            assert "observations" in padded_batch
+            assert "actions" in padded_batch
+            assert "pad_mask" in padded_batch
+
+            # Check that unpadded batch contains expected keys
+            assert "log_probs" in unpadded_batch
+            assert "advantages" in unpadded_batch
+            assert "values" in unpadded_batch
+            assert "returns" in unpadded_batch
+
+            # Check that initial hidden states are present
+            try:
+                initial_hidden_states = padded_batch.get_non_tensor(
+                    "initial_hidden_states"
+                )
+                assert "h_actor" in initial_hidden_states
+            except KeyError:
+                # It's okay if initial_hidden_states is not present for this test
+                pass
+
+        assert minibatch_count > 0
+
+    def test_get_minibatch_sequences_without_preparation(self):
+        """Test that get_minibatch_sequences raises error without preparation."""
+        obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        action_space = spaces.Discrete(2)
+
+        buffer = RolloutBuffer(
+            capacity=10,
+            observation_space=obs_space,
+            action_space=action_space,
+            num_envs=2,
+            device="cpu",
+            max_seq_len=3,
+        )
+
+        # Try to get minibatch sequences without preparing
+        with pytest.raises(
+            ValueError,
+            match="Attempting to fetch minibatches before preparing sequences",
         ):
-            assert "observations" in tensor_sequences
-            assert "actions" in tensor_sequences
+            list(buffer.get_minibatch_sequences(2))
 
-    def test_get_specific_sequences(self):
-        """Test getting specific sequences."""
+    def test_pad_sequences_static_method(self):
+        """Test the static _pad_sequences method."""
+        # Test with regular tensors
+        sequences = [
+            torch.tensor([[1, 2], [3, 4]]),  # Length 2
+            torch.tensor([[5, 6], [7, 8], [9, 10]]),  # Length 3
+            torch.tensor([[11, 12]]),  # Length 1
+        ]
+
+        # Test padding to max length
+        padded = RolloutBuffer._pad_sequences(sequences)
+        assert padded.shape == (3, 3, 2)  # (batch_size, max_seq_len, feature_dim)
+
+        # Test padding to specific target length
+        padded_target = RolloutBuffer._pad_sequences(sequences, target_length=5)
+        assert padded_target.shape == (
+            3,
+            5,
+            2,
+        )  # (batch_size, target_length, feature_dim)
+
+        # Test with TensorDict sequences
+        td_sequences = [
+            TensorDict(
+                {"obs": torch.tensor([[1, 2]]), "act": torch.tensor([0])},
+                batch_size=[1],
+            ),
+            TensorDict(
+                {"obs": torch.tensor([[3, 4], [5, 6]]), "act": torch.tensor([1, 0])},
+                batch_size=[2],
+            ),
+        ]
+
+        padded_td = RolloutBuffer._pad_sequences(td_sequences)
+        assert isinstance(padded_td, TensorDict)
+        assert padded_td["obs"].shape == (
+            2,
+            2,
+            2,
+        )  # (batch_size, max_seq_len, feature_dim)
+        assert padded_td["act"].shape == (2, 2)  # (batch_size, max_seq_len)
+
+    def test_different_bptt_sequence_types(self):
+        """Test different BPTT sequence types."""
+        from agilerl.typing import BPTTSequenceType
+
+        obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        action_space = spaces.Discrete(2)
+        hidden_state_arch = {
+            "h_actor": (1, 2, 4),
+        }
+
+        max_seq_len = 4
+        episode_length = 12
+        for seq_type in [
+            BPTTSequenceType.CHUNKED,
+            BPTTSequenceType.MAXIMUM,
+            BPTTSequenceType.FIFTY_PERCENT_OVERLAP,
+        ]:
+            buffer = RolloutBuffer(
+                capacity=20,
+                observation_space=obs_space,
+                action_space=action_space,
+                num_envs=1,
+                device="cpu",
+                max_seq_len=max_seq_len,
+                bptt_sequence_type=seq_type,
+                recurrent=True,
+                hidden_state_architecture=hidden_state_arch,
+            )
+
+            # Add a long episode
+            for i in range(episode_length):
+                obs = np.array([[i, i + 1]])
+                action = np.array([i % 2])
+                reward = np.array([1.0])
+                done = np.array([i == 11])  # Episode ends at the last step
+                value = np.array([0.5])
+                log_prob = np.array([0.1])
+
+                buffer.add(obs, action, reward, done, value, log_prob)
+
+            # Compute returns
+            last_value = np.array([0.0])
+            last_done = np.array([True])
+            buffer.compute_returns_and_advantages(last_value, last_done)
+
+            # Prepare sequence tensors
+            buffer.prepare_sequence_tensors()
+
+            # Check that the number of sequences is correct
+            if seq_type == BPTTSequenceType.CHUNKED:
+                assert buffer.num_sequences == episode_length // max_seq_len
+            elif seq_type == BPTTSequenceType.MAXIMUM:
+                assert buffer.num_sequences == episode_length - max_seq_len + 1
+            elif seq_type == BPTTSequenceType.FIFTY_PERCENT_OVERLAP:
+                assert buffer.num_sequences == 5
+
+            # Check that sequences were created
+            assert buffer.num_sequences > 0
+            assert buffer.max_sequence_length <= 4
+
+    def test_empty_buffer_sequence_preparation(self):
+        """Test sequence preparation with empty buffer."""
         obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
         action_space = spaces.Discrete(2)
         hidden_state_arch = {
@@ -882,100 +1117,512 @@ class TestRolloutBufferSequences:
             action_space=action_space,
             num_envs=2,
             device="cpu",
+            max_seq_len=3,
             recurrent=True,
             hidden_state_architecture=hidden_state_arch,
+        )
+
+        # Try to prepare sequences with empty buffer
+        with pytest.raises(ValueError):
+            buffer.prepare_sequence_tensors()
+
+    def test_sequence_preparation_with_dict_observations(self):
+        """Test sequence preparation with dictionary observations."""
+        obs_space = spaces.Dict(
+            {
+                "vector": spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32),
+                "discrete": spaces.Discrete(3),
+            }
+        )
+        action_space = spaces.Discrete(2)
+        hidden_state_arch = {
+            "h_actor": (1, 2, 4),
+        }
+
+        buffer = RolloutBuffer(
+            capacity=10,
+            observation_space=obs_space,
+            action_space=action_space,
+            num_envs=2,
+            device="cpu",
             max_seq_len=3,
+            recurrent=True,
+            hidden_state_architecture=hidden_state_arch,
         )
 
         # Add multiple timesteps
         for i in range(5):
-            obs = np.array([[i, i + 1], [i + 2, i + 3]])
+            obs = {
+                "vector": np.array([[i, i + 1], [i + 2, i + 3]]),
+                "discrete": np.array([[i % 3], [(i + 1) % 3]]),
+            }
             action = np.array([i % 2, (i + 1) % 2])
             reward = np.array([1.0, -1.0])
-            done = np.array([False, False])
+            done = np.array([i == 4, i == 2])
             value = np.array([0.5, -0.5])
             log_prob = np.array([0.1, 0.2])
-            hidden_state = {"h_actor": torch.randn(1, 2, 4)}
 
-            buffer.add(
-                obs, action, reward, done, value, log_prob, hidden_state=hidden_state
-            )
+            buffer.add(obs, action, reward, done, value, log_prob)
 
         # Compute returns
         last_value = np.array([0.8, 0.0])
-        last_done = np.array([False, False])
+        last_done = np.array([True, True])
         buffer.compute_returns_and_advantages(last_value, last_done)
 
-        # Get specific sequences
-        sequence_coords = [(0, 0), (1, 1)]  # (env_idx, time_idx)
-        sequences = buffer.get_specific_sequences_tensor_batch(
-            seq_len=3, sequence_coords=sequence_coords
-        )
+        # Prepare sequence tensors
+        buffer.prepare_sequence_tensors()
 
-        assert isinstance(sequences, (TensorDict, dict))
+        # Check that observations are properly structured
+        assert "observations" in buffer.padded_data
+        obs_data = buffer.padded_data["observations"]
+        assert isinstance(obs_data, TensorDict)
+        assert "vector" in obs_data
+        assert "discrete" in obs_data
 
-        if isinstance(sequences, TensorDict) and len(sequences.keys()) > 0:
-            assert "observations" in sequences
-            assert "actions" in sequences
-
-    def test_empty_sequences(self):
-        """Test sequence methods with empty buffer."""
+    def test_sequence_preparation_different_max_seq_len(self):
+        """Test sequence preparation with different max_seq_len values."""
         obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
         action_space = spaces.Discrete(2)
         hidden_state_arch = {
             "h_actor": (1, 2, 4),
         }
+        # Test with max_seq_len=None (should use full episodes)
+        buffer_no_limit = RolloutBuffer(
+            capacity=10,
+            observation_space=obs_space,
+            action_space=action_space,
+            num_envs=1,
+            device="cpu",
+            max_seq_len=None,
+            recurrent=True,
+            hidden_state_architecture=hidden_state_arch,
+        )
 
+        # Add a long episode
+        for i in range(8):
+            obs = np.array([[i, i + 1]])
+            action = np.array([i % 2])
+            reward = np.array([1.0])
+            done = np.array([i == 7])  # Episode ends at the last step
+            value = np.array([0.5])
+            log_prob = np.array([0.1])
+
+            buffer_no_limit.add(obs, action, reward, done, value, log_prob)
+
+        # Compute returns
+        last_value = np.array([0.0])
+        last_done = np.array([True])
+        buffer_no_limit.compute_returns_and_advantages(last_value, last_done)
+
+        # Prepare sequence tensors
+        buffer_no_limit.prepare_sequence_tensors()
+
+        # Should have one sequence of length 8
+        assert buffer_no_limit.num_sequences == 1
+        assert buffer_no_limit.max_sequence_length == 8
+
+    def test_minibatch_sequences_batch_size_larger_than_sequences(self):
+        """Test minibatch sequences when batch size is larger than available sequences."""
+        obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        action_space = spaces.Discrete(2)
+        hidden_state_arch = {
+            "h_actor": (1, 2, 4),
+        }
         buffer = RolloutBuffer(
             capacity=10,
             observation_space=obs_space,
             action_space=action_space,
-            num_envs=2,
+            num_envs=1,
             device="cpu",
+            max_seq_len=3,
             recurrent=True,
             hidden_state_architecture=hidden_state_arch,
-            max_seq_len=3,
         )
 
-        # Try to get sequences from empty buffer
-        with pytest.raises(ValueError):
-            buffer.get_sequences(seq_len=3, batch_size=2)
+        # Add a short episode
+        for i in range(3):
+            obs = np.array([[i, i + 1]])
+            action = np.array([i % 2])
+            reward = np.array([1.0])
+            done = np.array([i == 2])
+            value = np.array([0.5])
+            log_prob = np.array([0.1])
+
+            buffer.add(obs, action, reward, done, value, log_prob)
+
+        # Compute returns
+        last_value = np.array([0.0])
+        last_done = np.array([True])
+        buffer.compute_returns_and_advantages(last_value, last_done)
+
+        # Prepare sequence tensors
+        buffer.prepare_sequence_tensors()
+
+        # Request batch size larger than available sequences
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            minibatch_generator = buffer.get_minibatch_sequences(batch_size=10)
+            list(minibatch_generator)  # Consume the generator
+
+            # Should have issued a warning
+            assert len(w) > 0
+            assert "larger than the number of sequences" in str(w[0].message)
+
+    def test_bptt_sequence_type_parameter(self):
+        """Test that bptt_sequence_type parameter is properly stored."""
+        from agilerl.typing import BPTTSequenceType
+
+        obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        action_space = spaces.Discrete(2)
+        hidden_state_arch = {
+            "h_actor": (1, 2, 4),
+        }
+        buffer = RolloutBuffer(
+            capacity=10,
+            observation_space=obs_space,
+            action_space=action_space,
+            num_envs=1,
+            device="cpu",
+            max_seq_len=3,
+            bptt_sequence_type=BPTTSequenceType.MAXIMUM,
+            recurrent=True,
+            hidden_state_architecture=hidden_state_arch,
+        )
+
+        assert buffer.bptt_sequence_type == BPTTSequenceType.MAXIMUM
+
+    def test_sequence_preparation_device_parameter(self):
+        """Test sequence preparation with specific device parameter."""
+        obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        action_space = spaces.Discrete(2)
+        hidden_state_arch = {
+            "h_actor": (1, 2, 4),
+        }
+        buffer = RolloutBuffer(
+            capacity=10,
+            observation_space=obs_space,
+            action_space=action_space,
+            num_envs=1,
+            device="cpu",
+            max_seq_len=3,
+            recurrent=True,
+            hidden_state_architecture=hidden_state_arch,
+        )
+
+        # Add some data
+        for i in range(3):
+            obs = np.array([[i, i + 1]])
+            action = np.array([i % 2])
+            reward = np.array([1.0])
+            done = np.array([i == 2])
+            value = np.array([0.5])
+            log_prob = np.array([0.1])
+
+            buffer.add(obs, action, reward, done, value, log_prob)
+
+        # Compute returns
+        last_value = np.array([0.0])
+        last_done = np.array([True])
+        buffer.compute_returns_and_advantages(last_value, last_done)
+
+        # Prepare sequence tensors with specific device
+        buffer.prepare_sequence_tensors(device="cpu")
+
+        # Check that data is on the correct device
+        assert buffer.padded_data.device.type == "cpu"
+        assert buffer.unpadded_data.device.type == "cpu"
 
 
 class TestRolloutBufferUtilities:
     """Test utility methods and edge cases."""
 
-    def test_reset(self):
+    @pytest.mark.parametrize(
+        "bptt_sequence_type",
+        [
+            BPTTSequenceType.CHUNKED,
+            BPTTSequenceType.MAXIMUM,
+            BPTTSequenceType.FIFTY_PERCENT_OVERLAP,
+        ],
+    )
+    @pytest.mark.parametrize("max_seq_len", [None, 3, 5])
+    def test_get_complete_sequences_method(self, bptt_sequence_type, max_seq_len):
+        """Test the _get_complete_sequences method directly."""
+        obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        action_space = spaces.Discrete(2)
+        hidden_state_arch = {
+            "h_actor": (1, 2, 4),
+        }
+        buffer = RolloutBuffer(
+            capacity=10,
+            observation_space=obs_space,
+            action_space=action_space,
+            num_envs=2,
+            device="cpu",
+            max_seq_len=max_seq_len,
+            bptt_sequence_type=bptt_sequence_type,
+            recurrent=True,
+            hidden_state_architecture=hidden_state_arch,
+        )
+
+        # Create test data
+        test_data = torch.arange(20).reshape(10, 2)  # 10 timesteps, 2 envs
+        episode_done_indices = [[3, 7, 9], [4, 9]]  # Different episode endings per env
+
+        sequences, max_length = buffer._get_complete_sequences(
+            test_data, episode_done_indices
+        )
+
+        # Should have multiple sequences
+        assert len(sequences) > 0
+        assert max_length > 0
+
+        # Check that sequences are torch tensors
+        for seq in sequences:
+            assert isinstance(seq, torch.Tensor)
+
+    def test_convert_td_to_np_dict_method(self):
+        """Test the _convert_td_to_np_dict method."""
+        obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        action_space = spaces.Discrete(2)
+
+        buffer = RolloutBuffer(
+            capacity=5,
+            observation_space=obs_space,
+            action_space=action_space,
+            num_envs=1,
+            device="cpu",
+        )
+
+        # Create a test TensorDict
+        test_td = TensorDict(
+            {
+                "observations": torch.randn(3, 2),
+                "actions": torch.randint(0, 2, (3, 1)),
+                "rewards": torch.randn(3),
+                "hidden_states": TensorDict(
+                    {
+                        "h_actor": torch.randn(3, 1, 4),
+                    },
+                    batch_size=[3],
+                ),
+            },
+            batch_size=[3],
+        )
+
+        # Convert to numpy dict
+        np_dict = buffer._convert_td_to_np_dict(test_td)
+
+        # Check that conversion worked
+        assert isinstance(np_dict, dict)
+        assert "observations" in np_dict
+        assert "actions" in np_dict
+        assert "rewards" in np_dict
+        assert "hidden_states" in np_dict
+
+        # Check that arrays are numpy arrays
+        assert isinstance(np_dict["observations"], np.ndarray)
+        assert isinstance(np_dict["actions"], np.ndarray)
+        assert isinstance(np_dict["rewards"], np.ndarray)
+        assert isinstance(np_dict["hidden_states"], dict)
+        assert isinstance(np_dict["hidden_states"]["h_actor"], np.ndarray)
+
+    def test_sequence_preparation_with_multiple_episodes_per_env(self):
+        """Test sequence preparation with multiple episodes per environment."""
+        obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        action_space = spaces.Discrete(2)
+        hidden_state_arch = {
+            "h_actor": (1, 2, 4),
+        }
+        buffer = RolloutBuffer(
+            capacity=20,
+            observation_space=obs_space,
+            action_space=action_space,
+            num_envs=2,
+            device="cpu",
+            max_seq_len=4,
+            recurrent=True,
+            hidden_state_architecture=hidden_state_arch,
+        )
+
+        # Add multiple episodes with different lengths
+        for i in range(15):
+            obs = np.array([[i, i + 1], [i + 2, i + 3]])
+            action = np.array([i % 2, (i + 1) % 2])
+            reward = np.array([1.0, -1.0])
+            # Create episodes of different lengths for each environment
+            done = np.array([i % 6 == 5, i % 4 == 3])
+            value = np.array([0.5, -0.5])
+            log_prob = np.array([0.1, 0.2])
+
+            buffer.add(obs, action, reward, done, value, log_prob)
+
+        # Compute returns
+        last_value = np.array([0.8, 0.0])
+        last_done = np.array([True, True])
+        buffer.compute_returns_and_advantages(last_value, last_done)
+
+        # Prepare sequence tensors
+        buffer.prepare_sequence_tensors()
+
+        # Should have created multiple sequences
+        assert buffer.num_sequences > 2
+        assert buffer.max_sequence_length <= 4
+
+    def test_sequence_preparation_short_episodes(self):
+        """Test sequence preparation with episodes shorter than max_seq_len."""
+        obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        action_space = spaces.Discrete(2)
+        hidden_state_arch = {
+            "h_actor": (1, 2, 4),
+        }
+        buffer = RolloutBuffer(
+            capacity=10,
+            observation_space=obs_space,
+            action_space=action_space,
+            num_envs=1,
+            device="cpu",
+            max_seq_len=5,  # Longer than episodes
+            recurrent=True,
+            hidden_state_architecture=hidden_state_arch,
+        )
+
+        # Add short episodes
+        for episode in range(3):
+            for i in range(2):  # Each episode is only 2 steps
+                obs = np.array([[episode * 10 + i, episode * 10 + i + 1]])
+                action = np.array([i % 2])
+                reward = np.array([1.0])
+                done = np.array([i == 1])  # Episode ends after 2 steps
+                value = np.array([0.5])
+                log_prob = np.array([0.1])
+
+                buffer.add(obs, action, reward, done, value, log_prob)
+
+        # Compute returns
+        last_value = np.array([0.0])
+        last_done = np.array([True])
+        buffer.compute_returns_and_advantages(last_value, last_done)
+
+        # Prepare sequence tensors
+        buffer.prepare_sequence_tensors()
+
+        # Should have 3 sequences, each of length 2
+        assert buffer.num_sequences == 3
+        assert buffer.max_sequence_length == 2
+
+    def test_minibatch_sequences_remainder_handling(self):
+        """Test minibatch sequences with remainder sequences."""
+        obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        action_space = spaces.Discrete(2)
+        hidden_state_arch = {
+            "h_actor": (1, 2, 4),
+        }
+        buffer = RolloutBuffer(
+            capacity=15,
+            observation_space=obs_space,
+            action_space=action_space,
+            num_envs=1,
+            device="cpu",
+            max_seq_len=2,
+            recurrent=True,
+            hidden_state_architecture=hidden_state_arch,
+        )
+
+        # Add 5 short episodes (will create 5 sequences)
+        for episode in range(5):
+            for i in range(2):
+                obs = np.array([[episode * 10 + i, episode * 10 + i + 1]])
+                action = np.array([i % 2])
+                reward = np.array([1.0])
+                done = np.array([i == 1])
+                value = np.array([0.5])
+                log_prob = np.array([0.1])
+
+                buffer.add(obs, action, reward, done, value, log_prob)
+
+        # Compute returns
+        last_value = np.array([0.0])
+        last_done = np.array([True])
+        buffer.compute_returns_and_advantages(last_value, last_done)
+
+        # Prepare sequence tensors
+        buffer.prepare_sequence_tensors()
+
+        # Get minibatches with batch_size=2 (should have 2 full batches + 1 remainder)
+        batch_size = 2
+        minibatch_generator = buffer.get_minibatch_sequences(batch_size)
+
+        batch_sizes = []
+        for padded_batch, unpadded_batch in minibatch_generator:
+            # Count sequences in this batch by checking the batch dimension
+            batch_sequences = padded_batch.batch_size[0] // buffer.max_sequence_length
+            batch_sizes.append(batch_sequences)
+
+        # Should have 2 batches of size 2 and 1 batch of size 1
+        assert 2 in batch_sizes  # Full batches
+        assert 1 in batch_sizes  # Remainder batch
+
+    @pytest.mark.parametrize("recurrent", [True, False])
+    def test_reset(self, recurrent):
         """Test buffer reset."""
         obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
         action_space = spaces.Discrete(2)
+        hidden_state_arch = {
+            "h_actor": (1, 2, 4),
+        }
         buffer = RolloutBuffer(
             capacity=5,
             observation_space=obs_space,
             action_space=action_space,
             num_envs=2,
             device="cpu",
+            max_seq_len=3,
+            recurrent=recurrent,
+            hidden_state_architecture=hidden_state_arch,
         )
 
-        # Add data
+        # Add some data
         obs = np.array([[1.0, 2.0], [3.0, 4.0]])
         action = np.array([0, 1])
         reward = np.array([1.0, -1.0])
         done = np.array([False, True])
         value = np.array([0.5, -0.5])
         log_prob = np.array([0.1, 0.2])
+        hidden_state = {"h_actor": torch.randn(1, 2, 4)}
 
-        buffer.add(obs, action, reward, done, value, log_prob)
+        buffer.add(
+            obs, action, reward, done, value, log_prob, hidden_state=hidden_state
+        )
 
-        assert buffer.pos == 1
-        assert buffer.size() == 2
+        # Prepare sequences
+        buffer.compute_returns_and_advantages(
+            np.array([0.0, 0.0]), np.array([True, True])
+        )
 
-        # Reset
+        if recurrent:
+            buffer.prepare_sequence_tensors()
+        else:
+            with pytest.raises(ValueError):
+                buffer.prepare_sequence_tensors()
+
+            return
+
+        # Check that buffer has data
+        assert buffer.pos > 0
+        assert buffer.padded_data is not None
+        assert buffer.unpadded_data is not None
+
+        # Reset buffer
         buffer.reset()
 
+        # Check that buffer is reset
         assert buffer.pos == 0
-        assert not buffer.full
-        assert buffer.size() == 0
+        assert buffer.full is False
+        assert buffer.num_sequences is None
+        assert buffer.max_sequence_length is None
+        assert buffer.unpadded_slices is None
+        assert buffer.padded_data is None
+        assert buffer.unpadded_data is None
 
     def test_size_method(self):
         """Test size method."""

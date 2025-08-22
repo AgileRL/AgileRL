@@ -33,7 +33,7 @@ from agilerl.algorithms.core.registry import HyperparameterConfig
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules import EvolvableModule
-from agilerl.typing import GymSpaceType, PopulationType
+from agilerl.typing import BPTTSequenceType, GymSpaceType, PopulationType
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, clone_llm
 from agilerl.utils.llm_utils import DummyOptimizer
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
@@ -349,6 +349,9 @@ def create_population(
                 share_encoders=INIT_HP.get("SHARE_ENCODERS", True),
                 recurrent=INIT_HP.get("RECURRENT", False),
                 use_rollout_buffer=INIT_HP.get("USE_ROLLOUT_BUFFER", False),
+                bptt_sequence_type=INIT_HP.get(
+                    "BPTT_SEQUENCE_TYPE", BPTTSequenceType.CHUNKED
+                ),
                 actor_network=actor_network,
                 critic_network=critic_network,
                 device=device,
