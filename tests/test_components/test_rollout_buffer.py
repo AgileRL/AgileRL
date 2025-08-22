@@ -1617,7 +1617,7 @@ class TestRolloutBufferUtilities:
 
         # Check that buffer is reset
         assert buffer.pos == 0
-        assert buffer.full == False
+        assert buffer.full is False
         assert buffer.num_sequences is None
         assert buffer.max_sequence_length is None
         assert buffer.unpadded_slices is None

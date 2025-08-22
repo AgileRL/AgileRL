@@ -18,7 +18,7 @@ from agilerl.algorithms.core import (
     MultiAgentRLAlgorithm,
     RLAlgorithm,
 )
-from agilerl.modules import EvolvableLSTM, EvolvableModule, ModuleDict
+from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.typing import (
     EvolvableNetworkType,
     MutationMethod,

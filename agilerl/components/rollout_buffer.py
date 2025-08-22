@@ -1,7 +1,5 @@
-import random  # Added to support random sequence sampling for BPTT
 import warnings
 from collections import OrderedDict
-from functools import singledispatch
 from typing import Any, Dict, Generator, List, Optional, Tuple, Union
 
 import numpy as np
