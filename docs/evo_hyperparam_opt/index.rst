@@ -105,9 +105,9 @@ of the hyperparameters and evolvable networks registered for mutation. Specifica
         # Need to use the algorithms attribute names in DQN 'lr', 'batch_size',
         # and 'learn_step' to register the hyperparameters
         hp_config = HyperparameterConfig(
-            lr=RLParameter(min=1e-4, max=1e-2, dtype=float),
-            batch_size=RLParameter(min=32, max=256, dtype=int),
-            learn_step=RLParameter(min=1, max=10, dtype=int, grow_factor=1.5, shrink_factor=0.75),
+            lr=RLParameter(min=1e-4, max=1e-2),
+            batch_size=RLParameter(min=32, max=256),
+            learn_step=RLParameter(min=1, max=10, grow_factor=1.5, shrink_factor=0.75),
         )
 
     - The optimizers used in an algorithm are also indirectly mutable since they include mutable parameters such as the learning rate, and optimize evolvable networks. For this reason,
@@ -222,9 +222,9 @@ method. If we wanted to mutate the learning rate, batch size, and learning step 
     # Need to use the algorithms attribute names in DQN 'lr', 'batch_size',
     # and 'learn_step' to register the hyperparameters
     hp_config = HyperparameterConfig(
-        lr=RLParameter(min=1e-4, max=1e-2, dtype=float),
-        batch_size=RLParameter(min=32, max=256, dtype=int),
-        learn_step=RLParameter(min=1, max=10, dtype=int, grow_factor=1.5, shrink_factor=0.75),
+        lr=RLParameter(min=1e-4, max=1e-2),
+        batch_size=RLParameter(min=32, max=256),
+        learn_step=RLParameter(min=1, max=10, grow_factor=1.5, shrink_factor=0.75),
     )
 
 

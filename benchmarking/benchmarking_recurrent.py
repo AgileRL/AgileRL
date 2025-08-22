@@ -14,6 +14,7 @@ from agilerl.utils.utils import (
     make_vect_envs,
     print_hyperparams,
 )
+from agilerl.wrappers.agent import RSNorm
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -103,12 +104,18 @@ def main_recurrent(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
             max=MUTATION_PARAMS["MAX_BATCH_SIZE"],
             dtype=int,
         ),
-        learn_step=RLParameter(
-            min=MUTATION_PARAMS["MIN_LEARN_STEP"],
-            max=MUTATION_PARAMS["MAX_LEARN_STEP"],
-            dtype=int,
-            grow_factor=1.5,
-            shrink_factor=0.75,
+        # learn_step=RLParameter(
+        #     min=MUTATION_PARAMS["MIN_LEARN_STEP"],
+        #     max=MUTATION_PARAMS["MAX_LEARN_STEP"],
+        #     dtype=int,
+        #     grow_factor=1.5,
+        #     shrink_factor=0.75,
+        # ),
+        ent_coef=RLParameter(
+            min=MUTATION_PARAMS["MIN_ENT_COEF"],
+            max=MUTATION_PARAMS["MAX_ENT_COEF"],
+            grow_factor=1.0,
+            shrink_factor=0.9,
         ),
     )
 
@@ -123,6 +130,9 @@ def main_recurrent(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         num_envs=INIT_HP["NUM_ENVS"],
         device=device,
     )
+
+    # Normalize observations using running mean and std
+    agent_pop = [RSNorm(agent) for agent in agent_pop]
 
     env_name_prefix = INIT_HP["ENV_NAME"].split("-")[0]
     env_name_prefix = env_name_prefix + "NoVel"

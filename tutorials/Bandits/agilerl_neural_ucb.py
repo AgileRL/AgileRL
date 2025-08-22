@@ -3,6 +3,8 @@
 Authors: Nick (https://github.com/nicku-a)
 """
 
+from typing import List
+
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -11,26 +13,31 @@ from scipy.ndimage import gaussian_filter1d
 from tensordict import TensorDict
 from ucimlrepo import fetch_ucirepo
 
+from agilerl.algorithms import NeuralUCB
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.replay_buffer import ReplayBuffer
-from agilerl.utils.utils import create_population
+from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.tournament import TournamentSelection
+from agilerl.utils.utils import create_population, default_progress_bar
 from agilerl.wrappers.learning import BanditEnv
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    NET_CONFIG = {"encoder_config": {"hidden_size": [128]}}  # Actor head hidden size
+    NET_CONFIG = {
+        "latent_dim": 64,
+        "encoder_config": {"hidden_size": [64]},
+        "head_config": {"hidden_size": [64]},
+    }
 
     INIT_HP = {
-        "POPULATION_SIZE": 1,  # Population size
+        "POPULATION_SIZE": 4,  # Population size
         "BATCH_SIZE": 64,  # Batch size
         "LR": 1e-3,  # Learning rate
         "GAMMA": 1.0,  # Scaling factor
         "LAMBDA": 1.0,  # Regularization factor
         "REG": 0.000625,  # Loss regularization factor
         "LEARN_STEP": 2,  # Learning frequency
-        # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-        "CHANNELS_LAST": False,
     }
 
     # Fetch data  https://archive.ics.uci.edu/
@@ -55,7 +62,7 @@ if __name__ == "__main__":
         low=features.values.min(), high=features.values.max(), shape=context_dim
     )
     action_space = spaces.Discrete(action_dim)
-    pop = create_population(
+    pop: List[NeuralUCB] = create_population(
         algo="NeuralUCB",  # Algorithm
         observation_space=observation_space,  # Observation space
         action_space=action_space,  # Action space
@@ -71,19 +78,40 @@ if __name__ == "__main__":
         device=device,
     )
 
+    tournament = TournamentSelection(
+        tournament_size=2,  # Tournament selection size
+        elitism=True,  # Elitism in tournament selection
+        population_size=INIT_HP["POPULATION_SIZE"],  # Population size
+        eval_loop=1,  # Evaluate using last N fitness scores
+    )
+
+    mutations = Mutations(
+        no_mutation=0.4,  # No mutation
+        architecture=0.2,  # Architecture mutation
+        new_layer_prob=0.2,  # New layer mutation
+        parameters=0.2,  # Network parameters mutation
+        activation=0.2,  # Activation layer mutation
+        rl_hp=0.2,  # Learning HP mutation
+        mutation_sd=0.1,  # Mutation strength
+        mutate_elite=False,  # Mutate best agent in population  # Network architecture
+        rand_seed=1,  # Random seed
+        device=device,
+    )
+
     max_steps = 2500  # Max steps per episode
     episode_steps = 500  # Steps in episode
     evo_steps = 500  # Evolution frequency
     eval_steps = 500  # Evaluation steps per episode
     eval_loop = 1  # Number of evaluation episodes
-
-    print("Training...")
+    evo_count = 0
 
     regret = [[0] for _ in pop]
     score = [[0] for _ in pop]
     total_steps = 0
 
     # TRAINING LOOP
+    print("Training...")
+    pbar = default_progress_bar(max_steps)
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         for i, agent in enumerate(pop):  # Loop through population
             losses = []
@@ -122,21 +150,31 @@ if __name__ == "__main__":
             total_steps += episode_steps
             agent.steps[-1] += episode_steps
 
+        pbar.update(episode_steps)
+
         # Evaluate population
         fitnesses = [
             agent.test(
                 env,
-                swap_channels=INIT_HP["CHANNELS_LAST"],
                 max_steps=eval_steps,
                 loop=eval_loop,
             )
             for agent in pop
         ]
 
-        print(f"--- Global steps {total_steps} ---")
-        print(f"Steps {[agent.steps[-1] for agent in pop]}")
-        print(f"Regret: {[regret[i][-1] for i in range(len(pop))]}")
-        print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
+        pbar.write(
+            f"--- Global steps {total_steps} ---\n"
+            f"Steps {[agent.steps[-1] for agent in pop]}\n"
+            f"Regret: {[regret[i][-1] for i in range(len(pop))]}\n"
+            f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}\n'
+            f"Mutations: {[agent.mut for agent in pop]}"
+        )
+
+        if pop[0].steps[-1] // evo_steps > evo_count:
+            # Tournament selection and population mutation
+            elite, pop = tournament.select(pop)
+            pop = mutations.mutation(pop)
+            evo_count += 1
 
     # Plot the results
     plt.figure()

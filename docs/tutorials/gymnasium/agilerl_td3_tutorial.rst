@@ -161,10 +161,8 @@ population. The sequence of evolution (tournament selection followed by mutation
     hp_config = HyperparameterConfig(
         lr_actor = RLParameter(min=1e-4, max=1e-2),
         lr_critic = RLParameter(min=1e-4, max=1e-2),
-        learn_step = RLParameter(min=1, max=16, dtype=int),
-        batch_size = RLParameter(
-            min=8, max=512, dtype=int
-            )
+        learn_step = RLParameter(min=1, max=16),
+        batch_size = RLParameter(min=8, max=512),
     )
 
     # Define a population

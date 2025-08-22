@@ -717,10 +717,8 @@ Before we go any further in this tutorial, it would be helpful to define and set
       # Mutation config for RL hyperparameters
       hp_config = HyperparameterConfig(
          lr = RLParameter(min=1e-4, max=1e-2),
-         batch_size = RLParameter(min=8, max=64, dtype=int),
-         learn_step = RLParameter(
-               min=1, max=120, dtype=int, grow_factor=1.5, shrink_factor=0.75
-               )
+         batch_size = RLParameter(min=8, max=64),
+         learn_step = RLParameter(min=1, max=120, grow_factor=1.5, shrink_factor=0.75)
       )
 
       # Create a population ready for evolutionary hyper-parameter optimisation

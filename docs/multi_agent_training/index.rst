@@ -257,10 +257,8 @@ In the snippet below, we show an example of how to create a population of MADDPG
         hp_config = HyperparameterConfig(
             lr_actor = RLParameter(min=1e-4, max=1e-2),
             lr_critic = RLParameter(min=1e-4, max=1e-2),
-            batch_size = RLParameter(min=8, max=512, dtype=int),
-            learn_step = RLParameter(
-                min=20, max=200, dtype=int, grow_factor=1.5, shrink_factor=0.75
-                )
+            batch_size = RLParameter(min=8, max=512),
+            learn_step = RLParameter(min=20, max=200, grow_factor=1.5, shrink_factor=0.75)
         )
 
         # Create a population ready for evolutionary hyper-parameter optimisation
@@ -649,10 +647,8 @@ In the snippet below, we show an example of how to create a population of IPPO a
         # Mutation config for RL hyperparameters
         hp_config = HyperparameterConfig(
             lr = RLParameter(min=1e-4, max=1e-2),
-            batch_size = RLParameter(min=8, max=1024, dtype=int),
-            learn_step = RLParameter(
-                min=256, max=8192, dtype=int, grow_factor=1.5, shrink_factor=0.75
-                )
+            batch_size = RLParameter(min=8, max=1024),
+            learn_step = RLParameter(min=256, max=8192, grow_factor=1.5, shrink_factor=0.75)
         )
 
         # Create a population ready for evolutionary hyper-parameter optimisation

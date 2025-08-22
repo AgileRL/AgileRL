@@ -409,8 +409,8 @@ to have access to the ``HalfCheetah-v4`` environment.
         hp_config = HyperparameterConfig(
             lr_actor=RLParameter(min=1e-4, max=1e-2),
             lr_critic=RLParameter(min=1e-4, max=1e-2),
-            batch_size=RLParameter(min=8, max=512, dtype=int),
-            learn_step=RLParameter(min=1, max=16, dtype=int, grow_factor=1.5, shrink_factor=0.75)
+            batch_size=RLParameter(min=8, max=512),
+            learn_step=RLParameter(min=1, max=16, grow_factor=1.5, shrink_factor=0.75)
         )
 
         # Architecture of networks in algorithm
