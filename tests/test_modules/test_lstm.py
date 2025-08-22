@@ -66,7 +66,6 @@ def test_forward_with_states(device):
     num_outputs = 5
     num_layers = 2
     batch_size = 1
-    seq_len = 5
 
     evolvable_lstm = EvolvableLSTM(
         input_size=input_size,
@@ -76,9 +75,9 @@ def test_forward_with_states(device):
         device=device,
     )
 
-    input_tensor = torch.randn(batch_size, seq_len, input_size).to(device)
-    h0 = torch.zeros(num_layers, batch_size, hidden_size).to(device)
-    c0 = torch.zeros(num_layers, batch_size, hidden_size).to(device)
+    input_tensor = torch.randn(batch_size, 1, input_size).to(device)
+    h0 = torch.zeros(num_layers, 1, hidden_size).to(device)
+    c0 = torch.zeros(num_layers, 1, hidden_size).to(device)
 
     with torch.no_grad():
         # Pass hidden states to forward manually
@@ -246,7 +245,7 @@ def test_change_activation(device):
         assert lstm.output_activation == activation
 
         # Verify the activation works through forward pass
-        input_tensor = torch.randn(1, 5, 10).to(device)
+        input_tensor = torch.randn(1, 10).to(device)
         h0 = torch.zeros(1, 1, 64).to(device)
         c0 = torch.zeros(1, 1, 64).to(device)
         output, (hn, cn) = lstm.forward(
