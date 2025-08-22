@@ -11,11 +11,13 @@ import numpy as np
 import torch
 
 from agilerl.algorithms import PPO
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.rollouts import collect_rollouts, collect_rollouts_recurrent
 from agilerl.typing import BPTTSequenceType
 from agilerl.utils.utils import create_population, default_progress_bar
+from agilerl.wrappers.agent import RSNorm
 
 
 # --- Define the Memory Game Environment ---
@@ -117,7 +119,7 @@ def run_demo():
         NET_CONFIG = {
             "encoder_config": {
                 "hidden_state_size": 64,  # LSTM hidden state size
-                "max_seq_len": 3,  # Match episode length
+                "max_seq_len": None,  # Use full episodes for BPTT
                 "num_layers": 1,
             },
         }
@@ -159,16 +161,26 @@ def run_demo():
     observation_space = env.single_observation_space
     action_space = env.single_action_space
 
+    hp_config = HyperparameterConfig(
+        lr=RLParameter(min=1e-4, max=1e-3),
+        batch_size=RLParameter(min=16, max=128),
+        learn_step=RLParameter(min=16, max=128, dtype=int),
+    )
+
     pop: List[PPO] = create_population(
         algo="PPO",
         observation_space=observation_space,
         action_space=action_space,
         net_config=NET_CONFIG,
         INIT_HP=INIT_HP,
+        hp_config=hp_config,
         population_size=INIT_HP["POP_SIZE"],
         num_envs=num_envs,
         device=device,
     )
+
+    # Normalize observations using running mean and std
+    pop = [RSNorm(agent) for agent in pop]
 
     # --- Setup Evolution Components ---
     eval_loop = 10
@@ -188,13 +200,13 @@ def run_demo():
         rl_hp=0.2,
         mutation_sd=0.1,
         activation_selection=["ReLU", "ELU", "GELU"],
-        mutate_elite=True,
+        mutate_elite=False,
         rand_seed=1,
         device=device,
     )
 
     # --- Training Loop ---
-    max_steps = 5_000_000
+    max_steps = 5_000_000 // len(pop)
     required_score = 0.95
     evo_steps = INIT_HP["LEARN_STEP"] * 30
     eval_steps = None
@@ -235,7 +247,7 @@ def run_demo():
                 completed_episodes += episode_scores
 
             pop_episode_scores.append(
-                np.mean(completed_episodes)
+                round(np.mean(completed_episodes), 2)
                 if len(completed_episodes) > 0
                 else "0 completed episodes"
             )

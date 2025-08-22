@@ -5,10 +5,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import gymnasium as gym
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from gymnasium import spaces
 
+import wandb
 from agilerl.algorithms import PPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -353,7 +353,10 @@ def train_on_policy(
         # Evaluate population
         fitnesses = [
             agent.test(
-                env, swap_channels=swap_channels, max_steps=eval_steps, loop=eval_loop
+                env,
+                swap_channels=swap_channels,
+                max_steps=eval_steps,
+                loop=eval_loop,
             )
             for agent in pop
         ]

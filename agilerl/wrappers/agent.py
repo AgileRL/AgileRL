@@ -9,6 +9,7 @@ import torch
 from gymnasium import spaces
 from tensordict import is_tensor_collection
 
+from agilerl.algorithms import PPO
 from agilerl.algorithms.core import (
     EvolvableAlgorithm,
     MultiAgentRLAlgorithm,
@@ -70,7 +71,7 @@ class AgentWrapper(ABC, Generic[AgentType]):
         :return: Device of the agent
         :rtype: DeviceType
         """
-        return self.agent.device
+        return self.agent.device if not hasattr(self.agent, "rollout_buffer") else "cpu"
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}({self.agent})"
@@ -391,7 +392,9 @@ class RSNorm(AgentWrapper[AgentType]):
         obs = self.normalize_observation(obs)
         return self.wrapped_get_action(obs, *args, **kwargs)
 
-    def learn(self, experiences: ExperiencesType, *args: Any, **kwargs: Any) -> Any:
+    def learn(
+        self, experiences: Optional[ExperiencesType] = None, *args: Any, **kwargs: Any
+    ) -> Any:
         """Learns from the experiences after normalizing the observations.
 
         :param experiences: Experiences from the environment
@@ -404,8 +407,28 @@ class RSNorm(AgentWrapper[AgentType]):
         :return: Learning information
         :rtype: Any
         """
+        if experiences is None:
+            if not isinstance(self.agent, PPO) or not self.agent.use_rollout_buffer:
+                raise ValueError(
+                    "Experiences must be provided if not using a rollout buffer."
+                )
+
+            buffer_size = (
+                self.agent.rollout_buffer.capacity
+                if not self.agent.rollout_buffer.full
+                else self.agent.rollout_buffer.pos
+            )
+            valid_data = self.agent.rollout_buffer.buffer[:buffer_size]
+            valid_data["observations"] = self.normalize_observation(
+                valid_data["observations"]
+            )
+            valid_data["next_observations"] = self.normalize_observation(
+                valid_data["next_observations"]
+            )
+            self.agent.rollout_buffer.buffer[:buffer_size] = valid_data
+
         # NOTE: We want to move towards always passing experiences as TensorDict objects
-        if is_tensor_collection(experiences):
+        elif is_tensor_collection(experiences):
             experiences["obs"] = self.normalize_observation(experiences["obs"])
             experiences["next_obs"] = self.normalize_observation(
                 experiences["next_obs"]

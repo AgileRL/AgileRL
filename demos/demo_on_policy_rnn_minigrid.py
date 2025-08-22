@@ -153,7 +153,7 @@ def run_demo():
     training_complete = False
 
     print("Training...")
-    pbar = default_progress_bar(max_steps * len(pop))
+    pbar = default_progress_bar(max_steps)
     while (
         np.less([agent.steps[-1] for agent in pop], max_steps).all()
         and not training_complete

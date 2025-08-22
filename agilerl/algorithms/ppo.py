@@ -305,7 +305,7 @@ class PPO(RLAlgorithm):
             self.register_mutation_hook(self.share_encoder_parameters)
 
         self.optimizer = OptimizerWrapper(
-            optim.AdamW, networks=[self.actor, self.critic], lr=self.lr
+            optim.Adam, networks=[self.actor, self.critic], lr=self.lr
         )
 
         # Initialize rollout buffer if enabled
@@ -322,10 +322,6 @@ class PPO(RLAlgorithm):
         self.register_network_group(NetworkGroup(eval_network=self.critic))
 
         self.hidden_state = None
-        self._last_obs = None
-        self._last_done = None
-        self._last_scores = None
-        self._last_info = None
 
     def share_encoder_parameters(self) -> None:
         """Shares the encoder parameters between the actor and critic."""
@@ -752,6 +748,13 @@ class PPO(RLAlgorithm):
             warnings.warn("Buffer data is empty. Skipping learning step.")
             return 0.0
 
+        # Normalize advantages globally
+        valid_advantages: torch.Tensor = buffer_td.get("advantages")
+        normalized_advantages = (valid_advantages - valid_advantages.mean()) / (
+            valid_advantages.std() + 1e-8
+        )
+        buffer_td["advantages"] = normalized_advantages
+
         batch_size = self.batch_size
         num_samples = self.rollout_buffer.size()
         indices = np.arange(num_samples)
@@ -773,39 +776,14 @@ class PPO(RLAlgorithm):
                 mb_returns = minibatch_td["returns"]
                 mb_old_values = minibatch_td["values"]
 
-                eval_hidden_state = None
-                if self.recurrent:
-                    # If recurrent, hidden_states should be in the buffer_td
-                    # buffer_td["hidden_states"] is a TD: {key: tensor_shape_(total_samples, layers, size)}
-                    # minibatch_td["hidden_states"] will be {key: tensor_shape_(len(minibatch_indices), layers, size)}
-                    # _get_action_and_values expects dict {key: (layers, batch, size)}
-                    if "hidden_states" in minibatch_td.keys(include_nested=True):
-                        mb_hidden_states_td: TensorDict = minibatch_td.get(
-                            "hidden_states"
-                        )
-                        eval_hidden_state = {
-                            # v has shape (minibatch_size, layers, size), permute to (layers, minibatch_size, size)
-                            k: v.permute(1, 0, 2).contiguous()
-                            for k, v in mb_hidden_states_td.items()
-                        }
-                    else:
-                        warnings.warn(
-                            "Recurrent policy, but no hidden_states found in minibatch_td for flat learning."
-                        )
-
                 if isinstance(self.action_space, spaces.Discrete):
                     mb_actions = mb_actions.squeeze(-1)
 
                 log_probs, entropy, values = self.evaluate_actions(
-                    obs=mb_obs, actions=mb_actions, hidden_state=eval_hidden_state
+                    obs=mb_obs, actions=mb_actions, hidden_state=None
                 )
 
-                # Normalize advantages
-                mb_advantages = (mb_advantages - mb_advantages.mean()) / (
-                    mb_advantages.std() + 1e-8
-                )
-
-                # Policy los
+                # Policy loss
                 ratio = torch.exp(log_probs - mb_log_probs)
                 policy_loss1 = -mb_advantages * ratio
                 policy_loss2 = -mb_advantages * torch.clamp(
@@ -862,6 +840,23 @@ class PPO(RLAlgorithm):
         :return: Mean loss over the epochs
         :rtype: float
         """
+        buffer_size = (
+            self.rollout_buffer.capacity
+            if self.rollout_buffer.full
+            else self.rollout_buffer.pos
+        )
+
+        # Normalize advantages globally
+        valid_advantages: torch.Tensor = self.rollout_buffer.buffer.get("advantages")[
+            :buffer_size
+        ]
+        original_shape = valid_advantages.shape
+        flat_adv = valid_advantages.reshape(-1)
+        normalized_flat_adv = (flat_adv - flat_adv.mean()) / (flat_adv.std() + 1e-8)
+        self.rollout_buffer.buffer["advantages"][:buffer_size] = (
+            normalized_flat_adv.reshape(original_shape)
+        )
+
         # Form padded sequences to perform BPTT on
         self.rollout_buffer.prepare_sequence_tensors(device=self.device)
 
@@ -893,7 +888,6 @@ class PPO(RLAlgorithm):
                     )
                 )
 
-                policy_loss_total, value_loss_total, entropy_loss_total = 0.0, 0.0, 0.0
                 approx_kl_divs_minibatch_timesteps = []
 
                 # For actor: {key: (layers, batch_seq_size, hidden_size)}
@@ -913,7 +907,7 @@ class PPO(RLAlgorithm):
                 # log_prob: (batch_seq,)
                 (
                     new_log_probs,
-                    entropies,
+                    entropy,
                     new_values,
                 ) = self.evaluate_actions(
                     obs=mb_obs_seq,
@@ -921,18 +915,13 @@ class PPO(RLAlgorithm):
                     hidden_state=mb_initial_hidden_states_dict,
                 )
 
-                # Normalize advantages
-                mb_advantages = (mb_advantages - mb_advantages.mean()) / (
-                    mb_advantages.std() + 1e-8
-                )
-
                 # Mask out padded values
                 new_values = new_values[mb_pad_mask]
                 new_log_probs = new_log_probs[mb_pad_mask]
-                entropies = entropies[mb_pad_mask]
+                entropy = entropy[mb_pad_mask]
 
-                if isinstance(entropies, torch.Tensor):
-                    entropies = entropies.mean()
+                if isinstance(entropy, torch.Tensor):
+                    entropy = entropy.mean()
 
                 # Policy loss
                 ratio = torch.exp(new_log_probs - mb_old_log_probs)
@@ -940,11 +929,20 @@ class PPO(RLAlgorithm):
                 policy_loss2 = -mb_advantages * torch.clamp(
                     ratio, 1 - self.clip_coef, 1 + self.clip_coef
                 )
-                policy_loss_total += torch.max(policy_loss1, policy_loss2).mean()
+                policy_loss = torch.max(policy_loss1, policy_loss2).mean()
 
                 # Value loss
-                value_loss_total += 0.5 * ((new_values - mb_returns) ** 2).mean()
-                entropy_loss_total += -entropies  # entropy_t is already mean
+                v_loss_unclipped = (new_values - mb_returns) ** 2
+                v_clipped = mb_values + torch.clamp(
+                    new_values - mb_values, -self.clip_coef, self.clip_coef
+                )
+
+                v_loss_clipped = (v_clipped - mb_returns) ** 2
+                v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
+                value_loss = v_loss_max.mean()
+
+                # Entropy loss
+                entropy_loss = -entropy
 
                 with torch.no_grad():
                     log_ratio = new_log_probs - mb_old_log_probs
@@ -953,9 +951,9 @@ class PPO(RLAlgorithm):
                     )
 
                 loss = (
-                    policy_loss_total
-                    + self.vf_coef * value_loss_total
-                    + self.ent_coef * entropy_loss_total
+                    policy_loss
+                    + self.vf_coef * value_loss
+                    + self.ent_coef * entropy_loss
                 )
 
                 self.optimizer.zero_grad()

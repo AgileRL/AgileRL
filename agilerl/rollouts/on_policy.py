@@ -62,6 +62,9 @@ def _collect_rollouts(
         obs, info = env.reset()
         scores = np.zeros(agent.num_envs)
         done = np.zeros(agent.num_envs)
+        agent.hidden_state = (
+            agent.get_initial_hidden_state(agent.num_envs) if recurrent else None
+        )
     else:
         obs = last_obs
         done = last_done
@@ -71,9 +74,6 @@ def _collect_rollouts(
     n_steps = n_steps or -(agent.learn_step // -agent.num_envs)
     agent.rollout_buffer.reset()
 
-    agent.hidden_state = (
-        agent.get_initial_hidden_state(agent.num_envs) if recurrent else None
-    )
     current_hidden_state_for_actor = agent.hidden_state
 
     completed_episode_scores = []

@@ -531,10 +531,8 @@ End-to-end example
         # RL hyperparameters configuration for mutation during training
         hp_config = HyperparameterConfig(
             lr = RLParameter(min=6.25e-5, max=1e-2),
-            learn_step = RLParameter(min=1, max=10, dtype=int),
-            batch_size = RLParameter(
-                min=8, max=512, dtype=int
-                )
+            learn_step = RLParameter(min=1, max=10),
+            batch_size = RLParameter(min=8, max=512),
         )
 
         # Tournament selection

@@ -1,6 +1,7 @@
 import random  # Added to support random sequence sampling for BPTT
 import warnings
 from collections import OrderedDict
+from functools import singledispatch
 from typing import Any, Dict, Generator, List, Optional, Tuple, Union
 
 import numpy as np
@@ -15,7 +16,12 @@ from agilerl.typing import (
     StandardTensorDict,
     TorchObsType,
 )
-from agilerl.utils.algo_utils import get_num_actions, get_obs_shape, maybe_add_batch_dim
+from agilerl.utils.algo_utils import (
+    extract_sequences_from_episode,
+    get_num_actions,
+    get_obs_shape,
+    maybe_add_batch_dim,
+)
 
 
 class RolloutBuffer:
@@ -574,11 +580,17 @@ class RolloutBuffer:
     @staticmethod
     def _pad_sequences(
         sequences: List[Union[torch.Tensor, TensorDict]],
+        target_length: Optional[int] = None,
     ) -> Union[torch.Tensor, TensorDict]:
-        """Pads a sequence to the target length using zeros. Results in a tensor of shape (target_length, *sequence.shape[1:]).
+        """Pads sequences using zeros. If target_length is provided, the sequences are padded to the target length.
+        Otherwise, the sequences are padded to the length of the longest sequence. Results in a tensor of
+        shape (B, T, *). We provide the option to pad to a specified target length but in general these should be padded
+        to the maximum length of the sequences in the batch (i.e. using `torch.nn.utils.rnn.pad_sequence`).
 
         :param sequences: The sequences to be padded.
         :type sequences: List[Union[torch.Tensor, TensorDict]]
+        :param target_length: The target length to pad the sequences to. If None, the sequences are padded to the length of the longest sequence.
+        :type target_length: Optional[int]
         :return: The padded sequence.
         :rtype: Union[torch.Tensor, TensorDict]
         """
@@ -590,11 +602,25 @@ class RolloutBuffer:
             }
             return TensorDict(
                 {
-                    key: RolloutBuffer._pad_sequences(sequences_T[key])
+                    key: RolloutBuffer._pad_sequences(sequences_T[key], target_length)
                     for key in sequences_T.keys()
                 }
             )
 
+        # If target_length is provided, pad the sequences to the target length
+        if target_length is not None:
+            padded_sequences = []
+            for seq in sequences:
+                current_length = seq.size(0)
+                pad_amount = target_length - current_length
+                pad_spec = [0, 0] * (seq.dim() - 1) + [0, pad_amount]
+                padded_sequences.append(
+                    torch.nn.functional.pad(seq, pad_spec, mode="constant", value=0)
+                )
+
+            return torch.stack(padded_sequences)
+
+        # Otherwise, pad the sequences to the length of the longest sequence
         return torch.nn.utils.rnn.pad_sequence(
             sequences, batch_first=True, padding_value=0
         )
@@ -604,8 +630,9 @@ class RolloutBuffer:
         data: torch.Tensor,
         episode_done_indices: List[List[int]],
     ) -> Tuple[List[torch.Tensor], int]:
-        """Splits the provided data into episodes and, if specified, as many sequences of length
-        `self.max_seq_len` as possible.
+        """Splits the provided data into sequences. If `self.max_seq_len` is not set, the entire episode
+        is used as a sequence. Otherwise, the episode is split into sequences of length `self.max_seq_len`.
+        If the episode is shorter than `self.max_seq_len`, the entire episode is used as a sequence.
 
         :param data: The data to be split into sequences.
         :type data: torch.Tensor
@@ -616,7 +643,7 @@ class RolloutBuffer:
         """
         max_seq_len = self.max_seq_len
         sequences = []
-        max_length = max_seq_len or 1
+        max_length = 1
         for env_idx in range(self.num_envs):
             start_index = 0
             for done_index in episode_done_indices[env_idx]:
@@ -625,41 +652,21 @@ class RolloutBuffer:
 
                 # Split episodes into sequences for truncated BPTT
                 # If max_seq_len is not set, use the entire episode as a sequence
-                if max_seq_len is not None:
-                    # Gather unique sequences in the episode
-                    if self.bptt_sequence_type == BPTTSequenceType.CHUNKED:
-                        num_chunks = max(1, len(episode) // max_seq_len)
-                        for chunk_i in range(num_chunks):
-                            sequences.append(
-                                episode[
-                                    chunk_i * max_seq_len : (chunk_i + 1) * max_seq_len
-                                ].clone()
-                            )
-
-                    # Gather all possible sequences of length max_seq_len
-                    elif self.bptt_sequence_type == BPTTSequenceType.MAXIMUM:
-                        for start in range(0, len(episode), max_seq_len):
-                            end = start + max_seq_len
-                            sequences.append(episode[start:end].clone())
-
-                    # Gather sequences of length max_seq_len with 50% overlap
-                    elif (
-                        self.bptt_sequence_type
-                        == BPTTSequenceType.FIFTY_PERCENT_OVERLAP
-                    ):
-                        step_size = max_seq_len // 2
-                        for start in range(
-                            0, len(episode) - max_seq_len + 1, step_size
-                        ):
-                            sequences.append(
-                                episode[start : start + max_seq_len].clone()
-                            )
+                # NOTE: It may be the case that we provide a max_seq_len but we have episodes
+                # that are shorter than max_seq_len. In this case, we will use the entire episode
+                # as a sequence, and later pad the shorter episodes to the max_seq_len.
+                if (max_seq_len is not None) and (len(episode) >= max_seq_len):
+                    # Extract sequences from the episode
+                    truncated_sequences = extract_sequences_from_episode(
+                        episode=episode,
+                        max_seq_len=max_seq_len,
+                        sequence_type=self.bptt_sequence_type,
+                    )
+                    sequences.extend(truncated_sequences)
                 else:
                     sequences.append(episode)
-                    max_length = (
-                        len(episode) if len(episode) > max_length else max_length
-                    )
 
+                max_length = len(episode) if len(episode) > max_length else max_length
                 start_index = done_index + 1
 
         return sequences, max_length
@@ -667,11 +674,21 @@ class RolloutBuffer:
     def prepare_sequence_tensors(self, device: Optional[str] = None) -> TensorDict:
         """Returns a TensorDict with all of the possible sequences in the buffer for the
         observations, actions, and hidden states. We pad the sequences to the same length to obtain
-        a TensorDict with batch_size [num_sequences, max_sequence_length] for efficient batch processing.
+        a TensorDict with batch_size [num_sequences, max_sequence_length] for efficient truncated BPTT.
 
+        :param device: Device to put tensors on, defaults to None (uses self.device).
+        :type device: Optional[str]
         :return: Dictionary with tensor sequences.
         :rtype: TensorDict
         """
+        if not self.recurrent:
+            raise ValueError(
+                "prepare_sequence_tensors() is only supported when recurrent=True."
+            )
+
+        if self.size() == 0:
+            raise ValueError("Attempting to prepare sequences with empty buffer.")
+
         target_device = device or self.device
         buffer_size = self.capacity if self.full else self.pos
 
@@ -688,7 +705,7 @@ class RolloutBuffer:
             env_dones_list = env_dones.nonzero().squeeze(-1).tolist()
             episode_done_indices.append(env_dones_list)
 
-            # Index of the last element of a trajectory marks the end of an episode
+            # Mark the end of the buffer as the end of an episode
             if (
                 len(episode_done_indices[env_idx]) == 0
                 or episode_done_indices[env_idx][-1] != buffer_size - 1
@@ -705,7 +722,6 @@ class RolloutBuffer:
 
         self.unpadded_slices = unpadded_slices
 
-        # Need to pad observations and actions for batch processing
         valid_data_to_pad: TensorDictBase = valid_buffer_data_view.select(
             "observations", "actions", "hidden_states"
         ).clone()
@@ -723,14 +739,23 @@ class RolloutBuffer:
             )
 
             # Apply zero-padding to ensure that each episode has the same length
-            padded_data_source[key] = RolloutBuffer._pad_sequences(sequences)
+            # NOTE: In https://github.com/MarcoMeter/recurrent-ppo-truncated-bpttm sequences
+            # are padded to the maximum episode length, whereas these should be padded to the
+            # specified max_sequence_length for truncated BPTT to see its benefits.
+            padded_data_source[key] = RolloutBuffer._pad_sequences(
+                sequences, target_length=None
+            )
 
-        self.max_sequence_length = max_sequence_length
+        self.max_sequence_length = (
+            min(max_sequence_length, self.max_seq_len)
+            if self.max_seq_len is not None
+            else max_sequence_length
+        )
         self.num_sequences = len(sequences)
 
         padded_td = TensorDict(
             source=padded_data_source,
-            batch_size=[self.num_sequences, max_sequence_length],
+            batch_size=[self.num_sequences, self.max_sequence_length],
         )
 
         # Now, create the "initial_hidden_states" part for the output TensorDict

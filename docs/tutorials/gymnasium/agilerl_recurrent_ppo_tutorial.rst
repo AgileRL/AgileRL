@@ -58,6 +58,7 @@ Dependencies
 
     from agilerl.typing import BPTTSequenceType
     from agilerl.algorithms import PPO
+    from agilerl.wrappers.agent import RSNorm
     from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
@@ -90,12 +91,12 @@ Additionally, we also define our upper and lower limits for these hyperparameter
             "ENT_COEF": 0.0,  # Entropy coefficient
             "VF_COEF": 0.5,  # Value function coefficient
             "MAX_GRAD_NORM": 0.5,  # Maximum norm for gradient clipping
-            "SHARE_ENCODERS": False, # Flag to signal that we want to share encoders between agents
+            "SHARE_ENCODERS": True, # Flag to signal that we want to share encoders between agents
             "RECURRENT": True # Flag to signal that we want a recurrent policy
             "USE_ROLLOUT_BUFFER ": True # Use a rollout buffer for data collection
             "TARGET_KL": None,  # Target KL divergence threshold
             "UPDATE_EPOCHS": 4,  # Number of policy update epochs
-            "TARGET_SCORE": 200.0,  # Target score that will beat the environment
+            "TARGET_SCORE": -200.0,  # Target score that will beat the environment
             "MAX_STEPS": 150000,  # Maximum number of steps an agent takes in an environment
             "EVO_STEPS": 10000,  # Evolution frequency
             "EVAL_STEPS": None,  # Number of evaluation steps per episode
@@ -122,7 +123,6 @@ Additionally, we also define our upper and lower limits for these hyperparameter
         hp_config = HyperparameterConfig(
             lr=RLParameter(min=1e-4, max=1e-2),
             batch_size=RLParameter(min=128, max=1024),
-            learn_step=RLParameter(min=learn_step // 2, max=learn_step * 5),
             # In general we want the entropy to decay over time
             ent_coef=RLParameter(min=0.0001, max=0.001, grow_factor=1.0, shrink_factor=0.9),
         )
@@ -200,10 +200,11 @@ followed by mutations) is detailed further below.
 
     # Define the network configuration of a simple mlp with two hidden layers, each with 64 nodes
     net_config = {
+        "latent_dim": 64,
         "encoder_config": {
             "hidden_state_size": 64,  # LSTM hidden state size
             "num_layers": 1,
-            "max_seq_len": 16, # Maximum sequence length for BPTT
+            "max_seq_len": 16, # Maximum sequence length for truncated BPTT
         },
         "head_config": {
             "hidden_size": [128],
@@ -222,6 +223,10 @@ followed by mutations) is detailed further below.
         num_envs=num_envs,
         device=device,
     )
+
+    # Wrap the population with the RSNorm wrapper to
+    # normalize observations using running statistics
+    pop = [RSNorm(agent) for agent in pop]
 
 Creating Mutations and Tournament Objects
 -----------------------------------------
@@ -333,8 +338,8 @@ function and is an example of how we might choose to make use of a population of
         from agilerl.utils.utils import default_progress_bar
 
         # --- Training Loop ---
-        max_steps = 5_000_000 // len(pop)
-        required_score = 0.95
+        max_steps = 1_000_000
+        required_score = -200
         evo_steps = INIT_HP["LEARN_STEP"] * 5
         eval_steps = None
 
@@ -342,7 +347,7 @@ function and is an example of how we might choose to make use of a population of
         training_complete = False
 
         print("Training...")
-        pbar = default_progress_bar(max_steps * len(pop))
+        pbar = default_progress_bar(max_steps)
         while (
             np.less([agent.steps[-1] for agent in pop], max_steps).all()
             and not training_complete

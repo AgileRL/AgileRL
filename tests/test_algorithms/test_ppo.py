@@ -151,6 +151,7 @@ def test_initialize_ppo(
     observation_space = request.getfixturevalue(observation_space)
     action_space = request.getfixturevalue(action_space)
     ppo = PPO(observation_space, action_space, accelerator=accelerator)
+
     assert ppo.algo == "PPO"
     assert ppo.observation_space == observation_space
     assert ppo.action_space == action_space
@@ -329,7 +330,7 @@ def test_returns_expected_action(observation_space, action_space, build_ppo, req
 
     # Now with grad=True, and eval_action
     eval_action = torch.Tensor([[0, 1, 0, 1]]).to(build_ppo.device)
-    action_logprob, dist_entropy, state_values, _ = build_ppo.evaluate_actions(
+    action_logprob, dist_entropy, state_values = build_ppo.evaluate_actions(
         obs=state, actions=eval_action
     )
 
@@ -594,7 +595,7 @@ def test_clone_after_learning(
         net_config = {
             "encoder_config": {
                 "hidden_state_size": 64,
-                "max_seq_len": 10,
+                "max_seq_len": None,  # Use entire episodes
             }
         }
     else:
@@ -614,10 +615,8 @@ def test_clone_after_learning(
     if use_rollout_buffer:
         dummy_env = DummyEnv(observation_space.shape, vect=True, num_envs=num_vec_envs)
         # Use the correct rollout collection function based on whether the policy is recurrent
-        if recurrent:
-            collect_rollouts_recurrent(ppo, dummy_env)
-        else:
-            collect_rollouts(ppo, dummy_env)
+        collect_function = collect_rollouts_recurrent if recurrent else collect_rollouts
+        collect_function(ppo, dummy_env)
         ppo.learn()
     else:
         states = np.random.randn(
@@ -818,6 +817,7 @@ def test_ppo_with_rollout_buffer(observation_space, action_space, request):
     ["discrete_space", "vector_space", "multidiscrete_space", "multibinary_space"],
 )
 @pytest.mark.parametrize("recurrent", [True, False])
+@pytest.mark.parametrize("max_seq_len", [None, 10])
 @pytest.mark.parametrize(
     "bptt_sequence_type",
     [
@@ -827,7 +827,7 @@ def test_ppo_with_rollout_buffer(observation_space, action_space, request):
     ],
 )
 def test_ppo_learn_with_rollout_buffer(
-    observation_space, action_space, bptt_sequence_type, recurrent, request
+    observation_space, action_space, bptt_sequence_type, recurrent, max_seq_len, request
 ):
     if recurrent and observation_space != "vector_space":
         pytest.skip("Recurrent PPO with non-vector space is not supported yet!")
@@ -842,7 +842,7 @@ def test_ppo_learn_with_rollout_buffer(
         net_config = {
             "encoder_config": {
                 "hidden_state_size": 64,
-                "max_seq_len": 10,
+                "max_seq_len": max_seq_len,
             }
         }
     else:
@@ -917,12 +917,7 @@ def test_ppo_with_hidden_states(
         )
 
     if use_rollout_buffer:
-        if max_seq_len is None:
-            with pytest.raises(ValueError):
-                ppo = make_ppo()
-            return
-        else:
-            ppo = make_ppo()
+        ppo = make_ppo()
     else:
         with pytest.raises(ValueError):
             ppo = make_ppo()

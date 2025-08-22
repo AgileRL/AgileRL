@@ -16,6 +16,7 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.rollouts.on_policy import collect_rollouts, collect_rollouts_recurrent
 from agilerl.typing import BPTTSequenceType
 from agilerl.utils.utils import create_population, default_progress_bar, make_vect_envs
+from agilerl.wrappers.agent import RSNorm
 from benchmarking.benchmarking_recurrent import MaskVelocityWrapper
 
 
@@ -34,10 +35,11 @@ def run_demo():
 
     if recurrent:
         NET_CONFIG = {
+            "latent_dim": 64,
             "encoder_config": {
                 "hidden_state_size": 64,  # LSTM hidden state size
                 "num_layers": 1,
-                "max_seq_len": 16,
+                "max_seq_len": 16,  # max sequence length for truncated BPTT
             },
             "head_config": {
                 "hidden_size": [128],
@@ -45,6 +47,7 @@ def run_demo():
         }
     else:
         NET_CONFIG = {
+            "latent_dim": 64,
             "encoder_config": {
                 "hidden_size": [64],
             },
@@ -55,27 +58,27 @@ def run_demo():
 
     # Hyperparameters
     INIT_HP = {
-        "POP_SIZE": 3,  # Population size
-        "BATCH_SIZE": 128,
+        "POP_SIZE": 2,  # Population size
+        "BATCH_SIZE": 256,
         "LEARN_STEP": learn_step,
-        "LR": 1e-3,
-        "GAMMA": 0.9,
+        "LR": 3e-4,
+        "GAMMA": 0.99,
         "GAE_LAMBDA": 0.95,
         "CLIP_COEF": 0.2,
         "ENT_COEF": 0.001,
-        "VF_COEF": 1.0,
+        "VF_COEF": 0.2,
         "MAX_GRAD_NORM": 0.5,
         "UPDATE_EPOCHS": 4,
-        "SHARE_ENCODERS": True,  # Use same LSTM for actor and critic
+        "SHARE_ENCODERS": False,  # Use same LSTM for actor and critic
         "USE_ROLLOUT_BUFFER": True,
         "RECURRENT": recurrent,
         "ACTION_STD_INIT": 0.6,
         "TARGET_KL": None,
-        "BPTT_SEQUENCE_TYPE": BPTTSequenceType.CHUNKED,
+        "BPTT_SEQUENCE_TYPE": BPTTSequenceType.MAXIMUM,
     }
 
     def make_env():
-        return MaskVelocityWrapper(gym.make("Pendulum-v1"))
+        return MaskVelocityWrapper(gym.make("CartPole-v1"))
 
     env = make_vect_envs(
         make_env=make_env, num_envs=num_envs, should_async_vector=False
@@ -85,10 +88,10 @@ def run_demo():
     observation_space = env.single_observation_space
     action_space = env.single_action_space
 
+    # Configuration for RL hyperparameter mutations
     hp_config = HyperparameterConfig(
         lr=RLParameter(min=1e-4, max=1e-2),
         batch_size=RLParameter(min=128, max=1024),
-        learn_step=RLParameter(min=learn_step // 2, max=learn_step * 5),
         # In general we want the entropy to decay over time
         ent_coef=RLParameter(min=0.0001, max=0.001, grow_factor=1.0, shrink_factor=0.9),
     )
@@ -105,10 +108,13 @@ def run_demo():
         device=device,
     )
 
+    # Normalize observations using running statistics
+    pop = [RSNorm(agent) for agent in pop]
+
     # --- Setup Evolution Components ---
     eval_loop = 10
     tournament = TournamentSelection(
-        tournament_size=2,
+        tournament_size=1,
         elitism=True,
         population_size=INIT_HP["POP_SIZE"],
         eval_loop=eval_loop,
@@ -118,27 +124,27 @@ def run_demo():
         no_mutation=0.4,
         architecture=0,
         new_layer_prob=0.0,
-        parameters=0.2,
+        parameters=0.0,
         activation=0,
         rl_hp=0.2,
         mutation_sd=0.1,
         activation_selection=["ReLU", "ELU", "GELU"],
-        mutate_elite=True,
+        mutate_elite=False,
         rand_seed=1,
         device=device,
     )
 
     # --- Training Loop (Performance-Flamegraph Style) ---
-    max_steps = 5_000_000 // len(pop)
+    max_steps = 5_000_000
     required_score = 500
-    evo_steps = INIT_HP["LEARN_STEP"] * 3
+    evo_steps = INIT_HP["LEARN_STEP"] * 5
     eval_steps = None
 
     total_steps = 0
     training_complete = False
 
     print("Training...")
-    pbar = default_progress_bar(max_steps * len(pop))
+    pbar = default_progress_bar(max_steps)
     while (
         np.less([agent.steps[-1] for agent in pop], max_steps).all()
         and not training_complete
