@@ -39,7 +39,6 @@ def run_demo():
             "encoder_config": {
                 "hidden_state_size": 64,  # LSTM hidden state size
                 "num_layers": 1,
-                "max_seq_len": 16,  # max sequence length for truncated BPTT
             },
             "head_config": {
                 "hidden_size": [128],
@@ -74,7 +73,8 @@ def run_demo():
         "RECURRENT": recurrent,
         "ACTION_STD_INIT": 0.6,
         "TARGET_KL": None,
-        "BPTT_SEQUENCE_TYPE": BPTTSequenceType.MAXIMUM,
+        "BPTT_SEQUENCE_TYPE": BPTTSequenceType.CHUNKED,
+        "MAX_SEQ_LEN": 16,  # max sequence length for truncated BPTT
     }
 
     def make_env():

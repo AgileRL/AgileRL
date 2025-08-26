@@ -104,6 +104,7 @@ Additionally, we also define our upper and lower limits for these hyperparameter
             "TOURN_SIZE": 2,  # Tournament size
             "ELITISM": True,  # Elitism in tournament selection
             "BPTT_SEQUENCE_TYPE": BPTTSequenceType.CHUNKED, # Type of BPTT sequences to use
+            "MAX_SEQ_LEN": 16, # Maximum sequence length for truncated BPTT
         }
 
         # Mutation parameters
@@ -204,7 +205,6 @@ followed by mutations) is detailed further below.
         "encoder_config": {
             "hidden_state_size": 64,  # LSTM hidden state size
             "num_layers": 1,
-            "max_seq_len": 16, # Maximum sequence length for truncated BPTT
         },
         "head_config": {
             "hidden_size": [128],
@@ -295,7 +295,7 @@ fitnesses (fitness is each agents test scores on the environment).
 
     trained_pop, pop_fitnesses = train_on_policy(
         env=env,
-        env_name="PendulumPO-v1",
+        env_name="PendulumNoVel-v1",
         algo="PPO",
         pop=pop,
         INIT_HP=INIT_HP,
