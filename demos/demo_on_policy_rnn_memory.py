@@ -119,7 +119,6 @@ def run_demo():
         NET_CONFIG = {
             "encoder_config": {
                 "hidden_state_size": 64,  # LSTM hidden state size
-                "max_seq_len": None,  # Use full episodes for BPTT
                 "num_layers": 1,
             },
         }
@@ -150,6 +149,7 @@ def run_demo():
         "ACTION_STD_INIT": 0.6,
         "TARGET_KL": None,
         "BPTT_SEQUENCE_TYPE": BPTTSequenceType.MAXIMUM,
+        "MAX_SEQ_LEN": None,  # Use full episodes for BPTT
     }
 
     def make_env():

@@ -8,12 +8,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import tqdm
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl.algorithms import (
     CQN,
     DDPG,
@@ -352,6 +352,7 @@ def create_population(
                 bptt_sequence_type=INIT_HP.get(
                     "BPTT_SEQUENCE_TYPE", BPTTSequenceType.CHUNKED
                 ),
+                max_seq_len=INIT_HP.get("MAX_SEQ_LEN", None),
                 actor_network=actor_network,
                 critic_network=critic_network,
                 device=device,

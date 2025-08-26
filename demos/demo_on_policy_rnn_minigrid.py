@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import gymnasium as gym
 import imageio
+import minigrid
 import numpy as np
 import torch
 
@@ -17,6 +18,7 @@ from agilerl.algorithms import PPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.rollouts.on_policy import collect_rollouts, collect_rollouts_recurrent
+from agilerl.typing import BPTTSequenceType
 from agilerl.utils.utils import create_population, default_progress_bar
 
 
@@ -59,13 +61,13 @@ def run_demo():
     recurrent = True  # <--- CHANGE THIS TO ENABLE/DISABLE RECURRENT
     active_collect = collect_rollouts if not recurrent else collect_rollouts_recurrent
 
-    max_seq_len = 128
     if recurrent:
         NET_CONFIG = {
+            "latent_dim": 64,
             "encoder_config": {
-                "hidden_state_size": 128,  # LSTM hidden state size
-                "max_seq_len": max_seq_len,
+                "hidden_state_size": 64,  # LSTM hidden state size
             },
+            "head_config": {"hidden_size": [64]},
         }
     else:
         NET_CONFIG = {
@@ -76,7 +78,7 @@ def run_demo():
 
     # Hyperparameters
     num_envs = 16  # Fewer envs for MiniGrid due to slowness
-    learn_step = max_seq_len * num_envs
+    learn_step = 512 * num_envs
     INIT_HP = {
         "POP_SIZE": 1,  # Population size
         "BATCH_SIZE": 128,
@@ -93,6 +95,8 @@ def run_demo():
         "SHARE_ENCODERS": False,
         "USE_ROLLOUT_BUFFER": True,
         "RECURRENT": recurrent,
+        "BPTT_SEQUENCE_TYPE": BPTTSequenceType.CHUNKED,
+        "MAX_SEQ_LEN": 16,  # Maximum sequence length for truncated BPTT
         "ACTION_STD_INIT": 0.6,
         "TARGET_KL": None,
     }
@@ -145,7 +149,7 @@ def run_demo():
     # --- Training Loop (Performance-Flamegraph Style) ---
     max_steps = 5_000_000 // len(pop)
     required_score = 0.9
-    evo_steps = INIT_HP["LEARN_STEP"] * 10
+    evo_steps = INIT_HP["LEARN_STEP"] * 5
     eval_steps = None
     eval_loop = 5
 
@@ -183,6 +187,8 @@ def run_demo():
                 steps += agent.learn_step
                 agent.steps[-1] += agent.learn_step
                 completed_episodes += episode_scores
+
+                pbar.write(f"Completed scores: {round(np.mean(episode_scores), 2)}")
 
             pop_episode_scores.append(
                 np.mean(completed_episodes)
