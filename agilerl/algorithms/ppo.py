@@ -349,6 +349,24 @@ class PPO(RLAlgorithm):
             **self.rollout_buffer_config,
         )
 
+    def _extract_hidden_state(
+        self, full_hidden_state: Dict[str, ArrayOrTensor], encoder_name: str
+    ) -> Dict[str, ArrayOrTensor]:
+        """Extract hidden state components for a specific network encoder.
+
+        :param full_hidden_state: Complete hidden state dictionary
+        :type full_hidden_state: Dict[str, ArrayOrTensor]
+        :param encoder_name: Name of the encoder to extract hidden states for
+        :type encoder_name: str
+        :return: Hidden state dictionary for the specific encoder
+        :rtype: Dict[str, ArrayOrTensor]
+        """
+        network_hidden_state = {}
+        for key, value in full_hidden_state.items():
+            if key.startswith(encoder_name):
+                network_hidden_state[key] = value
+        return network_hidden_state
+
     def _get_action_and_values(
         self,
         obs: ArrayOrTensor,
@@ -380,25 +398,43 @@ class PPO(RLAlgorithm):
         :rtype: Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[Dict[str, ArrayOrTensor]]]
         """
         if hidden_state is not None:
-            latent_pi, next_hidden_actor = self.actor.extract_features(
-                obs, hidden_state=hidden_state
-            )
-            action, log_prob, entropy = self.actor.forward_head(
-                latent_pi, action_mask=action_mask, sample=sample
-            )
-
-            # Start with actor's next hidden state
-            next_hidden_combined: Dict[str, torch.Tensor] = next_hidden_actor
             if self.share_encoders:
-                values = self.critic.forward_head(latent_pi).squeeze(-1)
-            else:
-                # If not sharing, critic might have its own hidden state components or update existing ones
-                values, next_hidden_critic = self.critic(
+                # When sharing encoders, both networks use the same hidden state
+                latent_pi, next_hidden_actor = self.actor.extract_features(
                     obs, hidden_state=hidden_state
-                )  # Pass original hidden_state
+                )
+                action, log_prob, entropy = self.actor.forward_head(
+                    latent_pi, action_mask=action_mask, sample=sample
+                )
+                values = self.critic.forward_head(latent_pi).squeeze(-1)
+                next_hidden_combined = next_hidden_actor
+            else:
+                # When not sharing encoders, extract separate hidden states for actor and critic
+                actor_hidden_state = self._extract_hidden_state(
+                    hidden_state, "actor_encoder"
+                )
+                critic_hidden_state = self._extract_hidden_state(
+                    hidden_state, "critic_encoder"
+                )
+
+                # Forward pass through actor with its hidden state
+                latent_pi, next_hidden_actor = self.actor.extract_features(
+                    obs, hidden_state=actor_hidden_state
+                )
+                action, log_prob, entropy = self.actor.forward_head(
+                    latent_pi, action_mask=action_mask, sample=sample
+                )
+
+                # Forward pass through critic with its hidden state
+                values, next_hidden_critic = self.critic(
+                    obs, hidden_state=critic_hidden_state
+                )
                 values = values.squeeze(-1)
 
-                # Merge if critic returns its own next_hidden
+                # Combine the next hidden states from both networks
+                next_hidden_combined = {}
+                if next_hidden_actor is not None:
+                    next_hidden_combined.update(next_hidden_actor)
                 if next_hidden_critic is not None:
                     next_hidden_combined.update(next_hidden_critic)
 
