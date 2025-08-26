@@ -11,10 +11,13 @@ import numpy as np
 import torch
 
 from agilerl.algorithms import PPO
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.rollouts import collect_rollouts, collect_rollouts_recurrent
+from agilerl.typing import BPTTSequenceType
 from agilerl.utils.utils import create_population, default_progress_bar
+from agilerl.wrappers.agent import RSNorm
 
 
 # --- Define the Memory Game Environment ---
@@ -108,31 +111,31 @@ def run_demo():
     active_collect = collect_rollouts if not recurrent else collect_rollouts_recurrent
 
     # --- Create Environment and Population ---
-    n_symbols = 10
-    delay_steps = 10
+    n_symbols = 5
+    delay_steps = 5
     num_envs = 16  # Can be higher for faster training
 
     if recurrent:
         NET_CONFIG = {
             "encoder_config": {
-                "hidden_state_size": 128,  # LSTM hidden state size
-                "max_seq_len": delay_steps + 2,  # Match episode length
-                "num_layers": 2,
+                "hidden_state_size": 64,  # LSTM hidden state size
+                "max_seq_len": None,  # Use full episodes for BPTT
+                "num_layers": 1,
             },
         }
     else:
         NET_CONFIG = {
             "encoder_config": {
-                "hidden_size": [128],
+                "hidden_size": [64],
             },
         }
 
     # Hyperparameters
     INIT_HP = {
         "POP_SIZE": 2,  # Population size
-        "BATCH_SIZE": 256,
-        "LEARN_STEP": (delay_steps + 2)
-        * num_envs,  # Match episode length (delay_steps + 2)
+        "BATCH_SIZE": 16,
+        # Match episode length (delay_steps + 2)
+        "LEARN_STEP": (delay_steps + 2) * num_envs,
         "LR": 1e-4,
         "GAMMA": 0.99,
         "GAE_LAMBDA": 1.0,
@@ -146,6 +149,7 @@ def run_demo():
         "USE_ROLLOUT_BUFFER": True,
         "ACTION_STD_INIT": 0.6,
         "TARGET_KL": None,
+        "BPTT_SEQUENCE_TYPE": BPTTSequenceType.MAXIMUM,
     }
 
     def make_env():
@@ -157,16 +161,26 @@ def run_demo():
     observation_space = env.single_observation_space
     action_space = env.single_action_space
 
+    hp_config = HyperparameterConfig(
+        lr=RLParameter(min=1e-4, max=1e-3),
+        batch_size=RLParameter(min=16, max=128),
+        learn_step=RLParameter(min=16, max=128, dtype=int),
+    )
+
     pop: List[PPO] = create_population(
         algo="PPO",
         observation_space=observation_space,
         action_space=action_space,
         net_config=NET_CONFIG,
         INIT_HP=INIT_HP,
+        hp_config=hp_config,
         population_size=INIT_HP["POP_SIZE"],
         num_envs=num_envs,
         device=device,
     )
+
+    # Normalize observations using running mean and std
+    pop = [RSNorm(agent) for agent in pop]
 
     # --- Setup Evolution Components ---
     eval_loop = 10
@@ -186,15 +200,15 @@ def run_demo():
         rl_hp=0.2,
         mutation_sd=0.1,
         activation_selection=["ReLU", "ELU", "GELU"],
-        mutate_elite=True,
+        mutate_elite=False,
         rand_seed=1,
         device=device,
     )
 
     # --- Training Loop ---
-    max_steps = 5_000_000
+    max_steps = 5_000_000 // len(pop)
     required_score = 0.95
-    evo_steps = INIT_HP["LEARN_STEP"] * 100
+    evo_steps = INIT_HP["LEARN_STEP"] * 30
     eval_steps = None
 
     total_steps = 0
@@ -233,7 +247,7 @@ def run_demo():
                 completed_episodes += episode_scores
 
             pop_episode_scores.append(
-                np.mean(completed_episodes)
+                round(np.mean(completed_episodes), 2)
                 if len(completed_episodes) > 0
                 else "0 completed episodes"
             )
@@ -255,6 +269,7 @@ def run_demo():
             f"Scores: {pop_episode_scores}\n"
             f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
             f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
+            f"Mutations: {[agent.mut for agent in pop]}\n"
         )
 
         if any(score >= required_score for score in pop_episode_scores):
@@ -300,6 +315,7 @@ def run_demo():
         episode_steps = 0
         if recurrent:
             hidden_state = elite.get_initial_hidden_state(1)
+
         while not done[0]:
             if recurrent:
                 action, _, _, _, hidden_state = elite.get_action(

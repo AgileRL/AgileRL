@@ -326,8 +326,16 @@ class Mutations:
 
         mutated_population = []
         for mutation, individual in zip(mutation_choice, population):
-            individual = mutation(individual)  # Call sampled mutation for individual
-            individual.mutation_hook()  # Call hooks specified by user
+            wrapped_ind = isinstance(individual, AgentWrapper)
+            agent = individual.agent if wrapped_ind else individual
+
+            agent = mutation(agent)  # Call sampled mutation for individual
+            agent.mutation_hook()  # Call hooks specified by user
+
+            if wrapped_ind:
+                individual.agent = agent
+            else:
+                individual = agent
 
             mutated_population.append(individual)
 
@@ -367,23 +375,15 @@ class Mutations:
         :return: Individual from population with network architecture mutation
         :rtype: RLAlgorithm or MultiAgentRLAlgorithm
         """
-        wrapped_ind = isinstance(individual, AgentWrapper)
-        agent = individual.agent if wrapped_ind else individual
-
-        if isinstance(agent, RLAlgorithm):
-            agent = self._architecture_mutate_single(agent)
-        elif isinstance(agent, MultiAgentRLAlgorithm):
-            agent = self._architecture_mutate_multi(agent)
+        if isinstance(individual, RLAlgorithm):
+            individual = self._architecture_mutate_single(individual)
+        elif isinstance(individual, MultiAgentRLAlgorithm):
+            individual = self._architecture_mutate_multi(individual)
         else:
             raise MutationError(
                 f"Architecture mutations are not supported for {individual.__class__.__name__}. "
                 "Please make sure your algorithm inherits from 'RLAlgorithm' or 'MultiAgentRLAlgorithm'."
             )
-
-        if wrapped_ind:
-            individual.agent = agent
-        else:
-            individual = agent
 
         return individual
 
@@ -500,7 +500,9 @@ class Mutations:
         :rtype: RLAlgorithm or MultiAgentRLAlgorithm
         """
         if isinstance(individual, LLMAlgorithm):
-            warnings.warn("Parameter mutations are not supported for LLM algorithms.")
+            warnings.warn(
+                "Parameter mutations are not supported for LLM algorithms. Skipping mutation."
+            )
             individual.mut = "None"
             return individual
 
@@ -533,6 +535,7 @@ class Mutations:
 
         individual.reinit_optimizers()  # Reinitialize optimizer
         individual.mut = "param"
+
         return individual
 
     def _get_mutations_options(
@@ -706,11 +709,13 @@ class Mutations:
 
         model_params: Dict[str, torch.Tensor] = network.state_dict()
 
-        # Collect keys corresponding to weight matrices (ignoring normalization params)
+        # Collect keys corresponding to weight matrices (ignoring normalization / lstm params)
+        exclude_keys = ["lstm", "norm"]
         potential_keys = [
             key
             for key in model_params
-            if "norm" not in key and len(model_params[key].shape) == 2
+            if all(exclude_key not in key for exclude_key in exclude_keys)
+            and len(model_params[key].shape) == 2
         ]
 
         # Randomly choose a subset of keys to mutate

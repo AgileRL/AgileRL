@@ -353,7 +353,10 @@ def train_on_policy(
         # Evaluate population
         fitnesses = [
             agent.test(
-                env, swap_channels=swap_channels, max_steps=eval_steps, loop=eval_loop
+                env,
+                swap_channels=swap_channels,
+                max_steps=eval_steps,
+                loop=eval_loop,
             )
             for agent in pop
         ]
