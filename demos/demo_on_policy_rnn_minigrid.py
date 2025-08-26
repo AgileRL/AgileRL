@@ -10,7 +10,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import gymnasium as gym
 import imageio
-import minigrid
+
+# import minigrid NOTE: Remove comment when training
 import numpy as np
 import torch
 
