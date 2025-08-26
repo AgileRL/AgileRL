@@ -3,11 +3,11 @@ from typing import List
 
 import numpy as np
 import torch
+import wandb
 from gymnasium import spaces
 from tensordict import TensorDict
 from ucimlrepo import fetch_ucirepo
 
-import wandb
 from agilerl.algorithms import NeuralUCB
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
