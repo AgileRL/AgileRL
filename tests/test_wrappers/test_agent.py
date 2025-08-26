@@ -10,12 +10,17 @@ from accelerate import Accelerator
 from gymnasium import spaces
 from pettingzoo import ParallelEnv
 
-from agilerl.algorithms import DDPG, IPPO
+from agilerl.algorithms import DDPG, IPPO, PPO
 from agilerl.algorithms.core import MultiAgentRLAlgorithm, RLAlgorithm
 from agilerl.modules import EvolvableMLP
+from agilerl.rollouts.on_policy import collect_rollouts
 from agilerl.utils.utils import make_multi_agent_vect_envs
 from agilerl.wrappers.agent import AsyncAgentsWrapper, RSNorm
-from tests.helper_functions import assert_state_dicts_equal, get_experiences_batch
+from tests.helper_functions import (
+    assert_not_equal_state_dict,
+    assert_state_dicts_equal,
+    get_experiences_batch,
+)
 
 
 class DummyMultiEnvAsync(ParallelEnv):
@@ -111,6 +116,30 @@ class DummyMultiEnvAsync(ParallelEnv):
         infos = {agent: {} for agent in self.active_agents}
 
         return observations, rewards, dones, truncated, infos
+
+
+class DummyEnv:
+    def __init__(self, state_size, vect=True, num_envs=2):
+        self.state_size = state_size
+        self.vect = vect
+        self.num_envs = num_envs
+        if self.vect:
+            self.state_size = (num_envs,) + self.state_size
+            self.n_envs = num_envs
+        else:
+            self.n_envs = 1
+
+    def reset(self):
+        return np.random.rand(*self.state_size), {}
+
+    def step(self, action):
+        return (
+            np.random.rand(*self.state_size),
+            np.random.randint(0, 5, self.n_envs),
+            np.random.randint(0, 2, self.n_envs),
+            np.random.randint(0, 2, self.n_envs),
+            {},
+        )
 
 
 @pytest.fixture(scope="function")
@@ -391,10 +420,10 @@ def test_rsnorm_learn(observation_space, vector_space, request, accelerator):
     # Copy state dict before learning - should be different to after updating weights
     actor = ddpg.actor
     actor_target = ddpg.actor_target
-    actor_pre_learn_sd = str(copy.deepcopy(ddpg.actor.state_dict()))
+    actor_pre_learn_sd = copy.deepcopy(ddpg.actor.state_dict())
     critic = ddpg.critic
     critic_target = ddpg.critic_target
-    critic_pre_learn_sd = str(copy.deepcopy(ddpg.critic.state_dict()))
+    critic_pre_learn_sd = copy.deepcopy(ddpg.critic.state_dict())
 
     for i in range(policy_freq * 2):
         # Create a batch of experiences & learn
@@ -405,15 +434,35 @@ def test_rsnorm_learn(observation_space, vector_space, request, accelerator):
         ddpg.scores.append(0)
         actor_loss, critic_loss = ddpg.learn(experiences)
 
+    with pytest.raises(ValueError):
+        ddpg.learn()
+
     assert isinstance(actor_loss, float)
     assert isinstance(critic_loss, float)
     assert critic_loss >= 0.0
     assert actor == ddpg.actor
     assert actor_target == ddpg.actor_target
-    assert actor_pre_learn_sd != str(ddpg.actor.state_dict())
+    assert_not_equal_state_dict(actor_pre_learn_sd, ddpg.actor.state_dict())
+    assert_not_equal_state_dict(critic_pre_learn_sd, ddpg.critic.state_dict())
     assert critic == ddpg.critic
     assert critic_target == ddpg.critic_target
-    assert critic_pre_learn_sd != str(ddpg.critic.state_dict())
+
+
+def test_rsnorm_learn_ppo(vector_space):
+    observation_space = vector_space
+    action_space = copy.deepcopy(vector_space)
+    ppo = PPO(observation_space, action_space, use_rollout_buffer=True, num_envs=1)
+    ppo = RSNorm(ppo)
+
+    env = DummyEnv(state_size=observation_space.shape, vect=True, num_envs=ppo.num_envs)
+    collect_rollouts(ppo, env, n_steps=20)
+
+    actor_pre_learn_sd = copy.deepcopy(ppo.actor.state_dict())
+    critic_pre_learn_sd = copy.deepcopy(ppo.critic.state_dict())
+    ppo.learn()
+
+    assert_not_equal_state_dict(actor_pre_learn_sd, ppo.actor.state_dict())
+    assert_not_equal_state_dict(critic_pre_learn_sd, ppo.critic.state_dict())
 
 
 # Clones the agent and returns an identical agent.

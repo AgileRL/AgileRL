@@ -54,7 +54,6 @@ NET_CONFIG:
     encoder_config:
         hidden_state_size: 64
         num_layers: 1
-        max_seq_len: 16
 
     head_config:
         hidden_size: [128]
