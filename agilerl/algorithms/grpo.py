@@ -380,7 +380,7 @@ class GRPO(LLMAlgorithm):
                 os.environ["MASTER_ADDR"] = os.environ.get("MASTER_ADDR", "localhost")
                 os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "12345")
 
-                self.model_ref = None
+                # model_ref = None
 
                 # max_num_seqs = (
                 #     self.batch_size_per_process
@@ -867,17 +867,16 @@ class GRPO(LLMAlgorithm):
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
         gather_if_zero3 = nullcontext
-        if self.model_ref is None:
-            self.model_ref = self.accelerator.unwrap_model(self.actor)
-        self.model_ref.set_adapter("actor")
-        with gather_if_zero3(list(self.model_ref.parameters())):
-            self.model_ref.merge_adapter()
-            for name, param in self.model_ref.named_parameters():
+        model_ref = self.accelerator.unwrap_model(self.actor)
+        model_ref.set_adapter("actor")
+        with gather_if_zero3(list(model_ref.parameters())):
+            model_ref.merge_adapter()
+            for name, param in model_ref.named_parameters():
                 assert (
                     param.dtype == torch.bfloat16
                 ), "INCORRECT DATA TYPE"  # FIXME remove
                 name = name.removeprefix("base_model.model.").replace(".base_layer", "")
-                if self.model_ref.prefix in name:
+                if model_ref.prefix in name:
                     continue
 
                 if "original_module" in name:
@@ -887,7 +886,7 @@ class GRPO(LLMAlgorithm):
                     self.llm.llm_engine.model_executor.driver_worker.model_runner.model
                 )
                 llm_model.load_weights([(name, param.data)])
-            self.model_ref.unmerge_adapter()
+            model_ref.unmerge_adapter()
 
         self.llm.reset_prefix_cache()
 
