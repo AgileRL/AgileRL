@@ -646,6 +646,8 @@ class GRPO(LLMAlgorithm):
             else base_model
         )
 
+        print("INITALI ACTOR", self.actor)
+
         if self.use_separate_reference_adapter and add_adapters:
             self.actor.add_adapter(
                 adapter_name="reference", peft_config=self.lora_config  # type: ignore
