@@ -1,7 +1,7 @@
 import copy
 import warnings
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, TypedDict
 
 import gymnasium as gym
 import torch
@@ -10,6 +10,12 @@ from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 from transformers.tokenization_utils_base import BatchEncoding
+
+
+class ReturnedPrompts(TypedDict):
+    input_ids: torch.Tensor
+    attention_mask: torch.Tensor
+    text: str | None
 
 
 class HuggingFaceGym(gym.Env):
@@ -145,14 +151,16 @@ class HuggingFaceGym(gym.Env):
             zip(completions, self.answers, self.questions)
         ):
 
-            if self.return_raw_completions:
-                completion_to_decode = group_completion[
-                    :, self.last_tokenized_prompts[idx][1].shape[1] :
-                ]
-            else:
-                completion_to_decode = group_completion[
-                    :, self.last_tokenized_prompts[idx]["input_ids"].shape[1] :
-                ]
+            # if self.return_raw_completions:
+            #     completion_to_decode = group_completion[
+            #         :, self.last_tokenized_prompts[idx][1].shape[1] :
+            #     ]
+            # else:
+            #     completion_to_decode = group_completion[
+            #         :, self.last_tokenized_prompts[idx]["input_ids"].shape[1] :
+            #     ]
+
+            completion_to_decode = group_completion[:, self.last_tokenized_prompts[idx]["input_ids"].shape[1] :]
 
             # Vectorize this in the future
             decoded_group_completion = self.tokenizer.batch_decode(
@@ -166,25 +174,39 @@ class HuggingFaceGym(gym.Env):
             total_rewards.append(rewards)
         return torch.tensor(total_rewards)
 
-    def _get_next_batch(self) -> List[BatchEncoding] | List[Tuple[str, torch.Tensor]]:
+    def _get_next_batch(self) -> List[ReturnedPrompts]:
         """Get the next batch of tokenized prompts."""
         try:
             batch = next(self.dataloader)
             self.questions = batch["question"]
             self.answers = batch["answer"]
-            returned_prompts = batch["tokenized_prompts"]
-            if self.return_raw_completions:
-                returned_prompts = [
-                    (
-                        self.tokenizer.batch_decode(
+            # returned_prompts = batch["tokenized_prompts"]
+
+            returned_prompts = [
+                {
+                    "input_ids": returned_prompt["input_ids"],
+                    "attention_mask": returned_prompt["attention_mask"],
+                    "text": self.tokenizer.batch_decode(
                             returned_prompt["input_ids"],
                             skip_special_tokens=True,
                             clean_up_tokenization_spaces=False,
-                        )[0],
-                        returned_prompt["input_ids"],
-                    )  # FIXME what about batches here
-                    for returned_prompt in returned_prompts
-                ]
+                        )[0] if self.return_raw_completions else None
+                } for returned_prompt in batch["tokenized_prompts"]
+            ]
+
+
+            # if self.return_raw_completions:
+            #     returned_prompts = [
+            #         (
+            #             self.tokenizer.batch_decode(
+            #                 returned_prompt["input_ids"],
+            #                 skip_special_tokens=True,
+            #                 clean_up_tokenization_spaces=False,
+            #             )[0],
+            #             returned_prompt["input_ids"],
+            #         )  # FIXME what about batches here
+            #         for returned_prompt in returned_prompts
+            #     ]
         except StopIteration:
             self._reset_dataloaders(
                 reset_train=not self.evaluation_mode,

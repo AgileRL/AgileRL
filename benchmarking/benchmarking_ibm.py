@@ -18,7 +18,7 @@ from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
-MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"  # "ibm-granite/granite-3.3-2b-instruct"
+MODEL_PATH = "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5" #"Qwen/Qwen2.5-0.5B-Instruct"  # "ibm-granite/granite-3.3-2b-instruct"
 DATASET = "openai/gsm8k"
 
 
@@ -27,7 +27,7 @@ def create_model(pretrained_model_name_or_path):
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         torch_dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
-        device_map="auto",
+        # device_map="auto",
     )
 
     lora_config = LoraConfig(

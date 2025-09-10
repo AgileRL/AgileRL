@@ -35,6 +35,7 @@ from agilerl.utils.algo_utils import (
 from agilerl.utils.llm_utils import (
     DummyOptimizer,
     HuggingFaceGym,
+    ReturnedPrompts,
 )
 
 DeepSpeedOptimizerType = Union[
@@ -402,7 +403,7 @@ class GRPO(LLMAlgorithm):
             self.wrap_models()
 
     def get_action(
-        self, prompts: List[Dict[str, torch.Tensor]], training: bool = True
+        self, prompts: List[ReturnedPrompts], training: bool = True
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
         """Returns the next action to take in the environment.
 
@@ -894,8 +895,8 @@ class GRPO(LLMAlgorithm):
         # The below line returns a list: [prompt1 * group_size, ..., promptN * group_size],
         # where N is the data batch size, list length is group_size * N
         group_prompts = [prompt for prompt in prompts for _ in range(group_size)]
-        prompts_ids = [prompt[1] for prompt in group_prompts]
-        prompts_text = [prompt[0] for prompt in group_prompts]
+        prompts_ids = [prompt["input_ids"] for prompt in group_prompts]
+        prompts_text = [prompt["text"] for prompt in group_prompts]
         prompts_text = [
             re.sub(rf"^({re.escape(str(self.pad_token))})+", "", text)
             for text in prompts_text
