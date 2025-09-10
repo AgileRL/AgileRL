@@ -419,6 +419,7 @@ class GRPO(LLMAlgorithm):
                 completion_ids = []
                 action_masks = []
                 for prompt in prompts:
+                    prompt.pop("text", None)
                     prompt["input_ids"] = (
                         prompt["input_ids"].repeat(group_size, 1).to(self.actor.device)
                     )
@@ -453,7 +454,6 @@ class GRPO(LLMAlgorithm):
             completion_ids, action_masks = self._generate_with_vllm_colocate(
                 prompts, group_size
             )
-            assert False
 
         return completion_ids, action_masks
 

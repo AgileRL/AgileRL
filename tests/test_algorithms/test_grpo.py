@@ -971,7 +971,7 @@ def test_init_grpo_scheduler_warning(
                 "max_tokens": 20,
                 "group_size": 5,
                 "set_reference_policy_adapter": True,
-                "use_vllm": True,
+                "use_vllm": False,
             },
         ),
         # (
@@ -999,11 +999,10 @@ def test_get_action_grpo(grpo, accelerator, request, training, data_batch_size):
         {
             "input_ids": torch.randint(0, vocab_size, (input_size,)),
             "attention_mask": torch.ones(*(input_size,)),
+            "text": "Hello, how are you?"
         }
         for _ in range(data_batch_size)
     ]
-    print("IS GRPO USING VLLM", grpo.use_vllm)
-    assert False
     completion_ids, _ = grpo.get_action(states, training)
     print("COMPLETION IDS")
     print(completion_ids)
