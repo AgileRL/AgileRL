@@ -867,7 +867,11 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 k: v for k, v in network_info["modules"].items() if k.startswith(name)
             }
 
-            module_cls = net_dict[f"{name}_cls"]
+            module_cls = net_dict.get(f"{name}_cls", None)
+            if module_cls is None:
+                # This allows us to super this method in the LLMAlgorithm class
+                # as we don't want to reinstantiate the network in this class
+                break
             init_dict = net_dict[f"{name}_init_dict"]
 
             module_dict_cls = net_dict.get(f"{name}_module_dict_cls", None)
@@ -1822,7 +1826,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 and self.accelerator.is_main_process
             ):
                 raise NotImplementedError(
-                    "DeepSpeed ZeRO Stage 3 is not yet supported in AgileRL. This feature is under development and will be available in a future release."
+                    "DeepSpeed ZeRO Stage 3 is not yet supported in AgileRL. This feature is in development and will be available in a future release."
                 )
 
         seed = 42
@@ -1866,16 +1870,37 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     selected_adapters=["actor", "reference"],
                     is_main_process=self.accelerator.is_main_process,
                 )
-
         checkpoint_dict = get_checkpoint_dict(
             self, using_deepspeed=self.accelerator is not None
         )
         checkpoint_dict["_weights_only"] = weights_only
         checkpoint_dict.pop("llm", None)
-        checkpoint_dict.pop("model_ref", None)
         checkpoint_dict.pop("tp_group", None)
 
-        if self.accelerator is not None and self.accelerator.is_main_process:
+        if self.accelerator is None:
+            # Add optimizer and actor info to checkpoint
+            # Network is not an EvolvableModule, so we need to add it manually
+            checkpoint_dict["network_info"]["network_names"].append("actor")
+            checkpoint_dict["network_info"]["modules"][
+                "actor_state_dict"
+            ] = self.actor.state_dict()
+            checkpoint_dict["network_info"][
+                "actor_state_dict"
+            ] = self.actor.state_dict()
+            checkpoint_dict["network_info"]["optimizer_names"].append("optimizer")
+            checkpoint_dict["network_info"]["optimizers"][
+                "actor_optimizer_cls"
+            ] = self.optimizer.optimizer_cls.__name__
+            checkpoint_dict["network_info"]["optimizers"][
+                "actor_optimizer_state_dict"
+            ] = self.optimizer.state_dict()
+            checkpoint_dict["network_info"]["optimizers"][
+                "actor_optimizer_networks"
+            ] = self.optimizer.network_names
+            checkpoint_dict["network_info"]["optimizers"]["actor_optimizer_lr"] = "lr"
+            checkpoint_dict["network_info"]["optimizers"]["actor_optimizer_kwargs"] = {}
+
+        if self.accelerator is None or self.accelerator.is_main_process:
             torch.save(
                 checkpoint_dict,
                 path + "/attributes.pt",

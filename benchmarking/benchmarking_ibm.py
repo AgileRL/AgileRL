@@ -18,7 +18,7 @@ from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
-MODEL_PATH = "ibm-granite/granite-3.3-2b-instruct"
+MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"  # "ibm-granite/granite-3.3-2b-instruct"
 DATASET = "openai/gsm8k"
 
 

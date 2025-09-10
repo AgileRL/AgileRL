@@ -2,7 +2,7 @@ import gc
 import os
 import re
 import warnings
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from typing import Dict, List, Optional, Tuple, Union
 
 import deepspeed
@@ -98,8 +98,6 @@ class GRPO(LLMAlgorithm):
     :type wrap: bool, optional
     :param clone: Flag to indicate if the instantiation is a cloning, defaults to False
     :type clone: bool, optional
-    :param gradient_checkpointing: Flag to indicate if the model should use gradient checkpointing, defaults to False
-    :type gradient_checkpointing: bool, optional
     :param use_separate_reference_adapter: Flag to indicate if the reference policy should have a separate adapter, defaults to False
     :type use_separate_reference_adapter: bool, optional
     :param use_vllm: Flag to indicate if the model should use vllm for generation, defaults to False
@@ -119,7 +117,7 @@ class GRPO(LLMAlgorithm):
         pad_token: str,
         hp_config: Optional[HyperparameterConfig] = None,
         index: int = 0,
-        batch_size: int = 4,
+        batch_size: int = 16,
         beta: float = 0.001,
         lr: float = 5e-7,
         clip_coef: float = 0.2,
@@ -141,7 +139,6 @@ class GRPO(LLMAlgorithm):
         device: str = "cpu",
         wrap: bool = True,
         clone: bool = False,
-        gradient_checkpointing: bool = False,
         use_separate_reference_adapter: bool = False,
         use_vllm: bool = False,
         vllm_config: Optional[VLLMConfig] = None,
@@ -294,7 +291,7 @@ class GRPO(LLMAlgorithm):
             top_k=top_k,
             min_p=min_p,
         )
-        if lora_config is None:
+        if lora_config is None and not isinstance(actor_network, PeftModel):
             warnings.warn(
                 "No LoRA config provided. Using default LoRA configuration for RL finetuning."
             )
@@ -317,7 +314,6 @@ class GRPO(LLMAlgorithm):
         self.cosine_lr_schedule_config = cosine_lr_schedule_config
         self.wrap = wrap
         self.use_separate_reference_adapter = use_separate_reference_adapter
-        self.gradient_checkpointing = gradient_checkpointing
         if max_grad_norm and (accelerator is not None) and accelerator.is_main_process:
             warnings.warn(
                 "Argument 'max_grad_norm' will be overwritten by the 'gradient_clipping' value set in the deepspeed config."
@@ -329,12 +325,14 @@ class GRPO(LLMAlgorithm):
         self.local_rank = (
             "0" if self.accelerator is None else self.accelerator.local_process_index
         )
+
         self.pretrained_model_name_or_path = actor_network.name_or_path
         self._initialize_actors(actor_network, not clone)
         self.use_vllm = use_vllm
         self.vllm_config = vllm_config
 
-        set_seed(seed, device_specific=True)
+        if self.accelerator is not None:
+            set_seed(seed, device_specific=True)
 
         if self.use_vllm:
             # os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = (
@@ -379,16 +377,6 @@ class GRPO(LLMAlgorithm):
                 os.environ["WORLD_SIZE"] = str(self.accelerator.num_processes)
                 os.environ["MASTER_ADDR"] = os.environ.get("MASTER_ADDR", "localhost")
                 os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "12345")
-
-                # model_ref = None
-
-                # max_num_seqs = (
-                #     self.batch_size_per_process
-                #     * self.vllm_config.tensor_parallel_size
-                #     * self.accelerator.state.deepspeed_plugin.deepspeed_config[
-                #         "gradient_accumulation_steps"
-                #     ]
-                # )
                 max_model_len = self.max_output_tokens
 
                 self.llm = LLM(
@@ -464,6 +452,7 @@ class GRPO(LLMAlgorithm):
             completion_ids, action_masks = self._generate_with_vllm_colocate(
                 prompts, group_size
             )
+            assert False
 
         return completion_ids, action_masks
 
@@ -480,6 +469,7 @@ class GRPO(LLMAlgorithm):
             *experiences, padding_values=[self.pad_token_id, False, None]
         )
         advantages = self._calculate_advantage(rewards).to(self.device)
+
         with torch.no_grad():
             reference_log_probs = self._get_logprobs(
                 completion_ids, use_reference=True, eval_mode=True
@@ -550,7 +540,7 @@ class GRPO(LLMAlgorithm):
             # Update the reference update tracker
             if self.use_separate_reference_adapter:
                 # Activate both adapters
-                # Iterate over the parame
+                # Iterate over the params
                 ref_param = None
                 actor_param = None
                 for name, param in self.actor.named_parameters():
@@ -646,12 +636,11 @@ class GRPO(LLMAlgorithm):
             else base_model
         )
 
-        print("INITALI ACTOR", self.actor)
-
         if self.use_separate_reference_adapter and add_adapters:
             self.actor.add_adapter(
                 adapter_name="reference", peft_config=self.lora_config  # type: ignore
             )
+
         self.actor.set_adapter("actor")
 
         optim_class = self._select_optim_class()
@@ -672,8 +661,6 @@ class GRPO(LLMAlgorithm):
             if self.cosine_lr_schedule_config is not None
             else None
         )
-        if self.gradient_checkpointing:
-            self.actor.base_model.gradient_checkpointing_enable()
 
     def _calculate_advantage(
         self, rewards: torch.Tensor, eps: float = 1e-8
@@ -771,52 +758,49 @@ class GRPO(LLMAlgorithm):
         :return: Log probabilities of the completion IDs.
         :rtype: torch.Tensor
         """
-        if use_reference:
-            self._use_reference_policy()
 
-        self.actor.train(mode=not eval_mode)
+        with self.select_policy(use_reference):
+            self.actor.train(mode=not eval_mode)
+            attention_mask = ids != self.pad_token_id
+            model_kwargs = {
+                "input_ids": ids,
+                "attention_mask": attention_mask,
+                "use_cache": False,
+            }
+            if self.calc_position_embeddings:
+                position_ids = attention_mask.long().cumsum(dim=-1) - 1
+                position_ids.masked_fill_(mask=(attention_mask == 0), value=1)
+                model_kwargs |= {"position_ids": position_ids}
 
-        attention_mask = ids != self.pad_token_id
-        model_kwargs = {
-            "input_ids": ids,
-            "attention_mask": attention_mask,
-            "use_cache": False,
-        }
-        if self.calc_position_embeddings:
-            position_ids = attention_mask.long().cumsum(dim=-1) - 1
-            position_ids.masked_fill_(mask=(attention_mask == 0), value=1)
-            model_kwargs |= {"position_ids": position_ids}
+            if self.reduce_memory_peak:
+                log_probs_list = []
+                for input_id, mask in zip(ids, attention_mask):
+                    input_id = input_id.reshape(1, -1)
+                    mask = mask.reshape(1, -1)
+                    kwargs = {
+                        "input_ids": input_id,
+                        "attention_mask": mask,
+                        "use_cache": False,
+                    }
 
-        if self.reduce_memory_peak:
-            log_probs_list = []
-            for input_id, mask in zip(ids, attention_mask):
-                input_id = input_id.reshape(1, -1)
-                mask = mask.reshape(1, -1)
-                kwargs = {
-                    "input_ids": input_id,
-                    "attention_mask": mask,
-                    "use_cache": False,
-                }
+                    logit = self.actor.forward(**kwargs).logits
+                    logit = logit / self.temperature
+                    log_prob = (
+                        F.log_softmax(logit[:, :-1], dim=-1)
+                        .gather(dim=-1, index=input_id[:, 1:].unsqueeze(-1))
+                        .squeeze(-1)
+                    )
+                    log_probs_list.append(log_prob)
+                log_probs = torch.cat(log_probs_list)
 
-                logit = self.actor.forward(**kwargs).logits
-                logit /= self.temperature
-                log_prob = (
-                    F.log_softmax(logit[:, :-1], dim=-1)
-                    .gather(dim=-1, index=input_id[:, 1:].unsqueeze(-1))
+            else:
+                logits = self.actor.forward(**model_kwargs).logits
+                logits = logits / self.temperature
+                log_probs = (
+                    F.log_softmax(logits[:, :-1], dim=-1)
+                    .gather(dim=-1, index=ids[:, 1:].unsqueeze(-1))
                     .squeeze(-1)
                 )
-                log_probs_list.append(log_prob)
-            log_probs = torch.cat(log_probs_list)
-
-        else:
-            logits = self.actor.forward(**model_kwargs).logits
-            logits /= self.temperature
-            log_probs = (
-                F.log_softmax(logits[:, :-1], dim=-1)
-                .gather(dim=-1, index=ids[:, 1:].unsqueeze(-1))
-                .squeeze(-1)
-            )
-        self._use_policy()
         return log_probs
 
     def _backward_pass(self, loss: float) -> None:
@@ -825,6 +809,7 @@ class GRPO(LLMAlgorithm):
         :param loss: Loss
         :type loss: float
         """
+
         if self.accelerator is not None:
             self.accelerator.backward(loss)
             if (
@@ -844,6 +829,16 @@ class GRPO(LLMAlgorithm):
         if self.lr_scheduler is not None:
             self.lr_scheduler.step()
             self.lr = self.lr_scheduler.get_last_lr()[0]
+
+    @contextmanager
+    def select_policy(self, use_reference: bool = False) -> None:
+        """Select the policy."""
+        if use_reference:
+            self._use_reference_policy()
+        else:
+            self._use_policy()
+        yield
+        self._use_policy()
 
     def _use_reference_policy(self) -> None:
         """Use the reference policy."""
@@ -874,9 +869,6 @@ class GRPO(LLMAlgorithm):
         with gather_if_zero3(list(model_ref.parameters())):
             model_ref.merge_adapter()
             for name, param in model_ref.named_parameters():
-                assert (
-                    param.dtype == torch.bfloat16
-                ), "INCORRECT DATA TYPE"  # FIXME remove
                 name = name.removeprefix("base_model.model.").replace(".base_layer", "")
                 if model_ref.prefix in name:
                     continue
