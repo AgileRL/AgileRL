@@ -10,6 +10,7 @@ from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 from transformers.tokenization_utils_base import BatchEncoding
+from torch.utils.data.distributed import DistributedSampler
 
 
 class ReturnedPrompts(TypedDict):
@@ -62,15 +63,33 @@ class HuggingFaceGym(gym.Env):
                 tokenizer, apply_chat_template_fn
             )
         dataloader_kwargs = {"collate_fn": custom_collate_fn}
+        if self.accelerator is not None and self.accelerator.num_processes > 1:
+            train_sampler = DistributedSampler(
+                train_dataset,
+                num_replicas=self.accelerator.num_processes,
+                rank=self.accelerator.process_index,
+                shuffle=True,
+            )
+            test_sampler = DistributedSampler(
+                test_dataset,
+                num_replicas=self.accelerator.num_processes,
+                rank=self.accelerator.process_index,
+                shuffle=False,
+            )
+        else:
+            train_sampler = None
+            test_sampler = None
         self.train_dataloader = DataLoader(
             train_dataset,
             batch_size=data_batch_size_per_gpu,
-            shuffle=True,
+            shuffle=(train_sampler is None),
+            sampler=train_sampler,
             **dataloader_kwargs,
         )
         self.test_dataloader = DataLoader(
             test_dataset,
             batch_size=data_batch_size_per_gpu,
+            sampler=test_sampler,
             shuffle=False,
             **dataloader_kwargs,
         )
@@ -93,7 +112,7 @@ class HuggingFaceGym(gym.Env):
             high=tokenizer.vocab_size - 1,
         )
         self.evaluation_mode = False
-        self.num_dataset_passes = 0
+        self.num_epochs = 0
         self.return_raw_completions = return_raw_completions
 
     def step(
@@ -193,8 +212,6 @@ class HuggingFaceGym(gym.Env):
                         )[0] if self.return_raw_completions else None
                 } for returned_prompt in batch["tokenized_prompts"]
             ]
-
-
             # if self.return_raw_completions:
             #     returned_prompts = [
             #         (
@@ -208,11 +225,17 @@ class HuggingFaceGym(gym.Env):
             #         for returned_prompt in returned_prompts
             #     ]
         except StopIteration:
+            self.num_epochs += 1
+            # Ensure DistributedSampler shuffles differently next epoch
+            if isinstance(self.train_dataloader.sampler, DistributedSampler):
+                self.train_dataloader.sampler.set_epoch(self.num_epochs)
+            if isinstance(self.test_dataloader.sampler, DistributedSampler):
+                self.test_dataloader.sampler.set_epoch(self.num_epochs)
             self._reset_dataloaders(
                 reset_train=not self.evaluation_mode,
                 reset_test=self.evaluation_mode,
             )
-            self.num_dataset_passes += 1
+            s
             return self._get_next_batch()
         return returned_prompts
 

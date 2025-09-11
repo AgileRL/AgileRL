@@ -19,8 +19,8 @@ from torch.nn.utils import clip_grad_norm_
 from transformers import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
 
-# from trl.extras.vllm_client import VLLMClient
 from vllm import LLM, SamplingParams
+from vllm.distributed.parallel_state import destroy_model_parallel
 
 from agilerl.algorithms.core import LLMAlgorithm, OptimizerWrapper
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
@@ -42,12 +42,6 @@ DeepSpeedOptimizerType = Union[
     DeepSpeedZeroOptimizer,  # ZeRO Stage 1 & 2 optimizer
     DeepSpeedZeroOptimizer_Stage3,  # ZeRO Stage 3 optimizer
 ]
-
-
-# Dummy to avoid installing trl
-class VLLMClient:
-    def __init__(self, *args, **kwargs):
-        pass
 
 
 class GRPO(LLMAlgorithm):
@@ -87,6 +81,8 @@ class GRPO(LLMAlgorithm):
     :type max_output_tokens: int, optional
     :param min_output_tokens: Minimum output tokens, defaults to 0
     :type min_output_tokens: int, optional
+    :param max_model_len: Maximum context window length, defaults to None
+    :type max_model_len: int, optional
     :param lora_config: Config for LoRA, defaults to None
     :type lora_config: LoraConfig, optional
     :param cosine_lr_schedule_config: Config for cosine lr scheduling, defaults to None
@@ -134,6 +130,7 @@ class GRPO(LLMAlgorithm):
         reduce_memory_peak: bool = False,
         max_output_tokens: int = 1024,
         min_output_tokens: Optional[int] = None,
+        max_model_len: Optional[int] = None,
         lora_config: Optional[LoraConfig] = None,
         cosine_lr_schedule_config: Optional[CosineLRScheduleConfig] = None,
         accelerator: Optional[Accelerator] = None,
@@ -246,6 +243,8 @@ class GRPO(LLMAlgorithm):
                     self.accelerator.state.deepspeed_plugin.deepspeed_config[
                         "train_micro_batch_size_per_gpu"
                     ] = self.micro_batch_size_per_gpu
+                    print("DEEPSPEED CONFIG IN GRPO")
+                    print(self.accelerator.state.deepspeed_plugin.deepspeed_config)
 
         else:
             self.batch_size_per_process = batch_size
@@ -281,9 +280,12 @@ class GRPO(LLMAlgorithm):
         self.min_output_tokens = min_output_tokens
         self.pad_token_id = pad_token_id
         self.pad_token = pad_token
+        self.max_model_len = max_model_len if max_model_len is not None else 2 * max_output_tokens
+    
         self.generation_config = GenerationConfig(
             do_sample=True,
             temperature=temperature,
+            max_length=self.max_model_len,
             max_new_tokens=max_output_tokens,
             min_new_tokens=min_output_tokens,
             pad_token_id=pad_token_id,
@@ -378,19 +380,18 @@ class GRPO(LLMAlgorithm):
                 os.environ["WORLD_SIZE"] = str(self.accelerator.num_processes)
                 os.environ["MASTER_ADDR"] = os.environ.get("MASTER_ADDR", "localhost")
                 os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "12345")
-                max_model_len = self.max_output_tokens
 
                 self.llm = LLM(
                     model=self.pretrained_model_name_or_path,
                     tensor_parallel_size=self.vllm_config.tensor_parallel_size,
                     gpu_memory_utilization=self.vllm_config.gpu_memory_utilization,
                     max_num_seqs=self.vllm_config.max_num_seqs,
-                    max_model_len=max_model_len,
+                    max_model_len=self.max_model_len,
                     distributed_executor_backend="external_launcher",
                     seed=self.accelerator.process_index
                     // self.vllm_config.tensor_parallel_size,
                     max_num_batched_tokens=self.vllm_config.max_num_seqs
-                    * max_model_len,
+                    * self.max_model_len,
                     model_impl="vllm",
                 )
 
@@ -603,9 +604,9 @@ class GRPO(LLMAlgorithm):
                 next_prompts, reward = env.step(completion_ids)
                 prompts = next_prompts
                 rewards.append(reward)
-        mean_fit = np.mean(rewards)
-        self.fitness.append(mean_fit)
         reward_tensor = torch.cat(rewards)
+        mean_fit = torch.mean(reward_tensor)
+        self.fitness.append(mean_fit)
         return reward_tensor
 
     def _initialize_actors(
@@ -910,6 +911,7 @@ class GRPO(LLMAlgorithm):
             "top_k": -1 if self.top_k is None else self.top_k,
             "min_p": 0.0 if self.min_p is None else self.min_p,
             "max_tokens": self.max_output_tokens,
+            "min_tokens": 0 if self.min_output_tokens is None else self.min_output_tokens,
         }
         sampling_params = SamplingParams(**generation_kwargs)
 

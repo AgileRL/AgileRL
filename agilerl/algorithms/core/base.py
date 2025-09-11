@@ -38,6 +38,7 @@ from torch._dynamo import OptimizedModule
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import SequentialLR
 from transformers import AutoModelForCausalLM
+from vllm.distributed.parallel_state import destroy_model_parallel
 
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import (
@@ -2106,6 +2107,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 None,
                 None,
             )
+        if self.use_vllm:
+            destroy_model_parallel()
+            del self.llm.llm_engine.model_executor.driver_worker 
+            self.llm = None
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -2172,11 +2177,19 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             original_lr_scheduler = self.lr_scheduler
             clone.lr_scheduler = None
             self.lr_scheduler = None
+            if self.use_vllm:
+                original_llm = self.llm
+                cloned_llm = clone.llm
+                clone.llm = None
+                self.llm = None
             clone = EvolvableAlgorithm.copy_attributes(self, clone)
             clone.accelerator = accelerator
             clone.lr_scheduler = lr_scheduler
             clone.lr_scheduler = cloned_lr_scheduler
             self.lr_scheduler = original_lr_scheduler
+            if self.use_vllm:
+                clone.llm = cloned_llm
+                self.llm = original_llm
 
             if self.accelerator is None:
                 clone.optimizer.optimizer.load_state_dict(

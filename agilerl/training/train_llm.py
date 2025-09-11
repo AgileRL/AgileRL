@@ -41,6 +41,7 @@ def finetune_llm(
     verbose: bool = True,
     accelerator: Optional[Accelerator] = None,
     max_steps: Optional[int] = None,
+    num_epochs: Optional[int] = None,
 ):
     """
     Finetunes a population of GRPOs on a HuggingFaceGym environment.
@@ -75,6 +76,8 @@ def finetune_llm(
     :type accelerator: Accelerator, optional
     :param max_steps: Maximum number of steps to run, defaults to None
     :type max_steps: int, optional
+    :param num_epochs: Number of epochs to run, if set, takes precedence over max_steps, defaults to None
+    :type num_epochs: int, optional
     """
 
     if evo_steps is not None and (tournament is None or mutation is None):
@@ -85,6 +88,11 @@ def finetune_llm(
     if (tournament is not None and mutation is not None) and evo_steps is None:
         raise ValueError(
             "'evo_steps' must be set if 'tournament' and 'mutation' are not None."
+        )
+
+    if num_epochs is not None and max_steps is not None:
+        warnings.warn(
+            "'num_epochs' is set but 'max_steps' is also set. 'num_epochs' will take precedence over 'max_steps'."
         )
 
     if mutation is not None:
@@ -124,9 +132,13 @@ def finetune_llm(
         print("\nTraining...")
 
     bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
-    if max_steps is None:
+    if max_steps is None and num_epochs is None:
         max_steps = len(env)
-    training_steps = max_steps // effective_data_batch_size
+
+    elif max_steps is None and num_epochs is not None:
+        max_steps = num_epochs * len(env)
+
+    training_steps = -(max_steps // -effective_data_batch_size)
     if accelerator is None or accelerator.is_main_process:
         pbar = trange(
             max_steps,
@@ -143,7 +155,7 @@ def finetune_llm(
     for i in range(training_steps):
         agent_metrics_dict = {}
         for agent_idx, agent in enumerate(pop):
-            agent.set_reference_policy(env.num_dataset_passes)
+            agent.set_reference_policy(env.num_epochs)
             completion_ids, action_masks = agent.get_action(prompts)
             completion_lengths = np.mean([x.shape[1] for x in completion_ids])
 
@@ -344,6 +356,9 @@ def finetune_llm(
                     }
                 wandb_dict |= test_dict
             wandb.log(wandb_dict)
+
+        if env.num_epochs == num_epochs:
+            break
 
     if (
         verbose
