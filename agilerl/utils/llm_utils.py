@@ -58,6 +58,7 @@ class HuggingFaceGym(gym.Env):
         self.reward_fn = reward_fn
         self.tokenizer = tokenizer
         self.data_batch_size_per_gpu = data_batch_size_per_gpu
+        self.accelerator = accelerator
         if custom_collate_fn is None:
             custom_collate_fn = HuggingFaceGym.create_collate_fn(
                 tokenizer, apply_chat_template_fn
@@ -97,7 +98,6 @@ class HuggingFaceGym(gym.Env):
             "train": len(train_dataset),
             "test": len(test_dataset),
         }
-        self.accelerator = accelerator
         if self.accelerator is not None:
             self.train_dataloader = self.accelerator.prepare(self.train_dataloader)
             self.test_dataloader = self.accelerator.prepare(self.test_dataloader)
