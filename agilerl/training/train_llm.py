@@ -122,6 +122,7 @@ def finetune_llm(
         init_hp["effective_data_batch_size"] = effective_data_batch_size
         init_hp["batch_size"] = init_hp.get("BATCH_SIZE", 1)
         init_hp["distributed_training"] = True if accelerator is not None else False
+        init_hp["model_name"] = pop[0].pretrained_model_name_or_path
         init_wandb(
             algo=init_hp["ALGO"],
             env_name=env.name,

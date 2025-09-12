@@ -442,16 +442,8 @@ class GRPO(LLMAlgorithm):
                     action_mask = action_mask[:, 1:]
                     action_masks.append(action_mask)
         else:
-            if isinstance(prompts, dict):
-                raise ValueError(
-                    "VLLM client only accepts prompts as text, not tokens, please ensure"
-                    "'return_raw_completions' is set to True in the HuggingFaceGym"
-                    "instance."
-                )
-
             # Move model to vllm
             self._move_model_to_vllm()
-
             completion_ids, action_masks = self._generate_with_vllm_colocate(
                 prompts, group_size
             )

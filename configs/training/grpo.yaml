@@ -32,9 +32,10 @@ INIT_HP:
     POP_SIZE: 1
     EVAL_LOOP: 1
     USE_VLLM: true
-    # VLLM_CONFIG:
-    #     tensor_parallel_size: 1
-    #     gpu_memory_utilization: 0.4   
+    VLLM_CONFIG:
+        tensor_parallel_size: 1
+        gpu_memory_utilization: 0.4
+        max_num_seqs: 8
 
 
 # MASTER_ADDR=34.13.155.70 \

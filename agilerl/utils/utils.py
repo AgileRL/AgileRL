@@ -573,6 +573,7 @@ def create_population(
                 accelerator=Accelerator() if accelerator else None,
                 device=device,
                 use_separate_reference_adapter=True,
+                max_model_len=1024+512,
                 use_vllm=INIT_HP.get("USE_VLLM", False),
                 vllm_config=(
                     VLLMConfig(**INIT_HP.get("VLLM_CONFIG"))
