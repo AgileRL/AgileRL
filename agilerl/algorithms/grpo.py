@@ -18,7 +18,6 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from torch.nn.utils import clip_grad_norm_
 from transformers import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
-
 from vllm import LLM, SamplingParams
 from vllm.distributed.parallel_state import destroy_model_parallel
 
@@ -278,8 +277,10 @@ class GRPO(LLMAlgorithm):
         self.min_output_tokens = min_output_tokens
         self.pad_token_id = pad_token_id
         self.pad_token = pad_token
-        self.max_model_len = max_model_len if max_model_len is not None else 2 * max_output_tokens
-    
+        self.max_model_len = (
+            max_model_len if max_model_len is not None else max_output_tokens + 512
+        )
+
         self.generation_config = GenerationConfig(
             do_sample=True,
             temperature=temperature,
@@ -901,7 +902,9 @@ class GRPO(LLMAlgorithm):
             "top_k": -1 if self.top_k is None else self.top_k,
             "min_p": 0.0 if self.min_p is None else self.min_p,
             "max_tokens": self.max_output_tokens,
-            "min_tokens": 0 if self.min_output_tokens is None else self.min_output_tokens,
+            "min_tokens": (
+                0 if self.min_output_tokens is None else self.min_output_tokens
+            ),
         }
         sampling_params = SamplingParams(**generation_kwargs)
 
