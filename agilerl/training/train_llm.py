@@ -163,12 +163,16 @@ def finetune_llm(
             # Use the reward function stored in env.step to calculate reward of the each answer from the group
 
             next_prompts, rewards = env.step(completion_ids)
+            print(f"Process {accelerator.process_index} len(next_prompts): {len(next_prompts)}")
+            accelerator.wait_for_everyone()
+            # assert False
+
             experiences = (
                 completion_ids,
                 action_masks,
                 rewards,
             )
-            loss, kl = agent.learn(experiences)
+            loss, kl = agent.learn(experiences) 
             metrics = [loss, kl, rewards, completion_lengths]
             if max_reward is not None:
                 accuracy = (rewards == max_reward).sum() / len(rewards.flatten())
@@ -240,9 +244,7 @@ def finetune_llm(
             if (i + 1)*effective_data_batch_size % max_steps == 0 or (i + 1)*effective_data_batch_size % checkpoint_steps == 0:
                 # save_llm_checkpoint(agent, elite_path)
                 # FIXME done for single agent saving
-                print(f"Saving checkpoint {(i+1)*effective_data_batch_size}")
                 agent.save_checkpoint(f"round2_gsm8k_checkpoint_{(i+1)*effective_data_batch_size}", weights_only=True)
-                print(f"Checkpoint saved {(i+1)*effective_data_batch_size}")
 
         if wb and (accelerator is None or accelerator.is_main_process):
             wandb_dict = {

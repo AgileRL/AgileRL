@@ -243,8 +243,6 @@ class GRPO(LLMAlgorithm):
                     self.accelerator.state.deepspeed_plugin.deepspeed_config[
                         "train_micro_batch_size_per_gpu"
                     ] = self.micro_batch_size_per_gpu
-                    print("DEEPSPEED CONFIG IN GRPO")
-                    print(self.accelerator.state.deepspeed_plugin.deepspeed_config)
 
         else:
             self.batch_size_per_process = batch_size
@@ -579,7 +577,7 @@ class GRPO(LLMAlgorithm):
         env: HuggingFaceGym,
         loop: int = 1,
     ) -> torch.Tensor:
-        """Returns mean test score of agent in environment with epsilon-greedy policy.
+        """Returns test score tensor of llm on test sub-set.
 
         :param env: The environment to be tested in
         :type env: HuggingFaceGym environment
@@ -597,7 +595,7 @@ class GRPO(LLMAlgorithm):
                 prompts = next_prompts
                 rewards.append(reward)
         reward_tensor = torch.cat(rewards)
-        mean_fit = torch.mean(reward_tensor)
+        mean_fit = torch.mean(reward_tensor).item()
         self.fitness.append(mean_fit)
         return reward_tensor
 

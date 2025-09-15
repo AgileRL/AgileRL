@@ -64,33 +64,15 @@ class HuggingFaceGym(gym.Env):
                 tokenizer, apply_chat_template_fn
             )
         dataloader_kwargs = {"collate_fn": custom_collate_fn}
-        if self.accelerator is not None and self.accelerator.num_processes > 1:
-            train_sampler = DistributedSampler(
-                train_dataset,
-                num_replicas=self.accelerator.num_processes,
-                rank=self.accelerator.process_index,
-                shuffle=True,
-            )
-            test_sampler = DistributedSampler(
-                test_dataset,
-                num_replicas=self.accelerator.num_processes,
-                rank=self.accelerator.process_index,
-                shuffle=False,
-            )
-        else:
-            train_sampler = None
-            test_sampler = None
         self.train_dataloader = DataLoader(
             train_dataset,
             batch_size=data_batch_size_per_gpu,
-            shuffle=(train_sampler is None),
-            sampler=train_sampler,
+            shuffle=True,
             **dataloader_kwargs,
         )
         self.test_dataloader = DataLoader(
             test_dataset,
             batch_size=data_batch_size_per_gpu,
-            sampler=test_sampler,
             shuffle=False,
             **dataloader_kwargs,
         )
@@ -117,7 +99,7 @@ class HuggingFaceGym(gym.Env):
 
     def step(
         self, completions: torch.Tensor
-    ) -> Tuple[List[BatchEncoding], torch.Tensor]:
+    ) -> Tuple[List[ReturnedPrompts], torch.Tensor]:
         """Take a step in the HuggingFaceGym environment, calculate rewards from completions generated from previous prompt and provide new batch
         of prompts.
 
@@ -134,7 +116,7 @@ class HuggingFaceGym(gym.Env):
 
     def reset(
         self, reset_dataloaders: bool = False
-    ) -> Tuple[List[BatchEncoding], Dict[str, Any]]:
+    ) -> Tuple[List[ReturnedPrompts], Dict[str, Any]]:
         """Reset the environment and get the next batch of tokenized prompts.
 
         :param reset_dataloaders: Whether to reset the dataloaders, defaults to False
@@ -169,21 +151,11 @@ class HuggingFaceGym(gym.Env):
         for idx, (group_completion, answer, question) in enumerate(
             zip(completions, self.answers, self.questions)
         ):
-
-            # if self.return_raw_completions:
-            #     completion_to_decode = group_completion[
-            #         :, self.last_tokenized_prompts[idx][1].shape[1] :
-            #     ]
-            # else:
-            #     completion_to_decode = group_completion[
-            #         :, self.last_tokenized_prompts[idx]["input_ids"].shape[1] :
-            #     ]
-
             completion_to_decode = group_completion[:, self.last_tokenized_prompts[idx]["input_ids"].shape[1] :]
 
             # Vectorize this in the future
             decoded_group_completion = self.tokenizer.batch_decode(
-                completion_to_decode,
+                completion_to_decode,   
                 skip_special_tokens=True,
             )
             rewards = [
@@ -199,7 +171,6 @@ class HuggingFaceGym(gym.Env):
             batch = next(self.dataloader)
             self.questions = batch["question"]
             self.answers = batch["answer"]
-            # returned_prompts = batch["tokenized_prompts"]
 
             returned_prompts = [
                 {
@@ -212,30 +183,14 @@ class HuggingFaceGym(gym.Env):
                         )[0] if self.return_raw_completions else None
                 } for returned_prompt in batch["tokenized_prompts"]
             ]
-            # if self.return_raw_completions:
-            #     returned_prompts = [
-            #         (
-            #             self.tokenizer.batch_decode(
-            #                 returned_prompt["input_ids"],
-            #                 skip_special_tokens=True,
-            #                 clean_up_tokenization_spaces=False,
-            #             )[0],
-            #             returned_prompt["input_ids"],
-            #         )  # FIXME what about batches here
-            #         for returned_prompt in returned_prompts
-            #     ]
         except StopIteration:
-            self.num_epochs += 1
-            # Ensure DistributedSampler shuffles differently next epoch
-            if isinstance(self.train_dataloader.sampler, DistributedSampler):
-                self.train_dataloader.sampler.set_epoch(self.num_epochs)
-            if isinstance(self.test_dataloader.sampler, DistributedSampler):
-                self.test_dataloader.sampler.set_epoch(self.num_epochs)
+            if not self.evaluation_mode:
+                self.num_epochs += 1
+           
             self._reset_dataloaders(
                 reset_train=not self.evaluation_mode,
                 reset_test=self.evaluation_mode,
             )
-            s
             return self._get_next_batch()
         return returned_prompts
 

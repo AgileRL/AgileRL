@@ -256,7 +256,7 @@ def main(init_hp, mut_p):
         elite_path="saved_llms",
         max_reward=4.0,
         evo_steps=10,
-        checkpoint_steps=500,
+        checkpoint_steps=1000,
         mutation=None,  # mutations,
         tournament=None,  # tournament,
         accelerator=accelerator,
