@@ -132,6 +132,7 @@ model, and the Countdown dataset, and initialise them as follows:
         tokenizer.pad_token_id = tokenizer.eos_token_id
         train_dataset, test_dataset = make_dataset(DATASET)
         INIT_HP["PAD_TOKEN_ID"] = tokenizer.pad_token_id
+        INIT_HP["PAD_TOKEN"] = tokenizer.eos_token
 
 Create the Reasoning Environment
 --------------------------------
@@ -219,12 +220,6 @@ for displaying these behaviours, the agent itself discovers the best way to achi
                 + format_reward_func([completion], [solution])[0]
             )
 
-            if reward == 2.0:
-                with open("countdown_completions.txt", "a") as text_file:
-                    text_file.write(
-                        f"Prompt {prompt}" + "\n" + completion + "\n" + "=" * 50 + "\n"
-                    )
-
             return reward
 
 Now we have defined our reward functions, we must also design our prompt. This forms the input given
@@ -244,7 +239,7 @@ format. Combining all these components, we can now initialise the HuggingFaceGym
                 },
                 {
                     "role": "user",
-                    "content": f"Using each number in this tensor only once {tuple(i.item() for i in q)}, create an equation that equals {a.item()}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
+                    "content": f"Using each number in this list only once {q}, create an equation that equals {a.item()}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
                 },
                 {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
             ]
@@ -260,22 +255,6 @@ format. Combining all these components, we can now initialise the HuggingFaceGym
             )
             return tokenized_prompt
 
-        def custom_collate_fn(batch):
-            # Extract answers and questions
-            answers = torch.tensor([item["answer"] for item in batch])
-
-            # For questions of variable length, we need to pad them
-            # First, find the maximum length
-            max_len = max(len(item["question"]) for item in batch)
-
-            # Create padded tensor
-            questions = torch.zeros(len(batch), max_len, dtype=torch.long)
-            for i, item in enumerate(batch):
-                q_len = len(item["question"])
-                questions[i, :q_len] = torch.tensor(item["question"])
-
-            return {"answer": answers, "question": questions}
-
 
         # Define accelerators for distributed training
         accelerator = Accelerator()
@@ -287,8 +266,7 @@ format. Combining all these components, we can now initialise the HuggingFaceGym
             tokenizer=tokenizer,
             reward_fn=combined_rewards,
             apply_chat_template_fn=countdown_chat_template,
-            data_batch_size=8,
-            custom_collate_fn=custom_collate_fn,
+            data_batch_size_per_gpu=10,
             accelerator=accelerator,
         )
 
@@ -392,6 +370,7 @@ The simplest way to train an AgileRL agent is to use the :meth:`finetune_llm() <
         tournament=tournament,
         accelerator=accelerator,
         verbose=True,
+        num_epochs=1
     )
 
 Configuring Accelerate and DeepSpeed
@@ -454,39 +433,12 @@ function and is an example of how we might choose to make use of a population of
 
     .. code-block:: python
 
-        def gather_tensor(tensor: Union[torch.Tensor, float], accelerator: Accelerator) -> torch.Tensor:
-            """Gather tensors from gpus
-
-            :param tensor: Tensor to gather
-            :type tensor: torch.Tensor
-            :param accelerator: Accelerator object
-            :type accelerator: accelerate.Accelerator
-            :return: Stacked tensors
-            :rtype: torch.Tensor
-            """
-            if not isinstance(tensor, torch.Tensor):
-                tensor = torch.tensor(tensor, device=accelerator.device)
-            tensor = tensor.to(accelerator.device)
-            gathered_tensors = accelerator.gather(tensor)
-            return gathered_tensors
-
-
-        def aggregate_metrics_across_gpus(
-            accelerator: Accelerator, metric_tensor: Union[torch.Tensor, float]
-        ) -> float:
-            """Aggregate gathered tensors
-
-            :param accelerator: Accelerator object
-            :type accelerator: accelerate.Accelerator
-            :param metric_tensor: Metrics
-            :type metric_tensor: torch.Tensor
-            :return: Mean metric
-            :rtype: float
-            """
-            all_metrics = gather_tensor(metric_tensor, accelerator)
-            avg_metrics = all_metrics.mean().item()
-            return avg_metrics
-
+        from agilerl.utils.utils import aggregate_metrics_across_gpus
+        from agilerl.training.train_llm import tournament_selection_and_mutation
+        from tqdm import trange
+        import numpy as np
+        import torch
+        from accelerate import Accelerator
 
         accelerator = Accelerator()
         if accelerator is None or accelerator.is_main_process:
@@ -607,54 +559,45 @@ Once we have finetuned our LLM, we may want to use it for inference. Below outli
 in this tutorial, this `forum <https://discuss.huggingface.co/t/save-load-and-do-inference-with-fine-tuned-model/76291/2>`_
 provides more info for loading finetuned models.
 
-Load Fine-tuned LLM
-~~~~~~~~~~~~~~~~~~~
+
+Load fine-tuned LLM into vLLM Engine for inference
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
 .. code-block:: python
 
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    from peft import PeftModel
-    import torch
+    from vllm import LLM
 
-    base_model = AutoModelForCausalLM.from_pretrained(
-        "Qwen/Qwen2.5-3B",
-        torch_dtype=torch.bfloat16,
-        device_map="auto"
+    llm = LLM(
+        model="Qwen/Qwen2.5-3B",
+        tensor_parallel_size=1,
+        gpu_memory_utilization=0.9,
+        max_num_seqs=1024,
+        max_model_len=1536,
+        distributed_executor_backend="external_launcher",
+        seed=0,
+        model_impl="vllm",
+        enable_lora=True,
     )
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B")
-    model = PeftModel.from_pretrained(base_model, "path/to/model/directory")
 
-Inference
-~~~~~~~~~
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        top_p=1.0,
+        top_k=-1,
+        max_tokens=max_output_tokens,
+        seed=42,
+    )
 
-.. code-block:: python
-
-    # Put model in evaluation mode
-    model.eval()
-
-    # Tokenize input
-    inputs = countdown_chat_template(torch.tensor([33, 19, 27, 5]), # Numbers
-                                    torch.tensor([39]),            # Answer
-                                    tokenizer)
-
-    # Move inputs to the same device as model
-    inputs = {k: v.to(model.device) for k, v in inputs.items()}
-
-    # Generate text (inference)
-    with torch.no_grad():  # Disable gradient calculation for inference
-        outputs = model.generate(
-            input_ids=inputs["input_ids"],
-            attention_mask=inputs["attention_mask"],
-            max_new_tokens=100,  # Control the length of generated text
-            temperature=0.7,     # Control randomness (lower = more deterministic)
-            top_p=0.9,           # Nucleus sampling parameter
-            do_sample=True,      # Use sampling instead of greedy decoding
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id
-        )
-
-    # Decode the generated text
-    generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    print(generated_text)
+    prompts = "Using each number in this list only once 33, 19, 27, 5, create an equation that equals 82. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once.""
+    outputs = llm.generate(
+        prompts,
+        sampling_params=sampling_params,
+        lora_request=LoRARequest(
+            lora_name="trained_model",
+            lora_int_id=1,
+            lora_path=checkpoint_path + "/actor",
+        ),
+    )
 
 Full Training Code
 ------------------

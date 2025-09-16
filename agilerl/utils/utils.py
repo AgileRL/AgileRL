@@ -572,8 +572,8 @@ def create_population(
                 ),
                 accelerator=Accelerator() if accelerator else None,
                 device=device,
-                use_separate_reference_adapter=True,
-                max_model_len=1024+512,
+                use_separate_reference_adapter=False,
+                max_model_len=INIT_HP.get("MAX_MODEL_LEN", None),
                 use_vllm=INIT_HP.get("USE_VLLM", False),
                 vllm_config=(
                     VLLMConfig(**INIT_HP.get("VLLM_CONFIG"))
@@ -933,13 +933,17 @@ def aggregate_metrics_across_gpus(
     return avg_metrics
 
 
-def save_llm_checkpoint(agent: LLMAlgorithm, checkpoint_path: str | None) -> None:
+def save_llm_checkpoint(
+    agent: LLMAlgorithm, checkpoint_path: str | None, weights_only: bool = False
+) -> None:
     """Checkpoint the LLM
 
     :param agent: Agent
     :type agent: LLMAlgorithm
     :param checkpoint_path: Checkpoint path
     :type checkpoint_path: str
+    :param weights_only: If True, only save the weights of the model, defaults to False
+    :type weights_only: bool, optional
     """
     assert agent.actor is not None, "Actor is not initialized"
     base_path = "./saved_checkpoints" if checkpoint_path is None else checkpoint_path
@@ -947,10 +951,10 @@ def save_llm_checkpoint(agent: LLMAlgorithm, checkpoint_path: str | None) -> Non
     os.makedirs(path, exist_ok=True)
     if agent.accelerator is not None:
         agent.accelerator.wait_for_everyone()
-        agent.actor.save_pretrained(path)
+        agent.save_checkpoint(path, weights_only=weights_only)
         agent.accelerator.wait_for_everyone()
     else:
-        agent.actor.save_pretrained(path)
+        agent.save_checkpoint(path, weights_only=weights_only)
 
 
 def consolidate_mutations(population: list[LLMAlgorithm]) -> None:

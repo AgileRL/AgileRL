@@ -139,8 +139,6 @@ def finetune_llm(
     elif max_steps is None and num_epochs is not None:
         max_steps = num_epochs * len(env)
 
-    print("MAX STEPS", max_steps)
-
     training_steps = -(max_steps // -effective_data_batch_size)
     if accelerator is None or accelerator.is_main_process:
         pbar = trange(
