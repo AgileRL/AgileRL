@@ -28,7 +28,6 @@ tqdm==4.66.4
 ucimlrepo==0.0.3
 wandb==0.17.6
 huggingface
-datasets==3.3.2
 transformers>=4.55.0
 peft==0.15.2
 vllm>=0.10.0
