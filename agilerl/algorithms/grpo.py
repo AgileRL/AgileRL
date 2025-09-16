@@ -64,7 +64,7 @@ class GRPO(LLMAlgorithm):
     :type lr: float, optional
     :param clip_coef: Surrogate clipping coefficient, defaults to 0.2
     :type clip_coef: float, optional
-    :param max_grad_norm: Maximum norm for gradient clipping, defaults to 0.5
+    :param max_grad_norm: Maximum norm for gradient clipping, defaults to 0.1
     :type max_grad_norm: float, optional
     :param update_epochs: Number of policy update epochs, defaults to 4
     :type update_epochs: int, optional

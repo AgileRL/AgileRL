@@ -178,7 +178,7 @@ class HuggingFaceGym(gym.Env):
                     "attention_mask": returned_prompt["attention_mask"],
                     "text": self.tokenizer.batch_decode(
                             returned_prompt["input_ids"],
-                            skip_special_tokens=True,
+                            skip_special_tokens=False, # Needs to be False here as we need to provide context about user roles to the model
                             clean_up_tokenization_spaces=False,
                         )[0] if self.return_raw_completions else None
                 } for returned_prompt in batch["tokenized_prompts"]

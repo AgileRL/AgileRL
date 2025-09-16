@@ -161,11 +161,8 @@ def finetune_llm(
             completion_lengths = np.mean([x.shape[1] for x in completion_ids])
 
             # Use the reward function stored in env.step to calculate reward of the each answer from the group
-
             next_prompts, rewards = env.step(completion_ids)
-            print(f"Process {accelerator.process_index} len(next_prompts): {len(next_prompts)}")
             accelerator.wait_for_everyone()
-            # assert False
 
             experiences = (
                 completion_ids,
@@ -241,7 +238,7 @@ def finetune_llm(
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
         else:
-            if (i + 1)*effective_data_batch_size % max_steps == 0 or (i + 1)*effective_data_batch_size % checkpoint_steps == 0:
+            if (i + 1) * effective_data_batch_size % max_steps == 0 or (i + 1) * effective_data_batch_size % checkpoint_steps == 0:
                 # save_llm_checkpoint(agent, elite_path)
                 # FIXME done for single agent saving
                 agent.save_checkpoint(f"round2_gsm8k_checkpoint_{(i+1)*effective_data_batch_size}", weights_only=True)

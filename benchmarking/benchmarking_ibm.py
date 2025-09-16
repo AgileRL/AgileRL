@@ -196,7 +196,7 @@ def main(init_hp, mut_p):
         tokenizer=tokenizer,
         reward_fn=reward_fn,
         apply_chat_template_fn=chat_template,
-        data_batch_size_per_gpu=10,
+        data_batch_size_per_gpu=20,
         accelerator=accelerator,
         return_raw_completions=init_hp.get(
             "USE_VLLM", False
@@ -229,7 +229,7 @@ def main(init_hp, mut_p):
 
     tournament = TournamentSelection(
         init_hp["TOURN_SIZE"],
-        init_hp["ELITISM"],
+        init_hp["ELITISM"], 
         init_hp["POP_SIZE"],
         init_hp["EVAL_LOOP"],
     )
@@ -251,7 +251,7 @@ def main(init_hp, mut_p):
         env=env,
         init_hp=init_hp,
         evaluation_interval=10,
-        wb=True,
+        wb=False,
         save_elite=True,
         elite_path="saved_llms",
         max_reward=4.0,

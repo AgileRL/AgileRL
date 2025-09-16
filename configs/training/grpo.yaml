@@ -35,7 +35,7 @@ INIT_HP:
     VLLM_CONFIG:
         tensor_parallel_size: 1
         gpu_memory_utilization: 0.4
-        max_num_seqs: 16
+        max_num_seqs: 8
 
 
 # MASTER_ADDR=34.13.155.70 \
