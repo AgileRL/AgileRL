@@ -70,6 +70,7 @@ from agilerl.typing import (
 )
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
+    check_supported_space,
     chkpt_attribute_to_device,
     clone_llm,
     create_warmup_cosine_scheduler,
@@ -1164,12 +1165,8 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
 
         super().__init__(index, hp_config, device, accelerator, torch_compiler, name)
 
-        assert isinstance(
-            observation_space, spaces.Space
-        ), "Observation space must be an instance of gymnasium.spaces.Space."
-        assert isinstance(
-            action_space, spaces.Space
-        ), "Action space must be an instance of gymnasium.spaces.Space."
+        check_supported_space(observation_space)
+        check_supported_space(action_space)
 
         self.observation_space = observation_space
         self.action_space = action_space
@@ -1283,6 +1280,11 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             raise ValueError(
                 f"Observation spaces must be a list or dictionary of spaces.Space objects. Got {type(observation_spaces)}."
             )
+
+        for obs_space in self.possible_observation_spaces.values():
+            check_supported_space(obs_space)
+        for action_space in self.possible_action_spaces.values():
+            check_supported_space(action_space)
 
         self.agent_ids = list(self.possible_observation_spaces.keys())
         self.n_agents = len(self.agent_ids)
