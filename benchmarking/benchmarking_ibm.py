@@ -18,7 +18,7 @@ from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
-MODEL_PATH = "ibm-granite/granite-3.3-2b-instruct"
+MODEL_PATH = "Qwen/Qwen2.5-0.5B"  # "ibm-granite/granite-3.3-2b-instruct"
 DATASET = "openai/gsm8k"
 
 
@@ -229,7 +229,7 @@ def main(init_hp, mut_p):
 
     tournament = TournamentSelection(
         init_hp["TOURN_SIZE"],
-        init_hp["ELITISM"], 
+        init_hp["ELITISM"],
         init_hp["POP_SIZE"],
         init_hp["EVAL_LOOP"],
     )
@@ -261,7 +261,7 @@ def main(init_hp, mut_p):
         tournament=None,  # tournament,
         accelerator=accelerator,
         verbose=True,
-        num_epochs=1
+        num_epochs=1,
     )
     accelerator.end_training()
 

@@ -9,12 +9,6 @@ deepspeed_config:
     zero3_init_flag: false
     zero_stage: 2
     gradient_checkpointing: true
-    activation_checkpointing:
-        partition_activations: true
-        cpu_checkpointing: true
-        contiguous_memory_optimization: false
-        number_checkpoints: null
-        synchronize_checkpoint_boundary: false
 mixed_precision: bf16
 distributed_type: DEEPSPEED
 downcast_bf16: no

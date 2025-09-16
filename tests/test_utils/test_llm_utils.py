@@ -113,7 +113,8 @@ def test_hugging_face_gym_init(dataset, num_samples):
 
 @pytest.mark.parametrize("num_samples", [200])
 @pytest.mark.parametrize("eval_mode", [True, False])
-def test_hugging_face_gym_step(dataset, num_samples, eval_mode):
+@pytest.mark.parametrize("return_raw_completions", [True, False])
+def test_hugging_face_gym_step(dataset, num_samples, eval_mode, return_raw_completions):
     train_dataset, test_dataset = dataset
     tokenizer = DummyTokenizer()
     data_batch_size = 8
@@ -124,6 +125,7 @@ def test_hugging_face_gym_step(dataset, num_samples, eval_mode):
         reward_fn=dummy_reward_fn,
         apply_chat_template_fn=dummy_chat_template_fn,
         data_batch_size_per_gpu=data_batch_size,
+        return_raw_completions=return_raw_completions,
     )
     env.evaluation_mode = eval_mode
     env.reset()
@@ -131,16 +133,28 @@ def test_hugging_face_gym_step(dataset, num_samples, eval_mode):
     tokenized_prompts, rewards = env.step(completions)
     assert isinstance(tokenized_prompts, list)
     assert isinstance(rewards, torch.Tensor)
-    for prompt in tokenized_prompts:
-        assert isinstance(prompt, dict)
-        assert sorted(list(prompt.keys())) == ["attention_mask", "input_ids"]
-        assert isinstance(prompt["attention_mask"], torch.Tensor)
-        assert isinstance(prompt["input_ids"], torch.Tensor)
+
+    for prompts in tokenized_prompts:
+        assert sorted(prompts.keys()) == ["attention_mask", "input_ids", "text"]
+        for key, val in prompts.items():
+            match key:
+                case "attention_mask":
+                    assert isinstance(val, torch.Tensor)
+                case "input_ids":
+                    assert isinstance(val, torch.Tensor)
+                case "text":
+                    if return_raw_completions:
+                        assert isinstance(val, str)
+                    else:
+                        assert val is None
 
 
 @pytest.mark.parametrize("num_samples", [200])
 @pytest.mark.parametrize("reset_dataloaders", [True, False])
-def test_hugging_face_gym_reset(dataset, num_samples, reset_dataloaders):
+@pytest.mark.parametrize("return_raw_completions", [True, False])
+def test_hugging_face_gym_reset(
+    dataset, num_samples, reset_dataloaders, return_raw_completions
+):
     train_dataset, test_dataset = dataset
     tokenizer = DummyTokenizer()
     data_batch_size = 8
@@ -151,14 +165,24 @@ def test_hugging_face_gym_reset(dataset, num_samples, reset_dataloaders):
         reward_fn=dummy_reward_fn,
         apply_chat_template_fn=dummy_chat_template_fn,
         data_batch_size_per_gpu=data_batch_size,
+        return_raw_completions=return_raw_completions,
     )
     tokenized_prompts = env.reset(reset_dataloaders)
     assert isinstance(tokenized_prompts, list)
-    for prompt in tokenized_prompts:
-        assert isinstance(prompt, dict)
-        assert sorted(list(prompt.keys())) == ["attention_mask", "input_ids"]
-        assert isinstance(prompt["attention_mask"], torch.Tensor)
-        assert isinstance(prompt["input_ids"], torch.Tensor)
+
+    for prompts in tokenized_prompts:
+        assert sorted(prompts.keys()) == ["attention_mask", "input_ids", "text"]
+        for key, val in prompts.items():
+            match key:
+                case "attention_mask":
+                    assert isinstance(val, torch.Tensor)
+                case "input_ids":
+                    assert isinstance(val, torch.Tensor)
+                case "text":
+                    if return_raw_completions:
+                        assert isinstance(val, str)
+                    else:
+                        assert val is None
 
 
 @pytest.mark.parametrize("num_samples", [200])
