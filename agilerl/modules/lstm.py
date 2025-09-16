@@ -48,7 +48,6 @@ class EvolvableLSTM(EvolvableModule):
         output_activation: str = None,
         min_hidden_state_size: int = 32,
         max_hidden_state_size: int = 512,
-        max_seq_len: int = None,
         min_layers: int = 1,
         max_layers: int = 3,
         dropout: float = 0.0,
@@ -87,17 +86,19 @@ class EvolvableLSTM(EvolvableModule):
         self.min_layers = min_layers
         self.max_layers = max_layers
         self.dropout = dropout
-        self.max_seq_len = max_seq_len
-
-        # For LSTM, hidden state and cell state have shape (num_layers * num_directions, batch_size, hidden_size)
-        # Assuming unidirectional LSTM (num_directions=1) !TODO: SHOULD WE HAVE A DIRECTIONAL LSTM IN THE FUTURE?
-        self.hidden_state_architecture = {
-            "h": (self.num_layers, BatchDimension, self.hidden_state_size),
-            "c": (self.num_layers, BatchDimension, self.hidden_state_size),
-        }
 
         # Create the network
         self.model = self.create_lstm()
+
+    @property
+    def hidden_state_architecture(self) -> Dict[str, Tuple[int, ...]]:
+        """Returns the hidden state architecture."""
+        # For LSTM, hidden state and cell state have shape (num_layers * num_directions, batch_size, hidden_size)
+        # Assuming unidirectional LSTM (num_directions=1) !TODO: SHOULD WE HAVE A DIRECTIONAL LSTM IN THE FUTURE?
+        return {
+            "h": (self.num_layers, BatchDimension, self.hidden_state_size),
+            "c": (self.num_layers, BatchDimension, self.hidden_state_size),
+        }
 
     def create_lstm(self) -> nn.ModuleDict:
         """Creates and returns an LSTM network with the current configuration.
@@ -105,11 +106,13 @@ class EvolvableLSTM(EvolvableModule):
         :return: LSTM network
         :rtype: nn.ModuleDict
         """
+        features_dim = int(self.hidden_state_size)
+
         # Define network components
         model_dict = nn.ModuleDict()
         model_dict[f"{self.name}_lstm"] = nn.LSTM(
             input_size=self.input_size,
-            hidden_size=int(self.hidden_state_size),
+            hidden_size=features_dim,
             num_layers=self.num_layers,
             batch_first=True,
             dropout=self.dropout if self.num_layers > 1 else 0,
@@ -118,7 +121,7 @@ class EvolvableLSTM(EvolvableModule):
 
         # Add activation if specified
         model_dict[f"{self.name}_lstm_output"] = nn.Linear(
-            self.hidden_state_size, self.num_outputs, device=self.device
+            features_dim, self.num_outputs, device=self.device
         )
         model_dict[f"{self.name}_output_activation"] = get_activation(
             self.output_activation
@@ -176,12 +179,13 @@ class EvolvableLSTM(EvolvableModule):
             x = torch.tensor(x, dtype=torch.float32, device=self.device)
 
         # If input is 2D (batch_size, features), add sequence length dimension
+        x_shape = x.shape
         if x.dim() == 2:
-            # Reshape to (batch_size, seq_len=1, features)
             x = x.unsqueeze(1)
         elif x.dim() != 3:
             raise ValueError(
-                f"Expected 2D (batch_size, features) or 3D (batch_size, seq_len, features) input, but got {x.dim()}D"
+                f"Expected 2D (batch_size, features) or 3D "
+                f"(batch_size, seq_len, features) input, but got {x.dim()}D"
             )
 
         # Use provided hidden state if available
@@ -189,12 +193,28 @@ class EvolvableLSTM(EvolvableModule):
             h0 = hidden_state.get(f"{self.name}_h", None)
             c0 = hidden_state.get(f"{self.name}_c", None)
 
+            # Reshape to (batch_seq_size, seq_len, features)
+            sequence_input = False
+            if h0.shape[1] != x_shape[0]:
+                sequence_input = True
+                x = x.view(h0.shape[1], -1, x_shape[1])
+
             lstm_output, (h_n, c_n) = self.model[f"{self.name}_lstm"](x, (h0, c0))
+
+            # Reshape back to original shape
+            lstm_output: torch.Tensor = lstm_output
+            if sequence_input:
+                out_shape = lstm_output.shape
+                lstm_output = lstm_output.reshape(
+                    out_shape[0] * out_shape[1], out_shape[2]
+                )
+            else:
+                lstm_output = lstm_output.squeeze(1)
         else:
             raise ValueError("Hidden state is required for LSTM forward pass.")
 
         # Process output
-        lstm_output = self.model[f"{self.name}_lstm_output"](lstm_output[:, -1, :])
+        lstm_output = self.model[f"{self.name}_lstm_output"](lstm_output)
         lstm_output = self.model[f"{self.name}_output_activation"](lstm_output)
 
         # Return output and new hidden state

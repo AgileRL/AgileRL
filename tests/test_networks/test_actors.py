@@ -197,20 +197,26 @@ def test_deterministic_actor_rescale_action():
     # Test rescaling with different output activations
 
     # Create a simple action space
-    action_low = torch.tensor([-2.0, -1.0])
-    action_high = torch.tensor([2.0, 3.0])
+    action_low = torch.tensor([-2.0, -1.0], dtype=torch.float64)
+    action_high = torch.tensor([2.0, 3.0], dtype=torch.float64)
 
     # Test with Tanh activation (default for DeterministicActor)
-    action = torch.tensor([[-0.5, 0.5]])  # Action from network between -1 and 1
+    action = torch.tensor(
+        [[-0.5, 0.5]], dtype=torch.float32
+    )  # Action from network between -1 and 1
     rescaled = DeterministicActor.rescale_action(
         action, action_low, action_high, "Tanh"
     )
+
     # Calculate expected value: low + (high - low) * (action - (-1)) / (1 - (-1))
     expected = torch.tensor([[-1.0, 2.0]])  # Should be mapped to middle of range
     torch.testing.assert_close(rescaled, expected)
+    assert rescaled.dtype == action.dtype
 
     # Test with Sigmoid activation
-    action = torch.tensor([[0.25, 0.75]])  # Action from network between 0 and 1
+    action = torch.tensor(
+        [[0.25, 0.75]], dtype=torch.float32
+    )  # Action from network between 0 and 1
     rescaled = DeterministicActor.rescale_action(
         action, action_low, action_high, "Sigmoid"
     )
@@ -218,16 +224,20 @@ def test_deterministic_actor_rescale_action():
         [[-1.0, 2.0]]
     )  # Should be mapped to quarter/three-quarters of range
     torch.testing.assert_close(rescaled, expected)
+    assert rescaled.dtype == action.dtype
 
     # Test with no activation (unbounded)
-    action = torch.tensor([[1.0, -3.0]])  # Unbounded action
+    action = torch.tensor([[1.0, -3.0]], dtype=torch.float32)  # Unbounded action
     rescaled = DeterministicActor.rescale_action(action, action_low, action_high, None)
     # With no activation, action is just passed through as is
     expected = action
     torch.testing.assert_close(rescaled, expected)
+    assert rescaled.dtype == action.dtype
 
     # Test clipping behavior (out-of-bounds values)
-    action = torch.tensor([[-2.0, 2.0]])  # Actions outside of tanh range
+    action = torch.tensor(
+        [[-2.0, 2.0]], dtype=torch.float32
+    )  # Actions outside of tanh range
     rescaled = DeterministicActor.rescale_action(
         action, action_low, action_high, "Tanh"
     )
@@ -240,8 +250,11 @@ def test_deterministic_actor_rescale_action():
     expected_second = action_low + (action_high - action_low) * (
         action[0, 1] - (-1.0)
     ) / (1.0 - (-1.0))
-    expected = torch.tensor([[expected_first[0], expected_second[1]]])
+    expected = torch.tensor(
+        [[expected_first[0], expected_second[1]]], dtype=action.dtype
+    )
     torch.testing.assert_close(rescaled, expected)
+    assert rescaled.dtype == action.dtype
 
 
 def test_deterministic_actor_forward_rescaling():
@@ -333,8 +346,6 @@ def test_distribution_mutation_methods(
 
         if new_dist.last_mutation_attr is not None:
             # Check that architecture has changed
-            print(evolvable_dist)
-            print(new_dist.last_mutation_attr)
             assert_not_equal_state_dict(
                 evolvable_dist.state_dict(), new_dist.state_dict()
             )
@@ -342,11 +353,6 @@ def test_distribution_mutation_methods(
             # Checks that parameters that are not mutated are the same
             check_equal_params_ind(evolvable_dist, new_dist)
         else:
-            print(method)
-            print(new_dist.last_mutation_attr)
-            print(new_dist.wrapped.last_mutation_attr)
-            print(evolvable_dist)
-            print(new_dist)
             raise ValueError(
                 f"Last mutation attribute is None. Expected {method} to be applied."
             )

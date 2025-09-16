@@ -257,10 +257,8 @@ In the snippet below, we show an example of how to create a population of MADDPG
         hp_config = HyperparameterConfig(
             lr_actor = RLParameter(min=1e-4, max=1e-2),
             lr_critic = RLParameter(min=1e-4, max=1e-2),
-            batch_size = RLParameter(min=8, max=512, dtype=int),
-            learn_step = RLParameter(
-                min=20, max=200, dtype=int, grow_factor=1.5, shrink_factor=0.75
-                )
+            batch_size = RLParameter(min=8, max=512),
+            learn_step = RLParameter(min=20, max=200, grow_factor=1.5, shrink_factor=0.75)
         )
 
         # Create a population ready for evolutionary hyper-parameter optimisation
@@ -347,7 +345,7 @@ Alternatively, use a custom training loop. Combining all of the above:
         from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
         from agilerl.hpo.mutation import Mutations
         from agilerl.hpo.tournament import TournamentSelection
-        from agilerl.utils.utils import create_population
+        from agilerl.utils.utils import create_population, default_progress_bar
         from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -451,7 +449,7 @@ Alternatively, use a custom training loop. Combining all of the above:
 
         # TRAINING LOOP
         print("Training...")
-        pbar = trange(max_steps, unit="step")
+        pbar = default_progress_bar(max_steps)
         while np.less([agent.steps[-1] for agent in pop], max_steps).all():
             pop_episode_scores = []
             for agent in pop:  # Loop through population
@@ -574,12 +572,12 @@ Alternatively, use a custom training loop. Combining all of the above:
                 for episode_scores in pop_episode_scores
             ]
 
-            print(f"--- Global steps {total_steps} ---")
-            print(f"Steps {[agent.steps[-1] for agent in pop]}")
-            print(f"Scores: {mean_scores}")
-            print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-            print(
-                f'5 fitness avgs: {["%.2f"%np.mean(agent.fitness[-5:]) for agent in pop]}'
+            pbar.write(
+                f"--- Global steps {total_steps} ---\n"
+                f"Steps: {[agent.steps[-1] for agent in pop]}\n"
+                f"Scores: {mean_scores}\n"
+                f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
+                f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
             )
 
             # Tournament selection and population mutation
@@ -649,10 +647,8 @@ In the snippet below, we show an example of how to create a population of IPPO a
         # Mutation config for RL hyperparameters
         hp_config = HyperparameterConfig(
             lr = RLParameter(min=1e-4, max=1e-2),
-            batch_size = RLParameter(min=8, max=1024, dtype=int),
-            learn_step = RLParameter(
-                min=256, max=8192, dtype=int, grow_factor=1.5, shrink_factor=0.75
-                )
+            batch_size = RLParameter(min=8, max=1024),
+            learn_step = RLParameter(min=256, max=8192, grow_factor=1.5, shrink_factor=0.75)
         )
 
         # Create a population ready for evolutionary hyper-parameter optimisation

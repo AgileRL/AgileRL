@@ -702,6 +702,7 @@ def test_mutation_applies_architecture_mutations(
         ).items():
             network.rng = EvoDummyRNG()
 
+    applied_mutations = set()
     for mut_method in mut_methods:
 
         class DummyRNG:
@@ -711,6 +712,11 @@ def test_mutation_applies_architecture_mutations(
         mutations.rng = DummyRNG()
 
         new_population = [agent.clone(wrap=False) for agent in population]
+
+        # Apply architecture mutations to the population
+        if isinstance(population[0], RSNorm):
+            new_population = [agent.agent for agent in new_population]
+
         mutated_population = [
             mutations.architecture_mutate(agent) for agent in new_population
         ]
@@ -725,6 +731,7 @@ def test_mutation_applies_architecture_mutations(
             assert individual.mut == (policy.last_mutation_attr or "None")
 
             if policy.last_mutation_attr is not None:
+                applied_mutations.add(policy.last_mutation_attr)
                 # assert str(old_policy.state_dict()) != str(policy.state_dict())
                 for group in old.registry.groups:
                     if group.eval_network != policy_name:
@@ -739,6 +746,10 @@ def test_mutation_applies_architecture_mutations(
             assert old.index == individual.index
 
         # assert_equal_state_dict(population, mutated_population)
+
+    assert all(mut in mut_methods for mut in applied_mutations), set(mut_methods) - set(
+        applied_mutations
+    )
 
     del mutations, mutated_population, new_population
 
@@ -1236,6 +1247,7 @@ def test_mutation_applies_architecture_mutations_multi_agent(
 
     test_agent = "agent_0" if algo != "IPPO" else "agent"
     mut_methods = population[0].actors[test_agent].mutation_methods
+    applied_mutations = set()
     for mut_method in mut_methods:
 
         class DummyRNG:
@@ -1245,6 +1257,10 @@ def test_mutation_applies_architecture_mutations_multi_agent(
         mutations.rng = DummyRNG()
 
         new_population = [agent.clone(wrap=False) for agent in population]
+
+        if isinstance(new_population[0], AsyncAgentsWrapper):
+            new_population = [agent.agent for agent in new_population]
+
         mutated_population = [
             mutations.architecture_mutate(agent) for agent in new_population
         ]
@@ -1256,6 +1272,7 @@ def test_mutation_applies_architecture_mutations_multi_agent(
             # old_policy = getattr(old, policy_name)
             if policy.last_mutation_attr is not None:
                 sampled_mutation = ".".join(policy.last_mutation_attr.split(".")[1:])
+                applied_mutations.add(sampled_mutation)
             else:
                 sampled_mutation = None
 
@@ -1279,6 +1296,10 @@ def test_mutation_applies_architecture_mutations_multi_agent(
         torch.cuda.empty_cache()
 
     del mutations
+
+    assert all(mut in applied_mutations for mut in mut_methods), set(mut_methods) - set(
+        applied_mutations
+    )
 
 
 # The mutation method applies BERT architecture mutations to the population and returns the mutated population.

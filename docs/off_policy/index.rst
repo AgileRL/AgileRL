@@ -45,7 +45,7 @@ are more likely to remain present in the population. The sequence of evolution (
         import torch
 
         from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-        from agilerl.utils.utils import create_population, make_vect_envs
+        from agilerl.utils.utils import create_population, make_vect_envs, default_progress_bar
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -77,10 +77,8 @@ are more likely to remain present in the population. The sequence of evolution (
         # RL hyperparameter configuration for mutations
         hp_config = HyperparameterConfig(
             lr = RLParameter(min=1e-4, max=1e-2),
-            batch_size = RLParameter(min=8, max=64, dtype=int),
-            learn_step = RLParameter(
-                min=1, max=120, dtype=int, grow_factor=1.5, shrink_factor=0.75
-                )
+            batch_size = RLParameter(min=8, max=64),
+            learn_step = RLParameter(min=1, max=120, grow_factor=1.5, shrink_factor=0.75)
         )
 
         pop = create_population(
@@ -240,7 +238,7 @@ Alternatively, use a custom training loop. Combining all of the above:
 
         # TRAINING LOOP
         print("Training...")
-        pbar = trange(max_steps, unit="step")
+        pbar = default_progress_bar(max_steps)
         while np.less([agent.steps[-1] for agent in pop], max_steps).all():
             pop_episode_scores = []
             for agent in pop:  # Loop through population
@@ -322,12 +320,12 @@ Alternatively, use a custom training loop. Combining all of the above:
                 for episode_scores in pop_episode_scores
             ]
 
-            print(f"--- Global steps {total_steps} ---")
-            print(f"Steps {[agent.steps[-1] for agent in pop]}")
-            print(f"Scores: {mean_scores}")
-            print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-            print(
-                f'5 fitness avgs: {["%.2f"%np.mean(agent.fitness[-5:]) for agent in pop]}'
+            pbar.write(
+                f"--- Global steps {total_steps} --- \n"
+                f"Steps: {[agent.steps[-1] for agent in pop]} \n"
+                f"Scores: {mean_scores} \n"
+                f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]} \n'
+                f'5 fitness avgs: {["%.2f"%np.mean(agent.fitness[-5:]) for agent in pop]}',
             )
 
             # Tournament selection and population mutation

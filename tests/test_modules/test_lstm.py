@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from agilerl.modules.lstm import EvolvableLSTM
+from agilerl.typing import BatchDimension
 from tests.helper_functions import assert_state_dicts_equal
 
 ######### Define fixtures #########
@@ -65,7 +66,6 @@ def test_forward_with_states(device):
     num_outputs = 5
     num_layers = 2
     batch_size = 1
-    seq_len = 5
 
     evolvable_lstm = EvolvableLSTM(
         input_size=input_size,
@@ -75,9 +75,9 @@ def test_forward_with_states(device):
         device=device,
     )
 
-    input_tensor = torch.randn(batch_size, seq_len, input_size).to(device)
-    h0 = torch.zeros(num_layers, batch_size, hidden_size).to(device)
-    c0 = torch.zeros(num_layers, batch_size, hidden_size).to(device)
+    input_tensor = torch.randn(batch_size, 1, input_size).to(device)
+    h0 = torch.zeros(num_layers, 1, hidden_size).to(device)
+    c0 = torch.zeros(num_layers, 1, hidden_size).to(device)
 
     with torch.no_grad():
         # Pass hidden states to forward manually
@@ -190,6 +190,10 @@ def test_add_nodes(
     if numb_new_nodes is None:
         numb_new_nodes = result["numb_new_nodes"]
     assert lstm.hidden_state_size == original_hidden_size + numb_new_nodes
+    assert lstm.hidden_state_architecture == {
+        "h": (lstm.num_layers, BatchDimension, original_hidden_size + numb_new_nodes),
+        "c": (lstm.num_layers, BatchDimension, original_hidden_size + numb_new_nodes),
+    }
 
 
 ######### Test remove_lstm_node #########
@@ -217,6 +221,10 @@ def test_remove_nodes(
     if numb_new_nodes is None:
         numb_new_nodes = result["numb_new_nodes"]
     assert lstm.hidden_state_size == original_hidden_size - numb_new_nodes
+    assert lstm.hidden_state_architecture == {
+        "h": (lstm.num_layers, BatchDimension, original_hidden_size - numb_new_nodes),
+        "c": (lstm.num_layers, BatchDimension, original_hidden_size - numb_new_nodes),
+    }
 
 
 ######### Test activation change #########
@@ -237,7 +245,7 @@ def test_change_activation(device):
         assert lstm.output_activation == activation
 
         # Verify the activation works through forward pass
-        input_tensor = torch.randn(1, 5, 10).to(device)
+        input_tensor = torch.randn(1, 10).to(device)
         h0 = torch.zeros(1, 1, 64).to(device)
         c0 = torch.zeros(1, 1, 64).to(device)
         output, (hn, cn) = lstm.forward(

@@ -91,6 +91,9 @@ class PPO(RLAlgorithm):
     :type wrap: bool, optional
     :param bptt_sequence_type: Type of sequence for BPTT learning, defaults to BPTTSequenceType.CHUNKED
     :type bptt_sequence_type: BPTTSequenceType, optional
+    :param max_seq_len: Maximum sequence length for truncated BPTT, defaults to None, where complete episodes
+    are used as sequences.
+    :type max_seq_len: int, optional
     """
 
     def __init__(
@@ -125,6 +128,7 @@ class PPO(RLAlgorithm):
         accelerator: Optional[Any] = None,
         wrap: bool = True,
         bptt_sequence_type: BPTTSequenceType = BPTTSequenceType.CHUNKED,
+        max_seq_len: Optional[int] = None,
     ) -> None:
         super().__init__(
             observation_space,
@@ -221,21 +225,10 @@ class PPO(RLAlgorithm):
         self.use_rollout_buffer = use_rollout_buffer
         self.net_config = net_config
 
-        if self.recurrent:
-            if not self.use_rollout_buffer:
-                raise ValueError("use_rollout_buffer must be True if recurrent=True.")
+        if self.recurrent and not self.use_rollout_buffer:
+            raise ValueError("use_rollout_buffer must be True if recurrent=True.")
 
-            net_config_dict = self.net_config if self.net_config is not None else {}
-            self.max_seq_len = net_config_dict.get("encoder_config", {}).get(
-                "max_seq_len", None
-            )
-            if self.max_seq_len is None:
-                raise ValueError(
-                    "max_seq_len must be provided in net_config['encoder_config'] if recurrent=True."
-                )
-        else:
-            self.max_seq_len = None
-
+        self.max_seq_len = max_seq_len
         self.batch_size = batch_size
         self.lr = lr
         self.gamma = gamma
@@ -326,10 +319,6 @@ class PPO(RLAlgorithm):
         self.register_network_group(NetworkGroup(eval_network=self.critic))
 
         self.hidden_state = None
-        self._last_obs = None
-        self._last_done = None
-        self._last_scores = None
-        self._last_info = None
 
     def share_encoder_parameters(self) -> None:
         """Shares the encoder parameters between the actor and critic."""
@@ -356,8 +345,27 @@ class PPO(RLAlgorithm):
                 self.get_hidden_state_architecture() if self.recurrent else None
             ),
             max_seq_len=self.max_seq_len if self.recurrent else None,
+            bptt_sequence_type=self.bptt_sequence_type,
             **self.rollout_buffer_config,
         )
+
+    def _extract_hidden_state(
+        self, full_hidden_state: Dict[str, ArrayOrTensor], encoder_name: str
+    ) -> Dict[str, ArrayOrTensor]:
+        """Extract hidden state components for a specific network encoder.
+
+        :param full_hidden_state: Complete hidden state dictionary
+        :type full_hidden_state: Dict[str, ArrayOrTensor]
+        :param encoder_name: Name of the encoder to extract hidden states for
+        :type encoder_name: str
+        :return: Hidden state dictionary for the specific encoder
+        :rtype: Dict[str, ArrayOrTensor]
+        """
+        network_hidden_state = {}
+        for key, value in full_hidden_state.items():
+            if key.startswith(encoder_name):
+                network_hidden_state[key] = value
+        return network_hidden_state
 
     def _get_action_and_values(
         self,
@@ -390,25 +398,43 @@ class PPO(RLAlgorithm):
         :rtype: Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[Dict[str, ArrayOrTensor]]]
         """
         if hidden_state is not None:
-            latent_pi, next_hidden_actor = self.actor.extract_features(
-                obs, hidden_state=hidden_state
-            )
-            action, log_prob, entropy = self.actor.forward_head(
-                latent_pi, action_mask=action_mask, sample=sample
-            )
-
-            # Start with actor's next hidden state
-            next_hidden_combined: Dict[str, torch.Tensor] = next_hidden_actor
             if self.share_encoders:
-                values = self.critic.forward_head(latent_pi).squeeze(-1)
-            else:
-                # If not sharing, critic might have its own hidden state components or update existing ones
-                values, next_hidden_critic = self.critic(
+                # When sharing encoders, both networks use the same hidden state
+                latent_pi, next_hidden_actor = self.actor.extract_features(
                     obs, hidden_state=hidden_state
-                )  # Pass original hidden_state
+                )
+                action, log_prob, entropy = self.actor.forward_head(
+                    latent_pi, action_mask=action_mask, sample=sample
+                )
+                values = self.critic.forward_head(latent_pi).squeeze(-1)
+                next_hidden_combined = next_hidden_actor
+            else:
+                # When not sharing encoders, extract separate hidden states for actor and critic
+                actor_hidden_state = self._extract_hidden_state(
+                    hidden_state, "actor_encoder"
+                )
+                critic_hidden_state = self._extract_hidden_state(
+                    hidden_state, "critic_encoder"
+                )
+
+                # Forward pass through actor with its hidden state
+                latent_pi, next_hidden_actor = self.actor.extract_features(
+                    obs, hidden_state=actor_hidden_state
+                )
+                action, log_prob, entropy = self.actor.forward_head(
+                    latent_pi, action_mask=action_mask, sample=sample
+                )
+
+                # Forward pass through critic with its hidden state
+                values, next_hidden_critic = self.critic(
+                    obs, hidden_state=critic_hidden_state
+                )
                 values = values.squeeze(-1)
 
-                # Merge if critic returns its own next_hidden
+                # Combine the next hidden states from both networks
+                next_hidden_combined = {}
+                if next_hidden_actor is not None:
+                    next_hidden_combined.update(next_hidden_actor)
                 if next_hidden_critic is not None:
                     next_hidden_combined.update(next_hidden_critic)
 
@@ -464,6 +490,7 @@ class PPO(RLAlgorithm):
         self,
         obs: ArrayOrTensor,
         actions: ArrayOrTensor,
+        hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Evaluates the actions.
 
@@ -471,13 +498,17 @@ class PPO(RLAlgorithm):
         :type obs: ArrayOrTensor
         :param actions: Actions to evaluate
         :type actions: ArrayOrTensor
-        :return: Log probability, entropy, and state values
+        :param hidden_state: Hidden state for recurrent policies, defaults to None. Expected shape: dict with tensors of shape (batch_size, 1, hidden_size).
+        :type hidden_state: Optional[Dict[str, ArrayOrTensor]]
+        :return: Log probability, entropy, state values
         :rtype: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         """
         obs = self.preprocess_observation(obs)
 
         # Get values from actor-critic
-        _, _, entropy, values, _ = self._get_action_and_values(obs, sample=False)
+        _, _, entropy, values, _ = self._get_action_and_values(
+            obs, hidden_state=hidden_state, sample=False
+        )
 
         log_prob = self.actor.action_log_prob(actions)
 
@@ -576,11 +607,7 @@ class PPO(RLAlgorithm):
             # i.e. it's possible to do one learn with rollouts, then another with experiences on the same agent
             if experiences is None:
                 # Learn from the internal rollout buffer
-                if (
-                    self.recurrent
-                    and self.max_seq_len is not None
-                    and self.max_seq_len > 0
-                ):
+                if self.recurrent:
                     return self._learn_from_rollout_buffer_bptt()
                 else:
                     return self._learn_from_rollout_buffer_flat()
@@ -659,7 +686,7 @@ class PPO(RLAlgorithm):
         num_samples = experiences[4].size(0)
         batch_idxs = np.arange(num_samples)
         mean_loss = 0
-        for epoch in range(self.update_epochs):
+        for _ in range(self.update_epochs):
             np.random.shuffle(batch_idxs)
             for start in range(0, num_samples, self.batch_size):
                 minibatch_idxs = batch_idxs[start : start + self.batch_size]
@@ -680,7 +707,7 @@ class PPO(RLAlgorithm):
 
                 if len(minibatch_idxs) > 1:
                     log_prob, entropy, value = self.evaluate_actions(
-                        obs=batch_observations, actions=batch_actions
+                        obs=batch_observations, actions=batch_actions, hidden_state=None
                     )
 
                     logratio = log_prob - batch_log_probs
@@ -754,12 +781,15 @@ class PPO(RLAlgorithm):
             warnings.warn("Buffer data is empty. Skipping learning step.")
             return 0.0
 
-        observations = buffer_td["observations"]
-        advantages = buffer_td["advantages"]
+        # Normalize advantages globally
+        valid_advantages: torch.Tensor = buffer_td.get("advantages")
+        normalized_advantages = (valid_advantages - valid_advantages.mean()) / (
+            valid_advantages.std() + 1e-8
+        )
+        buffer_td["advantages"] = normalized_advantages
 
         batch_size = self.batch_size
-        num_samples = observations.size(0)  # Total number of samples in the buffer
-
+        num_samples = self.rollout_buffer.size()
         indices = np.arange(num_samples)
         mean_loss = 0.0
         approx_kl_divs = []
@@ -775,44 +805,15 @@ class PPO(RLAlgorithm):
                 mb_obs = minibatch_td["observations"]
                 mb_actions = minibatch_td["actions"]
                 mb_log_probs = minibatch_td["log_probs"]
-                mb_advantages = advantages[minibatch_indices]
+                mb_advantages = minibatch_td["advantages"]
                 mb_returns = minibatch_td["returns"]
                 mb_old_values = minibatch_td["values"]
 
-                eval_hidden_state = None
-                if self.recurrent:
-                    # If recurrent, hidden_states should be in the buffer_td
-                    # buffer_td["hidden_states"] is a TD: {key: tensor_shape_(total_samples, layers, size)}
-                    # minibatch_td["hidden_states"] will be {key: tensor_shape_(len(minibatch_indices), layers, size)}
-                    # _get_action_and_values expects dict {key: (layers, batch, size)}
-                    if "hidden_states" in minibatch_td.keys(include_nested=True):
-                        mb_hidden_states_td: TensorDict = minibatch_td.get(
-                            "hidden_states"
-                        )
-                        eval_hidden_state = {
-                            # v has shape (minibatch_size, layers, size), permute to (layers, minibatch_size, size)
-                            k: v.permute(1, 0, 2).contiguous()
-                            for k, v in mb_hidden_states_td.items()
-                        }
-                    else:
-                        warnings.warn(
-                            "Recurrent policy, but no hidden_states found in minibatch_td for flat learning."
-                        )
+                if isinstance(self.action_space, spaces.Discrete):
+                    mb_actions = mb_actions.squeeze(-1)
 
-                _, _, entropy, values, _ = self._get_action_and_values(
-                    mb_obs,
-                    hidden_state=eval_hidden_state,
-                    sample=False,  # No sampling during evaluation for loss calculation
-                )
-
-                log_probs = self.actor.action_log_prob(mb_actions)
-
-                if entropy is None:  # For continuous squashed actions
-                    entropy = -log_probs
-
-                # Normalize advantages
-                mb_advantages = (mb_advantages - mb_advantages.mean()) / (
-                    mb_advantages.std() + 1e-8
+                log_probs, entropy, values = self.evaluate_actions(
+                    obs=mb_obs, actions=mb_actions, hidden_state=None
                 )
 
                 # Policy loss
@@ -867,211 +868,125 @@ class PPO(RLAlgorithm):
         return mean_loss
 
     def _learn_from_rollout_buffer_bptt(self) -> float:
-        """Learning procedure using truncated BPTT for recurrent networks."""
-        seq_len = self.max_seq_len
+        """Learning procedure using truncated BPTT for recurrent networks.
 
-        buffer_actual_size = (
+        :return: Mean loss over the epochs
+        :rtype: float
+        """
+        buffer_size = (
             self.rollout_buffer.capacity
             if self.rollout_buffer.full
             else self.rollout_buffer.pos
         )
-        if buffer_actual_size < seq_len:
-            warnings.warn(
-                f"Buffer size {buffer_actual_size} is less than seq_len {seq_len}. Skipping BPTT learning step."
-            )
-            return 0.0
 
-        # Normalize advantages globally once before epochs
-        valid_advantages_tensor: torch.Tensor = self.rollout_buffer.buffer[
-            "advantages"
-        ][:buffer_actual_size]
-        if valid_advantages_tensor.numel() > 0:
-            original_shape = valid_advantages_tensor.shape
-            flat_adv = valid_advantages_tensor.reshape(-1)
-            normalized_flat_adv = (flat_adv - flat_adv.mean()) / (flat_adv.std() + 1e-8)
-            self.rollout_buffer.buffer["advantages"][:buffer_actual_size] = (
-                normalized_flat_adv.reshape(original_shape)
-            )
-        else:
-            warnings.warn("No advantages to normalize in BPTT pre-normalization step.")
+        # Normalize advantages globally
+        valid_advantages: torch.Tensor = self.rollout_buffer.buffer.get("advantages")[
+            :buffer_size
+        ]
+        original_shape = valid_advantages.shape
+        flat_adv = valid_advantages.reshape(-1)
+        normalized_flat_adv = (flat_adv - flat_adv.mean()) / (flat_adv.std() + 1e-8)
+        self.rollout_buffer.buffer["advantages"][:buffer_size] = (
+            normalized_flat_adv.reshape(original_shape)
+        )
 
-        # Determine all possible start coordinates for sequences
-        num_possible_starts_per_env = buffer_actual_size - seq_len + 1
-        if num_possible_starts_per_env <= 0:
-            warnings.warn(
-                f"Not enough data in buffer ({buffer_actual_size} steps) to form sequences of length {seq_len}. Skipping BPTT."
-            )
-            return 0.0
+        # Form padded sequences to perform BPTT on
+        self.rollout_buffer.prepare_sequence_tensors(device=self.device)
 
-        all_start_coords = []  # List of (env_idx, time_idx_in_env_rollout)
-        if self.bptt_sequence_type == BPTTSequenceType.CHUNKED:
-            num_chunks_per_env = buffer_actual_size // seq_len
-            if num_chunks_per_env == 0:
-                warnings.warn(
-                    f"Not enough data for any full chunks of length {seq_len}. Skipping BPTT."
-                )
-                return 0.0
-            for env_idx in range(self.num_envs):
-                for chunk_i in range(num_chunks_per_env):
-                    all_start_coords.append((env_idx, chunk_i * seq_len))
-        elif self.bptt_sequence_type == BPTTSequenceType.MAXIMUM:
-            for env_idx in range(self.num_envs):
-                for t_idx in range(num_possible_starts_per_env):
-                    all_start_coords.append((env_idx, t_idx))
-        elif self.bptt_sequence_type == BPTTSequenceType.FIFTY_PERCENT_OVERLAP:
-            step_size = seq_len // 2
-            if step_size == 0:  # Fallback for seq_len=1
-                warnings.warn(
-                    f"Sequence length {seq_len} too short for 50% overlap. Using CHUNKED behavior."
-                )
-                num_chunks_per_env = buffer_actual_size // seq_len
-                if num_chunks_per_env == 0:
-                    return 0.0  # Not enough for even one chunk
-                for env_idx in range(self.num_envs):
-                    for chunk_i in range(num_chunks_per_env):
-                        all_start_coords.append((env_idx, chunk_i * seq_len))
-            else:
-                for env_idx in range(self.num_envs):
-                    for time_idx in range(
-                        0, buffer_actual_size - seq_len + 1, step_size
-                    ):
-                        all_start_coords.append((env_idx, time_idx))
-        else:
-            raise ValueError(f"Unknown BPTTSequenceType: {self.bptt_sequence_type}")
-
-        if not all_start_coords:
-            warnings.warn("No BPTT sequences to sample. Skipping learning.")
-            return 0.0
-
-        sequences_per_minibatch = (
-            self.batch_size
-        )  # Here, batch_size means number of sequences per minibatch
+        # Here, batch_size means number of sequences per minibatch
         mean_loss = 0.0
         total_minibatch_updates_total = 0
-
         for epoch in range(self.update_epochs):
             approx_kl_divs_epoch = []  # KL divergences for this epoch's minibatches
-            np.random.shuffle(all_start_coords)
             num_minibatches_this_epoch = 0
 
-            for i in range(0, len(all_start_coords), sequences_per_minibatch):
-                current_coords_minibatch = all_start_coords[
-                    i : i + sequences_per_minibatch
-                ]
-                if not current_coords_minibatch:
-                    continue
-
-                # Fetch minibatch of sequences; returns TensorDict on self.device
-                # Batch_size: [len(current_coords_minibatch), seq_len]
-                # "initial_hidden_states" is a non-tensor entry in TD: Dict[str, Tensor(batch_seq_size, layers, size)]
-                current_minibatch_td = (
-                    self.rollout_buffer.get_specific_sequences_tensor_batch(
-                        seq_len=seq_len,
-                        sequence_coords=current_coords_minibatch,
-                        device=self.device,
+            # Itreate over minibatches of sequences
+            minibatch_gen = self.rollout_buffer.get_minibatch_sequences(
+                batch_size=self.batch_size,
+            )
+            for minibatch_padded, minibatch_unpadded in minibatch_gen:
+                # Obs shape: (batch_seq * seq_len, *obs_dims) or nested TD
+                # Actions shape: (batch_seq * seq_len, *act_dims)
+                # Other tensors shape: (batch_seq * seq_len, )
+                mb_obs_seq = minibatch_padded["observations"]
+                mb_actions_seq = minibatch_padded["actions"]
+                mb_pad_mask = minibatch_padded["pad_mask"]
+                mb_old_log_probs = minibatch_unpadded["log_probs"]
+                mb_advantages = minibatch_unpadded["advantages"]
+                mb_values = minibatch_unpadded["values"]
+                mb_returns = minibatch_unpadded["returns"]
+                mb_initial_hidden_states_dict: Dict[str, torch.Tensor] = (
+                    minibatch_padded.get_non_tensor(
+                        "initial_hidden_states", default=None
                     )
                 )
 
-                if (
-                    current_minibatch_td.is_empty()
-                    or "observations"
-                    not in current_minibatch_td.keys(
-                        include_nested=True, leaves_only=True
-                    )
-                ):
-                    warnings.warn("Skipping empty or invalid minibatch of sequences.")
-                    continue
-
-                mb_obs_seq = current_minibatch_td[
-                    "observations"
-                ]  # Shape: (batch_seq, seq_len, *obs_dims) or nested TD
-                mb_actions_seq = current_minibatch_td[
-                    "actions"
-                ]  # Shape: (batch_seq, seq_len, *act_dims)
-                mb_old_log_probs_seq = current_minibatch_td[
-                    "log_probs"
-                ]  # Shape: (batch_seq, seq_len)
-                mb_advantages_seq = current_minibatch_td[
-                    "advantages"
-                ]  # Shape: (batch_seq, seq_len) (already normalized)
-                mb_returns_seq = current_minibatch_td[
-                    "returns"
-                ]  # Shape: (batch_seq, seq_len)
-
-                mb_initial_hidden_states_dict = current_minibatch_td.get_non_tensor(
-                    "initial_hidden_states", default=None
-                )
-
-                policy_loss_total, value_loss_total, entropy_loss_total = 0.0, 0.0, 0.0
-                current_step_hidden_state_actor = (
-                    None  # For actor: {key: (layers, batch_seq_size, hidden_size)}
-                )
                 approx_kl_divs_minibatch_timesteps = []
 
+                # For actor: {key: (layers, batch_seq_size, hidden_size)}
                 if self.recurrent and mb_initial_hidden_states_dict is not None:
-                    current_step_hidden_state_actor = {
+                    mb_initial_hidden_states_dict = {
                         # val is (batch_seq_size, layers, size), permute to (layers, batch_seq_size, size)
                         key: val.permute(1, 0, 2).contiguous().to(self.device)
                         for key, val in mb_initial_hidden_states_dict.items()
                     }
 
-                for t in range(seq_len):
-                    obs_t = (
-                        mb_obs_seq[:, t]
-                        if not isinstance(mb_obs_seq, TensorDict)
-                        else mb_obs_seq[:, t]
+                # Need to flatten action dimension for Discrete action spaces
+                if isinstance(self.action_space, spaces.Discrete):
+                    mb_actions_seq = mb_actions_seq.squeeze(-1)
+
+                # new_value: (batch_seq,),
+                # entropy: (batch_seq,) or scalar,
+                # log_prob: (batch_seq,)
+                (
+                    new_log_probs,
+                    entropy,
+                    new_values,
+                ) = self.evaluate_actions(
+                    obs=mb_obs_seq,
+                    actions=mb_actions_seq,
+                    hidden_state=mb_initial_hidden_states_dict,
+                )
+
+                # Mask out padded values
+                new_values = new_values[mb_pad_mask]
+                new_log_probs = new_log_probs[mb_pad_mask]
+                entropy = entropy[mb_pad_mask]
+
+                if isinstance(entropy, torch.Tensor):
+                    entropy = entropy.mean()
+
+                # Policy loss
+                ratio = torch.exp(new_log_probs - mb_old_log_probs)
+                policy_loss1 = -mb_advantages * ratio
+                policy_loss2 = -mb_advantages * torch.clamp(
+                    ratio, 1 - self.clip_coef, 1 + self.clip_coef
+                )
+                policy_loss = torch.max(policy_loss1, policy_loss2).mean()
+
+                # Value loss
+                v_loss_unclipped = (new_values - mb_returns) ** 2
+                v_clipped = mb_values + torch.clamp(
+                    new_values - mb_values, -self.clip_coef, self.clip_coef
+                )
+
+                v_loss_clipped = (v_clipped - mb_returns) ** 2
+                v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
+                value_loss = v_loss_max.mean()
+
+                # Entropy loss
+                entropy_loss = -entropy
+
+                with torch.no_grad():
+                    log_ratio = new_log_probs - mb_old_log_probs
+                    approx_kl_divs_minibatch_timesteps.append(
+                        ((torch.exp(log_ratio) - 1) - log_ratio).mean().item()
                     )
-                    actions_t, old_log_prob_t = (
-                        mb_actions_seq[:, t],
-                        mb_old_log_probs_seq[:, t],
-                    )
-                    adv_t, return_t = mb_advantages_seq[:, t], mb_returns_seq[:, t]
-
-                    (
-                        _,
-                        _,
-                        entropy_t,
-                        new_value_t,
-                        next_hidden_state_for_actor_step,
-                    ) = self._get_action_and_values(
-                        obs_t,
-                        hidden_state=current_step_hidden_state_actor,
-                        sample=False,
-                    )  # new_value_t: (batch_seq,), entropy_t: (batch_seq,) or scalar
-
-                    new_log_prob_t = self.actor.action_log_prob(
-                        actions_t
-                    )  # Shape: (batch_seq,)
-                    entropy_t = (
-                        (-new_log_prob_t.mean())
-                        if entropy_t is None
-                        else entropy_t.mean()
-                    )  # Ensure scalar
-
-                    ratio = torch.exp(new_log_prob_t - old_log_prob_t)
-                    policy_loss1 = -adv_t * ratio
-                    policy_loss2 = -adv_t * torch.clamp(
-                        ratio, 1 - self.clip_coef, 1 + self.clip_coef
-                    )
-                    policy_loss_total += torch.max(policy_loss1, policy_loss2).mean()
-                    value_loss_total += 0.5 * ((new_value_t - return_t) ** 2).mean()
-                    entropy_loss_total += -entropy_t  # entropy_t is already mean
-
-                    with torch.no_grad():
-                        log_ratio = new_log_prob_t - old_log_prob_t
-                        approx_kl_divs_minibatch_timesteps.append(
-                            ((torch.exp(log_ratio) - 1) - log_ratio).mean().item()
-                        )
-
-                    if self.recurrent and next_hidden_state_for_actor_step is not None:
-                        current_step_hidden_state_actor = (
-                            next_hidden_state_for_actor_step
-                        )
 
                 loss = (
-                    policy_loss_total / seq_len
-                    + self.vf_coef * (value_loss_total / seq_len)
-                    + self.ent_coef * (entropy_loss_total / seq_len)
+                    policy_loss
+                    + self.vf_coef * value_loss
+                    + self.ent_coef * entropy_loss
                 )
 
                 self.optimizer.zero_grad()

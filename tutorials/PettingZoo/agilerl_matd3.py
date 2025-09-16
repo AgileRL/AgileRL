@@ -9,16 +9,17 @@ from typing import List
 import numpy as np
 import torch
 from pettingzoo.mpe import simple_speaker_listener_v4
-from tqdm import trange
 
 from agilerl.algorithms import MATD3
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.utils.algo_utils import obs_channels_to_first
-from agilerl.utils.utils import create_population, observation_space_channels_to_first
-from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
+from agilerl.utils.utils import (
+    create_population,
+    default_progress_bar,
+    make_multi_agent_vect_envs,
+)
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -26,11 +27,12 @@ if __name__ == "__main__":
 
     # Define the network configuration
     NET_CONFIG = {
+        "latent_dim": 64,
         "encoder_config": {
-            "hidden_size": [32],  # Actor hidden size
+            "hidden_size": [64],  # Actor hidden size
         },
         "head_config": {
-            "hidden_size": [32],  # Critic hidden size
+            "hidden_size": [64],  # Critic hidden size
         },
     }
 
@@ -38,15 +40,13 @@ if __name__ == "__main__":
     INIT_HP = {
         "POPULATION_SIZE": 4,
         "ALGO": "MATD3",  # Algorithm
-        # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-        "CHANNELS_LAST": False,
-        "BATCH_SIZE": 32,  # Batch size
+        "BATCH_SIZE": 128,  # Batch size
         "O_U_NOISE": True,  # Ornstein Uhlenbeck action noise
         "EXPL_NOISE": 0.1,  # Action noise scale
         "MEAN_NOISE": 0.0,  # Mean action noise
         "THETA": 0.15,  # Rate of mean reversion in OU noise
         "DT": 0.01,  # Timestep for OU noise
-        "LR_ACTOR": 0.001,  # Actor learning rate
+        "LR_ACTOR": 0.0001,  # Actor learning rate
         "LR_CRITIC": 0.001,  # Critic learning rate
         "GAMMA": 0.95,  # Discount factor
         "MEMORY_SIZE": 100000,  # Max memory buffer size
@@ -56,25 +56,17 @@ if __name__ == "__main__":
     }
 
     num_envs = 8
-    # Define the simple speaker listener environment as a parallel environment
-    env = AsyncPettingZooVecEnv(
-        [
-            lambda: simple_speaker_listener_v4.parallel_env(continuous_actions=True)
-            for _ in range(num_envs)
-        ]
-    )
-    env.reset()
+
+    def make_env():
+        return simple_speaker_listener_v4.parallel_env(continuous_actions=True)
+
+    env = make_multi_agent_vect_envs(env=make_env, num_envs=num_envs)
 
     # Configure the multi-agent algo input arguments
     observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
     action_spaces = [env.single_action_space(agent) for agent in env.agents]
-    if INIT_HP["CHANNELS_LAST"]:
-        observation_spaces = [
-            observation_space_channels_to_first(obs) for obs in observation_spaces
-        ]
 
     # Append number of agents and agent IDs to the initial hyperparameter dictionary
-    INIT_HP["N_AGENTS"] = env.num_agents
     INIT_HP["AGENT_IDS"] = env.agents
 
     # Mutation config for RL hyperparameters
@@ -131,50 +123,36 @@ if __name__ == "__main__":
     )
 
     # Define training loop parameters
-    max_steps = 2000000  # Max steps (default: 2000000)
+    max_steps = 2_000_000  # Max steps (default: 2000000)
     learning_delay = 0  # Steps before starting learning
-    evo_steps = 1000  # Evolution frequency
+    evo_steps = 10_000  # Evolution frequency
     eval_steps = None  # Evaluation steps per episode - go until done
     eval_loop = 1  # Number of evaluation episodes
     elite = pop[0]  # Assign a placeholder "elite" agent
-
     total_steps = 0
 
     # TRAINING LOOP
     print("Training...")
-    pbar = trange(max_steps, unit="step")
+    pbar = default_progress_bar(max_steps)
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         pop_episode_scores = []
         for agent in pop:  # Loop through population
             agent.set_training_mode(True)
-
             obs, info = env.reset()  # Reset environment at start of episode
             scores = np.zeros(num_envs)
             completed_episode_scores = []
             steps = 0
-            if INIT_HP["CHANNELS_LAST"]:
-                obs = {
-                    agent_id: obs_channels_to_first(s) for agent_id, s in obs.items()
-                }
-
             for idx_step in range(evo_steps // num_envs):
-
-                # Get next action from agent
-                action, raw_action = agent.get_action(obs=obs, infos=info)
-
-                # Act in environment
-                next_obs, reward, termination, truncation, info = env.step(action)
+                action, raw_action = agent.get_action(
+                    obs=obs, infos=info
+                )  # Predict action
+                next_obs, reward, termination, truncation, info = env.step(
+                    action
+                )  # Act in environment
 
                 scores += np.sum(np.array(list(reward.values())).transpose(), axis=-1)
                 total_steps += num_envs
                 steps += num_envs
-
-                # Image processing if necessary for the environment
-                if INIT_HP["CHANNELS_LAST"]:
-                    next_obs = {
-                        agent_id: obs_channels_to_first(ns)
-                        for agent_id, ns in next_obs.items()
-                    }
 
                 # Save experiences to replay buffer
                 memory.save_to_memory(
@@ -195,19 +173,24 @@ if __name__ == "__main__":
                         and len(memory) >= agent.batch_size
                         and memory.counter > learning_delay
                     ):
-                        # Sample replay buffer
-                        experiences = memory.sample(agent.batch_size)
-                        # Learn according to agent's RL algorithm
-                        agent.learn(experiences)
+                        experiences = memory.sample(
+                            agent.batch_size
+                        )  # Sample replay buffer
+                        agent.learn(
+                            experiences
+                        )  # Learn according to agent's RL algorithm
+
                 # Handle num_envs > learn step; learn multiple times per step in env
                 elif (
                     len(memory) >= agent.batch_size and memory.counter > learning_delay
                 ):
                     for _ in range(num_envs // agent.learn_step):
-                        # Sample replay buffer
-                        experiences = memory.sample(agent.batch_size)
-                        # Learn according to agent's RL algorithm
-                        agent.learn(experiences)
+                        experiences = memory.sample(
+                            agent.batch_size
+                        )  # Sample replay buffer
+                        agent.learn(
+                            experiences
+                        )  # Learn according to agent's RL algorithm
 
                 obs = next_obs
 
@@ -221,6 +204,7 @@ if __name__ == "__main__":
                         agent.scores.append(scores[idx])
                         scores[idx] = 0
                         reset_noise_indices.append(idx)
+
                 agent.reset_action_noise(reset_noise_indices)
 
             pbar.update(evo_steps // len(pop))
@@ -232,7 +216,6 @@ if __name__ == "__main__":
         fitnesses = [
             agent.test(
                 env,
-                swap_channels=INIT_HP["CHANNELS_LAST"],
                 max_steps=eval_steps,
                 loop=eval_loop,
             )
@@ -247,12 +230,13 @@ if __name__ == "__main__":
             for episode_scores in pop_episode_scores
         ]
 
-        print(f"--- Global steps {total_steps} ---")
-        print(f"Steps {[agent.steps[-1] for agent in pop]}")
-        print(f"Scores: {mean_scores}")
-        print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-        print(
-            f'5 fitness avgs: {["%.2f"%np.mean(agent.fitness[-5:]) for agent in pop]}'
+        pbar.write(
+            f"--- Global steps {total_steps} ---\n"
+            f"Steps {[agent.steps[-1] for agent in pop]}\n"
+            f"Scores: {mean_scores}\n"
+            f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
+            f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
+            f"Mutations: {[agent.mut for agent in pop]}"
         )
 
         # Tournament selection and population mutation

@@ -102,9 +102,7 @@ Additionally, we also define our upper and lower limits for these hyperparameter
         # RL hyperparameters configuration for mutation during training
         hp_config = HyperparameterConfig(
             lr = RLParameter(min=1e-4, max=1e-2),
-            batch_size = RLParameter(
-                min=8, max=1024, dtype=int
-                )
+            batch_size = RLParameter(min=8, max=1024),
         )
 
 

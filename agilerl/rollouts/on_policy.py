@@ -48,20 +48,23 @@ def _collect_rollouts(
     :return: The observation, done flag, scores, and info for the current step.
     :rtype: Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]
     """
-    if not getattr(agent, "use_rollout_buffer", False):
+    if not agent.use_rollout_buffer:
         raise RuntimeError(
             "collect_rollouts can only be used when use_rollout_buffer=True"
         )
 
     if (
         last_obs is None
-        or last_done is None
-        or last_scores is None
-        or last_info is None
+        and last_done is None
+        and last_scores is None
+        and last_info is None
     ):
         obs, info = env.reset()
         scores = np.zeros(agent.num_envs)
         done = np.zeros(agent.num_envs)
+        agent.hidden_state = (
+            agent.get_initial_hidden_state(agent.num_envs) if recurrent else None
+        )
     else:
         obs = last_obs
         done = last_done
@@ -71,9 +74,6 @@ def _collect_rollouts(
     n_steps = n_steps or -(agent.learn_step // -agent.num_envs)
     agent.rollout_buffer.reset()
 
-    agent.hidden_state = (
-        agent.get_initial_hidden_state(agent.num_envs) if recurrent else None
-    )
     current_hidden_state_for_actor = agent.hidden_state
 
     completed_episode_scores = []
@@ -130,12 +130,11 @@ def _collect_rollouts(
             obs=obs,
             action=action,
             reward=reward_np,
-            done=done,
+            done=is_terminal_np,
             value=value_np,
             log_prob=log_prob_np,
             next_obs=next_obs,
             hidden_state=current_hidden_state_for_buffer,
-            episode_start=is_terminal_np,
         )
 
         scores += reward_np
@@ -169,7 +168,6 @@ def _collect_rollouts(
                 scores[idx] = 0
 
     # Calculate last value to compute returns and advantages properly
-    # TODO: We shouldn't access a hidden method here...
     with torch.no_grad():
         if recurrent:
             _, _, _, last_value, _ = agent._get_action_and_values(

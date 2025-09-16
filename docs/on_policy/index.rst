@@ -73,8 +73,6 @@ are more likely to remain present in the population. The sequence of evolution (
 
         observation_space = env.single_observation_space
         action_space = env.single_action_space
-        if INIT_HP['CHANNELS_LAST']:
-            observation_space = observation_space_channels_to_first(observation_space)
 
         pop = create_population(
             algo="PPO",  # RL algorithm
@@ -108,7 +106,6 @@ The easiest way to train a population of agents using PPO is to use our on-polic
         env=env,                              # Gym-style environment
         env_name="LunarLander-v3",  # Environment name
         pop=agent_pop,  # Population of agents
-        swap_channels=INIT_HP['CHANNELS_LAST'],  # Swap image channel from last to first
         max_steps=200000,  # Max number of training steps
         evo_steps=10000,  # Evolution frequency
         eval_steps=None,  # Number of steps in evaluation episode
@@ -143,7 +140,7 @@ Alternatively, use a custom on-policy training loop:
         from tqdm import trange
         from agilerl.hpo.mutation import Mutations
         from agilerl.hpo.tournament import TournamentSelection
-        from agilerl.utils.utils import create_population, make_vect_envs
+        from agilerl.utils.utils import create_population, make_vect_envs, default_progress_bar
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -181,10 +178,8 @@ Alternatively, use a custom on-policy training loop:
         # RL hyperparameters configuration for mutation during training
         hp_config = HyperparameterConfig(
             lr = RLParameter(min=1e-4, max=1e-2),
-            batch_size = RLParameter(
-                min=8, max=1024, dtype=int
-                )
-            learn_step = RLParameter(min=64, max=1024, dtype=int)
+            batch_size = RLParameter(min=8, max=1024),
+            learn_step = RLParameter(min=64, max=1024)
         )
 
         pop = create_population(
@@ -226,7 +221,7 @@ Alternatively, use a custom on-policy training loop:
 
         # TRAINING LOOP
         print("Training...")
-        pbar = trange(max_steps, unit="step")
+        pbar = default_progress_bar(max_steps)
         while np.less([agent.steps[-1] for agent in pop], max_steps).all():
             pop_episode_scores = []
             for agent in pop:  # Loop through population
@@ -308,7 +303,6 @@ Alternatively, use a custom on-policy training loop:
             fitnesses = [
                 agent.test(
                     env,
-                    swap_channels=INIT_HP["CHANNELS_LAST"],
                     max_steps=eval_steps,
                     loop=eval_loop,
                 )
@@ -323,12 +317,12 @@ Alternatively, use a custom on-policy training loop:
                 for episode_scores in pop_episode_scores
             ]
 
-            print(f"--- Global steps {total_steps} ---")
-            print(f"Steps {[agent.steps[-1] for agent in pop]}")
-            print(f"Scores: {mean_scores}")
-            print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-            print(
-                f'5 fitness avgs: {["%.2f"%np.mean(agent.fitness[-5:]) for agent in pop]}'
+            pbar.write(
+                f"--- Global steps {total_steps} ---\n"
+                f"Steps: {[agent.steps[-1] for agent in pop]}\n"
+                f"Scores: {mean_scores}\n"
+                f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
+                f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
             )
 
             # Tournament selection and population mutation
@@ -357,11 +351,8 @@ users must set both ``recurrent`` and ``use_rollout_buffer`` to ``True`` as argu
     .. code-block:: python
 
         import torch
-        from agilerl.utils.utils import (
-            create_population,
-            make_vect_envs,
-            observation_space_channels_to_first
-        )
+        from agilerl.rollouts.on_policy import collect_rollouts_recurrent
+        from agilerl.utils.utils import create_population, make_vect_envs, default_progress_bar
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -412,3 +403,101 @@ users must set both ``recurrent`` and ``use_rollout_buffer`` to ``True`` as argu
             num_envs=num_envs,  # Number of vectorized envs
             device=device,
         )
+
+        tournament = TournamentSelection(
+            tournament_size=2,  # Tournament selection size
+            elitism=True,  # Elitism in tournament selection
+            population_size=INIT_HP["POP_SIZE"],  # Population size
+            eval_loop=1,  # Evaluate using last N fitness scores
+        )
+
+        mutations = Mutations(
+            no_mutation=0.4,  # No mutation
+            architecture=0.2,  # Architecture mutation
+            new_layer_prob=0.2,  # New layer mutation
+            parameters=0.2,  # Network parameters mutation
+            activation=0,  # Activation layer mutation
+            rl_hp=0.2,  # Learning HP mutation
+            mutation_sd=0.1,  # Mutation strength  # Network architecture
+            rand_seed=1,  # Random seed
+            device=device,
+        )
+
+        max_steps = 200000  # Max steps
+        evo_steps = 10000  # Evolution frequency
+        eval_steps = None  # Evaluation steps per episode - go until done
+        eval_loop = 1  # Number of evaluation episodes
+        total_steps = 0
+
+        # TRAINING LOOP
+        print("Training...")
+        pbar = default_progress_bar(max_steps)
+        while np.less([agent.steps[-1] for agent in pop], max_steps).all():
+            pop_episode_scores = []
+            for agent in pop:  # Loop through population
+                steps = 0
+                completed_episodes = []
+                last_obs, last_done, last_scores, last_info = None, None, None, None
+                for _ in range(-(evo_steps // -agent.learn_step)):
+                    # Collect rollouts and save in buffer
+                    episode_scores, last_obs, last_done, last_scores, last_info = (
+                        collect_rollouts_recurrent(
+                            agent,
+                            env,
+                            last_obs=last_obs,
+                            last_done=last_done,
+                            last_scores=last_scores,
+                            last_info=last_info,
+                        )
+                    )
+
+                    agent.learn()  # Learn from rollout buffer
+
+                    # Update step counter and scores
+                    total_steps += agent.learn_step
+                    steps += agent.learn_step
+                    agent.steps[-1] += agent.learn_step
+                    completed_episodes += episode_scores
+
+                pop_episode_scores.append(
+                    np.mean(completed_episodes)
+                    if len(completed_episodes) > 0
+                    else "0 completed episodes"
+                )
+                pbar.update(steps // len(pop))
+
+            # Evaluate population
+            fitnesses = [
+                agent.test(
+                    env,
+                    max_steps=eval_steps,
+                    loop=eval_loop,
+                )
+                for agent in pop
+            ]
+
+            pbar.write(
+                f"--- Global steps {total_steps} ---\n"
+                f"Steps: {[agent.steps[-1] for agent in pop]}\n"
+                f"Scores: {pop_episode_scores}\n"
+                f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
+                f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
+            )
+
+            if any(score >= required_score for score in pop_episode_scores):
+                print(
+                    f"\nAgent achieved required score {required_score}. Stopping training."
+                )
+                elite, _ = tournament.select(pop)
+                break
+
+            # Tournament selection and population mutation
+            elite, pop = tournament.select(pop)
+            pop = mutations.mutation(pop)
+
+            # Update step counter
+            for agent in pop:
+                agent.steps.append(agent.steps[-1])
+
+        pbar.close()
+        env.close()
