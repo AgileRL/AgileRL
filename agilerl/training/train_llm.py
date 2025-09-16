@@ -32,7 +32,7 @@ def finetune_llm(
     elite_path: Optional[str] = None,
     wb: bool = False,
     evo_steps: Optional[int] = 20,
-    checkpoint_steps: Optional[int] = None, # FIXME added in on GCP, should we delete?
+    checkpoint_steps: Optional[int] = None,  # FIXME added in on GCP, should we delete?
     tournament: Optional[TournamentSelection] = None,
     mutation: Optional[Mutations] = None,
     wandb_api_key: Optional[str] = None,
@@ -139,6 +139,8 @@ def finetune_llm(
     elif max_steps is None and num_epochs is not None:
         max_steps = num_epochs * len(env)
 
+    print("MAX STEPS", max_steps)
+
     training_steps = -(max_steps // -effective_data_batch_size)
     if accelerator is None or accelerator.is_main_process:
         pbar = trange(
@@ -162,14 +164,13 @@ def finetune_llm(
 
             # Use the reward function stored in env.step to calculate reward of the each answer from the group
             next_prompts, rewards = env.step(completion_ids)
-            accelerator.wait_for_everyone()
 
             experiences = (
                 completion_ids,
                 action_masks,
                 rewards,
             )
-            loss, kl = agent.learn(experiences) 
+            loss, kl = agent.learn(experiences)
             metrics = [loss, kl, rewards, completion_lengths]
             if max_reward is not None:
                 accuracy = (rewards == max_reward).sum() / len(rewards.flatten())
@@ -238,10 +239,11 @@ def finetune_llm(
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
         else:
-            if (i + 1) * effective_data_batch_size % max_steps == 0 or (i + 1) * effective_data_batch_size % checkpoint_steps == 0:
-                # save_llm_checkpoint(agent, elite_path)
-                # FIXME done for single agent saving
-                agent.save_checkpoint(f"round2_gsm8k_checkpoint_{(i+1)*effective_data_batch_size}", weights_only=True)
+            if checkpoint_steps is not None and (
+                (i + 1) * effective_data_batch_size % max_steps == 0
+                or (i + 1) * effective_data_batch_size % checkpoint_steps == 0
+            ):
+                save_llm_checkpoint(agent, elite_path)
 
         if wb and (accelerator is None or accelerator.is_main_process):
             wandb_dict = {

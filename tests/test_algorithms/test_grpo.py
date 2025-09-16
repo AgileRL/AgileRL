@@ -2713,11 +2713,16 @@ def test_grpo_move_model_to_vllm_original_module(
     pretrained_model_name_or_path,
     reduce_memory_peak,
 ):
-    first_key = list(grpo.actor._modules.keys())[0]  # e.g. "0"
-    first_module = grpo.actor._modules.pop(first_key)  # grab and remove it
-    new_key = first_key + "_original_module"  # append suffix
-    grpo.actor._modules[new_key] = first_module  # reinsert with new name
-    grpo._move_model_to_vllm()
+    fake_named_params = [
+        (
+            "base_model.model.model.decoder.layers.0.self_attn_layer_norm.weight.original_module",
+            torch.randn(768),
+        ),
+    ]
+    model_ref = grpo.accelerator.unwrap_model(grpo.actor)
+    with patch.object(model_ref, "named_parameters", return_value=fake_named_params):
+        grpo._move_model_to_vllm()
+    AcceleratorState._reset_state(True)
 
 
 @pytest.mark.parametrize(

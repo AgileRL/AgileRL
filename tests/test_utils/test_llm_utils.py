@@ -5,6 +5,8 @@ import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
+from accelerate import Accelerator
+from accelerate.state import AcceleratorState
 from torch.utils.data import DataLoader, Dataset
 
 from agilerl.utils.llm_utils import (
@@ -70,6 +72,15 @@ def dummy_chat_template_fn(q, a, tokenizer):
     }
 
 
+@pytest.fixture(scope="function")
+def accelerator_factory():
+    def generate_accelerator(use_accelerator):
+        AcceleratorState._reset_state(True)
+        return Accelerator() if use_accelerator else None
+
+    return generate_accelerator
+
+
 @pytest.fixture
 def dataset(num_samples):
     train_dataset = DummyDataset(int(num_samples * 0.8))
@@ -78,7 +89,10 @@ def dataset(num_samples):
 
 
 @pytest.mark.parametrize("num_samples", [200])
-def test_hugging_face_gym_init(dataset, num_samples):
+@pytest.mark.parametrize("use_accelerator", [True, False])
+def test_hugging_face_gym_init(
+    dataset, accelerator_factory, num_samples, use_accelerator
+):
     train_dataset, test_dataset = dataset
     tokenizer = DummyTokenizer()
     data_batch_size = 8
@@ -89,6 +103,7 @@ def test_hugging_face_gym_init(dataset, num_samples):
         reward_fn=dummy_reward_fn,
         apply_chat_template_fn=dummy_chat_template_fn,
         data_batch_size_per_gpu=data_batch_size,
+        accelerator=accelerator_factory(use_accelerator),
     )
     assert env.name == "dummy_dataset"
     assert callable(env.reward_fn)
@@ -296,7 +311,7 @@ def test_create_chat_collate_fn():
 
 @pytest.mark.parametrize("num_samples", [20])
 @pytest.mark.parametrize("data_batch_size", [8, 10])
-def test_reset_dataloaders_when_dataloader_exhausted(
+def test_reset_dataloaders_when_train_dataloader_exhausted(
     dataset, num_samples, data_batch_size
 ):
     train_dataset, test_dataset = dataset
@@ -314,7 +329,32 @@ def test_reset_dataloaders_when_dataloader_exhausted(
         env._get_next_batch()
         total_sampled += data_batch_size
 
-    assert env.num_dataset_passes == 1
+    assert env.num_epochs == 1
+
+
+@pytest.mark.parametrize("num_samples", [20])
+@pytest.mark.parametrize("data_batch_size", [8, 10])
+def test_not_reset_dataloaders_when_test_dataloader_exhausted(
+    dataset, num_samples, data_batch_size
+):
+    train_dataset, test_dataset = dataset
+    tokenizer = DummyTokenizer()
+    env = HuggingFaceGym(
+        train_dataset=train_dataset,
+        test_dataset=test_dataset,
+        tokenizer=tokenizer,
+        reward_fn=dummy_reward_fn,
+        apply_chat_template_fn=dummy_chat_template_fn,
+        data_batch_size_per_gpu=data_batch_size,
+    )
+    total_sampled = 0
+    env.reset()
+    for _ in range(10):
+        with env.eval_mode():
+            env._get_next_batch()
+            total_sampled += data_batch_size
+
+    assert env.num_epochs == 0
 
 
 def test_dummy_optimizer_init():
@@ -387,54 +427,3 @@ def test_dummy_optimizer_load_state_dict():
         "Please ensure you are calling accelerator.prepare() on the optimizer."
     )
     assert str(exc_info.value) == expected_message
-
-
-# def test_selective_log_softmax_float32():
-#     """Test selective_log_softmax with float32 tensors."""
-#     # Create test data
-#     batch_size, seq_len, vocab_size = 2, 3, 10
-#     logits = torch.randn(batch_size, seq_len, vocab_size, dtype=torch.float32)
-#     index = torch.randint(0, vocab_size, (batch_size, seq_len), dtype=torch.long)
-
-#     # Test selective_log_softmax
-#     result = selective_log_softmax(logits, index)
-
-#     # Verify shape
-#     assert result.shape == (batch_size, seq_len)
-
-#     # Verify values are finite
-#     assert torch.isfinite(result).all()
-
-#     # Verify values are reasonable (log probabilities should be negative)
-#     assert (result <= 0).all()
-
-#     # Test against manual computation for a single element
-#     manual_log_softmax = F.log_softmax(logits[0, 0], dim=-1)
-#     manual_gather = manual_log_softmax[index[0, 0]]
-#     assert torch.allclose(result[0, 0], manual_gather, atol=1e-6)
-
-
-# def test_selective_log_softmax_bfloat16():
-#     """Test selective_log_softmax with bfloat16 tensors (fallback path)."""
-#     # Create test data with bfloat16
-#     batch_size, seq_len, vocab_size = 2, 3, 10
-#     logits = torch.randn(batch_size, seq_len, vocab_size, dtype=torch.bfloat16)
-#     index = torch.randint(0, vocab_size, (batch_size, seq_len), dtype=torch.long)
-
-#     # Test selective_log_softmax
-#     result = selective_log_softmax(logits, index)
-
-#     # Verify shape
-#     assert result.shape == (batch_size, seq_len)
-
-#     # Verify values are finite
-#     assert torch.isfinite(result).all()
-
-#     # Verify values are reasonable (log probabilities should be negative)
-#     assert (result <= 0).all()
-
-#     # Test against manual computation for a single element
-#     manual_log_softmax = F.log_softmax(logits[0, 0].float(), dim=-1)
-#     manual_gather = manual_log_softmax[index[0, 0]]
-#     # Use larger tolerance for bfloat16
-#     assert torch.allclose(result[0, 0].float(), manual_gather, atol=1e-3)

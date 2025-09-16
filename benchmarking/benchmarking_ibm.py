@@ -101,7 +101,7 @@ def extract_xml_answer(text: str) -> str:
     answer = answer.split("</answer>")[0]
     if "####" in answer:
         answer = answer.split("####")[1].strip().replace(",", "").replace("$", "")
-    return answer
+    return answer.split()
 
 
 def extract_hash_answer(text: str) -> str | None:
