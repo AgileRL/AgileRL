@@ -1,12 +1,12 @@
 import re
 from typing import Tuple
 
-from sympy.logic import false
 import torch
 import yaml
 from accelerate import Accelerator
 from datasets import load_dataset
 from peft import LoraConfig, get_peft_model
+from sympy.logic import false
 from torch.utils.data import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -29,7 +29,7 @@ def create_model(pretrained_model_name_or_path):
         attn_implementation="flash_attention_2",
         device_map="auto",
     )
-    
+
     lora_config = LoraConfig(
         r=16,
         lora_alpha=64,
@@ -137,8 +137,10 @@ def equation_reward_func(completions, target, nums, **kwargs):
             rewards.append(0.0)
     return rewards
 
+
 def combined_rewards(completion, solution, prompt):
     import torch.distributed as dist
+
     # if dist.get_rank() == 1:
     #     print("LLM completion, solution, prompt, and reward for rank 1")
     #     print("COMPLETION", completion)
@@ -161,7 +163,7 @@ def combined_rewards(completion, solution, prompt):
         print("SOLUTION", solution)
         print("PROMPT", prompt)
         print("REWARD", reward)
-        print("*"*50)
+        print("*" * 50)
 
     if reward == 2.0:
         with open("countdown_completions.txt", "a") as text_file:

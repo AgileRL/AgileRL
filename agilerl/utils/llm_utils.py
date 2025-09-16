@@ -8,9 +8,9 @@ import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from transformers import AutoTokenizer
 from transformers.tokenization_utils_base import BatchEncoding
-from torch.utils.data.distributed import DistributedSampler
 
 
 class ReturnedPrompts(TypedDict):
@@ -151,11 +151,13 @@ class HuggingFaceGym(gym.Env):
         for idx, (group_completion, answer, question) in enumerate(
             zip(completions, self.answers, self.questions)
         ):
-            completion_to_decode = group_completion[:, self.last_tokenized_prompts[idx]["input_ids"].shape[1] :]
+            completion_to_decode = group_completion[
+                :, self.last_tokenized_prompts[idx]["input_ids"].shape[1] :
+            ]
 
             # Vectorize this in the future
             decoded_group_completion = self.tokenizer.batch_decode(
-                completion_to_decode,   
+                completion_to_decode,
                 skip_special_tokens=True,
             )
             rewards = [
@@ -176,17 +178,22 @@ class HuggingFaceGym(gym.Env):
                 {
                     "input_ids": returned_prompt["input_ids"],
                     "attention_mask": returned_prompt["attention_mask"],
-                    "text": self.tokenizer.batch_decode(
+                    "text": (
+                        self.tokenizer.batch_decode(
                             returned_prompt["input_ids"],
-                            skip_special_tokens=False, # Needs to be False here as we need to provide context about user roles to the model
+                            skip_special_tokens=False,  # Needs to be False here as we need to provide context about user roles to the model
                             clean_up_tokenization_spaces=False,
-                        )[0] if self.return_raw_completions else None
-                } for returned_prompt in batch["tokenized_prompts"]
+                        )[0]
+                        if self.return_raw_completions
+                        else None
+                    ),
+                }
+                for returned_prompt in batch["tokenized_prompts"]
             ]
         except StopIteration:
             if not self.evaluation_mode:
                 self.num_epochs += 1
-           
+
             self._reset_dataloaders(
                 reset_train=not self.evaluation_mode,
                 reset_test=self.evaluation_mode,

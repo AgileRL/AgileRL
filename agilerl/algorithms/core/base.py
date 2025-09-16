@@ -2112,7 +2112,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             )
         if self.use_vllm:
             destroy_model_parallel()
-            del self.llm.llm_engine.model_executor.driver_worker 
+            del self.llm.llm_engine.model_executor.driver_worker
             self.llm = None
         gc.collect()
         torch.cuda.empty_cache()
