@@ -1932,12 +1932,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 )
                 self.actor = PeftModel.from_pretrained(
                     base_model,
-                    os.path.join(path, f"actor"),
+                    os.path.join(path, "actor"),
                     is_trainable=True,
                     adapter_name="actor",
                 )
                 self.actor.load_adapter(
-                    os.path.join(path, f"reference"),
+                    os.path.join(path, "reference"),
                     is_trainable=False,
                     adapter_name="reference",
                 )
