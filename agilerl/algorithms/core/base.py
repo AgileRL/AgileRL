@@ -1254,12 +1254,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             assert len(agent_ids) == len(
                 observation_spaces
             ), "Number of agent IDs must match number of observation spaces."
-            assert all(
-                isinstance(_space, spaces.Space) for _space in observation_spaces
-            ), "Observation spaces must be instances of gymnasium.spaces.Space."
-            assert all(
-                isinstance(_space, spaces.Space) for _space in action_spaces
-            ), "Action spaces must be instances of gymnasium.spaces.Space."
+
             self.possible_observation_spaces = spaces.Dict(
                 {
                     agent_id: space

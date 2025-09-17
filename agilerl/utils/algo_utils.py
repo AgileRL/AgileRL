@@ -72,9 +72,10 @@ def check_supported_space(observation_space: GymSpaceType) -> None:
             ), "AgileRL does not support nested Tuple and Dict spaces in Tuple spaces."
             check_supported_space(subspace)
     elif isinstance(observation_space, spaces.MultiDiscrete):
-        assert (
-            len(observation_space.nvec.shape) == 1
-        ), "AgileRL does not support multi-dimensional MultiDiscrete spaces."
+        assert len(observation_space.nvec.shape) == 1, (
+            "AgileRL does not support multi-dimensional MultiDiscrete spaces. Got shape "
+            f"{observation_space.nvec.shape}."
+        )
 
 
 def get_input_size_from_space(
