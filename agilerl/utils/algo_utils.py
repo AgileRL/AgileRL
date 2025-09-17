@@ -45,6 +45,39 @@ from agilerl.typing import (
 PreTrainedModelType = Union[PeftModel, PreTrainedModel]
 
 
+def check_supported_space(observation_space: GymSpaceType) -> None:
+    """Checks if the observation space is supported by AgileRL.
+
+    :param observation_space: The observation space to check.
+    :type observation_space: GymSpaceType
+    """
+    assert isinstance(
+        observation_space, spaces.Space
+    ), "Observation space must be an instance of gymnasium.spaces.Space."
+
+    assert not isinstance(
+        observation_space, (spaces.Graph, spaces.Sequence, spaces.OneOf)
+    ), "AgileRL does not support Graph, Sequence, and OneOf spaces."
+
+    if isinstance(observation_space, spaces.Dict):
+        for subspace in observation_space.spaces.values():
+            assert not isinstance(
+                subspace, (spaces.Tuple, spaces.Dict)
+            ), "AgileRL does not support nested Tuple and Dict spaces in Dict spaces."
+            check_supported_space(subspace)
+    elif isinstance(observation_space, spaces.Tuple):
+        for subspace in observation_space.spaces:
+            assert not isinstance(
+                subspace, (spaces.Tuple, spaces.Dict)
+            ), "AgileRL does not support nested Tuple and Dict spaces in Tuple spaces."
+            check_supported_space(subspace)
+    elif isinstance(observation_space, spaces.MultiDiscrete):
+        assert len(observation_space.nvec.shape) == 1, (
+            "AgileRL does not support multi-dimensional MultiDiscrete spaces. Got shape "
+            f"{observation_space.nvec.shape}."
+        )
+
+
 def get_input_size_from_space(
     observation_space: GymSpaceType,
 ) -> Union[int, Dict[str, int], Tuple[int, ...]]:
