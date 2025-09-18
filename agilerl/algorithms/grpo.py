@@ -819,13 +819,14 @@ class GRPO(LLMAlgorithm):
                 logits = logits / self.temperature
                 print("LOGITS SHAPE BEFORE MEMORY EFFICIENT LOGITS", logits.shape)
                 # logits_to_keep = batch_ids.shape[1]
-                log_prob = GRPO._memory_efficient_logits(logits, batch_ids[:, 1:])
-                assert False
-                log_prob = (
-                    F.log_softmax(logits[:, :-1], dim=-1)
-                    .gather(dim=-1, index=batch_ids[:, 1:].unsqueeze(-1))
-                    .squeeze(-1)
+                log_prob = GRPO._memory_efficient_logits(
+                    logits[:, :-1], batch_ids[:, 1:]
                 )
+                # log_prob = (
+                #     F.log_softmax(logits[:, :-1], dim=-1)
+                #     .gather(dim=-1, index=batch_ids[:, 1:].unsqueeze(-1))
+                #     .squeeze(-1)
+                # )
                 log_probs.append(log_prob)
         return torch.cat(log_probs)
         #     else:
@@ -1059,6 +1060,8 @@ class GRPO(LLMAlgorithm):
         for row_logits, row_labels in zip(
             logits, index
         ):  # loop to reduce peak mem consumption
+            print("Row logits shape in memory efficient logits", row_logits.shape)
+            print("Row index shape in memory efficient logits", row_labels.shape)
             row_logps = F.log_softmax(row_logits, dim=-1)
             row_per_token_logps = row_logps.gather(
                 dim=-1, index=row_labels.unsqueeze(-1)
