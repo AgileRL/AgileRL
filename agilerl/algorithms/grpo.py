@@ -516,8 +516,10 @@ class GRPO(LLMAlgorithm):
             old_log_probs,
             reference_log_probs,
         )
+        print("ACTION MASKS", action_masks)
+        assert False
         for _ in range(self.update_epochs):
-            self.rng.shuffle(batch_idxs)
+            # self.rng.shuffle(batch_idxs)
             for start in range(0, num_samples, batch_size):
                 minibatch_idxs = batch_idxs[
                     start : min((start + batch_size), num_samples)
@@ -819,16 +821,12 @@ class GRPO(LLMAlgorithm):
                 logits = logits / self.temperature
                 print("LOGITS SHAPE BEFORE MEMORY EFFICIENT LOGITS", logits.shape)
                 # logits_to_keep = batch_ids.shape[1]
+                # inputs_to_keep = batch
                 log_prob = GRPO._memory_efficient_logits(
                     logits[:, :-1], batch_ids[:, 1:]
                 )
-                # log_prob = (
-                #     F.log_softmax(logits[:, :-1], dim=-1)
-                #     .gather(dim=-1, index=batch_ids[:, 1:].unsqueeze(-1))
-                #     .squeeze(-1)
-                # )
                 log_probs.append(log_prob)
-        return torch.cat(log_probs)
+        return torch.cat(log_probs, dim=0)
         #     else:
         #         model_kwargs = {
         #             "input_ids": ids,
