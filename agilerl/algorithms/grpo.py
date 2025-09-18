@@ -463,12 +463,21 @@ class GRPO(LLMAlgorithm):
 
         print(f"Completion IDs, shape {completion_ids.shape}")
 
+        num_samples = advantages.shape[0]
+        batch_idxs = np.arange(num_samples)
+        mean_loss, mean_kl = 0, 0
+        batch_size = min(num_samples, self.batch_size_per_process)
+
         with torch.no_grad():
             reference_log_probs = self._get_logprobs(
-                completion_ids, use_reference=True, eval_mode=True
+                completion_ids,
+                batch_size=batch_size,
+                use_reference=True,
+                eval_mode=True,
             )
             old_log_probs = self._get_logprobs(
                 completion_ids,
+                batch_size=batch_size,
                 use_reference=False,
                 eval_mode=True,
             )
@@ -479,11 +488,6 @@ class GRPO(LLMAlgorithm):
             old_log_probs,
             reference_log_probs,
         )
-
-        num_samples = advantages.shape[0]
-        batch_idxs = np.arange(num_samples)
-        mean_loss, mean_kl = 0, 0
-        batch_size = min(num_samples, self.batch_size_per_process)
         for _ in range(self.update_epochs):
             self.rng.shuffle(batch_idxs)
             for start in range(0, num_samples, batch_size):
@@ -498,7 +502,10 @@ class GRPO(LLMAlgorithm):
                     batch_reference_log_probs,
                 ) = get_experiences_samples(minibatch_idxs, *experiences)
                 batch_log_probs = self._get_logprobs(
-                    batch_ids, use_reference=False, eval_mode=False
+                    batch_ids,
+                    batch_size=batch_size,
+                    use_reference=False,
+                    eval_mode=False,
                 )
                 loss, kl = self._grpo_loss(
                     batch_action_mask,
@@ -738,12 +745,18 @@ class GRPO(LLMAlgorithm):
         return loss.mean(), kl.mean()
 
     def _get_logprobs(
-        self, ids: torch.Tensor, use_reference: bool = False, eval_mode: bool = False
+        self,
+        ids: torch.Tensor,
+        batch_size: int,
+        use_reference: bool = False,
+        eval_mode: bool = False,
     ) -> torch.Tensor:
         """Find the log probabilities for a set of previously generated ids.
 
         :param ids: Completion IDs.
         :type ids: torch.Tensor
+        :param batch_size: Batch size.
+        :type batch_size: int
         :param use_reference: Flag to indicate to use reference policy, defaults to False
         :type use_reference: bool, optional
         :param eval_mode: Flag to indicate setting policy network to evaluation mode, defaults to False
@@ -755,38 +768,40 @@ class GRPO(LLMAlgorithm):
         with self.select_policy(use_reference):
             self.actor.train(mode=not eval_mode)
             attention_mask = ids != self.pad_token_id
-            model_kwargs = {
-                "input_ids": ids,
-                "attention_mask": attention_mask,
-                "use_cache": False,
-            }
             if self.calc_position_embeddings:
                 position_ids = attention_mask.long().cumsum(dim=-1) - 1
                 position_ids.masked_fill_(mask=(attention_mask == 0), value=1)
-                model_kwargs |= {"position_ids": position_ids}
 
-            if self.reduce_memory_peak:
-                log_probs_list = []
-                for input_id, mask in zip(ids, attention_mask):
-                    input_id = input_id.reshape(1, -1)
-                    mask = mask.reshape(1, -1)
-                    kwargs = {
-                        "input_ids": input_id,
-                        "attention_mask": mask,
+            if ids.shape[0] > batch_size:
+                # Split the sample into batches
+                for batch in range(0, ids.shape[0], batch_size):
+                    batch_ids = ids[batch : batch + batch_size]
+                    batch_attention_mask = attention_mask[batch : batch + batch_size]
+                    batch_model_kwargs = {
+                        "input_ids": batch_ids,
+                        "attention_mask": batch_attention_mask,
                         "use_cache": False,
                     }
-
-                    logit = self.actor.forward(**kwargs).logits
-                    logit = logit / self.temperature
+                    if self.calc_position_embeddings:
+                        batch_position_ids = position_ids[batch : batch + batch_size]
+                        batch_model_kwargs |= {"position_ids": batch_position_ids}
+                    logits = self.actor.forward(**batch_model_kwargs).logits
+                    logits = logits / self.temperature
                     log_prob = (
-                        F.log_softmax(logit[:, :-1], dim=-1)
-                        .gather(dim=-1, index=input_id[:, 1:].unsqueeze(-1))
+                        F.log_softmax(logits[:, :-1], dim=-1)
+                        .gather(dim=-1, index=batch_ids[:, 1:].unsqueeze(-1))
                         .squeeze(-1)
                     )
-                    log_probs_list.append(log_prob)
-                log_probs = torch.cat(log_probs_list)
-
+                    log_probs.append(log_prob)
+                log_probs = torch.cat(log_probs)
             else:
+                model_kwargs = {
+                    "input_ids": ids,
+                    "attention_mask": attention_mask,
+                    "use_cache": False,
+                }
+                if self.calc_position_embeddings:
+                    model_kwargs |= {"position_ids": position_ids}
                 logits = self.actor.forward(**model_kwargs).logits
                 logits = logits / self.temperature
                 log_probs = (
