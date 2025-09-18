@@ -817,6 +817,8 @@ class GRPO(LLMAlgorithm):
                     batch_model_kwargs |= {"position_ids": batch_position_ids}
                 logits = self.actor.forward(**batch_model_kwargs).logits
                 logits = logits / self.temperature
+                print("LOGITS SHAPE", logits.shape)
+                assert False
                 log_prob = (
                     F.log_softmax(logits[:, :-1], dim=-1)
                     .gather(dim=-1, index=batch_ids[:, 1:].unsqueeze(-1))
