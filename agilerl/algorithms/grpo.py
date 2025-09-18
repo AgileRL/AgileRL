@@ -499,28 +499,25 @@ class GRPO(LLMAlgorithm):
 
         with torch.no_grad():
             reference_log_probs = self._get_logprobs(
-                completion_ids[:, :-logits_to_keep],
+                completion_ids[:, logits_to_keep:],
                 batch_size=batch_size,
                 use_reference=True,
                 eval_mode=True,
             )
             old_log_probs = self._get_logprobs(
-                completion_ids[:, :-logits_to_keep],
+                completion_ids[:, logits_to_keep:],
                 batch_size=batch_size,
                 use_reference=False,
                 eval_mode=True,
             )
         experiences = (
-            completion_ids[:, :-logits_to_keep],
-            action_masks[:, :-logits_to_keep],
+            completion_ids[:, logits_to_keep:],
+            action_masks[:, logits_to_keep:],
             advantages,
-            old_log_probs[:, :-logits_to_keep],
-            reference_log_probs[:, :-logits_to_keep],
+            old_log_probs[:, logits_to_keep:],
+            reference_log_probs[:, logits_to_keep:],
         )
 
-        print(
-            "LOGITS TO KEEP", action_masks.argmax(dim=-1).min().item()
-        )  # batch, seq_len
         for _ in range(self.update_epochs):
             # self.rng.shuffle(batch_idxs)
             for start in range(0, num_samples, batch_size):
