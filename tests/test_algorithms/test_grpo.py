@@ -47,6 +47,7 @@ dist_env = dict(
     RANK="0",
     LOCAL_RANK="0",
     WORLD_SIZE="1",
+    PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True",
 )
 
 deepspeed_base_config = {
