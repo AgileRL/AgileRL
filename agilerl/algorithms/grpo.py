@@ -3,14 +3,13 @@ import os
 import re
 import warnings
 from contextlib import contextmanager, nullcontext
-from typing import Dict, List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
-import deepspeed
 import numpy as np
 import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
-from accelerate.utils import broadcast_object_list, gather_object, set_seed
+from accelerate.utils import set_seed
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from gymnasium import spaces
@@ -19,7 +18,6 @@ from torch.nn.utils import clip_grad_norm_
 from transformers import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
 from vllm import LLM, SamplingParams
-from vllm.distributed.parallel_state import destroy_model_parallel
 
 from agilerl.algorithms.core import LLMAlgorithm, OptimizerWrapper
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
@@ -195,7 +193,7 @@ class GRPO(LLMAlgorithm):
                 ] = self.micro_batch_size_per_gpu
                 if batch_size % self.accelerator.num_processes != 0:
                     raise ValueError(
-                        f"Batch size must be divisible by the number of processes."
+                        f"Batch size ({batch_size}) must be divisible by the number of processes ({self.accelerator.num_processes})."
                     )
                 gradient_accumulation_steps = (
                     batch_size / self.accelerator.num_processes
@@ -207,7 +205,7 @@ class GRPO(LLMAlgorithm):
             else:
                 if batch_size % self.accelerator.num_processes != 0:
                     raise ValueError(
-                        f"Batch size must be divisible by the number of processes."
+                        f"Batch size ({batch_size}) must be divisible by the number of processes ({self.accelerator.num_processes})."
                     )
                 self.batch_size_per_process = int(
                     batch_size / self.accelerator.num_processes
@@ -221,7 +219,7 @@ class GRPO(LLMAlgorithm):
                     != 0
                 ):
                     raise ValueError(
-                        f"Batch size must be divisible by the product of the number of processes and gradient accumulation steps."
+                        f"Batch size ({batch_size}) must be divisible by the product of the number of processes ({self.accelerator.num_processes}) and gradient accumulation steps ({self.accelerator.state.deepspeed_plugin.deepspeed_config.get('gradient_accumulation_steps', 1)})."
                         "Gradient accumulation steps can be updated in the deepspeed config by changing the 'gradient_accumulation_steps' parameter."
                     )
                 self.micro_batch_size_per_gpu = int(

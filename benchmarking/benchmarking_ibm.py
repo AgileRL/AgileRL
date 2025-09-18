@@ -6,15 +6,11 @@ import yaml
 from accelerate import Accelerator
 from datasets import load_dataset
 from peft import LoraConfig, get_peft_model
-from sympy.logic import false
 from torch.utils.data import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-from agilerl.hpo.mutation import Mutations
-from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_llm import finetune_llm
-from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
@@ -113,7 +109,6 @@ def extract_hash_answer(text: str) -> str | None:
 # Reward functions
 def correctness_reward_func(completions, prompts, answer, **kwargs) -> list[float]:
     responses = [completion for completion in completions]
-    q = prompts[0]
     extracted_responses = [extract_xml_answer(r) for r in responses]
     return [2.0 if r == a else 0.0 for r, a in zip(extracted_responses, answer)]
 
@@ -227,24 +222,24 @@ def main(init_hp, mut_p):
 
     del model
 
-    tournament = TournamentSelection(
-        init_hp["TOURN_SIZE"],
-        init_hp["ELITISM"],
-        init_hp["POP_SIZE"],
-        init_hp["EVAL_LOOP"],
-    )
+    # tournament = TournamentSelection(
+    #     init_hp["TOURN_SIZE"],
+    #     init_hp["ELITISM"],
+    #     init_hp["POP_SIZE"],
+    #     init_hp["EVAL_LOOP"],
+    # )
 
-    mutations = Mutations(
-        no_mutation=mut_p["NO_MUT"],
-        architecture=0,
-        new_layer_prob=0,
-        parameters=0,
-        activation=0,
-        rl_hp=mut_p["RL_HP_MUT"],
-        mutation_sd=mut_p["MUT_SD"],
-        rand_seed=mut_p["RAND_SEED"],
-        accelerator=accelerator,
-    )
+    # mutations = Mutations(
+    #     no_mutation=mut_p["NO_MUT"],
+    #     architecture=0,
+    #     new_layer_prob=0,
+    #     parameters=0,
+    #     activation=0,
+    #     rl_hp=mut_p["RL_HP_MUT"],
+    #     mutation_sd=mut_p["MUT_SD"],
+    #     rand_seed=mut_p["RAND_SEED"],
+    #     accelerator=accelerator,
+    # )
 
     finetune_llm(
         pop=pop,

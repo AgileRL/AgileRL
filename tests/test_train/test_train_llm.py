@@ -317,7 +317,7 @@ def test_finetune_llm_max_steps_set_from_num_epochs():
     mutation.activation_mut = 0
 
     # Mock other dependencies
-    with patch("agilerl.training.train_llm.trange") as mock_trange, patch(
+    with patch("agilerl.training.train_llm.trange"), patch(
         "agilerl.training.train_llm.init_wandb"
     ), patch("agilerl.training.train_llm.wandb"), patch(
         "agilerl.training.train_llm.aggregate_metrics_across_gpus"
@@ -367,13 +367,13 @@ def test_finetune_llm_break_on_num_epochs():
     mutation.activation_mut = 0
 
     # Mock other dependencies
-    with patch("agilerl.training.train_llm.trange") as mock_trange, patch(
+    with patch("agilerl.training.train_llm.trange"), patch(
         "agilerl.training.train_llm.init_wandb"
     ), patch("agilerl.training.train_llm.wandb"), patch(
         "agilerl.training.train_llm.aggregate_metrics_across_gpus"
     ) as mock_agg, patch(
         "agilerl.training.train_llm.save_llm_checkpoint"
-    ) as mock_save:
+    ):
 
         mock_env.num_epochs = 2
         mock_agg.return_value = 0.5

@@ -4,7 +4,6 @@ import gymnasium as gym
 import numpy as np
 import pytest
 import torch
-import torch.nn.functional as F
 from accelerate import Accelerator
 from accelerate.state import AcceleratorState
 from torch.utils.data import DataLoader, Dataset

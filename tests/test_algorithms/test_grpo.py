@@ -1,5 +1,6 @@
 import copy
 import gc
+import socket
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -280,9 +281,6 @@ def create_module(input_size, max_tokens, vocab_size, device):
         ),
         device=device,
     )
-
-
-import socket
 
 
 def get_free_port():
@@ -727,7 +725,7 @@ def test_init_grpo_vllm_tp_warning(
     [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
-def test_init_grpo_scheduler_warning(
+def test_init_grpo_scheduler_warning_no_accelerator(
     grpo,
     accelerator_factory,
     model_factory,
@@ -742,7 +740,6 @@ def test_init_grpo_scheduler_warning(
     pretrained_model_name_or_path,
     reduce_memory_peak,
 ):
-    accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with pytest.warns(UserWarning):
         GRPO(
             gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
@@ -2758,7 +2755,6 @@ def test_update_lr(
     pretrained_model_name_or_path,
     reduce_memory_peak,
 ):
-    accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     opt = (
         grpo.optimizer.optimizer
         if not use_deepspeed_optimizer

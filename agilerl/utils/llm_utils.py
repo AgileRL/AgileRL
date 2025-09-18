@@ -5,10 +5,8 @@ from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, TypedD
 
 import gymnasium as gym
 import torch
-import torch.nn.functional as F
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
 from transformers import AutoTokenizer
 from transformers.tokenization_utils_base import BatchEncoding
 

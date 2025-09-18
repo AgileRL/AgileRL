@@ -6,7 +6,6 @@ import yaml
 from accelerate import Accelerator
 from datasets import load_dataset
 from peft import LoraConfig, get_peft_model
-from sympy.logic import false
 from torch.utils.data import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -14,7 +13,6 @@ from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_llm import finetune_llm
-from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
@@ -256,8 +254,8 @@ def main(init_hp, mut_p):
         elite_path="saved_llms",
         max_reward=2.0,
         evo_steps=1,
-        mutation=None,  # mutations,
-        tournament=None,  # tournament,
+        mutation=mutations,
+        tournament=tournament,
         accelerator=accelerator,
         verbose=True,
     )
