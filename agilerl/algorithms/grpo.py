@@ -517,13 +517,6 @@ class GRPO(LLMAlgorithm):
             old_log_probs[:-logits_to_keep],
             reference_log_probs[:-logits_to_keep],
         )
-        torch.set_printoptions(
-            threshold=float("inf"),  # Print all elements
-            linewidth=200,  # Wider lines
-            profile="full",  # Full precision
-        )
-
-        print("ACTION MASKS", action_masks)
 
         print(
             "LOGITS TO KEEP", action_masks.argmax(dim=-1).min().item()
