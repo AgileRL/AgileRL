@@ -488,8 +488,6 @@ class GRPO(LLMAlgorithm):
         )
         advantages = self._calculate_advantage(rewards).to(self.device)
 
-        print(f"Completion IDs, shape {completion_ids.shape}")
-
         num_samples = advantages.shape[0]
         batch_idxs = np.arange(num_samples)
         mean_loss, mean_kl = 0, 0
@@ -518,7 +516,6 @@ class GRPO(LLMAlgorithm):
         for _ in range(self.update_epochs):
             self.rng.shuffle(batch_idxs)
             for start in range(0, num_samples, batch_size):
-                print("batch number =========", start)
                 minibatch_idxs = batch_idxs[
                     start : min((start + batch_size), num_samples)
                 ]
