@@ -256,6 +256,9 @@ class GRPO(LLMAlgorithm):
                         raise ValueError(
                             f"When specifying micro_batch_size_per_gpu, batch_size ({batch_size}) must be divisible by the product of the number of processes ({self.accelerator.num_processes}) and micro_batch_size_per_gpu ({self.micro_batch_size_per_gpu})."
                         )
+                    self.accelerator.state.deepspeed_plugin.deepspeed_config[
+                        "train_micro_batch_size_per_gpu"
+                    ] = self.micro_batch_size_per_gpu
                     gradient_accumulation_steps = (
                         batch_size
                         / self.accelerator.num_processes

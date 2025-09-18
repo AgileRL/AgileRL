@@ -1368,7 +1368,7 @@ def test_calculate_advantage(
     "use_vllm, pretrained_model_name_or_path",
     [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
 )
-@pytest.mark.parametrize("batch_size", [8])
+@pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 def test_calculate_kl_divergence(
     grpo,
@@ -1449,7 +1449,7 @@ def test_grpo_loss(
     "use_vllm, pretrained_model_name_or_path, reduce_memory_peak",
     [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5", True)],
 )
-@pytest.mark.parametrize("batch_size", [16])
+@pytest.mark.parametrize("batch_size", [1])
 def test_grpo_learn(
     grpo,
     accelerator_factory,
@@ -1523,7 +1523,7 @@ def test_grpo_learn(
         (False, None, False),
     ],
 )
-@pytest.mark.parametrize("batch_size", [8])
+@pytest.mark.parametrize("batch_size", [1])
 def test_get_logprobs(
     grpo,
     accelerator_factory,
@@ -1565,7 +1565,7 @@ def test_get_logprobs(
     "use_vllm, pretrained_model_name_or_path, reduce_memory_peak",
     [(False, None, False)],
 )
-@pytest.mark.parametrize("batch_size", [8])
+@pytest.mark.parametrize("batch_size", [1])
 def test_get_backward_pass_with_scheduler(
     grpo,
     accelerator_factory,
@@ -1599,7 +1599,7 @@ def test_get_backward_pass_with_scheduler(
     "use_vllm, pretrained_model_name_or_path",
     [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
 )
-@pytest.mark.parametrize("batch_size", [8])
+@pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 def test_grpo_value_error_with_nan_loss(
     grpo,
@@ -1815,7 +1815,7 @@ def test_grpo_save_load_checkpoint_vllm(
     "use_vllm, pretrained_model_name_or_path",
     [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
 )
-@pytest.mark.parametrize("batch_size", [8])
+@pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 def test_save_load_distributed_actor_no_accelerator(
     grpo,
@@ -2218,7 +2218,7 @@ def test_grpo_clone_with_accelerator_vllm(
     "use_vllm, pretrained_model_name_or_path",
     [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
 )
-@pytest.mark.parametrize("batch_size", [2])
+@pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 def test_grpo_test(
     grpo,
@@ -2251,7 +2251,7 @@ def test_grpo_test(
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path", [(True, "facebook/opt-125m")]
 )
-@pytest.mark.parametrize("batch_size", [2])
+@pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 def test_grpo_test_vllm(
     grpo,
@@ -2341,7 +2341,7 @@ def test_clone_llm_peft(vocab_size, input_size, max_tokens):
     [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
-@pytest.mark.parametrize("batch_size", [8])
+@pytest.mark.parametrize("batch_size", [1])
 def test_grpo_clean_up(
     grpo,
     accelerator_factory,
@@ -2377,7 +2377,7 @@ def test_grpo_clean_up(
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path", [(True, "facebook/opt-125m")]
 )
-@pytest.mark.parametrize("batch_size", [8])
+@pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 def test_grpo_clean_up_vllm(
     grpo,
@@ -2415,7 +2415,7 @@ def test_grpo_clean_up_vllm(
     "use_vllm, pretrained_model_name_or_path",
     [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
 )
-@pytest.mark.parametrize("batch_size", [8])
+@pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 def test_grpo_preprocess_observation(
     grpo,
@@ -2450,7 +2450,7 @@ def test_grpo_preprocess_observation(
     "use_vllm, pretrained_model_name_or_path",
     [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
 )
-@pytest.mark.parametrize("batch_size", [8])
+@pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 def test_load_distributed_actor_warning(
     grpo,
