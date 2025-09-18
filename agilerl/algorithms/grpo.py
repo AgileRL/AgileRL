@@ -74,6 +74,8 @@ class GRPO(LLMAlgorithm):
     :type calc_position_embeddings: bool, optional
     :param reduce_memory_peak: Flag to reduce memory peak in the _get_logprobs method, defaults to False
     :type reduce_memory_peak: bool, optional
+    :param micro_batch_size_per_gpu: Batch size per process, can be specified when reduce_memory_peak is False, defaults to None
+    :type micro_batch_size_per_gpu: int, optional
     :param max_output_tokens: Max number of answer tokens, defaults to 512
     :type max_output_tokens: int, optional
     :param min_output_tokens: Minimum output tokens, defaults to 0
@@ -124,6 +126,7 @@ class GRPO(LLMAlgorithm):
         top_k: int = 50,
         min_p: float = 0.0,
         calc_position_embeddings: bool = True,
+        micro_batch_size_per_gpu: int | None = None,
         reduce_memory_peak: bool = False,
         max_output_tokens: int = 1024,
         min_output_tokens: Optional[int] = None,
@@ -207,39 +210,83 @@ class GRPO(LLMAlgorithm):
                     raise ValueError(
                         f"Batch size ({batch_size}) must be divisible by the number of processes ({self.accelerator.num_processes})."
                     )
+
                 self.batch_size_per_process = int(
                     batch_size / self.accelerator.num_processes
                 )
 
-                if (
-                    self.batch_size_per_process
-                    % self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
-                        "gradient_accumulation_steps", 1
+                if micro_batch_size_per_gpu is None:
+                    if (
+                        self.batch_size_per_process
+                        % self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
+                            "gradient_accumulation_steps", 1
+                        )
+                        != 0
+                    ):
+                        raise ValueError(
+                            f"Batch size ({batch_size}) must be divisible by the product of the number of processes ({self.accelerator.num_processes}) and gradient accumulation steps ({self.accelerator.state.deepspeed_plugin.deepspeed_config.get('gradient_accumulation_steps', 1)})."
+                            "Gradient accumulation steps can be updated in the deepspeed config by changing the 'gradient_accumulation_steps' parameter."
+                        )
+                    self.micro_batch_size_per_gpu = int(
+                        self.batch_size_per_process
+                        / self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
+                            "gradient_accumulation_steps", 1
+                        )
                     )
-                    != 0
-                ):
-                    raise ValueError(
-                        f"Batch size ({batch_size}) must be divisible by the product of the number of processes ({self.accelerator.num_processes}) and gradient accumulation steps ({self.accelerator.state.deepspeed_plugin.deepspeed_config.get('gradient_accumulation_steps', 1)})."
-                        "Gradient accumulation steps can be updated in the deepspeed config by changing the 'gradient_accumulation_steps' parameter."
-                    )
-                self.micro_batch_size_per_gpu = int(
-                    self.batch_size_per_process
-                    / self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
-                        "gradient_accumulation_steps", 1
-                    )
-                )
 
-                # train_batch == micro_batch * grad_acc * self.world_size
-
-                if (
-                    self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
-                        "train_micro_batch_size_per_gpu", "auto"
+                    if (
+                        self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
+                            "train_micro_batch_size_per_gpu", "auto"
+                        )
+                        == "auto"
+                    ):
+                        self.accelerator.state.deepspeed_plugin.deepspeed_config[
+                            "train_micro_batch_size_per_gpu"
+                        ] = self.micro_batch_size_per_gpu
+                else:
+                    self.micro_batch_size_per_gpu = micro_batch_size_per_gpu
+                    if (
+                        batch_size
+                        % (
+                            self.micro_batch_size_per_gpu
+                            * self.accelerator.num_processes
+                        )
+                        != 0
+                    ):
+                        raise ValueError(
+                            f"When specifying micro_batch_size_per_gpu, batch_size ({batch_size}) must be divisible by the product of the number of processes ({self.accelerator.num_processes}) and micro_batch_size_per_gpu ({self.micro_batch_size_per_gpu})."
+                        )
+                    gradient_accumulation_steps = (
+                        batch_size
+                        / self.accelerator.num_processes
+                        / self.micro_batch_size_per_gpu
                     )
-                    == "auto"
-                ):
+                    warnings.warn(
+                        f"Overwriting deepspeed config gradient accumulation steps from {self.accelerator.state.deepspeed_plugin.deepspeed_config.get('gradient_accumulation_steps', 'auto')} to {gradient_accumulation_steps}"
+                    )
                     self.accelerator.state.deepspeed_plugin.deepspeed_config[
-                        "train_micro_batch_size_per_gpu"
-                    ] = self.micro_batch_size_per_gpu
+                        "gradient_accumulation_steps"
+                    ] = gradient_accumulation_steps
+
+                    print("Batch size", batch_size)
+                    print("Micro batch size per gpu", self.micro_batch_size_per_gpu)
+                    print("Gradient accumulation steps", gradient_accumulation_steps)
+                    print("Number of processes", self.accelerator.num_processes)
+                    print("Batch size per process", self.batch_size_per_process)
+
+                    print(
+                        "Batch size equal to product of micro batch size per gpu, num_processes and gradient accumulation steps",
+                        batch_size
+                        == self.micro_batch_size_per_gpu
+                        * gradient_accumulation_steps
+                        * self.accelerator.num_processes,
+                    )
+                    print(
+                        "Batch size per process equal to product of micro batch size per gpu and gradient accumulation steps",
+                        self.batch_size_per_process
+                        == self.micro_batch_size_per_gpu * gradient_accumulation_steps,
+                    )
+                    assert False
 
         else:
             self.batch_size_per_process = batch_size
