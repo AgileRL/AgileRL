@@ -361,7 +361,7 @@ def model_factory():
         model = AutoModelForCausalLM.from_pretrained(
             pretrained_model_name_or_path=pretrained_model_name_or_path,
             torch_dtype=torch.float16,
-            attn_implementation="flash_attention_2",
+            attn_implementation="sdpa",
         )
         model.gradient_checkpointing_enable()
         model = get_peft_model(model, peft_config)
