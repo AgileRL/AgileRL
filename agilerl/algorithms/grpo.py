@@ -774,29 +774,28 @@ class GRPO(LLMAlgorithm):
                 position_ids = attention_mask.long().cumsum(dim=-1) - 1
                 position_ids.masked_fill_(mask=(attention_mask == 0), value=1)
 
-            if num_samples > batch_size:
-                # Split the sample into batches
-                log_probs = []
-                for batch in range(0, num_samples, batch_size):
-                    end_idx = min((batch + batch_size), num_samples)
-                    batch_ids = ids[batch:end_idx]
-                    batch_attention_mask = attention_mask[batch:end_idx]
-                    batch_model_kwargs = {
-                        "input_ids": batch_ids,
-                        "attention_mask": batch_attention_mask,
-                        "use_cache": False,
-                    }
-                    if self.calc_position_embeddings:
-                        batch_position_ids = position_ids[batch:end_idx]
-                        batch_model_kwargs |= {"position_ids": batch_position_ids}
-                    logits = self.actor.forward(**batch_model_kwargs).logits
-                    logits = logits / self.temperature
-                    log_prob = (
-                        F.log_softmax(logits[:, :-1], dim=-1)
-                        .gather(dim=-1, index=batch_ids[:, 1:].unsqueeze(-1))
-                        .squeeze(-1)
-                    )
-                    log_probs.append(log_prob)
+            # Split the sample into batches
+            log_probs = []
+            for batch in range(0, num_samples, batch_size):
+                end_idx = min((batch + batch_size), num_samples)
+                batch_ids = ids[batch:end_idx]
+                batch_attention_mask = attention_mask[batch:end_idx]
+                batch_model_kwargs = {
+                    "input_ids": batch_ids,
+                    "attention_mask": batch_attention_mask,
+                    "use_cache": False,
+                }
+                if self.calc_position_embeddings:
+                    batch_position_ids = position_ids[batch:end_idx]
+                    batch_model_kwargs |= {"position_ids": batch_position_ids}
+                logits = self.actor.forward(**batch_model_kwargs).logits
+                logits = logits / self.temperature
+                log_prob = (
+                    F.log_softmax(logits[:, :-1], dim=-1)
+                    .gather(dim=-1, index=batch_ids[:, 1:].unsqueeze(-1))
+                    .squeeze(-1)
+                )
+                log_probs.append(log_prob)
         return torch.cat(log_probs)
         #     else:
         #         model_kwargs = {
