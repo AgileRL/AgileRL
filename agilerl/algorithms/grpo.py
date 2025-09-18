@@ -817,7 +817,9 @@ class GRPO(LLMAlgorithm):
                     batch_model_kwargs |= {"position_ids": batch_position_ids}
                 logits = self.actor.forward(**batch_model_kwargs).logits
                 logits = logits / self.temperature
-                print("LOGITS SHAPE", logits.shape)
+                print("LOGITS SHAPE BEFORE MEMORY EFFICIENT LOGITS", logits.shape)
+                # logits_to_keep = batch_ids.shape[1]
+                log_prob = GRPO._memory_efficient_logits(logits, batch_ids[:, 1:])
                 assert False
                 log_prob = (
                     F.log_softmax(logits[:, :-1], dim=-1)
@@ -1037,3 +1039,30 @@ class GRPO(LLMAlgorithm):
             action_masks.append(action_mask)
 
         return completion_ids, action_masks
+
+    @staticmethod
+    def _memory_efficient_logits(
+        logits: torch.Tensor, index: torch.Tensor
+    ) -> torch.Tensor:
+        """Calculate the log probabilities for a set of previously generated ids, looping to reduce peak memory consumption.
+
+        :param logits: Logits.
+        :type logits: torch.Tensor
+        :param index: Index.
+        :type index: torch.Tensor
+        :return: Log probabilities of the completion IDs.
+        :rtype: torch.Tensor
+        """
+        print("Logits shape in memory efficient logits", logits.shape)
+        print("Index shape in memory efficient logits", index.shape)
+        per_token_logps = []
+        for row_logits, row_labels in zip(
+            logits, index
+        ):  # loop to reduce peak mem consumption
+            row_logps = F.log_softmax(row_logits, dim=-1)
+            row_per_token_logps = row_logps.gather(
+                dim=-1, index=row_labels.unsqueeze(-1)
+            ).squeeze(-1)
+            per_token_logps.append(row_per_token_logps)
+        per_token_logps = torch.stack(per_token_logps)
+        return per_token_logps
