@@ -797,23 +797,23 @@ class GRPO(LLMAlgorithm):
                         .squeeze(-1)
                     )
                     log_probs.append(log_prob)
-                log_probs = torch.cat(log_probs)
-            else:
-                model_kwargs = {
-                    "input_ids": ids,
-                    "attention_mask": attention_mask,
-                    "use_cache": False,
-                }
-                if self.calc_position_embeddings:
-                    model_kwargs |= {"position_ids": position_ids}
-                logits = self.actor.forward(**model_kwargs).logits
-                logits = logits / self.temperature
-                log_probs = (
-                    F.log_softmax(logits[:, :-1], dim=-1)
-                    .gather(dim=-1, index=ids[:, 1:].unsqueeze(-1))
-                    .squeeze(-1)
-                )
-        return log_probs
+        return torch.cat(log_probs)
+        #     else:
+        #         model_kwargs = {
+        #             "input_ids": ids,
+        #             "attention_mask": attention_mask,
+        #             "use_cache": False,
+        #         }
+        #         if self.calc_position_embeddings:
+        #             model_kwargs |= {"position_ids": position_ids}
+        #         logits = self.actor.forward(**model_kwargs).logits
+        #         logits = logits / self.temperature
+        #         log_probs = (
+        #             F.log_softmax(logits[:, :-1], dim=-1)
+        #             .gather(dim=-1, index=ids[:, 1:].unsqueeze(-1))
+        #             .squeeze(-1)
+        #         )
+        # return log_probs
 
     def _backward_pass(self, loss: float) -> None:
         """Perform a backward pass
