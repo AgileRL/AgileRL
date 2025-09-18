@@ -1543,7 +1543,7 @@ def test_get_logprobs(
         grpo.device
     )
 
-    log_probs = grpo._get_logprobs(ids=ids)
+    log_probs = grpo._get_logprobs(ids=ids, batch_size=1)
     log_probs_reduced_mem = grpo._get_logprobs(ids=ids)
     assert log_probs.shape == (ids.shape[0], ids.shape[1] - 1)
     assert log_probs_reduced_mem.shape == (ids.shape[0], ids.shape[1] - 1)

@@ -775,6 +775,7 @@ class GRPO(LLMAlgorithm):
 
             if num_samples > batch_size:
                 # Split the sample into batches
+                log_probs = []
                 for batch in range(0, ids.shape[0], batch_size):
                     end_idx = min((batch + batch_size), num_samples)
                     batch_ids = ids[batch:end_idx]
