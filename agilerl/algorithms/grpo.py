@@ -516,6 +516,12 @@ class GRPO(LLMAlgorithm):
             old_log_probs,
             reference_log_probs,
         )
+        torch.set_printoptions(
+            threshold=float("inf"),  # Print all elements
+            linewidth=200,  # Wider lines
+            profile="full",  # Full precision
+        )
+
         print("ACTION MASKS", action_masks)
         assert False
         for _ in range(self.update_epochs):
