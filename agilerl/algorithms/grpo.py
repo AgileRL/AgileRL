@@ -776,7 +776,7 @@ class GRPO(LLMAlgorithm):
             if num_samples > batch_size:
                 # Split the sample into batches
                 log_probs = []
-                for batch in range(0, ids.shape[0], batch_size):
+                for batch in range(0, num_samples, batch_size):
                     end_idx = min((batch + batch_size), num_samples)
                     batch_ids = ids[batch:end_idx]
                     batch_attention_mask = attention_mask[batch:end_idx]
@@ -905,6 +905,8 @@ class GRPO(LLMAlgorithm):
         # The below line returns a list: [prompt1 * group_size, ..., promptN * group_size],
         # where N is the data batch size, list length is group_size * N
         group_prompts = [prompt for prompt in prompts for _ in range(group_size)]
+        print(f"Group prompts, shape {len(group_prompts)}")
+        print([prompt for prompt in group_prompts])
         prompts_ids = [prompt["input_ids"] for prompt in group_prompts]
         prompts_text = [prompt["text"] for prompt in group_prompts]
         prompts_text = [
