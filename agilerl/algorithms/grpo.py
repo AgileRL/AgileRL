@@ -266,27 +266,7 @@ class GRPO(LLMAlgorithm):
                     )
                     self.accelerator.state.deepspeed_plugin.deepspeed_config[
                         "gradient_accumulation_steps"
-                    ] = gradient_accumulation_steps
-
-                    print("Batch size", batch_size)
-                    print("Micro batch size per gpu", self.micro_batch_size_per_gpu)
-                    print("Gradient accumulation steps", gradient_accumulation_steps)
-                    print("Number of processes", self.accelerator.num_processes)
-                    print("Batch size per process", self.batch_size_per_process)
-
-                    print(
-                        "Batch size equal to product of micro batch size per gpu, num_processes and gradient accumulation steps",
-                        batch_size
-                        == self.micro_batch_size_per_gpu
-                        * gradient_accumulation_steps
-                        * self.accelerator.num_processes,
-                    )
-                    print(
-                        "Batch size per process equal to product of micro batch size per gpu and gradient accumulation steps",
-                        self.batch_size_per_process
-                        == self.micro_batch_size_per_gpu * gradient_accumulation_steps,
-                    )
-                    assert False
+                    ] = int(gradient_accumulation_steps)
 
         else:
             self.batch_size_per_process = batch_size
