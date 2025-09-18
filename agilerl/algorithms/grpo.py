@@ -461,6 +461,8 @@ class GRPO(LLMAlgorithm):
         )
         advantages = self._calculate_advantage(rewards).to(self.device)
 
+        print(f"Completion IDs, shape {completion_ids.shape}")
+
         with torch.no_grad():
             reference_log_probs = self._get_logprobs(
                 completion_ids, use_reference=True, eval_mode=True
