@@ -491,6 +491,7 @@ class GRPO(LLMAlgorithm):
         for _ in range(self.update_epochs):
             self.rng.shuffle(batch_idxs)
             for start in range(0, num_samples, batch_size):
+                print("batch number =========", start)
                 minibatch_idxs = batch_idxs[
                     start : min((start + batch_size), num_samples)
                 ]
@@ -903,7 +904,7 @@ class GRPO(LLMAlgorithm):
         # prompts = [prompt1, prompt1, ..., prompt1 (group_size times), prompt2, prompt2, ..., prompt2 (group_size times), ...]
 
         # The below line returns a list: [prompt1 * group_size, ..., promptN * group_size],
-        # where N is the data batch size, list length is group_size * N
+        # where N is the data batch size per gpu, list length is group_size * N
         group_prompts = [prompt for prompt in prompts for _ in range(group_size)]
         print(f"Group prompts, shape {len(group_prompts)}")
         print([prompt for prompt in group_prompts])
