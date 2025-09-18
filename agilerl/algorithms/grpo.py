@@ -767,23 +767,25 @@ class GRPO(LLMAlgorithm):
 
         with self.select_policy(use_reference):
             self.actor.train(mode=not eval_mode)
+            num_samples = ids.shape[0]
             attention_mask = ids != self.pad_token_id
             if self.calc_position_embeddings:
                 position_ids = attention_mask.long().cumsum(dim=-1) - 1
                 position_ids.masked_fill_(mask=(attention_mask == 0), value=1)
 
-            if ids.shape[0] > batch_size:
+            if num_samples > batch_size:
                 # Split the sample into batches
                 for batch in range(0, ids.shape[0], batch_size):
-                    batch_ids = ids[batch : batch + batch_size]
-                    batch_attention_mask = attention_mask[batch : batch + batch_size]
+                    end_idx = min((batch + batch_size), num_samples)
+                    batch_ids = ids[batch:end_idx]
+                    batch_attention_mask = attention_mask[batch:end_idx]
                     batch_model_kwargs = {
                         "input_ids": batch_ids,
                         "attention_mask": batch_attention_mask,
                         "use_cache": False,
                     }
                     if self.calc_position_embeddings:
-                        batch_position_ids = position_ids[batch : batch + batch_size]
+                        batch_position_ids = position_ids[batch:end_idx]
                         batch_model_kwargs |= {"position_ids": batch_position_ids}
                     logits = self.actor.forward(**batch_model_kwargs).logits
                     logits = logits / self.temperature
