@@ -516,6 +516,15 @@ class GRPO(LLMAlgorithm):
             )
             if deepspeed.checkpointing.is_configured():
                 deepspeed.checkpointing.reset()
+
+        print(
+            "Shape of experiences before slicing",
+            completion_ids.shape,
+            action_masks.shape,
+            advantages.shape,
+            old_log_probs.shape,
+            reference_log_probs.shape,
+        )
         experiences = (
             completion_ids[:, logits_to_keep:],
             action_masks[:, logits_to_keep:],
@@ -845,8 +854,10 @@ class GRPO(LLMAlgorithm):
                 log_prob = GRPO._memory_efficient_logits(
                     logits[:, :-1], batch_ids[:, 1:]
                 )
+
+                batch_model_kwargs = None
+                logits = None
                 if not eval_mode:
-                    del batch_model_kwargs
                     assert log_prob.requires_grad  # FIXME remove
                 log_probs.append(log_prob)
         return torch.cat(log_probs, dim=0)
