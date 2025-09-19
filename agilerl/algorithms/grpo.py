@@ -496,17 +496,20 @@ class GRPO(LLMAlgorithm):
         batch_idxs = np.arange(num_samples)
         mean_loss, mean_kl = 0, 0
         batch_size = min(num_samples, self.batch_size_per_process)
-        # logits_to_keep = action_masks.argmax(dim=-1).min().item()
+        logits_to_keep = action_masks.argmax(dim=-1).min().item()
+
+        print("this is the logits to keep", logits_to_keep)
+        print("Here is the argmax", action_masks.argmax(dim=-1))
 
         with torch.no_grad():
             reference_log_probs = self._get_logprobs(
-                completion_ids,
+                completion_ids[:, logits_to_keep:],
                 batch_size=batch_size,
                 use_reference=True,
                 eval_mode=True,
             )
             old_log_probs = self._get_logprobs(
-                completion_ids,
+                completion_ids[:, logits_to_keep:],
                 batch_size=batch_size,
                 use_reference=False,
                 eval_mode=True,
@@ -514,11 +517,20 @@ class GRPO(LLMAlgorithm):
             if deepspeed.checkpointing.is_configured():
                 deepspeed.checkpointing.reset()
         experiences = (
-            completion_ids,
-            action_masks,
+            completion_ids[:, logits_to_keep:],
+            action_masks[:, logits_to_keep:],
             advantages,
-            old_log_probs,
-            reference_log_probs,
+            old_log_probs[:, logits_to_keep:],
+            reference_log_probs[:, logits_to_keep:],
+        )
+
+        print(
+            "Shapes of experiences",
+            completion_ids.shape,
+            action_masks.shape,
+            advantages.shape,
+            old_log_probs.shape,
+            reference_log_probs.shape,
         )
 
         for _ in range(self.update_epochs):
@@ -756,6 +768,11 @@ class GRPO(LLMAlgorithm):
         :return: Mean loss and mean KL divergence.
         :rtype: Tuple[torch.Tensor, torch.Tensor]
         """
+        print("LOG PROBS SHAPE", log_probs.shape)
+        print("REFERENCE LOG PROBS SHAPE", reference_log_probs.shape)
+        print("OLD LOG PROBS SHAPE", old_log_probs.shape)
+        print("ADVANTAGES SHAPE", advantages.shape)
+        print("MASK SHAPE", mask.shape)
         kl = self._calculate_kl_divergence(log_probs, reference_log_probs)
         log_probs_ratio = torch.exp(log_probs - old_log_probs)
         clipped_log_probs_ratio = log_probs_ratio.clamp(
@@ -1058,14 +1075,8 @@ class GRPO(LLMAlgorithm):
         :return: Log probabilities of the completion IDs.
         :rtype: torch.Tensor
         """
-        print("Logits shape in memory efficient logits", logits.shape)
-        print("Index shape in memory efficient logits", index.shape)
         per_token_logps = []
-        for row_logits, row_labels in zip(
-            logits, index
-        ):  # loop to reduce peak mem consumption
-            print("Row logits shape in memory efficient logits", row_logits.shape)
-            print("Row index shape in memory efficient logits", row_labels.shape)
+        for row_logits, row_labels in zip(logits, index):
             row_logps = F.log_softmax(row_logits, dim=-1)
             row_per_token_logps = row_logps.gather(
                 dim=-1, index=row_labels.unsqueeze(-1)
