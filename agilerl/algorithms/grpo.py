@@ -566,7 +566,7 @@ class GRPO(LLMAlgorithm):
                     )
                 batch_log_probs = self._get_logprobs(
                     batch_ids,
-                    batch_size=batch_size,
+                    batch_size=1,
                     use_reference=False,
                     eval_mode=False,
                 )
