@@ -516,15 +516,15 @@ class GRPO(LLMAlgorithm):
             )
             if deepspeed.checkpointing.is_configured():
                 deepspeed.checkpointing.reset()
-
-        print(
-            "Shape of experiences before slicing",
-            completion_ids.shape,
-            action_masks.shape,
-            advantages.shape,
-            old_log_probs.shape,
-            reference_log_probs.shape,
-        )
+        if self.accelerator.is_main_process:
+            print(
+                "Shape of experiences before slicing",
+                completion_ids.shape,
+                action_masks.shape,
+                advantages.shape,
+                old_log_probs.shape,
+                reference_log_probs.shape,
+            )
         experiences = (
             completion_ids[:, logits_to_keep:],
             action_masks[:, logits_to_keep:],
@@ -532,15 +532,15 @@ class GRPO(LLMAlgorithm):
             old_log_probs,
             reference_log_probs,
         )
-
-        print(
-            "Shapes of experiences",
-            completion_ids.shape,
-            action_masks.shape,
-            advantages.shape,
-            old_log_probs.shape,
-            reference_log_probs.shape,
-        )
+        if self.accelerator.is_main_process:
+            print(
+                "Shapes of experiences",
+                completion_ids.shape,
+                action_masks.shape,
+                advantages.shape,
+                old_log_probs.shape,
+                reference_log_probs.shape,
+            )
 
         for _ in range(self.update_epochs):
             # self.rng.shuffle(batch_idxs)
@@ -555,6 +555,15 @@ class GRPO(LLMAlgorithm):
                     batch_old_log_probs,
                     batch_reference_log_probs,
                 ) = get_experiences_samples(minibatch_idxs, *experiences)
+                if self.accelerator.is_main_process:
+                    print(
+                        "BATCHED EXPERIENCES SHAPES",
+                        batch_ids.shape,
+                        batch_action_mask.shape,
+                        batch_advantages.shape,
+                        batch_old_log_probs.shape,
+                        batch_reference_log_probs.shape,
+                    )
                 batch_log_probs = self._get_logprobs(
                     batch_ids,
                     batch_size=batch_size,
@@ -832,8 +841,9 @@ class GRPO(LLMAlgorithm):
                 position_ids = attention_mask.long().cumsum(dim=-1) - 1
                 position_ids.masked_fill_(mask=(attention_mask == 0), value=1)
 
-            print("SHAPE OF NUM SAMPLES", num_samples)
-            print("BATCH SIZE", batch_size)
+            if not eval_mode and self.accelerator.is_main_process:
+                print("SHAPE OF NUM SAMPLES", num_samples)
+                print("BATCH SIZE", batch_size)
 
             # Split the sample into batches
             log_probs = []
@@ -861,6 +871,7 @@ class GRPO(LLMAlgorithm):
                 batch_model_kwargs = None
                 logits = None
                 if not eval_mode:
+                    print("Log probs", log_prob)
                     assert log_prob.requires_grad  # FIXME remove
                 log_probs.append(log_prob)
         return torch.cat(log_probs, dim=0)
