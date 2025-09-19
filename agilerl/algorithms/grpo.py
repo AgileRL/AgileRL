@@ -5,6 +5,7 @@ import warnings
 from contextlib import contextmanager, nullcontext
 from typing import List, Optional, Tuple, Union
 
+import deepspeed
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -510,6 +511,8 @@ class GRPO(LLMAlgorithm):
                 use_reference=False,
                 eval_mode=True,
             )
+            if deepspeed.checkpointing.is_configured():
+                deepspeed.checkpointing.reset()
         experiences = (
             completion_ids[:, logits_to_keep:],
             action_masks[:, logits_to_keep:],
