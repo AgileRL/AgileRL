@@ -1075,7 +1075,8 @@ class GRPO(LLMAlgorithm):
                 )
             return
 
-        self.micro_batch_size_per_gpu = micro_batch_size_per_gpu
+        print("micro_batch_size_per_gpu", micro_batch_size_per_gpu)
+        self.micro_batch_size_per_gpu = int(micro_batch_size_per_gpu)
         if (
             batch_size
             % (self.micro_batch_size_per_gpu * self.accelerator.num_processes)
