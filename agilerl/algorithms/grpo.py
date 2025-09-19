@@ -566,7 +566,7 @@ class GRPO(LLMAlgorithm):
                     )
                 batch_log_probs = self._get_logprobs(
                     batch_ids,
-                    batch_size=1,
+                    batch_size=batch_size,
                     use_reference=False,
                     eval_mode=False,
                 )
@@ -849,15 +849,15 @@ class GRPO(LLMAlgorithm):
             log_probs = []
             for batch in range(0, num_samples, batch_size):
                 end_idx = min((batch + batch_size), num_samples)
-                batch_ids = ids[batch:end_idx]
-                batch_attention_mask = attention_mask[batch:end_idx]
+                batch_ids = ids[batch:end_idx, :]
+                batch_attention_mask = attention_mask[batch:end_idx, :]
                 batch_model_kwargs = {
                     "input_ids": batch_ids,
                     "attention_mask": batch_attention_mask,
                     "use_cache": False,
                 }
                 if self.calc_position_embeddings:
-                    batch_position_ids = position_ids[batch:end_idx]
+                    batch_position_ids = position_ids[batch:end_idx, :]
                     batch_model_kwargs |= {"position_ids": batch_position_ids}
                 logits = self.actor.forward(**batch_model_kwargs).logits
                 logits = logits / self.temperature
