@@ -496,51 +496,29 @@ class GRPO(LLMAlgorithm):
         batch_idxs = np.arange(num_samples)
         mean_loss, mean_kl = 0, 0
         batch_size = min(num_samples, self.batch_size_per_process)
-        logits_to_keep = action_masks.argmax(dim=-1).min().item()
-
-        print("this is the logits to keep", logits_to_keep)
-        print("Here is the argmax", action_masks.argmax(dim=-1))
+        # logits_to_keep = action_masks.argmax(dim=-1).min().item()
 
         with torch.no_grad():
             reference_log_probs = self._get_logprobs(
-                completion_ids[:, logits_to_keep:],
+                completion_ids,
                 batch_size=batch_size,
                 use_reference=True,
                 eval_mode=True,
             )
             old_log_probs = self._get_logprobs(
-                completion_ids[:, logits_to_keep:],
+                completion_ids,
                 batch_size=batch_size,
                 use_reference=False,
                 eval_mode=True,
             )
-            if deepspeed.checkpointing.is_configured():
-                deepspeed.checkpointing.reset()
-        if self.accelerator.is_main_process:
-            print(
-                "Shape of experiences before slicing",
-                completion_ids.shape,
-                action_masks.shape,
-                advantages.shape,
-                old_log_probs.shape,
-                reference_log_probs.shape,
-            )
+
         experiences = (
-            completion_ids[:, logits_to_keep:],
-            action_masks[:, logits_to_keep:],
+            completion_ids,
+            action_masks,
             advantages,
             old_log_probs,
             reference_log_probs,
         )
-        if self.accelerator.is_main_process:
-            print(
-                "Shapes of experiences",
-                completion_ids.shape,
-                action_masks.shape,
-                advantages.shape,
-                old_log_probs.shape,
-                reference_log_probs.shape,
-            )
 
         for _ in range(self.update_epochs):
             # self.rng.shuffle(batch_idxs)
@@ -566,7 +544,7 @@ class GRPO(LLMAlgorithm):
                     )
                 batch_log_probs = self._get_logprobs(
                     batch_ids,
-                    batch_size=batch_size,
+                    batch_size=1,  # Ideally we want "batch_size" here but getting killed by OOM
                     use_reference=False,
                     eval_mode=False,
                 )
