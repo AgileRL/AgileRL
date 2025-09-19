@@ -867,8 +867,13 @@ class GRPO(LLMAlgorithm):
                     )
                 logits = self.actor.forward(**batch_model_kwargs).logits
                 logits = logits / self.temperature
-                if eval_mode and self.accelerator.is_main_process:
-                    print("LOGITS SHAPE BEFORE MEMORY EFFICIENT LOGITS", logits.shape)
+                if not eval_mode and self.accelerator.is_main_process:
+                    print(
+                        "LOGITS SHAPE BEFORE MEMORY EFFICIENT LOGITS",
+                        logits.shape,
+                        logits[:, :-1].shape,
+                        batch_ids[:, 1:].shape,
+                    )
                 # logits_to_keep = batch_ids.shape[1]
                 # inputs_to_keep = batch
                 log_prob = GRPO._memory_efficient_logits(
