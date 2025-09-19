@@ -862,7 +862,8 @@ class GRPO(LLMAlgorithm):
                 if not eval_mode and self.accelerator.is_main_process:
                     print(
                         "Shape of forward input",
-                        {k: v.shape for k, v in batch_model_kwargs.items()},
+                        batch_ids.shape,
+                        batch_attention_mask.shape,
                     )
                 logits = self.actor.forward(**batch_model_kwargs).logits
                 logits = logits / self.temperature
