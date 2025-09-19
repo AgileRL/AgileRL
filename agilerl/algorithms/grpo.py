@@ -859,12 +859,12 @@ class GRPO(LLMAlgorithm):
                 if self.calc_position_embeddings:
                     batch_position_ids = position_ids[batch:end_idx, :]
                     batch_model_kwargs |= {"position_ids": batch_position_ids}
-                if not eval_mode and self.accelerator.is_main_process:
-                    print(
-                        "Shape of forward input",
-                        batch_ids.shape,
-                        batch_attention_mask.shape,
-                    )
+                # if not eval_mode and self.accelerator.is_main_process:
+                print(
+                    "Shape of forward input",
+                    batch_ids.shape,
+                    batch_attention_mask.shape,
+                )
                 logits = self.actor.forward(**batch_model_kwargs).logits
                 logits = logits / self.temperature
                 if not eval_mode and self.accelerator.is_main_process:
