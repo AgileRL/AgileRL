@@ -195,7 +195,9 @@ class GRPO(LLMAlgorithm):
                 "Cannot specify micro_batch_size_per_gpu when reduce_memory_peak is True."
             )
 
-        self._configure_batch_size(batch_size)
+        self._configure_batch_size(
+            batch_size, clone, reduce_memory_peak, micro_batch_size_per_gpu
+        )
 
         if self.accelerator is not None:
             if (
