@@ -529,8 +529,8 @@ class GRPO(LLMAlgorithm):
             completion_ids[:, logits_to_keep:],
             action_masks[:, logits_to_keep:],
             advantages,
-            old_log_probs[:, logits_to_keep:],
-            reference_log_probs[:, logits_to_keep:],
+            old_log_probs,
+            reference_log_probs,
         )
 
         print(
@@ -831,6 +831,9 @@ class GRPO(LLMAlgorithm):
             if self.calc_position_embeddings:
                 position_ids = attention_mask.long().cumsum(dim=-1) - 1
                 position_ids.masked_fill_(mask=(attention_mask == 0), value=1)
+
+            print("SHAPE OF NUM SAMPLES", num_samples)
+            print("BATCH SIZE", batch_size)
 
             # Split the sample into batches
             log_probs = []
