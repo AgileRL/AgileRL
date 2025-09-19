@@ -827,8 +827,7 @@ class GRPO(LLMAlgorithm):
                 )
                 if not eval_mode:
                     del batch_model_kwargs
-                    del logits
-                assert log_prob.requires_grad
+                assert log_prob.requires_grad  # FIXME remove
                 log_probs.append(log_prob)
         return torch.cat(log_probs, dim=0)
         #     else:
