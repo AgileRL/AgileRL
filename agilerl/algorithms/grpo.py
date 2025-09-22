@@ -1010,7 +1010,7 @@ class GRPO(LLMAlgorithm):
                 // ds_config.get("gradient_accumulation_steps", 1)
             )
             if self.micro_batch_size_per_gpu == 0:
-                raise ValueError(f"Calculated micro_batch_size_per_gpu is 0...")
+                raise ValueError("Calculated micro_batch_size_per_gpu is 0...")
 
             if ds_config.get("train_micro_batch_size_per_gpu", "auto") == "auto":
                 ds_config["train_micro_batch_size_per_gpu"] = (
