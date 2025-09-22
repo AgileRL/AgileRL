@@ -190,7 +190,7 @@ class GRPO(LLMAlgorithm):
             )
             cosine_lr_schedule_config = None
 
-        if reduce_memory_peak and micro_batch_size_per_gpu is not None:
+        if not clone and reduce_memory_peak and micro_batch_size_per_gpu is not None:
             raise ValueError(
                 "Cannot specify micro_batch_size_per_gpu when reduce_memory_peak is True."
             )
@@ -290,9 +290,6 @@ class GRPO(LLMAlgorithm):
             set_seed(seed, device_specific=True)
 
         if self.use_vllm:
-            # os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = (
-            #     "spawn"  # FIXME is this needed??
-            # )
             if self.vllm_config is None:
                 warnings.warn(
                     "No VLLM config provided. Using default VLLM configuration for generation."
@@ -420,7 +417,6 @@ class GRPO(LLMAlgorithm):
         batch_idxs = np.arange(num_samples)
         mean_loss, mean_kl = 0, 0
         batch_size = min(num_samples, self.micro_batch_size_per_gpu)
-        # logits_to_keep = action_masks.argmax(dim=-1).min().item()
 
         with torch.no_grad():
             reference_log_probs = self._get_logprobs(
@@ -445,7 +441,7 @@ class GRPO(LLMAlgorithm):
         )
 
         for _ in range(self.update_epochs):
-            # self.rng.shuffle(batch_idxs)
+            self.rng.shuffle(batch_idxs)
             for start in range(0, num_samples, batch_size):
                 minibatch_idxs = batch_idxs[
                     start : min((start + batch_size), num_samples)
@@ -457,15 +453,6 @@ class GRPO(LLMAlgorithm):
                     batch_old_log_probs,
                     batch_reference_log_probs,
                 ) = get_experiences_samples(minibatch_idxs, *experiences)
-                if self.accelerator.is_main_process:
-                    print(
-                        "BATCHED EXPERIENCES SHAPES",
-                        batch_ids.shape,
-                        batch_action_mask.shape,
-                        batch_advantages.shape,
-                        batch_old_log_probs.shape,
-                        batch_reference_log_probs.shape,
-                    )
                 batch_log_probs = self._get_logprobs(
                     batch_ids,
                     batch_size=batch_size,
@@ -688,11 +675,6 @@ class GRPO(LLMAlgorithm):
         :return: Mean loss and mean KL divergence.
         :rtype: Tuple[torch.Tensor, torch.Tensor]
         """
-        print("LOG PROBS SHAPE", log_probs.shape)
-        print("REFERENCE LOG PROBS SHAPE", reference_log_probs.shape)
-        print("OLD LOG PROBS SHAPE", old_log_probs.shape)
-        print("ADVANTAGES SHAPE", advantages.shape)
-        print("MASK SHAPE", mask.shape)
         kl = self._calculate_kl_divergence(log_probs, reference_log_probs)
         log_probs_ratio = torch.exp(log_probs - old_log_probs)
         clipped_log_probs_ratio = log_probs_ratio.clamp(
@@ -743,10 +725,6 @@ class GRPO(LLMAlgorithm):
                 position_ids = attention_mask.long().cumsum(dim=-1) - 1
                 position_ids.masked_fill_(mask=(attention_mask == 0), value=1)
 
-            if not eval_mode and self.accelerator.is_main_process:
-                print("SHAPE OF NUM SAMPLES", num_samples)
-                print("BATCH SIZE", batch_size)
-
             # Split the sample into batches
             log_probs = []
             for batch in range(0, num_samples, batch_size):
@@ -761,50 +739,15 @@ class GRPO(LLMAlgorithm):
                 if self.calc_position_embeddings:
                     batch_position_ids = position_ids[batch:end_idx, :]
                     batch_model_kwargs |= {"position_ids": batch_position_ids}
-                # if not eval_mode and self.accelerator.is_main_process:
-                print(
-                    "Shape of forward input",
-                    batch_ids.shape,
-                    batch_attention_mask.shape,
-                )
                 logits = self.actor.forward(**batch_model_kwargs).logits
                 logits = logits / self.temperature
-                if not eval_mode and self.accelerator.is_main_process:
-                    print(
-                        "LOGITS SHAPE BEFORE MEMORY EFFICIENT LOGITS",
-                        logits.shape,
-                        logits[:, :-1].shape,
-                        batch_ids[:, 1:].shape,
-                    )
-                # logits_to_keep = batch_ids.shape[1]
-                # inputs_to_keep = batch
                 log_prob = GRPO._memory_efficient_logits(
                     logits[:, :-1], batch_ids[:, 1:]
                 )
-
                 batch_model_kwargs = None
                 logits = None
-                if not eval_mode:
-                    # print("Log probs", log_prob)
-                    assert log_prob.requires_grad  # FIXME remove
                 log_probs.append(log_prob)
         return torch.cat(log_probs, dim=0)
-        #     else:
-        #         model_kwargs = {
-        #             "input_ids": ids,
-        #             "attention_mask": attention_mask,
-        #             "use_cache": False,
-        #         }
-        #         if self.calc_position_embeddings:
-        #             model_kwargs |= {"position_ids": position_ids}
-        #         logits = self.actor.forward(**model_kwargs).logits
-        #         logits = logits / self.temperature
-        #         log_probs = (
-        #             F.log_softmax(logits[:, :-1], dim=-1)
-        #             .gather(dim=-1, index=ids[:, 1:].unsqueeze(-1))
-        #             .squeeze(-1)
-        #         )
-        # return log_probs
 
     def _backward_pass(self, loss: float) -> None:
         """Perform a backward pass
@@ -1075,7 +1018,6 @@ class GRPO(LLMAlgorithm):
                 )
             return
 
-        print("micro_batch_size_per_gpu", micro_batch_size_per_gpu)
         self.micro_batch_size_per_gpu = int(micro_batch_size_per_gpu)
         if (
             batch_size
@@ -1094,80 +1036,3 @@ class GRPO(LLMAlgorithm):
         )
         ds_config["gradient_accumulation_steps"] = int(gradient_accumulation_steps)
         return
-
-        # if self.accelerator is not None and not clone:
-
-        #     if reduce_memory_peak:
-        #         self.batch_size_per_process = 1
-        #         self.micro_batch_size_per_gpu = 1
-        #         self.accelerator.state.deepspeed_plugin.deepspeed_config[
-        #             "train_micro_batch_size_per_gpu"
-        #         ] = self.micro_batch_size_per_gpu
-        #         gradient_accumulation_steps = (
-        #             batch_size / self.accelerator.num_processes
-        #         )
-        #         self.accelerator.state.deepspeed_plugin.deepspeed_config[
-        #             "gradient_accumulation_steps"
-        #         ] = int(gradient_accumulation_steps)
-
-        #     else:
-
-        #         self.batch_size_per_process = int(
-        #             batch_size / self.accelerator.num_processes
-        #         )
-
-        #         if micro_batch_size_per_gpu is None:
-        #             if (
-        #                 self.batch_size_per_process
-        #                 % self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
-        #                     "gradient_accumulation_steps", 1
-        #                 )
-        #                 != 0
-        #             ):
-        #                 raise ValueError(
-        #                     f"Batch size ({batch_size}) must be divisible by the product of the number of processes ({self.accelerator.num_processes}) and gradient accumulation steps ({self.accelerator.state.deepspeed_plugin.deepspeed_config.get('gradient_accumulation_steps', 1)})."
-        #                     "Gradient accumulation steps can be updated in the deepspeed config by changing the 'gradient_accumulation_steps' parameter."
-        #                 )
-        #             self.micro_batch_size_per_gpu = int(
-        #                 self.batch_size_per_process
-        #                 / self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
-        #                     "gradient_accumulation_steps", 1
-        #                 )
-        #             )
-
-        #             if (
-        #                 self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
-        #                     "train_micro_batch_size_per_gpu", "auto"
-        #                 )
-        #                 == "auto"
-        #             ):
-        #                 self.accelerator.state.deepspeed_plugin.deepspeed_config[
-        #                     "train_micro_batch_size_per_gpu"
-        #                 ] = self.micro_batch_size_per_gpu
-        #         else:
-        #             self.micro_batch_size_per_gpu = micro_batch_size_per_gpu
-        #             if (
-        #                 batch_size
-        #                 % (
-        #                     self.micro_batch_size_per_gpu
-        #                     * self.accelerator.num_processes
-        #                 )
-        #                 != 0
-        #             ):
-        #                 raise ValueError(
-        #                     f"When specifying micro_batch_size_per_gpu, batch_size ({batch_size}) must be divisible by the product of the number of processes ({self.accelerator.num_processes}) and micro_batch_size_per_gpu ({self.micro_batch_size_per_gpu})."
-        #                 )
-        #             self.accelerator.state.deepspeed_plugin.deepspeed_config[
-        #                 "train_micro_batch_size_per_gpu"
-        #             ] = self.micro_batch_size_per_gpu
-        #             gradient_accumulation_steps = (
-        #                 batch_size
-        #                 / self.accelerator.num_processes
-        #                 / self.micro_batch_size_per_gpu
-        #             )
-        #             warnings.warn(
-        #                 f"Overwriting deepspeed config gradient accumulation steps from {self.accelerator.state.deepspeed_plugin.deepspeed_config.get('gradient_accumulation_steps', 'auto')} to {gradient_accumulation_steps}"
-        #             )
-        #             self.accelerator.state.deepspeed_plugin.deepspeed_config[
-        #                 "gradient_accumulation_steps"
-        #             ] = int(gradient_accumulation_steps)
