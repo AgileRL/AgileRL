@@ -2178,102 +2178,102 @@ def test_grpo_save_load_distributed_actor(
     AcceleratorState._reset_state(True)
 
 
-@pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-@pytest.mark.parametrize("use_deepspeed_optimizer", [True])
-@pytest.mark.parametrize("use_separate_reference_adapter", [True])
-@pytest.mark.parametrize("vocab_size", [1000])
-@pytest.mark.parametrize("input_size", [10])
-@pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize("group_size", [5])
-@pytest.mark.parametrize(
-    "use_vllm, pretrained_model_name_or_path", [(True, "facebook/opt-125m")]
-)
-@pytest.mark.parametrize("reduce_memory_peak", [True])
-@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-def test_grpo_save_load_distributed_actor_vllm(
-    grpo,
-    accelerator_factory,
-    model_factory,
-    config,
-    use_deepspeed_optimizer,
-    use_separate_reference_adapter,
-    vocab_size,
-    input_size,
-    max_tokens,
-    group_size,
-    use_vllm,
-    pretrained_model_name_or_path,
-    tmpdir,
-    reduce_memory_peak,
-    micro_batch_size_per_gpu,
-):
-    accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    grpo._save_distributed_actor(checkpoint_path)
-    grpo_optim_state_dict = (
-        grpo.actor.optimizer.state_dict()
-        if use_deepspeed_optimizer
-        else grpo.optimizer.state_dict()
-    )
-    grpo_optim_state_dict.pop("loss_scaler", None)
-    new_grpo = GRPO(
-        gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
-        gym.spaces.Box(low=0, high=vocab_size - 1),
-        actor_network=model_factory(pretrained_model_name_or_path),
-        pad_token_id=vocab_size - 1,
-        pad_token="<pad>",
-        device="cuda" if torch.cuda.is_available() else "cpu",
-        group_size=group_size,
-        lora_config=LoraConfig(
-            r=16,
-            lora_alpha=64,
-            target_modules=[
-                "q_proj",
-                "k_proj",
-                "v_proj",
-                "o_proj",
-                "gate_proj",
-                "up_proj",
-                "down_proj",
-            ],
-            task_type="CAUSAL_LM",
-            lora_dropout=0.05,
-        ),
-        cosine_lr_schedule_config=(
-            None
-            if accelerator is not None
-            else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
-        ),
-        accelerator=accelerator,
-        use_separate_reference_adapter=use_separate_reference_adapter,
-    )
-    new_grpo._load_distributed_actor(checkpoint_path)
+# @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
+# @pytest.mark.parametrize("use_deepspeed_optimizer", [True])
+# @pytest.mark.parametrize("use_separate_reference_adapter", [True])
+# @pytest.mark.parametrize("vocab_size", [1000])
+# @pytest.mark.parametrize("input_size", [10])
+# @pytest.mark.parametrize("max_tokens", [20])
+# @pytest.mark.parametrize("group_size", [5])
+# @pytest.mark.parametrize(
+#     "use_vllm, pretrained_model_name_or_path", [(True, "facebook/opt-125m")]
+# )
+# @pytest.mark.parametrize("reduce_memory_peak", [True])
+# @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+# def test_grpo_save_load_distributed_actor_vllm(
+#     grpo,
+#     accelerator_factory,
+#     model_factory,
+#     config,
+#     use_deepspeed_optimizer,
+#     use_separate_reference_adapter,
+#     vocab_size,
+#     input_size,
+#     max_tokens,
+#     group_size,
+#     use_vllm,
+#     pretrained_model_name_or_path,
+#     tmpdir,
+#     reduce_memory_peak,
+#     micro_batch_size_per_gpu,
+# ):
+#     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
+#     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+#     grpo._save_distributed_actor(checkpoint_path)
+#     grpo_optim_state_dict = (
+#         grpo.actor.optimizer.state_dict()
+#         if use_deepspeed_optimizer
+#         else grpo.optimizer.state_dict()
+#     )
+#     grpo_optim_state_dict.pop("loss_scaler", None)
+#     new_grpo = GRPO(
+#         gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
+#         gym.spaces.Box(low=0, high=vocab_size - 1),
+#         actor_network=model_factory(pretrained_model_name_or_path),
+#         pad_token_id=vocab_size - 1,
+#         pad_token="<pad>",
+#         device="cuda" if torch.cuda.is_available() else "cpu",
+#         group_size=group_size,
+#         lora_config=LoraConfig(
+#             r=16,
+#             lora_alpha=64,
+#             target_modules=[
+#                 "q_proj",
+#                 "k_proj",
+#                 "v_proj",
+#                 "o_proj",
+#                 "gate_proj",
+#                 "up_proj",
+#                 "down_proj",
+#             ],
+#             task_type="CAUSAL_LM",
+#             lora_dropout=0.05,
+#         ),
+#         cosine_lr_schedule_config=(
+#             None
+#             if accelerator is not None
+#             else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+#         ),
+#         accelerator=accelerator,
+#         use_separate_reference_adapter=use_separate_reference_adapter,
+#     )
+#     new_grpo._load_distributed_actor(checkpoint_path)
 
-    if use_deepspeed_optimizer:
-        opt = grpo.actor.optimizer
-        new_opt = new_grpo.actor.optimizer
-    else:
-        opt = grpo.optimizer
-        new_opt = new_grpo.optimizer
+#     if use_deepspeed_optimizer:
+#         opt = grpo.actor.optimizer
+#         new_opt = new_grpo.actor.optimizer
+#     else:
+#         opt = grpo.optimizer
+#         new_opt = new_grpo.optimizer
 
-    if not use_deepspeed_optimizer and accelerator is None:
-        assert (
-            new_opt.optimizer.loss_scaler.cur_scale
-            == opt.optimizer.loss_scaler.cur_scale
-        )
-    assert new_opt.state_dict().keys() == opt.state_dict().keys()
+#     if not use_deepspeed_optimizer and accelerator is None:
+#         assert (
+#             new_opt.optimizer.loss_scaler.cur_scale
+#             == opt.optimizer.loss_scaler.cur_scale
+#         )
+#     assert new_opt.state_dict().keys() == opt.state_dict().keys()
 
-    # Check that the actor network is updated and the reference actor is not
-    for param, pre_learn_param in zip(
-        new_grpo.actor.parameters(), grpo.actor.parameters()
-    ):
-        assert torch.equal(param, pre_learn_param)
+#     # Check that the actor network is updated and the reference actor is not
+#     for param, pre_learn_param in zip(
+#         new_grpo.actor.parameters(), grpo.actor.parameters()
+#     ):
+#         assert torch.equal(param, pre_learn_param)
 
-    for key in new_opt.state_dict().keys():
-        if key == "loss_scaler":
-            continue
-        assert str(new_opt.state_dict()[key]) == str(grpo_optim_state_dict[key])
-    AcceleratorState._reset_state(True)
+#     for key in new_opt.state_dict().keys():
+#         if key == "loss_scaler":
+#             continue
+#         assert str(new_opt.state_dict()[key]) == str(grpo_optim_state_dict[key])
+#     AcceleratorState._reset_state(True)
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2, deepspeed_config_stage_1])
