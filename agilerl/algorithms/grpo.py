@@ -5,7 +5,6 @@ import warnings
 from contextlib import contextmanager, nullcontext
 from typing import List, Optional, Tuple, Union
 
-import deepspeed
 import numpy as np
 import torch
 import torch.nn.functional as F
