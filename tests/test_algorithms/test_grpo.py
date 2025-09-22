@@ -2375,6 +2375,7 @@ def test_grpo_clone_with_accelerator(
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+@patch("agilerl.algorithms.grpo.LLM", DummyVLLM)
 def test_grpo_clone_with_accelerator_vllm(
     grpo,
     accelerator_factory,
@@ -2444,7 +2445,7 @@ def test_grpo_clone_with_accelerator_vllm(
     assert new_grpo.wrap == grpo.wrap
     assert new_grpo.device == grpo.device
     assert new_grpo.fitness == grpo.fitness
-    assert isinstance(new_grpo.llm, LLM)
+    assert isinstance(new_grpo.llm, DummyVLLM)
     AcceleratorState._reset_state(True)
     gc.collect()
     torch.cuda.empty_cache()
