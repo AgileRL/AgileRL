@@ -453,7 +453,7 @@ def grpo_factory():
         )
         if use_vllm:
             lora_config = None
-            vllm_config = VLLMConfig(gpu_memory_utilization=0.05)
+            vllm_config = VLLMConfig(gpu_memory_utilization=0.05, max_num_seqs=1)
             actor = model_factory(pretrained_model_name_or_path)
         else:
 
@@ -854,7 +854,7 @@ def test_grpo_save_load_checkpoint_vllm(
                 else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
             ),
             use_vllm=use_vllm,
-            vllm_config=VLLMConfig(gpu_memory_utilization=0.05),
+            vllm_config=VLLMConfig(gpu_memory_utilization=0.05, max_num_seqs=1),
             accelerator=accelerator,
             use_separate_reference_adapter=use_separate_reference_adapter,
         )
@@ -1096,7 +1096,9 @@ def test_init_grpo_vllm_with_tp_gt_one(
                 else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
             ),
             use_vllm=use_vllm,
-            vllm_config=VLLMConfig(gpu_memory_utilization=0.05, tensor_parallel_size=2),
+            vllm_config=VLLMConfig(
+                gpu_memory_utilization=0.05, tensor_parallel_size=2, max_num_seqs=1
+            ),
             accelerator=accelerator,
             use_separate_reference_adapter=use_separate_reference_adapter,
         )
@@ -1152,7 +1154,9 @@ def test_init_grpo_vllm_tp_value_error(
                 else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
             ),
             use_vllm=use_vllm,
-            vllm_config=VLLMConfig(gpu_memory_utilization=0.05, tensor_parallel_size=2),
+            vllm_config=VLLMConfig(
+                gpu_memory_utilization=0.05, tensor_parallel_size=2, max_num_seqs=1
+            ),
             accelerator=accelerator,
             use_separate_reference_adapter=use_separate_reference_adapter,
         )
