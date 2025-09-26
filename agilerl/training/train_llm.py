@@ -3,14 +3,15 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch.distributed as dist
-import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import GRPO
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.typing import LLMPopulationType
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import (
     aggregate_metrics_across_gpus,
@@ -20,11 +21,10 @@ from agilerl.utils.utils import (
 )
 
 InitDictType = Optional[Dict[str, Any]]
-PopulationType = List[RLAlgorithm]
 
 
 def finetune_llm(
-    pop: List[GRPO],
+    pop: LLMPopulationType,
     env: HuggingFaceGym,
     init_hp: Optional[Dict[str, Any]] = None,
     save_elite: Optional[bool] = None,

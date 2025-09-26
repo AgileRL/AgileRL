@@ -18,6 +18,7 @@ from agilerl.protocols import (
     EvolvableAlgorithm,
     EvolvableModule,
     EvolvableNetwork,
+    LLMAlgorithm,
     ModuleDict,
 )
 
@@ -100,6 +101,7 @@ SingleAgentMutReturnType = Dict[str, Any]
 MultiAgentMutReturnType = Dict[str, Dict[str, Any]]
 MutationReturnType = Union[SingleAgentMutReturnType, MultiAgentMutReturnType]
 PopulationType = List[EvolvableAlgorithm]
+LLMPopulationType = List[LLMAlgorithm]
 MutationMethod = Callable[[EvolvableAlgorithm], EvolvableAlgorithm]
 ConfigType = Union[IsDataclass, Dict[str, Any]]
 StateDict = Union[Dict[str, Any], List[Dict[str, Any]]]

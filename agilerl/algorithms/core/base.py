@@ -2283,3 +2283,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             ] = lr
 
         return accelerator, None
+
+    def recompile(self) -> None:
+        """Recompiles the algorithm."""
+        raise NotImplementedError(
+            "Recompile method is not available for LLM finetuning algorithms."
+        )

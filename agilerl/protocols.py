@@ -17,6 +17,7 @@ Type aliases are provided for common types used throughout the framework.
 
 from enum import Enum
 from typing import (
+    TYPE_CHECKING,
     Any,
     Callable,
     Dict,
@@ -37,6 +38,10 @@ import torch
 from accelerate import Accelerator
 from numpy.typing import ArrayLike
 from torch.optim.optimizer import Optimizer
+
+if TYPE_CHECKING:
+    from agilerl.typing import ExperiencesType
+    from agilerl.utils.llm_utils import HuggingFaceGym, ReturnedPrompts
 
 NumpyObsType = Union[ArrayLike, Dict[str, ArrayLike], Tuple[ArrayLike, ...]]
 TorchObsType = Union[torch.Tensor, Dict[str, torch.Tensor], Tuple[torch.Tensor, ...]]
@@ -283,6 +288,21 @@ class EvolvableAlgorithm(Protocol):
     ) -> SelfEvolvableAlgorithm: ...
     def recompile(self) -> None: ...
     def mutation_hook(self) -> None: ...
+
+
+@runtime_checkable
+class LLMAlgorithm(EvolvableAlgorithm, Protocol):
+    """Protocol for GRPO (Gradient-based Reinforcement Policy Optimization) algorithm.
+
+    Extends EvolvableAlgorithm with GRPO-specific methods for action generation,
+    learning from experiences, and environment testing.
+    """
+
+    def get_action(
+        self, prompts: List["ReturnedPrompts"], training: bool = True
+    ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]: ...
+    def learn(self, experiences: "ExperiencesType") -> Tuple[float, float]: ...
+    def test(self, env: "HuggingFaceGym", loop: int = 1) -> torch.Tensor: ...
 
 
 # Define a TypeVar for EvolvableAlgorithm that can be used for generic typing
