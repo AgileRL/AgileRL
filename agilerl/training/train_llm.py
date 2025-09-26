@@ -1,5 +1,5 @@
 import warnings
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 import torch.distributed as dist
@@ -7,8 +7,6 @@ from accelerate import Accelerator
 from tqdm import trange
 
 import wandb
-from agilerl.algorithms import GRPO
-from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.typing import LLMPopulationType

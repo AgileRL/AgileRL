@@ -284,7 +284,7 @@ def cleanup_vllm_instances():
     if hasattr(vllm, "_global_llm_engine"):
         try:
             vllm._global_llm_engine.shutdown()
-        except:
+        except Exception:
             pass
         del vllm._global_llm_engine
 
@@ -293,7 +293,7 @@ def cleanup_vllm_instances():
         for engine in vllm.engine.llm_engine._cached_engines.values():
             try:
                 engine.shutdown()
-            except:
+            except Exception:
                 pass
         vllm.engine.llm_engine._cached_engines.clear()
 
@@ -305,7 +305,7 @@ def cleanup_vllm_instances():
                 try:
                     if hasattr(instance, "llm_engine"):
                         instance.llm_engine.shutdown()
-                except:
+                except Exception:
                     pass
             vllm.LLM._instances.clear()
 
@@ -370,6 +370,9 @@ def cleanup_after_test():
 @pytest.fixture(scope="function")
 def accelerator_factory():
     def generate_accelerator(use_deepspeed_optimizer, config):
+        gc.collect()
+        torch.cuda.empty_cache()
+        AcceleratorState._reset_state(True)
         if use_deepspeed_optimizer and (config is not None):
             config["optimizer"] = {
                 "type": "AdamW",
@@ -435,6 +438,10 @@ def grpo_factory():
         reduce_memory_peak,
         micro_batch_size_per_gpu,
     ):
+        gc.collect()
+        torch.cuda.empty_cache()
+        AcceleratorState._reset_state(True)
+
         accelerator = accelerator_factory(use_deepspeed_optimizer, config)
         if not use_deepspeed_optimizer and accelerator is not None:
             accelerator.state.deepspeed_plugin.deepspeed_config.pop("optimizer", None)
@@ -504,6 +511,19 @@ def grpo_factory():
         return grpo
 
     return generate_grpo
+    #     yield grpo
+    # try:
+    #     if accelerator is not None:
+    #         AcceleratorState._reset_state(True)
+    #         grpo.clean_up()
+    # finally:
+    #     del accelerator
+    #     del actor
+    #     del grpo
+
+    #     gc.collect()
+    #     torch.cuda.empty_cache()
+    #     torch.cuda.synchronize()
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -1244,7 +1264,6 @@ def test_init_grpo_scheduler_warning_no_accelerator(
 @pytest.mark.parametrize("reduce_memory_peak", [True, False])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_init_grpo_batch_size_value_error(
-    grpo_factory,
     accelerator_factory,
     model_factory,
     config,
@@ -1259,21 +1278,6 @@ def test_init_grpo_batch_size_value_error(
     reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
-    grpo = grpo_factory(
-        accelerator_factory,
-        model_factory,
-        config,
-        use_deepspeed_optimizer,
-        vocab_size,
-        input_size,
-        max_tokens,
-        group_size,
-        use_separate_reference_adapter,
-        use_vllm,
-        pretrained_model_name_or_path,
-        reduce_memory_peak,
-        micro_batch_size_per_gpu,
-    )
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with pytest.raises(ValueError), patch(
         "accelerate.Accelerator.num_processes",
@@ -1314,7 +1318,6 @@ def test_init_grpo_batch_size_value_error(
 @pytest.mark.parametrize("reduce_memory_peak", [False])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_init_grpo_batch_size_grad_accum_error(
-    grpo_factory,
     accelerator_factory,
     model_factory,
     config,
@@ -1329,21 +1332,6 @@ def test_init_grpo_batch_size_grad_accum_error(
     reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
-    grpo = grpo_factory(
-        accelerator_factory,
-        model_factory,
-        config,
-        use_deepspeed_optimizer,
-        vocab_size,
-        input_size,
-        max_tokens,
-        group_size,
-        use_separate_reference_adapter,
-        use_vllm,
-        pretrained_model_name_or_path,
-        reduce_memory_peak,
-        micro_batch_size_per_gpu,
-    )
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with pytest.raises(ValueError), patch(
         "accelerate.Accelerator.num_processes",
@@ -1457,6 +1445,7 @@ def test_init_grpo_zero3_warning(
 ):
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with pytest.raises(NotImplementedError):
+        gc.collect()
         vocab_size = 1000
         input_size = 10
         max_tokens = 20
@@ -1509,6 +1498,7 @@ def test_init_grpo_lr_warning(
 ):
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with pytest.warns(UserWarning):
+        gc.collect()
         vocab_size = 1000
         input_size = 10
         max_tokens = 20
@@ -1564,6 +1554,7 @@ def test_init_grpo_max_grad_norm_warning(
 ):
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with pytest.warns(UserWarning):
+        gc.collect()
         vocab_size = 1000
         input_size = 10
         max_tokens = 20
@@ -1618,6 +1609,7 @@ def test_init_grpo_scheduler_warning(
 ):
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with pytest.warns(UserWarning):
+        gc.collect()
         vocab_size = 1000
         input_size = 10
         max_tokens = 20
@@ -1677,6 +1669,7 @@ def test_init_grpo_micro_batch_size_per_gpu_value_error(
 ):
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with pytest.raises(ValueError) as e:
+        gc.collect()
         vocab_size = 1000
         input_size = 10
         max_tokens = 20
@@ -1742,6 +1735,7 @@ def test_init_grpo_micro_batch_size_per_gpu_zero_error(
 ):
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with pytest.raises(ValueError) as e:
+        gc.collect()
         vocab_size = 1000
         input_size = 10
         max_tokens = 20
@@ -1806,6 +1800,7 @@ def test_init_grpo_micro_batch_size_per_gpu_division_error(
 ):
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with pytest.raises(ValueError) as e:
+        gc.collect()
         vocab_size = 1000
         input_size = 10
         max_tokens = 20
@@ -3284,6 +3279,7 @@ def test_init_grpo_lora_config_warning(
 ):
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with pytest.warns(UserWarning):
+        gc.collect()
         vocab_size = 1000
         input_size = 10
         max_tokens = 20
@@ -3702,6 +3698,7 @@ def test_grpo_ref_actor_is_same_as_actor_after_learning_reference_adapater(
         micro_batch_size_per_gpu,
     )
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
+    gc.collect()
     observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
     action_space = gym.spaces.Box(
         low=0,
@@ -3778,6 +3775,7 @@ def test_grpo_set_reference_policy_with_wrong_adapter_name(
 ):
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with pytest.raises(ValueError):
+        gc.collect()
         vocab_size = 1000
         input_size = 10
         max_tokens = 20
