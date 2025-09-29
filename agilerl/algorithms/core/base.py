@@ -39,7 +39,6 @@ from tensordict import TensorDict
 from torch._dynamo import OptimizedModule
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import SequentialLR
-from transformers import AutoModelForCausalLM
 from vllm.distributed.parallel_state import destroy_model_parallel
 
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
