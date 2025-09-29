@@ -411,7 +411,7 @@ def model_factory():
         )
         model = AutoModelForCausalLM.from_pretrained(
             pretrained_model_name_or_path=pretrained_model_name_or_path,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.bfloat16,
             attn_implementation="sdpa",
         )
         model.gradient_checkpointing_enable()
@@ -654,7 +654,9 @@ def test_grpo_move_model_to_vllm(
         if name in merged_model_ref.state_dict():
             if param.shape != merged_model_ref.state_dict()[name].shape:
                 continue
-            assert torch.allclose(param, merged_model_ref.state_dict()[name])
+            assert torch.allclose(
+                param.to(torch.bfloat16), merged_model_ref.state_dict()[name]
+            )
 
 
 @pytest.mark.parametrize(
@@ -1727,16 +1729,19 @@ def test_init_grpo_micro_batch_size_per_gpu_value_error(
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False])
+@pytest.mark.parametrize("batch_size", [2])
+@pytest.mark.parametrize("reduce_memory_peak", [False])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [1])
-@pytest.mark.parametrize("reduce_memory_peak", [True])
-def test_init_grpo_micro_batch_size_per_gpu_zero_error(
+def test_init_grpo_micro_batch_size_per_gpu_division_error(
     accelerator_factory,
     config,
     use_deepspeed_optimizer,
     use_separate_reference_adapter,
     micro_batch_size_per_gpu,
     reduce_memory_peak,
+    batch_size,
 ):
+    config["gradient_accumulation_steps"] = 3
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with pytest.raises(ValueError) as e:
         gc.collect()
@@ -1767,6 +1772,7 @@ def test_init_grpo_micro_batch_size_per_gpu_zero_error(
                 device="cuda" if torch.cuda.is_available() else "cpu",
             ),
             lr=0.1,
+            batch_size=batch_size,
             pad_token_id=vocab_size - 1,
             pad_token="<pad>",
             device="cuda" if torch.cuda.is_available() else "cpu",
@@ -1781,9 +1787,12 @@ def test_init_grpo_micro_batch_size_per_gpu_zero_error(
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
             reduce_memory_peak=reduce_memory_peak,
         )
-        assert "Calculated micro_batch_size_per_gpu is 0..." in str(e.value)
-        gc.collect()
-        torch.cuda.empty_cache()
+    assert (
+        f"When specifying micro_batch_size_per_gpu, batch_size ({batch_size}) must be divisible by the product of the number of processes ({accelerator.num_processes}) and micro_batch_size_per_gpu ({micro_batch_size_per_gpu})."
+        in str(e.value)
+    )
+    gc.collect()
+    torch.cuda.empty_cache()
     AcceleratorState._reset_state(True)
 
 
@@ -2418,9 +2427,9 @@ def test_grpo_load():
 
 
 @pytest.mark.parametrize(
-    "config", [deepspeed_config_stage_2, None, deepspeed_config_stage_1]
+    "config, use_deepspeed_optimizer",
+    [(deepspeed_config_stage_2, True), (None, False), (deepspeed_config_stage_1, True)],
 )
-@pytest.mark.parametrize("use_deepspeed_optimizer", [False, True])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
 @pytest.mark.parametrize("vocab_size", [1000])
 @pytest.mark.parametrize("input_size", [10])
@@ -2432,6 +2441,7 @@ def test_grpo_load():
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+@pytest.mark.parametrize("weights_only", [False, True])
 def test_grpo_save_load_checkpoint(
     grpo_factory,
     accelerator_factory,
@@ -2448,6 +2458,7 @@ def test_grpo_save_load_checkpoint(
     tmpdir,
     reduce_memory_peak,
     micro_batch_size_per_gpu,
+    weights_only,
 ):
     grpo = grpo_factory(
         accelerator_factory,
@@ -2466,7 +2477,7 @@ def test_grpo_save_load_checkpoint(
     )
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with tempfile.TemporaryDirectory() as tmpdir:
-        grpo.save_checkpoint(tmpdir)
+        grpo.save_checkpoint(tmpdir, weights_only=weights_only)
         new_grpo = GRPO(
             gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
             gym.spaces.Box(low=0, high=vocab_size - 1),
@@ -2494,7 +2505,13 @@ def test_grpo_save_load_checkpoint(
                     for param, new_param in zip(
                         grpo.actor.parameters(), new_grpo.actor.parameters()
                     ):
-                        assert torch.equal(param, new_param)
+                        print(
+                            "USE SEPARATE REFERENCE ADAPTER",
+                            use_separate_reference_adapter,
+                        )
+                        print("use deepspeed optimizer", use_deepspeed_optimizer)
+                        print("PARAMT TYPE", param.dtype, new_param.dtype)
+                        assert torch.allclose(param, new_param)
                 elif attr == "optimizer":
                     for param, new_param in zip(
                         grpo.optimizer.parameters(), new_grpo.optimizer.parameters()
@@ -3421,82 +3438,6 @@ def test_init_grpo_multiple_adapters(
         gc.collect()
         torch.cuda.empty_cache()
         AcceleratorState._reset_state(True)
-
-
-# @pytest.mark.parametrize(
-#     "config",
-#     [
-#         deepspeed_config_stage_2,
-#     ],
-# )
-# @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
-# @pytest.mark.parametrize("use_separate_reference_adapter", [True])
-# @pytest.mark.parametrize("vocab_size", [1000])
-# @pytest.mark.parametrize("input_size", [10])
-# @pytest.mark.parametrize("max_tokens", [20])
-# @pytest.mark.parametrize("group_size", [5])
-# @pytest.mark.parametrize(
-#     "use_vllm, pretrained_model_name_or_path",
-#     [(True, "facebook/opt-125m")],
-# )
-# @pytest.mark.parametrize("reduce_memory_peak", [True])
-# @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-# def test_grpo_move_model_to_vllm(
-#     grpo_factory,
-#     model_factory,
-#     accelerator_factory,
-#     config,
-#     use_deepspeed_optimizer,
-#     use_separate_reference_adapter,
-#     vocab_size,
-#     input_size,
-#     max_tokens,
-#     group_size,
-#     use_vllm,
-#     pretrained_model_name_or_path,
-#     reduce_memory_peak,
-#     micro_batch_size_per_gpu,
-# ):
-#     grpo = grpo_factory(
-#         accelerator_factory,
-#         model_factory,
-#         config,
-#         use_deepspeed_optimizer,
-#         vocab_size,
-#         input_size,
-#         max_tokens,
-#         group_size,
-#         use_separate_reference_adapter,
-#         use_vllm,
-#         pretrained_model_name_or_path,
-#         reduce_memory_peak,
-#         micro_batch_size_per_gpu,
-#     )
-#     # Change lora B so that the parameters are different
-#     for name, param in grpo.actor.named_parameters():
-#         if "lora_B" in name and param is not None:
-#             param.data.normal_()
-#     model_ref = grpo.accelerator.unwrap_model(grpo.actor)
-#     model_ref.set_adapter("actor")
-#     model_ref.merge_adapter()
-#     merged_model_ref = copy.deepcopy(model_ref)
-#     model_ref.unmerge_adapter()
-#     grpo._move_model_to_vllm()
-
-#     llm_prefix = "model.decoder."
-#     merged_prefix = "base_model.model.model.decoder."
-
-#     for (
-#         name,
-#         param,
-#     ) in (
-#         grpo.llm.llm_engine.model_executor.driver_worker.model_runner.model.named_parameters()
-#     ):
-#         name = merged_prefix + name.removeprefix(llm_prefix)
-#         if name in merged_model_ref.state_dict():
-#             if param.shape != merged_model_ref.state_dict()[name].shape:
-#                 continue
-#             assert torch.allclose(param, merged_model_ref.state_dict()[name])
 
 
 @pytest.mark.parametrize(

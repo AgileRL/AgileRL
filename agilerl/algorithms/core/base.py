@@ -30,9 +30,11 @@ from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
+from deepspeed.runtime.engine import DeepSpeedEngine
 from gymnasium import spaces
 from numpy.typing import ArrayLike
-from peft import PeftModel
+from peft import PeftModel, set_peft_model_state_dict
+from safetensors.torch import load_file
 from tensordict import TensorDict
 from torch._dynamo import OptimizedModule
 from torch.optim import AdamW
@@ -1869,9 +1871,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if not weights_only:
                 self._save_distributed_actor(path, tag="save_checkpoint")
             else:
+                selected_adapters = (
+                    ["actor", "reference"]
+                    if self.use_separate_reference_adapter
+                    else ["actor"]
+                )
                 self.actor.save_pretrained(
                     save_directory=path,
-                    selected_adapters=["actor", "reference"],
+                    selected_adapters=selected_adapters,
                     is_main_process=self.accelerator.is_main_process,
                 )
         checkpoint_dict = get_checkpoint_dict(
@@ -1925,21 +1932,19 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             weights_only = checkpoint.get("_weights_only", False)
 
             if weights_only:
-                base_model = AutoModelForCausalLM.from_pretrained(
-                    self.pretrained_model_name_or_path,
-                    device_map="auto",
-                    torch_dtype=torch.bfloat16,
-                )
-                self.actor = PeftModel.from_pretrained(
-                    base_model,
-                    os.path.join(path, "actor"),
-                    is_trainable=True,
-                    adapter_name="actor",
-                )
-                self.actor.load_adapter(
-                    os.path.join(path, "reference"),
-                    is_trainable=False,
-                    adapter_name="reference",
+                if self.use_separate_reference_adapter:
+                    self._update_existing_adapter(
+                        self.accelerator,
+                        self.actor,
+                        path,
+                        "reference",
+                    )
+
+                self._update_existing_adapter(
+                    self.accelerator,
+                    self.actor,
+                    path,
+                    "actor",
                 )
             else:
                 self._load_distributed_actor(path, tag="save_checkpoint")
@@ -2289,3 +2294,43 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         raise NotImplementedError(
             "Recompile method is not available for LLM finetuning algorithms."
         )
+
+    @staticmethod
+    def _update_existing_adapter(
+        accelerator: Accelerator,
+        wrapped_model: DeepSpeedEngine,
+        checkpoint_dir: str,
+        adapter_name: str,
+    ) -> None:
+        """
+        Overwrite weights of an existing adapter in-place without creating new parameters.
+
+        :param accelerator: Accelerator
+        :type accelerator: Accelerator
+        :param wrapped_model: Wrapped model
+        :type wrapped_model: DeepSpeedEngine
+        :param checkpoint_dir: Checkpoint directory
+        :type checkpoint_dir: str
+        :param adapter_name: Adapter name
+        :type adapter_name: str
+
+        :return: None
+        :rtype: None
+        """
+        base_model = accelerator.unwrap_model(wrapped_model)
+        if hasattr(base_model, "module"):
+            base_model = base_model.module
+
+        adapter_path = f"{checkpoint_dir}/{adapter_name}/adapter_model.safetensors"
+        adapter_state = load_file(adapter_path, device="cpu")
+
+        with torch.no_grad():
+            set_peft_model_state_dict(
+                base_model, adapter_state, adapter_name=adapter_name
+            )
+        base_model.set_adapter(adapter_name)
+
+        # Make reference weights not trainable
+        for name, param in base_model.named_parameters():
+            if "reference" in name:
+                param.requires_grad = False
