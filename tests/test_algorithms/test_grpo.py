@@ -3825,6 +3825,60 @@ def test_grpo_set_reference_policy_with_wrong_adapter_name(
     AcceleratorState._reset_state(True)
 
 
+@pytest.mark.parametrize("config", [deepspeed_config_stage_2])
+@pytest.mark.parametrize("use_deepspeed_optimizer", [False])
+@pytest.mark.parametrize("use_separate_reference_adapter", [False])
+@pytest.mark.parametrize("vocab_size", [100])
+@pytest.mark.parametrize("input_size", [10])
+@pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize("group_size", [2])
+@pytest.mark.parametrize(
+    "use_vllm, pretrained_model_name_or_path",
+    [
+        (False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"),
+    ],
+)
+@pytest.mark.parametrize("training", [True, False])
+@pytest.mark.parametrize("data_batch_size", [4])
+@pytest.mark.parametrize("reduce_memory_peak", [True])
+@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+def test_grpo_exception_on_recompile(
+    grpo_factory,
+    accelerator_factory,
+    model_factory,
+    config,
+    use_deepspeed_optimizer,
+    use_separate_reference_adapter,
+    pretrained_model_name_or_path,
+    vocab_size,
+    input_size,
+    max_tokens,
+    group_size,
+    use_vllm,
+    training,
+    data_batch_size,
+    reduce_memory_peak,
+    micro_batch_size_per_gpu,
+):
+    grpo = grpo_factory(
+        accelerator_factory,
+        model_factory,
+        config,
+        use_deepspeed_optimizer,
+        vocab_size,
+        input_size,
+        max_tokens,
+        group_size,
+        use_separate_reference_adapter,
+        use_vllm,
+        pretrained_model_name_or_path,
+        reduce_memory_peak,
+        micro_batch_size_per_gpu,
+    )
+    with pytest.raises(NotImplementedError):
+        grpo.recompile()
+
+
 def check_ref_adapater_is_same_as_actor_after_learning(grpo):
     ref_param = None
     actor_param = None
