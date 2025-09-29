@@ -3,10 +3,10 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 import torch.distributed as dist
-import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
+import wandb
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.typing import LLMPopulationType
@@ -227,7 +227,7 @@ def finetune_llm(
                     tournament=tournament,
                     mutation=mutation,
                     env_name=env.name,
-                    accelerator=accelerator,  # Set as None for LLM finetuning as it does not require the same accelerator handling as standard RL models
+                    accelerator=accelerator,
                     language_model=True,
                     elite_path=elite_path,
                     save_elite=save_elite,
@@ -235,9 +235,9 @@ def finetune_llm(
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
         else:
-            if checkpoint_steps is not None and (
-                (i + 1) * effective_data_batch_size % max_steps == 0
-                or (i + 1) * effective_data_batch_size % checkpoint_steps == 0
+            if (i + 1) * effective_data_batch_size % max_steps == 0 or (
+                checkpoint_steps is not None
+                and (i + 1) * effective_data_batch_size % checkpoint_steps == 0
             ):
                 save_llm_checkpoint(agent, elite_path)
 
@@ -363,8 +363,17 @@ def finetune_llm(
         and total_steps > evaluation_interval
         and (accelerator is None or accelerator.is_main_process)
     ):
-        fitness = [str(round(agent.fitness[-1], 2)) for agent in pop]
-        avg_fitness = ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
+        fitness_calculated = len(agent.fitness) > 0
+        fitness = (
+            [str(round(agent.fitness[-1], 2)) for agent in pop]
+            if fitness_calculated
+            else [None] * len(pop)
+        )
+        avg_fitness = (
+            ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
+            if fitness_calculated
+            else [None] * len(pop)
+        )
         avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
         agents = [agent.index for agent in pop]
         num_steps = [agent.steps[-1] for agent in pop]
