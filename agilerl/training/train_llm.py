@@ -29,7 +29,7 @@ def finetune_llm(
     elite_path: Optional[str] = None,
     wb: bool = False,
     evo_steps: Optional[int] = 20,
-    checkpoint_steps: Optional[int] = None,  # FIXME added in on GCP, should we delete?
+    checkpoint_steps: Optional[int] = None,
     tournament: Optional[TournamentSelection] = None,
     mutation: Optional[Mutations] = None,
     wandb_api_key: Optional[str] = None,

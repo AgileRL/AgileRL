@@ -196,9 +196,7 @@ def main(init_hp, mut_p):
         apply_chat_template_fn=countdown_chat_template,
         data_batch_size_per_gpu=10,
         accelerator=accelerator,
-        return_raw_completions=init_hp.get(
-            "USE_VLLM", False
-        ),  # init_hp.get("VLLM_CONFIG", None) is not None, FIXME
+        return_raw_completions=init_hp.get("USE_VLLM", False),
     )
 
     init_hp["PAD_TOKEN_ID"] = tokenizer.eos_token_id
