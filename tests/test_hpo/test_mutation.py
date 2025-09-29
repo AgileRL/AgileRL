@@ -1460,6 +1460,7 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
                         device="cuda" if torch.cuda.is_available() else "cpu",
                     ),
                     index=0,
+                    pad_token="<pad>",
                     hp_config=grpo_hp_config,
                     pad_token_id=1000 - 1,
                     device="cuda" if torch.cuda.is_available() else "cpu",
@@ -1503,7 +1504,9 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
             for agent in mutated_population:
                 for param_group in agent.optimizer.optimizer.param_groups:
                     assert param_group["lr"] == agent.lr
+            print("Here is the mutations: ", mutations)
         except Exception as e:
+            print("Exception: ", e)
             raise e
         finally:
             # Cleanup
@@ -1536,6 +1539,7 @@ def test_mutations_warns_on_llm_algorithm(
             index=0,
             hp_config=grpo_hp_config,
             pad_token_id=1000 - 1,
+            pad_token="<pad>",
             device="cuda" if torch.cuda.is_available() else "cpu",
             lora_config=LoraConfig(
                 r=16,
