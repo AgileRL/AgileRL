@@ -1729,9 +1729,9 @@ def test_init_grpo_micro_batch_size_per_gpu_value_error(
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False])
-@pytest.mark.parametrize("batch_size", [2])
+@pytest.mark.parametrize("micro_batch_size_per_gpu", [7])
 @pytest.mark.parametrize("reduce_memory_peak", [False])
-@pytest.mark.parametrize("micro_batch_size_per_gpu", [1])
+@pytest.mark.parametrize("batch_size", [16])
 def test_init_grpo_micro_batch_size_per_gpu_division_error(
     accelerator_factory,
     config,
@@ -1741,7 +1741,6 @@ def test_init_grpo_micro_batch_size_per_gpu_division_error(
     reduce_memory_peak,
     batch_size,
 ):
-    config["gradient_accumulation_steps"] = 3
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with pytest.raises(ValueError) as e:
         gc.collect()
@@ -1772,7 +1771,6 @@ def test_init_grpo_micro_batch_size_per_gpu_division_error(
                 device="cuda" if torch.cuda.is_available() else "cpu",
             ),
             lr=0.1,
-            batch_size=batch_size,
             pad_token_id=vocab_size - 1,
             pad_token="<pad>",
             device="cuda" if torch.cuda.is_available() else "cpu",
@@ -1781,6 +1779,7 @@ def test_init_grpo_micro_batch_size_per_gpu_division_error(
             cosine_lr_schedule_config=CosineLRScheduleConfig(
                 num_epochs=10, warmup_proportion=0.05
             ),
+            batch_size=batch_size,
             max_grad_norm=0.1,
             accelerator=accelerator,
             use_separate_reference_adapter=use_separate_reference_adapter,
