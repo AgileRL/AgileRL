@@ -328,6 +328,7 @@ def test_language_model_tournament(use_accelerator, elitism, num_processes):
             action_space=action_space,
             actor_network=clone_llm(actor_network),
             pad_token_id=INIT_HP.get("PAD_TOKEN_ID"),
+            pad_token="<pad>",
             hp_config=None,
             index=idx,
             batch_size=INIT_HP.get("BATCH_SIZE", 1),
