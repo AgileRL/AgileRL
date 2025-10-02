@@ -213,7 +213,7 @@ Combining all these components, we can now initialise the HuggingFaceGym object.
                 {
                     "role": "user",
                     "content": (
-                        f"Using each number in this list only once {q}, create an equation that equals {a.item()}. You "
+                        f"Using each number in this list only once {q}, create an equation that equals {a}. You "
                         "can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. "
                         "And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>."
                     )
@@ -240,7 +240,7 @@ Combining all these components, we can now initialise the HuggingFaceGym object.
             tokenizer=tokenizer,
             reward_fn=combined_rewards,
             apply_chat_template_fn=countdown_chat_template,
-            data_batch_size_per_gpu=10,
+            data_batch_size_per_gpu=16,
             accelerator=accelerator,
         )
 

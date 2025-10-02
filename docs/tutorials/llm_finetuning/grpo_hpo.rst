@@ -72,7 +72,13 @@ unlike the rest of the AgileRL framework, we can only tune the RL hyperparameter
             "TOURN_SIZE": 2,
             "ELITISM": True,
             "POP_SIZE": 4,
-            "EVAL_LOOP": 1
+            "EVAL_LOOP": 1,
+            "USE_VLLM": True,
+            "VLLM_CONFIG": {
+                "tensor_parallel_size": 1,
+                "gpu_memory_utilization": 0.4,
+                "max_num_seqs": 8,
+            },
         }
 
 Defining our Base Model and Dataset
@@ -239,7 +245,7 @@ format. Combining all these components, we can now initialise the HuggingFaceGym
                 },
                 {
                     "role": "user",
-                    "content": f"Using each number in this list only once {q}, create an equation that equals {a.item()}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
+                    "content": f"Using each number in this list only once {q}, create an equation that equals {a}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
                 },
                 {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
             ]
@@ -289,7 +295,7 @@ training in this tutorial, we use deepspeed and accelerate.
     hp_config = HyperparameterConfig(
         beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),
         lr=RLParameter(min=mut_p["MIN_LR"], max=mut_p["MAX_LR"]),
-        group_size=RLParameter(min=mut_p["MIN_GROUP_SIZE"], max=mut_p["MAX_GROUP_SIZE"]),
+        group_size=RLParameter(min=mut_p["MIN_GROUP_SIZE"], max=mut_p["MAX_GROUP_SIZE"], dtype=int),
     )
 
     pop = create_population(
