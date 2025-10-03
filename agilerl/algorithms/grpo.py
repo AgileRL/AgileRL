@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
 from accelerate.utils import set_seed
+from deepspeed import zero
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from gymnasium import spaces
@@ -813,10 +814,9 @@ class GRPO(LLMAlgorithm):
         # TODO: Add support for ZeRO Stage 3
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
-        gather_if_zero3 = nullcontext
         model_ref = self.accelerator.unwrap_model(self.actor)
         model_ref.set_adapter("actor")
-        with gather_if_zero3(list(model_ref.parameters())):
+        with self.gather_if_zero3(list(model_ref.parameters()), modifier_rank=0):
             model_ref.merge_adapter()
             for name, param in model_ref.named_parameters():
                 name = name.removeprefix("base_model.model.").replace(".base_layer", "")

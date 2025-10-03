@@ -7,6 +7,7 @@ import tempfile
 import warnings
 from abc import ABC, ABCMeta, abstractmethod
 from collections import OrderedDict, defaultdict
+from contextlib import nullcontext
 from dataclasses import asdict
 from importlib.metadata import version
 from typing import (
@@ -1833,6 +1834,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 raise NotImplementedError(
                     "DeepSpeed ZeRO Stage 3 is not yet supported in AgileRL. This feature is in development and will be available in a future release."
                 )
+        self.gather_if_zero3 = (
+            nullcontext if self.zero_stage != 3 else zero.GatheredParameters
+        )
 
         seed = 42
         if self.accelerator is not None:
@@ -1875,11 +1879,15 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     if self.use_separate_reference_adapter
                     else ["actor"]
                 )
-                self.actor.save_pretrained(
-                    save_directory=path,
-                    selected_adapters=selected_adapters,
-                    is_main_process=self.accelerator.is_main_process,
-                )
+                model_ref = self.accelerator.unwrap_model(self.actor)
+                with self.gather_if_zero3(
+                    list(model_ref.parameters()), modifier_rank=0
+                ):
+                    model_ref.save_pretrained(
+                        save_directory=path,
+                        selected_adapters=selected_adapters,
+                        is_main_process=self.accelerator.is_main_process,
+                    )
         checkpoint_dict = get_checkpoint_dict(
             self, using_deepspeed=self.accelerator is not None
         )
@@ -1893,6 +1901,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 path + "/attributes.pt",
                 pickle_module=dill,
             )
+        self.accelerator.wait_for_everyone()
 
     # TODO: This could hopefully be abstracted into EvolvableAlgorithm with a decorator to
     # handle _load_distributed_actor if deepspeed is used.
@@ -1910,15 +1919,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if weights_only:
                 if self.use_separate_reference_adapter:
                     self._update_existing_adapter(
-                        self.accelerator,
-                        self.actor,
                         path,
                         "reference",
                     )
 
                 self._update_existing_adapter(
-                    self.accelerator,
-                    self.actor,
                     path,
                     "actor",
                 )
@@ -2271,10 +2276,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             "Recompile method is not available for LLM finetuning algorithms."
         )
 
-    @staticmethod
     def _update_existing_adapter(
-        accelerator: Accelerator,
-        wrapped_model: DeepSpeedEngine,
+        self,
         checkpoint_dir: str,
         adapter_name: str,
     ) -> None:
@@ -2293,20 +2296,22 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: None
         :rtype: None
         """
-        base_model = accelerator.unwrap_model(wrapped_model)
+        base_model = self.accelerator.unwrap_model(self.actor)
         if hasattr(base_model, "module"):
             base_model = base_model.module
 
         adapter_path = f"{checkpoint_dir}/{adapter_name}/adapter_model.safetensors"
         adapter_state = load_file(adapter_path, device="cpu")
 
-        with torch.no_grad():
-            set_peft_model_state_dict(
-                base_model, adapter_state, adapter_name=adapter_name
-            )
-        base_model.set_adapter(adapter_name)
+        with self.gather_if_zero3(list(base_model.parameters()), modifier_rank=0):
+            with torch.no_grad():
+                set_peft_model_state_dict(
+                    base_model, adapter_state, adapter_name=adapter_name
+                )
+            base_model.set_adapter(adapter_name)
 
-        # Make reference weights not trainable
-        for name, param in base_model.named_parameters():
-            if "reference" in name:
-                param.requires_grad = False
+            # Make reference weights not trainable
+            for name, param in base_model.named_parameters():
+                if "reference" in name:
+                    param.requires_grad = False
+        self.accelerator.wait_for_everyone()
