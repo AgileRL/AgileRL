@@ -597,7 +597,7 @@ class GRPO(LLMAlgorithm):
         self.actor.set_adapter("actor")
 
         if self.accelerator is None:
-            self.actor = DummyEvolvable(lambda: self.actor, {}, self.device)
+            self.actor = DummyEvolvable(module=self.actor, device=self.device)
 
         optim_class = self._select_optim_class()
         self.optimizer = OptimizerWrapper(

@@ -38,6 +38,7 @@ from agilerl.algorithms.core.base import (
     LLMAlgorithm,
     OptimizerWrapper,
 )
+from agilerl.modules.dummy import DummyEvolvable
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig, clone_llm
 
 dist_env = dict(
@@ -1437,7 +1438,7 @@ def test_init_grpo_with_no_accelerator(
     assert grpo.pad_token_id == 999
     assert grpo.pad_token == "<pad>"
     assert isinstance(grpo.generation_config, GenerationConfig)
-    assert isinstance(grpo.actor, PeftModel)
+    assert isinstance(grpo.actor, DummyEvolvable)
     assert isinstance(grpo.optimizer, OptimizerWrapper)
     assert isinstance(grpo.lr_scheduler, SequentialLR), grpo.lr_scheduler
     AcceleratorState._reset_state(True)

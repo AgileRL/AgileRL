@@ -34,14 +34,24 @@ class DummyEvolvable(EvolvableModule):
 
     def __init__(
         self,
-        module_fn: Callable[[], nn.Module],
-        module_kwargs: Optional[Dict[str, Any]],
         device: DeviceType,
+        module: nn.Module | None = None,
+        module_fn: Callable[[], nn.Module] | None = None,
+        module_kwargs: Optional[Dict[str, Any]] | None = None,
     ) -> None:
 
+        if module is None and module_fn is None:
+            raise ValueError("Either module or module_fn must be provided.")
+
+        if module_fn is not None and module_kwargs is None:
+            module_kwargs = {}
+
+        if module is None:
+            module = module_fn(**module_kwargs).to(device)
+        else:
+            module = module.to(device)
         # Initialize the module
         super().__init__(device)
-        module = module_fn(**module_kwargs).to(device)
         self.module = module
         self.module_fn = module_fn
         self.module_kwargs = module_kwargs
@@ -52,12 +62,8 @@ class DummyEvolvable(EvolvableModule):
     def forward(self, *args, **kwargs) -> torch.Tensor:
         return self.module(*args, **kwargs)
 
-    def generate(self, *args, **kwargs) -> torch.Tensor:
-        if not hasattr(self.module, "generate"):
-            raise AttributeError(
-                f"Module {self.module_fn} does not have a generate method."
-            )
-        return self.module.generate(*args, **kwargs)
-
-    def gradient_checkpointing_enable(self) -> None:
-        self.module.gradient_checkpointing_enable()
+    def __getattr__(self, name: str) -> Any:
+        module = self.__dict__["_modules"]["module"]
+        if name == "module":
+            return module
+        return getattr(module, name)
