@@ -1,7 +1,7 @@
 import copy
 import warnings
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, TypedDict
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 
 import gymnasium as gym
 import torch
@@ -10,11 +10,7 @@ from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 from transformers.tokenization_utils_base import BatchEncoding
 
-
-class ReturnedPrompts(TypedDict):
-    input_ids: torch.Tensor
-    attention_mask: torch.Tensor
-    text: str | None
+from agilerl.typing import ReturnedPrompts
 
 
 class HuggingFaceGym(gym.Env):

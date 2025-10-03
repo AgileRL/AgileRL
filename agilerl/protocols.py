@@ -290,21 +290,6 @@ class EvolvableAlgorithm(Protocol):
     def mutation_hook(self) -> None: ...
 
 
-@runtime_checkable
-class LLMAlgorithm(EvolvableAlgorithm, Protocol):
-    """Protocol for GRPO (Gradient-based Reinforcement Policy Optimization) algorithm.
-
-    Extends EvolvableAlgorithm with GRPO-specific methods for action generation,
-    learning from experiences, and environment testing.
-    """
-
-    def get_action(
-        self, prompts: List["ReturnedPrompts"], training: bool = True
-    ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]: ...
-    def learn(self, experiences: "ExperiencesType") -> Tuple[float, float]: ...
-    def test(self, env: "HuggingFaceGym", loop: int = 1) -> torch.Tensor: ...
-
-
 # Define a TypeVar for EvolvableAlgorithm that can be used for generic typing
 T_EvolvableAlgorithm = TypeVar("T_EvolvableAlgorithm", bound=EvolvableAlgorithm)
 

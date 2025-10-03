@@ -1504,7 +1504,6 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
             for agent in mutated_population:
                 for param_group in agent.optimizer.optimizer.param_groups:
                     assert param_group["lr"] == agent.lr
-            print("Here is the mutations: ", mutations)
         except Exception as e:
             print("Exception: ", e)
             raise e

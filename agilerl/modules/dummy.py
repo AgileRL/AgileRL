@@ -1,4 +1,4 @@
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -35,18 +35,16 @@ class DummyEvolvable(EvolvableModule):
     def __init__(
         self,
         module_fn: Callable[[], nn.Module],
-        module_kwargs: Dict[str, Any],
+        module_kwargs: Optional[Dict[str, Any]],
         device: DeviceType,
     ) -> None:
 
         # Initialize the module
-        module = module_fn(**module_kwargs).to(device)
-
         super().__init__(device)
-
+        module = module_fn(**module_kwargs).to(device)
+        self.module = module
         self.module_fn = module_fn
         self.module_kwargs = module_kwargs
-        self.module = module
 
     def change_activation(self, activation: str, output: bool) -> None:
         return
@@ -60,3 +58,6 @@ class DummyEvolvable(EvolvableModule):
                 f"Module {self.module_fn} does not have a generate method."
             )
         return self.module.generate(*args, **kwargs)
+
+    def gradient_checkpointing_enable(self) -> None:
+        self.module.gradient_checkpointing_enable()

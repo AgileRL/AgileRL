@@ -21,7 +21,8 @@ from vllm import LLM, SamplingParams
 
 from agilerl.algorithms.core import LLMAlgorithm, OptimizerWrapper
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.typing import ExperiencesType
+from agilerl.modules.dummy import DummyEvolvable
+from agilerl.typing import ExperiencesType, LLMObsType
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     VLLMConfig,
@@ -32,7 +33,6 @@ from agilerl.utils.algo_utils import (
 from agilerl.utils.llm_utils import (
     DummyOptimizer,
     HuggingFaceGym,
-    ReturnedPrompts,
 )
 
 DeepSpeedOptimizerType = Union[
@@ -352,7 +352,7 @@ class GRPO(LLMAlgorithm):
             self.wrap_models()
 
     def get_action(
-        self, prompts: List[ReturnedPrompts], training: bool = True
+        self, obs: LLMObsType, training: bool = True
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
         """Returns the next action to take in the environment.
 
@@ -360,6 +360,8 @@ class GRPO(LLMAlgorithm):
         :type states: numpy.ndarray[float]
         :param training: Flag to indicate training mode, defaults to True
         :type training: bool, optional
+        :return: Completion IDs and action masks
+        :rtype: Tuple[List[torch.Tensor], List[torch.Tensor]]
         """
         group_size = self.group_size if training else 1
         self.actor.eval()
@@ -367,7 +369,7 @@ class GRPO(LLMAlgorithm):
             with torch.no_grad():
                 completion_ids = []
                 action_masks = []
-                for prompt in prompts:
+                for prompt in obs:
                     prompt.pop("text", None)
                     prompt["input_ids"] = (
                         prompt["input_ids"].repeat(group_size, 1).to(self.actor.device)
@@ -393,7 +395,7 @@ class GRPO(LLMAlgorithm):
             # Move model to vllm
             self._move_model_to_vllm()
             completion_ids, action_masks = self._generate_with_vllm_colocate(
-                prompts, group_size
+                obs, group_size
             )
 
         return completion_ids, action_masks
@@ -593,6 +595,9 @@ class GRPO(LLMAlgorithm):
             )
 
         self.actor.set_adapter("actor")
+
+        if self.accelerator is None:
+            self.actor = DummyEvolvable(lambda: self.actor, {}, self.device)
 
         optim_class = self._select_optim_class()
         self.optimizer = OptimizerWrapper(

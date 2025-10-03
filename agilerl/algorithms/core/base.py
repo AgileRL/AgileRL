@@ -1887,29 +1887,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         checkpoint_dict.pop("llm", None)
         checkpoint_dict.pop("tp_group", None)
 
-        if self.accelerator is None:
-            # Add optimizer and actor info to checkpoint
-            # Network is not an EvolvableModule, so we need to add it manually
-            checkpoint_dict["network_info"]["network_names"].append("actor")
-            checkpoint_dict["network_info"]["modules"][
-                "actor_state_dict"
-            ] = self.actor.state_dict()
-            checkpoint_dict["network_info"][
-                "actor_state_dict"
-            ] = self.actor.state_dict()
-            checkpoint_dict["network_info"]["optimizer_names"].append("optimizer")
-            checkpoint_dict["network_info"]["optimizers"][
-                "actor_optimizer_cls"
-            ] = self.optimizer.optimizer_cls.__name__
-            checkpoint_dict["network_info"]["optimizers"][
-                "actor_optimizer_state_dict"
-            ] = self.optimizer.state_dict()
-            checkpoint_dict["network_info"]["optimizers"][
-                "actor_optimizer_networks"
-            ] = self.optimizer.network_names
-            checkpoint_dict["network_info"]["optimizers"]["actor_optimizer_lr"] = "lr"
-            checkpoint_dict["network_info"]["optimizers"]["actor_optimizer_kwargs"] = {}
-
         if self.accelerator is None or self.accelerator.is_main_process:
             torch.save(
                 checkpoint_dict,
@@ -2088,6 +2065,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 self.actor is not None
             ), "Actor is set to None, please check that the actor is defined."
             self.actor = self.actor.to(self.device)
+            # print("MODULKE", self.actor.module)
             self.actor.gradient_checkpointing_enable()
 
     def clean_up(self) -> None:
