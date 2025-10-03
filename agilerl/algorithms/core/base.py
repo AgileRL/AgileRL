@@ -137,7 +137,6 @@ def get_checkpoint_dict(
     :rtype: dict[str, Any]
     """
     attribute_dict = EvolvableAlgorithm.inspect_attributes(agent)
-    print("ATTRIBUTE DICT", attribute_dict.keys())
     attribute_dict["agilerl_version"] = version("agilerl")
     attribute_dict.pop("accelerator", None)
 
@@ -162,7 +161,6 @@ def get_checkpoint_dict(
 
         elif isinstance(evolvable_obj, (OptimizedModule, EvolvableModule)):
             module_chkpt = module_checkpoint_dict(evolvable_obj, attr)
-            print("MODULE CHKPT", module_chkpt.keys())
             network_info["modules"].update(module_chkpt)
 
         else:
@@ -1889,37 +1887,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         checkpoint_dict.pop("llm", None)
         checkpoint_dict.pop("tp_group", None)
 
-        # print("Checkpoint dict", checkpoint_dict.keys())
-        # print("Torch compiler", self.torch_compiler)
-        # print("LR", self.lr)
-        # print("Network info", checkpoint_dict["network_info"])
-        # checkpoint_dict.pop("generation_config")
-        # checkpoint_dict.pop("lora_config")
-        # checkpoint_dict.pop("vllm_config")
-        # checkpoint_dict.pop("cosine_lr_schedule_config")
-        # checkpoint_dict.pop("rng")
-        # checkpoint_dict["network_info"]["modules"].pop("actor_init_dict")
-
         if self.accelerator is None or self.accelerator.is_main_process:
-
-            def find_unpicklable_keys(checkpoint_dict):
-                """Test each key individually to find which one can't be pickled"""
-                unpicklable = []
-
-                for key, value in checkpoint_dict.items():
-                    try:
-                        dill.dumps(value)
-                        print(f"✓ '{key}' is picklable")
-                    except Exception as e:
-                        print(f"✗ '{key}' FAILED: {type(e).__name__}: {str(e)[:100]}")
-                        unpicklable.append(key)
-
-                return unpicklable
-
-            # print("UNPICKLABLE KEYS", find_unpicklable_keys(checkpoint_dict))
-            # print("UNPICKLABLE NETWORK", find_unpicklable_keys(checkpoint_dict["network_info"]))
-            # print("UNPICKLABLE MODULES", find_unpicklable_keys(checkpoint_dict['network_info']['modules']))
-            # print(checkpoint_dict['network_info']['modules']['actor_init_dict'])
             torch.save(
                 checkpoint_dict,
                 path + "/attributes.pt",
