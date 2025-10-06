@@ -20,10 +20,7 @@ from accelerate.utils import DeepSpeedPlugin
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
-from peft import (
-    LoraConfig,
-    get_peft_model,
-)
+from peft import LoraConfig, get_peft_model
 from torch.optim.lr_scheduler import SequentialLR
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.configuration_utils import PretrainedConfig
@@ -104,6 +101,11 @@ class DummyConfig(PretrainedConfig):
         self.input_size = input_size
         self.max_tokens = max_tokens
         self.vocab_size = vocab_size
+        # self.peft_config = dict(r=16,
+        #                 lora_alpha=64,
+        #                 target_modules=["linear_1"],
+        #                 task_type="CAUSAL_LM",
+        #                 lora_dropout=0.05)
 
 
 class DummyForwardOutput:
@@ -3056,6 +3058,12 @@ def test_clone_llm_peft(vocab_size, input_size, max_tokens):
     # Verify the PEFT adapter is properly cloned
     assert cloned_model.active_adapter == peft_model.active_adapter
     assert cloned_model.peft_config[cloned_model.active_adapter] == peft_config
+
+
+def test_clone_llm_peft_raises_error():
+    with pytest.raises(ValueError) as e:
+        clone_llm(1)
+    assert "Invalid 'original_model' type: int" in str(e.value)
 
 
 @pytest.mark.parametrize(
