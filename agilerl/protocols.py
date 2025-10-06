@@ -17,7 +17,6 @@ Type aliases are provided for common types used throughout the framework.
 
 from enum import Enum
 from typing import (
-    TYPE_CHECKING,
     Any,
     Callable,
     Dict,
@@ -38,10 +37,6 @@ import torch
 from accelerate import Accelerator
 from numpy.typing import ArrayLike
 from torch.optim.optimizer import Optimizer
-
-if TYPE_CHECKING:
-    from agilerl.typing import ExperiencesType
-    from agilerl.utils.llm_utils import HuggingFaceGym, ReturnedPrompts
 
 NumpyObsType = Union[ArrayLike, Dict[str, ArrayLike], Tuple[ArrayLike, ...]]
 TorchObsType = Union[torch.Tensor, Dict[str, torch.Tensor], Tuple[torch.Tensor, ...]]
