@@ -22,7 +22,6 @@ from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from peft import (
     LoraConfig,
-    PeftModel,
     get_peft_model,
 )
 from torch.optim.lr_scheduler import SequentialLR
