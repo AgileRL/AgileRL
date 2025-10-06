@@ -1831,8 +1831,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 and self.zero_stage > 2
                 and self.accelerator.is_main_process
             ):
-                raise NotImplementedError(
-                    "DeepSpeed ZeRO Stage 3 is not yet supported in AgileRL. This feature is in development and will be available in a future release."
+                warnings.warn(
+                    "DeepSpeed ZeRO Stage 3 is nascent and may not work as expected, proceed with caution when using this feature."
                 )
         self.gather_if_zero3 = (
             nullcontext if self.zero_stage != 3 else zero.GatheredParameters
