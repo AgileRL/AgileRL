@@ -3063,7 +3063,7 @@ def test_clone_llm_peft(vocab_size, input_size, max_tokens):
 def test_clone_llm_peft_raises_error():
     with pytest.raises(ValueError) as e:
         clone_llm(1)
-    assert "Invalid 'original_model' type: int" in str(e.value)
+    assert "Invalid 'original_model' type: <class 'int'>" in str(e.value)
 
 
 @pytest.mark.parametrize(
