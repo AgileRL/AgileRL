@@ -2143,8 +2143,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if self.zero_stage is None or self.zero_stage < 2:
                 actor_state_dict = clone_tensors_for_torch_save(actor.state_dict())
 
-            print("input_args", input_args)
-
             cloned_model = clone_llm(actor, state_dict=actor_state_dict)
 
             actor = None  # De-reference the actor

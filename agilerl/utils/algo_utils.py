@@ -1582,6 +1582,5 @@ def clone_llm(
         model.disable_adapter()
 
     if state_dict is not None:
-        print("State dict keys", state_dict.keys())
         model.load_state_dict(state_dict, strict=False)
     return model

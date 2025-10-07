@@ -103,10 +103,8 @@ def equation_reward_func(completions, target, nums, **kwargs):
             # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
             completion = "<think>" + completion
             answer_tags = re.findall(r"<answer>([\s\S]*?)<\/answer>", completion)
-            print("answer tags", answer_tags)
 
             if len(answer_tags) != 1:
-                print("in here 1")
                 rewards.append(0.0)
                 continue
 
@@ -114,13 +112,11 @@ def equation_reward_func(completions, target, nums, **kwargs):
             used_numbers = [int(n) for n in re.findall(r"\d+", equation)]
 
             if sorted(used_numbers) != sorted(numbers):
-                print("in here 2")
                 rewards.append(0.0)
                 continue
 
             allowed_pattern = r"^[\d+\-*/().\s]+$"
             if not re.match(allowed_pattern, equation):
-                print("in here 3")
                 rewards.append(0.0)
                 continue
 
@@ -129,7 +125,6 @@ def equation_reward_func(completions, target, nums, **kwargs):
             if abs(float(result) - float(gt)) < 1e-5:
                 rewards.append(1.0)
             else:
-                print("in here 4")
                 rewards.append(0.0)
         except Exception:
             rewards.append(0.0)
@@ -139,36 +134,10 @@ def equation_reward_func(completions, target, nums, **kwargs):
 def combined_rewards(completion, solution, prompt):
     import torch.distributed as dist
 
-    # if dist.get_rank() == 1:
-    #     print("LLM completion, solution, prompt, and reward for rank 1")
-    #     print("COMPLETION", completion)
-    #     print("SOLUTION", solution)
-    #     print("PROMPT", prompt)
     reward = (
         equation_reward_func([completion], [solution], [prompt])[0]
         + format_reward_func([completion], [solution])[0]
     )
-
-    # if dist.get_rank() == 1:
-    #     print("REWARD", reward)
-
-    # import time
-    # time.sleep(0.1)
-
-    if dist.get_rank() == 0:
-        print("LLM completion, solution, prompt, and reward for rank 0")
-        print("COMPLETION", completion)
-        print("SOLUTION", solution)
-        print("PROMPT", prompt)
-        print("REWARD", reward)
-        print("*" * 50)
-
-    if reward == 2.0:
-        with open("countdown_completions.txt", "a") as text_file:
-            text_file.write(
-                f"Prompt {prompt}" + "\n" + completion + "\n" + "=" * 50 + "\n"
-            )
-
     return reward
 
 
