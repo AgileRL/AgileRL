@@ -275,23 +275,23 @@ class RainbowDQN(RLAlgorithm):
 
     def _dqn_loss(
         self,
-        states: TorchObsType,
+        obs: TorchObsType,
         actions: torch.Tensor,
         rewards: torch.Tensor,
-        next_states: torch.Tensor,
+        next_obs: torch.Tensor,
         dones: torch.Tensor,
         gamma: float,
     ) -> torch.Tensor:
         """Calculates the DQN loss.
 
-        :param states: Batch of current states
-        :type states: torch.Tensor
+        :param obs: Batch of current states
+        :type obs: torch.Tensor
         :param actions: Batch of actions taken
         :type actions: torch.Tensor
         :param rewards: Batch of rewards received
         :type rewards: torch.Tensor
-        :param next_states: Batch of next states
-        :type next_states: torch.Tensor
+        :param next_obs: Batch of next states
+        :type next_obs: torch.Tensor
         :param dones: Batch of done flags indicating episode termination
         :type dones: torch.Tensor
         :param gamma: Discount factor
@@ -299,16 +299,15 @@ class RainbowDQN(RLAlgorithm):
         :return: Element-wise loss
         :rtype: torch.Tensor
         """
-        states = self.preprocess_observation(states)
-        next_states = self.preprocess_observation(next_states)
+        obs = self.preprocess_observation(obs)
+        next_obs = self.preprocess_observation(next_obs)
 
         with torch.no_grad():
+            # Predict next actions from next_obs
+            next_actions = self.actor(next_obs).argmax(1)
 
-            # Predict next actions from next_states
-            next_actions = self.actor(next_states).argmax(1)
-
-            # Predict the target q distribution for the same next states
-            target_q_dist = self.actor_target(next_states, q=False)
+            # Predict the target q distribution for the same next obs
+            target_q_dist = self.actor_target(next_obs, q=False)
 
             # Index the target q_dist to select the distributions corresponding to next_actions
             target_q_dist = target_q_dist[range(self.batch_size), next_actions]
@@ -349,7 +348,7 @@ class RainbowDQN(RLAlgorithm):
             )
 
         # Calculate the current obs
-        log_q_dist = self.actor(states, q=False, log=True)
+        log_q_dist = self.actor(obs, q=False, log=True)
         log_p = log_q_dist[range(self.batch_size), actions.squeeze().long()]
 
         # loss
@@ -375,29 +374,29 @@ class RainbowDQN(RLAlgorithm):
         :rtype: Tuple[float, numpy.ndarray, numpy.ndarray]
         """
         n_step = n_experiences is not None
-        states = experiences["obs"]
+        obs = experiences["obs"]
         actions = experiences["action"]
         rewards = experiences["reward"]
-        next_states = experiences["next_obs"]
+        next_obs = experiences["next_obs"]
         dones = experiences["done"]
         if per:
             weights = experiences["weights"]
             idxs = experiences["idxs"]
             if n_step:
-                n_states = n_experiences["obs"]
+                n_obs = n_experiences["obs"]
                 n_actions = n_experiences["action"]
                 n_rewards = n_experiences["reward"]
-                n_next_states = n_experiences["next_obs"]
+                n_next_obs = n_experiences["next_obs"]
                 n_dones = n_experiences["done"]
 
             if self.combined_reward or not n_step:
                 elementwise_loss = self._dqn_loss(
-                    states, actions, rewards, next_states, dones, self.gamma
+                    obs, actions, rewards, next_obs, dones, self.gamma
                 )
             if n_step:
                 n_gamma = self.gamma**self.n_step
                 n_step_elementwise_loss = self._dqn_loss(
-                    n_states, n_actions, n_rewards, n_next_states, n_dones, n_gamma
+                    n_obs, n_actions, n_rewards, n_next_obs, n_dones, n_gamma
                 )
                 if self.combined_reward:
                     elementwise_loss += n_step_elementwise_loss
@@ -409,10 +408,10 @@ class RainbowDQN(RLAlgorithm):
         else:
             if n_step:
                 idxs = experiences["idxs"]
-                n_states = n_experiences["obs"]
+                n_obs = n_experiences["obs"]
                 n_actions = n_experiences["action"]
                 n_rewards = n_experiences["reward"]
-                n_next_states = n_experiences["next_obs"]
+                n_next_obs = n_experiences["next_obs"]
                 n_dones = n_experiences["done"]
             else:
                 idxs = None
@@ -420,13 +419,13 @@ class RainbowDQN(RLAlgorithm):
             new_priorities = None
             if self.combined_reward or not n_step:
                 elementwise_loss = self._dqn_loss(
-                    states, actions, rewards, next_states, dones, self.gamma
+                    obs, actions, rewards, next_obs, dones, self.gamma
                 )
 
             if n_step:
                 n_gamma = self.gamma**self.n_step
                 n_step_elementwise_loss = self._dqn_loss(
-                    n_states, n_actions, n_rewards, n_next_states, n_dones, n_gamma
+                    n_obs, n_actions, n_rewards, n_next_obs, n_dones, n_gamma
                 )
                 if self.combined_reward:
                     elementwise_loss += n_step_elementwise_loss
@@ -508,7 +507,9 @@ class RainbowDQN(RLAlgorithm):
                         ) and not finished[idx]:
                             completed_episode_scores[idx] = scores[idx]
                             finished[idx] = 1
+
                 rewards.append(np.mean(completed_episode_scores))
+
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
         return mean_fit
