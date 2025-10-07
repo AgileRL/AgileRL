@@ -132,7 +132,6 @@ def equation_reward_func(completions, target, nums, **kwargs):
 
 
 def combined_rewards(completion, solution, prompt):
-    import torch.distributed as dist
 
     reward = (
         equation_reward_func([completion], [solution], [prompt])[0]
