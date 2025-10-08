@@ -8,6 +8,7 @@ deepspeed_config:
     offload_param_device: cpu
     zero3_init_flag: false
     zero_stage: 2
+    gradient_checkpointing: true
 mixed_precision: bf16
 distributed_type: DEEPSPEED
 downcast_bf16: no

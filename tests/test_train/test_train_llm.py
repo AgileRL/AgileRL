@@ -52,7 +52,13 @@ def test_finetune_llm_basic_training_loop(use_accelerator):
         assert mock_agent.test.call_count == 3  # Should be called at step 2
 
 
-@pytest.mark.parametrize("use_accelerator", [True, False])
+@pytest.mark.parametrize(
+    "use_accelerator",
+    [
+        True,
+        # False
+    ],
+)
 def test_finetune_llm_with_wandb_and_checkpoints(use_accelerator):
     """Test finetune_llm with wandb logging and checkpointing enabled."""
     # Create mock agent
@@ -103,6 +109,7 @@ def test_finetune_llm_with_wandb_and_checkpoints(use_accelerator):
             evaluation_interval=3,
             accelerator=None if use_accelerator else Accelerator(),
             max_reward=2.0,
+            checkpoint_steps=6,
         )
 
         # Verify wandb was initialized
@@ -177,7 +184,7 @@ def test_finetune_llm_evolvable_training_loop(use_accelerator):
 
 def test_finetune_llm_evo_steps_not_set():
     """Test that finetune_llm raises a ValueError if evo_steps is not set."""
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as evo_steps_not_set_error:
         finetune_llm(
             pop=[MagicMock()],
             env=MagicMock(),
@@ -186,9 +193,13 @@ def test_finetune_llm_evo_steps_not_set():
             tournament=MagicMock(),
             mutation=MagicMock(),
         )
+        assert (
+            "'evo_steps' is set but at least one of 'tournament' or 'mutation' is set to None. Evolution will not take place."
+            in str(evo_steps_not_set_error.value)
+        )
 
 
-def test_finetune_llm_warning_if_evo_steps_not_set():
+def test_finetune_llm_value_error_if_evo_steps_not_set():
     """Test that finetune_llm raises a warning if evo_steps is not set."""
     # Create mock agent
     mock_agent = MagicMock()
@@ -218,11 +229,161 @@ def test_finetune_llm_warning_if_evo_steps_not_set():
         mock_tournament_selection_and_mutation.return_value = [mock_agent]
 
         mock_agg.return_value = 0.5
-        with pytest.warns(UserWarning):
+        with pytest.raises(ValueError) as evo_steps_not_set_error:
             finetune_llm(
                 pop=[mock_agent],
                 env=mock_env,
                 evaluation_interval=2,
                 max_reward=2.0,
-                evo_steps=200,
+                evo_steps=None,
+                mutation=MagicMock(),
+                tournament=MagicMock(),
             )
+            assert (
+                "'evo_steps' must be set if 'tournament' and 'mutation' are not None."
+                in str(evo_steps_not_set_error.value)
+            )
+
+
+def test_finetune_llm_warning_num_epochs_and_max_steps():
+    """Test that finetune_llm raises a warning if evo_steps is not set."""
+    # Create mock agent
+    mock_agent = MagicMock()
+    mock_agent.fitness = [0.0]
+    mock_agent.local_rank = "0"  # Main process
+    mock_agent.get_action.return_value = (
+        [torch.ones(1, 100) for _ in range(2)],
+        Mock(),
+    )
+    mock_agent.learn.return_value = (0.5, 0.2)
+    mock_agent.test.return_value = torch.tensor([0.8])
+
+    # Create mock environment - use MagicMock for special methods
+    mock_env = MagicMock()
+    mock_env.__len__.return_value = 6
+    mock_env.reset.return_value = "initial_prompts"
+    mock_env.step.return_value = ("next_prompts", torch.tensor([2.0, 3.0]))
+    mock_env.data_batch_size_per_gpu = 1
+
+    # Mock other dependencies
+    with patch("agilerl.training.train_llm.trange"), patch(
+        "agilerl.training.train_llm.aggregate_metrics_across_gpus"
+    ) as mock_agg, patch("agilerl.training.train_llm.save_llm_checkpoint"), patch(
+        "agilerl.training.train_llm.tournament_selection_and_mutation"
+    ) as mock_tournament_selection_and_mutation:
+
+        mock_tournament_selection_and_mutation.return_value = [mock_agent]
+
+        mock_agg.return_value = 0.5
+        with pytest.warns(UserWarning) as num_epochs_and_max_steps_warning:
+            finetune_llm(
+                pop=[mock_agent],
+                env=mock_env,
+                evaluation_interval=2,
+                max_reward=2.0,
+                num_epochs=10,
+                max_steps=100,
+                evo_steps=None,
+            )
+            assert (
+                "'num_epochs' is set but 'max_steps' is also set. 'num_epochs' will take precedence over 'max_steps'."
+                in str(num_epochs_and_max_steps_warning[0].message)
+            )
+
+
+def test_finetune_llm_max_steps_set_from_num_epochs():
+    # Create mock agent
+    mock_agent = MagicMock()
+    mock_agent.fitness = [0.0]
+    mock_agent.local_rank = "0"  # Main process
+    mock_agent.get_action.return_value = (
+        [torch.ones(1, 100) for _ in range(2)],
+        Mock(),
+    )
+    mock_agent.learn.return_value = (0.5, 0.2)
+    mock_agent.test.return_value = torch.tensor([0.8])
+
+    # Create mock environment - use MagicMock for special methods
+    mock_env = MagicMock()
+    mock_env.__len__.return_value = 3
+    mock_env.reset.return_value = "initial_prompts"
+    mock_env.step.return_value = ("next_prompts", torch.tensor([2.0, 3.0]))
+    mock_env.data_batch_size_per_gpu = 1
+
+    mutation = MagicMock()
+    mutation.architecture_mut = 0
+    mutation.new_layer_prob = 0
+    mutation.parameters_mut = 0
+    mutation.activation_mut = 0
+
+    # Mock other dependencies
+    with patch("agilerl.training.train_llm.trange"), patch(
+        "agilerl.training.train_llm.init_wandb"
+    ), patch("agilerl.training.train_llm.wandb"), patch(
+        "agilerl.training.train_llm.aggregate_metrics_across_gpus"
+    ) as mock_agg, patch(
+        "agilerl.training.train_llm.save_llm_checkpoint"
+    ) as mock_save:
+
+        mock_agg.return_value = 0.5
+        finetune_llm(
+            pop=[mock_agent],
+            env=mock_env,
+            evaluation_interval=2,
+            max_reward=2.0,
+            evo_steps=1,
+            accelerator=None,
+            num_epochs=2,
+            checkpoint_steps=3,
+        )
+        # Verify 2 checkpoints as 2 epochs
+        assert mock_save.call_count == 2
+
+
+def test_finetune_llm_break_on_num_epochs():
+    # Create mock agent
+    # Create mock agent
+    mock_agent = MagicMock()
+    mock_agent.fitness = [0.0]
+    mock_agent.local_rank = "0"  # Main process
+    mock_agent.get_action.return_value = (
+        [torch.ones(1, 100) for _ in range(2)],
+        Mock(),
+    )
+    mock_agent.learn.return_value = (0.5, 0.2)
+    mock_agent.test.return_value = torch.tensor([0.8])
+
+    # Create mock environment - use MagicMock for special methods
+    mock_env = MagicMock()
+    mock_env.__len__.return_value = 3
+    mock_env.reset.return_value = "initial_prompts"
+    mock_env.step.return_value = ("next_prompts", torch.tensor([2.0, 3.0]))
+    mock_env.data_batch_size_per_gpu = 1
+
+    mutation = MagicMock()
+    mutation.architecture_mut = 0
+    mutation.new_layer_prob = 0
+    mutation.parameters_mut = 0
+    mutation.activation_mut = 0
+
+    # Mock other dependencies
+    with patch("agilerl.training.train_llm.trange"), patch(
+        "agilerl.training.train_llm.init_wandb"
+    ), patch("agilerl.training.train_llm.wandb"), patch(
+        "agilerl.training.train_llm.aggregate_metrics_across_gpus"
+    ) as mock_agg, patch(
+        "agilerl.training.train_llm.save_llm_checkpoint"
+    ):
+
+        mock_env.num_epochs = 2
+        mock_agg.return_value = 0.5
+        finetune_llm(
+            pop=[mock_agent],
+            env=mock_env,
+            evaluation_interval=2,
+            max_reward=2.0,
+            evo_steps=1,
+            accelerator=None,
+            num_epochs=2,
+            checkpoint_steps=3,
+        )

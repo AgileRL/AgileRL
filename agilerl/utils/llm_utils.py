@@ -10,6 +10,8 @@ from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 from transformers.tokenization_utils_base import BatchEncoding
 
+from agilerl.typing import ReturnedPrompts
+
 
 class HuggingFaceGym(gym.Env):
     """Class to convert HuggingFace datasets into Gymnasium style environment.
@@ -38,6 +40,7 @@ class HuggingFaceGym(gym.Env):
         data_batch_size_per_gpu: int = 8,
         custom_collate_fn: Optional[Callable] = None,
         accelerator: Optional[Accelerator] = None,
+        return_raw_completions: bool = False,
     ) -> None:
         assert {"question", "answer"}.issubset(
             set(train_dataset.features.keys())
@@ -49,6 +52,7 @@ class HuggingFaceGym(gym.Env):
         self.reward_fn = reward_fn
         self.tokenizer = tokenizer
         self.data_batch_size_per_gpu = data_batch_size_per_gpu
+        self.accelerator = accelerator
         if custom_collate_fn is None:
             custom_collate_fn = HuggingFaceGym.create_collate_fn(
                 tokenizer, apply_chat_template_fn
@@ -70,7 +74,6 @@ class HuggingFaceGym(gym.Env):
             "train": len(train_dataset),
             "test": len(test_dataset),
         }
-        self.accelerator = accelerator
         if self.accelerator is not None:
             self.train_dataloader = self.accelerator.prepare(self.train_dataloader)
             self.test_dataloader = self.accelerator.prepare(self.test_dataloader)
@@ -85,11 +88,12 @@ class HuggingFaceGym(gym.Env):
             high=tokenizer.vocab_size - 1,
         )
         self.evaluation_mode = False
-        self.num_dataset_passes = 0
+        self.num_epochs = 0
+        self.return_raw_completions = return_raw_completions
 
     def step(
         self, completions: torch.Tensor
-    ) -> Tuple[List[BatchEncoding], torch.Tensor]:
+    ) -> Tuple[List[ReturnedPrompts], torch.Tensor]:
         """Take a step in the HuggingFaceGym environment, calculate rewards from completions generated from previous prompt and provide new batch
         of prompts.
 
@@ -106,7 +110,7 @@ class HuggingFaceGym(gym.Env):
 
     def reset(
         self, reset_dataloaders: bool = False
-    ) -> Tuple[List[BatchEncoding], Dict[str, Any]]:
+    ) -> Tuple[List[ReturnedPrompts], Dict[str, Any]]:
         """Reset the environment and get the next batch of tokenized prompts.
 
         :param reset_dataloaders: Whether to reset the dataloaders, defaults to False
@@ -140,11 +144,14 @@ class HuggingFaceGym(gym.Env):
         total_rewards = []
         for idx, (group_completion, answer, question) in enumerate(
             zip(completions, self.answers, self.questions)
-        ):  # Vectorize this in the future
+        ):
+            completion_to_decode = group_completion[
+                :, self.last_tokenized_prompts[idx]["input_ids"].shape[1] :
+            ]
+
+            # Vectorize this in the future
             decoded_group_completion = self.tokenizer.batch_decode(
-                group_completion[
-                    :, self.last_tokenized_prompts[idx]["input_ids"].shape[1] :
-                ],
+                completion_to_decode,
                 skip_special_tokens=True,
             )
             rewards = [
@@ -154,21 +161,39 @@ class HuggingFaceGym(gym.Env):
             total_rewards.append(rewards)
         return torch.tensor(total_rewards)
 
-    def _get_next_batch(self) -> List[BatchEncoding]:
+    def _get_next_batch(self) -> List[ReturnedPrompts]:
         """Get the next batch of tokenized prompts."""
         try:
             batch = next(self.dataloader)
             self.questions = batch["question"]
             self.answers = batch["answer"]
-            tokenized_prompts = batch["tokenized_prompts"]
+
+            returned_prompts = [
+                {
+                    "input_ids": returned_prompt["input_ids"],
+                    "attention_mask": returned_prompt["attention_mask"],
+                    "text": (
+                        self.tokenizer.batch_decode(
+                            returned_prompt["input_ids"],
+                            skip_special_tokens=False,  # Needs to be False here as we need to provide context about user roles to the model
+                            clean_up_tokenization_spaces=False,
+                        )[0]
+                        if self.return_raw_completions
+                        else None
+                    ),
+                }
+                for returned_prompt in batch["tokenized_prompts"]
+            ]
         except StopIteration:
+            if not self.evaluation_mode:
+                self.num_epochs += 1
+
             self._reset_dataloaders(
                 reset_train=not self.evaluation_mode,
                 reset_test=self.evaluation_mode,
             )
-            self.num_dataset_passes += 1
             return self._get_next_batch()
-        return tokenized_prompts
+        return returned_prompts
 
     @contextmanager
     def eval_mode(self) -> Generator[None, None, None]:

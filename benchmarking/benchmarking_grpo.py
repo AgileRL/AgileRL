@@ -16,7 +16,7 @@ from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
-MODEL_PATH = "Qwen/Qwen2.5-0.5B"
+MODEL_PATH = "Qwen/Qwen2.5-3B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
 
@@ -25,7 +25,7 @@ def create_model(pretrained_model_name_or_path):
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         torch_dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
-        device_map="cpu",
+        device_map="auto",
     )
 
     lora_config = LoraConfig(
@@ -49,7 +49,7 @@ def countdown_chat_template(q, a, tokenizer):
         },
         {
             "role": "user",
-            "content": f"Using each number in this tensor only once {tuple(i for i in q)}, create an equation that equals {a}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
+            "content": f"Using each number in this list only once {q}, create an equation that equals {a}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
         },
         {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
     ]
@@ -85,8 +85,8 @@ def format_reward_func(completions, target, **kwargs):
             # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
             completion = "<think>" + completion
             regex = r"^<think>([^<]*(?:<(?!/?think>)[^<]*)*)<\/think>\n<answer>([\s\S]*?)<\/answer>$"
-            match = re.search(regex, completion, re.DOTALL)
-            if match is None or len(match.groups()) != 2:
+            matches = re.search(regex, completion, re.DOTALL)
+            if matches is None or len(matches.groups()) != 2:
                 rewards.append(0.0)
             else:
                 rewards.append(1.0)
@@ -111,7 +111,7 @@ def equation_reward_func(completions, target, nums, **kwargs):
             equation = answer_tags[0].strip()
             used_numbers = [int(n) for n in re.findall(r"\d+", equation)]
 
-            if sorted(used_numbers) != sorted(numbers.flatten().tolist()):
+            if sorted(used_numbers) != sorted(numbers):
                 rewards.append(0.0)
                 continue
 
@@ -132,17 +132,11 @@ def equation_reward_func(completions, target, nums, **kwargs):
 
 
 def combined_rewards(completion, solution, prompt):
+
     reward = (
         equation_reward_func([completion], [solution], [prompt])[0]
         + format_reward_func([completion], [solution])[0]
     )
-
-    if reward == 2.0:
-        with open("countdown_completions.txt", "a") as text_file:
-            text_file.write(
-                f"Prompt {prompt}" + "\n" + completion + "\n" + "=" * 50 + "\n"
-            )
-
     return reward
 
 
@@ -168,11 +162,13 @@ def main(init_hp, mut_p):
         tokenizer=tokenizer,
         reward_fn=combined_rewards,
         apply_chat_template_fn=countdown_chat_template,
-        data_batch_size_per_gpu=2,
+        data_batch_size_per_gpu=10,
         accelerator=accelerator,
+        return_raw_completions=init_hp.get("USE_VLLM", False),
     )
 
     init_hp["PAD_TOKEN_ID"] = tokenizer.eos_token_id
+    init_hp["PAD_TOKEN"] = tokenizer.eos_token
 
     hp_config = HyperparameterConfig(
         beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),
@@ -219,7 +215,7 @@ def main(init_hp, mut_p):
         env=env,
         init_hp=init_hp,
         evaluation_interval=10,
-        wb=False,
+        wb=True,
         save_elite=True,
         elite_path="saved_llms",
         max_reward=2.0,

@@ -21,6 +21,7 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from transformers import PreTrainedModel
 
+from agilerl.modules.dummy import DummyEvolvable
 from agilerl.protocols import (
     EvolvableAttributeType,
     EvolvableModule,
@@ -1180,6 +1181,7 @@ def stack_and_pad_experiences(
     *experiences: MaybeObsList,
     padding_values: List[Union[int, float, bool]],
     padding_side: str = "right",
+    device: Optional[str] = None,
 ) -> Tuple[ArrayOrTensor, ...]:
     """Stacks experiences into a single tensor, padding them to the maximum length.
 
@@ -1198,26 +1200,43 @@ def stack_and_pad_experiences(
         if not isinstance(exp, list):
             stacked_exp = exp
         elif isinstance(exp[0], torch.Tensor):
-            max_size = max(e.shape[-1] for e in exp)
-            padding_sizes = [(max_size - e.shape[-1]) for e in exp]
-            if sum(padding_sizes) != 0:
-                exp = [
-                    F.pad(
-                        e,
-                        (
-                            (0, padding_size)
-                            if padding_side == "right"
-                            else (padding_size, 0)
-                        ),
-                        value=padding,
-                    )
-                    for e, padding_size in zip(exp, padding_sizes)
-                ]
-            stacked_exp = torch.cat(exp, dim=0)
+            stacked_exp = _stack_and_pad_tensor_list(exp, padding, padding_side)
+        elif isinstance(exp[0], (list, tuple)):
+            exp = [torch.tensor(e).unsqueeze(0) for e in exp]
+            stacked_exp = _stack_and_pad_tensor_list(exp, padding, padding_side)
         else:
             raise TypeError(f"Unsupported experience type: {type(exp[0])}")
+        if device is not None:
+            stacked_exp = stacked_exp.to(device)
         stacked_experiences.append(stacked_exp)
     return tuple(stacked_experiences)
+
+
+def _stack_and_pad_tensor_list(
+    exp: List[torch.Tensor], padding: int, padding_side: str = "right"
+) -> torch.Tensor:
+    """
+    Stack and pad a list of tensors.
+
+    :param exp: List of tensors to stack and pad
+    :type exp: List[torch.Tensor]
+    :param padding_value: Value to pad with
+    :type padding_value: int
+    :param padding_side: Side to pad on, defaults to "right"
+    :type padding_side: str, optional
+    """
+    max_size = max(e.shape[-1] for e in exp)
+    padding_sizes = [(max_size - e.shape[-1]) for e in exp]
+    if sum(padding_sizes) != 0:
+        exp = [
+            F.pad(
+                e,
+                ((0, padding_size) if padding_side == "right" else (padding_size, 0)),
+                value=padding,
+            )
+            for e, padding_size in zip(exp, padding_sizes)
+        ]
+    return torch.cat(exp, dim=0)
 
 
 def flatten_experiences(*experiences: ObservationType) -> Tuple[ArrayOrTensor, ...]:
@@ -1284,6 +1303,28 @@ class CosineLRScheduleConfig:
 
     num_epochs: int
     warmup_proportion: float
+
+
+@dataclass
+class VLLMConfig:
+    """Data class to configure a VLLM client.
+
+    Note: has the same defaults as the VLLMClient class from trl library.
+
+    :param base_url: Base URL of the VLLM server, defaults to None
+    :type base_url: Optional[str], optional
+    :param host: Host of the VLLM server, defaults to "0.0.0.0"
+    :type host: str, optional
+    :param server_port: Server port of the VLLM server, defaults to 8000
+    :type server_port: int, optional
+    :param group_port: Group port of the VLLM server, defaults to 51216
+    :type group_port: int, optional
+    """
+
+    # Colocate mode parameters
+    tensor_parallel_size: int = 1
+    gpu_memory_utilization: float = 0.3
+    max_num_seqs: int = 8
 
 
 def create_warmup_cosine_scheduler(
@@ -1529,7 +1570,7 @@ def is_peft_model(model: nn.Module) -> bool:
 
 
 def clone_llm(
-    original_model: PreTrainedModelType,
+    original_model: PreTrainedModelType | DummyEvolvable,
     state_dict: Optional[Dict[str, torch.Tensor]] = None,
 ) -> PreTrainedModelType:
     """Clone the actor.
@@ -1540,11 +1581,22 @@ def clone_llm(
     :type state_dict: Optional[Dict[str, torch.Tensor]], optional
     :return: Cloned model
     """
-    if isinstance(original_model, PeftModel):
-        model_config = original_model.config
-        base_model = original_model.model
-        model = type(base_model)(model_config)
-        # Get all adapter names
+    match original_model:
+        case PeftModel():
+            pass
+        case PreTrainedModel():
+            pass
+        case DummyEvolvable():
+            original_model = original_model.module
+        case _:
+            raise ValueError(f"Invalid 'original_model' type: {type(original_model)}")
+
+    model_config = original_model.config
+    base_model = original_model.model
+    model = type(base_model)(model_config)
+    # Get all adapter names
+
+    if hasattr(original_model, "peft_config"):
         adapter_names = list(original_model.peft_config.keys())
 
         if len(adapter_names) > 1:
@@ -1561,8 +1613,7 @@ def clone_llm(
             peft_config = original_model.peft_config[adapter_name]
             model.add_adapter(peft_config=peft_config, adapter_name=adapter_name)
         model.disable_adapter()
-    else:
-        model = type(original_model)(original_model.config)
+
     if state_dict is not None:
-        model.load_state_dict(state_dict)
+        model.load_state_dict(state_dict, strict=False)
     return model
