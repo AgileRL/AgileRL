@@ -1,5 +1,5 @@
 import warnings
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 import torch.distributed as dist
@@ -7,10 +7,9 @@ import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
-from agilerl.algorithms import GRPO
-from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.typing import PopulationType
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import (
     aggregate_metrics_across_gpus,
@@ -20,17 +19,17 @@ from agilerl.utils.utils import (
 )
 
 InitDictType = Optional[Dict[str, Any]]
-PopulationType = List[RLAlgorithm]
 
 
 def finetune_llm(
-    pop: List[GRPO],
+    pop: PopulationType,
     env: HuggingFaceGym,
     init_hp: Optional[Dict[str, Any]] = None,
     save_elite: Optional[bool] = None,
     elite_path: Optional[str] = None,
     wb: bool = False,
     evo_steps: Optional[int] = 20,
+    checkpoint_steps: Optional[int] = None,
     tournament: Optional[TournamentSelection] = None,
     mutation: Optional[Mutations] = None,
     wandb_api_key: Optional[str] = None,
@@ -39,6 +38,7 @@ def finetune_llm(
     verbose: bool = True,
     accelerator: Optional[Accelerator] = None,
     max_steps: Optional[int] = None,
+    num_epochs: Optional[int] = None,
 ):
     """
     Finetunes a population of GRPOs on a HuggingFaceGym environment.
@@ -73,6 +73,8 @@ def finetune_llm(
     :type accelerator: Accelerator, optional
     :param max_steps: Maximum number of steps to run, defaults to None
     :type max_steps: int, optional
+    :param num_epochs: Number of epochs to run, if set, takes precedence over max_steps, defaults to None
+    :type num_epochs: int, optional
     """
 
     if evo_steps is not None and (tournament is None or mutation is None):
@@ -83,6 +85,11 @@ def finetune_llm(
     if (tournament is not None and mutation is not None) and evo_steps is None:
         raise ValueError(
             "'evo_steps' must be set if 'tournament' and 'mutation' are not None."
+        )
+
+    if num_epochs is not None and max_steps is not None:
+        warnings.warn(
+            "'num_epochs' is set but 'max_steps' is also set. 'num_epochs' will take precedence over 'max_steps'."
         )
 
     if mutation is not None:
@@ -106,29 +113,13 @@ def finetune_llm(
     data_increment = (
         getattr(dist, "get_world_size", lambda: 1)() if dist.is_initialized() else 1
     )
-    grad_accum = getattr(pop[0].actor, "gradient_accumulation_steps", lambda: 1)()
     effective_data_batch_size = data_increment * env.data_batch_size_per_gpu
-    effective_learning_batch_size = (
-        data_increment * init_hp["BATCH_SIZE_PER_GPU"] * grad_accum
-    )
-    if accelerator is None or accelerator.is_main_process:
-        print(
-            f"""
-=========================================================================
-Commencing RL finetuning
 
-Data batch size per gpu: {env.data_batch_size_per_gpu}
-Number of GPUs: {data_increment}
-Gradient accumulation: {grad_accum}
-Effective data batch size: {data_increment} * {env.data_batch_size_per_gpu} = {effective_data_batch_size}
-Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE_PER_GPU"]} * {grad_accum} = {effective_learning_batch_size}
-=========================================================================
-        """
-        )
     if wb and (accelerator is None or accelerator.is_main_process):
         init_hp["effective_data_batch_size"] = effective_data_batch_size
-        init_hp["effective_learning_batch_size"] = effective_learning_batch_size
+        init_hp["batch_size"] = init_hp.get("BATCH_SIZE", 1)
         init_hp["distributed_training"] = True if accelerator is not None else False
+        init_hp["model_name"] = pop[0].pretrained_model_name_or_path
         init_wandb(
             algo=init_hp["ALGO"],
             env_name=env.name,
@@ -139,9 +130,13 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE_PER_GPU"]
         print("\nTraining...")
 
     bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
-    if max_steps is None:
+    if max_steps is None and num_epochs is None:
         max_steps = len(env)
-    training_steps = max_steps // effective_data_batch_size
+
+    elif max_steps is None and num_epochs is not None:
+        max_steps = num_epochs * len(env)
+
+    training_steps = -(max_steps // -effective_data_batch_size)
     if accelerator is None or accelerator.is_main_process:
         pbar = trange(
             max_steps,
@@ -158,12 +153,14 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE_PER_GPU"]
     for i in range(training_steps):
         agent_metrics_dict = {}
         for agent_idx, agent in enumerate(pop):
-            agent.set_reference_policy(env.num_dataset_passes)
+            agent.set_reference_policy(env.num_epochs)
+
             completion_ids, action_masks = agent.get_action(prompts)
             completion_lengths = np.mean([x.shape[1] for x in completion_ids])
 
             # Use the reward function stored in env.step to calculate reward of the each answer from the group
             next_prompts, rewards = env.step(completion_ids)
+
             experiences = (
                 completion_ids,
                 action_masks,
@@ -230,7 +227,7 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE_PER_GPU"]
                     tournament=tournament,
                     mutation=mutation,
                     env_name=env.name,
-                    accelerator=accelerator,  # Set as None for LLM finetuning as it does not require the same accelerator handling as standard RL models
+                    accelerator=accelerator,
                     language_model=True,
                     elite_path=elite_path,
                     save_elite=save_elite,
@@ -238,7 +235,10 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE_PER_GPU"]
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
         else:
-            if (i + 1) % max_steps == 0:
+            if (i + 1) * effective_data_batch_size % max_steps == 0 or (
+                checkpoint_steps is not None
+                and (i + 1) * effective_data_batch_size % checkpoint_steps == 0
+            ):
                 save_llm_checkpoint(agent, elite_path)
 
         if wb and (accelerator is None or accelerator.is_main_process):
@@ -355,13 +355,25 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE_PER_GPU"]
                 wandb_dict |= test_dict
             wandb.log(wandb_dict)
 
+        if env.num_epochs == num_epochs:
+            break
+
     if (
         verbose
         and total_steps > evaluation_interval
         and (accelerator is None or accelerator.is_main_process)
     ):
-        fitness = [str(round(agent.fitness[-1], 2)) for agent in pop]
-        avg_fitness = ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
+        fitness_calculated = len(agent.fitness) > 0
+        fitness = (
+            [str(round(agent.fitness[-1], 2)) for agent in pop]
+            if fitness_calculated
+            else [None] * len(pop)
+        )
+        avg_fitness = (
+            ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
+            if fitness_calculated
+            else [None] * len(pop)
+        )
         avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
         agents = [agent.index for agent in pop]
         num_steps = [agent.steps[-1] for agent in pop]

@@ -4,9 +4,14 @@ import gymnasium as gym
 import numpy as np
 import pytest
 import torch
+from accelerate import Accelerator
+from accelerate.state import AcceleratorState
 from torch.utils.data import DataLoader, Dataset
 
-from agilerl.utils.llm_utils import DummyOptimizer, HuggingFaceGym
+from agilerl.utils.llm_utils import (
+    DummyOptimizer,
+    HuggingFaceGym,
+)
 
 
 class DummyTokenizer:
@@ -66,6 +71,15 @@ def dummy_chat_template_fn(q, a, tokenizer):
     }
 
 
+@pytest.fixture(scope="function")
+def accelerator_factory():
+    def generate_accelerator(use_accelerator):
+        AcceleratorState._reset_state(True)
+        return Accelerator() if use_accelerator else None
+
+    return generate_accelerator
+
+
 @pytest.fixture
 def dataset(num_samples):
     train_dataset = DummyDataset(int(num_samples * 0.8))
@@ -74,7 +88,10 @@ def dataset(num_samples):
 
 
 @pytest.mark.parametrize("num_samples", [200])
-def test_hugging_face_gym_init(dataset, num_samples):
+@pytest.mark.parametrize("use_accelerator", [True, False])
+def test_hugging_face_gym_init(
+    dataset, accelerator_factory, num_samples, use_accelerator
+):
     train_dataset, test_dataset = dataset
     tokenizer = DummyTokenizer()
     data_batch_size = 8
@@ -85,6 +102,7 @@ def test_hugging_face_gym_init(dataset, num_samples):
         reward_fn=dummy_reward_fn,
         apply_chat_template_fn=dummy_chat_template_fn,
         data_batch_size_per_gpu=data_batch_size,
+        accelerator=accelerator_factory(use_accelerator),
     )
     assert env.name == "dummy_dataset"
     assert callable(env.reward_fn)
@@ -109,7 +127,8 @@ def test_hugging_face_gym_init(dataset, num_samples):
 
 @pytest.mark.parametrize("num_samples", [200])
 @pytest.mark.parametrize("eval_mode", [True, False])
-def test_hugging_face_gym_step(dataset, num_samples, eval_mode):
+@pytest.mark.parametrize("return_raw_completions", [True, False])
+def test_hugging_face_gym_step(dataset, num_samples, eval_mode, return_raw_completions):
     train_dataset, test_dataset = dataset
     tokenizer = DummyTokenizer()
     data_batch_size = 8
@@ -120,6 +139,7 @@ def test_hugging_face_gym_step(dataset, num_samples, eval_mode):
         reward_fn=dummy_reward_fn,
         apply_chat_template_fn=dummy_chat_template_fn,
         data_batch_size_per_gpu=data_batch_size,
+        return_raw_completions=return_raw_completions,
     )
     env.evaluation_mode = eval_mode
     env.reset()
@@ -127,16 +147,28 @@ def test_hugging_face_gym_step(dataset, num_samples, eval_mode):
     tokenized_prompts, rewards = env.step(completions)
     assert isinstance(tokenized_prompts, list)
     assert isinstance(rewards, torch.Tensor)
-    for prompt in tokenized_prompts:
-        assert isinstance(prompt, dict)
-        assert sorted(list(prompt.keys())) == ["attention_mask", "input_ids"]
-        assert isinstance(prompt["attention_mask"], torch.Tensor)
-        assert isinstance(prompt["input_ids"], torch.Tensor)
+
+    for prompts in tokenized_prompts:
+        assert sorted(prompts.keys()) == ["attention_mask", "input_ids", "text"]
+        for key, val in prompts.items():
+            match key:
+                case "attention_mask":
+                    assert isinstance(val, torch.Tensor)
+                case "input_ids":
+                    assert isinstance(val, torch.Tensor)
+                case "text":
+                    if return_raw_completions:
+                        assert isinstance(val, str)
+                    else:
+                        assert val is None
 
 
 @pytest.mark.parametrize("num_samples", [200])
 @pytest.mark.parametrize("reset_dataloaders", [True, False])
-def test_hugging_face_gym_reset(dataset, num_samples, reset_dataloaders):
+@pytest.mark.parametrize("return_raw_completions", [True, False])
+def test_hugging_face_gym_reset(
+    dataset, num_samples, reset_dataloaders, return_raw_completions
+):
     train_dataset, test_dataset = dataset
     tokenizer = DummyTokenizer()
     data_batch_size = 8
@@ -147,14 +179,24 @@ def test_hugging_face_gym_reset(dataset, num_samples, reset_dataloaders):
         reward_fn=dummy_reward_fn,
         apply_chat_template_fn=dummy_chat_template_fn,
         data_batch_size_per_gpu=data_batch_size,
+        return_raw_completions=return_raw_completions,
     )
     tokenized_prompts = env.reset(reset_dataloaders)
     assert isinstance(tokenized_prompts, list)
-    for prompt in tokenized_prompts:
-        assert isinstance(prompt, dict)
-        assert sorted(list(prompt.keys())) == ["attention_mask", "input_ids"]
-        assert isinstance(prompt["attention_mask"], torch.Tensor)
-        assert isinstance(prompt["input_ids"], torch.Tensor)
+
+    for prompts in tokenized_prompts:
+        assert sorted(prompts.keys()) == ["attention_mask", "input_ids", "text"]
+        for key, val in prompts.items():
+            match key:
+                case "attention_mask":
+                    assert isinstance(val, torch.Tensor)
+                case "input_ids":
+                    assert isinstance(val, torch.Tensor)
+                case "text":
+                    if return_raw_completions:
+                        assert isinstance(val, str)
+                    else:
+                        assert val is None
 
 
 @pytest.mark.parametrize("num_samples", [200])
@@ -268,7 +310,7 @@ def test_create_chat_collate_fn():
 
 @pytest.mark.parametrize("num_samples", [20])
 @pytest.mark.parametrize("data_batch_size", [8, 10])
-def test_reset_dataloaders_when_dataloader_exhausted(
+def test_reset_dataloaders_when_train_dataloader_exhausted(
     dataset, num_samples, data_batch_size
 ):
     train_dataset, test_dataset = dataset
@@ -286,7 +328,32 @@ def test_reset_dataloaders_when_dataloader_exhausted(
         env._get_next_batch()
         total_sampled += data_batch_size
 
-    assert env.num_dataset_passes == 1
+    assert env.num_epochs == 1
+
+
+@pytest.mark.parametrize("num_samples", [20])
+@pytest.mark.parametrize("data_batch_size", [8, 10])
+def test_not_reset_dataloaders_when_test_dataloader_exhausted(
+    dataset, num_samples, data_batch_size
+):
+    train_dataset, test_dataset = dataset
+    tokenizer = DummyTokenizer()
+    env = HuggingFaceGym(
+        train_dataset=train_dataset,
+        test_dataset=test_dataset,
+        tokenizer=tokenizer,
+        reward_fn=dummy_reward_fn,
+        apply_chat_template_fn=dummy_chat_template_fn,
+        data_batch_size_per_gpu=data_batch_size,
+    )
+    total_sampled = 0
+    env.reset()
+    for _ in range(10):
+        with env.eval_mode():
+            env._get_next_batch()
+            total_sampled += data_batch_size
+
+    assert env.num_epochs == 0
 
 
 def test_dummy_optimizer_init():

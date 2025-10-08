@@ -35,6 +35,7 @@ For more details on how to set up GRPO and use it for training, check out the :r
     env.action_space,
     actor_network=model,
     pad_token_id=tokenizer.eos_token_id,
+    pad_token=tokenizer.eos_token,
     device="cuda:0",
     batch_size=8,
     group_size=8,
@@ -56,13 +57,14 @@ To save an agent, use the :ref:`save_llm_checkpoint<save_llm_checkpoint>` functi
     env.action_space,
     actor_network=model,
     pad_token_id=tokenizer.eos_token_id,
+    pad_token=tokenizer.eos_token,
   )
 
   checkpoint_path = "path/to/checkpoint"
   save_llm_checkpoint(agent, checkpoint_path)
 
 
-To load a saved agent, you must use the HuggingFace `.from_pretrained` method, AgileRL is
+To load a trained model, you must use the HuggingFace `.from_pretrained` method, AgileRL is
 compatible with HuggingFace and Peft models:
 
 .. code-block:: python

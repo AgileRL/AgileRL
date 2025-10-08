@@ -49,7 +49,7 @@ def countdown_chat_template(q, a, tokenizer):
         },
         {
             "role": "user",
-            "content": f"Using each number in this tensor only once {tuple(i for i in q)}, create an equation that equals {a}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
+            "content": f"Using each number in this list only once {q}, create an equation that equals {a}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
         },
         {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
     ]
@@ -165,7 +165,7 @@ def main():
         tokenizer=tokenizer,
         reward_fn=combined_rewards,
         apply_chat_template_fn=countdown_chat_template,
-        data_batch_size_per_gpu=2,
+        data_batch_size_per_gpu=10,
         accelerator=accelerator,
     )
 
@@ -175,11 +175,13 @@ def main():
         env.action_space,
         actor_network=model,
         pad_token_id=tokenizer.eos_token_id,
+        pad_token=tokenizer.eos_token,
         batch_size=4,
         max_output_tokens=1024,
         group_size=12,
         reduce_memory_peak=True,
         accelerator=accelerator,
+        use_vllm=True,
     )
     finetune_llm(
         pop=[agent],
@@ -190,6 +192,7 @@ def main():
         elite_path="checkpoints",
         max_reward=2.0,
         accelerator=accelerator,
+        num_epochs=1,
     )
 
 

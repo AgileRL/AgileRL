@@ -34,7 +34,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules import EvolvableModule
 from agilerl.typing import BPTTSequenceType, GymSpaceType, PopulationType
-from agilerl.utils.algo_utils import CosineLRScheduleConfig, clone_llm
+from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig, clone_llm
 from agilerl.utils.llm_utils import DummyOptimizer
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
@@ -554,9 +554,10 @@ def create_population(
                 action_space=action_space,
                 actor_network=clone_llm(actor_network, actor_network.state_dict()),
                 pad_token_id=INIT_HP.get("PAD_TOKEN_ID"),
+                pad_token=INIT_HP.get("PAD_TOKEN"),
                 hp_config=hp_config,
                 index=idx,
-                batch_size=INIT_HP.get("BATCH_SIZE_PER_GPU", 1),
+                batch_size=INIT_HP.get("BATCH_SIZE", 2),
                 beta=INIT_HP.get("BETA", 0.001),
                 lr=INIT_HP.get("LR", 5e-7),
                 clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
@@ -575,6 +576,15 @@ def create_population(
                 ),
                 accelerator=Accelerator() if accelerator else None,
                 device=device,
+                use_separate_reference_adapter=False,
+                max_model_len=INIT_HP.get("MAX_MODEL_LEN", None),
+                use_vllm=INIT_HP.get("USE_VLLM", False),
+                vllm_config=(
+                    VLLMConfig(**INIT_HP.get("VLLM_CONFIG"))
+                    if INIT_HP.get("VLLM_CONFIG", None) is not None
+                    and INIT_HP.get("USE_VLLM", False)
+                    else None
+                ),
                 **algo_kwargs,
             )
             population.append(agent)
@@ -928,13 +938,17 @@ def aggregate_metrics_across_gpus(
     return avg_metrics
 
 
-def save_llm_checkpoint(agent: LLMAlgorithm, checkpoint_path: str | None) -> None:
+def save_llm_checkpoint(
+    agent: LLMAlgorithm, checkpoint_path: str | None, weights_only: bool = False
+) -> None:
     """Checkpoint the LLM
 
     :param agent: Agent
     :type agent: LLMAlgorithm
     :param checkpoint_path: Checkpoint path
     :type checkpoint_path: str
+    :param weights_only: If True, only save the weights of the model, defaults to False
+    :type weights_only: bool, optional
     """
     assert agent.actor is not None, "Actor is not initialized"
     base_path = "./saved_checkpoints" if checkpoint_path is None else checkpoint_path
@@ -942,10 +956,10 @@ def save_llm_checkpoint(agent: LLMAlgorithm, checkpoint_path: str | None) -> Non
     os.makedirs(path, exist_ok=True)
     if agent.accelerator is not None:
         agent.accelerator.wait_for_everyone()
-        agent.actor.save_pretrained(path)
+        agent.save_checkpoint(path, weights_only=weights_only)
         agent.accelerator.wait_for_everyone()
     else:
-        agent.actor.save_pretrained(path)
+        agent.save_checkpoint(path, weights_only=weights_only)
 
 
 def consolidate_mutations(population: list[LLMAlgorithm]) -> None:

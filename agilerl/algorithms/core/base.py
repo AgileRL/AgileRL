@@ -30,13 +30,16 @@ from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
+from deepspeed.runtime.engine import DeepSpeedEngine
 from gymnasium import spaces
 from numpy.typing import ArrayLike
-from peft import PeftModel
+from peft import PeftModel, set_peft_model_state_dict
+from safetensors.torch import load_file
 from tensordict import TensorDict
 from torch._dynamo import OptimizedModule
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import SequentialLR
+from vllm.distributed.parallel_state import destroy_model_parallel
 
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import (
@@ -870,7 +873,11 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 k: v for k, v in network_info["modules"].items() if k.startswith(name)
             }
 
-            module_cls = net_dict[f"{name}_cls"]
+            module_cls = net_dict.get(f"{name}_cls", None)
+            if module_cls is None:
+                # This allows us to super this method in the LLMAlgorithm class
+                # as we don't want to reinstantiate the network in this class
+                break
             init_dict = net_dict[f"{name}_init_dict"]
 
             module_dict_cls = net_dict.get(f"{name}_module_dict_cls", None)
@@ -1820,8 +1827,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 and self.zero_stage > 2
                 and self.accelerator.is_main_process
             ):
-                warnings.warn(
-                    "Zero stage 3 support is nascent and has not been thoroughly tested. It may be unstable or subject to change. We recommend caution in production environments."
+                raise NotImplementedError(
+                    "DeepSpeed ZeRO Stage 3 is not yet supported in AgileRL. This feature is in development and will be available in a future release."
                 )
 
         seed = 42
@@ -1845,19 +1852,44 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     # TODO: This could hopefully be abstracted into EvolvableAlgorithm with a decorator to
     # handle _save_distributed_actor if deepspeed is used.
-    def save_checkpoint(self, path: str) -> None:
+    def save_checkpoint(self, path: str, weights_only: bool = False) -> None:
         """
         Override the save_checkpoint method to provide guidance on the correct method to use.
         :param path: Location to save checkpoint at
         :type path: string
+        :param weights_only: If True, only save the weights of the model, defaults to False
+        :type weights_only: bool, optional
         """
+
+        warnings.warn("weights_only default will be changed to True in the future.")
+
         if self.accelerator is not None:
-            self._save_distributed_actor(path, tag="save_checkpoint")
-        torch.save(
-            get_checkpoint_dict(self, using_deepspeed=self.accelerator is not None),
-            path + "/attributes.pt",
-            pickle_module=dill,
+            if not weights_only:
+                self._save_distributed_actor(path, tag="save_checkpoint")
+            else:
+                selected_adapters = (
+                    ["actor", "reference"]
+                    if self.use_separate_reference_adapter
+                    else ["actor"]
+                )
+                self.actor.save_pretrained(
+                    save_directory=path,
+                    selected_adapters=selected_adapters,
+                    is_main_process=self.accelerator.is_main_process,
+                )
+        checkpoint_dict = get_checkpoint_dict(
+            self, using_deepspeed=self.accelerator is not None
         )
+        checkpoint_dict["_weights_only"] = weights_only
+        checkpoint_dict.pop("llm", None)
+        checkpoint_dict.pop("tp_group", None)
+
+        if self.accelerator is None or self.accelerator.is_main_process:
+            torch.save(
+                checkpoint_dict,
+                path + "/attributes.pt",
+                pickle_module=dill,
+            )
 
     # TODO: This could hopefully be abstracted into EvolvableAlgorithm with a decorator to
     # handle _load_distributed_actor if deepspeed is used.
@@ -1869,8 +1901,27 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :type path: string
         """
         if self.accelerator is not None:
-            self._load_distributed_actor(path, tag="save_checkpoint")
             checkpoint = torch.load(path + "/attributes.pt", weights_only=False)
+            weights_only = checkpoint.get("_weights_only", False)
+
+            if weights_only:
+                if self.use_separate_reference_adapter:
+                    self._update_existing_adapter(
+                        self.accelerator,
+                        self.actor,
+                        path,
+                        "reference",
+                    )
+
+                self._update_existing_adapter(
+                    self.accelerator,
+                    self.actor,
+                    path,
+                    "actor",
+                )
+            else:
+                self._load_distributed_actor(path, tag="save_checkpoint")
+
             checkpoint["accelerator"] = (
                 Accelerator() if self.accelerator is not None else None
             )
@@ -2037,6 +2088,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 None,
                 None,
             )
+        if self.use_vllm:
+            destroy_model_parallel()
+            del self.llm.llm_engine.model_executor.driver_worker
+            self.llm = None
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -2103,11 +2158,19 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             original_lr_scheduler = self.lr_scheduler
             clone.lr_scheduler = None
             self.lr_scheduler = None
+            if self.use_vllm:
+                original_llm = self.llm
+                cloned_llm = clone.llm
+                clone.llm = None
+                self.llm = None
             clone = EvolvableAlgorithm.copy_attributes(self, clone)
             clone.accelerator = accelerator
             clone.lr_scheduler = lr_scheduler
             clone.lr_scheduler = cloned_lr_scheduler
             self.lr_scheduler = original_lr_scheduler
+            if self.use_vllm:
+                clone.llm = cloned_llm
+                self.llm = original_llm
 
             if self.accelerator is None:
                 clone.optimizer.optimizer.load_state_dict(
@@ -2198,3 +2261,49 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             ] = lr
 
         return accelerator, None
+
+    def recompile(self) -> None:
+        """Recompiles the algorithm."""
+        raise NotImplementedError(
+            "Recompile method is not available for LLM finetuning algorithms."
+        )
+
+    @staticmethod
+    def _update_existing_adapter(
+        accelerator: Accelerator,
+        wrapped_model: DeepSpeedEngine,
+        checkpoint_dir: str,
+        adapter_name: str,
+    ) -> None:
+        """
+        Overwrite weights of an existing adapter in-place without creating new parameters.
+
+        :param accelerator: Accelerator
+        :type accelerator: Accelerator
+        :param wrapped_model: Wrapped model
+        :type wrapped_model: DeepSpeedEngine
+        :param checkpoint_dir: Checkpoint directory
+        :type checkpoint_dir: str
+        :param adapter_name: Adapter name
+        :type adapter_name: str
+
+        :return: None
+        :rtype: None
+        """
+        base_model = accelerator.unwrap_model(wrapped_model)
+        if hasattr(base_model, "module"):
+            base_model = base_model.module
+
+        adapter_path = f"{checkpoint_dir}/{adapter_name}/adapter_model.safetensors"
+        adapter_state = load_file(adapter_path, device="cpu")
+
+        with torch.no_grad():
+            set_peft_model_state_dict(
+                base_model, adapter_state, adapter_name=adapter_name
+            )
+        base_model.set_adapter(adapter_name)
+
+        # Make reference weights not trainable
+        for name, param in base_model.named_parameters():
+            if "reference" in name:
+                param.requires_grad = False

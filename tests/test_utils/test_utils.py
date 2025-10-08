@@ -318,7 +318,9 @@ def test_save_with_accelerator():
     agent.accelerator.wait_for_everyone = Mock()
     agent.algo = "grpo"
     save_llm_checkpoint(agent, None)
-    agent.actor.save_pretrained.assert_called_once_with("./saved_checkpoints/grpo")
+    agent.save_checkpoint.assert_called_once_with(
+        "./saved_checkpoints/grpo", weights_only=False
+    )
     agent.accelerator.wait_for_everyone.assert_called()
     os.rmdir("saved_checkpoints/grpo")
 
@@ -330,7 +332,9 @@ def test_save_without_accelerator():
     agent.algo = "grpo"
     agent.accelerator = None
     save_llm_checkpoint(agent, None)
-    agent.actor.save_pretrained.assert_called_once_with("./saved_checkpoints/grpo")
+    agent.save_checkpoint.assert_called_once_with(
+        "./saved_checkpoints/grpo", weights_only=False
+    )
     os.rmdir("saved_checkpoints/grpo")
 
 
@@ -494,7 +498,7 @@ def test_tournament_selection_and_mutation_language_model():
         agent.optimizer.param_groups = [{"lr": 0.01}]
         agent.accelerator = MagicMock(spec=Accelerator)
         agent.actor = MagicMock()
-        agent.actor.save_pretrained = Mock()
+        agent.actor.save_checkpoint = Mock()
     tournament = MagicMock(spec=TournamentSelection)
     mutation = MagicMock(spec=Mutations)
     mutation.mutation = Mock(return_value=population)

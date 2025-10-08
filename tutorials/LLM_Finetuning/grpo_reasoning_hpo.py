@@ -160,12 +160,6 @@ def main(init_hp, mut_p):
 
     # Convert the HuggingFace dataset into a Gymnasium environment
     accelerator = Accelerator()
-    accelerator.state.deepspeed_plugin.deepspeed_config["activation_checkpointing"] = {
-        "partition_activations": True,
-        "cpu_checkpointing": True,
-        "synchronize_checkpoint_boundary": True,
-        "number_checkpoints": 2,
-    }
 
     env = HuggingFaceGym(
         train_dataset=train_dataset,
@@ -173,11 +167,12 @@ def main(init_hp, mut_p):
         tokenizer=tokenizer,
         reward_fn=combined_rewards,
         apply_chat_template_fn=countdown_chat_template,
-        data_batch_size_per_gpu=2,
+        data_batch_size_per_gpu=10,
         accelerator=accelerator,
     )
 
     init_hp["PAD_TOKEN_ID"] = tokenizer.pad_token_id
+    init_hp["PAD_TOKEN"] = tokenizer.eos_token
 
     hp_config = HyperparameterConfig(
         beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),
@@ -225,7 +220,7 @@ def main(init_hp, mut_p):
         env=env,
         init_hp=init_hp,
         evaluation_interval=10,
-        wb=False,
+        wb=True,
         save_elite=True,
         elite_path="saved_llms",
         max_reward=2.0,
@@ -234,7 +229,7 @@ def main(init_hp, mut_p):
         tournament=tournament,
         accelerator=accelerator,
         verbose=True,
-        max_steps=12000,
+        num_epochs=1,
     )
     accelerator.end_training()
 
@@ -273,7 +268,7 @@ if __name__ == "__main__":
         "COSINE_lR_SCHEDULER": None,
         "TOURN_SIZE": 2,
         "ELITISM": True,
-        "POP_SIZE": 1,
+        "POP_SIZE": 4,
         "EVAL_LOOP": 1,
     }
     main(INIT_HP, MUTATION_PARAMS)

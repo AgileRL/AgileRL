@@ -14,7 +14,7 @@ MUTATION_PARAMS:
 
 INIT_HP:
     ALGO: GRPO
-    BATCH_SIZE_PER_GPU: 4 # This is batch size per GPU
+    BATCH_SIZE: 16
     REDUCE_MEMORY_PEAK: true
     BETA: 0.001
     LR: 0.000005
@@ -31,3 +31,18 @@ INIT_HP:
     ELITISM: true
     POP_SIZE: 1
     EVAL_LOOP: 1
+    USE_VLLM: true
+    VLLM_CONFIG:
+        tensor_parallel_size: 1
+        gpu_memory_utilization: 0.4
+        max_num_seqs: 8
+
+
+# MASTER_ADDR=34.13.155.70 \
+# MASTER_PORT=51216 \
+# WORLD_SIZE=2 \
+# RANK=1 \
+# NCCL_IB_DISABLE=1 \
+# NCCL_SOCKET_IFNAME=wlan0 \
+# accelerate launch --config_file ./configs/accelerate/grpo_accelerate_config.yaml \
+#     benchmarking/benchmarking_grpo.py

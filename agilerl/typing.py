@@ -1,6 +1,17 @@
 from enum import Enum
 from numbers import Number
-from typing import Any, Callable, ClassVar, Dict, List, Protocol, Tuple, TypeVar, Union
+from typing import (
+    Any,
+    Callable,
+    ClassVar,
+    Dict,
+    List,
+    Protocol,
+    Tuple,
+    TypedDict,
+    TypeVar,
+    Union,
+)
 
 import gymnasium as gym
 import numpy as np
@@ -27,6 +38,12 @@ T = TypeVar("T", bound=Union[Module, OptimizedModule])
 
 class IsDataclass(Protocol):
     __dataclass_fields__: ClassVar[Dict[str, Any]]
+
+
+class ReturnedPrompts(TypedDict):
+    input_ids: torch.Tensor
+    attention_mask: torch.Tensor
+    text: str | None
 
 
 class MultiAgentSetup(Enum):
@@ -72,10 +89,11 @@ KernelSizeType = Union[int, Tuple[int, ...]]
 GymSpaceType = Union[SupportedObsSpaces, List[SupportedObsSpaces]]
 GymEnvType = Union[str, gym.Env, gym.vector.VectorEnv, gym.vector.AsyncVectorEnv]
 PzEnvType = Union[str, ParallelEnv]
+LLMObsType = List[ReturnedPrompts]
 
 NumpyObsType = Union[np.ndarray, ArrayDict, ArrayTuple]
 TorchObsType = Union[torch.Tensor, TensorDict, TensorTuple, StandardTensorDict]
-ObservationType = Union[NumpyObsType, TorchObsType, Number]
+ObservationType = Union[NumpyObsType, TorchObsType, Number, LLMObsType]
 MultiAgentObservationType = Dict[str, ObservationType]
 ActionType = Union[int, float, np.ndarray, torch.Tensor]
 InfosDict = Dict[str, Dict[str, Any]]
