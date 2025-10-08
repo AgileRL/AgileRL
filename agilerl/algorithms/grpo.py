@@ -2,7 +2,7 @@ import gc
 import os
 import re
 import warnings
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from typing import List, Optional, Tuple, Union
 
 import numpy as np
@@ -147,9 +147,10 @@ class GRPO(LLMAlgorithm):
     ) -> None:
 
         device = (
-            f"cuda:{os.getenv('LOCAL_RANK', '0')}"
-            if accelerator is not None and torch.cuda.is_available()
-            else device
+            f"cuda:{accelerator.process_index}"
+            if accelerator is not None else (
+                "cuda" if torch.cuda.is_available() else "cpu"
+            )
         )
         super().__init__(
             observation_space,
@@ -574,15 +575,10 @@ class GRPO(LLMAlgorithm):
 
         if isinstance(base_model, PeftModel) and add_adapters:
             # Handles backwards compatibility with user providing a peft model as the actor network
-            adapter_name = list(base_model.peft_config.keys())
-            if len(adapter_name) > 1:
-                warnings.warn(
-                    "AgileRL RL finetuning is only compatible with one adapter."
-                )
-            self.lora_config = base_model.peft_config[adapter_name[0]]
-            for adapter in adapter_name:
-                base_model.delete_adapter(adapter)
-            base_model = base_model.model
+            if self.lora_config is None:
+                adapter_name = list(base_model.peft_config.keys())
+                self.lora_config = base_model.peft_config[adapter_name[0]]
+                base_model = base_model.merge_and_unload()
 
         self.actor: PeftModel = (
             get_peft_model(base_model, self.lora_config, adapter_name="actor")
@@ -590,13 +586,14 @@ class GRPO(LLMAlgorithm):
             else base_model
         )
 
+        
         if self.use_separate_reference_adapter and add_adapters:
             self.actor.add_adapter(
                 adapter_name="reference", peft_config=self.lora_config  # type: ignore
             )
 
         self.actor.set_adapter("actor")
-
+        
         if self.accelerator is None:
             self.actor = DummyEvolvable(module=self.actor, device=self.device)
 
@@ -816,7 +813,9 @@ class GRPO(LLMAlgorithm):
             self.accelerator.wait_for_everyone()
         model_ref = self.accelerator.unwrap_model(self.actor)
         model_ref.set_adapter("actor")
-        with self.gather_if_zero3(list(model_ref.parameters()), modifier_rank=0):
+        with self.gather_if_zero3(
+            list(model_ref.parameters()), 
+        ):
             model_ref.merge_adapter()
             for name, param in model_ref.named_parameters():
                 name = name.removeprefix("base_model.model.").replace(".base_layer", "")
@@ -835,7 +834,7 @@ class GRPO(LLMAlgorithm):
         self.llm.reset_prefix_cache()
 
     def _generate_with_vllm_colocate(
-        self, prompts: List[Tuple[str, int]], group_size: int
+        self, prompts: LLMObsType, group_size: int
     ) -> List[torch.Tensor]:
 
         # I need to make the following happen

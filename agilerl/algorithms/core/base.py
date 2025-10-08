@@ -32,6 +32,7 @@ from accelerate.utils import broadcast_object_list
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 from deepspeed.runtime.engine import DeepSpeedEngine
+from deepspeed.runtime import zero
 from gymnasium import spaces
 from numpy.typing import ArrayLike
 from peft import PeftModel, set_peft_model_state_dict
@@ -1837,7 +1838,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.gather_if_zero3 = (
             nullcontext if self.zero_stage != 3 else zero.GatheredParameters
         )
-
         seed = 42
         if self.accelerator is not None:
             if self.accelerator.is_main_process:
@@ -1881,7 +1881,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 )
                 model_ref = self.accelerator.unwrap_model(self.actor)
                 with self.gather_if_zero3(
-                    list(model_ref.parameters()), modifier_rank=0
+                    list(model_ref.parameters())
                 ):
                     model_ref.save_pretrained(
                         save_directory=path,
@@ -1930,13 +1930,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             else:
                 self._load_distributed_actor(path, tag="save_checkpoint")
 
-            checkpoint["accelerator"] = (
-                Accelerator() if self.accelerator is not None else None
-            )
-            self.accelerator = None
             for attr, value in checkpoint.items():
                 setattr(self, attr, value)
+            
+            self.device = self.accelerator.device # Because torch.save is called from the main process, the device must be set to the accelerator device
 
+            # NOTE do we need to mess around with the optimizer here?
             self.optimizer = None
             self.optimizer = OptimizerWrapper(
                 optimizer_cls=self._select_optim_class(),
@@ -1945,7 +1944,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 lr=self.lr,
                 lr_name="lr",
             )
-            self.wrap_models()
+
         else:
             super().load_checkpoint(path + "/attributes.pt")
 
@@ -2096,10 +2095,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 None,
                 None,
             )
-        if self.use_vllm:
-            destroy_model_parallel()
-            del self.llm.llm_engine.model_executor.driver_worker
-            self.llm = None
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -2303,7 +2298,17 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         adapter_path = f"{checkpoint_dir}/{adapter_name}/adapter_model.safetensors"
         adapter_state = load_file(adapter_path, device="cpu")
 
-        with self.gather_if_zero3(list(base_model.parameters()), modifier_rank=0):
+        gather_kwargs = {
+            "params": list(base_model.parameters()),
+            "modifier_rank": 0
+        }
+        if self.zero_stage != 3:
+            gather_kwargs.pop("modifier_rank")
+
+
+        with self.gather_if_zero3(
+            *gather_kwargs.values()
+        ):
             with torch.no_grad():
                 set_peft_model_state_dict(
                     base_model, adapter_state, adapter_name=adapter_name
