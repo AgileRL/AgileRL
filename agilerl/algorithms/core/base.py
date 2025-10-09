@@ -1890,6 +1890,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 path + "/attributes.pt",
                 pickle_module=dill,
             )
+        if self.accelerator is not None:
+            self.accelerator.wait_for_everyone()
 
     # TODO: This could hopefully be abstracted into EvolvableAlgorithm with a decorator to
     # handle _load_distributed_actor if deepspeed is used.
@@ -1907,27 +1909,21 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if weights_only:
                 if self.use_separate_reference_adapter:
                     self._update_existing_adapter(
-                        self.accelerator,
-                        self.actor,
                         path,
                         "reference",
                     )
 
                 self._update_existing_adapter(
-                    self.accelerator,
-                    self.actor,
                     path,
                     "actor",
                 )
             else:
                 self._load_distributed_actor(path, tag="save_checkpoint")
 
-            checkpoint["accelerator"] = (
-                Accelerator() if self.accelerator is not None else None
-            )
-            self.accelerator = None
             for attr, value in checkpoint.items():
                 setattr(self, attr, value)
+
+            self.device = self.accelerator.device
 
             self.optimizer = None
             self.optimizer = OptimizerWrapper(
@@ -1937,7 +1933,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 lr=self.lr,
                 lr_name="lr",
             )
-            self.wrap_models()
         else:
             super().load_checkpoint(path + "/attributes.pt")
 
@@ -2089,8 +2084,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 None,
             )
         if self.use_vllm:
-            destroy_model_parallel()
-            del self.llm.llm_engine.model_executor.driver_worker
             self.llm = None
         gc.collect()
         torch.cuda.empty_cache()
@@ -2268,20 +2261,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             "Recompile method is not available for LLM finetuning algorithms."
         )
 
-    @staticmethod
     def _update_existing_adapter(
-        accelerator: Accelerator,
-        wrapped_model: DeepSpeedEngine,
+        self,
         checkpoint_dir: str,
         adapter_name: str,
     ) -> None:
         """
         Overwrite weights of an existing adapter in-place without creating new parameters.
 
-        :param accelerator: Accelerator
-        :type accelerator: Accelerator
-        :param wrapped_model: Wrapped model
-        :type wrapped_model: DeepSpeedEngine
         :param checkpoint_dir: Checkpoint directory
         :type checkpoint_dir: str
         :param adapter_name: Adapter name
@@ -2290,7 +2277,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: None
         :rtype: None
         """
-        base_model = accelerator.unwrap_model(wrapped_model)
+        base_model = self.accelerator.unwrap_model(self.actor)
         if hasattr(base_model, "module"):
             base_model = base_model.module
 
