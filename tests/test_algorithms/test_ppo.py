@@ -124,10 +124,17 @@ class SimpleCNN(nn.Module):
 
 
 @pytest.fixture(scope="function")
-def build_ppo(observation_space, action_space, accelerator, request):
+def build_ppo(observation_space, action_space, recurrent, accelerator, request):
     observation_space = request.getfixturevalue(observation_space)
     action_space = request.getfixturevalue(action_space)
-    return PPO(observation_space, action_space, accelerator=accelerator)
+    use_rollout_buffer = recurrent
+    return PPO(
+        observation_space,
+        action_space,
+        use_rollout_buffer=use_rollout_buffer,
+        recurrent=recurrent,
+        accelerator=accelerator,
+    )
 
 
 # Initializes all necessary attributes with default values
@@ -141,7 +148,12 @@ def build_ppo(observation_space, action_space, accelerator, request):
 )
 @pytest.mark.parametrize(
     "action_space",
-    ["vector_space", "discrete_space", "multidiscrete_space", "multibinary_space"],
+    [
+        "vector_space",
+        "discrete_space",
+        "multidiscrete_space",
+        "multibinary_space",
+    ],
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator()])
 def test_initialize_ppo(
@@ -149,7 +161,13 @@ def test_initialize_ppo(
 ):
     observation_space = request.getfixturevalue(observation_space)
     action_space = request.getfixturevalue(action_space)
-    ppo = PPO(observation_space, action_space, accelerator=accelerator)
+    ppo = PPO(
+        observation_space,
+        action_space,
+        accelerator=accelerator,
+        use_rollout_buffer=False,
+        recurrent=False,
+    )
 
     assert ppo.algo == "PPO"
     assert ppo.observation_space == observation_space
@@ -296,14 +314,17 @@ def test_initialize_ppo_with_actor_network_no_critic(
     ["vector_space", "discrete_space", "multidiscrete_space", "multibinary_space"],
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("recurrent", [False])
 # Returns the expected action when given a state observation.
-def test_returns_expected_action(observation_space, action_space, build_ppo, request):
+def test_returns_expected_action(
+    observation_space, action_space, build_ppo, request, recurrent
+):
     observation_space = request.getfixturevalue(observation_space)
     action_space = request.getfixturevalue(action_space)
     state = observation_space.sample()
 
-    # First with grad=False
-    action, action_logprob, dist_entropy, state_values = build_ppo.get_action(state)
+    act_ret = build_ppo.get_action(state)
+    action, action_logprob, dist_entropy, state_values = act_ret
 
     assert isinstance(action, np.ndarray)
     assert isinstance(action_logprob, np.ndarray)
@@ -331,6 +352,74 @@ def test_returns_expected_action(observation_space, action_space, build_ppo, req
     eval_action = torch.Tensor([[0, 1, 0, 1]]).to(build_ppo.device)
     action_logprob, dist_entropy, state_values = build_ppo.evaluate_actions(
         obs=state, actions=eval_action
+    )
+
+    assert isinstance(action_logprob, torch.Tensor)
+    assert isinstance(dist_entropy, torch.Tensor)
+    assert isinstance(state_values, torch.Tensor)
+
+
+@pytest.mark.parametrize(
+    "observation_space",
+    [
+        "vector_space",
+        "discrete_space",
+        "multidiscrete_space",
+        "multibinary_space",
+    ],
+)
+@pytest.mark.parametrize(
+    "action_space",
+    [
+        "vector_space",
+        "discrete_space",
+        "multidiscrete_space",
+        "multibinary_space",
+    ],
+)
+@pytest.mark.parametrize("recurrent", [True])
+@pytest.mark.parametrize("accelerator", [None])
+# Returns the expected action when given a state observation.
+def test_returns_expected_action_recurrent(
+    observation_space, action_space, recurrent, accelerator, build_ppo, request
+):
+    observation_space = request.getfixturevalue(observation_space)
+    action_space = request.getfixturevalue(action_space)
+    state = observation_space.sample()
+
+    act_ret = build_ppo.get_action(
+        state, hidden_state=build_ppo.get_initial_hidden_state()
+    )
+    action, action_logprob, dist_entropy, state_values, hidden_state = act_ret
+
+    assert isinstance(action, np.ndarray)
+    assert isinstance(action_logprob, np.ndarray)
+    assert isinstance(dist_entropy, np.ndarray)
+    assert isinstance(state_values, np.ndarray)
+    assert hidden_state is not None
+
+    if isinstance(action_space, spaces.Discrete):
+        for act in action:
+            assert act.is_integer()
+            assert act >= 0 and act < action_space.n
+    elif isinstance(action_space, spaces.MultiDiscrete):
+        assert len(action[0]) == len(action_space.nvec)
+        for i, act in enumerate(action[0]):
+            assert act.is_integer()
+            assert act >= 0 and act < action_space.nvec[i]
+    elif isinstance(action_space, spaces.MultiBinary):
+        assert len(action[0]) == action_space.n
+        for act in action[0]:
+            assert isinstance(act, np.float32)
+    else:
+        assert isinstance(action, np.ndarray)
+        assert action.shape == (1, *action_space.shape)
+
+    eval_action = torch.Tensor([[0, 1, 0, 1]]).to(build_ppo.device)
+    action_logprob, dist_entropy, state_values = build_ppo.evaluate_actions(
+        obs=state,
+        actions=eval_action,
+        hidden_state=hidden_state,
     )
 
     assert isinstance(action_logprob, torch.Tensor)
@@ -370,8 +459,9 @@ def test_ppo_optimizer_parameters(vector_space, discrete_space):
 @pytest.mark.parametrize("observation_space", ["vector_space"])
 @pytest.mark.parametrize("action_space", ["discrete_space"])
 @pytest.mark.parametrize("accelerator", [None])
+@pytest.mark.parametrize("recurrent", [False])
 def test_returns_expected_action_mask_vectorized(
-    build_ppo, observation_space, action_space, request
+    build_ppo, observation_space, action_space, recurrent, request
 ):
     observation_space = request.getfixturevalue(observation_space)
     action_space = request.getfixturevalue(action_space)
@@ -701,7 +791,12 @@ def test_clone_after_learning(
 )
 @pytest.mark.parametrize(
     "action_space",
-    ["discrete_space", "vector_space", "multidiscrete_space", "multibinary_space"],
+    [
+        "discrete_space",
+        "vector_space",
+        "multidiscrete_space",
+        "multibinary_space",
+    ],
 )
 def test_ppo_with_rollout_buffer(observation_space, action_space, request):
     observation_space = request.getfixturevalue(observation_space)
@@ -720,7 +815,10 @@ def test_ppo_with_rollout_buffer(observation_space, action_space, request):
     assert ppo.rollout_buffer.capacity == ppo.learn_step
     assert not ppo.rollout_buffer.recurrent
 
-    if not isinstance(observation_space, spaces.Box):
+    if not isinstance(
+        observation_space,
+        (spaces.Box, spaces.Discrete, spaces.MultiDiscrete, spaces.MultiBinary),
+    ):
         pytest.skip("Recurrent PPO with non-vector space is not supported yet!")
 
     # Build an encoder configuration that matches the observation space type
@@ -830,7 +928,13 @@ def test_ppo_with_rollout_buffer(observation_space, action_space, request):
 def test_ppo_learn_with_rollout_buffer(
     observation_space, action_space, bptt_sequence_type, recurrent, max_seq_len, request
 ):
-    if recurrent and observation_space != "vector_space":
+    supported_spaces = [
+        "vector_space",
+        "discrete_space",
+        "multidiscrete_space",
+        "multibinary_space",
+    ]
+    if recurrent and observation_space not in supported_spaces:
         pytest.skip("Recurrent PPO with non-vector space is not supported yet!")
 
     observation_space = request.getfixturevalue(observation_space)
