@@ -6,7 +6,7 @@ from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from functools import singledispatch
 from numbers import Number
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 import torch
@@ -81,15 +81,15 @@ def check_supported_space(observation_space: GymSpaceType) -> None:
 
 def get_input_size_from_space(
     observation_space: GymSpaceType,
-) -> Union[int, Dict[str, int], Tuple[int, ...]]:
+) -> Union[int, dict[str, int], tuple[int, ...]]:
     """Returns the dimension of the state space as it pertains to the underlying
     networks (i.e. the input size of the networks).
 
     :param observation_space: The observation space of the environment.
-    :type observation_space: spaces.Space or List[spaces.Space] or Dict[str, spaces.Space].
+    :type observation_space: spaces.Space or list[spaces.Space] or dict[str, spaces.Space].
 
     :return: The dimension of the state space.
-    :rtype: Union[int, Dict[str, int], Tuple[int, ...]]
+    :rtype: Union[int, dict[str, int], tuple[int, ...]]
     """
     if isinstance(observation_space, (list, tuple, spaces.Tuple)):
         return tuple(get_input_size_from_space(space) for space in observation_space)
@@ -114,15 +114,15 @@ def get_input_size_from_space(
 
 def get_output_size_from_space(
     action_space: GymSpaceType,
-) -> Union[int, Dict[str, int], Tuple[int, ...]]:
+) -> Union[int, dict[str, int], tuple[int, ...]]:
     """Returns the dimension of the action space as it pertains to the underlying
     networks (i.e. the output size of the networks).
 
     :param action_space: The action space of the environment.
-    :type action_space: spaces.Space or list[spaces.Space] or Dict[str, spaces.Space].
+    :type action_space: spaces.Space or list[spaces.Space] or dict[str, spaces.Space].
 
     :return: The dimension of the action space.
-    :rtype: Union[int, Dict[str, int], Tuple[int, ...]]
+    :rtype: Union[int, dict[str, int], tuple[int, ...]]
     """
     if isinstance(action_space, (list, tuple)):
         return tuple(get_output_size_from_space(space) for space in action_space)
@@ -169,7 +169,7 @@ def share_encoder_parameters(
         target_params.to_module(other.encoder)
 
 
-def get_hidden_states_shape_from_model(model: nn.Module) -> Dict[str, int]:
+def get_hidden_states_shape_from_model(model: nn.Module) -> dict[str, int]:
     """Loops through all of the modules in the model and checks if they have a
     `hidden_state_architecture` attribute. If they do, it adds the items to a
     dictionary and returns it. This should make it easier to initialize the
@@ -178,7 +178,7 @@ def get_hidden_states_shape_from_model(model: nn.Module) -> Dict[str, int]:
     :param model: The model to get the hidden states from.
     :type model: nn.Module
     :return: The hidden states shape from the model.
-    :rtype: Dict[str, int]
+    :rtype: dict[str, int]
     """
     hidden_state_architecture = {}
     for name, module in model.named_modules():
@@ -197,7 +197,7 @@ def extract_sequences_from_episode(
     episode: torch.Tensor,
     max_seq_len: int,
     sequence_type: BPTTSequenceType = BPTTSequenceType.CHUNKED,
-) -> List[torch.Tensor]:
+) -> list[torch.Tensor]:
     """Extract sequences from an episode.
 
     - `BPTTSequenceType.CHUNKED`: Extracts sequences by chunking the episode into unique
@@ -214,7 +214,7 @@ def extract_sequences_from_episode(
     :param sequence_type: The type of sequence to extract.
     :type sequence_type: BPTTSequenceType
     :return: The sequences extracted from the episode.
-    :rtype: List[torch.Tensor]
+    :rtype: list[torch.Tensor]
     """
     assert max_seq_len > 0, "max_seq_len must be greater than 0"
     assert len(episode) > 0, "episode must be non-empty"
@@ -259,13 +259,13 @@ def is_image_space(space: spaces.Space) -> bool:
     return isinstance(space, spaces.Box) and len(space.shape) == 3
 
 
-def get_obs_shape(space: spaces.Space) -> Tuple[int, ...] | Dict[str, Tuple[int, ...]]:
+def get_obs_shape(space: spaces.Space) -> tuple[int, ...] | dict[str, tuple[int, ...]]:
     """Returns the shape of the observation space.
 
     :param space: Observation space
     :type space: spaces.Space
     :return: Shape of the observation space
-    :rtype: Tuple[int, ...] | Dict[str, Tuple[int, ...]]
+    :rtype: tuple[int, ...] | dict[str, tuple[int, ...]]
     """
     if isinstance(space, spaces.Box):
         return space.shape
@@ -306,15 +306,15 @@ def get_num_actions(space: spaces.Space) -> int:
 
 
 def make_safe_deepcopies(
-    *args: Union[EvolvableModule, List[EvolvableModule]],
-) -> List[EvolvableModule]:
+    *args: Union[EvolvableModule, list[EvolvableModule]],
+) -> list[EvolvableModule]:
     """Makes deep copies of EvolvableModule objects and their attributes.
 
     :param args: EvolvableModule or lists of EvolvableModule objects to copy.
-    :type args: Union[EvolvableModule, List[EvolvableModule]].
+    :type args: Union[EvolvableModule, list[EvolvableModule]].
 
     :return: Deep copies of the EvolvableModule objects and their attributes.
-    :rtype: List[EvolvableModule].
+    :rtype: list[EvolvableModule].
     """
     copies = []
     for arg in args:
@@ -381,8 +381,8 @@ def recursive_check_module_attrs(obj: Any, networks_only: bool = False) -> bool:
 
 
 def chkpt_attribute_to_device(
-    chkpt_dict: Dict[str, torch.Tensor], device: str
-) -> Dict[str, Any]:
+    chkpt_dict: dict[str, torch.Tensor], device: str
+) -> dict[str, Any]:
     """Place checkpoint attributes on device. Used when loading saved agents.
 
     :param chkpt_dict: Checkpoint dictionary
@@ -391,7 +391,7 @@ def chkpt_attribute_to_device(
     :type device: str
 
     :return: Checkpoint dictionary with attributes on device
-    :rtype: Dict[str, Any]
+    :rtype: dict[str, Any]
     """
     if isinstance(chkpt_dict, list):
         return [chkpt_attribute_to_device(chkpt, device) for chkpt in chkpt_dict]
@@ -405,11 +405,11 @@ def chkpt_attribute_to_device(
     return chkpt_dict
 
 
-def key_in_nested_dict(nested_dict: Dict[str, Any], target: str) -> bool:
+def key_in_nested_dict(nested_dict: dict[str, Any], target: str) -> bool:
     """Helper function to determine if key is in nested dictionary
 
     :param nested_dict: Nested dictionary
-    :type nested_dict: Dict[str, Dict[str, ...]]
+    :type nested_dict: dict[str, dict[str, ...]]
     :param target: Target string
     :type target: str
 
@@ -424,13 +424,13 @@ def key_in_nested_dict(nested_dict: Dict[str, Any], target: str) -> bool:
     return False
 
 
-def remove_compile_prefix(state_dict: Dict[str, Any]) -> Dict[str, Any]:
+def remove_compile_prefix(state_dict: dict[str, Any]) -> dict[str, Any]:
     """Removes _orig_mod prefix on state dict created by torch compile
 
     :param state_dict: model state dict
     :type state_dict: dict
     :return: state dict with prefix removed
-    :rtype: Dict[str, Any]
+    :rtype: dict[str, Any]
     """
     return OrderedDict(
         [
@@ -440,7 +440,7 @@ def remove_compile_prefix(state_dict: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
-def module_checkpoint_dict(module: EvolvableAttributeType, name: str) -> Dict[str, Any]:
+def module_checkpoint_dict(module: EvolvableAttributeType, name: str) -> dict[str, Any]:
     """Returns a dictionary containing the module's class, init dict, and state dict.
 
     :param module: The module to checkpoint.
@@ -449,7 +449,7 @@ def module_checkpoint_dict(module: EvolvableAttributeType, name: str) -> Dict[st
     :type name: str
 
     :return: A dictionary containing the module's class, init dict, and state dict.
-    :rtype: Dict[str, Any]
+    :rtype: dict[str, Any]
     """
     if isinstance(module, ModuleDict):
         return module_checkpoint_multiagent(module, name)
@@ -457,7 +457,7 @@ def module_checkpoint_dict(module: EvolvableAttributeType, name: str) -> Dict[st
     return module_checkpoint_single(module, name)
 
 
-def module_checkpoint_single(module: EvolvableModule, name: str) -> Dict[str, Any]:
+def module_checkpoint_single(module: EvolvableModule, name: str) -> dict[str, Any]:
     """Returns a dictionary containing the module's class, init dict, and state dict.
 
     :param module: The module to checkpoint.
@@ -465,7 +465,7 @@ def module_checkpoint_single(module: EvolvableModule, name: str) -> Dict[str, An
     :param name: The name of the attribute to checkpoint.
     :type name: str
     :return: A dictionary containing the module's class, init dict, and state dict.
-    :rtype: Dict[str, Any]
+    :rtype: dict[str, Any]
     """
     module_cls = (
         module._orig_mod.__class__
@@ -482,7 +482,7 @@ def module_checkpoint_single(module: EvolvableModule, name: str) -> Dict[str, An
     }
 
 
-def module_checkpoint_multiagent(module: MultiAgentModule, name: str) -> Dict[str, Any]:
+def module_checkpoint_multiagent(module: MultiAgentModule, name: str) -> dict[str, Any]:
     """Returns a dictionary containing the module's class, init dict, and state dict.
 
     :param module: The module to checkpoint.
@@ -490,7 +490,7 @@ def module_checkpoint_multiagent(module: MultiAgentModule, name: str) -> Dict[st
     :param name: The name of the attribute to checkpoint.
     :type name: str
     :return: A dictionary containing the module's class, init dict, and state dict.
-    :rtype: Dict[str, Any]
+    :rtype: dict[str, Any]
     """
     agent_module_cls = OrderedDict()
     agent_init_dicts = OrderedDict()
@@ -513,7 +513,7 @@ def module_checkpoint_multiagent(module: MultiAgentModule, name: str) -> Dict[st
     }
 
 
-def format_shared_critic_encoder(encoder_configs: NetConfigType) -> Dict[str, Any]:
+def format_shared_critic_encoder(encoder_configs: NetConfigType) -> dict[str, Any]:
     """Formats the shared critic  (i.e. `EvolvableMultiInput`) config from the available
     encoder configs from all of the sub-agents. This dictionary is built when extracting the net
     config passed by the user in `MultiAgentAlgorithm.extract_net_config`.
@@ -523,9 +523,9 @@ def format_shared_critic_encoder(encoder_configs: NetConfigType) -> Dict[str, An
         groups, the deepest MLP config will be used for the shared critics `EvolvableMLP`.
 
     :param encoder_configs: Network configuration
-    :type encoder_configs: Dict[str, Any]
+    :type encoder_configs: dict[str, Any]
     :return: Formatted shared critic encoder config
-    :rtype: Dict[str, Any]
+    :rtype: dict[str, Any]
     """
     encoder_config = defaultdict(dict)
     for encoder_key, config in encoder_configs.items():
@@ -543,14 +543,14 @@ def format_shared_critic_encoder(encoder_configs: NetConfigType) -> Dict[str, An
 
 
 def get_deepest_head_config(
-    net_config: NetConfigType, agent_ids: List[str]
+    net_config: NetConfigType, agent_ids: list[str]
 ) -> NetConfigType:
     """Returns the deepest head config from the nested net config.
 
     :param net_config: Network configuration
     :type net_config: NetConfigType
     :param agent_ids: List of agent IDs
-    :type agent_ids: List[str]
+    :type agent_ids: list[str]
     :return: Largest head config
     """
     assert all(
@@ -573,13 +573,13 @@ def get_deepest_head_config(
     return deepest
 
 
-def concatenate_spaces(space_list: List[SupportedObsSpaces]) -> spaces.Space:
+def concatenate_spaces(space_list: list[SupportedObsSpaces]) -> spaces.Space:
     """Concatenates a list of spaces into a single space. If spaces correspond to images,
     we check that their shapes are the same and use the first space's shape as the shape of the
     concatenated space.
 
     :param space_list: List of spaces to concatenate
-    :type space_list: List[SupportedObsSpaces]
+    :type space_list: list[SupportedObsSpaces]
     :return: Concatenated space
     :rtype: spaces.Space
     """
@@ -816,7 +816,7 @@ def preprocess_observation(
     :type placeholder_value: Optional[Any], optional
 
     :return: Preprocessed observations
-    :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
+    :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or tuple[torch.Tensor[float], ...]
     """
     raise TypeError(
         f"AgileRL currently doesn't support {type(observation_space)} spaces."
@@ -826,11 +826,11 @@ def preprocess_observation(
 @preprocess_observation.register(spaces.Dict)
 def preprocess_dict_observation(
     observation_space: spaces.Dict,
-    observation: Dict[str, np.ndarray | torch.Tensor],
+    observation: dict[str, np.ndarray | torch.Tensor],
     device: Union[str, torch.device] = "cpu",
     normalize_images: bool = True,
     placeholder_value: Optional[Any] = None,
-) -> Dict[str, TorchObsType]:
+) -> dict[str, TorchObsType]:
     """Preprocess dictionary observations.
 
     :param observation: Dictionary observation
@@ -860,11 +860,11 @@ def preprocess_dict_observation(
 @preprocess_observation.register(spaces.Tuple)
 def preprocess_tuple_observation(
     observation_space: spaces.Tuple,
-    observation: Tuple[np.ndarray | torch.Tensor, ...],
+    observation: tuple[np.ndarray | torch.Tensor, ...],
     device: Union[str, torch.device] = "cpu",
     normalize_images: bool = True,
     placeholder_value: Optional[Any] = None,
-) -> Tuple[TorchObsType, ...]:
+) -> tuple[TorchObsType, ...]:
     """Preprocess tuple observations.
 
     :param observation: Tuple observation
@@ -876,7 +876,7 @@ def preprocess_tuple_observation(
     """
     if isinstance(observation, TensorDict):
         # Convert to tuple with values ordered by index at the end of key
-        dict_keys: List[str] = list(observation.keys())
+        dict_keys: list[str] = list(observation.keys())
         dict_keys.sort(key=lambda x: int(x.split("_")[-1]))
         observation = tuple(observation[key] for key in dict_keys)
 
@@ -1087,16 +1087,16 @@ def apply_image_normalization(
 # experiences in the absence of a rollout buffer -> This will not be needed in the future.
 def get_experiences_samples(
     minibatch_indices: np.ndarray, *experiences: TorchObsType
-) -> Tuple[TorchObsType, ...]:
+) -> tuple[TorchObsType, ...]:
     """Samples experiences given minibatch indices.
 
     :param minibatch_indices: Minibatch indices
     :type minibatch_indices: numpy.ndarray[int]
     :param experiences: Experiences to sample from
-    :type experiences: Tuple[torch.Tensor[float], ...]
+    :type experiences: tuple[torch.Tensor[float], ...]
 
     :return: Sampled experiences
-    :rtype: Tuple[torch.Tensor[float], ...]
+    :rtype: tuple[torch.Tensor[float], ...]
     """
     sampled_experiences = []
     for exp in experiences:
@@ -1116,7 +1116,7 @@ def get_experiences_samples(
 
 def stack_experiences(
     *experiences: MaybeObsList, to_torch: bool = True
-) -> Tuple[ObservationType, ...]:
+) -> tuple[ObservationType, ...]:
     """Stacks experiences into a single array or tensor.
 
     :param experiences: Experiences to stack
@@ -1125,7 +1125,7 @@ def stack_experiences(
     :type to_torch: bool, optional
 
     :return: Stacked experiences
-    :rtype: Tuple[ArrayOrTensor, ...]
+    :rtype: tuple[ArrayOrTensor, ...]
     """
     stacked_experiences = []
     for exp in experiences:
@@ -1179,10 +1179,10 @@ def stack_experiences(
 
 def stack_and_pad_experiences(
     *experiences: MaybeObsList,
-    padding_values: List[Union[int, float, bool]],
+    padding_values: list[Union[int, float, bool]],
     padding_side: str = "right",
     device: Optional[str] = None,
-) -> Tuple[ArrayOrTensor, ...]:
+) -> tuple[ArrayOrTensor, ...]:
     """Stacks experiences into a single tensor, padding them to the maximum length.
 
     :param experiences: Experiences to stack
@@ -1193,7 +1193,7 @@ def stack_and_pad_experiences(
     :type padding_side: str, optional
 
     :return: Stacked experiences
-    :rtype: Tuple[ArrayOrTensor, ...]
+    :rtype: tuple[ArrayOrTensor, ...]
     """
     stacked_experiences = []
     for exp, padding in zip(experiences, padding_values):
@@ -1213,13 +1213,13 @@ def stack_and_pad_experiences(
 
 
 def _stack_and_pad_tensor_list(
-    exp: List[torch.Tensor], padding: int, padding_side: str = "right"
+    exp: list[torch.Tensor], padding: int, padding_side: str = "right"
 ) -> torch.Tensor:
     """
     Stack and pad a list of tensors.
 
     :param exp: List of tensors to stack and pad
-    :type exp: List[torch.Tensor]
+    :type exp: list[torch.Tensor]
     :param padding_value: Value to pad with
     :type padding_value: int
     :param padding_side: Side to pad on, defaults to "right"
@@ -1239,14 +1239,14 @@ def _stack_and_pad_tensor_list(
     return torch.cat(exp, dim=0)
 
 
-def flatten_experiences(*experiences: ObservationType) -> Tuple[ArrayOrTensor, ...]:
+def flatten_experiences(*experiences: ObservationType) -> tuple[ArrayOrTensor, ...]:
     """Flattens experiences into a single array or tensor.
 
     :param experiences: Experiences to flatten
-    :type experiences: Tuple[numpy.ndarray[float], ...] or Tuple[torch.Tensor[float], ...]
+    :type experiences: tuple[numpy.ndarray[float], ...] or tuple[torch.Tensor[float], ...]
 
     :return: Flattened experiences
-    :rtype: Tuple[numpy.ndarray[float], ...] or Tuple[torch.Tensor[float], ...]
+    :rtype: tuple[numpy.ndarray[float], ...] or tuple[torch.Tensor[float], ...]
     """
 
     def flatten(arr: ArrayOrTensor) -> ArrayOrTensor:
@@ -1278,7 +1278,7 @@ def is_vectorized_experiences(*experiences: ObservationType) -> bool:
     """Checks if experiences are vectorised.
 
     :param experiences: Experiences to check
-    :type experiences: Tuple[numpy.ndarray[float], ...] or Tuple[torch.Tensor[float], ...]
+    :type experiences: tuple[numpy.ndarray[float], ...] or tuple[torch.Tensor[float], ...]
 
     :return: True if experiences are vectorised, False otherwise
     :rtype: bool
@@ -1373,11 +1373,11 @@ def create_warmup_cosine_scheduler(
     return scheduler
 
 
-def remove_nested_files(files: List[str]) -> None:
+def remove_nested_files(files: list[str]) -> None:
     """Remove nested files from a list of files.
 
     :param files: List of files to remove nested files from
-    :type files: List[str]
+    :type files: list[str]
     :param depth: Depth of the nested files, defaults to 0
     :type depth: int, optional
     """
@@ -1390,7 +1390,7 @@ def remove_nested_files(files: List[str]) -> None:
 
 def vectorize_experiences_by_agent(
     experiences: ExperiencesType, dim: int = 1
-) -> Union[torch.Tensor, Dict[str, torch.Tensor], Tuple[torch.Tensor, ...]]:
+) -> Union[torch.Tensor, dict[str, torch.Tensor], tuple[torch.Tensor, ...]]:
     """Reorganizes experiences into a tensor, vectorized by time step
 
     Example input:
@@ -1403,7 +1403,7 @@ def vectorize_experiences_by_agent(
     :param dim: New dimension to stack along
     :type dim: int
     :return: Tensor, dict of tensors, or tuple of tensors of experiences, stacked along provided dimension
-    :rtype: Union[torch.Tensor, Dict[str, torch.Tensor], Tuple[torch.Tensor, ...]]
+    :rtype: Union[torch.Tensor, dict[str, torch.Tensor], tuple[torch.Tensor, ...]]
     """
     if not experiences:
         return torch.tensor([])
@@ -1433,7 +1433,7 @@ def vectorize_experiences_by_agent(
         )
     else:
         # Original implementation for array/tensor observations
-        tensors: List[torch.Tensor] = []
+        tensors: list[torch.Tensor] = []
         for experience in experiences.values():
             if experience is None:
                 continue
@@ -1480,11 +1480,11 @@ def experience_to_tensors(
         return torch.from_numpy(array)
 
 
-def concatenate_tensors(tensors: List[TorchObsType]) -> TorchObsType:
+def concatenate_tensors(tensors: list[TorchObsType]) -> TorchObsType:
     """Concatenate tensors along first dimension
 
     :param tensors: List of tensors to concatenate
-    :type tensors: List[TorchObsType]
+    :type tensors: list[TorchObsType]
     :return: Concatenated tensor
     :rtype: TorchObsType
     """
@@ -1547,7 +1547,7 @@ def concatenate_experiences_into_batches(
     :param actions: Whether the experiences are actions, defaults to False
     :type actions: bool, optional
     :return: Tensor, dict of tensors, or tuple of tensors of experiences, stacked along first dimension, with shape (num_experiences, *shape)
-    :rtype: Union[torch.Tensor, Dict[str, torch.Tensor], Tuple[torch.Tensor, ...]]
+    :rtype: Union[torch.Tensor, dict[str, torch.Tensor], tuple[torch.Tensor, ...]]
     """
     tensors = []
     for agent_id in experiences.keys():
@@ -1571,14 +1571,14 @@ def is_peft_model(model: nn.Module) -> bool:
 
 def clone_llm(
     original_model: PreTrainedModelType | DummyEvolvable,
-    state_dict: Optional[Dict[str, torch.Tensor]] = None,
+    state_dict: Optional[dict[str, torch.Tensor]] = None,
 ) -> PreTrainedModelType:
     """Clone the actor.
 
     :param original_model: Model to clone
     :type original_model: PreTrainedModelType
     :param state_dict: State dict to load, defaults to None
-    :type state_dict: Optional[Dict[str, torch.Tensor]], optional
+    :type state_dict: Optional[dict[str, torch.Tensor]], optional
     :return: Cloned model
     """
     match original_model:

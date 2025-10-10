@@ -2,7 +2,7 @@ import inspect
 import warnings
 from copy import deepcopy
 from dataclasses import asdict
-from typing import Any, Dict, Optional, Tuple, Type, TypeVar, Union
+from typing import Any, Optional, TypeVar, Union
 
 import numpy as np
 import torch
@@ -32,11 +32,11 @@ DefaultEncoderType = Union[
 ]
 
 
-def assert_correct_mlp_net_config(net_config: Dict[str, Any]) -> None:
+def assert_correct_mlp_net_config(net_config: dict[str, Any]) -> None:
     """Asserts that the MLP network configuration is correct.
 
     :param net_config: Configuration of the MLP network.
-    :type net_config: Dict[str, Any]
+    :type net_config: dict[str, Any]
     """
     assert (
         "hidden_size" in net_config.keys()
@@ -49,11 +49,11 @@ def assert_correct_mlp_net_config(net_config: Dict[str, Any]) -> None:
     ), "Net config hidden_size must contain at least one element."
 
 
-def assert_correct_simba_net_config(net_config: Dict[str, Any]) -> None:
+def assert_correct_simba_net_config(net_config: dict[str, Any]) -> None:
     """Asserts that the MLP network configuration is correct.
 
     :param net_config: Configuration of the MLP network.
-    :type net_config: Dict[str, Any]
+    :type net_config: dict[str, Any]
     """
     assert (
         "hidden_size" in net_config.keys()
@@ -67,11 +67,11 @@ def assert_correct_simba_net_config(net_config: Dict[str, Any]) -> None:
     ), "Net config num_blocks must be an integer."
 
 
-def assert_correct_cnn_net_config(net_config: Dict[str, Any]) -> None:
+def assert_correct_cnn_net_config(net_config: dict[str, Any]) -> None:
     """Asserts that the CNN network configuration is correct.
 
     :param net_config: Configuration of the CNN network.
-    :type net_config: Dict[str, Any]
+    :type net_config: dict[str, Any]
     """
     for key in [
         "channel_size",
@@ -90,11 +90,11 @@ def assert_correct_cnn_net_config(net_config: Dict[str, Any]) -> None:
             ), "Kernel size must be of type int, list, or tuple."
 
 
-def assert_correct_lstm_net_config(net_config: Dict[str, Any]) -> None:
+def assert_correct_lstm_net_config(net_config: dict[str, Any]) -> None:
     """Asserts that the LSTM network configuration is correct.
 
     :param net_config: Configuration of the LSTM network.
-    :type net_config: Dict[str, Any]
+    :type net_config: dict[str, Any]
     """
     assert (
         "hidden_state_size" in net_config.keys()
@@ -147,7 +147,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     :type observation_space: spaces.Space
     :param encoder_cls: Encoder class to use for the network. Defaults to None, whereby it is
         automatically built using an AgileRL module according the observation space.
-    :type encoder_cls: Optional[Union[str, Type[EvolvableModule]]]
+    :type encoder_cls: Optional[Union[str, type[EvolvableModule]]]
     :param encoder_config: Configuration of the encoder. Defaults to None.
     :type encoder_config: Optional[ConfigType]
     :param action_space: Action space of the environment. Defaults to None.
@@ -173,14 +173,14 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     head_net: EvolvableModule
 
     # Custom encoder aliases
-    _encoder_aliases: Dict[str, Type[EvolvableModule]] = {
+    _encoder_aliases: dict[str, type[EvolvableModule]] = {
         "ResNet": EvolvableResNet,
     }
 
     def __init__(
         self,
         observation_space: spaces.Space,
-        encoder_cls: Optional[Union[str, Type[EvolvableModule]]] = None,
+        encoder_cls: Optional[Union[str, type[EvolvableModule]]] = None,
         encoder_config: Optional[NetConfigType] = None,
         encoder_name: str = "encoder",
         action_space: Optional[spaces.Space] = None,
@@ -261,11 +261,11 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         self.encoder.disable_mutations(MutationType.LAYER)
 
     @property
-    def encoder_config(self) -> Dict[str, Any]:
+    def encoder_config(self) -> dict[str, Any]:
         """Net configuration for encoder.
 
         :return: Initial dictionary for the network.
-        :rtype: Dict[str, Any]
+        :rtype: dict[str, Any]
         """
         return (
             self.encoder.net_config
@@ -274,11 +274,11 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         )
 
     @property
-    def head_config(self) -> Dict[str, Any]:
+    def head_config(self) -> dict[str, Any]:
         """Net configuration for head.
 
         :return: Initial dictionary for the network.
-        :rtype: Dict[str, Any]
+        :rtype: dict[str, Any]
         """
         if not hasattr(self, "head_net"):
             raise AttributeError("Network does not have a head_net attribute.")
@@ -299,14 +299,14 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         return self.forward(*args, **kwargs)
 
     def extract_features(
-        self, x: torch.Tensor, hidden_state: Optional[Dict[str, torch.Tensor]] = None
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        self, x: torch.Tensor, hidden_state: Optional[dict[str, torch.Tensor]] = None
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """Extract features from the encoder part of the network.
 
         :param x: Input tensor to extract features from
         :type x: torch.Tensor
         :param hidden_states: Hidden states for recurrent networks (unused in non-recurrent networks)
-        :type hidden_states: Dict[str, torch.Tensor], optional
+        :type hidden_states: dict[str, torch.Tensor], optional
         :return: The encoded features
         :rtype: torch.Tensor
         """
@@ -337,7 +337,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         )
 
     def create_mlp(
-        self, num_inputs: int, num_outputs: int, name: str, net_config: Dict[str, Any]
+        self, num_inputs: int, num_outputs: int, name: str, net_config: dict[str, Any]
     ) -> EvolvableMLP:
         """Builds the head of the network based on the passed configuration.
 
@@ -348,7 +348,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         :param name: Name of the network head.
         :type name: str
         :param net_config: Configuration of the network head.
-        :type net_config: Dict[str, Any]
+        :type net_config: dict[str, Any]
 
         :return: Network head.
         :rtype: EvolvableMLP
@@ -382,7 +382,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                     std_coeff=std_coeff, output_coeff=output_coeff
                 )
 
-    def initialize_hidden_state(self, batch_size: int = 1) -> Dict[str, torch.Tensor]:
+    def initialize_hidden_state(self, batch_size: int = 1) -> dict[str, torch.Tensor]:
         """Initialize the hidden state for the network.
 
         :param env: The environment to initialize the hidden state for
@@ -425,14 +425,14 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             module.change_activation(activation, output=_output)
 
     @mutation(MutationType.NODE)
-    def add_latent_node(self, numb_new_nodes: Optional[int] = None) -> Dict[str, Any]:
+    def add_latent_node(self, numb_new_nodes: Optional[int] = None) -> dict[str, Any]:
         """Add a latent node to the network.
 
         :param numb_new_nodes: Number of new nodes to add, defaults to None
         :type numb_new_nodes: int, optional
 
         :return: Configuration for adding a latent node.
-        :rtype: Dict[str, Any]
+        :rtype: dict[str, Any]
         """
         if numb_new_nodes is None:
             numb_new_nodes = self.rng.choice([8, 16, 32])
@@ -445,14 +445,14 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     @mutation(MutationType.NODE)
     def remove_latent_node(
         self, numb_new_nodes: Optional[int] = None
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Remove a latent node from the network.
 
         :param numb_new_nodes: Number of nodes to remove, defaults to None
         :type numb_new_nodes: int, optional
 
         :return: Configuration for removing a latent node.
-        :rtype: Dict[str, Any]
+        :rtype: dict[str, Any]
         """
         if numb_new_nodes is None:
             numb_new_nodes = self.rng.choice([8, 16, 32])
@@ -474,7 +474,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
 
         self.encoder = EvolvableModule.preserve_parameters(self.encoder, encoder)
 
-    def _build_encoder(self, net_config: Dict[str, Any]) -> DefaultEncoderType:
+    def _build_encoder(self, net_config: dict[str, Any]) -> DefaultEncoderType:
         """Builds the encoder for the network based on the environments observation space.
 
         :return: Encoder module.

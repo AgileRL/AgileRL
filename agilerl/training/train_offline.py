@@ -1,13 +1,13 @@
 import warnings
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import gymnasium as gym
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 
+import wandb
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.components.data import ReplayDataset, Transition
 from agilerl.components.replay_buffer import ReplayBuffer
@@ -23,8 +23,8 @@ from agilerl.utils.utils import (
     tournament_selection_and_mutation,
 )
 
-InitDictType = Optional[Dict[str, Any]]
-PopulationType = List[RLAlgorithm]
+InitDictType = Optional[dict[str, Any]]
+PopulationType = list[RLAlgorithm]
 
 
 def train_offline(
@@ -55,7 +55,7 @@ def train_offline(
     minari_dataset_id: Optional[str] = None,
     remote: bool = False,
     wandb_api_key: Optional[str] = None,
-) -> Tuple[PopulationType, List[List[float]]]:
+) -> tuple[PopulationType, list[list[float]]]:
     """The general offline RL training function. Returns trained population of agents and their fitnesses.
 
     :param env: The environment to train in

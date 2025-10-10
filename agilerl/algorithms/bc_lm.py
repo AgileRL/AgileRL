@@ -1,4 +1,4 @@
-from typing import Any, Callable, Optional, Tuple, Union
+from typing import Any, Callable, Optional, Union
 
 import numpy as np
 import torch
@@ -167,7 +167,7 @@ class BC_LM(nn.Module):
         temp: float = 1.0,
         top_k: Optional[int] = None,
         top_p: Optional[float] = None,
-    ) -> Tuple[torch.Tensor, Any]:
+    ) -> tuple[torch.Tensor, Any]:
         prepared_inputs = self.prepare_inputs(items)
         tokens = prepared_inputs["tokens"]
         scores, model_outputs = self.score(
@@ -189,7 +189,7 @@ class BC_LM(nn.Module):
         temp: float = 1.0,
         top_k: Optional[int] = None,
         top_p: Optional[float] = None,
-    ) -> Tuple[torch.Tensor, Any]:
+    ) -> tuple[torch.Tensor, Any]:
         scores, model_outputs = self.score(
             (
                 tokens.unsqueeze(1),

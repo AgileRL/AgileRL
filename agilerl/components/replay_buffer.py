@@ -1,5 +1,5 @@
 from collections import deque
-from typing import Deque, Dict, Optional, Union
+from typing import Deque, Optional, Union
 
 import torch
 from tensordict import TensorDict, TensorDictBase, is_tensor_collection
@@ -7,7 +7,7 @@ from tensordict import TensorDict, TensorDictBase, is_tensor_collection
 from agilerl.components.segment_tree import MinSegmentTree, SumSegmentTree
 from agilerl.typing import ArrayOrTensor
 
-DataType = Union[Dict[str, ArrayOrTensor], TensorDict]
+DataType = Union[dict[str, ArrayOrTensor], TensorDict]
 
 
 class ReplayBuffer:
@@ -74,7 +74,7 @@ class ReplayBuffer:
         """Add a transition to the buffer.
 
         :param data: Transition to add to the buffer
-        :type data: Union[TensorDict, Dict[str, Any]]
+        :type data: Union[TensorDict, dict[str, Any]]
         """
         # Initialize storage
         data = data.to(self.device)

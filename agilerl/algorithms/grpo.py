@@ -3,7 +3,7 @@ import os
 import re
 import warnings
 from contextlib import contextmanager, nullcontext
-from typing import List, Optional, Tuple, Union
+from typing import Optional, Union
 
 import numpy as np
 import torch
@@ -353,7 +353,7 @@ class GRPO(LLMAlgorithm):
 
     def get_action(
         self, obs: LLMObsType, training: bool = True
-    ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         """Returns the next action to take in the environment.
 
         :param states: Environment observation, or multiple observations in a batch
@@ -361,7 +361,7 @@ class GRPO(LLMAlgorithm):
         :param training: Flag to indicate training mode, defaults to True
         :type training: bool, optional
         :return: Completion IDs and action masks
-        :rtype: Tuple[List[torch.Tensor], List[torch.Tensor]]
+        :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
         """
         group_size = self.group_size if training else 1
         self.actor.eval()
@@ -400,7 +400,7 @@ class GRPO(LLMAlgorithm):
 
         return completion_ids, action_masks
 
-    def learn(self, experiences: ExperiencesType) -> Tuple[float, float]:
+    def learn(self, experiences: ExperiencesType) -> tuple[float, float]:
         """Updates agent network parameters to learn from experiences.
 
         :param experiences: Batched completion_ids, action_masks and rewards
@@ -663,7 +663,7 @@ class GRPO(LLMAlgorithm):
         old_log_probs: torch.Tensor,
         reference_log_probs: torch.Tensor,
         advantages: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Calculate the GRPO loss.
 
         :param mask: Attention mask.
@@ -677,7 +677,7 @@ class GRPO(LLMAlgorithm):
         :param advantages: Advantages.
         :type advantages: torch.Tensor
         :return: Mean loss and mean KL divergence.
-        :rtype: Tuple[torch.Tensor, torch.Tensor]
+        :rtype: tuple[torch.Tensor, torch.Tensor]
         """
         kl = self._calculate_kl_divergence(log_probs, reference_log_probs)
         log_probs_ratio = torch.exp(log_probs - old_log_probs)
@@ -835,8 +835,8 @@ class GRPO(LLMAlgorithm):
         self.llm.reset_prefix_cache()
 
     def _generate_with_vllm_colocate(
-        self, prompts: List[Tuple[str, int]], group_size: int
-    ) -> List[torch.Tensor]:
+        self, prompts: list[tuple[str, int]], group_size: int
+    ) -> list[torch.Tensor]:
 
         # I need to make the following happen
         # prompts = [prompt1, prompt1, ..., prompt1 (group_size times), prompt2, prompt2, ..., prompt2 (group_size times), ...]

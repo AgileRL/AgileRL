@@ -1,16 +1,16 @@
 import copy
 import math
 from collections import defaultdict
-from typing import Any, Callable, Optional, Tuple, Union
+from typing import Any, Callable, Optional, Union
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import wandb
 from torch.nn import functional as F
 from tqdm import tqdm
 
+import wandb
 from agilerl.data.rl_data import DataPoint
 from agilerl.modules.gpt import EvolvableGPT
 from agilerl.modules.mlp import EvolvableMLP
@@ -961,7 +961,7 @@ class ILQL(nn.Module):
         logit_top_p: Optional[float] = None,
         include_logits: bool = False,
         include_advantage: bool = True,
-    ) -> Tuple[torch.Tensor, Any]:
+    ) -> tuple[torch.Tensor, Any]:
         prepared_inputs = self.prepare_inputs(items)
         tokens = prepared_inputs["tokens"]
         is_state = (

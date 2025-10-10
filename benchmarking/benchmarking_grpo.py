@@ -1,5 +1,4 @@
 import re
-from typing import Tuple
 
 import torch
 import yaml
@@ -66,7 +65,7 @@ def countdown_chat_template(q, a, tokenizer):
     return tokenized_prompt
 
 
-def make_dataset(dataset_name: str) -> Tuple[Dataset, Dataset]:
+def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
     raw_dataset = (
         load_dataset(dataset_name, split="train").shuffle(seed=42).select(range(50000))
     )

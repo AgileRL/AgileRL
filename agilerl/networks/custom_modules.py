@@ -1,4 +1,4 @@
-from typing import Any, Dict, List
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -18,7 +18,7 @@ class DuelingDistributionalMLP(EvolvableMLP):
     :param num_outputs: Number of output features.
     :type num_outputs: int
     :param hidden_size: List of hidden layer sizes.
-    :type hidden_size: List[int]
+    :type hidden_size: list[int]
     :param num_atoms: Number of atoms in the distribution.
     :type num_atoms: int
     :param support: Support of the distribution.
@@ -57,7 +57,7 @@ class DuelingDistributionalMLP(EvolvableMLP):
         self,
         num_inputs: int,
         num_outputs: int,
-        hidden_size: List[int],
+        hidden_size: list[int],
         num_atoms: int,
         support: torch.Tensor,
         layer_norm: bool = True,
@@ -118,7 +118,7 @@ class DuelingDistributionalMLP(EvolvableMLP):
         )
 
     @property
-    def net_config(self) -> Dict[str, Any]:
+    def net_config(self) -> dict[str, Any]:
         net_config = super().net_config.copy()
         net_config.pop("num_atoms")
         net_config.pop("support")

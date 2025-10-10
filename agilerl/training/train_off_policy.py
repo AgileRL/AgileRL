@@ -1,15 +1,15 @@
 import time
 import warnings
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Optional, Union
 
 import gymnasium as gym
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from tensordict import TensorDictBase
 from torch.utils.data import DataLoader
 
+import wandb
 from agilerl.algorithms import DDPG, DQN, TD3, RainbowDQN
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.components import (
@@ -29,8 +29,8 @@ from agilerl.utils.utils import (
     tournament_selection_and_mutation,
 )
 
-InitDictType = Optional[Dict[str, Any]]
-PopulationType = List[RLAlgorithm]
+InitDictType = Optional[dict[str, Any]]
+PopulationType = list[RLAlgorithm]
 BufferType = Union[ReplayBuffer, PrioritizedReplayBuffer, MultiStepReplayBuffer]
 
 
@@ -66,8 +66,8 @@ def train_off_policy(
     verbose: bool = True,
     accelerator: Optional[Accelerator] = None,
     wandb_api_key: Optional[str] = None,
-    wandb_kwargs: Optional[Dict[str, Any]] = None,
-) -> Tuple[PopulationType, List[List[float]]]:
+    wandb_kwargs: Optional[dict[str, Any]] = None,
+) -> tuple[PopulationType, list[list[float]]]:
     """The general online RL training function. Returns trained population of agents
     and their fitnesses.
 

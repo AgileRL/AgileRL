@@ -4,7 +4,6 @@ Authors: Michael (https://github.com/mikepratt1), Nickua (https://github.com/nic
 """
 
 import os
-from typing import List
 
 import numpy as np
 import torch
@@ -80,7 +79,7 @@ if __name__ == "__main__":
     )
 
     # Create a population ready for evolutionary hyper-parameter optimisation
-    pop: List[MATD3] = create_population(
+    pop: list[MATD3] = create_population(
         INIT_HP["ALGO"],
         observation_spaces,
         action_spaces,

@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import torch
 
@@ -10,7 +10,7 @@ from agilerl.data.tokenizer import Tokenizer
 
 class TokenReward(ABC):
     @abstractmethod
-    def get_token_reward(self, tokens: List[int]) -> List[float]:
+    def get_token_reward(self, tokens: list[int]) -> list[float]:
         pass
 
 
@@ -18,19 +18,19 @@ class ConstantTokenReward(TokenReward):
     def __init__(self, c: float = 0.0):
         self.c = c
 
-    def get_token_reward(self, tokens: List[int]) -> List[float]:
+    def get_token_reward(self, tokens: list[int]) -> list[float]:
         return [self.c] * (len(tokens) - 1)
 
 
 class SpecifiedTokenReward(TokenReward):
     def __init__(
-        self, token_data: Dict[int, float], scale: float = 1.0, shift: float = 0.0
+        self, token_data: dict[int, float], scale: float = 1.0, shift: float = 0.0
     ):
         self.token_data = token_data
         self.scale = scale
         self.shift = shift
 
-    def get_token_reward(self, tokens: List[int]) -> List[float]:
+    def get_token_reward(self, tokens: list[int]) -> list[float]:
         return [
             (
                 (self.token_data[tok] * self.scale + self.shift)
@@ -53,7 +53,7 @@ class DataPoint:
     utterance_action_idxs: list[int]
     utterance_rewards: list[float]
     utterance_terminals: list[int]
-    meta: Optional[Dict[str, Any]] = None
+    meta: Optional[dict[str, Any]] = None
 
     def to_tensors(self, device, max_length: Optional[int]):
         tok = torch.tensor(self.tokens).to(device)
@@ -85,7 +85,7 @@ class DataPoint:
         obs: Language_Observation,
         tokenizer: Tokenizer,
         token_reward: TokenReward,
-        meta: Optional[Dict[str, Any]] = None,
+        meta: Optional[dict[str, Any]] = None,
     ):
         sequence, terminal = obs.to_sequence()
         obs_meta = obs.metadata()
@@ -167,7 +167,7 @@ class RL_Dataset(ABC):
         self.token_reward = token_reward
         self.max_len = max_len
 
-    def collate(self, items: List[DataPoint], device):
+    def collate(self, items: list[DataPoint], device):
         (
             tokens,
             state_idxs,

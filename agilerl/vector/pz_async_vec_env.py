@@ -9,7 +9,7 @@ from copy import deepcopy
 from enum import Enum
 from multiprocessing.connection import Connection
 from multiprocessing.sharedctypes import RawArray
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypeAlias, TypeVar, Union
+from typing import Any, Callable, Optional, TypeAlias, TypeVar, Union
 
 import numpy as np
 from gymnasium import logger, spaces
@@ -27,7 +27,7 @@ from agilerl.vector.pz_vec_env import PettingZooVecEnv
 AgentID = TypeVar("AgentID")
 ObsType = TypeVar("ObsType")
 PzEnvType = Union[PettingZooVecEnv, ParallelEnv]
-SharedMemoryType: TypeAlias = Union[RawArray, Tuple[RawArray, ...], Dict[str, RawArray]]
+SharedMemoryType: TypeAlias = Union[RawArray, tuple[RawArray, ...], dict[str, RawArray]]
 
 
 def reshape_observation(
@@ -36,7 +36,7 @@ def reshape_observation(
     """Reshape the raw data to the correct shape for the observation space.
 
     :param raw_data: The raw data to reshape
-    :type raw_data: np.ndarray, Dict[str, np.ndarray], Tuple[np.ndarray, ...]
+    :type raw_data: np.ndarray, dict[str, np.ndarray], tuple[np.ndarray, ...]
     :param space: The observation space
     :type space: gymnasium.spaces.Space
     :param num_envs: The number of environments
@@ -85,14 +85,14 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
     :type context: str, optional
     """
 
-    processes: List[mp.Process]
-    parent_pipes: List[Connection]
+    processes: list[mp.Process]
+    parent_pipes: list[Connection]
     error_queue: mp.Queue
     _state: AsyncState
 
     def __init__(
         self,
-        env_fns: List[Callable[[], PzEnvType]],
+        env_fns: list[Callable[[], PzEnvType]],
         copy: bool = True,
         context: Optional[str] = None,
     ):
@@ -175,8 +175,8 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         self,
         *,
         seed: Optional[int] = None,
-        options: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[Dict[str, NumpyObsType], Dict[str, Any]]:
+        options: Optional[dict[str, Any]] = None,
+    ) -> tuple[dict[str, NumpyObsType], dict[str, Any]]:
         """
         Reset all the environments and return two dictionaries of batched observations and infos.
 
@@ -191,7 +191,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
     def reset_async(
         self,
         seed: Optional[int] = None,
-        options: Optional[Dict[str, Any]] = None,
+        options: Optional[dict[str, Any]] = None,
     ) -> None:
         """Send calls to the :obj:`reset` methods of the sub-environments.
 
@@ -222,11 +222,11 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
 
         self._state = AsyncState.WAITING_RESET
 
-    def get_observations(self) -> Dict[str, NumpyObsType]:
+    def get_observations(self) -> dict[str, NumpyObsType]:
         """Get the observations from the environments.
 
         :return: Observations from the environments
-        :rtype: Dict[str, NumpyObsType]
+        :rtype: dict[str, NumpyObsType]
         """
         return (
             {
@@ -239,7 +239,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
 
     def reset_wait(
         self, timeout: Optional[float] = None
-    ) -> Tuple[Dict[str, NumpyObsType], Dict[str, Any]]:
+    ) -> tuple[dict[str, NumpyObsType], dict[str, Any]]:
         """Waits for the calls triggered by :meth:`reset_async` to finish and returns the results.
 
         :param timeout: Number of seconds before the call to ``reset_wait`` times out. If `None`, the call to
@@ -247,7 +247,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         :type timeout: int | float | None, optional
 
         :return: Tuple of observations and infos
-        :rtype: Tuple[Dict[str, NumpyObsType], Dict[str, Any]]
+        :rtype: tuple[dict[str, NumpyObsType], dict[str, Any]]
         """
         self._assert_is_running()
         if self._state != AsyncState.WAITING_RESET:
@@ -277,7 +277,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             infos,
         )
 
-    def step_async(self, actions: List[List[ActionType]]) -> None:
+    def step_async(self, actions: list[list[ActionType]]) -> None:
         """
         Tell all the environments to start taking a step with the given actions.
         Call step_wait() to get the results of the step.
@@ -305,7 +305,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         :type timeout: int | float | None, optional
 
         :return: Tuple of observations, rewards, dones, and infos
-        :rtype: Tuple[Dict[str, NumpyObsType], Dict[str, np.ndarray], Dict[str, np.ndarray], Dict[str, Any]]
+        :rtype: tuple[dict[str, NumpyObsType], dict[str, np.ndarray], dict[str, np.ndarray], dict[str, Any]]
         """
 
         self._assert_is_running()
@@ -521,7 +521,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
                 return False
         return True
 
-    def _raise_if_errors(self, successes: List[bool]) -> None:
+    def _raise_if_errors(self, successes: list[bool]) -> None:
         if all(successes):
             return
 
@@ -550,8 +550,8 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             )
 
     def _add_info(
-        self, vector_infos: Dict[str, Any], env_info: Dict[str, Any], env_num: int
-    ) -> Dict[str, Any]:
+        self, vector_infos: dict[str, Any], env_info: dict[str, Any], env_num: int
+    ) -> dict[str, Any]:
         """
         Compile a vectorized information dictionary
         """
@@ -617,17 +617,17 @@ class Observations:
     :param shared_memory: A RawArray that all envs write observations to.
     :type shared_memory: multiprocessing.RawArray
     :param obs_spaces: Dictionary of gymnasium observation spaces
-    :type obs_spaces: Dict[str, gymnasiums.spaces.Space]
+    :type obs_spaces: dict[str, gymnasiums.spaces.Space]
     :param num_envs: Number of environments
     :type num_envs: int
     """
 
-    obs_view: Dict[str, NumpyObsType]
+    obs_view: dict[str, NumpyObsType]
 
     def __init__(
         self,
-        shared_memory: Dict[str, SharedMemoryType],
-        obs_spaces: Dict[str, spaces.Space],
+        shared_memory: dict[str, SharedMemoryType],
+        obs_spaces: dict[str, spaces.Space],
         num_envs: int,
     ):
         self.num_envs = num_envs
@@ -715,15 +715,15 @@ def _create_memory_array(
 
 
 def create_shared_memory(
-    num_envs: int, obs_spaces: Dict[str, spaces.Space], context: Any
-) -> Dict[str, RawArray]:
+    num_envs: int, obs_spaces: dict[str, spaces.Space], context: Any
+) -> dict[str, RawArray]:
     """
     Create shared memory for multi-agent observations.
 
     :param num_envs: Number of environments
     :type num_envs: int
     :param obs_spaces: Dictionary of gymnasium observation spaces
-    :type obs_spaces: Dict[str, gymnasiums.spaces.Space]
+    :type obs_spaces: dict[str, gymnasiums.spaces.Space]
     :param context: Multiprocessing context
     :type context: Any
     """
@@ -749,7 +749,7 @@ def create_shared_memory(
 def get_placeholder_value(
     agent: str,
     transition_name: str,
-    obs_spaces: Optional[Dict[str, spaces.Space]] = None,
+    obs_spaces: Optional[dict[str, spaces.Space]] = None,
 ) -> Any:
     """Used to obtain a placeholder value to return for associated experience when an
     agent is killed or is inactive for the current step.
@@ -759,7 +759,7 @@ def get_placeholder_value(
     :param transition_name: Name of the transition
     :type transition_name: str
     :param obs_spaces: Observation spaces
-    :type obs_spaces: Dict[str, gymnasium.spaces.Space]
+    :type obs_spaces: dict[str, gymnasium.spaces.Space]
 
     :return: Placeholder value
     :rtype: Any
@@ -790,21 +790,21 @@ def get_placeholder_value(
 
 
 def process_transition(
-    transitions: Tuple[Dict[str, NumpyObsType], ...],
-    obs_spaces: Dict[str, spaces.Space],
-    transition_names: List[str],
-    agents: List[str],
-) -> List[Dict[str, NumpyObsType]]:
+    transitions: tuple[dict[str, NumpyObsType], ...],
+    obs_spaces: dict[str, spaces.Space],
+    transition_names: list[str],
+    agents: list[str],
+) -> list[dict[str, NumpyObsType]]:
     """Process transition, adds in placeholder values for killed agents.
 
     :param transitions: Tuple of environment transition
-    :type transitions: Tuple[Dict[str, NumpyObsType], ...]
+    :type transitions: tuple[dict[str, NumpyObsType], ...]
     :param obs_spaces: Observation spaces
-    :type obs_spaces: Dict[str, gymnasium.spaces.Space]
+    :type obs_spaces: dict[str, gymnasium.spaces.Space]
     :param transition_names: Names associated to transitions
-    :type transition_names: List[str]
+    :type transition_names: list[str]
     :param agents: List of agent names
-    :type agents: List[str]
+    :type agents: list[str]
     """
     transition_list = []
     for transition, name in zip(list(transitions), transition_names):
@@ -848,20 +848,20 @@ def write_vector_observation(
 
 def write_to_shared_memory(
     index: int,
-    observation: Dict[str, NumpyObsType],
-    shared_memory: Dict[str, RawArray],
-    obs_space: Dict[str, GymSpaceType],
+    observation: dict[str, NumpyObsType],
+    shared_memory: dict[str, RawArray],
+    obs_space: dict[str, GymSpaceType],
 ) -> None:
     """Set the observation for a given environment. Handles Dict and Tuple spaces.
 
     :param index: Environment index
     :type index: int
     :param observation: Observation from env.step or env.reset
-    :type observation: Dict[str, np.ndarray]
+    :type observation: dict[str, np.ndarray]
     :param shared_memory: Shared memory
-    :type shared_memory: Dict[str, mp.Array | Tuple[mp.Array, ...] | Dict[str, mp.Array]]
+    :type shared_memory: dict[str, mp.Array | tuple[mp.Array, ...] | dict[str, mp.Array]]
     :param obs_space: Observation space dictionary
-    :type obs_space: Dict[str, gymnasium.spaces.Space]
+    :type obs_space: dict[str, gymnasium.spaces.Space]
     """
     for agent in shared_memory.keys():
         agent_space = obs_space[agent]
@@ -886,9 +886,9 @@ def _async_worker(
     env_fn: Callable[[], ParallelEnv],
     pipe: Connection,
     parent_pipe: Connection,
-    shared_memory: Dict[str, RawArray],
+    shared_memory: dict[str, RawArray],
     error_queue: mp.Queue,
-    agents: List[str],
+    agents: list[str],
 ) -> None:
     """
     Worker function to run the environment in a subprocess.
@@ -902,15 +902,15 @@ def _async_worker(
     :param parent_pipe: Parent pipe object
     :type parent_pipe: Connection
     :param shared_memory: List of shared memories.
-    :type shared_memory: List[multiprocessing.Array]
+    :type shared_memory: list[multiprocessing.Array]
     :param error_queue: Queue object for collecting subprocess errors to communicate back to the main process
     :type error_queue: mp.Queue
     :param observation_shapes: Shapes of observations
-    :type observation_shapes: Dict[str, Tuple[int]]
+    :type observation_shapes: dict[str, tuple[int]]
     :param observation_widths: Flattened observation widths
-    :type observation_widths: Dict[str, int]
+    :type observation_widths: dict[str, int]
     :param observation_dtypes: Observation dtypes
-    :type observation_dtypes: Dict[str, np.dtype]
+    :type observation_dtypes: dict[str, np.dtype]
     :param agents: Agent names
     :type agents: str
 

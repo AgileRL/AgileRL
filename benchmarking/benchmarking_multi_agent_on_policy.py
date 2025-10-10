@@ -14,6 +14,7 @@ from agilerl.utils.utils import (
     create_population,
     make_multi_agent_vect_envs,
     observation_space_channels_to_first,
+    suppress_verbose_logging,
 )
 
 # !Note: If you are running this demo without having installed agilerl,
@@ -26,6 +27,7 @@ from agilerl.utils.utils import (
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env_logger.EnvLogger.suppress_output()
+    suppress_verbose_logging()
 
     print("============ AgileRL Multi-agent benchmarking ============")
 

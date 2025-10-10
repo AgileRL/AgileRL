@@ -1,5 +1,4 @@
 import copy
-from typing import Tuple
 
 import gymnasium
 import numpy as np
@@ -20,7 +19,7 @@ from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import assert_not_equal_state_dict, assert_state_dicts_equal
 
 
-def get_batch_states(observation_space, num_steps) -> Tuple[torch.Tensor, torch.Tensor]:
+def get_batch_states(observation_space, num_steps) -> tuple[torch.Tensor, torch.Tensor]:
     if isinstance(observation_space, spaces.Discrete):
         states = torch.randint(0, observation_space.n, (num_steps,)).float()
         next_states = torch.randint(0, observation_space.n, (1,)).float()

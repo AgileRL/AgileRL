@@ -2,7 +2,7 @@ import copy
 import warnings
 from collections import OrderedDict
 from dataclasses import asdict
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 import torch
@@ -40,11 +40,11 @@ class MATD3(MultiAgentRLAlgorithm):
     Paper: https://arxiv.org/abs/1910.01465
 
     :param observation_spaces: Observation space for each agent
-    :type observation_spaces: Union[List[spaces.Space], spaces.Dict]
+    :type observation_spaces: Union[list[spaces.Space], spaces.Dict]
     :param action_spaces: Action space for each agent
-    :type action_spaces: Union[List[spaces.Space], spaces.Dict]
+    :type action_spaces: Union[list[spaces.Space], spaces.Dict]
     :param agent_ids: Agent ID for each agent
-    :type agent_ids: Optional[List[str]], optional
+    :type agent_ids: Optional[list[str]], optional
     :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
     :type O_U_noise: bool, optional
     :param expl_noise: Scale for Ornstein Uhlenbeck action noise, or standard deviation for Gaussian exploration noise
@@ -64,7 +64,7 @@ class MATD3(MultiAgentRLAlgorithm):
     :param policy_freq: Policy update frequency, defaults to 2
     :type policy_freq: int, optional
     :param net_config: Network configuration, defaults to None
-    :type net_config: Optional[Dict[str, Any]], optional
+    :type net_config: Optional[dict[str, Any]], optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
     :param lr_actor: Learning rate for actor optimizer, defaults to 0.001
@@ -84,7 +84,7 @@ class MATD3(MultiAgentRLAlgorithm):
     :param actor_networks: List of custom actor networks, defaults to None
     :type actor_networks: Optional[ModuleDict], optional
     :param critic_networks: List containing two lists of custom critic networks, defaults to None
-    :type critic_networks: Optional[List[ModuleDict]], optional
+    :type critic_networks: Optional[list[ModuleDict]], optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -95,7 +95,7 @@ class MATD3(MultiAgentRLAlgorithm):
     :type wrap: bool, optional
     """
 
-    possible_action_spaces: Dict[str, Union[spaces.Box, spaces.Discrete]]
+    possible_action_spaces: dict[str, Union[spaces.Box, spaces.Discrete]]
 
     actors: MultiAgentModule[DeterministicActor]
     actor_targets: MultiAgentModule[DeterministicActor]
@@ -106,9 +106,9 @@ class MATD3(MultiAgentRLAlgorithm):
 
     def __init__(
         self,
-        observation_spaces: Union[List[spaces.Space], spaces.Dict],
-        action_spaces: Union[List[spaces.Space], spaces.Dict],
-        agent_ids: Optional[List[str]] = None,
+        observation_spaces: Union[list[spaces.Space], spaces.Dict],
+        action_spaces: Union[list[spaces.Space], spaces.Dict],
+        agent_ids: Optional[list[str]] = None,
         O_U_noise: bool = True,
         expl_noise: float = 0.1,
         vect_noise_dim: int = 1,
@@ -118,7 +118,7 @@ class MATD3(MultiAgentRLAlgorithm):
         index: int = 0,
         hp_config: Optional[HyperparameterConfig] = None,
         policy_freq: int = 2,
-        net_config: Optional[Dict[str, Any]] = None,
+        net_config: Optional[dict[str, Any]] = None,
         batch_size: int = 64,
         lr_actor: float = 0.001,
         lr_critic: float = 0.01,
@@ -128,7 +128,7 @@ class MATD3(MultiAgentRLAlgorithm):
         normalize_images: bool = True,
         mut: Optional[str] = None,
         actor_networks: Optional[ModuleDict] = None,
-        critic_networks: Optional[List[ModuleDict]] = None,
+        critic_networks: Optional[list[ModuleDict]] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         torch_compiler: Optional[str] = None,
@@ -448,14 +448,14 @@ class MATD3(MultiAgentRLAlgorithm):
 
     def process_infos(
         self, infos: Optional[InfosDict] = None
-    ) -> Tuple[ArrayDict, ArrayDict, ArrayDict]:
+    ) -> tuple[ArrayDict, ArrayDict, ArrayDict]:
         """
         Process the information, extract env_defined_actions, action_masks and agent_masks
 
         :param infos: Info dict
-        :type infos: Dict[str, Dict[...]]
+        :type infos: dict[str, dict[...]]
         :return: Action masks, env defined actions, agent masks
-        :rtype: Tuple[ArrayDict, ArrayDict, ArrayDict]
+        :rtype: tuple[ArrayDict, ArrayDict, ArrayDict]
         """
         if infos is None:
             infos = {agent: {} for agent in self.agent_ids}
@@ -465,19 +465,19 @@ class MATD3(MultiAgentRLAlgorithm):
         return action_masks, env_defined_actions, agent_masks
 
     def get_action(
-        self, obs: Dict[str, ObservationType], infos: Optional[InfosDict] = None
-    ) -> Tuple[ArrayDict, ArrayDict]:
+        self, obs: dict[str, ObservationType], infos: Optional[InfosDict] = None
+    ) -> tuple[ArrayDict, ArrayDict]:
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
 
         :param obs: Environment observations: {'agent_0': state_dim_0, ..., 'agent_n': state_dim_n}
-        :type obs: Dict[str, numpy.Array]
+        :type obs: dict[str, numpy.Array]
         :param infos: Information dictionary from environment, defaults to None
-        :type infos: Dict[str, Dict[...]], optional
+        :type infos: dict[str, dict[...]], optional
 
         :return: Processed actions for each agent, raw actions for each agent
-        :rtype: Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]
+        :rtype: tuple[dict[str, np.ndarray], dict[str, np.ndarray]]
         """
         assert not key_in_nested_dict(
             obs, "action_mask"
@@ -488,7 +488,7 @@ class MATD3(MultiAgentRLAlgorithm):
         # Preprocess observations
         preprocessed_states = self.preprocess_observation(obs)
 
-        action_dict: Dict[str, np.ndarray] = {}
+        action_dict: dict[str, np.ndarray] = {}
         for agent_id, obs in preprocessed_states.items():
             actor = self.actors[agent_id]
             actor.eval()
@@ -593,25 +593,25 @@ class MATD3(MultiAgentRLAlgorithm):
             noise = self.sample_gaussian[agent_id]
         return noise
 
-    def reset_action_noise(self, indices: List[int]) -> None:
+    def reset_action_noise(self, indices: list[int]) -> None:
         """Reset action noise.
 
         :param indices: List of indices to reset noise for
-        :type indices: List[int]
+        :type indices: list[int]
         """
         for agent_id in self.agent_ids:
             for idx in indices:
                 self.current_noise[agent_id][idx, :] = 0
 
-    def learn(self, experiences: Tuple[StandardTensorDict, ...]) -> Dict[str, float]:
+    def learn(self, experiences: tuple[StandardTensorDict, ...]) -> dict[str, float]:
         """Updates agent network parameters to learn from experiences.
 
         :param experience: Tuple of dictionaries containing batched states, actions,
             rewards, next_states, dones in that order for each individual agent.
-        :type experience: Tuple[Dict[str, torch.Tensor]]
+        :type experience: tuple[dict[str, torch.Tensor]]
 
         :return: Losses for each agent
-        :rtype: Dict[str, float]
+        :rtype: dict[str, float]
         """
         states, actions, rewards, next_states, dones = experiences
 
@@ -676,7 +676,7 @@ class MATD3(MultiAgentRLAlgorithm):
         actions: StandardTensorDict,
         rewards: StandardTensorDict,
         dones: StandardTensorDict,
-    ) -> Tuple[Optional[float], float]:
+    ) -> tuple[Optional[float], float]:
         """
         Inner call to each agent for the learning/algo training steps, up until the soft updates.
         Applies all forward/backward props.
@@ -698,7 +698,7 @@ class MATD3(MultiAgentRLAlgorithm):
         :type dones: dict[str, torch.Tensor]
 
         :return: Tuple containing actor loss (if applicable) and critic loss
-        :rtype: Tuple[Optional[float], float]
+        :rtype: tuple[Optional[float], float]
         """
         actor = self.actors[agent_id]
         critic_1 = self.critics_1[agent_id]

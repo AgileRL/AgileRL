@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import torch
 import torch.nn as nn
@@ -17,7 +17,7 @@ class EvolvableResNet(EvolvableModule):
     Paper: https://arxiv.org/abs/1512.03385
 
     :param input_shape: Input shape of the neural network
-    :type input_shape: List[int]
+    :type input_shape: list[int]
     :param num_outputs: Output layer dimension
     :type num_outputs: int
     :param channel_size: A list of integers representing the number of channels in each convolutional layer
@@ -50,7 +50,7 @@ class EvolvableResNet(EvolvableModule):
 
     def __init__(
         self,
-        input_shape: List[int],
+        input_shape: list[int],
         num_outputs: int,
         channel_size: int,
         kernel_size: int,
@@ -98,7 +98,7 @@ class EvolvableResNet(EvolvableModule):
         )
 
     @property
-    def net_config(self) -> Dict[str, Any]:
+    def net_config(self) -> dict[str, Any]:
         """Returns model configuration in dictionary."""
         net_config = self.init_dict.copy()
         for attr in ["num_inputs", "num_outputs", "device", "name"]:
@@ -119,7 +119,7 @@ class EvolvableResNet(EvolvableModule):
 
     def create_resnet(
         self,
-        input_shape: List[int],
+        input_shape: list[int],
         channel_size: int,
         kernel_size: int,
         stride_size: int,
@@ -132,11 +132,11 @@ class EvolvableResNet(EvolvableModule):
         :param in_channels: The number of input channels.
         :type in_channels: int
         :param channel_size: A list of integers representing the number of channels in each convolutional layer.
-        :type channel_size: List[int]
+        :type channel_size: list[int]
         :param kernel_size: A list of integers representing the kernel size of each convolutional layer.
-        :type kernel_size: List[int]
+        :type kernel_size: list[int]
         :param stride_size: A list of integers representing the stride size of each convolutional layer.
-        :type stride_size: List[int]
+        :type stride_size: list[int]
         :param num_blocks: The number of residual blocks in the CNN.
         :type num_blocks: int
         :param scale_factor: The scale factor for the CNN.
@@ -215,13 +215,13 @@ class EvolvableResNet(EvolvableModule):
     def add_channel(
         self,
         numb_new_channels: Optional[int] = None,
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         """Remove channel from hidden layer of convolutional neural network.
 
         :param numb_new_channels: Number of channels to add to hidden layer, defaults to None
         :type numb_new_channels: int, optional
         :return: Dictionary containing the hidden layer and number of new channels
-        :rtype: Dict[str, Union[int, None]]
+        :rtype: dict[str, Union[int, None]]
         """
         if numb_new_channels is None:
             numb_new_channels = self.rng.choice([8, 16, 32])
@@ -236,13 +236,13 @@ class EvolvableResNet(EvolvableModule):
     def remove_channel(
         self,
         numb_new_channels: Optional[int] = None,
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         """Remove channel from hidden layer of convolutional neural network.
 
         :param numb_new_channels: Number of channels to add to hidden layer, defaults to None
         :type numb_new_channels: int, optional
         :return: Dictionary containing the hidden layer and number of new channels
-        :rtype: Dict[str, Union[int, None]]
+        :rtype: dict[str, Union[int, None]]
         """
         if numb_new_channels is None:
             numb_new_channels = self.rng.choice([8, 16, 32])

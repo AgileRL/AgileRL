@@ -1,15 +1,15 @@
 import time
 import warnings
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import gymnasium as gym
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from tensordict import TensorDict
 from torch.utils.data import DataLoader
 
+import wandb
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.components.data import ReplayDataset
 from agilerl.components.replay_buffer import ReplayBuffer
@@ -24,8 +24,8 @@ from agilerl.utils.utils import (
     tournament_selection_and_mutation,
 )
 
-InitDictType = Optional[Dict[str, Any]]
-PopulationType = List[RLAlgorithm]
+InitDictType = Optional[dict[str, Any]]
+PopulationType = list[RLAlgorithm]
 
 
 def train_bandits(
@@ -54,7 +54,7 @@ def train_bandits(
     verbose: bool = True,
     accelerator: Optional[Accelerator] = None,
     wandb_api_key: Optional[str] = None,
-) -> Tuple[PopulationType, List[List[float]]]:
+) -> tuple[PopulationType, list[list[float]]]:
     """The general bandit training function. Returns trained population of agents
     and their fitnesses.
 

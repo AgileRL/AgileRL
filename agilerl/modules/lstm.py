@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Optional
 
 import torch
 import torch.nn as nn
@@ -91,7 +91,7 @@ class EvolvableLSTM(EvolvableModule):
         self.model = self.create_lstm()
 
     @property
-    def hidden_state_architecture(self) -> Dict[str, Tuple[int, ...]]:
+    def hidden_state_architecture(self) -> dict[str, tuple[int, ...]]:
         """Returns the hidden state architecture."""
         # For LSTM, hidden state and cell state have shape (num_layers * num_directions, batch_size, hidden_size)
         # Assuming unidirectional LSTM (num_directions=1) !TODO: SHOULD WE HAVE A DIRECTIONAL LSTM IN THE FUTURE?
@@ -130,7 +130,7 @@ class EvolvableLSTM(EvolvableModule):
         return model_dict
 
     @property
-    def net_config(self) -> Dict[str, Any]:
+    def net_config(self) -> dict[str, Any]:
         """Returns model configuration in dictionary format."""
         net_config = self.init_dict.copy()
         for attr in ["input_size", "num_outputs", "device", "name"]:
@@ -164,16 +164,16 @@ class EvolvableLSTM(EvolvableModule):
     def forward(
         self,
         x: ArrayOrTensor,
-        hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
-    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        hidden_state: Optional[dict[str, ArrayOrTensor]] = None,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Forward pass of the network.
 
         :param x: Input tensor
         :type x: ArrayOrTensor
         :param hidden_state: Dict containing hidden and cell states, defaults to None
-        :type hidden_state: Optional[Dict[str, torch.Tensor]]
+        :type hidden_state: Optional[dict[str, torch.Tensor]]
         :return: Output tensor and next hidden state
-        :rtype: Tuple[torch.Tensor, Dict[str, torch.Tensor]]
+        :rtype: tuple[torch.Tensor, dict[str, torch.Tensor]]
         """
         if not isinstance(x, torch.Tensor):
             x = torch.tensor(x, dtype=torch.float32, device=self.device)
@@ -248,13 +248,13 @@ class EvolvableLSTM(EvolvableModule):
             return self.add_node()
 
     @mutation(MutationType.NODE)
-    def add_node(self, numb_new_nodes: Optional[int] = None) -> Dict[str, int]:
+    def add_node(self, numb_new_nodes: Optional[int] = None) -> dict[str, int]:
         """Increases hidden size of the LSTM.
 
         :param numb_new_nodes: Number of nodes to add to hidden size, defaults to None
         :type numb_new_nodes: int, optional
         :return: Dictionary with number of new nodes
-        :rtype: Dict[str, int]
+        :rtype: dict[str, int]
         """
         if numb_new_nodes is None:
             numb_new_nodes = self.rng.choice([16, 32, 64])
@@ -267,13 +267,13 @@ class EvolvableLSTM(EvolvableModule):
         return {"numb_new_nodes": numb_new_nodes}
 
     @mutation(MutationType.NODE)
-    def remove_node(self, numb_new_nodes: Optional[int] = None) -> Dict[str, int]:
+    def remove_node(self, numb_new_nodes: Optional[int] = None) -> dict[str, int]:
         """Decreases hidden size of the LSTM.
 
         :param numb_new_nodes: Number of nodes to remove from hidden size, defaults to None
         :type numb_new_nodes: int, optional
         :return: Dictionary with number of new nodes
-        :rtype: Dict[str, int]
+        :rtype: dict[str, int]
         """
         if numb_new_nodes is None:
             numb_new_nodes = self.rng.choice([16, 32, 64])

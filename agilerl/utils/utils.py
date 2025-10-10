@@ -1,19 +1,20 @@
+import logging
 import os
 import warnings
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Optional, Union
 
 import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import tqdm
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl.algorithms import (
     CQN,
     DDPG,
@@ -153,6 +154,26 @@ def observation_space_channels_to_first(
     return observation_space
 
 
+def suppress_verbose_logging() -> None:
+    """Suppress verbose logging from DeepSpeed, Accelerate, and related libraries."""
+    # Suppress DeepSpeed logging
+    logging.getLogger("deepspeed").setLevel(logging.WARNING)
+
+    # Suppress Accelerate logging
+    logging.getLogger("accelerate").setLevel(logging.WARNING)
+
+    # Suppress specific DeepSpeed components
+    logging.getLogger("deepspeed.runtime.engine").setLevel(logging.WARNING)
+    logging.getLogger("deepspeed.runtime.zero").setLevel(logging.WARNING)
+    logging.getLogger("deepspeed.checkpoint").setLevel(logging.WARNING)
+
+    # Suppress JAX logging (if used)
+    logging.getLogger("jax").setLevel(logging.WARNING)
+
+    # Set root logger to INFO to avoid suppressing important messages
+    logging.getLogger().setLevel(logging.INFO)
+
+
 def default_progress_bar(
     max_steps: int,
     accelerator: Optional[Accelerator] = None,
@@ -193,19 +214,19 @@ def create_population(
     algo: str,
     observation_space: GymSpaceType,
     action_space: GymSpaceType,
-    net_config: Optional[Dict[str, Any]],
-    INIT_HP: Dict[str, Any],
+    net_config: Optional[dict[str, Any]],
+    INIT_HP: dict[str, Any],
     hp_config: Optional[HyperparameterConfig] = None,
     actor_network: Optional[EvolvableModule] = None,
     critic_network: Optional[EvolvableModule] = None,
     agent_wrapper: Optional[Callable] = None,
-    wrapper_kwargs: Optional[Dict[str, Any]] = None,
+    wrapper_kwargs: Optional[dict[str, Any]] = None,
     population_size: int = 1,
     num_envs: int = 1,
     device: str = "cpu",
     accelerator: Optional[Any] = None,
     torch_compiler: Optional[Any] = None,
-    algo_kwargs: Optional[Dict[str, Any]] = {},
+    algo_kwargs: Optional[dict[str, Any]] = {},
 ) -> PopulationType:
     """Returns population of identical agents.
 
@@ -737,12 +758,12 @@ def tournament_selection_and_mutation(
 def init_wandb(
     algo: str,
     env_name: str,
-    init_hyperparams: Optional[Dict[str, Any]] = None,
-    mutation_hyperparams: Optional[Dict[str, Any]] = None,
+    init_hyperparams: Optional[dict[str, Any]] = None,
+    mutation_hyperparams: Optional[dict[str, Any]] = None,
     wandb_api_key: Optional[str] = None,
     accelerator: Optional[Accelerator] = None,
     project: str = "AgileRL",
-    addl_args: Optional[Dict[str, Any]] = None,
+    addl_args: Optional[dict[str, Any]] = None,
 ) -> None:
     """Initializes wandb for logging hyperparameters and run metadata.
 
@@ -799,7 +820,7 @@ def calculate_vectorized_scores(
     terminations: np.ndarray,
     include_unterminated: bool = False,
     only_first_episode: bool = True,
-) -> List[float]:
+) -> list[float]:
     """
     Calculate the vectorized scores for episodes based on rewards and terminations.
 

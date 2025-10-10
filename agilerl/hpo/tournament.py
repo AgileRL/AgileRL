@@ -1,11 +1,9 @@
-from typing import List, Tuple
-
 import numpy as np
 from accelerate.utils import broadcast_object_list
 
 from agilerl.algorithms.core.base import EvolvableAlgorithm
 
-PopulationType = List[EvolvableAlgorithm]
+PopulationType = list[EvolvableAlgorithm]
 
 
 class TournamentSelection:
@@ -40,7 +38,7 @@ class TournamentSelection:
         self.eval_loop = eval_loop
         self.language_model = None
 
-    def _tournament(self, fitness_values: List[float]) -> int:
+    def _tournament(self, fitness_values: list[float]) -> int:
         """
         Perform tournament selection given a list of fitness values.
 
@@ -56,7 +54,7 @@ class TournamentSelection:
 
     def _elitism(
         self, population: PopulationType
-    ) -> Tuple[EvolvableAlgorithm, np.ndarray, int]:
+    ) -> tuple[EvolvableAlgorithm, np.ndarray, int]:
         """
         Perform elitism selection given a population of agents.
 
@@ -74,7 +72,7 @@ class TournamentSelection:
 
     def select(
         self, population: PopulationType
-    ) -> Tuple[EvolvableAlgorithm, PopulationType]:
+    ) -> tuple[EvolvableAlgorithm, PopulationType]:
         """
         Select the best agent and new population of agents following tournament selection.
 
@@ -94,7 +92,7 @@ class TournamentSelection:
 
     def _select_standard_agents(
         self, population: PopulationType
-    ) -> Tuple[EvolvableAlgorithm, PopulationType]:
+    ) -> tuple[EvolvableAlgorithm, PopulationType]:
         """
         Returns best agent and new population of agents following tournament selection. Used for
         a population of :class:`EvolvableAlgorithm <agilerl.algorithms.core.RLAlgorithm>` or
@@ -124,7 +122,7 @@ class TournamentSelection:
 
     def _select_llm_agents(
         self, population: PopulationType
-    ) -> Tuple[EvolvableAlgorithm, PopulationType]:
+    ) -> tuple[EvolvableAlgorithm, PopulationType]:
         """
         Returns best agent and new population of agents following tournament selection. Used for
         a population of :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` agents.

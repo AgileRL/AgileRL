@@ -5,14 +5,10 @@ from functools import wraps
 from typing import (
     Any,
     Callable,
-    Dict,
     Generic,
     Iterable,
     Iterator,
-    List,
     Optional,
-    Tuple,
-    Type,
     TypeVar,
     Union,
 )
@@ -41,7 +37,7 @@ def mutation(
     :rtype: Callable[[Callable], MutationMethod]
     """
 
-    def decorator(func: Callable[[Any], Optional[Dict[str, Any]]]) -> MutationMethod:
+    def decorator(func: Callable[[Any], Optional[dict[str, Any]]]) -> MutationMethod:
         @wraps(func)
         def wrapper(self, *args, **kwargs):
             return func(self, *args, **kwargs)
@@ -184,7 +180,7 @@ def _mutation_wrapper(
 
 def _get_filtered_methods(
     module: SelfEvolvableModule, mut_type: MutationType
-) -> List[str]:
+) -> list[str]:
     """Gets the mutation methods of a given type for the module.
 
     :param module: The evolvable module.
@@ -192,7 +188,7 @@ def _get_filtered_methods(
     :param mut_type: The type of mutation method.
     :type mut_type: MutationType
     :return: The filtered mutation methods.
-    :rtype: List[str]
+    :rtype: list[str]
     """
     _fetch = (
         "layer_mutation_methods"
@@ -200,7 +196,7 @@ def _get_filtered_methods(
         else "node_mutation_methods"
     )
 
-    init_methods: List[str] = getattr(module, "_" + _fetch)
+    init_methods: list[str] = getattr(module, "_" + _fetch)
     _filtered = []
     for method in init_methods:
         if "." not in method:
@@ -231,7 +227,7 @@ class ModuleMeta(type):
     """
 
     def __call__(
-        cls: Type[SelfEvolvableModule], *args, **kwargs
+        cls: type[SelfEvolvableModule], *args, **kwargs
     ) -> SelfEvolvableModule:
         instance: SelfEvolvableModule = super().__call__(*args, **kwargs)
 
@@ -260,8 +256,8 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
     :type random_seed: Optional[int]
     """
 
-    _evolvable_modules: Dict[str, Optional["EvolvableModule"]]
-    _mutation_hooks: List[Callable]
+    _evolvable_modules: dict[str, Optional["EvolvableModule"]]
+    _mutation_hooks: list[Callable]
 
     def __init__(self, device: str, random_seed: Optional[int] = None) -> None:
         nn.Module.__init__(self)
@@ -278,23 +274,23 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         super().__setattr__("_mutation_hooks", [])
 
     @property
-    def init_dict(self) -> Dict[str, Any]:
+    def init_dict(self) -> dict[str, Any]:
         return self.get_init_dict()
 
     @property
-    def net_config(self) -> Dict[str, Any]:
+    def net_config(self) -> dict[str, Any]:
         return self.get_init_dict()
 
     @property
-    def mutation_methods(self) -> List[str]:
+    def mutation_methods(self) -> list[str]:
         return self.layer_mutation_methods + self.node_mutation_methods
 
     @property
-    def layer_mutation_methods(self) -> List[str]:
+    def layer_mutation_methods(self) -> list[str]:
         return _get_filtered_methods(self, MutationType.LAYER)
 
     @property
-    def node_mutation_methods(self) -> List[str]:
+    def node_mutation_methods(self) -> list[str]:
         return _get_filtered_methods(self, MutationType.NODE)
 
     @property
@@ -343,7 +339,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         method should be implemented in the nested modules and it is not required on the parent.
 
         :param kwargs: Keyword arguments to pass to the network constructor.
-        :type kwargs: Dict[str, Any]
+        :type kwargs: dict[str, Any]
         """
         if any("." not in method for method in self.mutation_methods):
             raise NotImplementedError(
@@ -360,11 +356,11 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         """Forward pass of the network."""
         return self.forward(*args, **kwargs)
 
-    def get_init_dict(self) -> Dict[str, Any]:
+    def get_init_dict(self) -> dict[str, Any]:
         """Get the dictionary of constructor arguments for the network.
 
         :return: The dictionary of constructor arguments.
-        :rtype: Dict[str, Any]
+        :rtype: dict[str, Any]
         """
         constructor_args = inspect.signature(self.__init__).parameters
 
@@ -515,7 +511,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         superclasses to find all mutation methods and add them to the `_layer_mutation_methods`
         and `_node_mutation_methods` lists."""
 
-        def _fetch_methods(cls: Type) -> List[str]:
+        def _fetch_methods(cls: type) -> list[str]:
             return [
                 method
                 for method in vars(cls).values()
@@ -523,7 +519,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
             ]
 
         # Check mutation methods in class
-        class_methods: List[MutationMethod] = _fetch_methods(self.__class__)
+        class_methods: list[MutationMethod] = _fetch_methods(self.__class__)
         layer_methods = []
         node_methods = []
         for method in class_methods:
@@ -538,7 +534,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
                 if base is EvolvableModule:
                     return
 
-                base_methods: List[MutationMethod] = _fetch_methods(base)
+                base_methods: list[MutationMethod] = _fetch_methods(base)
                 for method in base_methods:
                     if method._mutation_type == MutationType.LAYER:
                         layer_methods.append(method.__name__)
@@ -589,7 +585,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         for module in self.modules().values():
             module.disable_mutations(mut_type)
 
-    def modules(self) -> Dict[str, "EvolvableModule"]:
+    def modules(self) -> dict[str, "EvolvableModule"]:
         """Returns the nested evolvable modules in the network.
 
         .. warning:: This overrides the behavior of `nn.Module.modules()` and only returns
@@ -608,12 +604,12 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         """
         return super().modules()
 
-    def get_mutation_methods(self) -> Dict[str, MutationMethod]:
+    def get_mutation_methods(self) -> dict[str, MutationMethod]:
         """Get all mutation methods for the network as dictionary of method names to
         mutation methods.
 
         :return: A dictionary of mutation methods.
-        :rtype: Dict[str, MutationMethod]
+        :rtype: dict[str, MutationMethod]
         """
 
         def get_method_from_name(name: str) -> MutationMethod:
@@ -634,19 +630,19 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         :type remove: str
         """
 
-        def filter_methods(methods: List[str]) -> List[str]:
+        def filter_methods(methods: list[str]) -> list[str]:
             return [method for method in methods if remove not in method]
 
         self._layer_mutation_methods = filter_methods(self._layer_mutation_methods)
         self._node_mutation_methods = filter_methods(self._node_mutation_methods)
 
-    def get_mutation_probs(self, new_layer_prob: float) -> List[float]:
+    def get_mutation_probs(self, new_layer_prob: float) -> list[float]:
         """Get the mutation probabilities for each mutation method.
 
         :param new_layer_prob: The probability of selecting a layer mutation method.
         :type new_layer_prob: float
         return: A list of probabilities for each mutation method.
-        rtype: List[float]
+        rtype: list[float]
         """
         num_layer_fns = len(self.layer_mutation_methods)
         num_node_fns = len(self.node_mutation_methods)
@@ -771,7 +767,7 @@ class EvolvableWrapper(EvolvableModule):
         for method in getattr(module, _fetch):
             if method not in self.mutation_methods:
                 setattr(self, method, getattr(module, method))
-                current_methods: List[str] = getattr(self, f"_{_fetch}")
+                current_methods: list[str] = getattr(self, f"_{_fetch}")
                 current_methods.append(method)
                 setattr(self, f"_{_fetch}", current_methods)
             else:
@@ -786,13 +782,13 @@ class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleType]):
     mutation methods of nested evolvable modules.
 
     :param modules: The modules to add to the dictionary.
-    :type modules: Optional[Dict[str, EvolvableModule]]
+    :type modules: Optional[dict[str, EvolvableModule]]
     :param device: The device to use for the modules.
     :type device: str
     """
 
     def __init__(
-        self, modules: Optional[Dict[str, EvolvableModule]] = None, device: str = "cpu"
+        self, modules: Optional[dict[str, EvolvableModule]] = None, device: str = "cpu"
     ) -> None:
         super().__init__(device)
         if modules is not None:
@@ -800,7 +796,7 @@ class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleType]):
                 self.add_module(name, module)
 
     @property
-    def layer_mutation_methods(self) -> List[str]:
+    def layer_mutation_methods(self) -> list[str]:
         return [
             f"{name}.{method}"
             for name, module in self.modules().items()
@@ -808,7 +804,7 @@ class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleType]):
         ]
 
     @property
-    def node_mutation_methods(self) -> List[str]:
+    def node_mutation_methods(self) -> list[str]:
         return [
             f"{name}.{method}"
             for name, module in self.modules().items()
@@ -828,7 +824,7 @@ class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleType]):
     def values(self) -> Iterable[ModuleType]:
         return super().values()
 
-    def items(self) -> Iterable[Tuple[str, ModuleType]]:
+    def items(self) -> Iterable[tuple[str, ModuleType]]:
         return super().items()
 
     def change_activation(self, activation: str, output: bool) -> None:
@@ -851,7 +847,7 @@ class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleType]):
         for module in self.modules().values():
             module.filter_mutation_methods(remove)
 
-    def modules(self) -> Dict[str, EvolvableModule]:
+    def modules(self) -> dict[str, EvolvableModule]:
         """Returns the nested evolvable modules in the network.
 
         .. warning:: This overrides the behavior of `nn.Module.modules()` and only returns
@@ -870,11 +866,11 @@ class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleType]):
 
         return evo_modules
 
-    def get_mutation_methods(self) -> Dict[str, MutationMethod]:
+    def get_mutation_methods(self) -> dict[str, MutationMethod]:
         """Get all mutation methods for the network.
 
         :return: A dictionary of mutation methods.
-        :rtype: Dict[str, MutationMethod]
+        :rtype: dict[str, MutationMethod]
         """
 
         def get_method_from_name(name: str) -> MutationMethod:

@@ -1,13 +1,12 @@
 from datetime import datetime
-from typing import List
 
 import numpy as np
 import torch
-import wandb
 from gymnasium import spaces
 from tensordict import TensorDict
 from ucimlrepo import fetch_ucirepo
 
+import wandb
 from agilerl.algorithms import NeuralUCB
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
@@ -56,7 +55,7 @@ if __name__ == "__main__":
         low=features.values.min(), high=features.values.max()
     )
     action_space = spaces.Discrete(env.arms)
-    pop: List[NeuralUCB] = create_population(
+    pop: list[NeuralUCB] = create_population(
         algo="NeuralUCB",  # Algorithm
         observation_space=observation_space,  # State dimension
         action_space=action_space,  # Action dimension

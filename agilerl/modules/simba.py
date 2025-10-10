@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import torch
 
@@ -92,7 +92,7 @@ class EvolvableSimBa(EvolvableModule):
         )
 
     @property
-    def net_config(self) -> Dict[str, Any]:
+    def net_config(self) -> dict[str, Any]:
         """Returns model configuration in dictionary."""
         net_config = self.init_dict.copy()
         for attr in ["num_inputs", "num_outputs", "device", "name"]:
@@ -161,7 +161,7 @@ class EvolvableSimBa(EvolvableModule):
             return self.add_node()
 
     @mutation(MutationType.NODE)
-    def add_node(self, numb_new_nodes: Optional[int] = None) -> Dict[str, int]:
+    def add_node(self, numb_new_nodes: Optional[int] = None) -> dict[str, int]:
         """Adds nodes to residual blocks of the neural network.
 
         :param numb_new_nodes: Number of nodes to add, defaults to None
@@ -176,7 +176,7 @@ class EvolvableSimBa(EvolvableModule):
         return {"numb_new_nodes": numb_new_nodes}
 
     @mutation(MutationType.NODE)
-    def remove_node(self, numb_new_nodes: Optional[int] = None) -> Dict[str, int]:
+    def remove_node(self, numb_new_nodes: Optional[int] = None) -> dict[str, int]:
         """Removes nodes from hidden layer of neural network.
 
         :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None
