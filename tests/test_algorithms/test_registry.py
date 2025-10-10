@@ -808,8 +808,6 @@ class TestIntegration:
             layer_sizes=layer_sizes_param, dropout_rates=dropout_rates_param
         )
 
-        registry = MutationRegistry(hp_config=hp_config)
-
         # Test that we can sample and mutate numpy array hyperparameters
         for _ in range(5):
             param_name, param = hp_config.sample()
