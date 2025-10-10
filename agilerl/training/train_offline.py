@@ -4,10 +4,10 @@ from typing import Any, Optional
 
 import gymnasium as gym
 import numpy as np
+import wandb
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 
-import wandb
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.components.data import ReplayDataset, Transition
 from agilerl.components.replay_buffer import ReplayBuffer
