@@ -20,7 +20,7 @@ from accelerate.utils import DeepSpeedPlugin
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
-from peft import LoraConfig, PeftModel, get_peft_model
+from peft import LoraConfig, LoraModel, PeftModel, get_peft_model
 from torch.optim.lr_scheduler import SequentialLR
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.configuration_utils import PretrainedConfig
@@ -865,7 +865,7 @@ def test_grpo_save_load_checkpoint_vllm(
         new_grpo.load_checkpoint(tmpdir)
 
         assert isinstance(new_grpo.actor, DeepSpeedEngine)
-        assert isinstance(new_grpo.actor.base_model, PeftModel)
+        assert isinstance(new_grpo.actor.base_model, (PeftModel, LoraModel))
 
         for attr in EvolvableAlgorithm.inspect_attributes(grpo):
             if not attr.startswith("_") and not attr.startswith("__"):
