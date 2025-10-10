@@ -24,7 +24,7 @@ def create_model(pretrained_model_name_or_path):
     model = AutoModelForCausalLM.from_pretrained(
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
+        attn_implementation="sdpa",
         device_map="auto",
     )
 
