@@ -30,7 +30,6 @@ from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
-from deepspeed.runtime.engine import DeepSpeedEngine
 from gymnasium import spaces
 from numpy.typing import ArrayLike
 from peft import PeftModel, set_peft_model_state_dict
@@ -39,7 +38,6 @@ from tensordict import TensorDict
 from torch._dynamo import OptimizedModule
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import SequentialLR
-from vllm.distributed.parallel_state import destroy_model_parallel
 
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import (
