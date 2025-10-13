@@ -1,7 +1,7 @@
 import copy
 import math
 from collections import defaultdict
-from typing import Any, Callable, Optional, Tuple, Union
+from typing import Any, Callable, Optional, Union
 
 import numpy as np
 import torch
@@ -961,7 +961,7 @@ class ILQL(nn.Module):
         logit_top_p: Optional[float] = None,
         include_logits: bool = False,
         include_advantage: bool = True,
-    ) -> Tuple[torch.Tensor, Any]:
+    ) -> tuple[torch.Tensor, Any]:
         prepared_inputs = self.prepare_inputs(items)
         tokens = prepared_inputs["tokens"]
         is_state = (

@@ -1,5 +1,5 @@
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from accelerate import Accelerator
 
@@ -18,16 +18,16 @@ def convert_path(path: Optional[str]) -> Optional[str]:
     return os.path.join(os.path.dirname(os.path.realpath(__file__)), "../../", path)
 
 
-def add_system_configs(cfg: Dict[str, Any], accelerator: Accelerator) -> Dict[str, Any]:
+def add_system_configs(cfg: dict[str, Any], accelerator: Accelerator) -> dict[str, Any]:
     """Adds system configurations to the configuration dictionary.
 
     :param cfg: Configuration dictionary.
-    :type cfg: Dict[str, Any]
+    :type cfg: dict[str, Any]
     :param accelerator: Accelerator object.
     :type accelerator: Accelerator
 
     :return: Configuration dictionary with system configurations.
-    :rtype: Dict[str, Any]
+    :rtype: dict[str, Any]
     """
     cfg["system"] = {}
     cfg["system"]["device"] = str(accelerator.device)
@@ -36,7 +36,7 @@ def add_system_configs(cfg: Dict[str, Any], accelerator: Accelerator) -> Dict[st
     return cfg["system"]
 
 
-def to_bin(n: int, pad_to_size: Optional[int] = None) -> List[int]:
+def to_bin(n: int, pad_to_size: Optional[int] = None) -> list[int]:
     """Converts a number to a binary list.
 
     :param n: Number to convert.
@@ -45,7 +45,7 @@ def to_bin(n: int, pad_to_size: Optional[int] = None) -> List[int]:
     :type pad_to_size: Optional[int]
 
     :return: Binary list.
-    :rtype: List[int]
+    :rtype: list[int]
     """
     bins = to_bin(n // 2) + [n % 2] if n > 1 else [n]
     if pad_to_size is None:

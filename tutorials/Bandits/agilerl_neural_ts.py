@@ -3,8 +3,6 @@
 Authors: Nick (https://github.com/nicku-a)
 """
 
-from typing import List
-
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -65,7 +63,7 @@ if __name__ == "__main__":
     action_space = spaces.Discrete(action_dim)
 
     # Create population of agents
-    pop: List[NeuralTS] = create_population(
+    pop: list[NeuralTS] = create_population(
         algo="NeuralTS",  # Algorithm
         observation_space=observation_space,  # Observation space
         action_space=action_space,  # Action space

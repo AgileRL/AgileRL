@@ -1,8 +1,9 @@
 import inspect
 from dataclasses import dataclass, field
 from numbers import Number
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Callable, Optional, Union
 
+import numpy as np
 import torch
 from torch.optim import Optimizer
 
@@ -47,20 +48,20 @@ class OptimizerConfig:
     :param name: The name of the attribute where the optimizer is stored.
     :type name: str
     :param networks: The list of network attribute names that the optimizer will update.
-    :type networks: List[str]
+    :type networks: list[str]
     :param lr: The learning rate of the optimizer.
     :type lr: str
     :param optimizer_cls: The optimizer class to be used.
-    :type optimizer_cls: Type[Optimizer]
+    :type optimizer_cls: type[Optimizer]
     :param optimizer_kwargs: The keyword arguments to be passed to the optimizer.
-    :type optimizer_kwargs: Dict[str, Any]
+    :type optimizer_kwargs: dict[str, Any]
     """
 
     name: str
-    networks: Union[str, List[str]]
+    networks: Union[str, list[str]]
     lr: str
-    optimizer_cls: Union[Type[Optimizer], List[Type[Optimizer]]]
-    optimizer_kwargs: Union[Dict[str, Any], List[Dict[str, Any]]]
+    optimizer_cls: Union[type[Optimizer], list[type[Optimizer]]]
+    optimizer_kwargs: Union[dict[str, Any], list[dict[str, Any]]]
 
     def __post_init__(self):
         # Save optimizer_cls as string for serialization
@@ -74,7 +75,7 @@ class OptimizerConfig:
     def __eq__(self, other: "OptimizerConfig") -> bool:
         return self.name == other.name and self.networks == other.networks
 
-    def get_optimizer_cls(self) -> Union[Type[Optimizer], Dict[str, Type[Optimizer]]]:
+    def get_optimizer_cls(self) -> Union[type[Optimizer], dict[str, type[Optimizer]]]:
         """Get the optimizer object/s from the stored configuration.
 
         :return: The optimizer object/s from the stored configuration.
@@ -108,50 +109,81 @@ class RLParameter:
     training. The hyperparameter is defined by a range of values that it can take, and the
     shrink and grow factors that will be used to mutate the hyperparameter value.
 
-    :param min: The minimum value that the hyperparameter can take.
+    :param min: The minimum value that the hyperparameter can take. For numpy arrays, this will be broadcast.
     :type min: float
-    :param max: The maximum value that the hyperparameter can take.
+    :param max: The maximum value that the hyperparameter can take. For numpy arrays, this will be broadcast.
     :type max: float
     :param shrink_factor: The factor by which the hyperparameter will be shrunk during mutation. Default is 0.8.
     :type shrink_factor: float
     :param grow_factor: The factor by which the hyperparameter will be grown during mutation. Default is 1.2.
     :type grow_factor: float
     :param dtype: The data type of the hyperparameter. Default is float.
-    :type dtype: Union[Type[float], Type[int]]
+    :type dtype: Union[type[float], type[int], type[np.ndarray]]
     :param value: The current value of the hyperparameter. Default is None.
-    :type value: Optional[Number]
+    :type value: Optional[Union[Number, np.ndarray]]
     """
 
     min: float
     max: float
     shrink_factor: float = 0.8
     grow_factor: float = 1.2
-    dtype: Union[Type[float], Type[int]] = float
-    value: Optional[Number] = field(default=None, init=False)
+    dtype: Union[type[float], type[int], type[np.ndarray]] = float
+    value: Optional[Union[Number, np.ndarray]] = field(default=None, init=False)
 
-    def mutate(self) -> Number:
+    def mutate(self) -> Union[Number, np.ndarray]:
         """Mutate the hyperparameter value by either growing or shrinking it.
 
+        For scalar values (int/float), the mutation applies the grow/shrink factor uniformly.
+        For numpy arrays, the mutation is applied element-wise, with proper broadcasting
+        of min/max constraints and preservation of the original array's dtype.
+
         :return: The mutated hyperparameter value.
-        :rtype: Number
+        :rtype: Union[Number, np.ndarray]
         """
         assert self.value is not None, "Hyperparameter value is not set"
 
         # Equal probability of growing or shrinking
         if torch.rand(1).item() < 0.5:
-            if self.value * self.shrink_factor > self.min:
-                new_value = self.value * self.shrink_factor
+            # Shrinking
+            if isinstance(self.value, np.ndarray):
+                new_value = np.where(
+                    self.value * self.shrink_factor > self.min,
+                    self.value * self.shrink_factor,
+                    self.min,
+                )
             else:
-                new_value = self.min
+                if self.value * self.shrink_factor > self.min:
+                    new_value = self.value * self.shrink_factor
+                else:
+                    new_value = self.min
         else:
-            if self.value * self.grow_factor < self.max:
-                new_value = self.value * self.grow_factor
+            # Growing
+            if isinstance(self.value, np.ndarray):
+                new_value = np.where(
+                    self.value * self.grow_factor < self.max,
+                    self.value * self.grow_factor,
+                    self.max,
+                )
             else:
-                new_value = self.max
+                if self.value * self.grow_factor < self.max:
+                    new_value = self.value * self.grow_factor
+                else:
+                    new_value = self.max
 
-        new_value = min(max(new_value, self.min), self.max)
-        new_value = round(new_value) if self.dtype == int else new_value
-        self.value = self.dtype(new_value)
+        # Clip the new value to the min and max
+        if isinstance(new_value, np.ndarray):
+            new_value = np.clip(new_value, self.min, self.max)
+        else:
+            new_value = min(max(new_value, self.min), self.max)
+
+        # Cast the new value to the correct dtype
+        if isinstance(new_value, np.ndarray):
+            # Preserve the original array's dtype
+            new_value = new_value.astype(self.value.dtype)
+            self.value = new_value
+        else:
+            self.value = self.dtype(new_value)
+
         return self.value
 
 
@@ -160,7 +192,7 @@ class HyperparameterConfig:
     hyperparameter, we store the name of the attribute where the hyperparameter is
     stored, and the range of values that the hyperparameter can take."""
 
-    def __init__(self, **kwargs: Dict[str, RLParameter]):
+    def __init__(self, **kwargs: dict[str, RLParameter]):
         self.config = kwargs
         for key, value in kwargs.items():
             if not isinstance(value, RLParameter):
@@ -194,17 +226,17 @@ class HyperparameterConfig:
     def __getitem__(self, key: str) -> RLParameter:
         return self.config[key]
 
-    def names(self) -> List[str]:
+    def names(self) -> list[str]:
         return list(self.config.keys())
 
-    def items(self) -> Dict[str, Any]:
+    def items(self) -> dict[str, Any]:
         return self.config.items()
 
-    def sample(self) -> Tuple[str, RLParameter]:
+    def sample(self) -> tuple[str, RLParameter]:
         """Sample a hyperparameter from the configuration.
 
         :return: The name of the hyperparameter and its configuration.
-        :rtype: Tuple[str, RLParameter]
+        :rtype: tuple[str, RLParameter]
         """
         key = torch.randperm(len(self.config))[0]
         return list(self.config.keys())[key], list(self.config.values())[key]
@@ -275,18 +307,18 @@ class NetworkGroup:
         return current_frame.f_back.f_back.f_back.f_locals["self"]
 
     def _infer_attribute_names(
-        self, container: object, objects: Union[object, List[object]]
-    ) -> List[str]:
+        self, container: object, objects: Union[object, list[object]]
+    ) -> list[str]:
         """
         Infer attribute names of the networks being optimized.
 
         :param container: The container object to inspect.
         :type container: object
         :param objects: The objects to match.
-        :type objects: Union[object, List[object]]
+        :type objects: Union[object, list[object]]
 
         :return: List of attribute names for the networks
-        :rtype: List[str]
+        :rtype: list[str]
         """
 
         def _match_condition(attr_value: Any) -> bool:
@@ -304,7 +336,7 @@ class NetworkGroup:
 
 def make_network_group(
     eval_network: str,
-    shared_networks: Optional[Union[str, List[str]]],
+    shared_networks: Optional[Union[str, list[str]]],
     policy: bool = False,
 ) -> NetworkGroup:
     """Make a network group from a given eval network and, optionally, some network/s that
@@ -313,7 +345,7 @@ def make_network_group(
     :param eval_network: The evaluation network.
     :type eval_network: str
     :param shared_networks: The list of shared networks.
-    :type shared_networks: Optional[Union[str, List[str]]]
+    :type shared_networks: Optional[Union[str, list[str]]]
     :param policy: Whether the network is a policy (e.g. the network used to get the actions
     of the agent). There must be one network group in an algorithm which sets this to True.
     Default is False.
@@ -345,9 +377,9 @@ class MutationRegistry:
     hp_config: Optional[HyperparameterConfig] = field(default=None)
 
     def __post_init__(self):
-        self.groups: List[NetworkGroup] = []
-        self.optimizers: List[OptimizerConfig] = []
-        self.hooks: List[Callable] = []
+        self.groups: list[NetworkGroup] = []
+        self.optimizers: list[OptimizerConfig] = []
+        self.hooks: list[Callable] = []
 
         if self.hp_config is None:
             self.hp_config = HyperparameterConfig()
@@ -380,11 +412,11 @@ class MutationRegistry:
         return self.groups == other.groups and self.optimizers == other.optimizers
 
     @property
-    def optimizer_networks(self) -> Dict[str, List[str]]:
+    def optimizer_networks(self) -> dict[str, list[str]]:
         """Get a dictionary of optimizer names and the network attribute names that they update.
 
         :return: A dictionary of optimizer names and the network attribute names that they update.
-        :rtype: Dict[str, List[str]]
+        :rtype: dict[str, list[str]]
         """
         return {config.name: config.networks for config in self.optimizers}
 
@@ -402,11 +434,11 @@ class MutationRegistry:
                 return group.eval_network if not return_group else group
         return
 
-    def all_registered(self) -> List[str]:
+    def all_registered(self) -> list[str]:
         """Returns all of the members in the registry.
 
         :return: A list of all the members in the registry.
-        :rtype: List[str]
+        :rtype: list[str]
         """
         all_registered = {group.eval_network for group in self.groups}
         all_registered.update(
@@ -422,12 +454,12 @@ class MutationRegistry:
         all_registered.update(opt.name for opt in self.optimizers)
         return all_registered
 
-    def networks(self) -> List[NetworkConfig]:
+    def networks(self) -> list[NetworkConfig]:
         """Get a list of network configurations in the registry.
 
         :return: A list of network configurations in the registry. This includes the evaluation
         and shared networks.
-        :rtype: List[NetworkConfig]
+        :rtype: list[NetworkConfig]
         """
         # Match with optimizers (only eval networks can have optimizers by definition)
         optimizer_eval = {}

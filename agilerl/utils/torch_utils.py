@@ -1,5 +1,5 @@
 import math
-from typing import Any, Callable, List, Union
+from typing import Any, Callable, Union
 
 import numpy as np
 import torch
@@ -74,7 +74,7 @@ def parameter_norm(model: nn.Module):
 
 
 def get_transformer_logs(
-    attentions: List[torch.Tensor], model: nn.Module, attn_mask: torch.Tensor
+    attentions: list[torch.Tensor], model: nn.Module, attn_mask: torch.Tensor
 ):
     """Extract logging information from transformer attention weights.
 
@@ -82,13 +82,13 @@ def get_transformer_logs(
     which can be useful for monitoring training dynamics.
 
     :param attentions: List of attention weight tensors from transformer layers
-    :type attentions: List[torch.Tensor]
+    :type attentions: list[torch.Tensor]
     :param model: Transformer model
     :type model: nn.Module
     :param attn_mask: Attention mask tensor
     :type attn_mask: torch.Tensor
     :return: Dictionary containing attention entropy and parameter norm
-    :rtype: Dict[str, Tuple[float, int]]
+    :rtype: dict[str, tuple[float, int]]
     """
     logs = {}
     n = attn_mask.sum()

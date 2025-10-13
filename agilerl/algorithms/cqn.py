@@ -1,12 +1,11 @@
 import random
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
-from numpy.typing import ArrayLike
 from torch.nn.utils import clip_grad_norm_
 
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
@@ -62,7 +61,7 @@ class CQN(RLAlgorithm):
         action_space: spaces.Space,
         index: int = 0,
         hp_config: Optional[HyperparameterConfig] = None,
-        net_config: Optional[Dict[str, Any]] = None,
+        net_config: Optional[dict[str, Any]] = None,
         batch_size: int = 64,
         lr: float = 1e-4,
         learn_step: int = 5,
@@ -166,8 +165,8 @@ class CQN(RLAlgorithm):
         self,
         obs: ObservationType,
         epsilon: float = 0,
-        action_mask: Optional[ArrayLike] = None,
-    ) -> ArrayLike:
+        action_mask: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
         """Returns the next action to take in the environment. Epsilon is the
         probability of taking a random action, used for exploration.
         For greedy behaviour, set epsilon to 0.
@@ -211,7 +210,7 @@ class CQN(RLAlgorithm):
 
         return action
 
-    def learn(self, experiences: Tuple[torch.Tensor, ...]) -> float:
+    def learn(self, experiences: tuple[torch.Tensor, ...]) -> float:
         """Updates agent network parameters to learn from experiences.
 
         :param experiences: List of batched states, actions, rewards, next_states, dones in that order.

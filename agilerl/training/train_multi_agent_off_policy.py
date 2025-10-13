@@ -2,7 +2,7 @@ import time
 import warnings
 from copy import deepcopy
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import numpy as np
 import wandb
@@ -25,8 +25,8 @@ from agilerl.utils.utils import (
 )
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
-InitDictType = Optional[Dict[str, Any]]
-PopulationType = List[MADDPG | MATD3]
+InitDictType = Optional[dict[str, Any]]
+PopulationType = list[MADDPG | MATD3]
 
 
 def train_multi_agent_off_policy(
@@ -56,7 +56,7 @@ def train_multi_agent_off_policy(
     verbose: bool = True,
     accelerator: Optional[Accelerator] = None,
     wandb_api_key: Optional[str] = None,
-) -> Tuple[PopulationType, List[List[float]]]:
+) -> tuple[PopulationType, list[list[float]]]:
     """The general off-policy multi-agent RL training function. Returns trained population of agents
     and their fitnesses.
 

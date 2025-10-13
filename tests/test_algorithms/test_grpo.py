@@ -5,7 +5,7 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Optional, Tuple
+from typing import Optional
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import gymnasium as gym
@@ -148,7 +148,7 @@ class DummyMLPPreTrainedModel(PreTrainedModel):
 
     def forward(
         self, input_ids: Optional[torch.Tensor] = None, *args, **kwargs
-    ) -> Tuple[torch.Tensor, ...]:
+    ) -> tuple[torch.Tensor, ...]:
         input_ids = input_ids.to(self.datatype)
         output = self.linear_2(self.linear_1(input_ids)).reshape(
             input_ids.shape[0],

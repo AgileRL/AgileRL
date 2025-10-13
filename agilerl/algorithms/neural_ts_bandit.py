@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import numpy as np
 import torch
@@ -10,7 +10,7 @@ from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.modules import EvolvableModule
 from agilerl.networks.value_networks import ValueNetwork
-from agilerl.typing import ArrayLike, ExperiencesType, GymEnvType, ObservationType
+from agilerl.typing import ExperiencesType, GymEnvType, ObservationType
 from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 from agilerl.utils.evolvable_networks import get_default_encoder_config
 
@@ -62,7 +62,7 @@ class NeuralTS(RLAlgorithm):
         action_space: spaces.Space,
         index: int = 0,
         hp_config: Optional[HyperparameterConfig] = None,
-        net_config: Optional[Dict[str, Any]] = None,
+        net_config: Optional[dict[str, Any]] = None,
         gamma: float = 1.0,
         lamb: float = 1.0,
         reg: float = 0.000625,
@@ -176,7 +176,7 @@ class NeuralTS(RLAlgorithm):
         )
 
     def get_action(
-        self, obs: ObservationType, action_mask: Optional[ArrayLike] = None
+        self, obs: ObservationType, action_mask: Optional[np.ndarray] = None
     ) -> int:
         """Returns the next action to take in the environment.
 

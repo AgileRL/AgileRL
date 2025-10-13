@@ -19,27 +19,23 @@ from enum import Enum
 from typing import (
     Any,
     Callable,
-    Dict,
     Generator,
     Generic,
     Iterable,
-    List,
     Optional,
     Protocol,
-    Tuple,
-    Type,
     TypeVar,
     Union,
     runtime_checkable,
 )
 
+import numpy as np
 import torch
 from accelerate import Accelerator
-from numpy.typing import ArrayLike
 from torch.optim.optimizer import Optimizer
 
-NumpyObsType = Union[ArrayLike, Dict[str, ArrayLike], Tuple[ArrayLike, ...]]
-TorchObsType = Union[torch.Tensor, Dict[str, torch.Tensor], Tuple[torch.Tensor, ...]]
+NumpyObsType = Union[np.ndarray, dict[str, np.ndarray], tuple[np.ndarray, ...]]
+TorchObsType = Union[torch.Tensor, dict[str, torch.Tensor], tuple[torch.Tensor, ...]]
 ObservationType = Union[NumpyObsType, TorchObsType]
 DeviceType = Union[str, torch.device]
 
@@ -66,7 +62,7 @@ class MutationMethod(Protocol):
     """
 
     _mutation_type: MutationType
-    _recreate_kwargs: Dict[str, Any]
+    _recreate_kwargs: dict[str, Any]
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
 
@@ -79,10 +75,10 @@ class OptimizerWrapper(Protocol):
     network configurations and training setups.
     """
 
-    optimizer: Union[Optimizer, Dict[str, Optimizer]]
-    optimizer_cls: Union[Type[Optimizer], Dict[str, Type[Optimizer]]]
+    optimizer: Union[Optimizer, dict[str, Optimizer]]
+    optimizer_cls: Union[type[Optimizer], dict[str, type[Optimizer]]]
     lr: Callable[[], float]
-    optimizer_kwargs: Dict[str, Any]
+    optimizer_kwargs: dict[str, Any]
 
 
 @runtime_checkable
@@ -94,11 +90,11 @@ class EvolvableModule(Protocol):
     reconstruction and optimization purposes.
     """
 
-    init_dict: Dict[str, Any]
+    init_dict: dict[str, Any]
     device: DeviceType
-    layer_mutation_methods: List[str]
-    node_mutation_methods: List[str]
-    mutation_methods: List[str]
+    layer_mutation_methods: list[str]
+    node_mutation_methods: list[str]
+    mutation_methods: list[str]
     last_mutation_attr: str
     last_mutation: Callable[[Any], Any]
     rng: Optional[Generator]
@@ -109,16 +105,16 @@ class EvolvableModule(Protocol):
     def forward(self, x: Any) -> Any: ...
     def parameters(self) -> Generator: ...
     def to(self, device: DeviceType) -> None: ...
-    def state_dict(self) -> Dict[str, Any]: ...
+    def state_dict(self) -> dict[str, Any]: ...
     def disable_mutations(self) -> None: ...
-    def get_mutation_methods(self) -> Dict[str, MutationMethod]: ...
-    def get_mutation_probs(self, new_layer_prob: float) -> List[float]: ...
+    def get_mutation_methods(self) -> dict[str, MutationMethod]: ...
+    def get_mutation_probs(self, new_layer_prob: float) -> list[float]: ...
     def sample_mutation_method(
         self, new_layer_prob: float, rng: Optional[Generator]
     ) -> str: ...
     def clone(self) -> "EvolvableModule": ...
     def load_state_dict(
-        self, state_dict: Dict[str, Any], strict: bool = True
+        self, state_dict: dict[str, Any], strict: bool = True
     ) -> None: ...
 
 
@@ -156,24 +152,24 @@ class ModuleDict(Protocol, Generic[T]):
     def __getitem__(self, key: str) -> T: ...
     def keys(self) -> Iterable[str]: ...
     def values(self) -> Iterable[T]: ...
-    def items(self) -> Iterable[Tuple[str, T]]: ...
-    def modules(self) -> Dict[str, T]: ...
-    def get_mutation_methods(self) -> Dict[str, MutationMethod]: ...
+    def items(self) -> Iterable[tuple[str, T]]: ...
+    def modules(self) -> dict[str, T]: ...
+    def get_mutation_methods(self) -> dict[str, MutationMethod]: ...
     def filter_mutation_methods(self, method: str) -> None: ...
 
     @property
-    def mutation_methods(self) -> List[str]: ...
+    def mutation_methods(self) -> list[str]: ...
     @property
-    def layer_mutation_methods(self) -> List[str]: ...
+    def layer_mutation_methods(self) -> list[str]: ...
     @property
-    def node_mutation_methods(self) -> List[str]: ...
+    def node_mutation_methods(self) -> list[str]: ...
 
 
 EvolvableNetworkType = Union[EvolvableModule, ModuleDict]
-OptimizerType = Union[Optimizer, Dict[str, Optimizer], OptimizerWrapper]
+OptimizerType = Union[Optimizer, dict[str, Optimizer], OptimizerWrapper]
 EvolvableAttributeType = Union[EvolvableNetworkType, OptimizerType]
-EvolvableNetworkDict = Dict[str, EvolvableNetworkType]
-EvolvableAttributeDict = Dict[str, EvolvableAttributeType]
+EvolvableNetworkDict = dict[str, EvolvableNetworkType]
+EvolvableAttributeDict = dict[str, EvolvableAttributeType]
 
 
 @runtime_checkable
@@ -198,7 +194,7 @@ class NetworkGroup(Protocol):
     """
 
     eval: EvolvableNetworkType
-    shared: Optional[Union[EvolvableNetworkType, List[EvolvableNetworkType]]]
+    shared: Optional[Union[EvolvableNetworkType, list[EvolvableNetworkType]]]
     policy: bool
     multiagent: bool
 
@@ -212,13 +208,13 @@ class OptimizerConfig(Protocol):
     """
 
     name: str
-    networks: Union[str, List[str]]
+    networks: Union[str, list[str]]
     lr: str
-    optimizer_cls: Union[Type[Optimizer], List[Type[Optimizer]]]
-    optimizer_kwargs: Union[Dict[str, Any], List[Dict[str, Any]]]
+    optimizer_cls: Union[type[Optimizer], list[type[Optimizer]]]
+    optimizer_kwargs: Union[dict[str, Any], list[dict[str, Any]]]
     multiagent: bool
 
-    def get_optimizer_cls(self) -> Union[Type[Optimizer], List[Type[Optimizer]]]: ...
+    def get_optimizer_cls(self) -> Union[type[Optimizer], list[type[Optimizer]]]: ...
 
 
 @runtime_checkable
@@ -229,11 +225,11 @@ class MutationRegistry(Protocol):
     are used during the mutation and evolution process.
     """
 
-    groups: List[NetworkGroup]
-    optimizers: List[OptimizerConfig]
-    hooks: List[Callable]
+    groups: list[NetworkGroup]
+    optimizers: list[OptimizerConfig]
+    hooks: list[Callable]
 
-    def networks(self) -> List[NetworkConfig]: ...
+    def networks(self) -> list[NetworkConfig]: ...
 
 
 SelfEvolvableAlgorithm = TypeVar("SelfEvolvableAlgorithm", bound="EvolvableAlgorithm")
@@ -253,31 +249,31 @@ class EvolvableAlgorithm(Protocol):
     registry: MutationRegistry
     mut: Optional[str]
     index: int
-    scores: List[float]
-    fitness: List[float]
-    steps: List[int]
+    scores: list[float]
+    fitness: list[float]
+    steps: list[int]
     torch_compiler: Optional[str]
 
     def unwrap_models(self) -> None: ...
     def wrap_models(self) -> None: ...
     def load(
-        cls: Type[SelfEvolvableAlgorithm], path: str
+        cls: type[SelfEvolvableAlgorithm], path: str
     ) -> SelfEvolvableAlgorithm: ...
     def load_checkpoint(
         self, path: str, device: str, accelerator: Optional[Accelerator]
     ) -> None: ...
     def save_checkpoint(self, path: str) -> None: ...
     def learn(
-        self, experiences: Tuple[Iterable[ObservationType], ...], **kwargs
+        self, experiences: tuple[Iterable[ObservationType], ...], **kwargs
     ) -> None: ...
     def get_action(self, obs: ObservationType, **kwargs) -> Any: ...
-    def test(self, *args, **kwargs) -> ArrayLike: ...
+    def test(self, *args, **kwargs) -> np.ndarray: ...
     def evolvable_attributes(
         self, networks_only: bool = False
     ) -> EvolvableAttributeDict: ...
     def inspect_attributes(
         agent: SelfEvolvableAlgorithm, input_args_only: bool = False
-    ) -> Dict[str, Any]: ...
+    ) -> dict[str, Any]: ...
     def clone(
         self: SelfEvolvableAlgorithm, index: Optional[int], wrap: bool
     ) -> SelfEvolvableAlgorithm: ...
@@ -301,5 +297,5 @@ class AgentWrapper(Protocol, Generic[T_EvolvableAlgorithm]):
 
     def get_action(self, obs: ObservationType, **kwargs) -> Any: ...
     def learn(
-        self, experiences: Tuple[Iterable[ObservationType], ...], **kwargs
+        self, experiences: tuple[Iterable[ObservationType], ...], **kwargs
     ) -> None: ...

@@ -1,7 +1,7 @@
 import math
 import warnings
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import torch
 import torch.nn as nn
@@ -58,8 +58,8 @@ class EvolvableBERT(EvolvableModule):
 
     def __init__(
         self,
-        encoder_layers: List[int],
-        decoder_layers: List[int],
+        encoder_layers: list[int],
+        decoder_layers: list[int],
         end2end: bool = True,
         src_vocab_size: int = 10837,
         tgt_vocab_size: int = 10837,
@@ -195,7 +195,7 @@ class EvolvableBERT(EvolvableModule):
 
     def create_mask(
         self, src: torch.Tensor, tgt: torch.Tensor, pad_idx: int
-    ) -> Tuple[torch.Tensor, ...]:
+    ) -> tuple[torch.Tensor, ...]:
         """Returns masks to hide source and target padding tokens.
 
         :param src: Source
@@ -285,7 +285,7 @@ class EvolvableBERT(EvolvableModule):
         src_mask: Optional[torch.Tensor] = None,
         src_key_padding_mask: Optional[torch.Tensor] = None,
         is_causal: bool = False,
-    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, ...]]:
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
         """Returns encoded transformer input.
 
         :param src: Encoder input sequence
@@ -369,7 +369,7 @@ class EvolvableBERT(EvolvableModule):
         memory_mask: Optional[torch.Tensor] = None,
         tgt_key_padding_mask: Optional[torch.Tensor] = None,
         memory_key_padding_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, ...]]:
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
         """Returns decoded transformer input.
 
         :param tgt: Decoder input sequence
@@ -418,7 +418,7 @@ class EvolvableBERT(EvolvableModule):
         mask: torch.Tensor,
         src_key_padding_mask: torch.Tensor,
         src_key_padding_mask_for_layers: torch.Tensor,
-    ) -> Tuple[torch.Tensor, bool, torch.Tensor]:
+    ) -> tuple[torch.Tensor, bool, torch.Tensor]:
         """Returns encoder output, conversion to nested and padding mask depending on if sparsity fast path possible.
         :param src: Encoder input sequence
         :type src: torch.Tensor
@@ -532,7 +532,7 @@ class EvolvableBERT(EvolvableModule):
         network: Optional[str] = None,
         hidden_layer: Optional[int] = None,
         numb_new_nodes: Optional[int] = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Adds nodes to hidden layer of encoder/decoder.
 
         :param network: Network to add node to, 'encoder' or 'decoder', defaults to None
@@ -543,7 +543,7 @@ class EvolvableBERT(EvolvableModule):
         :type numb_new_nodes: int, optional
 
         :return: Dictionary containing hidden layer, number of new nodes and network
-        :rtype: Dict[str, Any]
+        :rtype: dict[str, Any]
         """
         if network is None:
             network = self.rng.choice(["encoder", "decoder"])
@@ -578,7 +578,7 @@ class EvolvableBERT(EvolvableModule):
         network: Optional[str] = None,
         hidden_layer: Optional[int] = None,
         numb_new_nodes: Optional[int] = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Removes nodes from hidden layer of encoder/decoder.
 
         :param network: Network to remove node from, 'encoder' or 'decoder', defaults to None
@@ -589,7 +589,7 @@ class EvolvableBERT(EvolvableModule):
         :type numb_new_nodes: Optional[int], optional
 
         :return: Dictionary containing hidden layer, number of removed nodes and network
-        :rtype: Dict[str, Any]
+        :rtype: dict[str, Any]
         """
         if network is None:
             network = self.rng.choice(["encoder", "decoder"])

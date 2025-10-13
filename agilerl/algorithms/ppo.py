@@ -1,6 +1,6 @@
 import copy
 import warnings
-from typing import Any, Callable, Dict, Optional, Tuple, Union
+from typing import Any, Callable, Optional, Union
 
 import numpy as np
 import torch
@@ -102,7 +102,7 @@ class PPO(RLAlgorithm):
         action_space: spaces.Space,
         index: int = 0,
         hp_config: Optional[HyperparameterConfig] = None,
-        net_config: Optional[Dict[str, Any]] = None,
+        net_config: Optional[dict[str, Any]] = None,
         batch_size: int = 64,
         lr: float = 1e-4,
         learn_step: int = 2048,
@@ -122,7 +122,7 @@ class PPO(RLAlgorithm):
         share_encoders: bool = True,
         num_envs: int = 1,
         use_rollout_buffer: bool = False,
-        rollout_buffer_config: Optional[Dict[str, Any]] = {},
+        rollout_buffer_config: Optional[dict[str, Any]] = {},
         recurrent: bool = False,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
@@ -350,16 +350,16 @@ class PPO(RLAlgorithm):
         )
 
     def _extract_hidden_state(
-        self, full_hidden_state: Dict[str, ArrayOrTensor], encoder_name: str
-    ) -> Dict[str, ArrayOrTensor]:
+        self, full_hidden_state: dict[str, ArrayOrTensor], encoder_name: str
+    ) -> dict[str, ArrayOrTensor]:
         """Extract hidden state components for a specific network encoder.
 
         :param full_hidden_state: Complete hidden state dictionary
-        :type full_hidden_state: Dict[str, ArrayOrTensor]
+        :type full_hidden_state: dict[str, ArrayOrTensor]
         :param encoder_name: Name of the encoder to extract hidden states for
         :type encoder_name: str
         :return: Hidden state dictionary for the specific encoder
-        :rtype: Dict[str, ArrayOrTensor]
+        :rtype: dict[str, ArrayOrTensor]
         """
         network_hidden_state = {}
         for key, value in full_hidden_state.items():
@@ -372,16 +372,16 @@ class PPO(RLAlgorithm):
         obs: ArrayOrTensor,
         action_mask: Optional[ArrayOrTensor] = None,
         hidden_state: Optional[
-            Dict[str, ArrayOrTensor]
+            dict[str, ArrayOrTensor]
         ] = None,  # Hidden state is a dict for recurrent policies
         *,
         sample: bool = True,
-    ) -> Tuple[
+    ) -> tuple[
         ArrayOrTensor,
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
-        Optional[Dict[str, ArrayOrTensor]],
+        Optional[dict[str, ArrayOrTensor]],
     ]:
         """
         Returns the next action to take in the environment and the values.
@@ -391,11 +391,11 @@ class PPO(RLAlgorithm):
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: Optional[ArrayOrTensor]
         :param hidden_state: Hidden state for recurrent policies, defaults to None
-        :type hidden_state: Optional[Dict[str, ArrayOrTensor]]
+        :type hidden_state: Optional[dict[str, ArrayOrTensor]]
         :param sample: Whether to sample an action, defaults to True
         :type sample: bool
         :return: Action, log probability, entropy, state values, and (if recurrent) next hidden state
-        :rtype: Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[Dict[str, ArrayOrTensor]]]
+        :rtype: tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[dict[str, ArrayOrTensor]]]
         """
         if hidden_state is not None:
             if self.share_encoders:
@@ -451,17 +451,17 @@ class PPO(RLAlgorithm):
             )
             return action, log_prob, entropy, values, None
 
-    def get_hidden_state_architecture(self) -> Dict[str, Tuple[int, ...]]:
+    def get_hidden_state_architecture(self) -> dict[str, tuple[int, ...]]:
         """Get the hidden state architecture for the environment.
 
         :return: Dictionary describing the hidden state architecture (name to shape)
-        :rtype: Dict[str, Tuple[int, ...]]
+        :rtype: dict[str, tuple[int, ...]]
         """
         return {
             k: v.shape for k, v in self.get_initial_hidden_state(self.num_envs).items()
         }
 
-    def get_initial_hidden_state(self, num_envs: int = 1) -> Dict[str, ArrayOrTensor]:
+    def get_initial_hidden_state(self, num_envs: int = 1) -> dict[str, ArrayOrTensor]:
         """Get the initial hidden state for the environment.
 
         The hidden states are generally cached on a per Module basis.
@@ -470,7 +470,7 @@ class PPO(RLAlgorithm):
         :param num_envs: Number of environments, defaults to 1
         :type num_envs: int, optional
         :return: Initial hidden state dictionary
-        :rtype: Dict[str, ArrayOrTensor]
+        :rtype: dict[str, ArrayOrTensor]
         """
         # Return a batch of initial hidden states
         # Flat map them into "actor_*" and "critic_*" (if not sharing encoders)
@@ -490,8 +490,8 @@ class PPO(RLAlgorithm):
         self,
         obs: ArrayOrTensor,
         actions: ArrayOrTensor,
-        hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        hidden_state: Optional[dict[str, ArrayOrTensor]] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Evaluates the actions.
 
         :param obs: Environment observation, or multiple observations in a batch
@@ -499,9 +499,9 @@ class PPO(RLAlgorithm):
         :param actions: Actions to evaluate
         :type actions: ArrayOrTensor
         :param hidden_state: Hidden state for recurrent policies, defaults to None. Expected shape: dict with tensors of shape (batch_size, 1, hidden_size).
-        :type hidden_state: Optional[Dict[str, ArrayOrTensor]]
+        :type hidden_state: Optional[dict[str, ArrayOrTensor]]
         :return: Log probability, entropy, state values
-        :rtype: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         """
         obs = self.preprocess_observation(obs)
 
@@ -522,16 +522,16 @@ class PPO(RLAlgorithm):
         self,
         obs: ArrayOrTensor,
         action_mask: Optional[ArrayOrTensor] = None,
-        hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
+        hidden_state: Optional[dict[str, ArrayOrTensor]] = None,
     ) -> Union[
-        Tuple[
+        tuple[
             np.ndarray,  # action
             np.ndarray,  # log_prob
             np.ndarray,  # entropy
             np.ndarray,  # values
-            Optional[Dict[str, ArrayOrTensor]],  # next_hidden_state
+            Optional[dict[str, ArrayOrTensor]],  # next_hidden_state
         ],
-        Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],  # non-recurrent case
+        tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],  # non-recurrent case
     ]:
         """Returns the next action to take in the environment.
 
@@ -540,9 +540,9 @@ class PPO(RLAlgorithm):
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: Optional[ArrayOrTensor]
         :param hidden_state: Hidden state for recurrent policies, defaults to None
-        :type hidden_state: Optional[Dict[str, ArrayOrTensor]]
+        :type hidden_state: Optional[dict[str, ArrayOrTensor]]
         :return: Action, log probability, entropy, state values, and (if recurrent) next hidden state
-        :rtype: Union[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Optional[Dict[str, ArrayOrTensor]]], Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]
+        :rtype: Union[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Optional[dict[str, ArrayOrTensor]]], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]
         """
         obs = self.preprocess_observation(obs)
         with torch.no_grad():
@@ -915,7 +915,7 @@ class PPO(RLAlgorithm):
                 mb_advantages = minibatch_unpadded["advantages"]
                 mb_values = minibatch_unpadded["values"]
                 mb_returns = minibatch_unpadded["returns"]
-                mb_initial_hidden_states_dict: Dict[str, torch.Tensor] = (
+                mb_initial_hidden_states_dict: dict[str, torch.Tensor] = (
                     minibatch_padded.get_non_tensor(
                         "initial_hidden_states", default=None
                     )
@@ -1056,7 +1056,7 @@ class PPO(RLAlgorithm):
         max_steps: Optional[int] = None,
         loop: int = 3,
         vectorized: bool = True,
-        callback: Optional[Callable[[float, Dict[str, float]], None]] = None,
+        callback: Optional[Callable[[float, dict[str, float]], None]] = None,
     ) -> float:
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
@@ -1071,7 +1071,7 @@ class PPO(RLAlgorithm):
         :param vectorized: Whether the environment is vectorized, defaults to True
         :type vectorized: bool, optional
         :param callback: Optional callback function that takes the sum of rewards and the last info dictionary as input, defaults to None
-        :type callback: Optional[Callable[[float, Dict[str, float]], None]]
+        :type callback: Optional[Callable[[float, dict[str, float]], None]]
 
         :return: Mean test score of agent in environment
         :rtype: float

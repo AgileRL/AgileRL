@@ -1,6 +1,6 @@
 import copy
 import warnings
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Optional
 
 import numpy as np
 import torch
@@ -96,7 +96,7 @@ class TD3(RLAlgorithm):
         dt: float = 1e-2,
         index: int = 0,
         hp_config: Optional[HyperparameterConfig] = None,
-        net_config: Optional[Dict[str, Any]] = None,
+        net_config: Optional[dict[str, Any]] = None,
         batch_size: int = 64,
         lr_actor: float = 1e-4,
         lr_critic: float = 1e-3,
@@ -180,6 +180,8 @@ class TD3(RLAlgorithm):
         self.theta = theta
         self.dt = dt
         self.learn_counter = 0
+        self.action_low = action_space.low.astype(np.float32)
+        self.action_high = action_space.high.astype(np.float32)
 
         # Exploration noise
         self.expl_noise = (
@@ -379,7 +381,7 @@ class TD3(RLAlgorithm):
         if training:
             action += self.action_noise()
 
-        return action.clip(self.action_space.low, self.action_space.high)
+        return action.clip(self.action_low, self.action_high)
 
     def action_noise(self) -> np.ndarray:
         """Create action noise for exploration, either Ornstein Uhlenbeck or
@@ -414,7 +416,7 @@ class TD3(RLAlgorithm):
         experiences: ExperiencesType,
         noise_clip: float = 0.5,
         policy_noise: float = 0.2,
-    ) -> Tuple[Optional[float], float]:
+    ) -> tuple[Optional[float], float]:
         """Updates agent network parameters to learn from experiences.
 
         :param experiences: TensorDict of batched observations, actions, rewards, next_observations, dones.

@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple
+from typing import Optional
 
 from agilerl.data.language_environment import Language_Environment, Language_Observation
 from wordle.wordle_game import Vocabulary, WordleGame
@@ -8,7 +8,7 @@ class WordleObservation(Language_Observation):
     def __init__(self, game: WordleGame):
         self.game = game
 
-    def to_sequence(self) -> Tuple[List[Tuple[str, Optional[float]]], bool]:
+    def to_sequence(self) -> tuple[list[tuple[str, Optional[float]]], bool]:
         return self.game.transition_sequence()
 
     def __str__(self) -> str:
@@ -20,7 +20,7 @@ class WordleEnvironment(Language_Environment):
         self.vocab = vocab
         self.state = self.reset()
 
-    def step(self, action: str) -> Tuple[WordleObservation, float, bool]:
+    def step(self, action: str) -> tuple[WordleObservation, float, bool]:
         wordle_game, r, t = self.state.game.next(action)
         self.state = WordleObservation(wordle_game)
         return self.state, r, t

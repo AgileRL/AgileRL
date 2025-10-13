@@ -1,7 +1,6 @@
 import copy
 import gc
 import os
-from typing import List
 from unittest import mock
 
 import numpy as np
@@ -668,7 +667,7 @@ def test_mutation_applies_parameter_mutations(
 def test_mutation_applies_architecture_mutations(
     init_pop, device, accelerator, wrapper_cls
 ):
-    population: List[EvolvableAlgorithm] = init_pop
+    population: list[EvolvableAlgorithm] = init_pop
     if wrapper_cls is not None:
         population = [wrapper_cls(agent) for agent in population]
 
@@ -1215,7 +1214,7 @@ def test_mutation_applies_parameter_mutations_multi_agent(
 def test_mutation_applies_architecture_mutations_multi_agent(
     algo, init_pop, device, accelerator, wrapper_cls
 ):
-    population: List[EvolvableAlgorithm] = init_pop
+    population: list[EvolvableAlgorithm] = init_pop
     mutations = Mutations(
         0,
         1,

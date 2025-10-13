@@ -1,6 +1,6 @@
 from collections import OrderedDict
 from dataclasses import asdict
-from typing import Dict, List, Literal, Optional, Tuple, Union
+from typing import Literal, Optional, Union
 
 import numpy as np
 import torch
@@ -26,7 +26,7 @@ from agilerl.modules.custom_components import (
 )
 from agilerl.typing import DeviceType, NetConfigType
 
-TupleorInt = Union[Tuple[int, ...], int]
+TupleorInt = Union[tuple[int, ...], int]
 
 
 def compile_model(
@@ -168,7 +168,7 @@ def get_default_encoder_config(
     :type recurrent: bool
 
     :return: Default configuration for the encoder network.
-    :rtype: Dict[str, Any]
+    :rtype: dict[str, Any]
     """
     if isinstance(observation_space, (spaces.Dict, spaces.Tuple)):
         config = MultiInputNetConfig(output_activation=None)
@@ -215,7 +215,7 @@ def get_module_dict(module: nn.Module) -> nn.ModuleDict:
     :type module: nn.Module
 
     :return: ModuleDict from module
-    :rtype: Dict[str, nn.Module]
+    :rtype: dict[str, nn.Module]
     """
     for submodule in module.modules():
         if isinstance(submodule, nn.ModuleDict):
@@ -263,11 +263,11 @@ def get_conv_layer(
     :param out_channels: Number of output channels from convolutional layer
     :type out_channels: int
     :param kernel_size: Kernel size of convolutional layer
-    :type kernel_size: int or Tuple[int]
+    :type kernel_size: int or tuple[int]
     :param stride: Stride size of convolutional layer
-    :type stride: int or Tuple[int]
+    :type stride: int or tuple[int]
     :param padding: Convolutional layer padding
-    :type padding: int or Tuple[int]
+    :type padding: int or tuple[int]
 
     :return: Convolutional layer
     :rtype: nn.Module
@@ -345,20 +345,20 @@ def get_activation(activation_name: Optional[str], new_gelu: bool = False) -> nn
 
 def get_pooling(
     pooling_name: str,
-    kernel_size: Union[Tuple[int, ...], int],
-    stride: Union[Tuple[int, ...], int],
-    padding: Union[Tuple[int, ...], int],
+    kernel_size: Union[tuple[int, ...], int],
+    stride: Union[tuple[int, ...], int],
+    padding: Union[tuple[int, ...], int],
 ) -> nn.Module:
     """Returns pooling layer for corresponding activation name.
 
     :param pooling_names: Pooling layer name
     :type pooling_names: str
     :param kernel_size: Pooling layer kernel size
-    :type kernel_size: int or Tuple[int]
+    :type kernel_size: int or tuple[int]
     :param stride: Pooling layer stride
-    :type stride: int or Tuple[int]
+    :type stride: int or tuple[int]
     :param padding: Pooling layer padding
-    :type padding: int or Tuple[int]
+    :type padding: int or tuple[int]
 
     :return: Pooling layer
     :rtype: nn.Module
@@ -428,15 +428,15 @@ def init_weights_gaussian(m: nn.Module, mean: float, std: float) -> None:
 def create_cnn(
     block_type: Literal["Conv2d", "Conv3d"],
     in_channels: int,
-    channel_size: List[int],
-    kernel_size: List[TupleorInt],
-    stride_size: List[TupleorInt],
+    channel_size: list[int],
+    kernel_size: list[TupleorInt],
+    stride_size: list[TupleorInt],
     name: str = "cnn",
     init_layers: bool = True,
     layer_norm: bool = False,
     activation_fn: str = "ReLU",
     device: DeviceType = "cpu",
-) -> Dict[str, nn.Module]:
+) -> dict[str, nn.Module]:
     """
     Build a convolutional block.
 
@@ -445,11 +445,11 @@ def create_cnn(
     :param in_channels: Number of input channels.
     :type in_channels: int
     :param channel_size: List of channel sizes for each layer.
-    :type channel_size: List[int]
+    :type channel_size: list[int]
     :param kernel_size: List of kernel sizes for each layer.
-    :type kernel_size: List[int]
+    :type kernel_size: list[int]
     :param stride_size: List of stride sizes for each layer.
-    :type stride_size: List[int]
+    :type stride_size: list[int]
     :param name: Name of the block.
     :type name: str
     :param init_layers: Whether to initialize the layers. Defaults to True.
@@ -462,7 +462,7 @@ def create_cnn(
     :type device: DeviceType, optional
 
     :return: Convolutional block.
-    :rtype: Dict[str, nn.Module]
+    :rtype: dict[str, nn.Module]
     """
     net_dict = OrderedDict()
     channel_size = [in_channels] + channel_size
@@ -496,7 +496,7 @@ MlpLayer = Union[nn.Linear, NoisyLinear, nn.LayerNorm]
 def create_mlp(
     input_size: int,
     output_size: int,
-    hidden_size: List[int],
+    hidden_size: list[int],
     output_vanish: bool,
     output_activation: Optional[str] = None,
     noisy: bool = False,
@@ -516,7 +516,7 @@ def create_mlp(
     :param output_size: Number of output features.
     :type output_size: int
     :param hidden_size: List of hidden layer sizes.
-    :type hidden_size: List[int]
+    :type hidden_size: list[int]
     :param output_vanish: Whether to initialize output layer weights to a small value.
     :type output_vanish: bool
     :param output_activation: Activation function for output layer.
@@ -539,7 +539,7 @@ def create_mlp(
     :return: Multi-layer perceptron.
     :rtype: nn.Sequential
     """
-    net_dict: Dict[str, MlpLayer] = OrderedDict()
+    net_dict: dict[str, MlpLayer] = OrderedDict()
     hidden_size = [input_size] + hidden_size
     for l_no in range(1, len(hidden_size)):
         if noisy:  # Add linear layer
@@ -634,7 +634,7 @@ def create_simba(
     :return: Residual block.
     :rtype: nn.Sequential
     """
-    net_dict: Dict[str, nn.Module] = OrderedDict()
+    net_dict: dict[str, nn.Module] = OrderedDict()
 
     # Initial dense layer
     net_dict[f"{name}_linear_layer_input"] = nn.Linear(
@@ -669,7 +669,7 @@ def create_resnet(
     scale_factor: int = 4,
     device: str = "cpu",
     name: str = "resnet",
-) -> Dict[str, nn.Module]:
+) -> dict[str, nn.Module]:
     """Creates a number of residual blocks for image-based inputs.
 
     Paper: https://arxiv.org/abs/1512.03385.

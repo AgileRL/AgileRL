@@ -1,7 +1,7 @@
 import json
 import pickle as pkl
 import random
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import numpy as np
 from tqdm.auto import tqdm
@@ -23,7 +23,7 @@ from wordle.wordle_tokenizer import WordleTokenizer
 class WordleListDataset(List_RL_Dataset):
     def __init__(
         self,
-        items: List[Tuple[WordleObservation, Optional[Dict[str, Any]]]],
+        items: list[tuple[WordleObservation, Optional[dict[str, Any]]]],
         max_len: Optional[int],
         token_reward: TokenReward,
     ) -> None:
@@ -97,12 +97,12 @@ class WordleIterableDataset(Iterable_RL_Dataset):
 class WordleHumanDataset(Iterable_RL_Dataset):
     def __init__(
         self,
-        games: List[Tuple[str, List[str]]],
-        transitions: Dict[str, Dict[str, List[str]]],
+        games: list[tuple[str, list[str]]],
+        transitions: dict[str, dict[str, list[str]]],
         use_true_word: bool,
         max_len: Optional[int],
         token_reward: TokenReward,
-        game_indexes: Optional[List[int]],
+        game_indexes: Optional[list[int]],
         top_p: Optional[float],
     ) -> None:
         tokenizer = WordleTokenizer()
@@ -168,7 +168,7 @@ class WordleHumanDataset(Iterable_RL_Dataset):
         use_true_word: bool = False,
         max_len: Optional[int] = None,
         token_reward: Optional[TokenReward] = None,
-        game_indexes: Optional[List[int]] = None,
+        game_indexes: Optional[list[int]] = None,
         top_p: Optional[float] = None,
     ):
         if token_reward is None:

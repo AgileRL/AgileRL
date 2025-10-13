@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import gymnasium as gym
 import numpy as np
@@ -295,7 +295,7 @@ class SimpleCritic(EvolvableModule):
         self,
         num_inputs: int,
         num_outputs: int,
-        hidden_size: List[int],
+        hidden_size: list[int],
         activation: str = "ReLU",
         output_activation: str = None,
         min_hidden_layers: int = 1,
@@ -365,7 +365,7 @@ class SimpleCritic(EvolvableModule):
         )
 
     @property
-    def net_config(self) -> Dict[str, Any]:
+    def net_config(self) -> dict[str, Any]:
         """Returns model configuration in dictionary."""
         net_config = self.init_dict.copy()
         for attr in ["num_inputs", "num_outputs", "device", "name"]:
@@ -395,7 +395,7 @@ class SimpleCritic(EvolvableModule):
         EvolvableModule.init_weights_gaussian(output_layer, std_coeff=output_coeff)
 
     def forward(
-        self, obs: Dict[str, ArrayOrTensor], actions: ArrayOrTensor
+        self, obs: dict[str, ArrayOrTensor], actions: ArrayOrTensor
     ) -> torch.Tensor:
         """Returns output of neural network.
 
@@ -463,7 +463,7 @@ class SimpleCritic(EvolvableModule):
     @mutation(MutationType.NODE)
     def add_node(
         self, hidden_layer: Optional[int] = None, numb_new_nodes: Optional[int] = None
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         """Adds nodes to hidden layer of neural network.
 
         :param hidden_layer: Depth of hidden layer to add nodes to, defaults to None
@@ -489,7 +489,7 @@ class SimpleCritic(EvolvableModule):
     @mutation(MutationType.NODE)
     def remove_node(
         self, hidden_layer: Optional[int] = None, numb_new_nodes: Optional[int] = None
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         """Removes nodes from hidden layer of neural network.
 
         :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None

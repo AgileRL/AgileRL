@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "agilerl"
-version = "2.3.5.dev0"
+version = "2.3.5.dev1"
 
 
 description = "AgileRL is a deep reinforcement learning library focused on improving RL development through RLOps."
@@ -43,6 +43,9 @@ ucimlrepo = "^0.0.3"
 wandb = "^0.17.6"
 vllm = "0.10.0"
 
+[tool.pytest.ini_options]
+# Deterministic ordering for tests; useful for pytest-xdist.
+env = ["PYTHONHASHSEED=0"]
 
 [build-system]
 requires = ["poetry-core"]

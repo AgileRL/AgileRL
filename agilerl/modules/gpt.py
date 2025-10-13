@@ -1,7 +1,7 @@
 import inspect
 import math
 from collections import OrderedDict
-from typing import Optional, Tuple
+from typing import Optional
 
 import numpy as np
 import torch
@@ -209,11 +209,11 @@ class EvolvableGPT(EvolvableModule):
         tok_emb: Optional[torch.Tensor] = None,
         targets: Optional[torch.Tensor] = None,
         attn_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Tuple[torch.Tensor]] = None,
+        past_key_values: Optional[tuple[torch.Tensor]] = None,
         pos: Optional[torch.Tensor] = None,
         is_causal: bool = True,
-    ) -> Tuple[
-        torch.Tensor, Tuple[torch.Tensor], Tuple[torch.Tensor], Optional[torch.Tensor]
+    ) -> tuple[
+        torch.Tensor, tuple[torch.Tensor], tuple[torch.Tensor], Optional[torch.Tensor]
     ]:
         """Forward pass through evolvable GPT model.
 
@@ -226,13 +226,13 @@ class EvolvableGPT(EvolvableModule):
         :param attn_mask: Attention mask
         :type attn_mask: torch.Tensor, optional
         :param past_key_values: Past key values for caching
-        :type past_key_values: Tuple[torch.Tensor], optional
+        :type past_key_values: tuple[torch.Tensor], optional
         :param pos: Position ids
         :type pos: torch.Tensor, optional
         :param is_causal: Whether to apply causal mask
         :type is_causal: bool, optional
         :return: Tuple containing logits, all hidden states, presents, and loss
-        :rtype: Tuple[torch.Tensor, Tuple[torch.Tensor], Tuple[torch.Tensor], Optional[torch.Tensor]]
+        :rtype: tuple[torch.Tensor, tuple[torch.Tensor], tuple[torch.Tensor], Optional[torch.Tensor]]
         """
         if idx is not None:
             device = idx.device
@@ -734,9 +734,9 @@ class CausalSelfAttention(nn.Module):
         self,
         x: torch.Tensor,
         attn_mask: Optional[torch.Tensor] = None,
-        layer_past: Optional[Tuple[torch.Tensor]] = None,
+        layer_past: Optional[tuple[torch.Tensor]] = None,
         is_causal: bool = True,
-    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor]]:
         """
         Forward pass through the CausalSelfAttention module.
 
@@ -745,11 +745,11 @@ class CausalSelfAttention(nn.Module):
         :param attn_mask: Optional attention mask tensor.
         :type attn_mask: Optional[torch.Tensor]
         :param layer_past: Optional tuple of past key and value tensors for caching.
-        :type layer_past: Optional[Tuple[torch.Tensor]]
+        :type layer_past: Optional[tuple[torch.Tensor]]
         :param is_causal: Whether to apply causal mask.
         :type is_causal: bool
         :return: Tuple containing the output tensor and the present key and value tensors.
-        :rtype: Tuple[torch.Tensor, Tuple[torch.Tensor]]
+        :rtype: tuple[torch.Tensor, tuple[torch.Tensor]]
         """
         B, T, C = (
             x.size()
@@ -856,9 +856,9 @@ class Block(nn.Module):
         self,
         x: torch.Tensor,
         attn_mask: Optional[torch.Tensor] = None,
-        layer_past: Optional[Tuple[torch.Tensor]] = None,
+        layer_past: Optional[tuple[torch.Tensor]] = None,
         is_causal: bool = True,
-    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor]]:
         """
         Forward pass through the transformer block.
 
@@ -867,11 +867,11 @@ class Block(nn.Module):
         :param attn_mask: Optional attention mask tensor.
         :type attn_mask: Optional[torch.Tensor]
         :param layer_past: Optional tuple of past key and value tensors for caching.
-        :type layer_past: Optional[Tuple[torch.Tensor]]
+        :type layer_past: Optional[tuple[torch.Tensor]]
         :param is_causal: Whether to apply causal mask.
         :type is_causal: bool
         :return: Tuple containing the output tensor and the present key and value tensors.
-        :rtype: Tuple[torch.Tensor, Tuple[torch.Tensor]]
+        :rtype: tuple[torch.Tensor, tuple[torch.Tensor]]
         """
         attn_output, present = self.attn(
             self.ln_1(x),

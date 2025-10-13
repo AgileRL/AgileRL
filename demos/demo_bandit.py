@@ -1,5 +1,4 @@
 from datetime import datetime
-from typing import List
 
 import numpy as np
 import torch
@@ -56,7 +55,7 @@ if __name__ == "__main__":
         low=features.values.min(), high=features.values.max()
     )
     action_space = spaces.Discrete(env.arms)
-    pop: List[NeuralUCB] = create_population(
+    pop: list[NeuralUCB] = create_population(
         algo="NeuralUCB",  # Algorithm
         observation_space=observation_space,  # State dimension
         action_space=action_space,  # Action dimension

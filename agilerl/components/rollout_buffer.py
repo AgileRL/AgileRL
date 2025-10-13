@@ -1,6 +1,6 @@
 import warnings
 from collections import OrderedDict
-from typing import Any, Dict, Generator, List, Optional, Tuple, Union
+from typing import Any, Generator, Optional, Union
 
 import numpy as np
 import torch
@@ -44,7 +44,7 @@ class RolloutBuffer:
     :param recurrent: Whether to store hidden states, defaults to False.
     :type recurrent: bool, optional
     :param hidden_state_architecture: Architecture of hidden states if used, defaults to None.
-    :type hidden_state_architecture: Dict[str, Tuple[int, int, int]], optional
+    :type hidden_state_architecture: dict[str, tuple[int, int, int]], optional
     :param use_gae: Whether to compute GAE advantages, defaults to True.
     :type use_gae: bool, optional
     :param wrap_at_capacity: Whether to wrap the buffer at capacity, defaults to False. This is especially useful
@@ -56,7 +56,7 @@ class RolloutBuffer:
 
     padded_data: TensorDict
     unpadded_data: TensorDict
-    unpadded_slices: List[torch.Tensor]
+    unpadded_slices: list[torch.Tensor]
 
     def __init__(
         self,
@@ -68,7 +68,7 @@ class RolloutBuffer:
         gae_lambda: float = 0.95,
         gamma: float = 0.99,
         recurrent: bool = False,
-        hidden_state_architecture: Optional[Dict[str, Tuple[int, int, int]]] = None,
+        hidden_state_architecture: Optional[dict[str, tuple[int, int, int]]] = None,
         use_gae: bool = True,
         wrap_at_capacity: bool = False,
         max_seq_len: Optional[int] = None,
@@ -194,7 +194,7 @@ class RolloutBuffer:
                 raise ValueError(
                     "hidden_state_architecture must be provided if recurrent=True"
                 )
-            # self.hidden_state_architecture is Dict[str, Tuple[num_layers, num_envs_at_ppo_init, hidden_size]]
+            # self.hidden_state_architecture is dict[str, tuple[num_layers, num_envs_at_ppo_init, hidden_size]]
             # For buffer storage, each hidden state key should map to a tensor of shape:
             # (capacity, num_envs, num_layers, hidden_size)
             source_dict["hidden_states"] = {
@@ -229,9 +229,9 @@ class RolloutBuffer:
         value: Union[float, np.ndarray],
         log_prob: Union[float, np.ndarray],
         next_obs: Optional[ObservationType] = None,
-        hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
+        hidden_state: Optional[dict[str, ArrayOrTensor]] = None,
         next_hidden_state: Optional[
-            Dict[str, ArrayOrTensor]
+            dict[str, ArrayOrTensor]
         ] = None,  # Not used if only initial hidden states are stored
         episode_start: Optional[Union[bool, np.ndarray]] = None,
     ) -> None:
@@ -253,9 +253,9 @@ class RolloutBuffer:
         :param next_obs: Next observation batch (shape: (num_envs, *obs_shape)), defaults to None
         :type next_obs: Optional[ObservationType]
         :param hidden_state: Current hidden state batch (shape: (num_envs, hidden_size)), defaults to None
-        :type hidden_state: Optional[Dict[str, ArrayOrTensor]]
+        :type hidden_state: Optional[dict[str, ArrayOrTensor]]
         :param next_hidden_state: Next hidden state batch (shape: (num_envs, hidden_size)), defaults to None
-        :type next_hidden_state: Optional[Dict[str, ArrayOrTensor]]
+        :type next_hidden_state: Optional[dict[str, ArrayOrTensor]]
         :param episode_start: Episode start flag batch (shape: (num_envs,)), defaults to None
         :type episode_start: Optional[Union[bool, np.ndarray]]
         """
@@ -340,7 +340,7 @@ class RolloutBuffer:
 
         # Hidden States (assuming they are dictionaries of tensors)
         if self.recurrent and hidden_state is not None:
-            # hidden_state is Dict[str, Tensor] from PPO -> {key: (layers, num_envs, size)}
+            # hidden_state is dict[str, Tensor] from PPO -> {key: (layers, num_envs, size)}
             # We need to populate current_step_data["hidden_states"]
             # with {key: (num_envs, layers, size)}
             current_step_data["hidden_states"] = {}
@@ -437,14 +437,14 @@ class RolloutBuffer:
 
     def get(
         self, batch_size: Optional[int] = None
-    ) -> Dict[str, Union[np.ndarray, Dict[str, np.ndarray]]]:
+    ) -> dict[str, Union[np.ndarray, dict[str, np.ndarray]]]:
         """
         Get data from the buffer, flattened and optionally sampled into minibatches.
 
         :param batch_size: Size of the minibatch to sample. If None, returns all data. Defaults to None.
         :type batch_size: Optional[int]
         :return: Dictionary containing flattened buffer data arrays.
-        :rtype: Dict[str, Union[np.ndarray, Dict[str, np.ndarray]]]
+        :rtype: dict[str, Union[np.ndarray, dict[str, np.ndarray]]]
         """
         buffer_size = self.capacity if self.full else self.pos
         total_samples = buffer_size * self.num_envs
@@ -479,7 +479,7 @@ class RolloutBuffer:
 
     def get_tensor_batch(
         self, batch_size: Optional[int] = None, device: Optional[str] = None
-    ) -> Dict[str, Union[torch.Tensor, Dict[str, torch.Tensor]]]:
+    ) -> dict[str, Union[torch.Tensor, dict[str, torch.Tensor]]]:
         """
         Get data from the buffer as PyTorch tensors, flattened and optionally sampled.
         The output is a TensorDict.
@@ -489,7 +489,7 @@ class RolloutBuffer:
         :param device: Device to put tensors on, defaults to None (uses self.device).
         :type device: Optional[str]
         :return: TensorDict containing the data.
-        :rtype: Dict[str, Union[torch.Tensor, Dict[str, torch.Tensor]]]
+        :rtype: dict[str, Union[torch.Tensor, dict[str, torch.Tensor]]]
         """
         target_device = device or self.device
         buffer_size = self.capacity if self.full else self.pos
@@ -536,14 +536,14 @@ class RolloutBuffer:
 
     def _convert_td_to_np_dict(
         self, td: TensorDict
-    ) -> Dict[str, Union[np.ndarray, Dict[str, np.ndarray]]]:
+    ) -> dict[str, Union[np.ndarray, dict[str, np.ndarray]]]:
         """
         Convert a TensorDict to a dictionary of numpy arrays.
 
         :param td: TensorDict to convert.
         :type td: TensorDict
         :return: Dictionary of numpy arrays.
-        :rtype: Dict[str, Union[np.ndarray, Dict[str, np.ndarray]]]
+        :rtype: dict[str, Union[np.ndarray, dict[str, np.ndarray]]]
         """
         # Convert the TensorDict to the old dictionary of numpy arrays format
         np_dict = {}
@@ -577,7 +577,7 @@ class RolloutBuffer:
 
     @staticmethod
     def _pad_sequences(
-        sequences: List[Union[torch.Tensor, TensorDict]],
+        sequences: list[Union[torch.Tensor, TensorDict]],
         target_length: Optional[int] = None,
     ) -> Union[torch.Tensor, TensorDict]:
         """Pads sequences using zeros. If target_length is provided, the sequences are padded to the target length.
@@ -586,7 +586,7 @@ class RolloutBuffer:
         to the maximum length of the sequences in the batch (i.e. using `torch.nn.utils.rnn.pad_sequence`).
 
         :param sequences: The sequences to be padded.
-        :type sequences: List[Union[torch.Tensor, TensorDict]]
+        :type sequences: list[Union[torch.Tensor, TensorDict]]
         :param target_length: The target length to pad the sequences to. If None, the sequences are padded to the length of the longest sequence.
         :type target_length: Optional[int]
         :return: The padded sequence.
@@ -626,8 +626,8 @@ class RolloutBuffer:
     def _get_complete_sequences(
         self,
         data: torch.Tensor,
-        episode_done_indices: List[List[int]],
-    ) -> Tuple[List[torch.Tensor], int]:
+        episode_done_indices: list[list[int]],
+    ) -> tuple[list[torch.Tensor], int]:
         """Splits the provided data into sequences. If `self.max_seq_len` is not set, the entire episode
         is used as a sequence. Otherwise, the episode is split into sequences of length `self.max_seq_len`.
         If the episode is shorter than `self.max_seq_len`, the entire episode is used as a sequence.
@@ -635,9 +635,9 @@ class RolloutBuffer:
         :param data: The data to be split into sequences.
         :type data: torch.Tensor
         :param episode_done_indices: The indices of done signals.
-        :type episode_done_indices: List[List[int]]
+        :type episode_done_indices: list[list[int]]
         :return: A list of sequences and the length of the longest sequence.
-        :rtype: Tuple[List[torch.Tensor], int]
+        :rtype: tuple[list[torch.Tensor], int]
         """
         max_seq_len = self.max_seq_len
         sequences = []
@@ -697,7 +697,7 @@ class RolloutBuffer:
 
         # Split data into sequences and apply zero-padding
         # Retrieve the indices of dones as these are the last step of a whole episode
-        episode_done_indices: List[List[int]] = []
+        episode_done_indices: list[list[int]] = []
         for env_idx in range(self.num_envs):
             env_dones: torch.Tensor = valid_buffer_data_view["dones"][:, env_idx]
             env_dones_list = env_dones.nonzero().squeeze(-1).tolist()
@@ -782,13 +782,13 @@ class RolloutBuffer:
     def get_minibatch_sequences(
         self,
         batch_size: int,
-    ) -> Generator[Tuple[StandardTensorDict, StandardTensorDict], None, None]:
+    ) -> Generator[tuple[StandardTensorDict, StandardTensorDict], None, None]:
         """Get a minibatch of sequences from the buffer.
 
         :param batch_size: The number of sequences to sample.
         :type batch_size: int
         :return: A TensorDict containing the minibatch of sequences.
-        :rtype: Generator[Tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]], None, None]
+        :rtype: Generator[tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]], None, None]
         """
         if self.unpadded_slices is None:
             raise ValueError(
@@ -828,7 +828,7 @@ class RolloutBuffer:
             padded_indices = indices[sequences_samples].view(-1)
 
             # Unpadded and flat indices are used to sample unpadded training data
-            minibatch_seq_indices: List[int] = sequences_samples.tolist()
+            minibatch_seq_indices: list[int] = sequences_samples.tolist()
             unpadded_indices = [
                 self.unpadded_slices[idx].tolist() for idx in minibatch_seq_indices
             ]
@@ -851,19 +851,19 @@ class RolloutBuffer:
             start = end
             yield padded, unpadded
 
-    def __getstate__(self) -> Dict[str, Any]:
+    def __getstate__(self) -> dict[str, Any]:
         """Gets the state dictionary for pickling, ensuring arrays are copied.
 
         :return: State dictionary.
-        :rtype: Dict[str, Any]
+        :rtype: dict[str, Any]
         """
         return self.__dict__.copy()
 
-    def __setstate__(self, state: Dict[str, Any]) -> None:
+    def __setstate__(self, state: dict[str, Any]) -> None:
         """Sets the state dictionary when unpickling, re-initializing buffers.
 
         :param state: State dictionary.
-        :type state: Dict[str, Any]
+        :type state: dict[str, Any]
         """
         self.__dict__.update(state)
 

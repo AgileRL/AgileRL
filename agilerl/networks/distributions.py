@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Protocol, Tuple, Type, Union
+from typing import Optional, Protocol, Union
 
 import numpy as np
 import torch
@@ -9,7 +9,7 @@ from agilerl.modules.base import EvolvableModule, EvolvableWrapper
 from agilerl.typing import ArrayOrTensor, DeviceType, NetConfigType
 from agilerl.utils.algo_utils import get_output_size_from_space
 
-DistributionType = Union[Distribution, List[Distribution]]
+DistributionType = Union[Distribution, list[Distribution]]
 
 
 def sum_independent_tensor(tensor: torch.Tensor) -> torch.Tensor:
@@ -162,23 +162,23 @@ class CategoricalHandler:
 class MultiCategoricalHandler:
     """Handler for list of Categorical distributions (MultiDiscrete action spaces)."""
 
-    def sample(self, distribution: List[Categorical]) -> torch.Tensor:
+    def sample(self, distribution: list[Categorical]) -> torch.Tensor:
         """Sample an action from the distribution.
 
         :param distribution: List of Categorical distributions to sample from.
-        :type distribution: List[Categorical]
+        :type distribution: list[Categorical]
         :return: Sampled action.
         :rtype: torch.Tensor
         """
         return torch.stack([dist.sample() for dist in distribution], dim=1)
 
     def log_prob(
-        self, distribution: List[Categorical], action: torch.Tensor
+        self, distribution: list[Categorical], action: torch.Tensor
     ) -> torch.Tensor:
         """Get the log probability of the action.
 
         :param distribution: List of Categorical distributions to compute log probability for.
-        :type distribution: List[Categorical]
+        :type distribution: list[Categorical]
         :param action: Action.
         :type action: torch.Tensor
         """
@@ -188,11 +188,11 @@ class MultiCategoricalHandler:
         ]
         return torch.stack(multi_log_prob, dim=1).sum(dim=1)
 
-    def entropy(self, distribution: List[Categorical]) -> torch.Tensor:
+    def entropy(self, distribution: list[Categorical]) -> torch.Tensor:
         """Get the entropy of the action distribution.
 
         :param distribution: List of Categorical distributions to compute entropy for.
-        :type distribution: List[Categorical]
+        :type distribution: list[Categorical]
         :return: Entropy of the action distribution.
         :rtype: torch.Tensor
         """
@@ -205,13 +205,13 @@ class TorchDistribution:
     PPO, A2C, TRPO.
 
     :param distribution: Distribution to wrap.
-    :type distribution: Union[Distribution, List[Distribution]]
+    :type distribution: Union[Distribution, list[Distribution]]
     :param squash_output: Whether to squash the output to the action space.
     :type squash_output: bool
     """
 
     # Map distribution types to their handlers
-    _handlers: Dict[Type, DistributionHandler] = {
+    _handlers: dict[type, DistributionHandler] = {
         Normal: NormalHandler(),
         Bernoulli: BernoulliHandler(),
         Categorical: CategoricalHandler(),
@@ -460,7 +460,7 @@ class EvolvableDistribution(EvolvableWrapper):
         action_mask: Optional[ArrayOrTensor] = None,
         sample: bool = True,
     ) -> Union[
-        Tuple[torch.Tensor, torch.Tensor, torch.Tensor], Tuple[None, None, torch.Tensor]
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor], tuple[None, None, torch.Tensor]
     ]:
         """Forward pass of the network.
 
@@ -469,7 +469,7 @@ class EvolvableDistribution(EvolvableWrapper):
         :param action_mask: Mask to apply to the logits. Defaults to None.
         :type action_mask: Optional[ArrayOrTensor]
         :return: Action and log probability of the action.
-        :rtype: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         """
         logits = self.wrapped(latent)
 

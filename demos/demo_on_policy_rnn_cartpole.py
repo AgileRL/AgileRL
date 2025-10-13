@@ -3,8 +3,6 @@
 # This script demonstrates how to use recurrent neural networks (RNNs) or MLPs with PPO to solve the Pendulum-v1
 # environment with masked angular velocities.
 
-from typing import List
-
 import gymnasium as gym
 import numpy as np
 import torch
@@ -96,7 +94,7 @@ def run_demo():
         ent_coef=RLParameter(min=0.0001, max=0.001, grow_factor=1.0, shrink_factor=0.9),
     )
 
-    pop: List[PPO] = create_population(
+    pop: list[PPO] = create_population(
         algo="PPO",
         observation_space=observation_space,
         action_space=action_space,
