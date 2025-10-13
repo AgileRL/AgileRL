@@ -6,7 +6,7 @@
 # using a population and a simple evolutionary loop.
 import os
 import shutil
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Optional
 
 import gymnasium as gym
 import imageio
@@ -39,11 +39,11 @@ class MiniGridObsWrapper(gym.ObservationWrapper):
             low=0.0, high=1.0, shape=(flat_img_dim + 4,), dtype=np.float32
         )
 
-    def reset(self, **kwargs: Any) -> Tuple[np.ndarray, Dict[str, Any]]:
+    def reset(self, **kwargs: Any) -> tuple[np.ndarray, dict[str, Any]]:
         obs, info = self.env.reset(**kwargs)
         return self.observation(obs), info
 
-    def observation(self, obs: Dict[str, np.ndarray]) -> np.ndarray:
+    def observation(self, obs: dict[str, np.ndarray]) -> np.ndarray:
         img = obs["image"].astype(np.float32)
         flat_img = img.flatten()
         direction = obs["direction"]
@@ -114,7 +114,7 @@ def run_demo():
     observation_space = env.single_observation_space
     action_space = env.single_action_space
 
-    pop: List[PPO] = create_population(
+    pop: list[PPO] = create_population(
         algo="PPO",
         observation_space=observation_space,
         action_space=action_space,

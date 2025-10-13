@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Literal, Optional, Union
 
 import numpy as np
 import torch
@@ -13,13 +13,13 @@ BlockType = Literal["Conv1d", "Conv2d", "Conv3d"]
 
 
 def _assert_correct_kernel_sizes(
-    sizes: List[Tuple[int, ...]], block_type: BlockType
+    sizes: list[tuple[int, ...]], block_type: BlockType
 ) -> None:
     """Check that kernel sizes correspond to either 2d or 3d convolutions. We enforce
     CNN kernels to have the same value for width and height.
 
     :param sizes: Kernel sizes.
-    :type sizes:  Union[int, Tuple[int, ...]]
+    :type sizes:  Union[int, tuple[int, ...]]
     """
     for k_size in sizes:
         if len(k_size) == 2 and block_type == "Conv2d":
@@ -49,7 +49,7 @@ def _assert_correct_kernel_sizes(
 
 @dataclass
 class MutableKernelSizes:
-    sizes: List[KernelSizeType]
+    sizes: list[KernelSizeType]
     cnn_block_type: Literal["Conv2d", "Conv3d"]
     sample_input: Optional[torch.Tensor]
     rng: np.random.Generator
@@ -79,7 +79,7 @@ class MutableKernelSizes:
         self.tuple_sizes = tuple_sizes
 
     @property
-    def int_sizes(self) -> List[int]:
+    def int_sizes(self) -> list[int]:
         if self.tuple_sizes:
             return [k_size[-1] for k_size in self.sizes]
         return self.sizes
@@ -104,19 +104,19 @@ class MutableKernelSizes:
         self.sizes = self.sizes[:-1]
 
     def calc_max_kernel_sizes(
-        self, channel_size: List[int], stride_size: List[int], input_shape: List[int]
-    ) -> List[int]:
+        self, channel_size: list[int], stride_size: list[int], input_shape: list[int]
+    ) -> list[int]:
         """Calculate the maximum kernel sizes for each convolutional layer.
 
         :param channel_size: Number of channels in each convolutional layer.
-        :type channel_size: List[int]
+        :type channel_size: list[int]
         :param stride_size: Stride size of each convolutional layer.
-        :type stride_size: List[int]
+        :type stride_size: list[int]
         :param input_shape: Input shape.
-        :type input_shape: List[int]
+        :type input_shape: list[int]
 
         :return: Maximum kernel sizes for each convolutional layer.
-        :rtype: List[int]
+        :rtype: list[int]
         """
         kernel_size = self.int_sizes if self.tuple_sizes else self.sizes
         max_kernel_list = []
@@ -143,21 +143,21 @@ class MutableKernelSizes:
     def change_kernel_size(
         self,
         hidden_layer: int,
-        channel_size: List[int],
-        stride_size: List[int],
-        input_shape: Tuple[int],
-        kernel_size: Optional[Union[int, Tuple[int, ...]]] = None,
+        channel_size: list[int],
+        stride_size: list[int],
+        input_shape: tuple[int],
+        kernel_size: Optional[Union[int, tuple[int, ...]]] = None,
     ) -> int:
         """Randomly alters convolution kernel of random CNN layer.
 
         :param hidden_layer: Depth of hidden layer to change kernel size of.
         :type hidden_layer: int
         :param channel_size: Number of channels in each convolutional layer.
-        :type channel_size: List[int]
+        :type channel_size: list[int]
         :param stride_size: Stride size of each convolutional layer.
-        :type stride_size: List[int]
+        :type stride_size: list[int]
         :param input_shape: Input shape.
-        :type input_shape: Tuple[int]
+        :type input_shape: tuple[int]
         :param kernel_size: Kernel size to change to, defaults to None
         :type kernel_size: int, optional
 
@@ -224,15 +224,15 @@ class EvolvableCNN(EvolvableModule):
     * Changing the activation function for the output layer (e.g. ReLU to GELU)
 
     :param input_shape: Input shape
-    :type input_shape: List[int]
+    :type input_shape: list[int]
     :param num_outputs: Action dimension
     :type num_outputs: int
     :param channel_size: CNN channel size
-    :type channel_size: List[int]
+    :type channel_size: list[int]
     :param kernel_size: Convolution kernel size
-    :type kernel_size: List[KernelSizeType]
+    :type kernel_size: list[KernelSizeType]
     :param stride_size: Convolution stride size
-    :type stride_size: List[int]
+    :type stride_size: list[int]
     :param sample_input: Sample input tensor, defaults to None
     :type sample_input: Optional[torch.Tensor], optional
     :param block_type: Type of convolutional block, either 'Conv1d', 'Conv2d' or 'Conv3d', defaults to 'Conv2d'.
@@ -263,11 +263,11 @@ class EvolvableCNN(EvolvableModule):
 
     def __init__(
         self,
-        input_shape: List[int],
+        input_shape: list[int],
         num_outputs: int,
-        channel_size: List[int],
-        kernel_size: List[KernelSizeType],
-        stride_size: List[int],
+        channel_size: list[int],
+        kernel_size: list[KernelSizeType],
+        stride_size: list[int],
         sample_input: Optional[torch.Tensor] = None,
         block_type: Literal["Conv1d", "Conv2d", "Conv3d"] = "Conv2d",
         activation: str = "ReLU",
@@ -369,7 +369,7 @@ class EvolvableCNN(EvolvableModule):
         )
 
     @property
-    def net_config(self) -> Dict[str, Any]:
+    def net_config(self) -> dict[str, Any]:
         net_config = self.init_dict.copy()
         for attr in ["input_shape", "num_outputs", "device", "name"]:
             net_config.pop(attr, None)
@@ -377,11 +377,11 @@ class EvolvableCNN(EvolvableModule):
         return net_config
 
     @property
-    def kernel_size(self) -> List[KernelSizeType]:
+    def kernel_size(self) -> list[KernelSizeType]:
         """Returns the kernel size of the network.
 
         :return: Kernel size
-        :rtype: List[KernelSizeType]
+        :rtype: list[KernelSizeType]
         """
         return self.mut_kernel_size.int_sizes
 
@@ -475,9 +475,9 @@ class EvolvableCNN(EvolvableModule):
     def create_cnn(
         self,
         in_channels: int,
-        channel_size: List[int],
-        kernel_size: List[KernelSizeType],
-        stride_size: List[int],
+        channel_size: list[int],
+        kernel_size: list[KernelSizeType],
+        stride_size: list[int],
         sample_input: torch.Tensor,
     ) -> nn.Sequential:
         """
@@ -486,11 +486,11 @@ class EvolvableCNN(EvolvableModule):
         :param in_channels: The number of input channels.
         :type in_channels: int
         :param channel_size: A list of integers representing the number of channels in each convolutional layer.
-        :type channel_size: List[int]
+        :type channel_size: list[int]
         :param kernel_size: A list of integers representing the kernel size of each convolutional layer.
-        :type kernel_size: List[int]
+        :type kernel_size: list[int]
         :param stride_size: A list of integers representing the stride size of each convolutional layer.
-        :type stride_size: List[int]
+        :type stride_size: list[int]
         :param sample_input: A sample input tensor.
         :type sample_input: torch.Tensor
         :param name: The name of the CNN.
@@ -572,7 +572,7 @@ class EvolvableCNN(EvolvableModule):
 
         :return: If maximum number of hidden layers is reached, returns a dictionary containing
         the hidden layer and number of new channels.
-        :rtype: Optional[Dict[str, int]]
+        :rtype: Optional[dict[str, int]]
         """
         dims_to_check = (
             self.cnn_output_size[-1:]
@@ -641,12 +641,12 @@ class EvolvableCNN(EvolvableModule):
             return self.add_channel()
 
     @mutation(MutationType.LAYER, shrink_params=True)
-    def remove_layer(self) -> Optional[Dict[str, int]]:
+    def remove_layer(self) -> Optional[dict[str, int]]:
         """Removes a hidden layer from convolutional neural network.
 
         :return: If minimum number of hidden layers is reached, returns a dictionary containing
         the hidden layer and number of new channels.
-        :rtype: Optional[Dict[str, int]]
+        :rtype: Optional[dict[str, int]]
         """
         if len(self.channel_size) > self.min_hidden_layers:
             self.channel_size = self.channel_size[:-1]
@@ -658,7 +658,7 @@ class EvolvableCNN(EvolvableModule):
     @mutation(MutationType.NODE)
     def change_kernel(
         self, kernel_size: Optional[int] = None, hidden_layer: Optional[int] = None
-    ) -> Dict[str, Union[int, None]]:
+    ) -> dict[str, Union[int, None]]:
         """Randomly alters convolution kernel of random CNN layer.
 
         :param kernel_size: Kernel size to change to, defaults to None
@@ -667,7 +667,7 @@ class EvolvableCNN(EvolvableModule):
         :type hidden_layer: int, optional
 
         :return: Dictionary containing the hidden layer and kernel size
-        :rtype: Dict[str, Union[int, None]]
+        :rtype: dict[str, Union[int, None]]
         """
         if len(self.channel_size) > 1:
             if hidden_layer is None:
@@ -690,7 +690,7 @@ class EvolvableCNN(EvolvableModule):
         self,
         hidden_layer: Optional[int] = None,
         numb_new_channels: Optional[int] = None,
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         """Adds channel to hidden layer of convolutional neural network.
 
         :param hidden_layer: Depth of hidden layer to add channel to, defaults to None
@@ -720,7 +720,7 @@ class EvolvableCNN(EvolvableModule):
         self,
         hidden_layer: Optional[int] = None,
         numb_new_channels: Optional[int] = None,
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         """Remove channel from hidden layer of convolutional neural network.
 
         :param hidden_layer: Depth of hidden layer to add channel to, defaults to None
@@ -728,7 +728,7 @@ class EvolvableCNN(EvolvableModule):
         :param numb_new_channels: Number of channels to add to hidden layer, defaults to None
         :type numb_new_channels: int, optional
         :return: Dictionary containing the hidden layer and number of new channels
-        :rtype: Dict[str, Union[int, None]]
+        :rtype: dict[str, Union[int, None]]
         """
         if hidden_layer is None:
             hidden_layer = self.rng.integers(0, len(self.channel_size))

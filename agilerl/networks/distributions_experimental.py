@@ -1,5 +1,5 @@
 import math
-from typing import Optional, Tuple, Union
+from typing import Optional, Union
 
 import numpy as np
 import torch
@@ -397,7 +397,7 @@ class EvolvableDistribution(EvolvableWrapper):
         action_mask: Optional[ArrayOrTensor] = None,
         sample: bool = True,
     ) -> Union[
-        Tuple[torch.Tensor, torch.Tensor, torch.Tensor], Tuple[None, None, torch.Tensor]
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor], tuple[None, None, torch.Tensor]
     ]:
         """Forward pass of the network.
 
@@ -408,7 +408,7 @@ class EvolvableDistribution(EvolvableWrapper):
         :param sample: Whether to sample an action or return the mode/mean. Defaults to True.
         :type sample: bool
         :return: Action and log probability of the action.
-        :rtype: Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], Tuple[None, torch.Tensor, torch.Tensor]]
+        :rtype: Union[tuple[torch.Tensor, torch.Tensor, torch.Tensor], tuple[None, torch.Tensor, torch.Tensor]]
         """
         logits = self.wrapped(latent)
 

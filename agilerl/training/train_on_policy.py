@@ -1,7 +1,7 @@
 import time
 import warnings
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Optional
 
 import gymnasium as gym
 import numpy as np
@@ -21,9 +21,9 @@ from agilerl.utils.utils import (
     tournament_selection_and_mutation,
 )
 
-InitDictType = Optional[Dict[str, Any]]
+InitDictType = Optional[dict[str, Any]]
 OnPolicyAlgorithms = PPO
-PopulationType = List[OnPolicyAlgorithms]
+PopulationType = list[OnPolicyAlgorithms]
 
 
 def train_on_policy(
@@ -50,11 +50,11 @@ def train_on_policy(
     verbose: bool = True,
     accelerator: Optional[Accelerator] = None,
     wandb_api_key: Optional[str] = None,
-    wandb_kwargs: Optional[Dict[str, Any]] = None,
+    wandb_kwargs: Optional[dict[str, Any]] = None,
     collect_rollouts_fn: Optional[
         Callable[[OnPolicyAlgorithms, gym.Env, int], None]
     ] = None,
-) -> Tuple[PopulationType, List[List[float]]]:
+) -> tuple[PopulationType, list[list[float]]]:
     """The general on-policy RL training function. Returns trained population of agents
     and their fitnesses.
 

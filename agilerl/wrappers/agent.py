@@ -1,7 +1,7 @@
 from abc import ABC
 from collections import OrderedDict
 from functools import partial
-from typing import Any, Callable, Dict, Generic, List, Optional, Tuple, TypeVar, Union
+from typing import Any, Callable, Generic, Optional, TypeVar, Union
 
 import dill
 import numpy as np
@@ -26,7 +26,7 @@ from agilerl.utils.algo_utils import obs_to_tensor, stack_experiences
 from agilerl.wrappers.utils import RunningMeanStd
 
 AgentType = TypeVar("AgentType", bound=Union[RLAlgorithm, MultiAgentRLAlgorithm])
-MARLObservationType = Dict[str, ObservationType]
+MARLObservationType = dict[str, ObservationType]
 SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound="AgentWrapper")
 
 
@@ -76,7 +76,7 @@ class AgentWrapper(ABC, Generic[AgentType]):
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}({self.agent})"
 
-    def __getstate__(self) -> Dict[str, Any]:
+    def __getstate__(self) -> dict[str, Any]:
         return {
             "agent": self.agent,
             "observation_space": self.observation_space,
@@ -84,7 +84,7 @@ class AgentWrapper(ABC, Generic[AgentType]):
             "multi_agent": self.multi_agent,
         }
 
-    def __setstate__(self, state: Dict[str, Any]) -> None:
+    def __setstate__(self, state: dict[str, Any]) -> None:
         self.agent: AgentType = state["agent"]
         self.observation_space = state["observation_space"]
         self.action_space = state["action_space"]
@@ -217,7 +217,7 @@ class AgentWrapper(ABC, Generic[AgentType]):
 
 
 RunningStatsType = Union[
-    RunningMeanStd, Dict[str, RunningMeanStd], Tuple[RunningMeanStd, ...]
+    RunningMeanStd, dict[str, RunningMeanStd], tuple[RunningMeanStd, ...]
 ]
 
 
@@ -242,13 +242,13 @@ class RSNorm(AgentWrapper[AgentType]):
     :type norm_obs_keys: Optional[List]
     """
 
-    obs_rms: Union[RunningStatsType, Dict[str, RunningStatsType]]
+    obs_rms: Union[RunningStatsType, dict[str, RunningStatsType]]
 
     def __init__(
         self,
         agent: AgentType,
         epsilon: float = 1e-4,
-        norm_obs_keys: Optional[List[str]] = None,
+        norm_obs_keys: Optional[list[str]] = None,
     ) -> None:
         super().__init__(agent)
 
@@ -268,15 +268,15 @@ class RSNorm(AgentWrapper[AgentType]):
     def build_rms(
         observation_space: spaces.Space,
         epsilon: float = 1e-4,
-        norm_obs_keys: Optional[List[str]] = None,
+        norm_obs_keys: Optional[list[str]] = None,
         device: DeviceType = "cpu",
-    ) -> Union[RunningMeanStd, Dict[str, RunningMeanStd], Tuple[RunningMeanStd, ...]]:
+    ) -> Union[RunningMeanStd, dict[str, RunningMeanStd], tuple[RunningMeanStd, ...]]:
         """Builds the RunningMeanStd object(s) based on the observation space.
 
         :param observation_space: Observation space of the agent
         :type observation_space: spaces.Space
         :return: RunningMeanStd object(s)
-        :rtype: Union[RunningMeanStd, Dict[str, RunningMeanStd], Tuple[RunningMeanStd, ...]]
+        :rtype: Union[RunningMeanStd, dict[str, RunningMeanStd], tuple[RunningMeanStd, ...]]
         """
         if isinstance(observation_space, spaces.Dict):
             if norm_obs_keys is not None:
@@ -464,18 +464,18 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
         ), "AsyncAgentsWrapper is currently only supported for IPPO."
 
     def extract_inactive_agents(
-        self, obs: Dict[str, ObservationType]
-    ) -> Tuple[Dict[str, np.ndarray], Dict[str, ObservationType]]:
+        self, obs: dict[str, ObservationType]
+    ) -> tuple[dict[str, np.ndarray], dict[str, ObservationType]]:
         """Extract the inactive agents from an observation. Inspects each key in the
         observation dictionary and, if all the values are `np.nan` (as set by
         ``AsyncPettingZooVecEnv``), the agent is considered inactive and removed from
         the observation dictionary.
 
         :param obs: Observation dictionary
-        :type obs: Dict[str, ObservationType]
+        :type obs: dict[str, ObservationType]
 
         :return: Tuple of inactive agents and filtered observations
-        :rtype: Tuple[Dict[str, np.ndarray], Dict[str, ObservationType]]
+        :rtype: tuple[dict[str, np.ndarray], dict[str, ObservationType]]
         """
         inactive_agents = {}
         agents_to_remove = []

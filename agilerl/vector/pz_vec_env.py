@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import numpy as np
 from gymnasium.spaces import Space
@@ -24,19 +24,19 @@ class PettingZooVecEnv:
     :type possible_agents: list[str]
     """
 
-    metadata: Dict[str, Any] = {}
+    metadata: dict[str, Any] = {}
     render_mode: Optional[str] = None
     closed: bool = False
     num_envs: int
-    agents: List[str]
+    agents: list[str]
     num_agents: int
 
     def __init__(
         self,
         num_envs: int,
-        observation_spaces: Dict[str, Space],
-        action_spaces: List[Space],
-        possible_agents: List[str],
+        observation_spaces: dict[str, Space],
+        action_spaces: list[Space],
+        possible_agents: list[str],
     ):
         self.num_envs = num_envs
         self.agents = possible_agents
@@ -57,8 +57,8 @@ class PettingZooVecEnv:
         self.single_observation_space = self._get_single_observation_space
 
     def reset(
-        self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
+        self, seed: Optional[int] = None, options: Optional[dict[str, Any]] = None
+    ) -> dict[str, Any]:
         """
         Reset all the environments and return two dictionaries of batched observations and infos.
 
@@ -69,7 +69,7 @@ class PettingZooVecEnv:
         """
         pass
 
-    def step_async(self, actions: List[Dict[str, ActionType]]) -> None:
+    def step_async(self, actions: list[dict[str, ActionType]]) -> None:
         """
         Tell all the environments to start taking a step
         with the given actions.
@@ -89,7 +89,7 @@ class PettingZooVecEnv:
         """
         pass
 
-    def step(self, actions: Dict[str, np.ndarray]) -> PzStepReturn:
+    def step(self, actions: dict[str, np.ndarray]) -> PzStepReturn:
         """Take an action for each parallel environment
 
         :param actions: Dictionary of vectorized actions for each agent.

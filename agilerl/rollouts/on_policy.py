@@ -1,6 +1,6 @@
 """Functions for collecting rollouts for on-policy algorithms."""
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import numpy as np
 import torch
@@ -20,10 +20,10 @@ def _collect_rollouts(
     last_obs: Optional[np.ndarray] = None,
     last_done: Optional[np.ndarray] = None,
     last_scores: Optional[np.ndarray] = None,
-    last_info: Optional[Dict[str, Any]] = None,
+    last_info: Optional[dict[str, Any]] = None,
     *,
     recurrent: bool,
-) -> Tuple[List[float], np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
+) -> tuple[list[float], np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
     """Collect rollouts for on-policy algorithms.
 
     :param agent: The agent to collect rollouts for.
@@ -39,14 +39,14 @@ def _collect_rollouts(
     :param last_scores: The scores to use for the first step. Defaults to None, where the environment is reset.
     :type last_scores: Optional[np.ndarray]
     :param last_info: The info for the current step. Defaults to None, where the environment is reset.
-    :type last_info: Optional[Dict[str, Any]]
+    :type last_info: Optional[dict[str, Any]]
     :param recurrent: Whether the agent is recurrent.
     :type recurrent: bool
 
     :return: The list of scores for the episodes completed in the rollouts
-    :rtype: List[float]
+    :rtype: list[float]
     :return: The observation, done flag, scores, and info for the current step.
-    :rtype: Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]
+    :rtype: tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]
     """
     if not agent.use_rollout_buffer:
         raise RuntimeError(
@@ -191,7 +191,7 @@ def _collect_rollouts(
 
 def collect_rollouts(
     agent: SupportedOnPolicy, env: GymEnvType, n_steps: Optional[int] = None, **kwargs
-) -> List[float]:
+) -> list[float]:
     """Collect rollouts for non-recurrent on-policy algorithms.
 
     :param agent: The agent to collect rollouts for.
@@ -202,7 +202,7 @@ def collect_rollouts(
     :type n_steps: Optional[int]
 
     :return: The list of scores for the episodes completed in the rollouts
-    :rtype: List[float]
+    :rtype: list[float]
     """
 
     return _collect_rollouts(agent, env, n_steps, recurrent=False, **kwargs)
@@ -210,7 +210,7 @@ def collect_rollouts(
 
 def collect_rollouts_recurrent(
     agent: SupportedOnPolicy, env: GymEnvType, n_steps: Optional[int] = None, **kwargs
-) -> List[float]:
+) -> list[float]:
     """Collect rollouts for recurrent on-policy algorithms.
 
     :param agent: The agent to collect rollouts for.
@@ -221,7 +221,7 @@ def collect_rollouts_recurrent(
     :type n_steps: Optional[int]
 
     :return: The list of scores for the episodes completed in the rollouts
-    :rtype: List[float]
+    :rtype: list[float]
     """
 
     return _collect_rollouts(agent, env, n_steps, recurrent=True, **kwargs)

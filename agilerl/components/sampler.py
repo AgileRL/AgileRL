@@ -1,5 +1,5 @@
 import warnings
-from typing import Any, List, Optional, Union
+from typing import Any, Optional, Union
 
 import torch
 from tensordict import TensorDict
@@ -33,14 +33,14 @@ class Sampler:
 
     @staticmethod
     def tensordict_collate_fn(
-        batch: List[TensorDict],
-    ) -> Union[TensorDict, List[TensorDict]]:
+        batch: list[TensorDict],
+    ) -> Union[TensorDict, list[TensorDict]]:
         """Custom collate function that properly handles TensorDict objects.
 
         :param batch: List of TensorDict objects to collate
-        :type batch: List[TensorDict]
+        :type batch: list[TensorDict]
         :return: Either a single TensorDict or a list of TensorDicts
-        :rtype: Union[TensorDict, List[TensorDict]]
+        :rtype: Union[TensorDict, list[TensorDict]]
         """
         return TensorDict(
             {key: torch.stack([b[key] for b in batch]) for key in batch[0].keys()},

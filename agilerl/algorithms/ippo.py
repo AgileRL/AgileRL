@@ -1,7 +1,7 @@
 import copy
 import warnings
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 import torch
@@ -107,12 +107,12 @@ class IPPO(MultiAgentRLAlgorithm):
 
     def __init__(
         self,
-        observation_spaces: Union[List[spaces.Space], spaces.Dict],
-        action_spaces: Union[List[spaces.Space], spaces.Dict],
-        agent_ids: Optional[List[str]] = None,
+        observation_spaces: Union[list[spaces.Space], spaces.Dict],
+        action_spaces: Union[list[spaces.Space], spaces.Dict],
+        agent_ids: Optional[list[str]] = None,
         index: int = 0,
         hp_config: Optional[HyperparameterConfig] = None,
-        net_config: Optional[Dict[str, Any]] = None,
+        net_config: Optional[dict[str, Any]] = None,
         batch_size: int = 64,
         lr: float = 1e-4,
         learn_step: int = 2048,
@@ -353,14 +353,14 @@ class IPPO(MultiAgentRLAlgorithm):
 
     def process_infos(
         self, infos: Optional[InfosDict]
-    ) -> Tuple[ArrayDict, ArrayDict, ArrayDict]:
+    ) -> tuple[ArrayDict, ArrayDict, ArrayDict]:
         """
         Process the information, extract env_defined_actions, action_masks and agent_masks
 
         :param infos: Info dict
-        :type infos: Dict[str, Dict[...]]
+        :type infos: dict[str, dict[...]]
         :return: Tuple of action_masks, env_defined_actions, agent_masks
-        :rtype: Tuple[ArrayDict, ArrayDict, ArrayDict]
+        :rtype: tuple[ArrayDict, ArrayDict, ArrayDict]
         """
         if infos is None:
             infos = {agent: {} for agent in self.agent_ids}
@@ -376,10 +376,10 @@ class IPPO(MultiAgentRLAlgorithm):
         """Extract action masks from info dictionary
 
         :param infos: Info dict
-        :type infos: Dict[str, Dict[...]]
+        :type infos: dict[str, dict[...]]
 
         :return: Action masks
-        :rtype: Dict[str, np.ndarray]
+        :rtype: dict[str, np.ndarray]
         """
         # Get dict of form {"agent_id" : [1, 0, 0, 0]...} etc
         action_masks = {group_id: [] for group_id in self.observation_space}
@@ -410,17 +410,17 @@ class IPPO(MultiAgentRLAlgorithm):
         return action_masks
 
     def preprocess_observation(
-        self, observation: ObservationType, group_ids: List[str]
-    ) -> Dict[str, TorchObsType]:
+        self, observation: ObservationType, group_ids: list[str]
+    ) -> dict[str, TorchObsType]:
         """Preprocesses observations for forward pass through neural network.
 
         :param observation: Observations of environment
         :type observation: numpy.ndarray[float] or dict[str, numpy.ndarray[float]]
         :param group_ids: List of group IDs
-        :type group_ids: List[str]
+        :type group_ids: list[str]
 
         :return: Preprocessed observations
-        :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
+        :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or tuple[torch.Tensor[float], ...]
         """
         preprocessed = {group_id: [] for group_id in group_ids}
         for agent_id, agent_obs in observation.items():
@@ -452,11 +452,11 @@ class IPPO(MultiAgentRLAlgorithm):
         critic: ValueNetwork,
         action_mask: Optional[torch.Tensor] = None,
         batch_size: Optional[int] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Get actions and values for a batch of grouped observations.
 
         :param obs: Observations of environment
-        :type obs: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
+        :type obs: torch.Tensor[float] or dict[str, torch.Tensor[float]] or tuple[torch.Tensor[float], ...]
         :param actor: Actor network
         :type actor: StochasticActor
         :param critic: Critic network
@@ -466,7 +466,7 @@ class IPPO(MultiAgentRLAlgorithm):
         :param batch_size: Batch size
         :type batch_size: int, optional
         :return: Tuple of actions, log probabilities, entropies, values
-        :rtype: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
         """
         # Process in batches
         if batch_size is not None and obs.shape[0] > batch_size:
@@ -510,17 +510,17 @@ class IPPO(MultiAgentRLAlgorithm):
 
     def get_action(
         self,
-        obs: Dict[str, ObservationType],
+        obs: dict[str, ObservationType],
         infos: Optional[InfosDict] = None,
-    ) -> Tuple[ArrayDict, ArrayDict, ArrayDict, ArrayDict]:
+    ) -> tuple[ArrayDict, ArrayDict, ArrayDict, ArrayDict]:
         """Returns the next action to take in the environment.
 
         :param obs: Environment observations: {'agent_0': state_dim_0, ..., 'agent_n': state_dim_n}
-        :type obs: Dict[str, numpy.Array | Dict[str, numpy.Array] | Tuple[numpy.Array, ...]]
+        :type obs: dict[str, numpy.Array | dict[str, numpy.Array] | tuple[numpy.Array, ...]]
         :param infos: Information dictionary returned by env.step(actions)
-        :type infos: Dict[str, Dict[str, ...]]
+        :type infos: dict[str, dict[str, ...]]
         :return: Tuple of actions, log probabilities, entropies, values
-        :rtype: Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray], Dict[str, np.ndarray], Dict[str, np.ndarray]]
+        :rtype: tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict[str, np.ndarray], dict[str, np.ndarray]]
         """
         assert not key_in_nested_dict(
             obs, "action_mask"
@@ -602,10 +602,10 @@ class IPPO(MultiAgentRLAlgorithm):
 
         :param experiences: Tuple of dictionaries containing batched states, actions,
             rewards, next_states, dones in that order for each individual agent.
-        :type experiences: Tuple[Dict[str, torch.Tensor]]
+        :type experiences: tuple[dict[str, torch.Tensor]]
 
         :return: Loss dictionary
-        :rtype: Dict[str, torch.Tensor]
+        :rtype: dict[str, torch.Tensor]
         """
         # Process experiences
         states, actions, log_probs, rewards, dones, values, next_states, next_dones = (
@@ -657,7 +657,7 @@ class IPPO(MultiAgentRLAlgorithm):
 
         :param experience: States, actions, log_probs, rewards, dones, values, next_state, next_done in
             that order, organised by shared agent id
-        :type experience: Tuple[Union[numpy.ndarray, Dict[str, numpy.ndarray]], ...]
+        :type experience: tuple[Union[numpy.ndarray, dict[str, numpy.ndarray]], ...]
         :param actor: Actor network
         :type actor: EvolvableModule
         :param critic: Critic network

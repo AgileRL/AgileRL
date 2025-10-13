@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Optional
 
 import numpy as np
 import torch
@@ -12,7 +12,6 @@ from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.q_networks import RainbowQNetwork
 from agilerl.typing import (
-    ArrayLike,
     ExperiencesType,
     GymEnvType,
     ObservationType,
@@ -81,7 +80,7 @@ class RainbowDQN(RLAlgorithm):
         action_space: spaces.Space,
         index: int = 0,
         hp_config: Optional[HyperparameterConfig] = None,
-        net_config: Optional[Dict[str, Any]] = None,
+        net_config: Optional[dict[str, Any]] = None,
         batch_size: int = 64,
         lr: float = 1e-4,
         learn_step: int = 5,
@@ -184,7 +183,7 @@ class RainbowDQN(RLAlgorithm):
             )
         else:
             net_config = {} if net_config is None else net_config
-            head_config: Optional[Dict[str, Any]] = net_config.get("head_config", {})
+            head_config: Optional[dict[str, Any]] = net_config.get("head_config", {})
 
             head_config = MlpNetConfig(
                 hidden_size=head_config.get("hidden_size", [64]),
@@ -360,7 +359,7 @@ class RainbowDQN(RLAlgorithm):
         experiences: ExperiencesType,
         n_experiences: Optional[ExperiencesType] = None,
         per: bool = False,
-    ) -> Tuple[float, Optional[ArrayLike], Optional[ArrayLike]]:
+    ) -> tuple[float, Optional[np.ndarray], Optional[np.ndarray]]:
         """Updates agent network parameters to learn from experiences.
 
         :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
@@ -371,7 +370,7 @@ class RainbowDQN(RLAlgorithm):
         :type per: bool, optional
 
         :return: Tuple of loss, indices, and new priorities
-        :rtype: Tuple[float, numpy.ndarray, numpy.ndarray]
+        :rtype: tuple[float, numpy.ndarray, numpy.ndarray]
         """
         n_step = n_experiences is not None
         obs = experiences["obs"]

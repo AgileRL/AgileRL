@@ -1,5 +1,3 @@
-from typing import List
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -74,7 +72,7 @@ if __name__ == "__main__":
     )
 
     # Create a population of DQN agents
-    pop: List[DQN] = create_population(
+    pop: list[DQN] = create_population(
         algo="DQN",  # Algorithm
         observation_space=env.observation_space,  # Observation space
         action_space=env.action_space,  # Action space

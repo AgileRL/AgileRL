@@ -1,6 +1,6 @@
 import warnings
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import numpy as np
 import torch
@@ -20,7 +20,7 @@ from agilerl.utils.evolvable_networks import (
     layer_init,
 )
 
-LayerInfo = Dict[str, Dict[int, str]]
+LayerInfo = dict[str, dict[int, str]]
 
 
 class MakeEvolvable(EvolvableModule):
@@ -594,10 +594,10 @@ class MakeEvolvable(EvolvableModule):
     def create_cnn(
         self,
         input_size: int,
-        channel_size: List[int],
-        kernel_size: List[int],
-        stride_size: List[int],
-        padding: List[int],
+        channel_size: list[int],
+        kernel_size: list[int],
+        stride_size: list[int],
+        padding: list[int],
         name: str,
     ) -> nn.Sequential:
         """Creates and returns convolutional neural network.
@@ -607,11 +607,11 @@ class MakeEvolvable(EvolvableModule):
         :param channel_size: Output channel sizes for each layer
         :type channel_size: list[int]
         :param kernel_size: Kernel sizes
-        :type kernel_size: list[int] or list[Tuple[int]]
+        :type kernel_size: list[int] or list[tuple[int]]
         :param stride_size: Stride sizes
-        :type stride_size: list[int] or list[Tuple[int]]
+        :type stride_size: list[int] or list[tuple[int]]
         :param padding: Convolutional layer padding
-        :type padding: list[int] or list[Tuple[int]]
+        :type padding: list[int] or list[tuple[int]]
         :param name: Layer name
         :type name: str
         """
@@ -692,7 +692,7 @@ class MakeEvolvable(EvolvableModule):
 
         return nn.Sequential(net_dict)
 
-    def build_networks(self) -> Tuple[nn.Module, nn.Module, Optional[nn.Module]]:
+    def build_networks(self) -> tuple[nn.Module, nn.Module, Optional[nn.Module]]:
         """Creates and returns the feature and value net."""
 
         # Check if any CNN layers otherwise return just a mlp
@@ -798,7 +798,7 @@ class MakeEvolvable(EvolvableModule):
             )
         return feature_net, value_net, advantage_net
 
-    def get_init_dict(self) -> Dict[str, Any]:
+    def get_init_dict(self) -> dict[str, Any]:
         """Returns model information in dictionary."""
         init_dict = {
             "network": None,
@@ -898,7 +898,7 @@ class MakeEvolvable(EvolvableModule):
     @mutation(MutationType.NODE)
     def add_mlp_node(
         self, hidden_layer: Optional[int] = None, numb_new_nodes: Optional[int] = None
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         """Adds nodes to hidden layer of value network.
 
         :param hidden_layer: Depth of hidden layer to add nodes to, defaults to None
@@ -923,7 +923,7 @@ class MakeEvolvable(EvolvableModule):
     @mutation(MutationType.NODE)
     def remove_mlp_node(
         self, hidden_layer: Optional[int] = None, numb_new_nodes: Optional[int] = None
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         """Removes nodes from hidden layer of neural network.
 
         :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None
@@ -1044,7 +1044,7 @@ class MakeEvolvable(EvolvableModule):
         self,
         hidden_layer: Optional[int] = None,
         numb_new_channels: Optional[int] = None,
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         """Adds channel to hidden layer of Convolutional Neural Network.
 
         :param hidden_layer: Depth of hidden layer to add channel to, defaults to None
@@ -1071,7 +1071,7 @@ class MakeEvolvable(EvolvableModule):
         self,
         hidden_layer: Optional[int] = None,
         numb_new_channels: Optional[int] = None,
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         """Remove channel from hidden layer of convolutional neural network.
 
         :param hidden_layer: Depth of hidden layer to add channel to, defaults to None
@@ -1093,7 +1093,7 @@ class MakeEvolvable(EvolvableModule):
 
         return {"hidden_layer": hidden_layer, "numb_new_channels": numb_new_channels}
 
-    def calc_max_kernel_sizes(self) -> List[Tuple[int, int]]:
+    def calc_max_kernel_sizes(self) -> list[tuple[int, int]]:
         "Calculates the max kernel size for each convolutional layer of the feature net."
         max_kernel_list = []
         if self.cnn_layer_info["conv_layer_type"] != "Conv3d":
@@ -1150,7 +1150,7 @@ class MakeEvolvable(EvolvableModule):
 
         return max_kernel_list
 
-    def calc_stride_size_ranges(self) -> List[Tuple[int, int]]:
+    def calc_stride_size_ranges(self) -> list[tuple[int, int]]:
         "Calculates a range of stride sizes for each convolutional layer of the feature net."
         stride_range_list = []
         if self.cnn_layer_info["conv_layer_type"] != "Conv3d":

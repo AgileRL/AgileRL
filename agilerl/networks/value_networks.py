@@ -1,5 +1,5 @@
 from dataclasses import asdict
-from typing import Optional, Tuple, Type, Union
+from typing import Optional, Union
 
 import torch
 from gymnasium import spaces
@@ -19,7 +19,7 @@ class ValueNetwork(EvolvableNetwork):
     :type observation_space: spaces.Space
     :param encoder_cls: Encoder class to use for the network. Defaults to None, whereby it is
         automatically built using an AgileRL module according the observation space.
-    :type encoder_cls: Optional[Union[str, Type[EvolvableModule]]]
+    :type encoder_cls: Optional[Union[str, type[EvolvableModule]]]
     :param encoder_config: Configuration of the encoder.
     :type encoder_config: NetConfigType
     :param head_config: Configuration of the head.
@@ -43,7 +43,7 @@ class ValueNetwork(EvolvableNetwork):
     def __init__(
         self,
         observation_space: spaces.Space,
-        encoder_cls: Optional[Union[str, Type[EvolvableModule]]] = None,
+        encoder_cls: Optional[Union[str, type[EvolvableModule]]] = None,
         encoder_config: Optional[NetConfigType] = None,
         head_config: Optional[NetConfigType] = None,
         min_latent_dim: int = 8,
@@ -100,7 +100,7 @@ class ValueNetwork(EvolvableNetwork):
 
     def forward(
         self, x: TorchObsType, hidden_state: Optional[TorchObsType] = None
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """Forward pass of the network.
 
         :param x: Input tensor.
