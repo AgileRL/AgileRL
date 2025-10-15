@@ -34,6 +34,7 @@ from agilerl.utils.algo_utils import (
 from agilerl.utils.llm_utils import (
     DummyOptimizer,
     HuggingFaceGym,
+    gather_if_zero3,
 )
 
 DeepSpeedOptimizerType = Union[
@@ -811,13 +812,7 @@ class GRPO(LLMAlgorithm):
             self.accelerator.wait_for_everyone()
         model_ref = self.accelerator.unwrap_model(self.actor)
         model_ref.set_adapter("actor")
-        for name, param in model_ref.named_parameters():
-            print(name, param.dtype)
-            if param.dtype != torch.bfloat16:
-                print("PARAM NOT BFLOAT16")
-        with self.gather_if_zero3(
-            list(model_ref.parameters()),
-        ):
+        with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
             model_ref.merge_adapter()
             for name, param in model_ref.named_parameters():
                 name = name.removeprefix("base_model.model.").replace(".base_layer", "")
