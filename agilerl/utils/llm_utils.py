@@ -3,6 +3,7 @@ import warnings
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 
+import deepspeed
 import gymnasium as gym
 import torch
 from accelerate import Accelerator
@@ -307,3 +308,27 @@ class DummyOptimizer:
             "DummyOptimizer is a placeholder optimizer and should not be used."
             "Please ensure you are calling accelerator.prepare() on the optimizer."
         )
+
+
+@contextmanager
+def gather_if_zero3(
+    zero_stage: int, params: List[torch.Tensor], modifier_rank: int | None = None
+):
+    """
+    Conditional context manager for setting the zero stage for the model.
+
+    :param zero_stage: The zero stage
+    :type zero_stage: int
+    :param params: The parameters to gather
+    :type params: List[torch.Tensor]
+    :param modifier_rank: The modifier rank
+    :type modifier_rank: int | None
+    """
+    if zero_stage == 3:
+        with deepspeed.zero.GatheredParameters(
+            params=params,
+            modifier_rank=modifier_rank,
+        ):
+            yield
+    else:
+        yield

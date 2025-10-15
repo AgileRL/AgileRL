@@ -31,8 +31,8 @@ from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
-from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime import zero
+from deepspeed.runtime.engine import DeepSpeedEngine
 from gymnasium import spaces
 from numpy.typing import ArrayLike
 from peft import PeftModel, set_peft_model_state_dict
@@ -94,7 +94,7 @@ from agilerl.utils.evolvable_networks import (
     is_image_space,
     is_vector_space,
 )
-from agilerl.utils.llm_utils import DummyOptimizer
+from agilerl.utils.llm_utils import DummyOptimizer, gather_if_zero3
 
 __all__ = ["EvolvableAlgorithm", "RLAlgorithm", "MultiAgentRLAlgorithm"]
 
@@ -1835,9 +1835,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 warnings.warn(
                     "DeepSpeed ZeRO Stage 3 is nascent and may not work as expected, proceed with caution when using this feature."
                 )
-        self.gather_if_zero3 = (
-            nullcontext if self.zero_stage != 3 else zero.GatheredParameters
-        )
         seed = 42
         if self.accelerator is not None:
             if self.accelerator.is_main_process:
@@ -1880,9 +1877,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     else ["actor"]
                 )
                 model_ref = self.accelerator.unwrap_model(self.actor)
-                with self.gather_if_zero3(
-                    list(model_ref.parameters())
-                ):
+                with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
                     model_ref.save_pretrained(
                         save_directory=path,
                         selected_adapters=selected_adapters,
@@ -1932,8 +1927,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
             for attr, value in checkpoint.items():
                 setattr(self, attr, value)
-            
-            self.device = self.accelerator.device # Because torch.save is called from the main process, the device must be set to the accelerator device
+
+            self.device = (
+                self.accelerator.device
+            )  # Because torch.save is called from the main process, the device must be set to the accelerator device
 
             # NOTE do we need to mess around with the optimizer here?
             self.optimizer = None
@@ -2298,16 +2295,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         adapter_path = f"{checkpoint_dir}/{adapter_name}/adapter_model.safetensors"
         adapter_state = load_file(adapter_path, device="cpu")
 
-        gather_kwargs = {
-            "params": list(base_model.parameters()),
-            "modifier_rank": 0
-        }
-        if self.zero_stage != 3:
-            gather_kwargs.pop("modifier_rank")
-
-
-        with self.gather_if_zero3(
-            *gather_kwargs.values()
+        with gather_if_zero3(
+            self.zero_stage, list(base_model.parameters()), modifier_rank=0
         ):
             with torch.no_grad():
                 set_peft_model_state_dict(
