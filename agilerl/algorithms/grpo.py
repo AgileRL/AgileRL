@@ -148,9 +148,8 @@ class GRPO(LLMAlgorithm):
 
         device = (
             f"cuda:{accelerator.process_index}"
-            if accelerator is not None else (
-                "cuda" if torch.cuda.is_available() else "cpu"
-            )
+            if accelerator is not None
+            else ("cuda" if torch.cuda.is_available() else "cpu")
         )
         super().__init__(
             observation_space,
@@ -586,14 +585,13 @@ class GRPO(LLMAlgorithm):
             else base_model
         )
 
-        
         if self.use_separate_reference_adapter and add_adapters:
             self.actor.add_adapter(
                 adapter_name="reference", peft_config=self.lora_config  # type: ignore
             )
 
         self.actor.set_adapter("actor")
-        
+
         if self.accelerator is None:
             self.actor = DummyEvolvable(module=self.actor, device=self.device)
 
@@ -813,8 +811,9 @@ class GRPO(LLMAlgorithm):
             self.accelerator.wait_for_everyone()
         model_ref = self.accelerator.unwrap_model(self.actor)
         model_ref.set_adapter("actor")
+        print("Model ref parameters:", list(model_ref.parameters()))
         with self.gather_if_zero3(
-            list(model_ref.parameters()), 
+            list(model_ref.parameters()),
         ):
             model_ref.merge_adapter()
             for name, param in model_ref.named_parameters():
