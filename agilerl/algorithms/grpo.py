@@ -811,7 +811,10 @@ class GRPO(LLMAlgorithm):
             self.accelerator.wait_for_everyone()
         model_ref = self.accelerator.unwrap_model(self.actor)
         model_ref.set_adapter("actor")
-        print("Model ref parameters:", list(model_ref.parameters()))
+        for name, param in model_ref.named_parameters():
+            print(name, param.dtype)
+            if param.dtype != torch.bfloat16:
+                print("PARAM NOT BFLOAT16")
         with self.gather_if_zero3(
             list(model_ref.parameters()),
         ):
