@@ -7,6 +7,9 @@ To build on the :ref:`LLM reasoning tutorial<grpo_tutorial>`, we will now introd
 on GRPO whilst finetuning an LLM, leading to superior reasoning performance with smaller model sizes. Using our evolutionary approach,
 as referenced in the :ref:`evo_hyperparam_opt` section, we can select GRPO hyperparameters to maximise the performance of the LLM finetuning process.
 
+.. note::
+    Training populations of GRPO agents with HPO is computationally intensive, the below tutorial will take a long time to run. For faster, distributed training at scale
+    check out `AgileRL Arena <https://arena.agilerl.com>`_.
 
 Dependencies
 ------------
