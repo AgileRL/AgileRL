@@ -7,7 +7,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.training.train_off_policy import train_off_policy
-from agilerl.utils.evolvable_networks import (
+from agilerl.utils.algo_utils import (
     get_input_size_from_space,
     get_output_size_from_space,
 )
@@ -85,15 +85,14 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
             batch_size=RLParameter(
                 min=MUTATION_PARAMS["MIN_BATCH_SIZE"],
                 max=MUTATION_PARAMS["MAX_BATCH_SIZE"],
-                dtype=int,
             ),
             learn_step=RLParameter(
                 min=MUTATION_PARAMS["MIN_LEARN_STEP"],
                 max=MUTATION_PARAMS["MAX_LEARN_STEP"],
-                dtype=int,
                 grow_factor=1.5,
                 shrink_factor=0.75,
             ),
+            mean_noise=RLParameter(min=0.0, max=2.0),
         )
     else:
         hp_config = HyperparameterConfig(
@@ -161,7 +160,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
 
 
 if __name__ == "__main__":
-    with open("configs/training/td3.yaml") as file:
+    with open("configs/training/ddpg/ddpg.yaml") as file:
         config = yaml.safe_load(file)
     INIT_HP = config["INIT_HP"]
     MUTATION_PARAMS = config["MUTATION_PARAMS"]

@@ -19,7 +19,7 @@ INIT_HP:
     GAMMA: 0.99                # Discount factor
     MEMORY_SIZE: 100_000       # Max memory buffer size
     POLICY_FREQ: 2             # Policy update frequency
-    LEARN_STEP: 1              # Learning frequency
+    LEARN_STEP: 2             # Learning frequency
     TAU: 0.005                 # For soft update of target parameters
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
