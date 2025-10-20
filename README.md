@@ -228,7 +228,7 @@ agent_pop = create_population(
 Next, create the tournament, mutations and experience replay buffer objects that allow agents to share memory and efficiently perform evolutionary HPO.
 
 <details>
-<summary>Mutations and Tournament Seelection Example</summary>
+<summary>Mutations and Tournament Selection Example</summary>
 
 ```python
 from agilerl.components.replay_buffer import ReplayBuffer
