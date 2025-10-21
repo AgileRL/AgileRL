@@ -1856,7 +1856,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     # TODO: This could hopefully be abstracted into EvolvableAlgorithm with a decorator to
     # handle _save_distributed_actor if deepspeed is used.
-    def save_checkpoint(self, path: str, weights_only: bool = False) -> None:
+    def save_checkpoint(self, path: str, weights_only: bool = True) -> None:
         """
         Override the save_checkpoint method to provide guidance on the correct method to use.
         :param path: Location to save checkpoint at
@@ -1864,9 +1864,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :param weights_only: If True, only save the weights of the model, defaults to False
         :type weights_only: bool, optional
         """
-
-        warnings.warn("weights_only default will be changed to True in the future.")
-
         if self.accelerator is not None:
             if not weights_only:
                 self._save_distributed_actor(path, tag="save_checkpoint")

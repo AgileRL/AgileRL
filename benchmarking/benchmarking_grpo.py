@@ -10,13 +10,15 @@ from torch.utils.data import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
+from agilerl.algorithms.grpo import GRPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_llm import finetune_llm
+from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
-MODEL_PATH = "Qwen/Qwen2.5-3B"
+MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
 
@@ -25,7 +27,7 @@ def create_model(pretrained_model_name_or_path):
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         torch_dtype=torch.bfloat16,
         attn_implementation="sdpa",
-        device_map="auto",
+        # device_map="cpu",
     )
 
     lora_config = LoraConfig(
@@ -174,7 +176,7 @@ def combined_rewards(completion, solution, prompt):
 
 def main(init_hp, mut_p):
     # Instantiate the model and the associated tokenizer
-    model = create_model(pretrained_model_name_or_path=MODEL_PATH)
+    # model = create_model(pretrained_model_name_or_path=MODEL_PATH)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
@@ -209,19 +211,37 @@ def main(init_hp, mut_p):
             min=mut_p["MIN_GROUP_SIZE"], max=mut_p["MAX_GROUP_SIZE"], dtype=int
         ),
     )
-    pop = create_population(
-        algo=init_hp["ALGO"],
-        observation_space=env.observation_space,
-        action_space=env.action_space,
-        net_config=None,
-        actor_network=model,
-        INIT_HP=init_hp,
-        hp_config=hp_config,
-        population_size=init_hp["POP_SIZE"],
-        accelerator=accelerator,
-    )
+    # pop = create_population(
+    #     algo=init_hp["ALGO"],
+    #     observation_space=env.observation_space,
+    #     action_space=env.action_space,
+    #     net_config=None,
+    #     actor_network=model,
+    #     INIT_HP=init_hp,
+    #     hp_config=hp_config,
+    #     population_size=init_hp["POP_SIZE"],
+    #     accelerator=accelerator,
+    # )
 
-    del model
+    pop = [
+        GRPO(
+            env.observation_space,
+            env.action_space,
+            actor_network=create_model(pretrained_model_name_or_path=MODEL_PATH),
+            pad_token_id=tokenizer.eos_token_id,
+            pad_token=tokenizer.eos_token,
+            max_output_tokens=init_hp["MAX_OUTPUT_TOKENS"],
+            batch_size=init_hp["BATCH_SIZE"],
+            group_size=init_hp["GROUP_SIZE"],
+            reduce_memory_peak=init_hp["REDUCE_MEMORY_PEAK"],
+            accelerator=accelerator,
+            use_vllm=init_hp["USE_VLLM"],
+            vllm_config=VLLMConfig(**init_hp["VLLM_CONFIG"]),
+        )
+        for _ in range(init_hp["POP_SIZE"])
+    ]
+
+    # del model
 
     tournament = TournamentSelection(
         init_hp["TOURN_SIZE"],
@@ -246,8 +266,8 @@ def main(init_hp, mut_p):
         pop=pop,
         env=env,
         init_hp=init_hp,
-        evaluation_interval=10,
-        wb=True,
+        evaluation_interval=1,
+        wb=False,
         save_elite=True,
         elite_path="saved_llms",
         max_reward=2.0,
@@ -261,9 +281,6 @@ def main(init_hp, mut_p):
 
 
 if __name__ == "__main__":
-    import os
-
-    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     with open("configs/training/grpo.yaml") as file:
         config = yaml.safe_load(file)
     init_hp = config["INIT_HP"]

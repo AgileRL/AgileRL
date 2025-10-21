@@ -14,7 +14,7 @@ MUTATION_PARAMS:
 
 INIT_HP:
     ALGO: GRPO
-    BATCH_SIZE: 2
+    BATCH_SIZE: 32
     REDUCE_MEMORY_PEAK: true
     BETA: 0.001
     LR: 0.000005
@@ -23,26 +23,17 @@ INIT_HP:
     UPDATE_EPOCHS: 1
     GROUP_SIZE: 2
     TEMPERATURE: 0.9
-    CALC_POSITION_EMBEDDINGS: true
+    CALC_POSITION_EMBEDDINGS: false
     MIN_OUTPUT_TOKENS:
     MAX_OUTPUT_TOKENS: 200
     COSINE_lR_SCHEDULER:
     TOURN_SIZE: 2
     ELITISM: true
     POP_SIZE: 2
-    EVAL_LOOP: 1    
+    EVAL_LOOP: 1
     USE_VLLM: true
     VLLM_CONFIG:
         tensor_parallel_size: 1
         gpu_memory_utilization: 0.3
         max_num_seqs: 1
-
-
-# MASTER_ADDR=34.13.155.70 \
-# MASTER_PORT=51216 \
-# WORLD_SIZE=2 \
-# RANK=1 \
-# NCCL_IB_DISABLE=1 \
-# NCCL_SOCKET_IFNAME=wlan0 \
-# accelerate launch --config_file ./configs/accelerate/grpo_accelerate_config.yaml \
-#     benchmarking/benchmarking_grpo.py
+        sleep_mode: false

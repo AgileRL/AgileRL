@@ -283,7 +283,6 @@ class GRPO(LLMAlgorithm):
         )
 
         self.pretrained_model_name_or_path = actor_network.name_or_path
-        self._initialize_actors(actor_network, not clone)
         self.use_vllm = use_vllm
         self.vllm_config = vllm_config
 
@@ -343,10 +342,16 @@ class GRPO(LLMAlgorithm):
                     max_num_batched_tokens=self.vllm_config.max_num_seqs
                     * self.max_model_len,
                     model_impl="vllm",
+                    enable_sleep_mode=self.vllm_config.sleep_mode,
                 )
+                if self.vllm_config.sleep_mode:  # and self.accelerator.is_main_process:
+                    pass
+                    self.llm.sleep(level=2)
 
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
+
+        self._initialize_actors(actor_network, not clone)
 
         # Register network groups for mutations
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
@@ -394,12 +399,16 @@ class GRPO(LLMAlgorithm):
                     action_mask = action_mask[:, 1:]
                     action_masks.append(action_mask)
         else:
-            # Move model to vllm
+
+            if self.vllm_config.sleep_mode:  # and self.accelerator.is_main_process:
+                torch.cuda.empty_cache()
+                self.llm.wake_up()
             self._move_model_to_vllm()
             completion_ids, action_masks = self._generate_with_vllm_colocate(
                 obs, group_size
             )
-
+            if self.vllm_config.sleep_mode:  # and self.accelerator.is_main_process:
+                self.llm.sleep(level=2)
         return completion_ids, action_masks
 
     def learn(self, experiences: ExperiencesType) -> Tuple[float, float]:
