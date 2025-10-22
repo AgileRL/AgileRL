@@ -31,11 +31,7 @@ from agilerl.utils.algo_utils import (
     get_experiences_samples,
     stack_and_pad_experiences,
 )
-from agilerl.utils.llm_utils import (
-    DummyOptimizer,
-    HuggingFaceGym,
-    gather_if_zero3,
-)
+from agilerl.utils.llm_utils import DummyOptimizer, HuggingFaceGym, gather_if_zero3
 
 DeepSpeedOptimizerType = Union[
     DeepSpeedZeroOptimizer,  # ZeRO Stage 1 & 2 optimizer
@@ -397,7 +393,6 @@ class GRPO(LLMAlgorithm):
                     action_mask = action_mask[:, 1:]
                     action_masks.append(action_mask)
         else:
-
             if self.vllm_config.sleep_mode:  # and self.accelerator.is_main_process:
                 torch.cuda.empty_cache()
                 self.llm.wake_up()
@@ -600,6 +595,7 @@ class GRPO(LLMAlgorithm):
             self.actor.add_adapter(
                 adapter_name="reference", peft_config=self.lora_config  # type: ignore
             )
+
         self.actor.set_adapter("actor")
 
         if self.accelerator is None:

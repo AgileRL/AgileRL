@@ -74,6 +74,7 @@ unlike the rest of the AgileRL framework, we can only tune the RL hyperparameter
             "POP_SIZE": 4,
             "EVAL_LOOP": 1,
             "USE_VLLM": False, # vLLM is not recommended with population based HPO due to its increased memory usage
+
         }
 
 Defining our Base Model and Dataset

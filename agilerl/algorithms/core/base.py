@@ -41,6 +41,7 @@ from tensordict import TensorDict
 from torch._dynamo import OptimizedModule
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import SequentialLR
+from vllm.distributed.parallel_state import destroy_model_parallel
 
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import (
@@ -74,6 +75,7 @@ from agilerl.typing import (
 )
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
+    check_supported_space,
     chkpt_attribute_to_device,
     clone_llm,
     create_warmup_cosine_scheduler,
@@ -1172,12 +1174,8 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
 
         super().__init__(index, hp_config, device, accelerator, torch_compiler, name)
 
-        assert isinstance(
-            observation_space, spaces.Space
-        ), "Observation space must be an instance of gymnasium.spaces.Space."
-        assert isinstance(
-            action_space, spaces.Space
-        ), "Action space must be an instance of gymnasium.spaces.Space."
+        check_supported_space(observation_space)
+        check_supported_space(action_space)
 
         self.observation_space = observation_space
         self.action_space = action_space
@@ -1265,12 +1263,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             assert len(agent_ids) == len(
                 observation_spaces
             ), "Number of agent IDs must match number of observation spaces."
-            assert all(
-                isinstance(_space, spaces.Space) for _space in observation_spaces
-            ), "Observation spaces must be instances of gymnasium.spaces.Space."
-            assert all(
-                isinstance(_space, spaces.Space) for _space in action_spaces
-            ), "Action spaces must be instances of gymnasium.spaces.Space."
+
             self.possible_observation_spaces = spaces.Dict(
                 {
                     agent_id: space
@@ -1291,6 +1284,11 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             raise ValueError(
                 f"Observation spaces must be a list or dictionary of spaces.Space objects. Got {type(observation_spaces)}."
             )
+
+        for obs_space in self.possible_observation_spaces.values():
+            check_supported_space(obs_space)
+        for action_space in self.possible_action_spaces.values():
+            check_supported_space(action_space)
 
         self.agent_ids = list(self.possible_observation_spaces.keys())
         self.n_agents = len(self.agent_ids)
@@ -1863,6 +1861,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :param weights_only: If True, only save the weights of the model, defaults to False
         :type weights_only: bool, optional
         """
+
+        warnings.warn("weights_only default will be changed to True in the future.")
+
         if self.accelerator is not None:
             if not weights_only:
                 self._save_distributed_actor(path, tag="save_checkpoint")
@@ -1879,6 +1880,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                         selected_adapters=selected_adapters,
                         is_main_process=self.accelerator.is_main_process,
                     )
+
         checkpoint_dict = get_checkpoint_dict(
             self, using_deepspeed=self.accelerator is not None
         )
@@ -2089,6 +2091,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if hasattr(self, "llm"):
             del self.llm.llm_engine.model_executor
             del self.llm
+
         gc.collect()
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
@@ -2288,10 +2291,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         base_model = self.accelerator.unwrap_model(self.actor)
         if hasattr(base_model, "module"):
             base_model = base_model.module
-
         adapter_path = f"{checkpoint_dir}/{adapter_name}/adapter_model.safetensors"
         adapter_state = load_file(adapter_path, device="cpu")
-
         with gather_if_zero3(
             self.zero_stage, list(base_model.parameters()), modifier_rank=0
         ):

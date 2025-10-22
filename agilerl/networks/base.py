@@ -504,7 +504,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             assert_correct_lstm_net_config(net_config)
 
             encoder = EvolvableLSTM(
-                input_size=self.observation_space.shape[0],
+                input_size=spaces.flatdim(self.observation_space),
                 num_outputs=self.latent_dim,
                 device=self.device,
                 name=self.encoder_name,

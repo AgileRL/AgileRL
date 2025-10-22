@@ -18,7 +18,7 @@ from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import HuggingFaceGym
 from agilerl.utils.utils import create_population
 
-MODEL_PATH = "Qwen/Qwen2.5-0.5B"
+MODEL_PATH = "Qwen/Qwen2.5-3B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
 
@@ -133,17 +133,11 @@ def equation_reward_func(completions, target, nums, **kwargs):
 
 
 def combined_rewards(completion, solution, prompt):
+
     reward = (
         equation_reward_func([completion], [solution], [prompt])[0]
         + format_reward_func([completion], [solution])[0]
     )
-
-    if reward == 2.0:
-        with open("countdown_completions.txt", "a") as text_file:
-            text_file.write(
-                f"Prompt {prompt}" + "\n" + completion + "\n" + "=" * 50 + "\n"
-            )
-
     return reward
 
 
@@ -214,8 +208,8 @@ def main(init_hp, mut_p):
         pop=pop,
         env=env,
         init_hp=init_hp,
-        evaluation_interval=1,
-        wb=False,
+        evaluation_interval=10,
+        wb=True,
         save_elite=True,
         elite_path="saved_llms",
         max_reward=2.0,
