@@ -2175,12 +2175,12 @@ def test_grpo_loss(
 @pytest.mark.parametrize("vocab_size", [1000])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize("group_size", [5])
+@pytest.mark.parametrize("group_size", [6])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path, reduce_memory_peak",
     [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5", True)],
 )
-@pytest.mark.parametrize("batch_size", [4])
+@pytest.mark.parametrize("batch_size", [6])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_learn(
     grpo_factory,
