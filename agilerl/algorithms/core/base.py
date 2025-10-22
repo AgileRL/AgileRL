@@ -41,7 +41,6 @@ from tensordict import TensorDict
 from torch._dynamo import OptimizedModule
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import SequentialLR
-from vllm.distributed.parallel_state import destroy_model_parallel
 
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import (
@@ -1893,10 +1892,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 path + "/attributes.pt",
                 pickle_module=dill,
             )
-        self.accelerator.wait_for_everyone()
+        if self.accelerator is not None:
+            self.accelerator.wait_for_everyone()
 
-    # TODO: This could hopefully be abstracted into EvolvableAlgorithm with a decorator to
-    # handle _load_distributed_actor if deepspeed is used.
     def load_checkpoint(self, path: str) -> None:
         """
         Override the load_checkpoint method to provide guidance on the correct method to use.
@@ -2026,7 +2024,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 )
                 if load_path is None:
                     raise ValueError(
-                        f"Deepspeed failed to resume from checkpoint {path}"
+                        f"Load path is returned as None from deepspeed load_checkpoint."
                     )
                 self.actor.set_adapter("actor")
 
@@ -2089,6 +2087,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 None,
                 None,
             )
+        if hasattr(self, "llm"):
+            self.llm = None
         gc.collect()
         torch.cuda.empty_cache()
 

@@ -345,14 +345,12 @@ class GRPO(LLMAlgorithm):
                     enable_sleep_mode=self.vllm_config.sleep_mode,
                 )
                 if self.vllm_config.sleep_mode:  # and self.accelerator.is_main_process:
-                    pass
                     self.llm.sleep(level=2)
 
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
 
         self._initialize_actors(actor_network, not clone)
-
         # Register network groups for mutations
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
         if self.wrap:
@@ -587,7 +585,9 @@ class GRPO(LLMAlgorithm):
             if self.lora_config is None:
                 adapter_name = list(base_model.peft_config.keys())
                 self.lora_config = base_model.peft_config[adapter_name[0]]
-                base_model = base_model.merge_and_unload()
+            base_model = base_model.merge_and_unload()
+            if "default" in list(base_model.peft_config.keys()):
+                base_model.peft_config.pop("default")
 
         self.actor: PeftModel = (
             get_peft_model(base_model, self.lora_config, adapter_name="actor")
@@ -599,7 +599,6 @@ class GRPO(LLMAlgorithm):
             self.actor.add_adapter(
                 adapter_name="reference", peft_config=self.lora_config  # type: ignore
             )
-
         self.actor.set_adapter("actor")
 
         if self.accelerator is None:

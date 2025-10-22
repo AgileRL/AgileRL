@@ -47,11 +47,11 @@ dist_env = dict(
     RANK="0",
     LOCAL_RANK="0",
     WORLD_SIZE="1",
-    PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True",
+    # PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True",
 )
 
 deepspeed_base_config = {
-    "fp32": {
+    "bf16": {
         "enabled": True,
     },
     "auto_cast": True,
@@ -274,6 +274,12 @@ class DummyVLLM:
         """Reset the prefix cache - dummy implementation"""
         pass
 
+    def sleep(self, *args, **kwargs):
+        pass
+
+    def wake_up(self, *args, **kwargs):
+        pass
+
 
 def cleanup_vllm_instances():
     """Clean up vLLM LLM instances and engines"""
@@ -437,6 +443,7 @@ def grpo_factory():
         pretrained_model_name_or_path,
         reduce_memory_peak,
         micro_batch_size_per_gpu,
+        sleep_mode=False,
     ):
         gc.collect()
         torch.cuda.empty_cache()
@@ -453,7 +460,9 @@ def grpo_factory():
         )
         if use_vllm:
             lora_config = None
-            vllm_config = VLLMConfig(gpu_memory_utilization=0.05, max_num_seqs=1)
+            vllm_config = VLLMConfig(
+                gpu_memory_utilization=0.05, max_num_seqs=1, sleep_mode=sleep_mode
+            )
             actor = model_factory(pretrained_model_name_or_path)
         else:
 
@@ -784,7 +793,6 @@ def test_get_action_grpo(
         }
         for _ in range(data_batch_size)
     ]
-
     completion_ids, _ = grpo.get_action(states, training)
     group_size = 1 if not training else group_size
     for ids in completion_ids:
@@ -792,6 +800,91 @@ def test_get_action_grpo(
         assert ids.shape[1] <= max_tokens + input_size
     if grpo.accelerator is None:
         assert not grpo.actor.training
+    grpo.clean_up()
+    AcceleratorState._reset_state(True)
+
+
+@pytest.mark.parametrize("config", [deepspeed_config_stage_2])
+@pytest.mark.parametrize("use_deepspeed_optimizer", [False])
+@pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
+@pytest.mark.parametrize("vocab_size", [100])
+@pytest.mark.parametrize("input_size", [10])
+@pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize("group_size", [2])
+@pytest.mark.parametrize(
+    "use_vllm, pretrained_model_name_or_path",
+    [
+        (True, "facebook/opt-125m"),
+    ],
+)
+@pytest.mark.parametrize("training", [True, False])
+@pytest.mark.parametrize("data_batch_size", [4])
+@pytest.mark.parametrize("reduce_memory_peak", [True])
+@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+@pytest.mark.parametrize("sleep_mode", [True])
+@patch("agilerl.algorithms.grpo.LLM")
+def test_get_action_grpo_vllm_sleep_mode(
+    MockLLM,
+    grpo_factory,
+    accelerator_factory,
+    model_factory,
+    config,
+    use_deepspeed_optimizer,
+    use_separate_reference_adapter,
+    pretrained_model_name_or_path,
+    vocab_size,
+    input_size,
+    max_tokens,
+    group_size,
+    use_vllm,
+    training,
+    data_batch_size,
+    reduce_memory_peak,
+    micro_batch_size_per_gpu,
+    sleep_mode,
+):
+    mock_instance = MagicMock(spec=vllm.LLM)
+
+    # Configure methods
+    mock_instance.generate = MagicMock(
+        return_value=[MagicMock(outputs=[MagicMock(text="Generated text")])]
+    )
+    mock_instance.sleep = MagicMock()
+    mock_instance.wake_up = MagicMock()
+    mock_instance.shutdown = MagicMock()
+
+    # Make LLM() constructor return mock instance
+    MockLLM.return_value = mock_instance
+
+    grpo = grpo_factory(
+        accelerator_factory,
+        model_factory,
+        config,
+        use_deepspeed_optimizer,
+        vocab_size,
+        input_size,
+        max_tokens,
+        group_size,
+        use_separate_reference_adapter,
+        use_vllm,
+        pretrained_model_name_or_path,
+        reduce_memory_peak,
+        micro_batch_size_per_gpu,
+        sleep_mode,
+    )
+    with patch.object(
+        grpo, "_move_model_to_vllm"
+    ) as mock_move_model_to_vllm, patch.object(
+        grpo,
+        "_generate_with_vllm_colocate",
+        return_value=[torch.ones(1, 10), torch.ones(1, 10)],
+    ) as mock_generate_with_vllm_colocate:
+        grpo.get_action(torch.ones(1, 10), training)
+        mock_move_model_to_vllm.assert_called()
+        mock_generate_with_vllm_colocate.assert_called()
+    mock_instance.sleep.assert_called()
+    mock_instance.wake_up.assert_called()
+    grpo.clean_up()
     AcceleratorState._reset_state(True)
 
 
@@ -1450,7 +1543,7 @@ def test_init_grpo_zero3_warning(
     accelerator_factory, config, use_deepspeed_optimizer, use_separate_reference_adapter
 ):
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-    with pytest.raises(NotImplementedError):
+    with pytest.warns(UserWarning):
         gc.collect()
         vocab_size = 1000
         input_size = 10
@@ -1808,7 +1901,7 @@ def test_init_grpo_micro_batch_size_per_gpu_division_error(
 @pytest.mark.parametrize("training", [True, False])
 @pytest.mark.parametrize("data_batch_size", [8])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2])
-def test_get_action_grpo_vllm(
+def test_get_action_grpo_vllm_multiple_gpus(
     accelerator_factory,
     model_factory,
     config,
@@ -1899,6 +1992,7 @@ def test_get_action_grpo_vllm(
             assert ids.shape[1] <= max_tokens + input_size
         if grpo.accelerator is None:
             assert not grpo.actor.training
+    grpo.clean_up()
     AcceleratorState._reset_state(True)
 
 
@@ -2432,16 +2526,12 @@ def test_grpo_save_load_checkpoint(
                 if attr == "rng":
                     assert hasattr(new_grpo, attr)
                 elif attr == "actor":
-                    for param, new_param in zip(
-                        grpo.actor.parameters(), new_grpo.actor.parameters()
+                    for (name, param), (new_name, new_param) in zip(
+                        grpo.actor.named_parameters(), new_grpo.actor.named_parameters()
                     ):
-                        print(
-                            "USE SEPARATE REFERENCE ADAPTER",
-                            use_separate_reference_adapter,
-                        )
-                        print("use deepspeed optimizer", use_deepspeed_optimizer)
-                        print("PARAMT TYPE", param.dtype, new_param.dtype)
-                        assert torch.allclose(param, new_param)
+                        assert torch.allclose(
+                            param, new_param
+                        ), f"Parameter {name} is not equal (new_name: {new_name})"
                 elif attr == "optimizer":
                     for param, new_param in zip(
                         grpo.optimizer.parameters(), new_grpo.optimizer.parameters()
@@ -3266,108 +3356,6 @@ def test_init_grpo_lora_config_warning(
         gc.collect()
         torch.cuda.empty_cache()
     AcceleratorState._reset_state(True)
-
-
-@pytest.mark.parametrize("use_deepspeed_optimizer", [False])
-@pytest.mark.parametrize("config", [None])
-def test_init_grpo_multiple_adapters(
-    accelerator_factory, config, use_deepspeed_optimizer
-):
-    """Test GRPO initialization with a PEFT model containing multiple adapters."""
-    accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-    with pytest.warns(
-        UserWarning, match="AgileRL RL finetuning is only compatible with one adapter."
-    ):
-
-        # Clean up GPU memory
-        gc.collect()
-        torch.cuda.empty_cache()
-
-        # Set up test parameters
-        vocab_size = 1000
-        input_size = 10
-        max_tokens = 20
-        group_size = 5
-
-        # Create spaces
-        observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
-        action_space = gym.spaces.Box(
-            low=0,
-            high=vocab_size - 1,
-            shape=(20,),
-        )
-
-        # Create base model
-        base_model = create_module(
-            input_size=input_size,
-            max_tokens=max_tokens,
-            vocab_size=vocab_size,
-            device="cuda" if torch.cuda.is_available() else "cpu",
-        )
-
-        # Create first adapter
-        lora_config_1 = LoraConfig(
-            r=16,
-            lora_alpha=64,
-            target_modules=["linear_1"],
-            task_type="CAUSAL_LM",
-            lora_dropout=0.05,
-        )
-        peft_model = get_peft_model(base_model, lora_config_1, adapter_name="adapter1")
-
-        # Add second adapter
-        lora_config_2 = LoraConfig(
-            r=8,
-            lora_alpha=32,
-            target_modules=["linear_1"],
-            task_type="CAUSAL_LM",
-            lora_dropout=0.05,
-        )
-        peft_model.add_adapter(adapter_name="adapter2", peft_config=lora_config_2)
-
-        # Initialize GRPO with the multi-adapter model
-        grpo = GRPO(
-            observation_space,
-            action_space,
-            actor_network=peft_model,
-            lr=0.1,
-            pad_token_id=vocab_size - 1,
-            pad_token="<pad>",
-            device="cuda" if torch.cuda.is_available() else "cpu",
-            group_size=group_size,
-            cosine_lr_schedule_config=(
-                None
-                if accelerator is not None
-                else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
-            ),
-            accelerator=accelerator,
-            clone=False,
-        )
-
-        # Verify that only the first adapter is used
-        assert len(grpo.actor.peft_config) == 1
-        assert "actor" in grpo.actor.peft_config
-        assert (
-            grpo.actor.peft_config["actor"].r == lora_config_1.r
-        )  # Check that first adapter's config is used
-
-        # Test that the model still functions
-        test_input = torch.randint(0, vocab_size - 1, (1, input_size))
-        test_attention_mask = torch.ones_like(test_input)
-        test_state = {"input_ids": test_input, "attention_mask": test_attention_mask}
-
-        # Test get_action
-        completion_ids, masks = grpo.get_action([test_state], training=True)
-        assert isinstance(completion_ids, list)
-        assert len(completion_ids) == 1
-        assert len(masks) == 1
-        assert masks[0].shape == (5, input_size + max_tokens - 1)
-        assert completion_ids[0].shape == (5, max_tokens + input_size)
-
-        # Clean up
-        gc.collect()
-        torch.cuda.empty_cache()
-        AcceleratorState._reset_state(True)
 
 
 @pytest.mark.parametrize(

@@ -1291,7 +1291,7 @@ class VLLMConfig:
     tensor_parallel_size: int = 1
     gpu_memory_utilization: float = 0.3
     max_num_seqs: int = 8
-    sleep_mode: bool = True
+    sleep_mode: bool = False
 
 
 def create_warmup_cosine_scheduler(
@@ -1555,7 +1555,7 @@ def clone_llm(
         # Get all adapter names
         adapter_names = list(original_model.peft_config.keys())
 
-        if len(adapter_names) > 1:
+        if len(adapter_names) > 2:
             warnings.warn(
                 "Multiple adapters detected. Only the first adapter will be used for RL finetuning."
             )
@@ -1571,6 +1571,7 @@ def clone_llm(
         model.disable_adapter()
     else:
         model = type(original_model)(original_model.config)
+
     if state_dict is not None:
         model.load_state_dict(state_dict)
     return model
