@@ -42,12 +42,6 @@ class ReturnedPrompts(TypedDict):
     text: str | None
 
 
-class ReturnedPrompts(TypedDict):
-    input_ids: torch.Tensor
-    attention_mask: torch.Tensor
-    text: str | None
-
-
 class MultiAgentSetup(Enum):
     """Enum to specify the type of multi-agent setup."""
 

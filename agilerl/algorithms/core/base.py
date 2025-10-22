@@ -7,7 +7,6 @@ import tempfile
 import warnings
 from abc import ABC, ABCMeta, abstractmethod
 from collections import OrderedDict, defaultdict
-from contextlib import nullcontext
 from dataclasses import asdict
 from importlib.metadata import version
 from typing import (
@@ -27,8 +26,6 @@ from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
-from deepspeed.runtime import zero
-from deepspeed.runtime.engine import DeepSpeedEngine
 from gymnasium import spaces
 from peft import PeftModel, set_peft_model_state_dict
 from safetensors.torch import load_file
@@ -2015,7 +2012,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 )
                 if load_path is None:
                     raise ValueError(
-                        f"Load path is returned as None from deepspeed load_checkpoint."
+                        "Load path is returned as None from deepspeed load_checkpoint."
                     )
                 self.actor.set_adapter("actor")
 

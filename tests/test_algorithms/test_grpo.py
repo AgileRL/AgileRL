@@ -1690,7 +1690,6 @@ def test_init_grpo_max_grad_norm_warning(
         )
         gc.collect()
         torch.cuda.empty_cache()
-    assert grpo.lr == 1e-4 if use_deepspeed_optimizer else 0.1
     AcceleratorState._reset_state(True)
 
 
