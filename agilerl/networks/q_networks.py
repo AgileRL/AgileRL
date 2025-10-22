@@ -1,5 +1,5 @@
 from dataclasses import asdict
-from typing import Any, Dict, Optional, Type, Union
+from typing import Any, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -26,7 +26,7 @@ class QNetwork(EvolvableNetwork):
     :type action_space: DiscreteSpace
     :param encoder_cls: Encoder class to use for the network. Defaults to None, whereby it is
         automatically built using an AgileRL module according the observation space.
-    :type encoder_cls: Optional[Union[str, Type[EvolvableModule]]]
+    :type encoder_cls: Optional[Union[str, type[EvolvableModule]]]
     :param encoder_config: Configuration of the encoder network.
     :type encoder_config: ConfigType
     :param head_config: Configuration of the network MLP head.
@@ -55,7 +55,7 @@ class QNetwork(EvolvableNetwork):
         self,
         observation_space: spaces.Space,
         action_space: Union[spaces.Discrete, spaces.MultiDiscrete],
-        encoder_cls: Optional[Union[str, Type[EvolvableModule]]] = None,
+        encoder_cls: Optional[Union[str, type[EvolvableModule]]] = None,
         encoder_config: Optional[NetConfigType] = None,
         head_config: Optional[NetConfigType] = None,
         min_latent_dim: int = 8,
@@ -85,17 +85,19 @@ class QNetwork(EvolvableNetwork):
 
         if head_config is None:
             head_config = asdict(MlpNetConfig(hidden_size=[16], output_activation=None))
+        else:
+            head_config["output_activation"] = None
 
         self.num_actions = spaces.flatdim(action_space)
 
         # Build value network
         self.build_network_head(head_config)
 
-    def build_network_head(self, net_config: Dict[str, Any]) -> None:
+    def build_network_head(self, net_config: dict[str, Any]) -> None:
         """Builds the head of the network based on the passed configuration.
 
         :param net_config: Configuration of the network head.
-        :type net_config: Dict[str, Any]
+        :type net_config: dict[str, Any]
         """
         self.head_net = self.create_mlp(
             num_inputs=self.latent_dim,
@@ -142,7 +144,7 @@ class RainbowQNetwork(EvolvableNetwork):
     :type action_space: DiscreteSpace
     :param encoder_cls: Encoder class to use for the network. Defaults to None, whereby it is
         automatically built using an AgileRL module according the observation space.
-    :type encoder_cls: Optional[Union[str, Type[EvolvableModule]]]
+    :type encoder_cls: Optional[Union[str, type[EvolvableModule]]]
     :param encoder_config: Configuration of the encoder network.
     :type encoder_config: ConfigType
     :param support: Support for the distributional value function.
@@ -234,11 +236,11 @@ class RainbowQNetwork(EvolvableNetwork):
         # Build value and advantage networks
         self.build_network_head(head_config)
 
-    def build_network_head(self, net_config: Dict[str, Any]) -> None:
+    def build_network_head(self, net_config: dict[str, Any]) -> None:
         """Builds the value and advantage heads of the network based on the passed configuration.
 
         :param net_config: Configuration of the network head.
-        :type net_config: Dict[str, Any]
+        :type net_config: dict[str, Any]
         """
         self.head_net = DuelingDistributionalMLP(
             num_inputs=self.latent_dim,
@@ -296,7 +298,7 @@ class ContinuousQNetwork(EvolvableNetwork):
     :type action_space: spaces.Box
     :param encoder_cls: Encoder class to use for the network. Defaults to None, whereby it is
         automatically built using an AgileRL module according the observation space.
-    :type encoder_cls: Optional[Union[str, Type[EvolvableModule]]]
+    :type encoder_cls: Optional[Union[str, type[EvolvableModule]]]
     :param encoder_config: Configuration of the encoder network.
     :type encoder_config: ConfigType
     :param head_config: Configuration of the network MLP head.
@@ -328,7 +330,7 @@ class ContinuousQNetwork(EvolvableNetwork):
         self,
         observation_space: spaces.Space,
         action_space: spaces.Box,
-        encoder_cls: Optional[Type[EvolvableModule]] = None,
+        encoder_cls: Optional[type[EvolvableModule]] = None,
         encoder_config: Optional[NetConfigType] = None,
         head_config: Optional[NetConfigType] = None,
         min_latent_dim: int = 8,

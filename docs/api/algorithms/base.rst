@@ -54,7 +54,7 @@ being flagged as having shared parameters. We also have two separate optimizers 
             :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
             :type O_U_noise: bool, optional
             :param expl_noise: Scale for Ornstein Uhlenbeck action noise, or standard deviation for Gaussian exploration noise, defaults to 0.1
-            :type expl_noise: Union[float, ArrayLike], optional
+            :type expl_noise: Union[float, np.ndarray], optional
             :param vect_noise_dim: Vectorization dimension of environment for action noise, defaults to 1
             :type vect_noise_dim: int, optional
             :param mean_noise: Mean of exploration noise, defaults to 0.0
@@ -106,7 +106,7 @@ being flagged as having shared parameters. We also have two separate optimizers 
                 observation_space: spaces.Space,
                 action_space: spaces.Space,
                 O_U_noise: bool = True,
-                expl_noise: Union[float, ArrayLike] = 0.1,
+                expl_noise: Union[float, np.ndarray] = 0.1,
                 vect_noise_dim: int = 1,
                 mean_noise: float = 0.0,
                 theta: float = 0.15,

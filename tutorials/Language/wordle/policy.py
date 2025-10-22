@@ -1,7 +1,7 @@
 import math
 import random
 from collections import defaultdict
-from typing import List, Optional, Union
+from typing import Optional, Union
 
 from tqdm.auto import tqdm
 
@@ -42,7 +42,7 @@ class UserPolicy(Policy):
 
 
 class StartWordPolicy(Policy):
-    def __init__(self, start_words: Optional[List[str]] = None):
+    def __init__(self, start_words: Optional[list[str]] = None):
         super().__init__()
         self.start_words = start_words
         if self.start_words is None:

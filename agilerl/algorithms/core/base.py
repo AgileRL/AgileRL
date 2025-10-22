@@ -13,12 +13,8 @@ from importlib.metadata import version
 from typing import (
     Any,
     Callable,
-    Dict,
     Iterable,
-    List,
     Optional,
-    Tuple,
-    Type,
     TypeVar,
     Union,
     cast,
@@ -34,7 +30,6 @@ from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 from deepspeed.runtime import zero
 from deepspeed.runtime.engine import DeepSpeedEngine
 from gymnasium import spaces
-from numpy.typing import ArrayLike
 from peft import PeftModel, set_peft_model_state_dict
 from safetensors.torch import load_file
 from tensordict import TensorDict
@@ -74,6 +69,7 @@ from agilerl.typing import (
 )
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
+    check_supported_space,
     chkpt_attribute_to_device,
     clone_llm,
     create_warmup_cosine_scheduler,
@@ -107,7 +103,7 @@ class _RegistryMeta(type):
     initializing with specified network groups and optimizers."""
 
     def __call__(
-        cls: Type[SelfEvolvableAlgorithm], *args, **kwargs
+        cls: type[SelfEvolvableAlgorithm], *args, **kwargs
     ) -> SelfEvolvableAlgorithm:
         # Create the instance
         instance: SelfEvolvableAlgorithm = super().__call__(*args, **kwargs)
@@ -124,7 +120,7 @@ class RegistryMeta(_RegistryMeta, ABCMeta): ...
 
 def get_checkpoint_dict(
     agent: SelfEvolvableAlgorithm, using_deepspeed: bool = False
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Returns a dictionary of the agent's attributes to save in a checkpoint.
 
     Note: Accelerator is always excluded from the checkpoint as it cannot be serialized.
@@ -152,7 +148,7 @@ def get_checkpoint_dict(
         attribute_dict.pop("rollout_buffer")
 
     # Get checkpoint dictionaries for evolvable modules and optimizers
-    network_info: Dict[str, Dict[str, Any]] = {"modules": {}, "optimizers": {}}
+    network_info: dict[str, dict[str, Any]] = {"modules": {}, "optimizers": {}}
     for attr in agent.evolvable_attributes():
         evolvable_obj: EvolvableAttributeType = getattr(agent, attr)
         if isinstance(evolvable_obj, OptimizerWrapper):
@@ -186,14 +182,14 @@ def get_checkpoint_dict(
 
 
 def get_optimizer_cls(
-    optimizer_cls: Union[str, Dict[str, str]],
-) -> Union[Type[torch.optim.Optimizer], Dict[str, Type[torch.optim.Optimizer]]]:
+    optimizer_cls: Union[str, dict[str, str]],
+) -> Union[type[torch.optim.Optimizer], dict[str, type[torch.optim.Optimizer]]]:
     """Returns the optimizer class from the string or dictionary of optimizer classes.
 
     :param optimizer_cls: The optimizer class or dictionary of optimizer classes.
-    :type optimizer_cls: Union[str, Dict[str, str]]
+    :type optimizer_cls: Union[str, dict[str, str]]
     :return: The optimizer class or dictionary of optimizer classes.
-    :rtype: Union[Type[torch.optim.Optimizer], Dict[str, Type[torch.optim.Optimizer]]]
+    :rtype: Union[type[torch.optim.Optimizer], dict[str, type[torch.optim.Optimizer]]]
     """
     if isinstance(optimizer_cls, dict):
         optimizer_cls = {
@@ -313,20 +309,20 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         raise NotImplementedError
 
     @abstractmethod
-    def test(self, *args, **kwargs) -> ArrayLike:
+    def test(self, *args, **kwargs) -> np.ndarray:
         """Abstract method for testing the algorithm."""
         raise NotImplementedError
 
     @staticmethod
-    def get_state_dim(observation_space: GymSpaceType) -> Tuple[int, ...]:
+    def get_state_dim(observation_space: GymSpaceType) -> tuple[int, ...]:
         """Returns the dimension of the state space as it pertains to the underlying
         networks (i.e. the input size of the networks).
 
         :param observation_space: The observation space of the environment.
-        :type observation_space: spaces.Space or List[spaces.Space].
+        :type observation_space: spaces.Space or list[spaces.Space].
 
         :return: The dimension of the state space.
-        :rtype: Tuple[int, ...].
+        :rtype: tuple[int, ...].
         """
         warnings.warn(
             "This method is deprecated. Use get_input_size_from_space instead.",
@@ -335,12 +331,12 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         return get_input_size_from_space(observation_space)
 
     @staticmethod
-    def get_action_dim(action_space: GymSpaceType) -> Tuple[int, ...]:
+    def get_action_dim(action_space: GymSpaceType) -> tuple[int, ...]:
         """Returns the dimension of the action space as it pertains to the underlying
         networks (i.e. the output size of the networks).
 
         :param action_space: The action space of the environment.
-        :type action_space: spaces.Space or List[spaces.Space].
+        :type action_space: spaces.Space or list[spaces.Space].
 
         :return: The dimension of the action space.
         :rtype: int.
@@ -354,7 +350,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
     @staticmethod
     def inspect_attributes(
         agent: SelfEvolvableAlgorithm, input_args_only: bool = False
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Inspect and retrieve the attributes of the current object, excluding attributes related to the
         underlying evolvable networks (i.e. `EvolvableModule`, `torch.optim.Optimizer`) and with
@@ -451,21 +447,21 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
     @classmethod
     def population(
-        cls: Type[SelfEvolvableAlgorithm],
+        cls: type[SelfEvolvableAlgorithm],
         size: int,
         observation_space: GymSpaceType,
         action_space: GymSpaceType,
-        wrapper_cls: Optional[Type[SelfAgentWrapper]] = None,
-        wrapper_kwargs: Dict[str, Any] = {},
+        wrapper_cls: Optional[type[SelfAgentWrapper]] = None,
+        wrapper_kwargs: dict[str, Any] = {},
         **kwargs,
-    ) -> List[Union[SelfEvolvableAlgorithm, SelfAgentWrapper]]:
+    ) -> list[Union[SelfEvolvableAlgorithm, SelfAgentWrapper]]:
         """Creates a population of algorithms.
 
         :param size: The size of the population.
         :type size: int.
 
         :return: A list of algorithms.
-        :rtype: List[SelfEvolvableAlgorithm].
+        :rtype: list[SelfEvolvableAlgorithm].
         """
         if wrapper_cls is not None:
             return [
@@ -549,11 +545,12 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 hp_value = getattr(self, hp)
                 hp_spec = self.registry.hp_config[hp]
                 dtype = type(hp_value)
-                if dtype not in [int, float]:
+                if dtype not in [int, float, np.ndarray]:
                     raise TypeError(
                         f"Can't mutate hyperparameter {hp} of type {dtype}. AgileRL only supports "
-                        "mutating integer or float hyperparameters."
+                        "mutating integer, float, and numpy ndarray hyperparameters."
                     )
+
                 hp_spec.dtype = dtype
 
     def _wrap_attr(self, attr: EvolvableAttributeType) -> EvolvableAttributeType:
@@ -637,7 +634,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         """
         self.training = training
 
-    def get_lr_names(self) -> List[str]:
+    def get_lr_names(self) -> list[str]:
         """Returns the learning rates of the algorithm."""
         return [opt.lr for opt in self.registry.optimizers]
 
@@ -695,14 +692,14 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         for name, obj in self.evolvable_attributes(networks_only=True).items():
             setattr(self, name, compile_model(obj, self.torch_compiler))
 
-    def to_device(self, *experiences: TorchObsType) -> Tuple[TorchObsType, ...]:
+    def to_device(self, *experiences: TorchObsType) -> tuple[TorchObsType, ...]:
         """Moves experiences to the device.
 
         :param experiences: Experiences to move to device
-        :type experiences: Tuple[torch.Tensor[float], ...]
+        :type experiences: tuple[torch.Tensor[float], ...]
 
         :return: Experiences on the device
-        :rtype: Tuple[torch.Tensor[float], ...]
+        :rtype: tuple[torch.Tensor[float], ...]
         """
         device = self.device if self.accelerator is None else self.accelerator.device
         on_device = []
@@ -861,12 +858,12 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :param path: Location to load checkpoint from
         :type path: string
         """
-        checkpoint: Dict[str, Any] = torch.load(
+        checkpoint: dict[str, Any] = torch.load(
             path, map_location=self.device, pickle_module=dill, weights_only=False
         )
 
         # Recreate evolvable modules
-        network_info: Dict[str, Dict[str, Any]] = checkpoint["network_info"]
+        network_info: dict[str, dict[str, Any]] = checkpoint["network_info"]
         network_names = network_info["network_names"]
         for name in network_names:
             net_dict = {
@@ -967,7 +964,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
     @classmethod
     def load(
-        cls: Type[SelfEvolvableAlgorithm],
+        cls: type[SelfEvolvableAlgorithm],
         path: str,
         device: DeviceType = "cpu",
         accelerator: Optional[Accelerator] = None,
@@ -984,12 +981,12 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :return: An instance of the algorithm
         :rtype: RLAlgorithm
         """
-        checkpoint: Dict[str, Any] = torch.load(
+        checkpoint: dict[str, Any] = torch.load(
             path, map_location=device, pickle_module=dill, weights_only=False
         )
 
         # Reconstruct evolvable modules in algorithm
-        network_info: Optional[Dict[str, Dict[str, Any]]] = checkpoint.get(
+        network_info: Optional[dict[str, dict[str, Any]]] = checkpoint.get(
             "network_info"
         )
         if network_info is None:
@@ -1001,7 +998,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             )
 
         network_names = network_info["network_names"]
-        loaded_modules: Dict[str, EvolvableAttributeType] = {}
+        loaded_modules: dict[str, EvolvableAttributeType] = {}
         for name in network_names:
             net_dict = {
                 k: v for k, v in network_info["modules"].items() if k.startswith(name)
@@ -1021,7 +1018,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
             # Reconstruct the modules
             module_cls: Union[
-                Type[EvolvableModule], Dict[str, Type[EvolvableModule]]
+                type[EvolvableModule], dict[str, type[EvolvableModule]]
             ] = net_dict[f"{name}_cls"]
             if isinstance(module_cls, dict):
                 for agent_id, mod_cls in module_cls.items():
@@ -1172,12 +1169,8 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
 
         super().__init__(index, hp_config, device, accelerator, torch_compiler, name)
 
-        assert isinstance(
-            observation_space, spaces.Space
-        ), "Observation space must be an instance of gymnasium.spaces.Space."
-        assert isinstance(
-            action_space, spaces.Space
-        ), "Action space must be an instance of gymnasium.spaces.Space."
+        check_supported_space(observation_space)
+        check_supported_space(action_space)
 
         self.observation_space = observation_space
         self.action_space = action_space
@@ -1191,7 +1184,7 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         :type observations: ObservationType
 
         :return: Preprocessed observations
-        :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
+        :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or tuple[torch.Tensor[float], ...]
         """
         return preprocess_observation(
             self.observation_space,
@@ -1205,13 +1198,13 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
     """Base object for all multi-agent algorithms in the AgileRL framework.
 
     :param observation_spaces: The observation spaces of the agent environments.
-    :type observation_spaces: Union[List[spaces.Space], spaces.Dict]
+    :type observation_spaces: Union[list[spaces.Space], spaces.Dict]
     :param action_spaces: The action spaces of the agent environments.
-    :type action_spaces: Union[List[spaces.Space], spaces.Dict]
+    :type action_spaces: Union[list[spaces.Space], spaces.Dict]
     :param index: The index of the individual in the population.
     :type index: int.
     :param agent_ids: The agent IDs of the agents in the environment.
-    :type agent_ids: Optional[List[int]], optional
+    :type agent_ids: Optional[list[int]], optional
     :param learn_step: Learning frequency, defaults to 2048
     :type learn_step: int, optional
     :param device: Device to run the algorithm on, defaults to "cpu"
@@ -1228,13 +1221,13 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
     :type name: Optional[str], optional
     """
 
-    possible_observation_spaces: Dict[str, spaces.Space]
-    possible_action_spaces: Dict[str, spaces.Space]
+    possible_observation_spaces: dict[str, spaces.Space]
+    possible_action_spaces: dict[str, spaces.Space]
 
-    shared_agent_ids: List[str]
-    grouped_agents: Dict[str, List[str]]
-    unique_observation_spaces: Dict[str, spaces.Space]
-    unique_action_spaces: Dict[str, spaces.Space]
+    shared_agent_ids: list[str]
+    grouped_agents: dict[str, list[str]]
+    unique_observation_spaces: dict[str, spaces.Space]
+    unique_action_spaces: dict[str, spaces.Space]
 
     def __init__(
         self,
@@ -1265,12 +1258,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             assert len(agent_ids) == len(
                 observation_spaces
             ), "Number of agent IDs must match number of observation spaces."
-            assert all(
-                isinstance(_space, spaces.Space) for _space in observation_spaces
-            ), "Observation spaces must be instances of gymnasium.spaces.Space."
-            assert all(
-                isinstance(_space, spaces.Space) for _space in action_spaces
-            ), "Action spaces must be instances of gymnasium.spaces.Space."
+
             self.possible_observation_spaces = spaces.Dict(
                 {
                     agent_id: space
@@ -1291,6 +1279,11 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             raise ValueError(
                 f"Observation spaces must be a list or dictionary of spaces.Space objects. Got {type(observation_spaces)}."
             )
+
+        for obs_space in self.possible_observation_spaces.values():
+            check_supported_space(obs_space)
+        for action_space in self.possible_action_spaces.values():
+            check_supported_space(action_space)
 
         self.agent_ids = list(self.possible_observation_spaces.keys())
         self.n_agents = len(self.agent_ids)
@@ -1400,14 +1393,14 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
     def preprocess_observation(
         self, observation: ObservationType
-    ) -> Dict[str, TorchObsType]:
+    ) -> dict[str, TorchObsType]:
         """Preprocesses observations for forward pass through neural network.
 
         :param observations: Observations of environment
         :type observations: numpy.ndarray[float] or dict[str, numpy.ndarray[float]]
 
         :return: Preprocessed observations
-        :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
+        :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or tuple[torch.Tensor[float], ...]
         """
         preprocessed = {}
         for agent_id, agent_obs in observation.items():
@@ -1425,10 +1418,10 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         """Extract action masks from info dictionary
 
         :param infos: Info dict
-        :type infos: Dict[str, Dict[...]]
+        :type infos: dict[str, dict[...]]
 
         :return: Action masks
-        :rtype: Dict[str, np.ndarray]
+        :rtype: dict[str, np.ndarray]
         """
         # Get dict of form {"agent_id" : [1, 0, 0, 0]...} etc
         action_masks = {
@@ -1441,14 +1434,14 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
     def extract_agent_masks(
         self, infos: Optional[InfosDict] = None
-    ) -> Tuple[ArrayDict, ArrayDict]:
+    ) -> tuple[ArrayDict, ArrayDict]:
         """Extract env_defined_actions from info dictionary and determine agent masks
 
         :param infos: Info dict
-        :type infos: Dict[str, Dict[...]]
+        :type infos: dict[str, dict[...]]
 
         :return: Env defined actions and agent masks
-        :rtype: Tuple[ArrayDict, ArrayDict]
+        :rtype: tuple[ArrayDict, ArrayDict]
         """
         # Deal with case of no env_defined_actions defined in the info dict
         # Deal with empty info dicts for each sub agent
@@ -1510,7 +1503,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         net_config: Optional[NetConfigType] = None,
         flatten: bool = True,
         return_encoders: bool = False,
-    ) -> Union[NetConfigType, Tuple[NetConfigType, Dict[str, NetConfigType]]]:
+    ) -> Union[NetConfigType, tuple[NetConfigType, dict[str, NetConfigType]]]:
         """Extract an appropriate net config for each sub-agent from the passed net config dictionary. If
         grouped_agents is True, the net config will be built for the grouped agents i.e. through their
         common prefix in their agent_id, whenever the passed net config is None.
@@ -1543,7 +1536,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         # Helper function to append unique configs to the unique_configs dictionary
         # -> Access to unique configs is relevant for algorithms with networks that process
         # multiple agents' observations (e.g. shared critic in MADDPG)
-        def _add_to_encoder_configs(config: Dict[str, Any], agent_id: str = "") -> None:
+        def _add_to_encoder_configs(config: dict[str, Any], agent_id: str = "") -> None:
             config = config_from_dict(config)
             config_key = "mlp_config" if isinstance(config, MlpNetConfig) else agent_id
 
@@ -1701,7 +1694,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         self,
         group_outputs: ArrayDict,
         vect_dim: int,
-        grouped_agents: Dict[str, List[str]],
+        grouped_agents: dict[str, list[str]],
     ) -> ArrayDict:
         """Disassembles batched output by shared policies into their grouped agents' outputs.
 
@@ -1709,13 +1702,13 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             i.e. any given agent will always terminate at the same timestep in different vectorized environments.
 
         :param group_outputs: Dictionary to be disassembled, has the form {'agent': [4, 7, 8]}
-        :type group_outputs: Dict[str, np.ndarray]
+        :type group_outputs: dict[str, np.ndarray]
         :param vect_dim: Vectorization dimension size, i.e. number of vect envs
         :type vect_dim: int
         :param grouped_agents: Dictionary of grouped agent IDs
-        :type grouped_agents: Dict[str, List[str]]
+        :type grouped_agents: dict[str, list[str]]
         :return: Assembled dictionary, e.g. {'agent_0': 4, 'agent_1': 7, 'agent_2': 8}
-        :rtype: Dict[str, np.ndarray]
+        :rtype: dict[str, np.ndarray]
         """
         output_dict = {}
         for group_id, agent_ids in grouped_agents.items():
@@ -1732,9 +1725,9 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         """Sums the rewards for grouped agents
 
         :param rewards: Reward dictionary from environment
-        :type rewards: Dict[str, np.ndarray]
+        :type rewards: dict[str, np.ndarray]
         :return: Summed rewards dictionary
-        :rtype: Dict[str, np.ndarray]
+        :rtype: dict[str, np.ndarray]
         """
         reward_shape = list(rewards.values())[0]
         reward_shape = (
@@ -1755,11 +1748,11 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         """Assembles individual agent outputs into batched outputs for shared policies.
 
         :param agent_outputs: Dictionary with individual agent outputs, e.g. {'agent_0': 4, 'agent_1': 7, 'agent_2': 8}
-        :type agent_outputs: Dict[str, np.ndarray]
+        :type agent_outputs: dict[str, np.ndarray]
         :param vect_dim: Vectorization dimension size, i.e. number of vect envs
         :type vect_dim: int
         :return: Assembled dictionary with the form {'agent': [4, 7, 8]}
-        :rtype: Dict[str, np.ndarray]
+        :rtype: dict[str, np.ndarray]
         """
         group_outputs = {}
         for group_id in self.shared_agent_ids:
@@ -1849,12 +1842,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :type observations: numpy.ndarray[float] or dict[str, numpy.ndarray[float]]
 
         :return: Preprocessed observations
-        :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
+        :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or tuple[torch.Tensor[float], ...]
         """
         return cast(TorchObsType, observation)
 
-    # TODO: This could hopefully be abstracted into EvolvableAlgorithm with a decorator to
-    # handle _save_distributed_actor if deepspeed is used.
     def save_checkpoint(self, path: str, weights_only: bool = True) -> None:
         """
         Override the save_checkpoint method to provide guidance on the correct method to use.
@@ -1863,6 +1854,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :param weights_only: If True, only save the weights of the model, defaults to False
         :type weights_only: bool, optional
         """
+
+        warnings.warn("weights_only default will be changed to True in the future.")
+
         if self.accelerator is not None:
             if not weights_only:
                 self._save_distributed_actor(path, tag="save_checkpoint")
@@ -1879,6 +1873,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                         selected_adapters=selected_adapters,
                         is_main_process=self.accelerator.is_main_process,
                     )
+
         checkpoint_dict = get_checkpoint_dict(
             self, using_deepspeed=self.accelerator is not None
         )
@@ -1923,11 +1918,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             for attr, value in checkpoint.items():
                 setattr(self, attr, value)
 
-            self.device = (
-                self.accelerator.device
-            )  # Because torch.save is called from the main process, the device must be set to the accelerator device
+            self.device = self.accelerator.device
 
-            # NOTE do we need to mess around with the optimizer here?
             self.optimizer = None
             self.optimizer = OptimizerWrapper(
                 optimizer_cls=self._select_optim_class(),
@@ -1936,7 +1928,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 lr=self.lr,
                 lr_name="lr",
             )
-
         else:
             super().load_checkpoint(path + "/attributes.pt")
 
@@ -1963,11 +1954,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             """
         )
 
-    def _select_optim_class(self) -> Union[Type[OptimizerType], Type[DummyOptimizer]]:
+    def _select_optim_class(self) -> Union[type[OptimizerType], type[DummyOptimizer]]:
         """Select the optimizer class based on the accelerator and deepspeed config.
 
         :return: Optimizer class
-        :rtype: Union[Type[torch.optim.Optimizer], Type[DummyOptimizer]]
+        :rtype: Union[type[torch.optim.Optimizer], type[DummyOptimizer]]
         """
         if self.accelerator is None:
             return AdamW
@@ -2089,6 +2080,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if hasattr(self, "llm"):
             del self.llm.llm_engine.model_executor
             del self.llm
+
         gc.collect()
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
@@ -2198,7 +2190,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         lr: float,
         accelerator: Optional[Accelerator] = None,
         scheduler_config: Optional[CosineLRScheduleConfig] = None,
-    ) -> Tuple[Optional[Accelerator], Optional[SequentialLR]]:
+    ) -> tuple[Optional[Accelerator], Optional[SequentialLR]]:
         """Update the learning rate of the optimizer
 
         :param optimizer: Optimizer
@@ -2272,11 +2264,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     ) -> None:
         """
         Overwrite weights of an existing adapter in-place without creating new parameters.
-
-        :param accelerator: Accelerator
-        :type accelerator: Accelerator
-        :param wrapped_model: Wrapped model
-        :type wrapped_model: DeepSpeedEngine
+        xw
         :param checkpoint_dir: Checkpoint directory
         :type checkpoint_dir: str
         :param adapter_name: Adapter name

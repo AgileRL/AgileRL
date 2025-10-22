@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import torch
 
@@ -23,7 +23,7 @@ class EvolvableMLP(EvolvableModule):
     :param num_outputs: Output layer dimension
     :type num_outputs: int
     :param hidden_size: Hidden layer(s) size
-    :type hidden_size: List[int]
+    :type hidden_size: list[int]
     :param activation: Activation layer, defaults to 'ReLU'
     :type activation: str, optional
     :param output_activation: Output activation layer, defaults to None
@@ -62,7 +62,7 @@ class EvolvableMLP(EvolvableModule):
         self,
         num_inputs: int,
         num_outputs: int,
-        hidden_size: List[int],
+        hidden_size: list[int],
         activation: str = "ReLU",
         output_activation: str = None,
         min_hidden_layers: int = 1,
@@ -136,11 +136,11 @@ class EvolvableMLP(EvolvableModule):
         )
 
     @property
-    def net_config(self) -> Dict[str, Any]:
+    def net_config(self) -> dict[str, Any]:
         """Returns model configuration in dictionary.
 
         :return: Model configuration
-        :rtype: Dict[str, Any]
+        :rtype: dict[str, Any]
         """
         net_config = self.init_dict.copy()
         for attr in ["num_inputs", "num_outputs", "device", "name"]:
@@ -223,11 +223,11 @@ class EvolvableMLP(EvolvableModule):
         self.recreate_network()
 
     @mutation(MutationType.LAYER)
-    def add_layer(self) -> Optional[Dict[str, int]]:
+    def add_layer(self) -> Optional[dict[str, int]]:
         """Adds a hidden layer to neural network. Falls back on ``add_node()`` if ``max_hidden_layers`` reached.
 
         :return: Dictionary containing the hidden layer and number of new nodes.
-        :rtype: Dict[str, int]
+        :rtype: dict[str, int]
         """
         # add layer to hyper params
         if len(self.hidden_size) < self.max_hidden_layers:  # HARD LIMIT
@@ -236,11 +236,11 @@ class EvolvableMLP(EvolvableModule):
             return self.add_node()
 
     @mutation(MutationType.LAYER)
-    def remove_layer(self) -> Optional[Dict[str, int]]:
+    def remove_layer(self) -> Optional[dict[str, int]]:
         """Removes a hidden layer from neural network. Falls back on ``add_node()`` if ``min_hidden_layers`` reached.
 
         :return: Dictionary containing the hidden layer and number of new nodes.
-        :rtype: Dict[str, int]
+        :rtype: dict[str, int]
         """
         if len(self.hidden_size) > self.min_hidden_layers:  # HARD LIMIT
             self.hidden_size = self.hidden_size[:-1]
@@ -250,7 +250,7 @@ class EvolvableMLP(EvolvableModule):
     @mutation(MutationType.NODE)
     def add_node(
         self, hidden_layer: Optional[int] = None, numb_new_nodes: Optional[int] = None
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         """Adds nodes to hidden layer of neural network.
 
         :param hidden_layer: Depth of hidden layer to add nodes to, defaults to None
@@ -259,7 +259,7 @@ class EvolvableMLP(EvolvableModule):
         :type numb_new_nodes: int, optional
 
         :return: Dictionary containing the hidden layer and number of new nodes.
-        :rtype: Dict[str, int]
+        :rtype: dict[str, int]
         """
         if hidden_layer is None:
             hidden_layer = self.rng.integers(0, len(self.hidden_size))
@@ -278,7 +278,7 @@ class EvolvableMLP(EvolvableModule):
     @mutation(MutationType.NODE)
     def remove_node(
         self, hidden_layer: Optional[int] = None, numb_new_nodes: Optional[int] = None
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         """Removes nodes from hidden layer of neural network.
 
         :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None
@@ -287,7 +287,7 @@ class EvolvableMLP(EvolvableModule):
         :type numb_new_nodes: int, optional
 
         :return: Dictionary containing the hidden layer and number of new nodes.
-        :rtype: Dict[str, int]
+        :rtype: dict[str, int]
         """
         if hidden_layer is None:
             hidden_layer = self.rng.integers(0, len(self.hidden_size))

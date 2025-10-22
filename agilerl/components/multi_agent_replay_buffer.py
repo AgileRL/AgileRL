@@ -1,17 +1,16 @@
 import random
 from collections import deque, namedtuple
 from numbers import Number
-from typing import Any, Deque, Dict, List, NamedTuple, Optional, Tuple, Union
+from typing import Any, Deque, NamedTuple, Optional, Union
 
 import numpy as np
 import torch
-from numpy.typing import ArrayLike
 
 from agilerl.typing import NumpyObsType
 from agilerl.utils.algo_utils import obs_to_tensor
 
-NpTransitionType = Union[Number, ArrayLike, Dict[str, ArrayLike]]
-TorchTransitionType = Union[torch.Tensor, Dict[str, torch.Tensor]]
+NpTransitionType = Union[Number, np.ndarray, dict[str, np.ndarray]]
+TorchTransitionType = Union[torch.Tensor, dict[str, torch.Tensor]]
 
 
 class MultiAgentReplayBuffer:
@@ -21,9 +20,9 @@ class MultiAgentReplayBuffer:
     :param memory_size: Maximum length of the replay buffer
     :type memory_size: int
     :param field_names: Field names for experience named tuple, e.g. ['state', 'action', 'reward']
-    :type field_names: List[str]
+    :type field_names: list[str]
     :param agent_ids: Names of all agents that will act in the environment
-    :type agent_ids: List[str]
+    :type agent_ids: list[str]
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to None
     :type device: Optional[str]
     """
@@ -31,8 +30,8 @@ class MultiAgentReplayBuffer:
     def __init__(
         self,
         memory_size: int,
-        field_names: List[str],
-        agent_ids: List[str],
+        field_names: list[str],
+        agent_ids: list[str],
         device: Optional[str] = None,
     ):
         assert memory_size > 0, "Memory size must be greater than zero."
@@ -41,13 +40,13 @@ class MultiAgentReplayBuffer:
 
         self.memory_size: int = memory_size
         self.memory: Deque = deque(maxlen=memory_size)
-        self.field_names: List[str] = field_names
+        self.field_names: list[str] = field_names
         self.experience: NamedTuple = namedtuple(
             "Experience", field_names=self.field_names
         )
         self.counter: int = 0
         self.device: Optional[str] = device
-        self.agent_ids: List[str] = agent_ids
+        self.agent_ids: list[str] = agent_ids
 
     def __len__(self) -> int:
         """
@@ -59,7 +58,7 @@ class MultiAgentReplayBuffer:
         return len(self.memory)
 
     @staticmethod
-    def stack_transitions(transitions: List[NumpyObsType]) -> NumpyObsType:
+    def stack_transitions(transitions: list[NumpyObsType]) -> NumpyObsType:
         """Stacks transitions into a single array/dictionary/tuple of arrays.
 
         :param transitions: List of transitions
@@ -102,7 +101,7 @@ class MultiAgentReplayBuffer:
 
         return ts
 
-    def _add(self, *args: Dict[str, NumpyObsType]) -> None:
+    def _add(self, *args: dict[str, NumpyObsType]) -> None:
         """
         Adds experience to memory.
 
@@ -113,17 +112,17 @@ class MultiAgentReplayBuffer:
         self.memory.append(e)
 
     def _process_transition(
-        self, experiences: List[NamedTuple], np_array: bool = False
-    ) -> Dict[str, Dict[str, Any]]:
+        self, experiences: list[NamedTuple], np_array: bool = False
+    ) -> dict[str, dict[str, Any]]:
         """
         Returns transition dictionary from experiences.
 
         :param experiences: List of experiences
-        :type experiences: List[NamedTuple]
+        :type experiences: list[NamedTuple]
         :param np_array: Flag to return numpy arrays instead of tensors, defaults to False
         :type np_array: bool, optional
         :return: Transition dictionary
-        :rtype: Dict[str, Dict[str, Any]]
+        :rtype: dict[str, dict[str, Any]]
         """
         transition = {field: {} for field in self.field_names}
         experiences_filtered = [e for e in experiences if e is not None]
@@ -154,7 +153,7 @@ class MultiAgentReplayBuffer:
 
         return transition
 
-    def sample(self, batch_size: int, *args: Any) -> Tuple:
+    def sample(self, batch_size: int, *args: Any) -> tuple:
         """
         Returns sample of experiences from memory.
 
@@ -169,7 +168,7 @@ class MultiAgentReplayBuffer:
         transition = self._process_transition(experiences)
         return tuple(transition.values())
 
-    def save_to_memory_single_env(self, *args: Dict[str, NumpyObsType]) -> None:
+    def save_to_memory_single_env(self, *args: dict[str, NumpyObsType]) -> None:
         """
         Saves experience to memory.
 
@@ -181,15 +180,15 @@ class MultiAgentReplayBuffer:
         self.counter += 1
 
     def _reorganize_dicts(
-        self, *args: Dict[str, NumpyObsType]
-    ) -> Tuple[List[Dict[str, NumpyObsType]], ...]:
+        self, *args: dict[str, NumpyObsType]
+    ) -> tuple[list[dict[str, NumpyObsType]], ...]:
         """
         Reorganizes dictionaries from vectorized to unvectorized experiences.
 
         :param args: Variable length argument list of dictionaries
-        :type args: Dict[str, np.ndarray]
+        :type args: dict[str, np.ndarray]
         :return: Reorganized dictionaries
-        :rtype: Tuple[List[Dict[str, np.ndarray]], ...]
+        :rtype: tuple[list[dict[str, np.ndarray]], ...]
         """
 
         def maybe_to_array(value):
@@ -214,7 +213,7 @@ class MultiAgentReplayBuffer:
 
         return tuple(results)
 
-    def save_to_memory_vect_envs(self, *args: Dict[str, NumpyObsType]) -> None:
+    def save_to_memory_vect_envs(self, *args: dict[str, NumpyObsType]) -> None:
         """
         Saves multiple experiences to memory.
 
@@ -228,7 +227,7 @@ class MultiAgentReplayBuffer:
             self.counter += 1
 
     def save_to_memory(
-        self, *args: Dict[str, NumpyObsType], is_vectorised: bool = False
+        self, *args: dict[str, NumpyObsType], is_vectorised: bool = False
     ) -> None:
         """
         Applies appropriate save_to_memory function depending on whether

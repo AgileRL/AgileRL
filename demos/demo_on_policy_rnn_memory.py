@@ -4,8 +4,6 @@
 # The agent is shown a random symbol (one-hot) at the start, then receives blank observations for N steps, and is then asked to output the same symbol.
 # This is a minimal memory challenge for RL agents.
 
-from typing import List
-
 import gymnasium as gym
 import numpy as np
 import torch
@@ -167,7 +165,7 @@ def run_demo():
         learn_step=RLParameter(min=16, max=128, dtype=int),
     )
 
-    pop: List[PPO] = create_population(
+    pop: list[PPO] = create_population(
         algo="PPO",
         observation_space=observation_space,
         action_space=action_space,

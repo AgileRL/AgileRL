@@ -1,5 +1,4 @@
 import os
-from typing import List
 
 import numpy as np
 from accelerate import Accelerator
@@ -54,7 +53,7 @@ if __name__ == "__main__":
     observation_space = env.single_observation_space
     action_space = env.single_action_space
 
-    pop: List[DQN] = create_population(
+    pop: list[DQN] = create_population(
         algo="DQN",  # Algorithm
         observation_space=observation_space,  # Observation space
         action_space=action_space,  # Action space

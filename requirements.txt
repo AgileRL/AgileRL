@@ -30,4 +30,4 @@ wandb==0.17.6
 huggingface
 transformers>=4.55.0
 peft==0.15.2
-vllm>=0.10.0
+vllm==0.10.0

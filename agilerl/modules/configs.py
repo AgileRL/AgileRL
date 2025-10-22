@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Literal, Optional, Union
 
 import torch
 import yaml
@@ -12,13 +12,13 @@ class NetConfig:
     """Dataclass for storing evolvable network configurations."""
 
     @classmethod
-    def from_dict(cls, config: Dict[str, Any]) -> "NetConfig":
+    def from_dict(cls, config: dict[str, Any]) -> "NetConfig":
         return cls(**config)
 
     @classmethod
     def from_yaml(cls, path: str) -> "NetConfig":
         with open(path) as file:
-            config: Dict[str, Any] = yaml.safe_load(file)
+            config: dict[str, Any] = yaml.safe_load(file)
             assert "NET_CONFIG" in config, "NET_CONFIG not found in yaml file."
             net_config = config["NET_CONFIG"]
 
@@ -42,19 +42,19 @@ class NetConfig:
             delattr(self, key)
         return attr
 
-    def keys(self) -> List[str]:
+    def keys(self) -> list[str]:
         return list(self.__dataclass_fields__.keys())
 
-    def values(self) -> List[Any]:
+    def values(self) -> list[Any]:
         return [getattr(self, key) for key in self.keys()]
 
-    def items(self) -> Dict[str, Any]:
+    def items(self) -> dict[str, Any]:
         return {key: getattr(self, key) for key in self.keys()}.items()
 
 
 @dataclass
 class MlpNetConfig(NetConfig):
-    hidden_size: List[int]
+    hidden_size: list[int]
     activation: str = field(default="ReLU")
     output_activation: Optional[str] = field(default=None)
     min_hidden_layers: int = field(default=1)
@@ -112,9 +112,9 @@ class SimBaNetConfig(NetConfig):
 
 @dataclass
 class CnnNetConfig(NetConfig):
-    channel_size: List[int]
-    kernel_size: List[Union[int, Tuple[int, ...]]]
-    stride_size: List[int]
+    channel_size: list[int]
+    kernel_size: list[Union[int, tuple[int, ...]]]
+    stride_size: list[int]
     sample_input: Optional[torch.Tensor] = field(default=None)
     activation: str = field(default="ReLU")
     output_activation: Optional[str] = field(default=None)
@@ -158,7 +158,7 @@ class MultiInputNetConfig(NetConfig):
     mlp_config: Optional[NetConfigType] = field(default=None)
 
     # Additional settings
-    init_dicts: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    init_dicts: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self):
         """Validate configuration parameters after initialization."""

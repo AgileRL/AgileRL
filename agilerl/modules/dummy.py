@@ -1,4 +1,4 @@
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Optional
 
 import torch
 import torch.nn as nn
@@ -9,7 +9,7 @@ from agilerl.typing import DeviceType
 
 def to_evolvable(
     module_fn: Callable[[], nn.Module],
-    module_kwargs: Dict[str, Any],
+    module_kwargs: dict[str, Any],
     device: DeviceType,
 ) -> EvolvableModule:
     return DummyEvolvable(module_fn, module_kwargs, device)
@@ -27,7 +27,7 @@ class DummyEvolvable(EvolvableModule):
     :param module_fn: Function that returns a PyTorch nn.Module object.
     :type module_fn: Callable[[], nn.Module]
     :param module_kwargs: Keyword arguments to pass to the module_fn.
-    :type module_kwargs: Dict[str, Any]
+    :type module_kwargs: dict[str, Any]
     :param device: Device to run the module on.
     :type device: DeviceType
     """
@@ -37,7 +37,7 @@ class DummyEvolvable(EvolvableModule):
         device: DeviceType,
         module: nn.Module | None = None,
         module_fn: Callable[[], nn.Module] | None = None,
-        module_kwargs: Optional[Dict[str, Any]] | None = None,
+        module_kwargs: Optional[dict[str, Any]] | None = None,
     ) -> None:
 
         if module is None and module_fn is None:

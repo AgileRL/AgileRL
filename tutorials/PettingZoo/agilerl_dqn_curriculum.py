@@ -8,7 +8,7 @@ import os
 import random
 from collections import deque
 from datetime import datetime
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import numpy as np
 import torch
@@ -207,7 +207,7 @@ class CurriculumEnv:
         print("Replay buffer warmed up.")
         return memory
 
-    def check_winnable(self, lst: List[int], piece: int) -> bool:
+    def check_winnable(self, lst: list[int], piece: int) -> bool:
         """Checks if four pieces in a row represent a winnable opportunity, e.g. [1, 1, 1, 0] or [2, 0, 2, 2].
 
         :param lst: List of pieces in row
@@ -323,7 +323,7 @@ class CurriculumEnv:
                 )
         return reward
 
-    def last(self) -> Tuple[dict, float, bool, bool, dict]:
+    def last(self) -> tuple[dict, float, bool, bool, dict]:
         """Wrapper around PettingZoo env last method."""
         return self.env.last()
 
@@ -377,7 +377,7 @@ class Opponent:
 
     def random_opponent(
         self,
-        action_mask: List[int],
+        action_mask: list[int],
         last_opp_move: Optional[int] = None,
         block_vert_coef: float = 1,
     ) -> int:
@@ -448,7 +448,7 @@ class Opponent:
 
     def outcome(
         self, action: int, player: int, return_length: bool = False
-    ) -> Tuple[bool, Optional[float], bool, Optional[np.ndarray]]:
+    ) -> tuple[bool, Optional[float], bool, Optional[np.ndarray]]:
         """Takes move for weak rule-based opponent.
 
         :param action: Action to take in environment
@@ -609,7 +609,7 @@ if __name__ == "__main__":
         )
 
         # Create a population ready for evolutionary hyper-parameter optimisation
-        pop: List[DQN] = create_population(
+        pop: list[DQN] = create_population(
             INIT_HP["ALGO"],
             observation_space,
             action_spaces[0],

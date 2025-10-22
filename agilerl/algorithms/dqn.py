@@ -1,5 +1,5 @@
 import warnings
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import numpy as np
 import torch
@@ -65,7 +65,7 @@ class DQN(RLAlgorithm):
         action_space: spaces.Space,
         index: int = 0,
         hp_config: Optional[HyperparameterConfig] = None,
-        net_config: Optional[Dict[str, Any]] = None,
+        net_config: Optional[dict[str, Any]] = None,
         batch_size: int = 64,
         lr: float = 1e-4,
         learn_step: int = 5,

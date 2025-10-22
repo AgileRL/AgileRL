@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any, List, Tuple, Union
+from typing import Any, Union
 
 
 class Tokenizer(ABC):
@@ -21,14 +21,14 @@ class Tokenizer(ABC):
 
     @abstractmethod
     def encode(
-        self, str_: Union[str, List[str]], **kwargs
-    ) -> Tuple[Union[List[int], List[List[int]]], Union[List[int], List[List[int]]]]:
+        self, str_: Union[str, list[str]], **kwargs
+    ) -> tuple[Union[list[int], list[list[int]]], Union[list[int], list[list[int]]]]:
         pass
 
     @abstractmethod
     def decode(
-        self, tokens: Union[List[int], List[List[int]]], **kwargs
-    ) -> Union[str, List[str]]:
+        self, tokens: Union[list[int], list[list[int]]], **kwargs
+    ) -> Union[str, list[str]]:
         pass
 
     @abstractmethod

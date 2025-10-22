@@ -4,10 +4,7 @@ from typing import (
     Any,
     Callable,
     ClassVar,
-    Dict,
-    List,
     Protocol,
-    Tuple,
     TypedDict,
     TypeVar,
     Union,
@@ -18,7 +15,6 @@ import numpy as np
 import torch
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
-from numpy.typing import ArrayLike
 from pettingzoo import ParallelEnv
 from tensordict import TensorDict
 from torch._dynamo import OptimizedModule
@@ -37,7 +33,13 @@ T = TypeVar("T", bound=Union[Module, OptimizedModule])
 
 
 class IsDataclass(Protocol):
-    __dataclass_fields__: ClassVar[Dict[str, Any]]
+    __dataclass_fields__: ClassVar[dict[str, Any]]
+
+
+class ReturnedPrompts(TypedDict):
+    input_ids: torch.Tensor
+    attention_mask: torch.Tensor
+    text: str | None
 
 
 class ReturnedPrompts(TypedDict):
@@ -79,30 +81,30 @@ SupportedActionSpaces = Union[
     spaces.Box,
 ]
 
-ArrayOrTensor = Union[ArrayLike, torch.Tensor]
-StandardTensorDict = Dict[str, torch.Tensor]
-TensorTuple = Tuple[torch.Tensor, ...]
-ArrayDict = Dict[str, np.ndarray]
-ArrayTuple = Tuple[ArrayLike, ...]
-NetConfigType = Dict[str, Union[Dict[str, Any], Any]]
-KernelSizeType = Union[int, Tuple[int, ...]]
-GymSpaceType = Union[SupportedObsSpaces, List[SupportedObsSpaces]]
+ArrayOrTensor = Union[np.ndarray, torch.Tensor]
+StandardTensorDict = dict[str, torch.Tensor]
+TensorTuple = tuple[torch.Tensor, ...]
+ArrayDict = dict[str, np.ndarray]
+ArrayTuple = tuple[np.ndarray, ...]
+NetConfigType = dict[str, Union[dict[str, Any], Any]]
+KernelSizeType = Union[int, tuple[int, ...]]
+GymSpaceType = Union[SupportedObsSpaces, list[SupportedObsSpaces]]
 GymEnvType = Union[str, gym.Env, gym.vector.VectorEnv, gym.vector.AsyncVectorEnv]
 PzEnvType = Union[str, ParallelEnv]
-LLMObsType = List[ReturnedPrompts]
+LLMObsType = list[ReturnedPrompts]
 
 NumpyObsType = Union[np.ndarray, ArrayDict, ArrayTuple]
 TorchObsType = Union[torch.Tensor, TensorDict, TensorTuple, StandardTensorDict]
 ObservationType = Union[NumpyObsType, TorchObsType, Number, LLMObsType]
-MultiAgentObservationType = Dict[str, ObservationType]
+MultiAgentObservationType = dict[str, ObservationType]
 ActionType = Union[int, float, np.ndarray, torch.Tensor]
-InfosDict = Dict[str, Dict[str, Any]]
-MaybeObsList = Union[List[ObservationType], ObservationType]
-ExperiencesType = Union[Dict[str, ObservationType], Tuple[ObservationType, ...]]
-ActionReturnType = Union[Tuple[Union[ActionType, Any], ...], ActionType, Any]
-GymStepReturn = Tuple[NumpyObsType, ActionType, float, MaybeObsList, InfosDict]
-PzStepReturn = Tuple[
-    Dict[str, NumpyObsType], ArrayDict, ArrayDict, ArrayDict, Dict[str, Any]
+InfosDict = dict[str, dict[str, Any]]
+MaybeObsList = Union[list[ObservationType], ObservationType]
+ExperiencesType = Union[dict[str, ObservationType], tuple[ObservationType, ...]]
+ActionReturnType = Union[tuple[Union[ActionType, Any], ...], ActionType, Any]
+GymStepReturn = tuple[NumpyObsType, ActionType, float, MaybeObsList, InfosDict]
+PzStepReturn = tuple[
+    dict[str, NumpyObsType], ArrayDict, ArrayDict, ArrayDict, dict[str, Any]
 ]
 
 SingleAgentModule = Union[T, EvolvableModule, OptimizedModule, EvolvableNetwork]
@@ -112,15 +114,15 @@ EvolvableNetworkType = Union[EvolvableModule, ModuleDict[EvolvableModule]]
 DeviceType = Union[str, torch.device]
 OptimizerType = Union[Optimizer, AcceleratedOptimizer]
 ConfigType = Union[IsDataclass, NetConfigType]
-StateDict = Union[Dict[str, Any], Dict[str, Dict[str, Any]]]
+StateDict = Union[dict[str, Any], dict[str, dict[str, Any]]]
 
-SingleAgentMutReturnType = Dict[str, Any]
-MultiAgentMutReturnType = Dict[str, Dict[str, Any]]
+SingleAgentMutReturnType = dict[str, Any]
+MultiAgentMutReturnType = dict[str, dict[str, Any]]
 MutationReturnType = Union[SingleAgentMutReturnType, MultiAgentMutReturnType]
-PopulationType = List[EvolvableAlgorithm]
+PopulationType = list[EvolvableAlgorithm]
 MutationMethod = Callable[[EvolvableAlgorithm], EvolvableAlgorithm]
-ConfigType = Union[IsDataclass, Dict[str, Any]]
-StateDict = Union[Dict[str, Any], List[Dict[str, Any]]]
+ConfigType = Union[IsDataclass, dict[str, Any]]
+StateDict = Union[dict[str, Any], list[dict[str, Any]]]
 
 
 class BatchDimension:

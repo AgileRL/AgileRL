@@ -1,5 +1,5 @@
 import warnings
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import numpy as np
 import torch.distributed as dist
@@ -18,13 +18,13 @@ from agilerl.utils.utils import (
     tournament_selection_and_mutation,
 )
 
-InitDictType = Optional[Dict[str, Any]]
+InitDictType = Optional[dict[str, Any]]
 
 
 def finetune_llm(
     pop: PopulationType,
     env: HuggingFaceGym,
-    init_hp: Optional[Dict[str, Any]] = None,
+    init_hp: Optional[dict[str, Any]] = None,
     save_elite: Optional[bool] = None,
     elite_path: Optional[str] = None,
     wb: bool = False,

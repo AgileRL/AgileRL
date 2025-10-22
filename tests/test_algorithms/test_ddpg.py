@@ -296,9 +296,10 @@ def test_initialize_ddpg_with_actor_network_no_critic(
         "multidiscrete_space",
     ],
 )
-def test_returns_expected_action_training(observation_space, request):
+@pytest.mark.parametrize("action_dtype", [np.float32, np.float64])
+def test_returns_expected_action_training(observation_space, request, action_dtype):
     accelerator = Accelerator()
-    action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+    action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=action_dtype)
     observation_space = request.getfixturevalue(observation_space)
 
     # Test without accelerator

@@ -1,6 +1,6 @@
 import random
 from numbers import Number
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 import torch
@@ -14,8 +14,8 @@ from agilerl.typing import NumpyObsType, TorchObsType
 
 
 def assert_state_dicts_equal(
-    state_dict1: Dict[str, torch.Tensor],
-    state_dict2: Dict[str, torch.Tensor],
+    state_dict1: dict[str, torch.Tensor],
+    state_dict2: dict[str, torch.Tensor],
     rtol: float = 1e-5,
     atol: float = 1e-8,
 ) -> None:
@@ -23,9 +23,9 @@ def assert_state_dicts_equal(
     Compare two PyTorch state dictionaries using torch.allclose for efficient comparison.
 
     :param state_dict1: First state dictionary
-    :type state_dict1: Dict[str, torch.Tensor]
+    :type state_dict1: dict[str, torch.Tensor]
     :param state_dict2: Second state dictionary
-    :type state_dict2: Dict[str, torch.Tensor]
+    :type state_dict2: dict[str, torch.Tensor]
     :param rtol: Relative tolerance for torch.allclose
     :type rtol: float
     :param atol: Absolute tolerance for torch.allclose
@@ -55,8 +55,8 @@ def assert_state_dicts_equal(
 
 
 def assert_not_equal_state_dict(
-    state_dict1: Dict[str, torch.Tensor],
-    state_dict2: Dict[str, torch.Tensor],
+    state_dict1: dict[str, torch.Tensor],
+    state_dict2: dict[str, torch.Tensor],
     rtol: float = 1e-5,
     atol: float = 1e-8,
 ) -> None:
@@ -64,9 +64,9 @@ def assert_not_equal_state_dict(
     Compare two PyTorch state dictionaries using torch.allclose for efficient comparison.
 
     :param state_dict1: First state dictionary
-    :type state_dict1: Dict[str, torch.Tensor]
+    :type state_dict1: dict[str, torch.Tensor]
     :param state_dict2: Second state dictionary
-    :type state_dict2: Dict[str, torch.Tensor]
+    :type state_dict2: dict[str, torch.Tensor]
     :param rtol: Relative tolerance for torch.allclose
     :type rtol: float
     :param atol: Absolute tolerance for torch.allclose
@@ -104,7 +104,7 @@ def check_equal_params_ind(
                 ), f"Parameter {key} not equal after mutation {mutated_ind.last_mutation_attr}:\n{param.data[slice_index]}\n{old_param.data[slice_index]}"
 
 
-def unpack_network(model: nn.Sequential) -> List[nn.Module]:
+def unpack_network(model: nn.Sequential) -> list[nn.Module]:
     """Unpacks an nn.Sequential type model"""
     layer_list = []
     for layer in model.children():
@@ -128,7 +128,7 @@ def check_models_same(model1: nn.Module, model2: nn.Module) -> bool:
 
 
 def generate_random_box_space(
-    shape: Tuple[int, ...], low: Optional[Number] = None, high: Optional[Number] = None
+    shape: tuple[int, ...], low: Optional[Number] = None, high: Optional[Number] = None
 ) -> spaces.Box:
     return spaces.Box(
         low=random.randint(0, 5) if low is None else low,
@@ -149,8 +149,8 @@ def generate_multidiscrete_space(n: int, m: int) -> spaces.MultiDiscrete:
 def generate_dict_or_tuple_space(
     n_image: int,
     n_vector: int,
-    image_shape: Tuple[int, ...] = (3, 32, 32),
-    vector_shape: Tuple[int] = (4,),
+    image_shape: tuple[int, ...] = (3, 32, 32),
+    vector_shape: tuple[int] = (4,),
     dict_space: Optional[bool] = True,
 ) -> Union[spaces.Dict, spaces.Tuple]:
 
@@ -174,10 +174,10 @@ def generate_dict_or_tuple_space(
 
 def generate_multi_agent_box_spaces(
     n_agents: int,
-    shape: Tuple[int, ...],
-    low: Optional[Union[Number, List[Number]]] = -1,
-    high: Optional[Union[Number, List[Number]]] = 1,
-) -> List[spaces.Box]:
+    shape: tuple[int, ...],
+    low: Optional[Union[Number, list[Number]]] = -1,
+    high: Optional[Union[Number, list[Number]]] = 1,
+) -> list[spaces.Box]:
     if isinstance(low, list):
         assert len(low) == n_agents
     if isinstance(high, list):
@@ -201,13 +201,13 @@ def generate_multi_agent_box_spaces(
 
 def generate_multi_agent_discrete_spaces(
     n_agents: int, m: int
-) -> List[spaces.Discrete]:
+) -> list[spaces.Discrete]:
     return [generate_discrete_space(m) for _ in range(n_agents)]
 
 
 def generate_multi_agent_multidiscrete_spaces(
     n_agents: int, m: int
-) -> List[spaces.MultiDiscrete]:
+) -> list[spaces.MultiDiscrete]:
     return [generate_multidiscrete_space(m, m) for _ in range(n_agents)]
 
 
@@ -215,10 +215,10 @@ def gen_multi_agent_dict_or_tuple_spaces(
     n_agents: int,
     n_image: int,
     n_vector: int,
-    image_shape: Tuple[int, ...] = (3, 16, 16),
-    vector_shape: Tuple[int] = (4,),
+    image_shape: tuple[int, ...] = (3, 16, 16),
+    vector_shape: tuple[int] = (4,),
     dict_space: Optional[bool] = False,
-) -> List[Union[spaces.Dict, spaces.Tuple]]:
+) -> list[Union[spaces.Dict, spaces.Tuple]]:
     return [
         generate_dict_or_tuple_space(
             n_image, n_vector, image_shape, vector_shape, dict_space
@@ -333,7 +333,7 @@ def get_experiences_batch(
     ).to_tensordict()
 
 
-def assert_close_dict(before: Dict[str, Any], after: Dict[str, Any]) -> None:
+def assert_close_dict(before: dict[str, Any], after: dict[str, Any]) -> None:
     for key, value in before.items():
         if isinstance(value, dict):
             assert_close_dict(value, after[key])

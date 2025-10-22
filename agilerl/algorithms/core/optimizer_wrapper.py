@@ -1,5 +1,5 @@
 import inspect
-from typing import Any, Dict, List, Optional, Type, Union
+from typing import Any, Optional, Union
 
 import torch.nn as nn
 from peft import PeftModel
@@ -10,9 +10,9 @@ from agilerl.protocols import EvolvableAlgorithm
 from agilerl.typing import OptimizerType, StateDict
 from agilerl.utils.llm_utils import DummyOptimizer
 
-ModuleList = List[EvolvableModule]
+ModuleList = list[EvolvableModule]
 _Optimizer = Union[
-    Type[OptimizerType], Dict[str, Type[OptimizerType]], Type[DummyOptimizer]
+    type[OptimizerType], dict[str, type[OptimizerType]], type[DummyOptimizer]
 ]
 _Module = Union[EvolvableModule, ModuleDict, ModuleList, PeftModel]
 
@@ -21,7 +21,7 @@ def init_from_multiple(
     networks: ModuleList,
     optimizer_cls: OptimizerType,
     lr: float,
-    optimizer_kwargs: Dict[str, Any],
+    optimizer_kwargs: dict[str, Any],
 ) -> Optimizer:
     """
     Initialize an optimizer from a list of networks.
@@ -33,7 +33,7 @@ def init_from_multiple(
     :param lr: The learning rate of the optimizer.
     :type lr: float
     :param optimizer_kwargs: The keyword arguments to be passed to the optimizer.
-    :type optimizer_kwargs: Dict[str, Any]
+    :type optimizer_kwargs: dict[str, Any]
     """
     opt_args = []
     for i, net in enumerate(networks):
@@ -51,7 +51,7 @@ def init_from_single(
     network: EvolvableModule,
     optimizer_cls: OptimizerType,
     lr: float,
-    optimizer_kwargs: Dict[str, Any],
+    optimizer_kwargs: dict[str, Any],
 ) -> Optimizer:
     """
     Initialize an optimizer from a single network.
@@ -67,15 +67,15 @@ class OptimizerWrapper:
     to be able to reinitialize them after mutating an individual.
 
     :param optimizer_cls: The optimizer class to be initialized.
-    :type optimizer_cls: Type[torch.optim.Optimizer]
+    :type optimizer_cls: type[torch.optim.Optimizer]
     :param networks: The network/s that the optimizer will update.
     :type networks: EvolvableModule, ModuleDict
     :param lr: The learning rate of the optimizer.
     :type lr: float
     :param optimizer_kwargs: The keyword arguments to be passed to the optimizer.
-    :type optimizer_kwargs: Dict[str, Any]
+    :type optimizer_kwargs: dict[str, Any]
     :param network_names: The attribute names of the networks in the parent container.
-    :type network_names: List[str]
+    :type network_names: list[str]
     :param lr_name: The attribute name of the learning rate in the parent container.
     :type lr_name: str
     """
@@ -87,8 +87,8 @@ class OptimizerWrapper:
         optimizer_cls: _Optimizer,
         networks: _Module,
         lr: float,
-        optimizer_kwargs: Optional[Dict[str, Any]] = None,
-        network_names: Optional[List[str]] = None,
+        optimizer_kwargs: Optional[dict[str, Any]] = None,
+        network_names: Optional[list[str]] = None,
         lr_name: Optional[str] = None,
     ) -> None:
 
@@ -208,7 +208,7 @@ class OptimizerWrapper:
         current_frame = inspect.currentframe()
         return current_frame.f_back.f_back.f_locals["self"]
 
-    def _infer_network_attr_names(self, container: Any) -> List[str]:
+    def _infer_network_attr_names(self, container: Any) -> list[str]:
         """
         Infer attribute names of the networks being optimized.
 
@@ -263,7 +263,7 @@ class OptimizerWrapper:
         Load the state of the optimizer from the passed state dictionary.
 
         :param state_dict: State dictionary of the optimizer.
-        :type state_dict: Dict[str, Any]
+        :type state_dict: dict[str, Any]
         """
         if isinstance(self.networks[0], ModuleDict):
             assert (
@@ -293,7 +293,7 @@ class OptimizerWrapper:
 
         return self.optimizer.state_dict()
 
-    def optimizer_cls_names(self) -> Union[str, Dict[str, str]]:
+    def optimizer_cls_names(self) -> Union[str, dict[str, str]]:
         """
         Return the names of the optimizers.
         """
@@ -304,7 +304,7 @@ class OptimizerWrapper:
             }
         return self.optimizer_cls.__name__
 
-    def checkpoint_dict(self, name: str) -> Dict[str, Any]:
+    def checkpoint_dict(self, name: str) -> dict[str, Any]:
         """
         Return a dictionary of the optimizer's state and parameters.
 
@@ -312,7 +312,7 @@ class OptimizerWrapper:
         :type name: str
 
         :return: A dictionary of the optimizer's state and parameters.
-        :rtype: Dict[str, Any]
+        :rtype: dict[str, Any]
         """
         return {
             f"{name}_cls": self.optimizer_cls_names(),

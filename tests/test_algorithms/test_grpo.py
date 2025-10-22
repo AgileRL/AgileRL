@@ -5,7 +5,7 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Optional, Tuple
+from typing import Optional
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import gymnasium as gym
@@ -20,10 +20,7 @@ from accelerate.utils import DeepSpeedPlugin
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
-from peft import (
-    LoraConfig,
-    get_peft_model,
-)
+from peft import LoraConfig, LoraModel, PeftModel, get_peft_model
 from torch.optim.lr_scheduler import SequentialLR
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.configuration_utils import PretrainedConfig
@@ -47,7 +44,7 @@ dist_env = dict(
     RANK="0",
     LOCAL_RANK="0",
     WORLD_SIZE="1",
-    # PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True",
+    PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True",
 )
 
 deepspeed_base_config = {
@@ -146,7 +143,7 @@ class DummyMLPPreTrainedModel(PreTrainedModel):
 
     def forward(
         self, input_ids: Optional[torch.Tensor] = None, *args, **kwargs
-    ) -> Tuple[torch.Tensor, ...]:
+    ) -> tuple[torch.Tensor, ...]:
         input_ids = input_ids.to(self.datatype)
         output = self.linear_2(self.linear_1(input_ids)).reshape(
             input_ids.shape[0],
@@ -226,7 +223,9 @@ class DummyHuggingFaceEnv:
 
 
 class DummyVLLM:
-    def __init__(self, *args, **kwargs): ...
+    def __init__(self, *args, **kwargs):
+        self.llm_engine = MagicMock()
+        self.llm_engine.model_executor = MagicMock()
 
     def generate(self, prompts, *args, **kwargs):
         """
@@ -463,6 +462,7 @@ def grpo_factory():
             vllm_config = VLLMConfig(
                 gpu_memory_utilization=0.05, max_num_seqs=1, sleep_mode=sleep_mode
             )
+
             actor = model_factory(pretrained_model_name_or_path)
         else:
 
@@ -520,19 +520,6 @@ def grpo_factory():
         return grpo
 
     return generate_grpo
-    #     yield grpo
-    # try:
-    #     if accelerator is not None:
-    #         AcceleratorState._reset_state(True)
-    #         grpo.clean_up()
-    # finally:
-    #     del accelerator
-    #     del actor
-    #     del grpo
-
-    #     gc.collect()
-    #     torch.cuda.empty_cache()
-    #     torch.cuda.synchronize()
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -793,6 +780,7 @@ def test_get_action_grpo(
         }
         for _ in range(data_batch_size)
     ]
+
     completion_ids, _ = grpo.get_action(states, training)
     group_size = 1 if not training else group_size
     for ids in completion_ids:
@@ -852,6 +840,8 @@ def test_get_action_grpo_vllm_sleep_mode(
     mock_instance.sleep = MagicMock()
     mock_instance.wake_up = MagicMock()
     mock_instance.shutdown = MagicMock()
+    mock_instance.llm_engine = MagicMock()
+    mock_instance.llm_engine.model_executor = MagicMock()
 
     # Make LLM() constructor return mock instance
     MockLLM.return_value = mock_instance
@@ -890,7 +880,7 @@ def test_get_action_grpo_vllm_sleep_mode(
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [True])
-@pytest.mark.parametrize("use_separate_reference_adapter", [True])
+@pytest.mark.parametrize("use_separate_reference_adapter", [True, False])
 @pytest.mark.parametrize("vocab_size", [1000])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
@@ -954,6 +944,9 @@ def test_grpo_save_load_checkpoint_vllm(
             use_separate_reference_adapter=use_separate_reference_adapter,
         )
         new_grpo.load_checkpoint(tmpdir)
+
+        assert isinstance(new_grpo.actor, DeepSpeedEngine)
+        assert isinstance(new_grpo.actor.base_model, (PeftModel, LoraModel))
 
         for attr in EvolvableAlgorithm.inspect_attributes(grpo):
             if not attr.startswith("_") and not attr.startswith("__"):
@@ -1697,6 +1690,7 @@ def test_init_grpo_max_grad_norm_warning(
         )
         gc.collect()
         torch.cuda.empty_cache()
+    assert grpo.lr == 1e-4 if use_deepspeed_optimizer else 0.1
     AcceleratorState._reset_state(True)
 
 
@@ -3146,6 +3140,12 @@ def test_clone_llm_peft(vocab_size, input_size, max_tokens):
     # Verify the PEFT adapter is properly cloned
     assert cloned_model.active_adapter == peft_model.active_adapter
     assert cloned_model.peft_config[cloned_model.active_adapter] == peft_config
+
+
+def test_clone_llm_peft_raises_error():
+    with pytest.raises(ValueError) as e:
+        clone_llm(1)
+    assert "Invalid 'original_model' type: <class 'int'>" in str(e.value)
 
 
 @pytest.mark.parametrize(

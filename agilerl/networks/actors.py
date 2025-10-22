@@ -1,4 +1,4 @@
-from typing import Optional, Tuple, Type, Union
+from typing import Optional, Union
 
 import torch
 from gymnasium import spaces
@@ -21,7 +21,7 @@ class DeterministicActor(EvolvableNetwork):
     :type action_space: Union[spaces.Box, spaces.Discrete]
     :param encoder_cls: Encoder class to use for the network. Defaults to None, whereby it is
         automatically built using an AgileRL module according the observation space.
-    :type encoder_cls: Optional[Union[str, Type[EvolvableModule]]]
+    :type encoder_cls: Optional[Union[str, type[EvolvableModule]]]
     :param encoder_config: Configuration of the encoder network.
     :type encoder_config: NetConfigType
     :param head_config: Configuration of the network MLP head.
@@ -52,7 +52,7 @@ class DeterministicActor(EvolvableNetwork):
         self,
         observation_space: spaces.Space,
         action_space: Union[spaces.Box, spaces.Discrete],
-        encoder_cls: Optional[Union[str, Type[EvolvableModule]]] = None,
+        encoder_cls: Optional[Union[str, type[EvolvableModule]]] = None,
         encoder_config: Optional[NetConfigType] = None,
         head_config: Optional[NetConfigType] = None,
         clip_actions: bool = True,
@@ -210,7 +210,7 @@ class StochasticActor(EvolvableNetwork):
     :type action_space: spaces.Space
     :param encoder_cls: Encoder class to use for the network. Defaults to None, whereby it is
         automatically built using an AgileRL module according the observation space.
-    :type encoder_cls: Optional[Union[str, Type[EvolvableModule]]]
+    :type encoder_cls: Optional[Union[str, type[EvolvableModule]]]
     :param encoder_config: Configuration of the encoder network.
     :type encoder_config: NetConfigType
     :param head_config: Configuration of the network MLP head.
@@ -252,7 +252,7 @@ class StochasticActor(EvolvableNetwork):
         self,
         observation_space: spaces.Space,
         action_space: spaces.Space,
-        encoder_cls: Optional[Union[str, Type[EvolvableModule]]] = None,
+        encoder_cls: Optional[Union[str, type[EvolvableModule]]] = None,
         encoder_config: Optional[NetConfigType] = None,
         head_config: Optional[NetConfigType] = None,
         action_std_init: float = 0.0,
@@ -351,7 +351,7 @@ class StochasticActor(EvolvableNetwork):
 
     def forward(
         self, obs: TorchObsType, action_mask: Optional[ArrayOrTensor] = None
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Forward pass of the network.
 
         :param obs: Observation input.
@@ -359,7 +359,7 @@ class StochasticActor(EvolvableNetwork):
         :param action_mask: Action mask.
         :type action_mask: Optional[ArrayOrTensor]
         :return: Action and log probability of the action.
-        :rtype: Tuple[torch.Tensor, torch.Tensor]
+        :rtype: tuple[torch.Tensor, torch.Tensor]
         """
         latent = self.extract_features(obs)
         action, log_prob, entropy = self.head_net.forward(latent, action_mask)

@@ -3,7 +3,7 @@ import logging
 import warnings
 from collections import OrderedDict
 from functools import wraps
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union
+from typing import Any, Callable, Optional, TypeVar, Union
 
 import fastrand
 import numpy as np
@@ -30,7 +30,7 @@ from agilerl.wrappers.agent import AgentWrapper
 
 IndividualType = TypeVar("IndividualType", bound=EvolvableAlgorithm)
 MutationsType = TypeVar("MutationsType", bound="Mutations")
-PopulationType = List[IndividualType]
+PopulationType = list[IndividualType]
 BanditAlgorithm = Union[NeuralUCB, NeuralTS]
 
 torch._dynamo.config.cache_size_limit = 64
@@ -55,14 +55,14 @@ def set_global_seed(seed: Optional[int]) -> None:
 
 def get_offspring_eval_modules(
     individual: IndividualType,
-) -> Tuple[Dict[str, EvolvableNetworkType], Dict[str, EvolvableNetworkType]]:
+) -> tuple[dict[str, EvolvableNetworkType], dict[str, EvolvableNetworkType]]:
     """Get the offsprings of all of the evaluation modules in the individual.
 
     :param individual: The individual to inspect
     :type individual: EvolvableAlgorithm
 
     :return: Tuple of offspring policy and the rest of the evaluation modules
-    :rtype: Tuple[Dict[str, NetworkType], Dict[str, NetworkType]]
+    :rtype: tuple[dict[str, NetworkType], dict[str, NetworkType]]
     """
     registry = individual.registry
 
@@ -211,7 +211,7 @@ class Mutations:
         activation: float,
         rl_hp: float,
         mutation_sd: float = 0.1,
-        activation_selection: List[str] = ["ReLU", "ELU", "GELU"],
+        activation_selection: list[str] = ["ReLU", "ELU", "GELU"],
         mutate_elite: bool = True,
         rand_seed: Optional[int] = None,
         device: str = "cpu",
@@ -315,7 +315,7 @@ class Mutations:
 
         # Randomly choose mutation for each agent in population from options with
         # relative probabilities
-        mutation_choice: List[MutationMethod] = self.rng.choice(
+        mutation_choice: list[MutationMethod] = self.rng.choice(
             mutation_options, len(population), p=mutation_proba
         )
 
@@ -540,14 +540,14 @@ class Mutations:
 
     def _get_mutations_options(
         self, pretraining: bool = False
-    ) -> Tuple[List[Callable], List[float]]:
+    ) -> tuple[list[Callable], list[float]]:
         """Get the mutation options and probabilities for the given mutation
         configuration.
 
         :param pretraining: Boolean flag indicating if the mutation is before the training loop
         :type pretraining: bool
         :return: Mutation functions and their respective relative probabilities
-        :rtype: Tuple[List[Callable], List[float]]
+        :rtype: tuple[list[Callable], list[float]]
         """
         # Create lists of possible mutation functions and their
         # respective relative probabilities
@@ -591,14 +591,14 @@ class Mutations:
         setattr(individual, name, networks)
 
     def _reinit_module(
-        self, module: EvolvableModule, init_dict: Dict[str, Any]
+        self, module: EvolvableModule, init_dict: dict[str, Any]
     ) -> EvolvableModule:
         """Reinitialize the module with the given initialization dictionary.
 
         :param module: The module to reinitialize
         :type module: EvolvableModule
         :param init_dict: The initialization dictionary
-        :type init_dict: Dict[str, Any]
+        :type init_dict: dict[str, Any]
 
         :return: The reinitialized module
         :rtype: EvolvableModule
@@ -624,7 +624,7 @@ class Mutations:
         :rtype: EvolvableNetworkType
         """
         if isinstance(offspring, ModuleDict):
-            reinit_modules: Dict[str, EvolvableModule] = OrderedDict()
+            reinit_modules: dict[str, EvolvableModule] = OrderedDict()
             for agent_id in offspring:
                 nested_offspring: EvolvableModule = offspring[agent_id]
                 reinit_modules[agent_id] = self._reinit_module(
@@ -647,7 +647,7 @@ class Mutations:
     def _load_state_dicts(
         self,
         modules: ModuleDict[EvolvableModule],
-        state_dicts: Dict[str, Dict[str, Any]],
+        state_dicts: dict[str, dict[str, Any]],
         remove_prefix: bool = False,
     ) -> None:
         """Load the state dictionaries for a multi-agent ModuleDict.
@@ -655,7 +655,7 @@ class Mutations:
         :param modules: The modules to load the state dictionary into
         :type modules: ModuleDict[EvolvableModule]
         :param state_dicts: The state dictionary to load
-        :type state_dicts: Dict[str, Dict[str, Any]]
+        :type state_dicts: dict[str, dict[str, Any]]
         :param remove_prefix: Whether to remove the prefix from the state dictionary
         :type remove_prefix: bool
         """
@@ -707,7 +707,7 @@ class Mutations:
         reset_prob = super_mut_prob + 0.05
         mag_limit = 1000000
 
-        model_params: Dict[str, torch.Tensor] = network.state_dict()
+        model_params: dict[str, torch.Tensor] = network.state_dict()
 
         # Collect keys corresponding to weight matrices (ignoring normalization / lstm params)
         exclude_keys = ["lstm", "norm"]
@@ -959,8 +959,8 @@ class Mutations:
         self,
         network: EvolvableNetworkType,
         mut_method: Optional[str],
-        applied_mut_dict: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[Optional[str], MutationReturnType]:
+        applied_mut_dict: Optional[dict[str, Any]] = None,
+    ) -> tuple[Optional[str], MutationReturnType]:
         """Applies the mutation method to networks and returns mutation data if needed.
 
         :param networks: The networks to apply the mutation to
@@ -968,10 +968,10 @@ class Mutations:
         :param mut_method: The mutation method to apply
         :type mut_method: Optional[str]
         :param applied_mut_dict: The mutation dictionary, defaults to None
-        :type applied_mut_dict: Optional[Dict[str, Any]], optional
+        :type applied_mut_dict: Optional[dict[str, Any]], optional
 
         :return: The mutation method name and the mutation dictionary
-        :rtype: Tuple[Optional[str], MutationReturnType]
+        :rtype: tuple[Optional[str], MutationReturnType]
         """
         if not isinstance(network, EvolvableModule):
             raise MutationError(
@@ -1090,7 +1090,7 @@ class Mutations:
         )
 
     def _find_analogous_mutation(
-        self, sampled_mutation: str, available_methods: List[str], policy_agent: str
+        self, sampled_mutation: str, available_methods: list[str], policy_agent: str
     ) -> Optional[str]:
         """Find an analogous mutation method when exact match is not found.
 
@@ -1099,7 +1099,7 @@ class Mutations:
         :param sampled_mutation: The mutation method that was sampled (e.g., 'encoder.add_channel')
         :type sampled_mutation: str
         :param available_methods: List of available mutation methods
-        :type available_methods: List[str]
+        :type available_methods: list[str]
         :param policy_agent: The agent ID to match (e.g., 'agent_0')
         :type policy_agent: str
 
