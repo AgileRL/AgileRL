@@ -1,4 +1,5 @@
-from unittest.mock import MagicMock
+from contextlib import contextmanager
+from unittest.mock import MagicMock, patch
 
 import gymnasium as gym
 import numpy as np
@@ -11,6 +12,7 @@ from torch.utils.data import DataLoader, Dataset
 from agilerl.utils.llm_utils import (
     DummyOptimizer,
     HuggingFaceGym,
+    gather_if_zero3,
 )
 
 
@@ -426,3 +428,19 @@ def test_dummy_optimizer_load_state_dict():
         "Please ensure you are calling accelerator.prepare() on the optimizer."
     )
     assert str(exc_info.value) == expected_message
+
+
+@pytest.mark.parametrize("zero_stage", [0, 1, 2, 3])
+def test_gather_if_zero3(zero_stage):
+    """Test gather_if_zero3 context manager."""
+    params = [torch.tensor([1.0, 2.0, 3.0])]
+
+    @contextmanager
+    def dummy_gather_parameters(*args, **kwargs):
+        yield
+
+    with patch(
+        "deepspeed.zero.GatheredParameters", side_effect=dummy_gather_parameters
+    ) as mock_gathered_parameters:
+        with gather_if_zero3(zero_stage, params):
+            assert mock_gathered_parameters.call_count == (zero_stage == 3)
