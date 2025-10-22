@@ -41,7 +41,7 @@ tqdm = "^4.66.4"
 transformers = "^4.48.1"
 ucimlrepo = "^0.0.3"
 wandb = "^0.17.6"
-vllm = "0.10.0"
+vllm = "^0.10.0"
 
 
 [build-system]

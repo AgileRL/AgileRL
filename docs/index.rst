@@ -1,4 +1,4 @@
-----------------
+===============
 
 .. raw:: html
 
@@ -28,8 +28,8 @@
    <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"></a>
    <a href="https://docs.agilerl.com/en/latest/?badge=latest"><img src="https://readthedocs.org/projects/agilerl/badge/?version=latest" alt="Documentation Status"></a>
    <a href="https://pypi.python.org/pypi/agilerl/"><img src="https://static.pepy.tech/badge/agilerl" alt="Downloads"></a>
-   <a href="https://discord.gg/eB8HyTA2ux"><img src="https://dcbadge.limes.pink/api/server/https://discord.gg/eB8HyTA2ux?style=flat" alt="Discord"></a>
-   <a href="https://arena.agilerl.com"><img src="_static/arena-github-badge.svg" alt="Arena"></a>
+   <a href="https://discord.gg/eB8HyTA2ux"><img src="https://dcbadge.vercel.app/api/server/eB8HyTA2ux?style=flat" alt="Discord"></a>
+   <a href="https://arena.agilerl.com"><img src="../_static/arena-github-badge.svg" alt="Arena"></a>
    <br><br>
    <h3><i>🚀 <b>Train super-fast for free on <a href="https://arena.agilerl.com">Arena</a>, the RLOps platform from AgileRL 🚀</b></i></h3>
 

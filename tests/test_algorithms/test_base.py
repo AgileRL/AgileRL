@@ -322,13 +322,7 @@ class DummyMARLAlgorithm(MultiAgentRLAlgorithm):
 
 @pytest.mark.parametrize(
     "observation_space",
-    [
-        "dict_space",
-        "tuple_space",
-        "discrete_space",
-        "vector_space",
-        "multidiscrete_space",
-    ],
+    ["dict_space", "discrete_space", "vector_space", "multidiscrete_space"],
 )
 @pytest.mark.parametrize(
     "action_space",

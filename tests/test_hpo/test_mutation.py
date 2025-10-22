@@ -1448,6 +1448,7 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
             )
         else:
             accelerator = None
+        try:
             population = [
                 GRPO(
                     observation_space=vector_space,
@@ -1474,35 +1475,48 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
                 )
             ]  # some sort of population
 
-        mutations = Mutations(
-            0,
-            0,
-            0,
-            0,
-            0,
-            1,
-            0.1,
-            device="cuda" if torch.cuda.is_available() else "cpu",
-            accelerator=accelerator,
-        )
+            mutations = Mutations(
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                0.1,
+                device="cuda" if torch.cuda.is_available() else "cpu",
+                accelerator=accelerator,
+            )
 
-        new_population = [agent.clone(wrap=False) for agent in population]
-        mutated_population = mutations.mutation(new_population, pre_training_mut)
+            new_population = [agent.clone(wrap=False) for agent in population]
+            mutated_population = mutations.mutation(new_population, pre_training_mut)
 
-        assert len(mutated_population) == len(population)
-        for old, individual in zip(population, mutated_population):
-            available_mutations = grpo_hp_config.names()
-            assert individual.mut in available_mutations
+            assert len(mutated_population) == len(population)
+            for old, individual in zip(population, mutated_population):
+                available_mutations = grpo_hp_config.names()
+                assert individual.mut in available_mutations
 
-            new_value = getattr(individual, individual.mut)
-            min_value = grpo_hp_config[individual.mut].min
-            max_value = grpo_hp_config[individual.mut].max
-            assert min_value <= new_value <= max_value
-            assert old.index == individual.index
+                new_value = getattr(individual, individual.mut)
+                min_value = grpo_hp_config[individual.mut].min
+                max_value = grpo_hp_config[individual.mut].max
+                assert min_value <= new_value <= max_value
+                assert old.index == individual.index
 
-        for agent in mutated_population:
-            for param_group in agent.optimizer.optimizer.param_groups:
-                assert param_group["lr"] == agent.lr
+            for agent in mutated_population:
+                for param_group in agent.optimizer.optimizer.param_groups:
+                    assert param_group["lr"] == agent.lr
+        except Exception as e:
+            print("Exception: ", e)
+            raise e
+        finally:
+            # Cleanup
+            if use_accelerator:
+                accelerator.free_memory()
+                AcceleratorState._reset_state(True)
+            del mutations
+            del population
+            del mutated_population
+            del new_population
+            torch.cuda.empty_cache()
 
 
 @pytest.mark.parametrize("mutation_type", ["architecture", "parameters", "activation"])

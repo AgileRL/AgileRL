@@ -85,8 +85,6 @@ class QNetwork(EvolvableNetwork):
 
         if head_config is None:
             head_config = asdict(MlpNetConfig(hidden_size=[16], output_activation=None))
-        else:
-            head_config["output_activation"] = None
 
         self.num_actions = spaces.flatdim(action_space)
 

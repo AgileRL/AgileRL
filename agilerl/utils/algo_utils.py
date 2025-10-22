@@ -21,7 +21,6 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from transformers import PreTrainedModel
 
-from agilerl.modules.dummy import DummyEvolvable
 from agilerl.protocols import (
     EvolvableAttributeType,
     EvolvableModule,
@@ -42,42 +41,8 @@ from agilerl.typing import (
     SupportedObsSpaces,
     TorchObsType,
 )
-from agilerl.utils.llm_utils import gather_if_zero3
 
 PreTrainedModelType = Union[PeftModel, PreTrainedModel]
-
-
-def check_supported_space(observation_space: GymSpaceType) -> None:
-    """Checks if the observation space is supported by AgileRL.
-
-    :param observation_space: The observation space to check.
-    :type observation_space: GymSpaceType
-    """
-    assert isinstance(
-        observation_space, spaces.Space
-    ), "Observation space must be an instance of gymnasium.spaces.Space."
-
-    assert not isinstance(
-        observation_space, (spaces.Graph, spaces.Sequence, spaces.OneOf)
-    ), "AgileRL does not support Graph, Sequence, and OneOf spaces."
-
-    if isinstance(observation_space, spaces.Dict):
-        for subspace in observation_space.spaces.values():
-            assert not isinstance(
-                subspace, (spaces.Tuple, spaces.Dict)
-            ), "AgileRL does not support nested Tuple and Dict spaces in Dict spaces."
-            check_supported_space(subspace)
-    elif isinstance(observation_space, spaces.Tuple):
-        for subspace in observation_space.spaces:
-            assert not isinstance(
-                subspace, (spaces.Tuple, spaces.Dict)
-            ), "AgileRL does not support nested Tuple and Dict spaces in Tuple spaces."
-            check_supported_space(subspace)
-    elif isinstance(observation_space, spaces.MultiDiscrete):
-        assert len(observation_space.nvec.shape) == 1, (
-            "AgileRL does not support multi-dimensional MultiDiscrete spaces. Got shape "
-            f"{observation_space.nvec.shape}."
-        )
 
 
 def get_input_size_from_space(
@@ -1572,7 +1537,7 @@ def is_peft_model(model: nn.Module) -> bool:
 
 
 def clone_llm(
-    original_model: PreTrainedModelType | DummyEvolvable,
+    original_model: PreTrainedModelType,
     state_dict: Optional[Dict[str, torch.Tensor]] = None,
 ) -> PreTrainedModelType:
     """Clone the actor.
@@ -1583,32 +1548,16 @@ def clone_llm(
     :type state_dict: Optional[Dict[str, torch.Tensor]], optional
     :return: Cloned model
     """
+    from agilerl.utils.llm_utils import gather_if_zero3
 
     with gather_if_zero3(3, list(original_model.parameters())):
-        match original_model:
-            case PeftModel():
-                pass
-            case PreTrainedModel():
-                pass
-            case DummyEvolvable():
-                original_model = original_model.module
-            case _:
-                raise ValueError(
-                    f"Invalid 'original_model' type: {type(original_model)}"
-                )
-
-        model_config = original_model.config
-        base_model = original_model.model
-        model = type(base_model)(model_config)
-        # Get all adapter names
-
-        if hasattr(original_model, "peft_config"):
+        if isinstance(original_model, PeftModel):
+            model_config = original_model.config
+            base_model = original_model.model
+            model = type(base_model)(model_config)
+            # Get all adapter names
             adapter_names = list(original_model.peft_config.keys())
 
-            if len(adapter_names) > 1:
-                warnings.warn(
-                    "Multiple adapters detected. Only the first adapter will be used for RL finetuning."
-                )
             # Add first adapter using get_peft_model
             first_adapter = adapter_names[0]
             first_config = original_model.peft_config[first_adapter]
@@ -1619,6 +1568,9 @@ def clone_llm(
                 peft_config = original_model.peft_config[adapter_name]
                 model.add_adapter(peft_config=peft_config, adapter_name=adapter_name)
             model.disable_adapter()
-        if state_dict is not None:
-            model.load_state_dict(state_dict, strict=False)
+        else:
+            model = type(original_model)(original_model.config)
+
+    if state_dict is not None:
+        model.load_state_dict(state_dict)
     return model

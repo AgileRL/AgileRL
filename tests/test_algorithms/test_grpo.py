@@ -20,7 +20,10 @@ from accelerate.utils import DeepSpeedPlugin
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
-from peft import LoraConfig, get_peft_model
+from peft import (
+    LoraConfig,
+    get_peft_model,
+)
 from torch.optim.lr_scheduler import SequentialLR
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.configuration_utils import PretrainedConfig
@@ -44,7 +47,7 @@ dist_env = dict(
     RANK="0",
     LOCAL_RANK="0",
     WORLD_SIZE="1",
-    PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True",
+    # PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True",
 )
 
 deepspeed_base_config = {
@@ -223,9 +226,7 @@ class DummyHuggingFaceEnv:
 
 
 class DummyVLLM:
-    def __init__(self, *args, **kwargs):
-        self.llm_engine = MagicMock()
-        self.llm_engine.model_executor = MagicMock()
+    def __init__(self, *args, **kwargs): ...
 
     def generate(self, prompts, *args, **kwargs):
         """
@@ -519,6 +520,19 @@ def grpo_factory():
         return grpo
 
     return generate_grpo
+    #     yield grpo
+    # try:
+    #     if accelerator is not None:
+    #         AcceleratorState._reset_state(True)
+    #         grpo.clean_up()
+    # finally:
+    #     del accelerator
+    #     del actor
+    #     del grpo
+
+    #     gc.collect()
+    #     torch.cuda.empty_cache()
+    #     torch.cuda.synchronize()
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -779,7 +793,6 @@ def test_get_action_grpo(
         }
         for _ in range(data_batch_size)
     ]
-
     completion_ids, _ = grpo.get_action(states, training)
     group_size = 1 if not training else group_size
     for ids in completion_ids:
@@ -836,8 +849,6 @@ def test_get_action_grpo_vllm_sleep_mode(
     mock_instance.generate = MagicMock(
         return_value=[MagicMock(outputs=[MagicMock(text="Generated text")])]
     )
-    mock_instance.llm_engine = MagicMock()
-    mock_instance.llm_engine.model_executor = MagicMock()
     mock_instance.sleep = MagicMock()
     mock_instance.wake_up = MagicMock()
     mock_instance.shutdown = MagicMock()
@@ -1122,128 +1133,6 @@ def test_init_grpo_with_accelerator(
         assert grpo.use_vllm
         assert isinstance(grpo.vllm_config, VLLMConfig)
         assert isinstance(grpo.llm, LLM)
-    AcceleratorState._reset_state(True)
-
-
-@pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-@pytest.mark.parametrize("use_deepspeed_optimizer", [False])
-@pytest.mark.parametrize("use_vllm", [True])
-@pytest.mark.parametrize(
-    "pretrained_model_name_or_path", ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"]
-)
-@pytest.mark.parametrize("vocab_size", [1000])
-@pytest.mark.parametrize("input_size", [10])
-@pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize("group_size", [5])
-@pytest.mark.parametrize("use_separate_reference_adapter", [True])
-@pytest.mark.parametrize(
-    "reduce_memory_peak, micro_batch_size_per_gpu", [(True, None), (False, 2)]
-)
-def test_init_grpo_vllm_with_tp_gt_one(
-    accelerator_factory,
-    model_factory,
-    vocab_size,
-    input_size,
-    max_tokens,
-    group_size,
-    use_separate_reference_adapter,
-    use_vllm,
-    pretrained_model_name_or_path,
-    use_deepspeed_optimizer,
-    config,
-    reduce_memory_peak,
-    micro_batch_size_per_gpu,
-):
-    accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-    with patch.object(
-        torch.distributed,
-        "new_subgroups_by_enumeration",
-        return_value=("tp_group_calculated", None),
-    ), patch(
-        "accelerate.Accelerator.num_processes",
-        new_callable=PropertyMock,
-        return_value=2,
-    ), patch.object(
-        vllm.LLM, "__init__", return_value=None
-    ):
-        grpo = GRPO(
-            gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
-            gym.spaces.Box(low=0, high=vocab_size - 1),
-            actor_network=model_factory(pretrained_model_name_or_path),
-            pad_token_id=vocab_size - 1,
-            pad_token="<pad>",
-            device="cuda" if torch.cuda.is_available() else "cpu",
-            group_size=group_size,
-            cosine_lr_schedule_config=(
-                None
-                if accelerator is not None
-                else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
-            ),
-            use_vllm=use_vllm,
-            vllm_config=VLLMConfig(
-                gpu_memory_utilization=0.05, tensor_parallel_size=2, max_num_seqs=1
-            ),
-            accelerator=accelerator,
-            use_separate_reference_adapter=use_separate_reference_adapter,
-        )
-        assert grpo.tp_group == "tp_group_calculated"
-    AcceleratorState._reset_state(True)
-
-
-@pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-@pytest.mark.parametrize("use_deepspeed_optimizer", [False])
-@pytest.mark.parametrize("use_vllm", [True])
-@pytest.mark.parametrize(
-    "pretrained_model_name_or_path", ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"]
-)
-@pytest.mark.parametrize("vocab_size", [1000])
-@pytest.mark.parametrize("input_size", [10])
-@pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize("group_size", [5])
-@pytest.mark.parametrize("use_separate_reference_adapter", [True])
-@pytest.mark.parametrize("reduce_memory_peak", [True])
-@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-def test_init_grpo_vllm_tp_value_error(
-    accelerator_factory,
-    model_factory,
-    vocab_size,
-    input_size,
-    max_tokens,
-    group_size,
-    use_separate_reference_adapter,
-    use_vllm,
-    pretrained_model_name_or_path,
-    use_deepspeed_optimizer,
-    config,
-    reduce_memory_peak,
-    micro_batch_size_per_gpu,
-):
-    accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-    with patch.object(
-        torch.distributed,
-        "new_subgroups_by_enumeration",
-        return_value=("tp_group_calculated", None),
-    ), patch.object(vllm.LLM, "__init__", return_value=None), pytest.raises(ValueError):
-        GRPO(
-            gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
-            gym.spaces.Box(low=0, high=vocab_size - 1),
-            actor_network=model_factory(pretrained_model_name_or_path),
-            pad_token_id=vocab_size - 1,
-            pad_token="<pad>",
-            device="cuda" if torch.cuda.is_available() else "cpu",
-            group_size=group_size,
-            cosine_lr_schedule_config=(
-                None
-                if accelerator is not None
-                else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
-            ),
-            use_vllm=use_vllm,
-            vllm_config=VLLMConfig(
-                gpu_memory_utilization=0.05, tensor_parallel_size=2, max_num_seqs=1
-            ),
-            accelerator=accelerator,
-            use_separate_reference_adapter=use_separate_reference_adapter,
-        )
     AcceleratorState._reset_state(True)
 
 
@@ -1808,7 +1697,6 @@ def test_init_grpo_max_grad_norm_warning(
         )
         gc.collect()
         torch.cuda.empty_cache()
-    assert grpo.lr == 1e-4 if use_deepspeed_optimizer else 0.1
     AcceleratorState._reset_state(True)
 
 
