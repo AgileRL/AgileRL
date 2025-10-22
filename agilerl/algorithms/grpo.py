@@ -585,7 +585,8 @@ class GRPO(LLMAlgorithm):
             if self.lora_config is None:
                 adapter_name = list(base_model.peft_config.keys())
                 self.lora_config = base_model.peft_config[adapter_name[0]]
-            base_model = base_model.merge_and_unload()
+            with gather_if_zero3(self.zero_stage, list(base_model.parameters())):
+                base_model = base_model.merge_and_unload()
             if "default" in list(base_model.peft_config.keys()):
                 base_model.peft_config.pop("default")
 

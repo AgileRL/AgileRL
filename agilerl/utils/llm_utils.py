@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 import deepspeed
 import gymnasium as gym
 import torch
+import torch.nn as nn
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
@@ -332,3 +333,17 @@ def gather_if_zero3(
             yield
     else:
         yield
+
+
+def get_state_dict(model: nn.Module) -> Dict[str, torch.Tensor]:
+    """
+    Get the state dict of the model for zero3.
+
+    :param model: The model to get the state dict of.
+    :type model: nn.Module
+    :return: The state dict of the model.
+    :rtype: Dict[str, torch.Tensor]
+    """
+
+    with gather_if_zero3(3, list(model.parameters()), modifier_rank=0):
+        return model.state_dict()

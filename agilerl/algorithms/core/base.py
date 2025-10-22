@@ -2065,7 +2065,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     def clean_up(self) -> None:
         """Clean up the algorithm."""
-
         if self.accelerator is not None:
             (
                 self.actor,
@@ -2088,9 +2087,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 None,
             )
         if hasattr(self, "llm"):
-            self.llm = None
+            del self.llm.llm_engine.model_executor
+            del self.llm
         gc.collect()
         torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.synchronize()
 
     def clone(self, index: Optional[int] = None, wrap: bool = True):
         """Creates a clone of the algorithm.
@@ -2138,8 +2140,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 actor_state_dict = clone_tensors_for_torch_save(actor.state_dict())
 
             cloned_model = clone_llm(actor, state_dict=actor_state_dict)
-
-            actor = None  # De-reference the actor
             input_args["actor_network"] = cloned_model
             input_args["accelerator"] = (
                 Accelerator() if self.accelerator is not None else None

@@ -35,7 +35,7 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules import EvolvableModule
 from agilerl.typing import BPTTSequenceType, GymSpaceType, PopulationType
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig, clone_llm
-from agilerl.utils.llm_utils import DummyOptimizer
+from agilerl.utils.llm_utils import DummyOptimizer, get_state_dict
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 SupportedObservationSpace = Union[
@@ -552,7 +552,18 @@ def create_population(
             agent = GRPO(
                 observation_space=observation_space,
                 action_space=action_space,
-                actor_network=clone_llm(actor_network, actor_network.state_dict()),
+                actor_network=(
+                    clone_llm(
+                        actor_network,
+                        (
+                            actor_network.state_dict()
+                            if accelerator is None
+                            else get_state_dict(actor_network)
+                        ),
+                    )
+                    if idx != 0
+                    else actor_network
+                ),
                 pad_token_id=INIT_HP.get("PAD_TOKEN_ID"),
                 pad_token=INIT_HP.get("PAD_TOKEN"),
                 hp_config=hp_config,

@@ -73,12 +73,7 @@ unlike the rest of the AgileRL framework, we can only tune the RL hyperparameter
             "ELITISM": True,
             "POP_SIZE": 4,
             "EVAL_LOOP": 1,
-            "USE_VLLM": True,
-            "VLLM_CONFIG": {
-                "tensor_parallel_size": 1,
-                "gpu_memory_utilization": 0.4,
-                "max_num_seqs": 8,
-            },
+            "USE_VLLM": False, # vLLM is not recommended with population based HPO due to its increased memory usage
         }
 
 Defining our Base Model and Dataset

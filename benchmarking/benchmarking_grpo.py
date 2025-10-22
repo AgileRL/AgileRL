@@ -27,7 +27,6 @@ def create_model(pretrained_model_name_or_path):
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         torch_dtype=torch.bfloat16,
         attn_implementation="sdpa",
-        # device_map="cpu",
     )
 
     lora_config = LoraConfig(
@@ -105,10 +104,8 @@ def equation_reward_func(completions, target, nums, **kwargs):
             # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
             completion = "<think>" + completion
             answer_tags = re.findall(r"<answer>([\s\S]*?)<\/answer>", completion)
-            print("answer tags", answer_tags)
 
             if len(answer_tags) != 1:
-                print("in here 1")
                 rewards.append(0.0)
                 continue
 
@@ -116,13 +113,11 @@ def equation_reward_func(completions, target, nums, **kwargs):
             used_numbers = [int(n) for n in re.findall(r"\d+", equation)]
 
             if sorted(used_numbers) != sorted(numbers):
-                print("in here 2")
                 rewards.append(0.0)
                 continue
 
             allowed_pattern = r"^[\d+\-*/().\s]+$"
             if not re.match(allowed_pattern, equation):
-                print("in here 3")
                 rewards.append(0.0)
                 continue
 
@@ -131,7 +126,6 @@ def equation_reward_func(completions, target, nums, **kwargs):
             if abs(float(result) - float(gt)) < 1e-5:
                 rewards.append(1.0)
             else:
-                print("in here 4")
                 rewards.append(0.0)
         except Exception:
             rewards.append(0.0)
@@ -139,31 +133,10 @@ def equation_reward_func(completions, target, nums, **kwargs):
 
 
 def combined_rewards(completion, solution, prompt):
-    import torch.distributed as dist
-
-    # if dist.get_rank() == 1:
-    #     print("LLM completion, solution, prompt, and reward for rank 1")
-    #     print("COMPLETION", completion)
-    #     print("SOLUTION", solution)
-    #     print("PROMPT", prompt)
     reward = (
         equation_reward_func([completion], [solution], [prompt])[0]
         + format_reward_func([completion], [solution])[0]
     )
-
-    # if dist.get_rank() == 1:
-    #     print("REWARD", reward)
-
-    # import time
-    # time.sleep(0.1)
-
-    if dist.get_rank() == 0:
-        print("LLM completion, solution, prompt, and reward for rank 0")
-        print("COMPLETION", completion)
-        print("SOLUTION", solution)
-        print("PROMPT", prompt)
-        print("REWARD", reward)
-        print("*" * 50)
 
     if reward == 2.0:
         with open("countdown_completions.txt", "a") as text_file:
@@ -176,20 +149,13 @@ def combined_rewards(completion, solution, prompt):
 
 def main(init_hp, mut_p):
     # Instantiate the model and the associated tokenizer
-    # model = create_model(pretrained_model_name_or_path=MODEL_PATH)
+    model = create_model(pretrained_model_name_or_path=MODEL_PATH)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
 
     # Convert the HuggingFace dataset into a Gymnasium environment
     accelerator = Accelerator()
-    accelerator.state.deepspeed_plugin.deepspeed_config["activation_checkpointing"] = {
-        "partition_activations": True,
-        "cpu_checkpointing": True,
-        "synchronize_checkpoint_boundary": True,
-        "number_checkpoints": 2,
-    }
-
     env = HuggingFaceGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
@@ -211,37 +177,19 @@ def main(init_hp, mut_p):
             min=mut_p["MIN_GROUP_SIZE"], max=mut_p["MAX_GROUP_SIZE"], dtype=int
         ),
     )
-    # pop = create_population(
-    #     algo=init_hp["ALGO"],
-    #     observation_space=env.observation_space,
-    #     action_space=env.action_space,
-    #     net_config=None,
-    #     actor_network=model,
-    #     INIT_HP=init_hp,
-    #     hp_config=hp_config,
-    #     population_size=init_hp["POP_SIZE"],
-    #     accelerator=accelerator,
-    # )
+    pop = create_population(
+        algo=init_hp["ALGO"],
+        observation_space=env.observation_space,
+        action_space=env.action_space,
+        net_config=None,
+        actor_network=model,
+        INIT_HP=init_hp,
+        hp_config=hp_config,
+        population_size=init_hp["POP_SIZE"],
+        accelerator=accelerator,
+    )
 
-    pop = [
-        GRPO(
-            env.observation_space,
-            env.action_space,
-            actor_network=create_model(pretrained_model_name_or_path=MODEL_PATH),
-            pad_token_id=tokenizer.eos_token_id,
-            pad_token=tokenizer.eos_token,
-            max_output_tokens=init_hp["MAX_OUTPUT_TOKENS"],
-            batch_size=init_hp["BATCH_SIZE"],
-            group_size=init_hp["GROUP_SIZE"],
-            reduce_memory_peak=init_hp["REDUCE_MEMORY_PEAK"],
-            accelerator=accelerator,
-            use_vllm=init_hp["USE_VLLM"],
-            vllm_config=VLLMConfig(**init_hp["VLLM_CONFIG"]),
-        )
-        for _ in range(init_hp["POP_SIZE"])
-    ]
-
-    # del model
+    del model
 
     tournament = TournamentSelection(
         init_hp["TOURN_SIZE"],
