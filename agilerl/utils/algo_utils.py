@@ -1573,29 +1573,29 @@ def is_peft_model(model: nn.Module) -> bool:
 
 def clone_llm(
     original_model: PreTrainedModelType | DummyEvolvable,
+    zero_stage: int,
     state_dict: Optional[dict[str, torch.Tensor]] = None,
 ) -> PreTrainedModelType:
     """Clone the actor.
 
     :param original_model: Model to clone
     :type original_model: PreTrainedModelType
+    :param zero_stage: Zero stage to use, defaults to 0
+    :type zero_stage: int, optional
     :param state_dict: State dict to load, defaults to None
     :type state_dict: Optional[dict[str, torch.Tensor]], optional
     :return: Cloned model
     """
-    with gather_if_zero3(3, list(original_model.parameters())):
-        match original_model:
-            case PeftModel():
-                pass
-            case PreTrainedModel():
-                pass
-            case DummyEvolvable():
-                original_model = original_model.module
-            case _:
-                raise ValueError(
-                    f"Invalid 'original_model' type: {type(original_model)}"
-                )
-
+    match original_model:
+        case PeftModel():
+            pass
+        case PreTrainedModel():
+            pass
+        case DummyEvolvable():
+            original_model = original_model.module
+        case _:
+            raise ValueError(f"Invalid 'original_model' type: {type(original_model)}")
+    with gather_if_zero3(zero_stage, list(original_model.parameters())):
         model_config = original_model.config
         base_model = original_model.model
         model = type(base_model)(model_config)

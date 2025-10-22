@@ -576,7 +576,8 @@ def create_population(
                 actor_network=(
                     clone_llm(
                         actor_network,
-                        (
+                        zero_stage=INIT_HP.get("ZERO_STAGE", 0),
+                        state_dict=(
                             actor_network.state_dict()
                             if accelerator is None
                             else get_state_dict(actor_network)

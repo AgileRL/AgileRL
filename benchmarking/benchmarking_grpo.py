@@ -162,6 +162,9 @@ def main(init_hp, mut_p):
 
     init_hp["PAD_TOKEN_ID"] = tokenizer.eos_token_id
     init_hp["PAD_TOKEN"] = tokenizer.eos_token
+    init_hp["ZERO_STAGE"] = accelerator.state.deepspeed_plugin.deepspeed_config[
+        "zero_optimization"
+    ]["stage"]
 
     hp_config = HyperparameterConfig(
         beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),
