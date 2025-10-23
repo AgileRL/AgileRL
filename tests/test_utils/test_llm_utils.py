@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from agilerl.utils.llm_utils import (
     DummyOptimizer,
-    HuggingFaceGym,
+    ReasoningGym,
     gather_if_zero3,
 )
 
@@ -97,7 +97,7 @@ def test_hugging_face_gym_init(
     train_dataset, test_dataset = dataset
     tokenizer = DummyTokenizer()
     data_batch_size = 8
-    env = HuggingFaceGym(
+    env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
@@ -134,7 +134,7 @@ def test_hugging_face_gym_step(dataset, num_samples, eval_mode, return_raw_compl
     train_dataset, test_dataset = dataset
     tokenizer = DummyTokenizer()
     data_batch_size = 8
-    env = HuggingFaceGym(
+    env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
@@ -174,7 +174,7 @@ def test_hugging_face_gym_reset(
     train_dataset, test_dataset = dataset
     tokenizer = DummyTokenizer()
     data_batch_size = 8
-    env = HuggingFaceGym(
+    env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
@@ -207,7 +207,7 @@ def test_hugging_face_gym_reset_dataloaders(dataset, num_samples, reset_dataload
     train_dataset, test_dataset = dataset
     tokenizer = DummyTokenizer()
     data_batch_size = 8
-    env = HuggingFaceGym(
+    env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
@@ -237,7 +237,7 @@ def test_reset_warning(dataset, num_samples):
     train_dataset, test_dataset = dataset
     tokenizer = DummyTokenizer()
     data_batch_size = 8
-    env = HuggingFaceGym(
+    env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
@@ -255,7 +255,7 @@ def test_hugging_face_gym_len(dataset, num_samples):
     train_dataset, test_dataset = dataset
     tokenizer = DummyTokenizer()
     data_batch_size = 8
-    env = HuggingFaceGym(
+    env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
@@ -279,7 +279,7 @@ def test_create_chat_collate_fn():
         return {"input_ids": [1, 2, 3], "attention_mask": [1, 1, 1]}
 
     # Create the collate function
-    collate_fn = HuggingFaceGym.create_collate_fn(mock_tokenizer, mock_chat_template)
+    collate_fn = ReasoningGym.create_collate_fn(mock_tokenizer, mock_chat_template)
 
     # Create a sample batch
     batch = [
@@ -317,7 +317,7 @@ def test_reset_dataloaders_when_train_dataloader_exhausted(
 ):
     train_dataset, test_dataset = dataset
     tokenizer = DummyTokenizer()
-    env = HuggingFaceGym(
+    env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
@@ -340,7 +340,7 @@ def test_not_reset_dataloaders_when_test_dataloader_exhausted(
 ):
     train_dataset, test_dataset = dataset
     tokenizer = DummyTokenizer()
-    env = HuggingFaceGym(
+    env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,

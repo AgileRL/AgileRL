@@ -3,14 +3,14 @@ from typing import Any, Optional
 
 import numpy as np
 import torch.distributed as dist
-import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
+import wandb
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.typing import PopulationType
-from agilerl.utils.llm_utils import HuggingFaceGym
+from agilerl.utils.llm_utils import ReasoningGym
 from agilerl.utils.utils import (
     aggregate_metrics_across_gpus,
     init_wandb,
@@ -23,7 +23,7 @@ InitDictType = Optional[dict[str, Any]]
 
 def finetune_llm(
     pop: PopulationType,
-    env: HuggingFaceGym,
+    env: ReasoningGym,
     init_hp: Optional[dict[str, Any]] = None,
     save_elite: Optional[bool] = None,
     elite_path: Optional[str] = None,
@@ -401,3 +401,206 @@ def finetune_llm(
         pbar.close()
         if wb:
             wandb.finish()
+
+
+def finetune_llm_preference(
+    pop: PopulationType,
+    env: ReasoningGym,
+    init_hp: Optional[dict[str, Any]] = None,
+    save_elite: Optional[bool] = None,
+    elite_path: Optional[str] = None,
+    wb: bool = False,
+    evo_steps: Optional[int] = 20,
+    checkpoint_steps: Optional[int] = None,
+    tournament: Optional[TournamentSelection] = None,
+    mutation: Optional[Mutations] = None,
+    wandb_api_key: Optional[str] = None,
+    evaluation_interval: int = 10,
+    verbose: bool = True,
+    accelerator: Optional[Accelerator] = None,
+    max_steps: Optional[int] = None,
+    num_epochs: Optional[int] = None,
+):
+    if evo_steps is not None and (tournament is None or mutation is None):
+        warnings.warn(
+            "'evo_steps' is set but at least one of 'tournament' or 'mutation' is set to None. Evolution will not take place."
+        )
+
+    if (tournament is not None and mutation is not None) and evo_steps is None:
+        raise ValueError(
+            "'evo_steps' must be set if 'tournament' and 'mutation' are not None."
+        )
+
+    if num_epochs is not None and max_steps is not None:
+        warnings.warn(
+            "'num_epochs' is set but 'max_steps' is also set. 'num_epochs' will take precedence over 'max_steps'."
+        )
+    if mutation is not None:
+        assert (
+            mutation.architecture_mut == 0
+        ), "Architecture mutation is not allowed for LLM finetuning."
+        assert (
+            mutation.new_layer_prob == 0
+        ), "New layer mutation is not allowed for LLM finetuning."
+        assert (
+            mutation.parameters_mut == 0
+        ), "Network parameters mutation is not allowed for LLM finetuning."
+        assert (
+            mutation.activation_mut == 0
+        ), "Activation mutation is not allowed for LLM finetuning."
+
+    data_increment = accelerator.num_processes if accelerator is not None else 1
+    effective_data_batch_size = data_increment * env.data_batch_size_per_gpu
+
+    if wb and (accelerator is None or accelerator.is_main_process):
+        init_hp["effective_data_batch_size"] = effective_data_batch_size
+        init_hp["batch_size"] = init_hp.get("BATCH_SIZE", 1)
+        init_hp["distributed_training"] = True if accelerator is not None else False
+        init_hp["model_name"] = pop[0].pretrained_model_name_or_path
+        init_wandb(
+            algo=init_hp["ALGO"],
+            env_name=env.name,
+            wandb_api_key=wandb_api_key,
+            init_hyperparams=init_hp,
+        )
+
+    if accelerator is None or accelerator.is_main_process:
+        print("\nTraining...")
+
+    bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
+    if max_steps is None and num_epochs is None:
+        max_steps = len(env)
+
+    elif max_steps is None and num_epochs is not None:
+        max_steps = num_epochs * len(env)
+
+    training_steps = -(max_steps // -effective_data_batch_size)
+    if accelerator is None or accelerator.is_main_process:
+        pbar = trange(
+            max_steps,
+            unit="step",
+            bar_format=bar_format,
+            ascii=True,
+            dynamic_ncols=True,
+        )
+
+    total_steps = 0
+
+    prompts = env.reset(reset_dataloaders=True)
+    for i in range(training_steps):
+        agent_metrics_dict = {}
+        for agent_idx, agent in enumerate(pop):
+            agent.set_reference_policy(env.num_epochs)
+            loss, chosen_reward, rejected_reward = agent.learn(prompts)
+            next_prompts = env.step()
+            metrics = [loss, chosen_reward, rejected_reward]
+            agg_metrics = [
+                aggregate_metrics_across_gpus(accelerator, metric) for metric in metrics
+            ]
+            prompts = next_prompts
+            agent.steps[-1] += effective_data_batch_size
+            total_steps += effective_data_batch_size
+            agg_test_metrics = None
+
+            if (i + 1) % evaluation_interval == 0:
+                test_reward = agent.test(env)
+                test_metrics = [test_reward]
+                agg_test_metrics = [
+                    aggregate_metrics_across_gpus(accelerator, metric)
+                    for metric in test_metrics
+                ]
+
+                if accelerator is not None:
+                    accelerator.wait_for_everyone()
+
+            if accelerator is None or accelerator.is_main_process:
+                metrics_dict = {
+                    "global_step": total_steps,
+                    "Train/Loss": agg_metrics[0],
+                    "Train/Mean chosen reward": agg_metrics[1],
+                    "Train/Mean rejected reward": agg_metrics[2],
+                    "Train/Mean reward margin": agg_metrics[1] - agg_metrics[2],
+                }
+                agent_metrics_dict[f"agent_{agent_idx}/train_metrics"] = metrics_dict
+                if agg_test_metrics is not None:
+                    test_metrics_dict = {
+                        "Eval/Mean reward margin": agg_test_metrics[0],
+                    }
+                    agent_metrics_dict[f"agent_{agent_idx}/test_metrics"] = (
+                        test_metrics_dict
+                    )
+                pbar.update(effective_data_batch_size)
+                agent.scores.append(agg_metrics[1] - agg_metrics[2])
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+
+        # FIXME Add in tournament and mutation + checkpoint logic here
+
+        ##############################################################
+
+        if wb and (accelerator is None or accelerator.is_main_process):
+            wandb_dict = {
+                "Train/Best reward margin": np.max(
+                    [
+                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                            "Train/Mean reward margin"
+                        ]
+                        for agent_idx, _ in enumerate(pop)
+                    ]
+                ),
+                "Train/Mean population reward margin": np.mean(
+                    [
+                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                            "Train/Mean reward margin"
+                        ]
+                        for agent_idx, _ in enumerate(pop)
+                    ]
+                ),
+                "Train/Mean population loss": np.mean(
+                    [
+                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                            "Train/Loss"
+                        ]
+                        for agent_idx, _ in enumerate(pop)
+                    ]
+                ),
+                "Train/Mean population chosen reward": np.mean(
+                    [
+                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                            "Train/Mean chosen reward"
+                        ]
+                        for agent_idx, _ in enumerate(pop)
+                    ]
+                ),
+                "Train/Mean population rejected reward": np.mean(
+                    [
+                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                            "Train/Mean rejected reward"
+                        ]
+                        for agent_idx, _ in enumerate(pop)
+                    ]
+                ),
+            }
+            if agg_test_metrics is not None:
+                test_dict = {
+                    "Eval/Best reward margin": np.max(
+                        [
+                            agent_metrics_dict[f"agent_{agent_idx}/test_metrics"][
+                                "Eval/Mean reward margin"
+                            ]
+                            for agent_idx, _ in enumerate(pop)
+                        ]
+                    ),
+                    "Eval/Mean population reward margin": np.mean(
+                        [
+                            agent_metrics_dict[f"agent_{agent_idx}/test_metrics"][
+                                "Eval/Mean reward margin"
+                            ]
+                            for agent_idx, _ in enumerate(pop)
+                        ]
+                    ),
+                }
+                wandb_dict |= test_dict
+            wandb.log(wandb_dict)
+        if env.num_epochs == num_epochs:
+            break

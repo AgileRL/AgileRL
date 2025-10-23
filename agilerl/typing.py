@@ -36,10 +36,23 @@ class IsDataclass(Protocol):
     __dataclass_fields__: ClassVar[dict[str, Any]]
 
 
-class ReturnedPrompts(TypedDict):
+# FIXME ideally adjust the ReasoningGym to match the PreferencePrompts type (e.g the lists/btaching happens for the values of the
+# keys, not just returning a list of 'ReasoningPrompts')
+class ReasoningPrompts(TypedDict):
     input_ids: torch.Tensor
     attention_mask: torch.Tensor
     text: str | None
+
+
+class PreferencePrompts(TypedDict):
+    prompt: list[str]
+    prompt_lengths: list[int]
+    chosen: list[str]
+    rejected: list[str]
+    chosen_input_ids: torch.Tensor
+    chosen_attention_mask: torch.Tensor
+    rejected_input_ids: torch.Tensor
+    rejected_attention_mask: torch.Tensor
 
 
 class MultiAgentSetup(Enum):
@@ -85,7 +98,7 @@ KernelSizeType = Union[int, tuple[int, ...]]
 GymSpaceType = Union[SupportedObsSpaces, list[SupportedObsSpaces]]
 GymEnvType = Union[str, gym.Env, gym.vector.VectorEnv, gym.vector.AsyncVectorEnv]
 PzEnvType = Union[str, ParallelEnv]
-LLMObsType = list[ReturnedPrompts]
+LLMObsType = list[ReasoningPrompts]
 
 NumpyObsType = Union[np.ndarray, ArrayDict, ArrayTuple]
 TorchObsType = Union[torch.Tensor, TensorDict, TensorTuple, StandardTensorDict]

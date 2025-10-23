@@ -9,7 +9,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from agilerl.algorithms import GRPO
 from agilerl.training.train_llm import finetune_llm
-from agilerl.utils.llm_utils import HuggingFaceGym
+from agilerl.utils.llm_utils import ReasoningGym
 
 MODEL_PATH = "Qwen/Qwen2.5-3B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
@@ -158,7 +158,7 @@ def main():
     accelerator = Accelerator()
 
     # Convert the HuggingFace dataset into a Gymnasium environment
-    env = HuggingFaceGym(
+    env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,

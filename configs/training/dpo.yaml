@@ -1,0 +1,23 @@
+---
+INIT_HP:
+    ALGO: DPO
+    BATCH_SIZE: 16
+    BETA: 0.001
+    UPDATE_EPOCHS: 1
+    MAX_GRAD_NORM: 0.1
+    REDUCE_MEMORY_PEAK: false
+    CALC_POSITION_EMBEDDINGS: true
+    USE_SEPARATE_REFERENCE_ADAPTER: true
+    SEED: 42
+
+MUTATION_PARAMS:
+    NO_MUT: 0.1                          # No mutation
+    RL_HP_MUT: 0.6                       # Learning HP mutation
+    MUT_SD: 0.1                          # Mutation strength
+    RAND_SEED: 42                        # Random seed
+    MIN_LR: 0.0000001
+    MAX_LR: 0.00001
+    MIN_BETA: 0.0001
+    MAX_BETA: 0.01
+    MIN_GROUP_SIZE: 4
+    MAX_GROUP_SIZE: 12
