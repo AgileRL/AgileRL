@@ -173,7 +173,7 @@ class DummyMLPPreTrainedModel(PreTrainedModel):
         return
 
 
-class DummyHuggingFaceEnv:
+class DummyReasoningEnv:
     def __init__(self, vocab_size, input_size, data_batch_size, device):
         self.vocab_size = vocab_size
         self.input_size = input_size
@@ -1022,7 +1022,7 @@ def test_grpo_test_vllm(
         reduce_memory_peak,
         micro_batch_size_per_gpu,
     )
-    env = DummyHuggingFaceEnv(vocab_size, input_size, batch_size, device=grpo.device)
+    env = DummyReasoningEnv(vocab_size, input_size, batch_size, device=grpo.device)
     fitnesses = grpo.test(env)
     assert isinstance(fitnesses, torch.Tensor)
     AcceleratorState._reset_state(True)
@@ -3082,7 +3082,7 @@ def test_grpo_test(
         reduce_memory_peak,
         micro_batch_size_per_gpu,
     )
-    env = DummyHuggingFaceEnv(vocab_size, input_size, batch_size, device=grpo.device)
+    env = DummyReasoningEnv(vocab_size, input_size, batch_size, device=grpo.device)
     fitnesses = grpo.test(env)
     assert isinstance(fitnesses, torch.Tensor)
     AcceleratorState._reset_state(True)

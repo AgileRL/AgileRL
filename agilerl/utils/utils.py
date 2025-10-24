@@ -9,15 +9,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import tqdm
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl.algorithms import (
     CQN,
     DDPG,
+    DPO,
     DQN,
     GRPO,
     IPPO,
@@ -618,6 +619,40 @@ def create_population(
                     and INIT_HP.get("USE_VLLM", False)
                     else None
                 ),
+                **algo_kwargs,
+            )
+            population.append(agent)
+    elif algo == "DPO":
+        for idx in range(population_size):
+            agent = DPO(
+                observation_space=observation_space,
+                action_space=action_space,
+                actor_network=(
+                    clone_llm(
+                        actor_network,
+                        zero_stage=INIT_HP.get("ZERO_STAGE", 0),
+                        state_dict=(
+                            actor_network.state_dict()
+                            if accelerator is None
+                            else get_state_dict(actor_network)
+                        ),
+                    )
+                    if idx != 0
+                    else actor_network
+                ),
+                pad_token_id=INIT_HP.get("PAD_TOKEN_ID"),
+                pad_token=INIT_HP.get("PAD_TOKEN"),
+                hp_config=hp_config,
+                index=idx,
+                batch_size=INIT_HP.get("BATCH_SIZE", 2),
+                beta=INIT_HP.get("BETA", 0.001),
+                lr=INIT_HP.get("LR", 5e-7),
+                max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 0.1),
+                update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
+                calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
+                reduce_memory_peak=INIT_HP.get("REDUCE_MEMORY_PEAK", False),
+                accelerator=Accelerator() if accelerator else None,
+                device=device,
                 **algo_kwargs,
             )
             population.append(agent)

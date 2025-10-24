@@ -9,6 +9,10 @@ INIT_HP:
     CALC_POSITION_EMBEDDINGS: true
     USE_SEPARATE_REFERENCE_ADAPTER: true
     SEED: 42
+    TOURN_SIZE: 2
+    ELITISM: true
+    POP_SIZE: 4
+    EVAL_LOOP: 1
 
 MUTATION_PARAMS:
     NO_MUT: 0.1                          # No mutation

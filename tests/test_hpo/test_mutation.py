@@ -1417,8 +1417,9 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
 
 
 @pytest.mark.parametrize("use_accelerator", [True, False])
+@pytest.mark.parametrize("algo", ["GRPO", "DPO"])
 def test_mutation_applies_rl_hp_mutation_llm_algorithm(
-    request, grpo_hp_config, vector_space, monkeypatch, use_accelerator
+    request, grpo_hp_config, vector_space, monkeypatch, use_accelerator, algo
 ):
     pre_training_mut = False
 
@@ -1447,31 +1448,40 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
             )
         else:
             accelerator = None
-        population = [
-            GRPO(
-                observation_space=vector_space,
-                action_space=copy.deepcopy(vector_space),
-                actor_network=create_module(
-                    input_size=10,
-                    max_tokens=20,
-                    vocab_size=1000,
-                    device="cuda" if torch.cuda.is_available() else "cpu",
-                ),
-                index=0,
-                pad_token="<pad>",
-                hp_config=grpo_hp_config,
-                pad_token_id=1000 - 1,
+        init_hp = {
+            "PAD_TOKEN_ID": 1000 - 1,
+            "PAD_TOKEN": "<pad>",
+            "BATCH_SIZE": 2,
+            "BETA": 0.001,
+            "LR": 5e-7,
+            "MAX_GRAD_NORM": 0.1,
+            "UPDATE_EPOCHS": 1,
+        }
+
+        population = create_population(
+            algo=algo,
+            observation_space=vector_space,
+            action_space=copy.deepcopy(vector_space),
+            net_config=None,
+            INIT_HP=init_hp,
+            hp_config=grpo_hp_config,
+            actor_network=create_module(
+                input_size=10,
+                max_tokens=20,
+                vocab_size=1000,
                 device="cuda" if torch.cuda.is_available() else "cpu",
-                lora_config=LoraConfig(
+            ),
+            algo_kwargs={
+                "lora_config": LoraConfig(
                     r=16,
                     lora_alpha=64,
                     target_modules=["linear_1"],
                     task_type="CAUSAL_LM",
                     lora_dropout=0.05,
-                ),
-                accelerator=accelerator,
-            )
-        ]  # some sort of population
+                )
+            },
+            accelerator=accelerator,
+        )
 
         mutations = Mutations(
             0,
@@ -1504,35 +1514,44 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
 
 
 @pytest.mark.parametrize("mutation_type", ["architecture", "parameters", "activation"])
+@pytest.mark.parametrize("algo", ["GRPO", "DPO"])
 def test_mutations_warns_on_llm_algorithm(
-    request, grpo_hp_config, vector_space, mutation_type
+    request, grpo_hp_config, vector_space, mutation_type, algo
 ):
     pre_training_mut = False
+    init_hp = {
+        "PAD_TOKEN_ID": 1000 - 1,
+        "PAD_TOKEN": "<pad>",
+        "BATCH_SIZE": 2,
+        "BETA": 0.001,
+        "LR": 5e-7,
+        "MAX_GRAD_NORM": 0.1,
+        "UPDATE_EPOCHS": 1,
+    }
 
-    population = [
-        GRPO(
-            observation_space=vector_space,
-            action_space=copy.deepcopy(vector_space),
-            actor_network=create_module(
-                input_size=10,
-                max_tokens=20,
-                vocab_size=1000,
-                device="cuda" if torch.cuda.is_available() else "cpu",
-            ),
-            index=0,
-            hp_config=grpo_hp_config,
-            pad_token_id=1000 - 1,
-            pad_token="<pad>",
+    population = create_population(
+        algo=algo,
+        observation_space=vector_space,
+        action_space=copy.deepcopy(vector_space),
+        net_config=None,
+        INIT_HP=init_hp,
+        hp_config=grpo_hp_config,
+        actor_network=create_module(
+            input_size=10,
+            max_tokens=20,
+            vocab_size=1000,
             device="cuda" if torch.cuda.is_available() else "cpu",
-            lora_config=LoraConfig(
+        ),
+        algo_kwargs={
+            "lora_config": LoraConfig(
                 r=16,
                 lora_alpha=64,
                 target_modules=["linear_1"],
                 task_type="CAUSAL_LM",
                 lora_dropout=0.05,
-            ),
-        )
-    ]  # some sort of population
+            )
+        },
+    )
 
     mutations = Mutations(
         0,

@@ -2,7 +2,7 @@ import copy
 import warnings
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from typing import Any, Callable, Generator, Optional
+from typing import Any, Callable, Generator
 
 import deepspeed
 import gymnasium as gym
@@ -32,7 +32,7 @@ class HuggingFaceGym(gym.Env, ABC):
             Callable[[str, str, AutoTokenizer], BatchEncoding] | None
         ) = None,
         data_batch_size_per_gpu: int = 8,
-        accelerator: Optional[Accelerator] = None,
+        accelerator: Accelerator | None = None,
     ) -> None:
 
         self.name = train_dataset.info.dataset_name
@@ -171,8 +171,8 @@ class ReasoningGym(HuggingFaceGym):
         reward_fn: Callable[[str, str, str], float],
         apply_chat_template_fn: Callable[[str, str, AutoTokenizer], BatchEncoding],
         data_batch_size_per_gpu: int = 8,
-        custom_collate_fn: Optional[Callable] = None,
-        accelerator: Optional[Accelerator] = None,
+        custom_collate_fn: Callable | None = None,
+        accelerator: Accelerator | None = None,
         return_raw_completions: bool = False,
     ) -> None:
         assert {"question", "answer"}.issubset(
@@ -357,7 +357,7 @@ class PreferenceGym(HuggingFaceGym):
         test_dataset: Dataset,
         tokenizer: AutoTokenizer,
         data_batch_size_per_gpu: int = 8,
-        accelerator: Optional[Accelerator] = None,
+        accelerator: Accelerator | None = None,
     ):
         super().__init__(
             train_dataset=train_dataset,
@@ -395,10 +395,6 @@ class PreferenceGym(HuggingFaceGym):
         """
         self.reset_called = False
         return self._get_next_batch()
-
-    def _get_next_batch(self) -> PreferencePrompts:
-        batch = next(self.dataloader)
-        return batch
 
     def _get_next_batch(self) -> PreferencePrompts:
         try:

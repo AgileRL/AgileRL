@@ -5,14 +5,18 @@ import gymnasium as gym
 import numpy as np
 import pytest
 import torch
+import torch.nn as nn
 from accelerate import Accelerator
 from accelerate.state import AcceleratorState
 from torch.utils.data import DataLoader, Dataset
+from transformers import AutoTokenizer
 
 from agilerl.utils.llm_utils import (
     DummyOptimizer,
+    PreferenceGym,
     ReasoningGym,
     gather_if_zero3,
+    get_state_dict,
 )
 
 
@@ -35,7 +39,7 @@ class Info:
         self.dataset_name = name
 
 
-class DummyDataset(Dataset):
+class DummyReasoningDataset(Dataset):
     def __init__(self, num_samples):
         # Create dummy questions and answers
         self.questions = [f"This is question {i}?" for i in range(num_samples)]
@@ -50,13 +54,36 @@ class DummyDataset(Dataset):
         return {"question": self.questions[index], "answer": self.answers[index]}
 
 
+class DummyPreferenceDataset(Dataset):
+    def __init__(self, num_samples):
+        self.prompt = [f"This is prompt {i}." for i in range(num_samples)]
+        self.chosen = [f"This is chosen {i}." for i in range(num_samples)]
+        self.rejected = [f"This is rejected {i}." for i in range(num_samples)]
+        self.features = {
+            "prompt": self.prompt,
+            "chosen": self.chosen,
+            "rejected": self.rejected,
+        }
+        self.info = Info("dummy_dataset")
+
+    def __len__(self):
+        return len(self.prompt)
+
+    def __getitem__(self, index):
+        return {
+            "prompt": self.prompt[index],
+            "chosen": self.chosen[index],
+            "rejected": self.rejected[index],
+        }
+
+
 def dummy_reward_fn(*args, **kwargs):
     return 1.0
 
 
 def dummy_chat_template_fn_custom(q, a, tokenizer):
     """
-    Chat template function for test_hugging_face_gym_reset_dataloaders, gives unique input_ids for each question so
+    Chat template function for test_reasoning_gym_reset_dataloaders, gives unique input_ids for each question so
     we can test equality.
     """
     index = int(q.split(" ")[-1][0])
@@ -83,18 +110,25 @@ def accelerator_factory():
 
 
 @pytest.fixture
-def dataset(num_samples):
-    train_dataset = DummyDataset(int(num_samples * 0.8))
-    test_dataset = DummyDataset(int(num_samples * 0.2))
+def reasoning_dataset(num_samples):
+    train_dataset = DummyReasoningDataset(int(num_samples * 0.8))
+    test_dataset = DummyReasoningDataset(int(num_samples * 0.2))
+    return train_dataset, test_dataset
+
+
+@pytest.fixture
+def preference_dataset(num_samples):
+    train_dataset = DummyPreferenceDataset(int(num_samples * 0.8))
+    test_dataset = DummyPreferenceDataset(int(num_samples * 0.2))
     return train_dataset, test_dataset
 
 
 @pytest.mark.parametrize("num_samples", [200])
 @pytest.mark.parametrize("use_accelerator", [True, False])
-def test_hugging_face_gym_init(
-    dataset, accelerator_factory, num_samples, use_accelerator
+def test_reasoning_face_gym_init(
+    reasoning_dataset, accelerator_factory, num_samples, use_accelerator
 ):
-    train_dataset, test_dataset = dataset
+    train_dataset, test_dataset = reasoning_dataset
     tokenizer = DummyTokenizer()
     data_batch_size = 8
     env = ReasoningGym(
@@ -117,7 +151,6 @@ def test_hugging_face_gym_init(
         "tokenized_prompts",
     ]
     assert env.dataloader == env.train_dataloader_iter
-    assert callable(env.apply_chat_template_fn)
     assert not env.reset_called
     assert isinstance(env.observation_space, gym.spaces.Space)
     assert np.all(env.observation_space.high == tokenizer.vocab_size - 1)
@@ -130,8 +163,10 @@ def test_hugging_face_gym_init(
 @pytest.mark.parametrize("num_samples", [200])
 @pytest.mark.parametrize("eval_mode", [True, False])
 @pytest.mark.parametrize("return_raw_completions", [True, False])
-def test_hugging_face_gym_step(dataset, num_samples, eval_mode, return_raw_completions):
-    train_dataset, test_dataset = dataset
+def test_reasoning_face_gym_step(
+    reasoning_dataset, num_samples, eval_mode, return_raw_completions
+):
+    train_dataset, test_dataset = reasoning_dataset
     tokenizer = DummyTokenizer()
     data_batch_size = 8
     env = ReasoningGym(
@@ -168,10 +203,10 @@ def test_hugging_face_gym_step(dataset, num_samples, eval_mode, return_raw_compl
 @pytest.mark.parametrize("num_samples", [200])
 @pytest.mark.parametrize("reset_dataloaders", [True, False])
 @pytest.mark.parametrize("return_raw_completions", [True, False])
-def test_hugging_face_gym_reset(
-    dataset, num_samples, reset_dataloaders, return_raw_completions
+def test_reasoning_face_gym_reset(
+    reasoning_dataset, num_samples, reset_dataloaders, return_raw_completions
 ):
-    train_dataset, test_dataset = dataset
+    train_dataset, test_dataset = reasoning_dataset
     tokenizer = DummyTokenizer()
     data_batch_size = 8
     env = ReasoningGym(
@@ -203,8 +238,10 @@ def test_hugging_face_gym_reset(
 
 @pytest.mark.parametrize("num_samples", [200])
 @pytest.mark.parametrize("reset_dataloaders", [True, False])
-def test_hugging_face_gym_reset_dataloaders(dataset, num_samples, reset_dataloaders):
-    train_dataset, test_dataset = dataset
+def test_reasoning_face_gym_reset_dataloaders(
+    reasoning_dataset, num_samples, reset_dataloaders
+):
+    train_dataset, test_dataset = reasoning_dataset
     tokenizer = DummyTokenizer()
     data_batch_size = 8
     env = ReasoningGym(
@@ -233,8 +270,8 @@ def test_hugging_face_gym_reset_dataloaders(dataset, num_samples, reset_dataload
 
 
 @pytest.mark.parametrize("num_samples", [200])
-def test_reset_warning(dataset, num_samples):
-    train_dataset, test_dataset = dataset
+def test_reset_warning(reasoning_dataset, num_samples):
+    train_dataset, test_dataset = reasoning_dataset
     tokenizer = DummyTokenizer()
     data_batch_size = 8
     env = ReasoningGym(
@@ -251,8 +288,8 @@ def test_reset_warning(dataset, num_samples):
 
 
 @pytest.mark.parametrize("num_samples", [200])
-def test_hugging_face_gym_len(dataset, num_samples):
-    train_dataset, test_dataset = dataset
+def test_reasoning_face_gym_len(reasoning_dataset, num_samples):
+    train_dataset, test_dataset = reasoning_dataset
     tokenizer = DummyTokenizer()
     data_batch_size = 8
     env = ReasoningGym(
@@ -269,7 +306,8 @@ def test_hugging_face_gym_len(dataset, num_samples):
         assert len(env) == 200 * 0.2
 
 
-def test_create_chat_collate_fn():
+@pytest.mark.parametrize("num_samples", [20])
+def test_create_chat_collate_fn(reasoning_dataset, num_samples):
     """Test the create_chat_collate_fn method."""
     # Create a mock tokenizer
     mock_tokenizer = MagicMock()
@@ -278,8 +316,21 @@ def test_create_chat_collate_fn():
     def mock_chat_template(question, answer, tokenizer):
         return {"input_ids": [1, 2, 3], "attention_mask": [1, 1, 1]}
 
+    train_dataset, test_dataset = reasoning_dataset
+    tokenizer = DummyTokenizer()
+    data_batch_size = 8
+
+    env = ReasoningGym(
+        train_dataset=train_dataset,
+        test_dataset=test_dataset,
+        tokenizer=tokenizer,
+        reward_fn=dummy_reward_fn,
+        apply_chat_template_fn=dummy_chat_template_fn,
+        data_batch_size_per_gpu=data_batch_size,
+    )
+
     # Create the collate function
-    collate_fn = ReasoningGym.create_collate_fn(mock_tokenizer, mock_chat_template)
+    collate_fn = env.create_collate_fn(mock_tokenizer, mock_chat_template)
 
     # Create a sample batch
     batch = [
@@ -313,9 +364,9 @@ def test_create_chat_collate_fn():
 @pytest.mark.parametrize("num_samples", [20])
 @pytest.mark.parametrize("data_batch_size", [8, 10])
 def test_reset_dataloaders_when_train_dataloader_exhausted(
-    dataset, num_samples, data_batch_size
+    reasoning_dataset, num_samples, data_batch_size
 ):
-    train_dataset, test_dataset = dataset
+    train_dataset, test_dataset = reasoning_dataset
     tokenizer = DummyTokenizer()
     env = ReasoningGym(
         train_dataset=train_dataset,
@@ -336,9 +387,9 @@ def test_reset_dataloaders_when_train_dataloader_exhausted(
 @pytest.mark.parametrize("num_samples", [20])
 @pytest.mark.parametrize("data_batch_size", [8, 10])
 def test_not_reset_dataloaders_when_test_dataloader_exhausted(
-    dataset, num_samples, data_batch_size
+    reasoning_dataset, num_samples, data_batch_size
 ):
-    train_dataset, test_dataset = dataset
+    train_dataset, test_dataset = reasoning_dataset
     tokenizer = DummyTokenizer()
     env = ReasoningGym(
         train_dataset=train_dataset,
@@ -444,3 +495,274 @@ def test_gather_if_zero3(zero_stage):
     ) as mock_gathered_parameters:
         with gather_if_zero3(zero_stage, params):
             assert mock_gathered_parameters.call_count == (zero_stage == 3)
+
+
+@pytest.mark.parametrize("use_accelerator", [True, False])
+@pytest.mark.parametrize("num_samples", [20])
+def test_preference_gym_init(
+    preference_dataset, accelerator_factory, use_accelerator, num_samples
+):
+    train_dataset, test_dataset = preference_dataset
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    data_batch_size = 8
+    env = PreferenceGym(
+        train_dataset=train_dataset,
+        test_dataset=test_dataset,
+        tokenizer=tokenizer,
+        data_batch_size_per_gpu=data_batch_size,
+        accelerator=accelerator_factory(use_accelerator),
+    )
+    assert env.name == "dummy_dataset"
+    assert hasattr(env, "tokenizer")
+    assert isinstance(env.train_dataloader, DataLoader)
+    assert isinstance(env.test_dataloader, DataLoader)
+    print("KEYS", next(env.train_dataloader_iter).keys())
+    assert list(next(env.train_dataloader_iter).keys()) == [
+        "prompt",
+        "prompt_lengths",
+        "chosen",
+        "rejected",
+        "chosen_input_ids",
+        "chosen_attention_mask",
+        "rejected_input_ids",
+        "rejected_attention_mask",
+    ]
+    assert env.dataloader == env.train_dataloader_iter
+    assert not env.reset_called
+    assert isinstance(env.observation_space, gym.spaces.Space)
+    assert np.all(env.observation_space.high == tokenizer.vocab_size - 1)
+    assert isinstance(env.action_space, gym.spaces.Space)
+    assert np.all(env.action_space.high == tokenizer.vocab_size - 1)
+    assert not env.evaluation_mode
+    assert env.data_batch_size_per_gpu == data_batch_size
+
+
+@pytest.mark.parametrize("use_accelerator", [True, False])
+@pytest.mark.parametrize("num_samples", [20])
+def test_preference_gym_step(
+    preference_dataset, accelerator_factory, use_accelerator, num_samples
+):
+    train_dataset, test_dataset = preference_dataset
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    data_batch_size = 8
+    env = PreferenceGym(
+        train_dataset=train_dataset,
+        test_dataset=test_dataset,
+        tokenizer=tokenizer,
+        data_batch_size_per_gpu=data_batch_size,
+        accelerator=accelerator_factory(use_accelerator),
+    )
+    prompts = env.step()
+    assert isinstance(prompts, dict)
+    assert set(prompts.keys()) == {
+        "prompt",
+        "prompt_lengths",
+        "chosen",
+        "rejected",
+        "chosen_input_ids",
+        "chosen_attention_mask",
+        "rejected_input_ids",
+        "rejected_attention_mask",
+    }
+    assert len(prompts["prompt"]) == data_batch_size
+    assert len(prompts["prompt_lengths"]) == data_batch_size
+    assert len(prompts["chosen"]) == data_batch_size
+    assert len(prompts["rejected"]) == data_batch_size
+    assert len(prompts["chosen_input_ids"]) == data_batch_size
+    assert len(prompts["chosen_attention_mask"]) == data_batch_size
+    assert len(prompts["rejected_input_ids"]) == data_batch_size
+    assert len(prompts["rejected_attention_mask"]) == data_batch_size
+    assert isinstance(prompts["prompt"], list)
+    assert isinstance(prompts["prompt"][0], str)
+    assert isinstance(prompts["prompt_lengths"][0], int)
+    assert isinstance(prompts["prompt_lengths"], list)
+    assert isinstance(prompts["chosen"], list)
+    assert isinstance(prompts["rejected"], list)
+    assert isinstance(prompts["chosen_input_ids"], torch.Tensor)
+    assert isinstance(prompts["chosen_attention_mask"], torch.Tensor)
+    assert isinstance(prompts["rejected_input_ids"], torch.Tensor)
+    assert isinstance(prompts["rejected_attention_mask"], torch.Tensor)
+    assert not env.reset_called
+
+
+@pytest.mark.parametrize("use_accelerator", [True, False])
+@pytest.mark.parametrize("num_samples", [20])
+def test_preference_gym_reset(
+    preference_dataset, accelerator_factory, use_accelerator, num_samples
+):
+    train_dataset, test_dataset = preference_dataset
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    data_batch_size = 8
+    env = PreferenceGym(
+        train_dataset=train_dataset,
+        test_dataset=test_dataset,
+        tokenizer=tokenizer,
+        data_batch_size_per_gpu=data_batch_size,
+        accelerator=accelerator_factory(use_accelerator),
+    )
+    prompts = env.reset()
+    assert isinstance(prompts, dict)
+    assert set(prompts.keys()) == {
+        "prompt",
+        "prompt_lengths",
+        "chosen",
+        "rejected",
+        "chosen_input_ids",
+        "chosen_attention_mask",
+        "rejected_input_ids",
+        "rejected_attention_mask",
+    }
+    assert len(prompts["prompt"]) == data_batch_size
+    assert len(prompts["prompt_lengths"]) == data_batch_size
+    assert len(prompts["chosen"]) == data_batch_size
+    assert len(prompts["rejected"]) == data_batch_size
+    assert len(prompts["chosen_input_ids"]) == data_batch_size
+    assert len(prompts["chosen_attention_mask"]) == data_batch_size
+    assert len(prompts["rejected_input_ids"]) == data_batch_size
+    assert len(prompts["rejected_attention_mask"]) == data_batch_size
+    assert isinstance(prompts["prompt"], list)
+    assert isinstance(prompts["prompt"][0], str)
+    assert isinstance(prompts["prompt_lengths"][0], int)
+    assert isinstance(prompts["prompt_lengths"], list)
+    assert isinstance(prompts["chosen"], list)
+    assert isinstance(prompts["rejected"], list)
+    assert isinstance(prompts["chosen_input_ids"], torch.Tensor)
+    assert isinstance(prompts["chosen_attention_mask"], torch.Tensor)
+    assert isinstance(prompts["rejected_input_ids"], torch.Tensor)
+    assert isinstance(prompts["rejected_attention_mask"], torch.Tensor)
+    assert env.reset_called
+
+
+@pytest.mark.parametrize("use_accelerator", [True, False])
+@pytest.mark.parametrize("num_samples", [20])
+def test_preference_gym_reset_reset_dataloaders_warning(
+    preference_dataset, accelerator_factory, use_accelerator, num_samples
+):
+    train_dataset, test_dataset = preference_dataset
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    data_batch_size = 1
+    env = PreferenceGym(
+        train_dataset=train_dataset,
+        test_dataset=test_dataset,
+        tokenizer=tokenizer,
+        data_batch_size_per_gpu=data_batch_size,
+        accelerator=accelerator_factory(use_accelerator),
+    )
+    env.reset()
+    env.step()
+    env.step()
+    with pytest.warns(
+        UserWarning,
+        match=r"env\.reset\(\) called with reset_dataloaders=True, this will reset the dataloaders to the beginning of the dataset, proceed with caution\.",
+    ):
+        prompts = env.reset(reset_dataloaders=True)
+    assert len(prompts["prompt"]) == data_batch_size
+    assert isinstance(prompts, dict)
+    assert set(prompts.keys()) == {
+        "prompt",
+        "prompt_lengths",
+        "chosen",
+        "rejected",
+        "chosen_input_ids",
+        "chosen_attention_mask",
+        "rejected_input_ids",
+        "rejected_attention_mask",
+    }
+    assert len(prompts["prompt"]) == data_batch_size
+    assert len(prompts["prompt_lengths"]) == data_batch_size
+    assert len(prompts["chosen"]) == data_batch_size
+    assert len(prompts["rejected"]) == data_batch_size
+    assert len(prompts["chosen_input_ids"]) == data_batch_size
+    assert len(prompts["chosen_attention_mask"]) == data_batch_size
+    assert len(prompts["rejected_input_ids"]) == data_batch_size
+    assert len(prompts["rejected_attention_mask"]) == data_batch_size
+    assert isinstance(prompts["prompt"], list)
+    assert isinstance(prompts["prompt"][0], str)
+    assert isinstance(prompts["prompt_lengths"][0], int)
+    assert isinstance(prompts["prompt_lengths"], list)
+    assert isinstance(prompts["chosen"], list)
+    assert isinstance(prompts["rejected"], list)
+    assert isinstance(prompts["chosen_input_ids"], torch.Tensor)
+    assert isinstance(prompts["chosen_attention_mask"], torch.Tensor)
+    assert isinstance(prompts["rejected_input_ids"], torch.Tensor)
+    assert isinstance(prompts["rejected_attention_mask"], torch.Tensor)
+    assert env.reset_called
+
+
+@pytest.mark.parametrize("use_accelerator", [True, False])
+@pytest.mark.parametrize("num_samples", [20])
+def test_preference_gym_reset_reset_called_warning(
+    preference_dataset, accelerator_factory, use_accelerator, num_samples
+):
+    train_dataset, test_dataset = preference_dataset
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    data_batch_size = 1
+    env = PreferenceGym(
+        train_dataset=train_dataset,
+        test_dataset=test_dataset,
+        tokenizer=tokenizer,
+        data_batch_size_per_gpu=data_batch_size,
+        accelerator=accelerator_factory(use_accelerator),
+    )
+    with pytest.warns(
+        UserWarning,
+        match=r"env\.reset\(\) called more than once sequentially, it should typically follow with env\.step\(\)\.",
+    ):
+        env.reset_called = True
+        prompts = env.reset()
+    assert len(prompts["prompt"]) == data_batch_size
+    assert isinstance(prompts, dict)
+    assert set(prompts.keys()) == {
+        "prompt",
+        "prompt_lengths",
+        "chosen",
+        "rejected",
+        "chosen_input_ids",
+        "chosen_attention_mask",
+        "rejected_input_ids",
+        "rejected_attention_mask",
+    }
+    assert len(prompts["prompt"]) == data_batch_size
+    assert len(prompts["prompt_lengths"]) == data_batch_size
+    assert len(prompts["chosen"]) == data_batch_size
+    assert len(prompts["rejected"]) == data_batch_size
+    assert len(prompts["chosen_input_ids"]) == data_batch_size
+    assert len(prompts["chosen_attention_mask"]) == data_batch_size
+    assert len(prompts["rejected_input_ids"]) == data_batch_size
+    assert len(prompts["rejected_attention_mask"]) == data_batch_size
+    assert isinstance(prompts["prompt"], list)
+    assert isinstance(prompts["prompt"][0], str)
+    assert isinstance(prompts["prompt_lengths"][0], int)
+    assert isinstance(prompts["prompt_lengths"], list)
+    assert isinstance(prompts["chosen"], list)
+    assert isinstance(prompts["rejected"], list)
+    assert isinstance(prompts["chosen_input_ids"], torch.Tensor)
+    assert isinstance(prompts["chosen_attention_mask"], torch.Tensor)
+    assert isinstance(prompts["rejected_input_ids"], torch.Tensor)
+    assert isinstance(prompts["rejected_attention_mask"], torch.Tensor)
+    assert env.reset_called
+
+
+@pytest.mark.parametrize("num_samples", [20])
+@pytest.mark.parametrize("use_accelerator", [True, False])
+def test_preference_gym_reset_num_epochs(
+    preference_dataset, num_samples, accelerator_factory, use_accelerator
+):
+    train_dataset, test_dataset = preference_dataset
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    data_batch_size = 1
+    env = PreferenceGym(
+        train_dataset=train_dataset,
+        test_dataset=test_dataset,
+        tokenizer=tokenizer,
+        data_batch_size_per_gpu=data_batch_size,
+        accelerator=accelerator_factory(use_accelerator),
+    )
+    while env.num_epochs == 0:
+        env.step()
+    assert env.num_epochs == 1
+
+
+def test_get_state_dict():
+    model = nn.Linear(10, 10)
+    state_dict = get_state_dict(model)

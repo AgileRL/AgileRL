@@ -46,17 +46,13 @@ class DPO(LLMAlgorithm):
             if accelerator is not None
             else ("cuda" if torch.cuda.is_available() else "cpu")
         )
-        self.lr = lr
-        self.beta = beta
-        self.temperature = (
-            1  # Temperature for logits calculation, DPO does not use temperature
-        )
         super().__init__(
             observation_space,
             action_space,
             actor_network,
             index=index,
             batch_size=batch_size,
+            lr=lr,
             max_grad_norm=max_grad_norm,
             clone=clone,
             reduce_memory_peak=reduce_memory_peak,
@@ -74,6 +70,11 @@ class DPO(LLMAlgorithm):
             accelerator=accelerator,
             name="DPO",
         )
+        self.beta = beta
+        self.temperature = (
+            1  # Temperature for logits calculation, DPO does not use temperature
+        )
+        self.use_vllm = False  # DPO does not use VLLM
         self.update_epochs = update_epochs
         self._initialize_actors(actor_network, not clone)
         # Register network groups for mutations
@@ -142,11 +143,6 @@ class DPO(LLMAlgorithm):
         batch_idxs = np.arange(num_samples)
         mean_loss, mean_chosen_reward, mean_rejected_reward = 0.0, 0.0, 0.0
 
-        print("CHOSEN MASK SHAPE", chosen_mask.shape)
-        print("REJECTED MASK SHAPE", rejected_mask.shape)
-        print("CHOSEN INPUT IDS SHAPE", chosen_input_ids.shape)
-        print("REJECTED INPUT IDS SHAPE", rejected_input_ids.shape)
-
         with torch.no_grad():
             ref_rejected_log_probs = self._get_logprobs(
                 rejected_input_ids,
@@ -162,9 +158,6 @@ class DPO(LLMAlgorithm):
                 use_reference=True,
                 eval_mode=True,
             )
-
-        print("NUM SAMPLES LEARN ", num_samples)
-        print("BATCH SIZE LEARN ", batch_size)
 
         for _ in range(self.update_epochs):
             for start in range(0, num_samples, batch_size):

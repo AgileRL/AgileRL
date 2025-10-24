@@ -7,14 +7,12 @@ from typing import Optional, Union
 import numpy as np
 import torch
 from accelerate import Accelerator
-from accelerate.utils import set_seed
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from gymnasium import spaces
 from peft import LoraConfig, PeftModel
 from transformers import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
-from vllm import LLM
 
 from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
@@ -150,11 +148,14 @@ class GRPO(LLMAlgorithm):
             actor_network,
             index=index,
             batch_size=batch_size,
+            lr=lr,
             max_grad_norm=max_grad_norm,
             clone=clone,
             reduce_memory_peak=reduce_memory_peak,
             calc_position_embeddings=calc_position_embeddings,
             seed=seed,
+            pad_token_id=pad_token_id,
+            pad_token=pad_token,
             lora_config=lora_config,
             use_separate_reference_adapter=use_separate_reference_adapter,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
@@ -185,7 +186,6 @@ class GRPO(LLMAlgorithm):
             actor_network, (PeftModel, PreTrainedModel)
         ), "Actor network must be a PeftModel or PreTrainedModel"
 
-        self.lr = lr
         self.clip_coef = clip_coef
         self.update_epochs = update_epochs
         self.group_size = group_size
@@ -214,72 +214,10 @@ class GRPO(LLMAlgorithm):
             min_p=min_p,
         )
 
-        if self.accelerator is not None:
-            set_seed(seed, device_specific=True)
-
         self.use_vllm = use_vllm
         self.vllm_config = vllm_config
         if self.use_vllm:
-            if self.vllm_config is None:
-                warnings.warn(
-                    "No VLLM config provided. Using default VLLM configuration for generation."
-                )
-                self.vllm_config = VLLMConfig()
-            if self.accelerator is not None:
-                if (
-                    self.accelerator.num_processes
-                    % self.vllm_config.tensor_parallel_size
-                    != 0
-                ):
-                    raise ValueError(
-                        f"Tensor parallel size {self.vllm_config.tensor_parallel_size} must be a multiple of the number of processes {self.accelerator.num_processes}."
-                    )
-
-                if self.vllm_config.tensor_parallel_size > 1:
-                    # Create subgroups of ranks for TP, each group with `vllm_tensor_parallel_size` ranks.
-                    # For example, if world_size=8 and vllm_tensor_parallel_size=2 → groups: [0,1], [2,3], [4,5], [6,7]
-                    self.tp_group, _ = torch.distributed.new_subgroups_by_enumeration(
-                        [
-                            list(
-                                range(
-                                    i * self.vllm_config.tensor_parallel_size,
-                                    (i + 1) * self.vllm_config.tensor_parallel_size,
-                                )
-                            )
-                            for i in range(
-                                self.accelerator.num_processes
-                                // self.vllm_config.tensor_parallel_size
-                            )
-                        ]
-                    )
-
-                # vLLM requires the environment variables to be set for distributed training.
-                os.environ["RANK"] = str(self.accelerator.process_index)
-                os.environ["LOCAL_RANK"] = str(self.accelerator.local_process_index)
-                os.environ["WORLD_SIZE"] = str(self.accelerator.num_processes)
-                os.environ["MASTER_ADDR"] = os.environ.get("MASTER_ADDR", "localhost")
-                os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "12345")
-
-                self.llm = LLM(
-                    model=self.pretrained_model_name_or_path,
-                    tensor_parallel_size=self.vllm_config.tensor_parallel_size,
-                    gpu_memory_utilization=self.vllm_config.gpu_memory_utilization,
-                    max_num_seqs=self.vllm_config.max_num_seqs,
-                    max_model_len=self.max_model_len,
-                    distributed_executor_backend="external_launcher",
-                    seed=self.accelerator.process_index
-                    // self.vllm_config.tensor_parallel_size,
-                    max_num_batched_tokens=self.vllm_config.max_num_seqs
-                    * self.max_model_len,
-                    model_impl="vllm",
-                    enable_sleep_mode=self.vllm_config.sleep_mode,
-                )
-                if self.vllm_config.sleep_mode:  # and self.accelerator.is_main_process:
-                    self.llm.sleep(level=2)
-
-        if self.accelerator is not None:
-            self.accelerator.wait_for_everyone()
-
+            self._configure_vllm()
         self._initialize_actors(actor_network, not clone)
         # Register network groups for mutations
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))

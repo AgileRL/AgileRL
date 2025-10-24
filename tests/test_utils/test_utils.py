@@ -12,6 +12,7 @@ from pettingzoo.mpe import simple_speaker_listener_v4
 from agilerl.algorithms import (
     CQN,
     DDPG,
+    DPO,
     DQN,
     GRPO,
     IPPO,

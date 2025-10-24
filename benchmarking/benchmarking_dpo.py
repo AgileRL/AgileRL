@@ -7,10 +7,12 @@ from torch.utils.data import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from agilerl.algorithms.dpo import DPO
+from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_llm import finetune_llm_preference
 from agilerl.utils.llm_utils import PreferenceGym
 
-MODEL_PATH = "Qwen/Qwen2.5-3B"
+MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "HumanLLMs/Human-Like-DPO-Dataset"
 
 
@@ -70,19 +72,35 @@ def main(init_hp, mut_p):
         DPO(
             observation_space=spaces.Box(low=0, high=tokenizer.vocab_size - 1),
             action_space=spaces.Box(low=0, high=tokenizer.vocab_size - 1),
-            actor_network=model,
+            actor_network=create_model(pretrained_model_name_or_path=MODEL_PATH),
             pad_token_id=init_hp["PAD_TOKEN_ID"],
             pad_token=init_hp["PAD_TOKEN"],
             batch_size=init_hp["BATCH_SIZE"],
             beta=init_hp["BETA"],
             update_epochs=init_hp["UPDATE_EPOCHS"],
-            accelerator=accelerator,
+            accelerator=accelerator if idx == 0 else Accelerator(),
         )
+        for idx, _ in enumerate(range(init_hp["POP_SIZE"]))
     ]
 
-    # while True:
-    #     import time
-    #     time.sleep(1000000)
+    tournament = TournamentSelection(
+        init_hp["TOURN_SIZE"],
+        init_hp["ELITISM"],
+        init_hp["POP_SIZE"],
+        init_hp["EVAL_LOOP"],
+    )
+
+    mutations = Mutations(
+        no_mutation=mut_p["NO_MUT"],
+        architecture=0,
+        new_layer_prob=0,
+        parameters=0,
+        activation=0,
+        rl_hp=mut_p["RL_HP_MUT"],
+        mutation_sd=mut_p["MUT_SD"],
+        rand_seed=mut_p["RAND_SEED"],
+        accelerator=accelerator,
+    )
 
     finetune_llm_preference(
         pop=pop,
@@ -90,10 +108,10 @@ def main(init_hp, mut_p):
         init_hp=init_hp,
         save_elite=True,
         elite_path="saved_llms",
-        wb=False,
+        wb=True,
         evo_steps=1000,
-        tournament=None,
-        mutation=None,
+        tournament=tournament,
+        mutation=mutations,
         wandb_api_key=None,
         evaluation_interval=10,
         accelerator=accelerator,

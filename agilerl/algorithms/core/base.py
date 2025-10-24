@@ -26,7 +26,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
-from accelerate.utils import broadcast_object_list
+from accelerate.utils import broadcast_object_list, set_seed
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 from gymnasium import spaces
@@ -38,7 +38,7 @@ from torch.nn.utils import clip_grad_norm_
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import SequentialLR
 from transformers.modeling_utils import PreTrainedModel
-from vllm import SamplingParams
+from vllm import LLM, SamplingParams
 
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import (
@@ -73,6 +73,7 @@ from agilerl.typing import (
 )
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
+    VLLMConfig,
     check_supported_space,
     chkpt_attribute_to_device,
     clone_llm,
@@ -1804,6 +1805,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         actor_network: PreTrainedModel,
         index: int,
         batch_size: int,
+        lr: float,
         max_grad_norm: float,
         clone: bool,
         reduce_memory_peak: bool,
@@ -1892,6 +1894,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 task_type="CAUSAL_LM",
                 lora_dropout=0.05,
             )
+        self.lr = lr
         self.lora_config = lora_config
         self.wrap = wrap
         self.use_separate_reference_adapter = use_separate_reference_adapter
@@ -1925,6 +1928,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if self.accelerator.num_processes > 1:
                 seed = broadcast_object_list([seed], from_process=0)[0]
         self.rng = np.random.RandomState(seed)
+        if self.accelerator is not None:
+            set_seed(seed, device_specific=True)
 
     def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
         """Dummy preprocesses observations for forward pass through neural network.
@@ -2521,7 +2526,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :param loss: Loss
         :type loss: float
         """
-
         if self.accelerator is not None:
             self.accelerator.backward(loss)
             if (
@@ -2862,3 +2866,67 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         positions = torch.arange(max_length, dtype=torch.long).unsqueeze(0)
         mask = positions > prompt_lengths_tensor.unsqueeze(1)
         return mask
+
+    def _configure_vllm(self) -> None:
+        """
+        Configure vLLM for efficient inference during generation in 'get_action'.
+
+        """
+        if self.vllm_config is None:
+            warnings.warn(
+                "No VLLM config provided. Using default VLLM configuration for generation."
+            )
+            self.vllm_config = VLLMConfig()
+        if self.accelerator is not None:
+            if (
+                self.accelerator.num_processes % self.vllm_config.tensor_parallel_size
+                != 0
+            ):
+                raise ValueError(
+                    f"Tensor parallel size {self.vllm_config.tensor_parallel_size} must be a multiple of the number of processes {self.accelerator.num_processes}."
+                )
+
+            if self.vllm_config.tensor_parallel_size > 1:
+                # Create subgroups of ranks for TP, each group with `vllm_tensor_parallel_size` ranks.
+                # For example, if world_size=8 and vllm_tensor_parallel_size=2 → groups: [0,1], [2,3], [4,5], [6,7]
+                self.tp_group, _ = torch.distributed.new_subgroups_by_enumeration(
+                    [
+                        list(
+                            range(
+                                i * self.vllm_config.tensor_parallel_size,
+                                (i + 1) * self.vllm_config.tensor_parallel_size,
+                            )
+                        )
+                        for i in range(
+                            self.accelerator.num_processes
+                            // self.vllm_config.tensor_parallel_size
+                        )
+                    ]
+                )
+
+            # vLLM requires the environment variables to be set for distributed training.
+            os.environ["RANK"] = str(self.accelerator.process_index)
+            os.environ["LOCAL_RANK"] = str(self.accelerator.local_process_index)
+            os.environ["WORLD_SIZE"] = str(self.accelerator.num_processes)
+            os.environ["MASTER_ADDR"] = os.environ.get("MASTER_ADDR", "localhost")
+            os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "12345")
+
+            self.llm = LLM(
+                model=self.pretrained_model_name_or_path,
+                tensor_parallel_size=self.vllm_config.tensor_parallel_size,
+                gpu_memory_utilization=self.vllm_config.gpu_memory_utilization,
+                max_num_seqs=self.vllm_config.max_num_seqs,
+                max_model_len=self.max_model_len,
+                distributed_executor_backend="external_launcher",
+                seed=self.accelerator.process_index
+                // self.vllm_config.tensor_parallel_size,
+                max_num_batched_tokens=self.vllm_config.max_num_seqs
+                * self.max_model_len,
+                model_impl="vllm",
+                enable_sleep_mode=self.vllm_config.sleep_mode,
+            )
+            if self.vllm_config.sleep_mode:  # and self.accelerator.is_main_process:
+                self.llm.sleep(level=2)
+
+        if self.accelerator is not None:
+            self.accelerator.wait_for_everyone()

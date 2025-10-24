@@ -430,7 +430,6 @@ def finetune_llm_preference(
         raise ValueError(
             "'evo_steps' must be set if 'tournament' and 'mutation' are not None."
         )
-
     if num_epochs is not None and max_steps is not None:
         warnings.warn(
             "'num_epochs' is set but 'max_steps' is also set. 'num_epochs' will take precedence over 'max_steps'."
@@ -448,6 +447,11 @@ def finetune_llm_preference(
         assert (
             mutation.activation_mut == 0
         ), "Activation mutation is not allowed for LLM finetuning."
+
+    if init_hp is None:
+        init_hp = {}
+        init_hp["BATCH_SIZE_PER_GPU"] = pop[0].batch_size
+        init_hp["ALGO"] = pop[0].algo
 
     data_increment = accelerator.num_processes if accelerator is not None else 1
     effective_data_batch_size = data_increment * env.data_batch_size_per_gpu
@@ -535,8 +539,28 @@ def finetune_llm_preference(
             accelerator.wait_for_everyone()
 
         # FIXME Add in tournament and mutation + checkpoint logic here
-
-        ##############################################################
+        if tournament and mutation is not None:
+            if (i + 1) % evo_steps == 0:
+                if accelerator is not None:
+                    accelerator.wait_for_everyone()
+                pop = tournament_selection_and_mutation(
+                    population=pop,
+                    tournament=tournament,
+                    mutation=mutation,
+                    env_name=env.name,
+                    accelerator=accelerator,
+                    language_model=True,
+                    elite_path=elite_path,
+                    save_elite=save_elite,
+                )
+                if accelerator is not None:
+                    accelerator.wait_for_everyone()
+        else:
+            if (i + 1) * effective_data_batch_size % max_steps == 0 or (
+                checkpoint_steps is not None
+                and (i + 1) * effective_data_batch_size % checkpoint_steps == 0
+            ):
+                save_llm_checkpoint(agent, elite_path)
 
         if wb and (accelerator is None or accelerator.is_main_process):
             wandb_dict = {
@@ -604,3 +628,47 @@ def finetune_llm_preference(
             wandb.log(wandb_dict)
         if env.num_epochs == num_epochs:
             break
+    if (
+        verbose
+        and total_steps > evaluation_interval
+        and (accelerator is None or accelerator.is_main_process)
+    ):
+        fitness_calculated = len(agent.fitness) > 0
+        fitness = (
+            [str(round(agent.fitness[-1], 2)) for agent in pop]
+            if fitness_calculated
+            else [None] * len(pop)
+        )
+        avg_fitness = (
+            ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
+            if fitness_calculated
+            else [None] * len(pop)
+        )
+        avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
+        agents = [agent.index for agent in pop]
+        num_steps = [agent.steps[-1] for agent in pop]
+        muts = [agent.mut for agent in pop]
+
+        banner_text = f"Global Steps {total_steps}"
+        banner_width = max(len(banner_text) + 8, 35)
+        border = "=" * banner_width
+        centered_text = f"{banner_text}".center(banner_width)
+        pbar.write(
+            f"{border}\n"
+            f"{centered_text}\n"
+            f"{border}\n"
+            f"Fitness:\t\t{fitness}\n"
+            f"Score:\t\t{agg_metrics[2]}\n"
+            f"5 fitness avgs:\t{avg_fitness}\n"
+            f"10 score avgs:\t{avg_score}\n"
+            f"Agents:\t\t{agents}\n"
+            f"Steps:\t\t{num_steps}\n"
+            f"Mutations:\t\t{muts}"
+        )
+
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
+    if accelerator is None or accelerator.is_main_process:
+        pbar.close()
+        if wb:
+            wandb.finish()
