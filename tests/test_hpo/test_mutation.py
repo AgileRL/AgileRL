@@ -1506,6 +1506,8 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
             mut_agent.clean_up()
             old_agent.clean_up()
         AcceleratorState._reset_state(True)
+        gc.collect()
+        torch.cuda.empty_cache()
 
 
 @pytest.mark.parametrize("mutation_type", ["architecture", "parameters", "activation"])
@@ -1513,7 +1515,6 @@ def test_mutations_warns_on_llm_algorithm(
     request, grpo_hp_config, vector_space, mutation_type
 ):
     pre_training_mut = False
-
     population = [
         GRPO(
             observation_space=vector_space,
@@ -1578,3 +1579,5 @@ def test_mutations_warns_on_llm_algorithm(
     del population
     del mutated_population
     del new_population
+    gc.collect()
+    torch.cuda.empty_cache()
