@@ -80,8 +80,6 @@ def cleanup_after_test():
     yield
     gc.collect()
     torch.cuda.empty_cache()
-    torch.cuda.synchronize()
-    AcceleratorState._reset_state(True)
 
 
 @pytest.fixture(scope="function")
@@ -1523,7 +1521,8 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
         for mut_agent, old_agent in zip(mutated_population, new_population):
             mut_agent.clean_up()
             old_agent.clean_up()
-        AcceleratorState._reset_state(True)
+        if use_accelerator:
+            AcceleratorState._reset_state(True)
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -1602,7 +1601,6 @@ def test_mutations_warns_on_llm_algorithm(
     for mut_agent, old_agent in zip(mutated_population, new_population):
         mut_agent.clean_up()
         old_agent.clean_up()
-    AcceleratorState._reset_state(True)
     del mutations
     del population
     del mutated_population

@@ -268,41 +268,6 @@ class DummyVLLM:
         pass
 
 
-def cleanup_vllm_instances():
-    """Clean up vLLM LLM instances and engines"""
-    import vllm
-    import vllm.engine.llm_engine
-
-    # Clean global engine
-    if hasattr(vllm, "_global_llm_engine"):
-        try:
-            vllm._global_llm_engine.shutdown()
-        except Exception:
-            pass
-        del vllm._global_llm_engine
-
-    # Clean any cached engines
-    if hasattr(vllm.engine.llm_engine, "_cached_engines"):
-        for engine in vllm.engine.llm_engine._cached_engines.values():
-            try:
-                engine.shutdown()
-            except Exception:
-                pass
-        vllm.engine.llm_engine._cached_engines.clear()
-
-    # Clean LLM class instances
-    if hasattr(vllm, "LLM"):
-        # Clear any class-level caches
-        if hasattr(vllm.LLM, "_instances"):
-            for instance in vllm.LLM._instances:
-                try:
-                    if hasattr(instance, "llm_engine"):
-                        instance.llm_engine.shutdown()
-                except Exception:
-                    pass
-            vllm.LLM._instances.clear()
-
-
 def create_module(input_size, max_tokens, vocab_size, device):
     return DummyMLPPreTrainedModel(
         config=DummyConfig(
@@ -310,22 +275,6 @@ def create_module(input_size, max_tokens, vocab_size, device):
         ),
         device=device,
     )
-
-
-@pytest.fixture(autouse=True)
-def cleanup_after_test(request):
-    test_name = request.node.name
-    before = torch.cuda.memory_allocated() / 1e9
-    yield
-    cleanup_vllm_instances()
-    gc.collect()
-    torch.cuda.empty_cache()
-    torch.cuda.synchronize()
-    AcceleratorState._reset_state(True)
-    after = torch.cuda.memory_allocated() / 1e9
-    delta = after - before
-    if delta > 0.5:  # More than 500MB leaked
-        print(f"\n⚠️  {test_name}: {before:.2f}GB → {after:.2f}GB (Δ {delta:+.2f}GB)")
 
 
 @pytest.fixture(scope="function")
