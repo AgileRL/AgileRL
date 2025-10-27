@@ -361,7 +361,7 @@ class GRPO(LLMAlgorithm):
         """Returns fitness (test) score tensor of llm on test sub-set.
 
         :param env: The environment to be tested in
-        :type env: HuggingFaceGym environment
+        :type env: ReasoningGym environment
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
         :type loop: int, optional
         :return: Mean test score of the agent

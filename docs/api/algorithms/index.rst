@@ -95,6 +95,7 @@ Action Spaces
    ppo
    td3
    grpo
+   dpo
 
 Multi-Agent Algorithms
 ---------------------
@@ -151,3 +152,4 @@ LLM Algorithms
    :maxdepth: 1
 
    grpo
+   dpo

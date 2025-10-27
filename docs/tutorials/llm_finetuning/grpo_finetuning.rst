@@ -47,7 +47,7 @@ Dependencies
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from agilerl.algorithms import GRPO
     from agilerl.training.train_llm import finetune_llm
-    from agilerl.utils.llm_utils import HuggingFaceGym
+    from agilerl.utils.llm_utils import ReasoningGym
 
 
 Defining our base model and dataset
@@ -115,7 +115,7 @@ become very good at taking actions to solve tasks - to develop *agency*. Since w
 with reinforcement learning, it becomes an agent through this process.
 
 We must create a reinforcement learning environment in which our agent can explore possible
-solutions and learn to optimise rewards. AgileRL provides a :class:`HuggingFaceGym <agilerl.utils.llm_utils.HuggingFaceGym>`
+solutions and learn to optimise rewards. AgileRL provides a :class:`ReasoningGym <agilerl.utils.llm_utils.ReasoningGym>`
 class that wraps a Hugging Face dataset and converts it into a reinforcement learning, gymnasium-style environment.
 
 So, how does the environment know how to reward an agent for its outputs? Well, we must define a *reward_function*
@@ -198,7 +198,7 @@ Now we have defined our reward functions, we must also design our prompt. This f
 to the agent and provides the context necessary to complete the task. This is a task-specific feature,
 and different reasoning problems will require different chat templates, although they can follow a similar
 format. We must also define a function to collate our questions and answers, and standardise their length.
-Combining all these components, we can now initialise the HuggingFaceGym object.
+Combining all these components, we can now initialise the ReasoningGym object.
 
 .. collapse:: Convert HuggingFace Dataset to Gymnasium Environment
 
@@ -234,7 +234,7 @@ Combining all these components, we can now initialise the HuggingFaceGym object.
 
 
         # Convert the HuggingFace dataset into a Gymnasium environment
-        env = HuggingFaceGym(
+        env = ReasoningGym(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,

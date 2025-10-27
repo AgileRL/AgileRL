@@ -29,7 +29,7 @@ Dependencies
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
     from agilerl.training.train_llm import finetune_llm
-    from agilerl.utils.llm_utils import HuggingFaceGym
+    from agilerl.utils.llm_utils import ReasoningGym
     from agilerl.utils.utils import create_population
 
 Defining Hyperparameters
@@ -146,7 +146,7 @@ become very good at taking actions to solve tasks - to develop *agency*. Since w
 with reinforcement learning, it becomes an agent through this process.
 
 We must create a reinforcement learning environment in which our agent can explore possible
-solutions and learn to optimise rewards. AgileRL provides a :class:`HuggingFaceGym <agilerl.utils.llm_utils.HuggingFaceGym>`
+solutions and learn to optimise rewards. AgileRL provides a :class:`ReasoningGym <agilerl.utils.llm_utils.ReasoningGym>`
 class that wraps a Hugging Face dataset and converts it into a reinforcement learning, gymnasium-style environment.
 
 So, how does the environment know how to reward an agent for its outputs? Well, we must define a *reward_function*
@@ -229,7 +229,7 @@ for displaying these behaviours, the agent itself discovers the best way to achi
 Now we have defined our reward functions, we must also design our prompt. This forms the input given
 to the agent and provides the context necessary to complete the task. This is a task-specific feature,
 and different reasoning problems will require different chat templates, although they can follow a similar
-format. Combining all these components, we can now initialise the HuggingFaceGym object.
+format. Combining all these components, we can now initialise the ReasoningGym object.
 
 .. collapse:: Convert HuggingFace Dataset to Gymnasium Environment
 
@@ -264,7 +264,7 @@ format. Combining all these components, we can now initialise the HuggingFaceGym
         accelerator = Accelerator()
 
         # Convert the HuggingFace dataset into a Gymnasium environment
-        env = HuggingFaceGym(
+        env = ReasoningGym(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
