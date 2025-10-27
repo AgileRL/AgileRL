@@ -1,6 +1,8 @@
 import gc
+import random
 import socket
 
+import numpy as np
 import pytest
 import torch
 from accelerate import Accelerator
@@ -24,6 +26,18 @@ def get_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
         return s.getsockname()[1]
+
+
+@pytest.fixture(autouse=True)
+def set_seed():
+    """Set random seeds for reproducibility."""
+    SEED = 42
+    torch.manual_seed(SEED)
+    torch.cuda.manual_seed(SEED)
+    torch.cuda.manual_seed_all(SEED)
+    np.random.seed(SEED)
+    random.seed(SEED)
+    yield
 
 
 @pytest.fixture(autouse=True)
