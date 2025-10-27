@@ -76,6 +76,27 @@ def create_bert_networks_multi_agent(device):
     )
 
 
+@pytest.fixture(scope="module", autouse=True)
+def reset_torch_memory():
+    """Aggressively reset PyTorch memory and state, before and after mutations testing module"""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.reset_accumulated_memory_stats()
+        torch.cuda.synchronize()
+
+    import gc
+
+    gc.collect()
+
+    yield
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    gc.collect()
+
+
 @pytest.fixture(scope="function")
 def bert_network(device):
     return create_bert_network(device)

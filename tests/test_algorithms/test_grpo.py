@@ -330,6 +330,30 @@ def get_free_port():
         return s.getsockname()[1]
 
 
+@pytest.fixture(scope="module", autouse=True)
+def reset_torch_memory():
+    """Aggressively reset PyTorch memory and state"""
+    # Clear CUDA cache
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.reset_accumulated_memory_stats()
+        torch.cuda.synchronize()
+
+    # Clear CPU memory
+    import gc
+
+    gc.collect()
+
+    yield
+
+    # Cleanup after module
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    gc.collect()
+
+
 @pytest.fixture(autouse=True)
 def deepspeed_env():
     import os
