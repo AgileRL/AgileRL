@@ -12,7 +12,7 @@ from agilerl.training.train_llm import (
 
 
 @pytest.mark.parametrize("use_accelerator", [True, False])
-def test_finetune_llm_preference_basic_training_loop(use_accelerator):
+def test_finetune_llm_reasoning_basic_training_loop(use_accelerator):
     """Test the basic training loop in finetune_llm_reasoning."""
     # Create mock agent
     mock_agent = MagicMock()

@@ -1,6 +1,5 @@
 import copy
 import gc
-import socket
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -16,13 +15,12 @@ import vllm
 from accelerate import Accelerator
 from accelerate.scheduler import AcceleratedScheduler
 from accelerate.state import AcceleratorState
-from accelerate.utils import DeepSpeedPlugin
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from peft import LoraConfig, LoraModel, PeftModel, get_peft_model
 from torch.optim.lr_scheduler import SequentialLR
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 from transformers.configuration_utils import PretrainedConfig
 from transformers.generation.configuration_utils import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel

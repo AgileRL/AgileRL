@@ -46,7 +46,6 @@ def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
 
 def main(init_hp, mut_p):
     # Instantiate the model and the associated tokenizer
-    model = create_model(pretrained_model_name_or_path=MODEL_PATH)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
