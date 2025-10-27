@@ -262,14 +262,14 @@ class GRPO(LLMAlgorithm):
                     action_mask = action_mask[:, 1:]
                     action_masks.append(action_mask)
         else:
-            if self.vllm_config.sleep_mode:  # and self.accelerator.is_main_process:
+            if self.vllm_config.sleep_mode:
                 torch.cuda.empty_cache()
                 self.llm.wake_up()
             self._move_model_to_vllm()
             completion_ids, action_masks = self._generate_with_vllm_colocate(
                 obs, group_size
             )
-            if self.vllm_config.sleep_mode:  # and self.accelerator.is_main_process:
+            if self.vllm_config.sleep_mode:
                 self.llm.sleep(level=2)
 
         return completion_ids, action_masks

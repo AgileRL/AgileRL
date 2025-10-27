@@ -2926,7 +2926,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 model_impl="vllm",
                 enable_sleep_mode=self.vllm_config.sleep_mode,
             )
-            if self.vllm_config.sleep_mode:  # and self.accelerator.is_main_process:
+            if self.vllm_config.sleep_mode:
                 self.llm.sleep(level=2)
 
         if self.accelerator is not None:

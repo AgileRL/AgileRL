@@ -287,7 +287,7 @@ def test_dpo_get_action(
         "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5",
     ],
 )
-@pytest.mark.parametrize("data_batch_size", [2])
+@pytest.mark.parametrize("data_batch_size", [4])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_dpo_learn(
@@ -351,6 +351,7 @@ def test_dpo_learn(
             param.data.normal_(mean=0, std=1.0)
     prompts = env.reset()
     pre_learn_actor_state_dict = copy.deepcopy(dpo.actor.state_dict())
+    dpo.lr = 1e-3
     loss, chosen_reward, rejected_reward = dpo.learn(prompts)
     assert isinstance(loss, float)
     assert isinstance(chosen_reward, float)
@@ -362,7 +363,7 @@ def test_dpo_learn(
         pre_learn_actor_state_dict.items(),
     ):
         if "actor" in param_name:
-            assert not torch.equal(param, pre_learn_param)
+            assert not torch.allclose(param, pre_learn_param, rtol=1e-7, atol=1e-9)
 
         elif "reference" in param_name:
             assert torch.equal(param, pre_learn_param)
