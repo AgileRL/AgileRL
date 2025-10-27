@@ -28,7 +28,7 @@ Dependencies
     from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
-    from agilerl.training.train_llm import finetune_llm
+    from agilerl.training.train_llm import finetune_llm_reasoning
     from agilerl.utils.llm_utils import ReasoningGym
     from agilerl.utils.utils import create_population
 
@@ -354,11 +354,11 @@ The ``Mutations()`` class is used to mutate agents with pre-set probabilities. T
 
 Training and Saving an Agent
 ----------------------------
-The simplest way to train an AgileRL agent is to use the :meth:`finetune_llm() <agilerl.training.train_llm.finetune_llm>` function.
+The simplest way to train an AgileRL agent is to use the :meth:`finetune_llm_reasoning() <agilerl.training.train_llm.finetune_llm_reasoning>` function.
 
 .. code-block:: python
 
-    finetune_llm(
+    finetune_llm_reasoning(
         pop=pop,
         env=env,
         init_hp=init_hp,
@@ -428,7 +428,7 @@ Example config file:
 Using a Custom Training Loop
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 If we wanted to have more control over the training process, it is also possible to write our own custom
-training loops to train our agents. The training loop below can be used alternatively to the above ``finetune_llm``
+training loops to train our agents. The training loop below can be used alternatively to the above ``finetune_llm_reasoning``
 function and is an example of how we might choose to make use of a population of AgileRL agents in our own training loop.
 
 .. collapse:: Custom Training Loop

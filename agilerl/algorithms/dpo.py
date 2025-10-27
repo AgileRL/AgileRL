@@ -133,7 +133,6 @@ class DPO(LLMAlgorithm):
         prompt_masks = LLMAlgorithm.create_prompt_masks(
             prompt_lengths, max_length=max_length
         ).to(self.device)
-        # FIXME double check that this is correct
 
         # Mask has to be shifted by 1 as output log probs dims are 1 shorter than input ids as first token is used to predict the first log prob
         chosen_mask = (prompt_masks * chosen_attention_mask)[:, 1:]
@@ -146,17 +145,17 @@ class DPO(LLMAlgorithm):
         with torch.no_grad():
             ref_rejected_log_probs = self._get_logprobs(
                 rejected_input_ids,
-                # batch_rejected_attention_mask,
                 batch_size,
                 use_reference=True,
                 eval_mode=True,
+                attention_mask=rejected_attention_mask,
             )
             ref_chosen_log_probs = self._get_logprobs(
                 chosen_input_ids,
-                # batch_chosen_attention_mask,
                 batch_size,
                 use_reference=True,
                 eval_mode=True,
+                attention_mask=chosen_attention_mask,
             )
 
         for _ in range(self.update_epochs):
@@ -166,9 +165,9 @@ class DPO(LLMAlgorithm):
                 ]
                 (
                     batch_chosen_input_ids,
-                    # batch_chosen_attention_mask,
+                    batch_chosen_attention_mask,
                     batch_rejected_input_ids,
-                    # batch_rejected_attention_mask,
+                    batch_rejected_attention_mask,
                     batch_chosen_mask,
                     batch_rejected_mask,
                     batch_ref_rejected_log_probs,
@@ -176,9 +175,9 @@ class DPO(LLMAlgorithm):
                 ) = get_experiences_samples(
                     minibatch_idxs,
                     chosen_input_ids,
-                    # chosen_attention_mask,
+                    chosen_attention_mask,
                     rejected_input_ids,
-                    # rejected_attention_mask,
+                    rejected_attention_mask,
                     chosen_mask,
                     rejected_mask,
                     ref_rejected_log_probs,
@@ -186,17 +185,17 @@ class DPO(LLMAlgorithm):
                 )
                 batch_rejected_log_probs = self._get_logprobs(
                     batch_rejected_input_ids,
-                    # batch_rejected_attention_mask,
                     batch_size,
                     use_reference=False,
                     eval_mode=(not training),
+                    attention_mask=batch_rejected_attention_mask,
                 )
                 batch_chosen_log_probs = self._get_logprobs(
                     batch_chosen_input_ids,
-                    # batch_chosen_attention_mask,
                     batch_size,
                     use_reference=False,
                     eval_mode=(not training),
+                    attention_mask=batch_chosen_attention_mask,
                 )
                 loss, chosen_reward, rejected_reward = self._dpo_loss(
                     batch_chosen_log_probs,

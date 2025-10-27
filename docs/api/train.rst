@@ -16,8 +16,8 @@ The multi agent training function handles Pettingzoo-style environments and mult
 .. autofunction:: agilerl.training.train_multi_agent_off_policy.train_multi_agent_off_policy
 
 Finally, if you are training a LLM, you can use our LLM training functions. We have one for preference-based reinforcement learning (``finetune_llm_preference``) which should be used
-with DPO, and one for reinforcement learning with verifiable rewards (``finetune_llm``) which should be used with GRPO.
+with DPO, and one for reinforcement learning with verifiable rewards (``finetune_llm_reasoning``) which should be used with GRPO.
 
-.. autofunction:: agilerl.training.train_llm.finetune_llm
+.. autofunction:: agilerl.training.train_llm.finetune_llm_reasoning
 
 .. autofunction:: agilerl.training.train_llm.finetune_llm_preference

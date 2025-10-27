@@ -1951,8 +1951,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :type weights_only: bool, optional
         """
 
-        warnings.warn("weights_only default will be changed to True in the future.")
-
         if self.accelerator is not None:
             if not weights_only:
                 self._save_distributed_actor(path, tag="save_checkpoint")
@@ -2471,6 +2469,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         batch_size: int,
         use_reference: bool = False,
         eval_mode: bool = False,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Find the log probabilities for a set of previously generated ids.
 
@@ -2482,6 +2481,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :type use_reference: bool, optional
         :param eval_mode: Flag to indicate setting policy network to evaluation mode, defaults to False
         :type eval_mode: bool, optional
+        :param attention_mask: Attention mask.
+        :type attention_mask: torch.Tensor, optional
         :return: Log probabilities of the completion IDs.
         :rtype: torch.Tensor
         """
@@ -2489,15 +2490,15 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         with self.select_policy(use_reference):
             self.actor.train(mode=not eval_mode)
             num_samples = ids.shape[0]
-            attention_mask = ids != self.pad_token_id
+            if attention_mask is None:
+                # TODO this calc is avoided when using PreferenceGym, need to make ReasoningGym do the same
+                attention_mask = ids != self.pad_token_id
             if self.calc_position_embeddings:
-                # FIXME can avoid this calc with PreferenceGym, need to make ReasoningGym do the same
                 position_ids = attention_mask.long().cumsum(dim=-1) - 1
                 position_ids.masked_fill_(mask=(attention_mask == 0), value=1)
 
             # Split the sample into batches
             log_probs = []
-            print("NUM SAMPLES ", batch_size, num_samples)
             for batch in range(0, num_samples, batch_size):
                 end_idx = min((batch + batch_size), num_samples)
                 batch_ids = ids[batch:end_idx, :]

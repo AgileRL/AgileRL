@@ -46,7 +46,7 @@ Dependencies
     from torch.utils.data import Dataset
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from agilerl.algorithms import GRPO
-    from agilerl.training.train_llm import finetune_llm
+    from agilerl.training.train_llm import finetune_llm_reasoning
     from agilerl.utils.llm_utils import ReasoningGym
 
 
@@ -275,13 +275,13 @@ training in this tutorial, we use deepspeed and accelerate.
 
 Training and Saving an Agent
 ----------------------------
-The simplest way to train an AgileRL agent is to use the :meth:`finetune_llm() <agilerl.training.train_llm.finetune_llm>` function.
+The simplest way to train an AgileRL agent is to use the :meth:`finetune_llm_reasoning() <agilerl.training.train_llm.finetune_llm_reasoning>` function.
 This training function will orchestrate the training process, removing the the need to implement a training loop, and will save
 checkpoints of the trained agent that can be used later for inference. It also uses Weights and Biases for tracking.
 
 .. code-block:: python
 
-    finetune_llm(
+    finetune_llm_reasoning(
         pop=[agent],
         env=env,
         evaluation_interval=10,
@@ -346,7 +346,7 @@ Example config file:
 Using a custom training loop
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 If we wanted to have more control over the training process, it is also possible to write our own custom
-training loop to train our agent. The training loop below can be used alternatively to the above ``finetune_llm``
+training loop to train our agent. The training loop below can be used alternatively to the above ``finetune_llm_reasoning``
 function and is an example of how we might choose to train our agent to exhibit reasoning.
 
 .. collapse:: Custom Training Loop

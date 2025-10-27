@@ -766,3 +766,7 @@ def test_preference_gym_reset_num_epochs(
 def test_get_state_dict():
     model = nn.Linear(10, 10)
     state_dict = get_state_dict(model)
+    assert isinstance(state_dict, dict)
+    for key, value in state_dict.items():
+        assert isinstance(key, str)
+        assert isinstance(value, torch.Tensor)

@@ -6,14 +6,14 @@ from accelerate import Accelerator
 
 from agilerl.algorithms import DPO, GRPO
 from agilerl.training.train_llm import (
-    finetune_llm,
     finetune_llm_preference,
+    finetune_llm_reasoning,
 )
 
 
 @pytest.mark.parametrize("use_accelerator", [True, False])
-def test_finetune_llm_basic_training_loop(use_accelerator):
-    """Test the basic training loop in finetune_llm."""
+def test_finetune_llm_preference_basic_training_loop(use_accelerator):
+    """Test the basic training loop in finetune_llm_reasoning."""
     # Create mock agent
     mock_agent = MagicMock()
     mock_agent.fitness = [0.0]
@@ -38,7 +38,7 @@ def test_finetune_llm_basic_training_loop(use_accelerator):
     ) as mock_agg, patch("agilerl.training.train_llm.save_llm_checkpoint"):
 
         mock_agg.return_value = 0.5
-        finetune_llm(
+        finetune_llm_reasoning(
             pop=[mock_agent],
             env=mock_env,
             evaluation_interval=2,
@@ -61,8 +61,8 @@ def test_finetune_llm_basic_training_loop(use_accelerator):
         # False
     ],
 )
-def test_finetune_llm_with_wandb_and_checkpoints(use_accelerator):
-    """Test finetune_llm with wandb logging and checkpointing enabled."""
+def test_finetune_llm_reasoning_with_wandb_and_checkpoints(use_accelerator):
+    """Test finetune_llm_reasoning with wandb logging and checkpointing enabled."""
     # Create mock agent
     mock_agent = MagicMock()
     mock_agent.algo = "GRPO"
@@ -102,7 +102,7 @@ def test_finetune_llm_with_wandb_and_checkpoints(use_accelerator):
         mock_agg.return_value = 0.5
 
         # Run the function with wandb and checkpointing enabled
-        finetune_llm(
+        finetune_llm_reasoning(
             pop=[mock_agent],
             env=mock_env,
             save_elite=True,
@@ -126,8 +126,8 @@ def test_finetune_llm_with_wandb_and_checkpoints(use_accelerator):
 
 
 @pytest.mark.parametrize("use_accelerator", [True, False])
-def test_finetune_llm_evolvable_training_loop(use_accelerator):
-    """Test the basic training loop in finetune_llm."""
+def test_finetune_llm_reasoning_evolvable_training_loop(use_accelerator):
+    """Test the basic training loop in finetune_llm_reasoning."""
     # Create mock agent
     mock_agent = MagicMock()
     mock_agent.fitness = [0.0]
@@ -162,7 +162,7 @@ def test_finetune_llm_evolvable_training_loop(use_accelerator):
         mock_tournament_selection_and_mutation.return_value = [mock_agent]
 
         mock_agg.return_value = 0.5
-        finetune_llm(
+        finetune_llm_reasoning(
             pop=[mock_agent],
             env=mock_env,
             evaluation_interval=2,
@@ -184,9 +184,11 @@ def test_finetune_llm_evolvable_training_loop(use_accelerator):
         )  # Should be called at step 2
 
 
-@pytest.mark.parametrize("finetune_fn", [finetune_llm, finetune_llm_preference])
-def test_finetune_llm_evo_steps_not_set(finetune_fn):
-    """Test that finetune_llm raises a ValueError if evo_steps is not set."""
+@pytest.mark.parametrize(
+    "finetune_fn", [finetune_llm_reasoning, finetune_llm_preference]
+)
+def test_finetune_llm_reasoning_evo_steps_not_set(finetune_fn):
+    """Test that finetune_llm_reasoning raises a ValueError if evo_steps is not set."""
     with pytest.raises(ValueError) as evo_steps_not_set_error:
         finetune_fn(
             pop=[MagicMock()],
@@ -202,12 +204,14 @@ def test_finetune_llm_evo_steps_not_set(finetune_fn):
         )
 
 
-@pytest.mark.parametrize("finetune_fn", [finetune_llm, finetune_llm_preference])
-def test_finetune_llm_value_error_if_evo_steps_not_set(finetune_fn):
-    """Test that finetune_llm raises a warning if evo_steps is not set."""
+@pytest.mark.parametrize(
+    "finetune_fn", [finetune_llm_reasoning, finetune_llm_preference]
+)
+def test_finetune_llm_reasoning_value_error_if_evo_steps_not_set(finetune_fn):
+    """Test that finetune_llm_reasoning raises a warning if evo_steps is not set."""
 
     with pytest.raises(ValueError) as evo_steps_not_set_error:
-        finetune_llm(
+        finetune_llm_reasoning(
             pop=[MagicMock()],
             env=MagicMock(),
             evo_steps=None,
@@ -221,8 +225,8 @@ def test_finetune_llm_value_error_if_evo_steps_not_set(finetune_fn):
         )
 
 
-def test_finetune_llm_warning_num_epochs_and_max_steps():
-    """Test that finetune_llm raises a warning if evo_steps is not set."""
+def test_finetune_llm_reasoning_warning_num_epochs_and_max_steps():
+    """Test that finetune_llm_reasoning raises a warning if evo_steps is not set."""
     # Create mock agent
     mock_agent = MagicMock()
     mock_agent.fitness = [0.0]
@@ -252,7 +256,7 @@ def test_finetune_llm_warning_num_epochs_and_max_steps():
 
         mock_agg.return_value = 0.5
         with pytest.warns(UserWarning) as num_epochs_and_max_steps_warning:
-            finetune_llm(
+            finetune_llm_reasoning(
                 pop=[mock_agent],
                 env=mock_env,
                 evaluation_interval=2,
@@ -267,7 +271,7 @@ def test_finetune_llm_warning_num_epochs_and_max_steps():
             )
 
 
-def test_finetune_llm_max_steps_set_from_num_epochs():
+def test_finetune_llm_reasoning_max_steps_set_from_num_epochs():
     # Create mock agent
     mock_agent = MagicMock()
     mock_agent.fitness = [0.0]
@@ -302,7 +306,7 @@ def test_finetune_llm_max_steps_set_from_num_epochs():
     ) as mock_save:
 
         mock_agg.return_value = 0.5
-        finetune_llm(
+        finetune_llm_reasoning(
             pop=[mock_agent],
             env=mock_env,
             evaluation_interval=2,
@@ -316,7 +320,7 @@ def test_finetune_llm_max_steps_set_from_num_epochs():
         assert mock_save.call_count == 2
 
 
-def test_finetune_llm_break_on_num_epochs():
+def test_finetune_llm_reasoning_break_on_num_epochs():
     # Create mock agent
     # Create mock agent
     mock_agent = MagicMock()
@@ -353,7 +357,7 @@ def test_finetune_llm_break_on_num_epochs():
 
         mock_env.num_epochs = 2
         mock_agg.return_value = 0.5
-        finetune_llm(
+        finetune_llm_reasoning(
             pop=[mock_agent],
             env=mock_env,
             evaluation_interval=2,
@@ -681,7 +685,7 @@ def test_finetune_llm_preference_value_error_if_algo_not_dpo():
         )
 
 
-def test_finetune_llm_value_error_if_algo_not_grpo():
+def test_finetune_llm_reasoning_value_error_if_algo_not_grpo():
     # Create mock agent
     mock_agent = MagicMock(spec=GRPO)
     mock_agent.algo = "DPO"
@@ -690,7 +694,7 @@ def test_finetune_llm_value_error_if_algo_not_grpo():
         ValueError,
         match="The algorithm must be GRPO for preference-based reinforcement learning.",
     ):
-        finetune_llm(
+        finetune_llm_reasoning(
             pop=[mock_agent],
             env=MagicMock(),
             evaluation_interval=2,

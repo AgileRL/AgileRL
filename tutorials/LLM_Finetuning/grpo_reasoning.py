@@ -8,7 +8,7 @@ from torch.utils.data import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from agilerl.algorithms import GRPO
-from agilerl.training.train_llm import finetune_llm
+from agilerl.training.train_llm import finetune_llm_reasoning
 from agilerl.utils.llm_utils import ReasoningGym
 
 MODEL_PATH = "Qwen/Qwen2.5-3B"
@@ -182,7 +182,7 @@ def main():
         accelerator=accelerator,
         use_vllm=True,
     )
-    finetune_llm(
+    finetune_llm_reasoning(
         pop=[agent],
         env=env,
         evaluation_interval=10,

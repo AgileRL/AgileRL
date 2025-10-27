@@ -36,7 +36,7 @@ class IsDataclass(Protocol):
     __dataclass_fields__: ClassVar[dict[str, Any]]
 
 
-# FIXME ideally adjust the ReasoningGym to match the PreferencePrompts type (e.g the lists/btaching happens for the values of the
+# TODO ideally adjust the ReasoningGym to match the PreferencePrompts type (e.g the lists/btaching happens for the values of the
 # keys, not just returning a list of 'ReasoningPrompts')
 class ReasoningPrompts(TypedDict):
     input_ids: torch.Tensor

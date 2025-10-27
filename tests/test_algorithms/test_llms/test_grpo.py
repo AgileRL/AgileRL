@@ -37,16 +37,6 @@ from agilerl.algorithms.core.base import (
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig, clone_llm
 
-dist_env = dict(
-    ACCELERATE_USE_DEEPSPEED="true",
-    MASTER_ADDR="localhost",
-    MASTER_PORT="10999",
-    RANK="0",
-    LOCAL_RANK="0",
-    WORLD_SIZE="1",
-    PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True",
-)
-
 deepspeed_base_config = {
     "bf16": {
         "enabled": True,
@@ -324,45 +314,8 @@ def create_module(input_size, max_tokens, vocab_size, device):
     )
 
 
-def get_free_port():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        return s.getsockname()[1]
-
-
-@pytest.fixture(autouse=True)
-def deepspeed_env():
-    import os
-
-    dynamic_dist_env = dist_env.copy()
-    dynamic_dist_env["MASTER_PORT"] = str(get_free_port())
-    existing_vars = {}
-    for key, value in dynamic_dist_env.items():
-        key = key.upper()
-        if key in os.environ:
-            existing_vars[key] = os.environ[key]
-        os.environ[key] = str(value)
-
-    try:
-        yield
-    finally:
-        for key in dynamic_dist_env:
-            key = key.upper()
-            if key in existing_vars:
-                # restore previous value
-                os.environ[key] = existing_vars[key]
-            else:
-                os.environ.pop(key, None)
-        gc.collect()
-        torch.cuda.empty_cache()
-
-
 @pytest.fixture(autouse=True)
 def cleanup_after_test(request):
-    if not torch.cuda.is_available():
-        yield
-        return
-
     test_name = request.node.name
     before = torch.cuda.memory_allocated() / 1e9
     yield
@@ -373,63 +326,8 @@ def cleanup_after_test(request):
     AcceleratorState._reset_state(True)
     after = torch.cuda.memory_allocated() / 1e9
     delta = after - before
-
     if delta > 0.5:  # More than 500MB leaked
         print(f"\n⚠️  {test_name}: {before:.2f}GB → {after:.2f}GB (Δ {delta:+.2f}GB)")
-
-
-@pytest.fixture(scope="function")
-def accelerator_factory():
-    def generate_accelerator(use_deepspeed_optimizer, config):
-        gc.collect()
-        torch.cuda.empty_cache()
-        AcceleratorState._reset_state(True)
-        if use_deepspeed_optimizer and (config is not None):
-            config["optimizer"] = {
-                "type": "AdamW",
-                "params": {
-                    "lr": 1e-4,  # Smaller learning rate
-                    "betas": [0.9, 0.999],
-                    "eps": 1e-8,
-                    "weight_decay": 0.01,
-                },
-            }
-        return (
-            Accelerator(deepspeed_plugin=DeepSpeedPlugin(hf_ds_config=config))
-            if config is not None
-            else None
-        )
-
-    return generate_accelerator
-
-
-@pytest.fixture(scope="function")
-def model_factory():
-    def generate_model(pretrained_model_name_or_path):
-        peft_config = LoraConfig(
-            task_type="CAUSAL_LM",
-            r=16,
-            lora_alpha=64,
-            target_modules=[
-                "q_proj",
-                "k_proj",
-                "v_proj",
-                "o_proj",
-                "gate_proj",
-                "up_proj",
-                "down_proj",
-            ],
-        )
-        model = AutoModelForCausalLM.from_pretrained(
-            pretrained_model_name_or_path=pretrained_model_name_or_path,
-            torch_dtype=torch.bfloat16,
-            attn_implementation="sdpa",
-        )
-        model.gradient_checkpointing_enable()
-        model = get_peft_model(model, peft_config)
-        return model
-
-    return generate_model
 
 
 @pytest.fixture(scope="function")
@@ -816,7 +714,7 @@ def test_get_action_grpo(
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 @pytest.mark.parametrize("sleep_mode", [True])
-@patch("agilerl.algorithms.grpo.LLM")
+@patch("agilerl.algorithms.core.base.LLM")
 def test_get_action_grpo_vllm_sleep_mode(
     MockLLM,
     grpo_factory,
@@ -1165,6 +1063,17 @@ def test_init_grpo_vllm_with_tp_gt_one(
     reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
+    mock_instance = MagicMock(spec=vllm.LLM)
+
+    # Configure methods
+    mock_instance.generate = MagicMock(
+        return_value=[MagicMock(outputs=[MagicMock(text="Generated text")])]
+    )
+    mock_instance.sleep = MagicMock()
+    mock_instance.wake_up = MagicMock()
+    mock_instance.shutdown = MagicMock()
+    mock_instance.llm_engine = MagicMock()
+    mock_instance.llm_engine.model_executor = MagicMock()
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with patch.object(
         torch.distributed,
@@ -1176,6 +1085,8 @@ def test_init_grpo_vllm_with_tp_gt_one(
         return_value=2,
     ), patch.object(
         vllm.LLM, "__init__", return_value=None
+    ), patch.object(
+        vllm.LLM, "__new__", return_value=mock_instance
     ):
         grpo = GRPO(
             gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
@@ -1229,12 +1140,28 @@ def test_init_grpo_vllm_tp_value_error(
     reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
+    mock_instance = MagicMock(spec=vllm.LLM)
+
+    # Configure methods
+    mock_instance.generate = MagicMock(
+        return_value=[MagicMock(outputs=[MagicMock(text="Generated text")])]
+    )
+    mock_instance.sleep = MagicMock()
+    mock_instance.wake_up = MagicMock()
+    mock_instance.shutdown = MagicMock()
+    mock_instance.llm_engine = MagicMock()
+    mock_instance.llm_engine.model_executor = MagicMock()
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with patch.object(
         torch.distributed,
         "new_subgroups_by_enumeration",
         return_value=("tp_group_calculated", None),
-    ), patch.object(vllm.LLM, "__init__", return_value=None), pytest.raises(ValueError):
+    ), patch.object(vllm.LLM, "__init__", return_value=None), patch.object(
+        vllm.LLM, "__new__", return_value=mock_instance
+    ), pytest.raises(
+        ValueError,
+        match="Tensor parallel size 2 must be a multiple of the number of processes 1.",
+    ):
         GRPO(
             gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
             gym.spaces.Box(low=0, high=vocab_size - 1),
@@ -1252,59 +1179,6 @@ def test_init_grpo_vllm_tp_value_error(
             vllm_config=VLLMConfig(
                 gpu_memory_utilization=0.05, tensor_parallel_size=2, max_num_seqs=1
             ),
-            accelerator=accelerator,
-            use_separate_reference_adapter=use_separate_reference_adapter,
-        )
-
-
-@pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-@pytest.mark.parametrize("use_deepspeed_optimizer", [False])
-@pytest.mark.parametrize("use_vllm", [True])
-@pytest.mark.parametrize(
-    "pretrained_model_name_or_path", ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"]
-)
-@pytest.mark.parametrize("vocab_size", [1000])
-@pytest.mark.parametrize("input_size", [10])
-@pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize("group_size", [5])
-@pytest.mark.parametrize("use_separate_reference_adapter", [True])
-@pytest.mark.parametrize("reduce_memory_peak", [True])
-@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-def test_init_grpo_vllm_tp_warning(
-    accelerator_factory,
-    model_factory,
-    vocab_size,
-    input_size,
-    max_tokens,
-    group_size,
-    use_separate_reference_adapter,
-    use_vllm,
-    pretrained_model_name_or_path,
-    use_deepspeed_optimizer,
-    config,
-    reduce_memory_peak,
-    micro_batch_size_per_gpu,
-):
-    accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-    with patch.object(
-        torch.distributed,
-        "new_subgroups_by_enumeration",
-        return_value=("tp_group_calculated", None),
-    ), patch.object(vllm.LLM, "__init__", return_value=None), pytest.warns(UserWarning):
-        GRPO(
-            gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
-            gym.spaces.Box(low=0, high=vocab_size - 1),
-            actor_network=model_factory(pretrained_model_name_or_path),
-            pad_token_id=vocab_size - 1,
-            pad_token="<pad>",
-            device="cuda" if torch.cuda.is_available() else "cpu",
-            group_size=group_size,
-            cosine_lr_schedule_config=(
-                None
-                if accelerator is not None
-                else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
-            ),
-            use_vllm=use_vllm,
             accelerator=accelerator,
             use_separate_reference_adapter=use_separate_reference_adapter,
         )
@@ -1913,7 +1787,7 @@ def test_get_action_grpo_vllm_multiple_gpus(
 
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
 
-    with patch("agilerl.algorithms.grpo.LLM", DummyVLLM), patch.object(
+    with patch("agilerl.algorithms.core.base.LLM", DummyVLLM), patch.object(
         torch.distributed,
         "new_subgroups_by_enumeration",
         return_value=("tp_group_calculated", None),
@@ -2229,7 +2103,7 @@ def test_grpo_learn(
     )
 
     for name, param in grpo.actor.named_parameters():
-        if "lora_B" in name and param is not None:
+        if ("lora_A" in name or "lora_B" in name) and param is not None:
             param.data.normal_()
 
     pre_learn_actor_state_dict = copy.deepcopy(grpo.actor.state_dict())
@@ -2942,7 +2816,7 @@ def test_grpo_clone_with_accelerator(
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-@patch("agilerl.algorithms.grpo.LLM", DummyVLLM)
+@patch("agilerl.algorithms.core.base.LLM", DummyVLLM)
 def test_grpo_clone_with_accelerator_vllm(
     grpo_factory,
     accelerator_factory,
@@ -3271,7 +3145,7 @@ def test_grpo_preprocess_observation(
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-def test_load_distributed_actor_warning(
+def test_load_distributed_actor_value_error(
     grpo_factory,
     model_factory,
     accelerator_factory,
@@ -3306,8 +3180,64 @@ def test_load_distributed_actor_warning(
     )
     accelerator = MagicMock(spec=Accelerator)
     accelerator.state = MagicMock(spec=AcceleratorState)
+    accelerator.free_memory.side_effect = lambda *args: [None] * len(args)
     grpo.accelerator = accelerator
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Deepspeed failed to resume from checkpoint"):
+        grpo._load_distributed_actor(None)
+    grpo.clean_up()
+
+
+@pytest.mark.parametrize("config", [None])
+@pytest.mark.parametrize("use_deepspeed_optimizer", [False, True])
+@pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
+@pytest.mark.parametrize("vocab_size", [1000])
+@pytest.mark.parametrize("input_size", [10])
+@pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize("group_size", [5])
+@pytest.mark.parametrize(
+    "use_vllm, pretrained_model_name_or_path",
+    [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
+)
+@pytest.mark.parametrize("batch_size", [1])
+@pytest.mark.parametrize("reduce_memory_peak", [True])
+@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+def test_load_distributed_actor_warning(
+    grpo_factory,
+    model_factory,
+    accelerator_factory,
+    request,
+    batch_size,
+    config,
+    use_deepspeed_optimizer,
+    use_separate_reference_adapter,
+    vocab_size,
+    input_size,
+    max_tokens,
+    group_size,
+    use_vllm,
+    pretrained_model_name_or_path,
+    reduce_memory_peak,
+    micro_batch_size_per_gpu,
+):
+    grpo = grpo_factory(
+        accelerator_factory,
+        model_factory,
+        config,
+        use_deepspeed_optimizer,
+        vocab_size,
+        input_size,
+        max_tokens,
+        group_size,
+        use_separate_reference_adapter,
+        use_vllm,
+        pretrained_model_name_or_path,
+        reduce_memory_peak,
+        micro_batch_size_per_gpu,
+    )
+    with pytest.warns(
+        UserWarning,
+        match="Distributed actor load not supported for non-distributed training.",
+    ):
         grpo._load_distributed_actor(None)
     grpo.clean_up()
 

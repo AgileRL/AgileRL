@@ -13,13 +13,12 @@ from gymnasium import spaces
 from peft import LoraConfig
 
 from agilerl.algorithms.core import EvolvableAlgorithm
-from agilerl.algorithms.grpo import GRPO
 from agilerl.hpo.mutation import MutationError, Mutations
 from agilerl.modules import EvolvableBERT, ModuleDict
 from agilerl.utils.utils import create_population
 from agilerl.wrappers.agent import AsyncAgentsWrapper, RSNorm
 from tests.helper_functions import assert_state_dicts_equal
-from tests.test_algorithms.test_grpo import create_module
+from tests.test_algorithms.test_llms.test_grpo import create_module
 
 # Shared HP dict that can be used by any algorithm
 SHARED_INIT_HP = {

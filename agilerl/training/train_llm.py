@@ -22,7 +22,7 @@ from agilerl.utils.utils import (
 InitDictType = Optional[dict[str, Any]]
 
 
-def finetune_llm(
+def finetune_llm_reasoning(
     pop: PopulationType,
     env: ReasoningGym,
     init_hp: Optional[dict[str, Any]] = None,
@@ -96,21 +96,21 @@ def finetune_llm(
     if mutation is not None:
         assert (
             mutation.architecture_mut == 0
-        ), "Architecture mutation is not allowed for LLM finetuning."
+        ), "Probability of architecture mutation must be 0 for LLM finetuning."
         assert (
             mutation.new_layer_prob == 0
-        ), "New layer mutation is not allowed for LLM finetuning."
+        ), "Probability of new layer mutation must be 0 for LLM finetuning."
         assert (
             mutation.parameters_mut == 0
-        ), "Network parameters mutation is not allowed for LLM finetuning."
+        ), "Probability of network parameters mutation must be 0 for LLM finetuning."
         assert (
             mutation.activation_mut == 0
-        ), "Activation mutation is not allowed for LLM finetuning."
+        ), "Probability of activation mutation must be 0 for LLM finetuning."
 
-    if not isinstance(pop[0].algo, GRPO):
+    if not isinstance(pop[0], GRPO):
         raise ValueError(
-            "The algorithm must be GRPO for preference-based reinforcement learning."
-            f"Got {type(pop[0].algo)} instead."
+            "The algorithm must be GRPO for reasoning-based reinforcement learning."
+            f"Got {type(pop[0])} instead."
         )
 
     if init_hp is None:
@@ -444,21 +444,21 @@ def finetune_llm_preference(
     if mutation is not None:
         assert (
             mutation.architecture_mut == 0
-        ), "Architecture mutation is not allowed for LLM finetuning."
+        ), "Probability of architecture mutation must be 0 for LLM finetuning."
         assert (
             mutation.new_layer_prob == 0
-        ), "New layer mutation is not allowed for LLM finetuning."
+        ), "Probability of new layer mutation must be 0 for LLM finetuning."
         assert (
             mutation.parameters_mut == 0
-        ), "Network parameters mutation is not allowed for LLM finetuning."
+        ), "Probability of network parameters mutation must be 0 for LLM finetuning."
         assert (
             mutation.activation_mut == 0
-        ), "Activation mutation is not allowed for LLM finetuning."
+        ), "Probability of activation mutation must be 0 for LLM finetuning."
 
-    if not isinstance(pop[0].algo, DPO):
+    if not isinstance(pop[0], DPO):
         raise ValueError(
             "The algorithm must be DPO for preference-based reinforcement learning."
-            f"Got {type(pop[0].algo)} instead."
+            f"Got {type(pop[0])} instead."
         )
 
     if init_hp is None:
@@ -551,7 +551,6 @@ def finetune_llm_preference(
         if accelerator is not None:
             accelerator.wait_for_everyone()
 
-        # FIXME Add in tournament and mutation + checkpoint logic here
         if tournament and mutation is not None:
             if (i + 1) % evo_steps == 0:
                 if accelerator is not None:

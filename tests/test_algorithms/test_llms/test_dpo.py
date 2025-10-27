@@ -14,27 +14,14 @@ from peft import LoraConfig
 from transformers import AutoTokenizer
 
 from agilerl.algorithms.core.base import (
-    EvolvableAlgorithm,
-    LLMAlgorithm,
     OptimizerWrapper,
 )
 from agilerl.algorithms.dpo import DPO
 from agilerl.utils.llm_utils import PreferenceGym
-
-from .test_grpo import (
-    DummyConfig,
-    DummyForwardOutput,
-    DummyMLPPreTrainedModel,
-    accelerator_factory,
+from tests.test_algorithms.test_llms.test_grpo import (
     create_module,
-    deepspeed_base_config,
     deepspeed_config_stage_1,
-    deepspeed_config_stage_1_with_scheduler,
     deepspeed_config_stage_2,
-    deepspeed_config_stage_3,
-    deepspeed_env,
-    dist_env,
-    model_factory,
 )
 
 
@@ -224,6 +211,7 @@ def test_init_dpo(
             assert isinstance(dpo.actor.optimizer, DeepSpeedZeroOptimizer)
     else:
         assert isinstance(dpo.actor, torch.nn.Module)
+    dpo.clean_up()
     AcceleratorState._reset_state(True)
 
 
@@ -278,6 +266,8 @@ def test_dpo_get_action(
     )
     with pytest.raises(NotImplementedError):
         dpo.get_action(obs=None)
+    dpo.clean_up()
+    AcceleratorState._reset_state(True)
 
 
 @pytest.mark.parametrize(
@@ -379,6 +369,7 @@ def test_dpo_learn(
 
         else:
             assert torch.equal(param, pre_learn_param)
+    dpo.clean_up()
     AcceleratorState._reset_state(True)
 
 
@@ -460,4 +451,5 @@ def test_dpo_test(
     )
     fitness = dpo.test(env)
     assert isinstance(fitness, float)
+    dpo.clean_up()
     AcceleratorState._reset_state(True)

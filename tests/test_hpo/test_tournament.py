@@ -16,7 +16,7 @@ from tests.helper_functions import (
     generate_multi_agent_discrete_spaces,
     generate_random_box_space,
 )
-from tests.test_algorithms.test_grpo import create_module
+from tests.test_algorithms.test_llms.test_grpo import create_module
 
 # Shared HP dict that can be used by any algorithm
 INIT_HP = {
