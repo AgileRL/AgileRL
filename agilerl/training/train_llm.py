@@ -3,10 +3,10 @@ from typing import Any, Optional
 
 import numpy as np
 import torch.distributed as dist
+import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
-import wandb
 from agilerl.algorithms import DPO, GRPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
