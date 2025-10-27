@@ -358,18 +358,24 @@ def deepspeed_env():
 
 
 @pytest.fixture(autouse=True)
-def cleanup_after_test():
+def cleanup_after_test(request):
+    if not torch.cuda.is_available():
+        yield
+        return
+
+    test_name = request.node.name
+    before = torch.cuda.memory_allocated() / 1e9
     yield
-    # Force cleanup of all GRPO instances
+    cleanup_vllm_instances()
     gc.collect()
     torch.cuda.empty_cache()
     torch.cuda.synchronize()
-
-    # Reset accelerator state
     AcceleratorState._reset_state(True)
+    after = torch.cuda.memory_allocated() / 1e9
+    delta = after - before
 
-    # Clear any remaining vLLM instances
-    cleanup_vllm_instances()
+    if delta > 0.5:  # More than 500MB leaked
+        print(f"\n⚠️  {test_name}: {before:.2f}GB → {after:.2f}GB (Δ {delta:+.2f}GB)")
 
 
 @pytest.fixture(scope="function")
@@ -653,6 +659,7 @@ def test_grpo_move_model_to_vllm(
             assert torch.allclose(
                 param.to(torch.bfloat16), merged_model_ref.state_dict()[name]
             )
+    grpo.clean_up()
 
 
 @pytest.mark.parametrize(
@@ -713,7 +720,7 @@ def test_grpo_move_model_to_vllm_original_module(
     model_ref = grpo.accelerator.unwrap_model(grpo.actor)
     with patch.object(model_ref, "named_parameters", return_value=fake_named_params):
         grpo._move_model_to_vllm()
-    AcceleratorState._reset_state(True)
+    grpo.clean_up()
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -789,7 +796,6 @@ def test_get_action_grpo(
     if grpo.accelerator is None:
         assert not grpo.actor.training
     grpo.clean_up()
-    AcceleratorState._reset_state(True)
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -875,7 +881,6 @@ def test_get_action_grpo_vllm_sleep_mode(
     mock_instance.sleep.assert_called()
     mock_instance.wake_up.assert_called()
     grpo.clean_up()
-    AcceleratorState._reset_state(True)
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -975,6 +980,8 @@ def test_grpo_save_load_checkpoint_vllm(
                     ), f"Attribute {attr} is not equal"
                 else:
                     assert torch.equal(getattr(new_grpo, attr), getattr(grpo, attr))
+    new_grpo.clean_up()
+    grpo.clean_up()
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -1025,7 +1032,7 @@ def test_grpo_test_vllm(
     env = DummyReasoningEnv(vocab_size, input_size, batch_size, device=grpo.device)
     fitnesses = grpo.test(env)
     assert isinstance(fitnesses, torch.Tensor)
-    AcceleratorState._reset_state(True)
+    grpo.clean_up()
 
 
 @pytest.mark.parametrize(
@@ -1126,7 +1133,7 @@ def test_init_grpo_with_accelerator(
         assert grpo.use_vllm
         assert isinstance(grpo.vllm_config, VLLMConfig)
         assert isinstance(grpo.llm, LLM)
-    AcceleratorState._reset_state(True)
+    grpo.clean_up()
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -1191,7 +1198,7 @@ def test_init_grpo_vllm_with_tp_gt_one(
             use_separate_reference_adapter=use_separate_reference_adapter,
         )
         assert grpo.tp_group == "tp_group_calculated"
-    AcceleratorState._reset_state(True)
+    grpo.clean_up()
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -1248,7 +1255,6 @@ def test_init_grpo_vllm_tp_value_error(
             accelerator=accelerator,
             use_separate_reference_adapter=use_separate_reference_adapter,
         )
-    AcceleratorState._reset_state(True)
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -1302,7 +1308,6 @@ def test_init_grpo_vllm_tp_warning(
             accelerator=accelerator,
             use_separate_reference_adapter=use_separate_reference_adapter,
         )
-    AcceleratorState._reset_state(True)
 
 
 @pytest.mark.parametrize("vocab_size", [1000])
@@ -1339,7 +1344,6 @@ def test_init_grpo_scheduler_warning_no_accelerator(
             use_separate_reference_adapter=use_separate_reference_adapter,
             reduce_memory_peak=reduce_memory_peak,
         )
-    AcceleratorState._reset_state(True)
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -1393,7 +1397,6 @@ def test_init_grpo_batch_size_value_error(
             use_separate_reference_adapter=use_separate_reference_adapter,
             reduce_memory_peak=reduce_memory_peak,
         )
-    AcceleratorState._reset_state(True)
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -1450,7 +1453,6 @@ def test_init_grpo_batch_size_grad_accum_error(
             use_separate_reference_adapter=use_separate_reference_adapter,
             reduce_memory_peak=reduce_memory_peak,
         )
-    AcceleratorState._reset_state(True)
 
 
 @pytest.mark.parametrize(
@@ -1526,7 +1528,7 @@ def test_init_grpo_with_no_accelerator(
     assert isinstance(grpo.actor, DummyEvolvable)
     assert isinstance(grpo.optimizer, OptimizerWrapper)
     assert isinstance(grpo.lr_scheduler, SequentialLR), grpo.lr_scheduler
-    AcceleratorState._reset_state(True)
+    grpo.clean_up()
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_3])
@@ -1548,7 +1550,7 @@ def test_init_grpo_zero3_warning(
             high=vocab_size - 1,
             shape=(20,),
         )
-        GRPO(
+        grpo = GRPO(
             observation_space,
             action_space,
             actor_network=create_module(
@@ -1577,9 +1579,7 @@ def test_init_grpo_zero3_warning(
             accelerator=accelerator,
             use_separate_reference_adapter=use_separate_reference_adapter,
         )
-        gc.collect()
-        torch.cuda.empty_cache()
-    AcceleratorState._reset_state(True)
+    grpo.clean_up()
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -1635,7 +1635,7 @@ def test_init_grpo_lr_warning(
         gc.collect()
         torch.cuda.empty_cache()
     assert grpo.lr == 1e-4 if use_deepspeed_optimizer else 0.1
-    AcceleratorState._reset_state(True)
+    grpo.clean_up()
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -1690,7 +1690,6 @@ def test_init_grpo_max_grad_norm_warning(
         )
         gc.collect()
         torch.cuda.empty_cache()
-    AcceleratorState._reset_state(True)
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_1_with_scheduler])
@@ -1743,7 +1742,6 @@ def test_init_grpo_scheduler_warning(
         )
         gc.collect()
         torch.cuda.empty_cache()
-    AcceleratorState._reset_state(True)
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -1809,7 +1807,6 @@ def test_init_grpo_micro_batch_size_per_gpu_value_error(
         )
         gc.collect()
         torch.cuda.empty_cache()
-    AcceleratorState._reset_state(True)
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -1878,7 +1875,6 @@ def test_init_grpo_micro_batch_size_per_gpu_division_error(
     )
     gc.collect()
     torch.cuda.empty_cache()
-    AcceleratorState._reset_state(True)
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -1986,7 +1982,6 @@ def test_get_action_grpo_vllm_multiple_gpus(
         if grpo.accelerator is None:
             assert not grpo.actor.training
     grpo.clean_up()
-    AcceleratorState._reset_state(True)
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -2049,7 +2044,7 @@ def test_calculate_advantage(
     advantages = (rewards - mean_rewards) / (std_rewards + 1e-8)
     advantages = advantages.flatten().unsqueeze(1)
     assert torch.equal(advantages, calculated_advantage)
-    AcceleratorState._reset_state(True)
+    grpo.clean_up()
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -2106,7 +2101,7 @@ def test_calculate_kl_divergence(
     assert isinstance(kl, torch.Tensor)
     assert kl.shape == log_probs.shape
     assert kl.shape == reference_log_probs.shape
-    AcceleratorState._reset_state(True)
+    grpo.clean_up()
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -2166,7 +2161,7 @@ def test_grpo_loss(
     )
     assert loss != 0
     assert kl != 0
-    AcceleratorState._reset_state(True)
+    grpo.clean_up()
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -2175,12 +2170,12 @@ def test_grpo_loss(
 @pytest.mark.parametrize("vocab_size", [1000])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize("group_size", [5])
+@pytest.mark.parametrize("group_size", [6])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path, reduce_memory_peak",
     [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5", True)],
 )
-@pytest.mark.parametrize("batch_size", [4])
+@pytest.mark.parametrize("batch_size", [6])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_learn(
     grpo_factory,
@@ -2255,7 +2250,7 @@ def test_grpo_learn(
 
         else:
             assert torch.equal(param, pre_learn_param)
-    AcceleratorState._reset_state(True)
+    grpo.clean_up()
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -2312,7 +2307,7 @@ def test_get_logprobs(
 
     log_probs = grpo._get_logprobs(ids=ids, batch_size=1)
     assert log_probs.shape == (ids.shape[0], ids.shape[1] - 1)
-    AcceleratorState._reset_state(True)
+    grpo.clean_up()
 
 
 @pytest.mark.parametrize("config", [None])
@@ -2365,6 +2360,7 @@ def test_get_backward_pass_with_scheduler(
     )
     loss = grpo.actor.forward(ids).logits.mean()
     grpo._backward_pass(loss)
+    grpo.clean_up()
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -2434,8 +2430,8 @@ def test_grpo_value_error_with_nan_loss(
         ValueError
     ) as value_error:
         grpo.learn((completions, action_masks, rewards))
-
     assert "Loss is not finite" in str(value_error.value)
+    grpo.clean_up()
 
 
 def test_grpo_load():
@@ -2541,6 +2537,8 @@ def test_grpo_save_load_checkpoint(
                     ), f"Attribute {attr} is not equal"
                 else:
                     assert torch.equal(getattr(new_grpo, attr), getattr(grpo, attr))
+    grpo.clean_up()
+    new_grpo.clean_up()
 
 
 @pytest.mark.parametrize("config", [None])
@@ -2596,7 +2594,7 @@ def test_save_load_distributed_actor_no_accelerator(
 
     with pytest.warns(UserWarning):
         grpo._load_distributed_actor(checkpoint_path)
-    AcceleratorState._reset_state(True)
+    grpo.clean_up()
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2, deepspeed_config_stage_1])
@@ -2710,7 +2708,8 @@ def test_grpo_save_load_distributed_actor(
         if key == "loss_scaler":
             continue
         assert str(new_opt.state_dict()[key]) == str(grpo_optim_state_dict[key])
-    AcceleratorState._reset_state(True)
+    grpo.clean_up()
+    new_grpo.clean_up()
 
 
 @pytest.mark.skip(
@@ -2826,7 +2825,8 @@ def test_grpo_save_load_distributed_actor_vllm(
         if key == "loss_scaler":
             continue
         assert str(new_opt.state_dict()[key]) == str(grpo_optim_state_dict[key])
-    AcceleratorState._reset_state(True)
+    grpo.clean_up()
+    new_grpo.clean_up()
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2, deepspeed_config_stage_1])
@@ -2926,9 +2926,8 @@ def test_grpo_clone_with_accelerator(
     assert new_grpo.wrap == grpo.wrap
     assert new_grpo.device == grpo.device
     assert new_grpo.fitness == grpo.fitness
-    AcceleratorState._reset_state(True)
-    gc.collect()
-    torch.cuda.empty_cache()
+    grpo.clean_up()
+    new_grpo.clean_up()
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -3029,9 +3028,8 @@ def test_grpo_clone_with_accelerator_vllm(
     assert new_grpo.device == grpo.device
     assert new_grpo.fitness == grpo.fitness
     assert isinstance(new_grpo.llm, DummyVLLM)
-    AcceleratorState._reset_state(True)
-    gc.collect()
-    torch.cuda.empty_cache()
+    grpo.clean_up()
+    new_grpo.clean_up()
 
 
 @pytest.mark.parametrize(
@@ -3085,7 +3083,7 @@ def test_grpo_test(
     env = DummyReasoningEnv(vocab_size, input_size, batch_size, device=grpo.device)
     fitnesses = grpo.test(env)
     assert isinstance(fitnesses, torch.Tensor)
-    AcceleratorState._reset_state(True)
+    grpo.clean_up()
 
 
 @pytest.mark.parametrize("vocab_size", [1000])
@@ -3256,6 +3254,7 @@ def test_grpo_preprocess_observation(
         orig_obs := torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
     )
     assert torch.equal(obs, orig_obs)
+    grpo.clean_up()
 
 
 @pytest.mark.parametrize("config", [None])
@@ -3310,6 +3309,7 @@ def test_load_distributed_actor_warning(
     grpo.accelerator = accelerator
     with pytest.raises(ValueError):
         grpo._load_distributed_actor(None)
+    grpo.clean_up()
 
 
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
@@ -3354,7 +3354,6 @@ def test_init_grpo_lora_config_warning(
             )
         gc.collect()
         torch.cuda.empty_cache()
-    AcceleratorState._reset_state(True)
 
 
 @pytest.mark.parametrize(
@@ -3437,6 +3436,7 @@ def test_grpo_update_lr(
             grpo.accelerator.deepspeed_plugin.deepspeed_config["scheduler"]["params"][
                 "warmup_proportion"
             ] = 0.05
+    grpo.clean_up()
 
 
 @pytest.mark.parametrize(
@@ -3511,6 +3511,7 @@ def test_set_reference_policy(
     ).logits
     assert torch.allclose(output_before, output_after)
     assert grpo.reference_update_tracker == reference_update_tracker
+    grpo.clean_up()
 
 
 @pytest.mark.parametrize(
@@ -3605,7 +3606,7 @@ def test_grpo_ref_actor_is_same_as_actor_after_learning_reference_adapater(
     assert not check_ref_adapater_is_same_as_actor_after_learning(grpo)
     grpo.set_reference_policy(reference_update_tracker=1)
     assert check_ref_adapater_is_same_as_actor_after_learning(grpo)
-    AcceleratorState._reset_state(True)
+    grpo.clean_up()
 
 
 @pytest.mark.parametrize(
@@ -3680,7 +3681,7 @@ def test_grpo_set_reference_policy_with_wrong_adapter_name(
         )
         grpo.actor.add_adapter("wrong_adapter", peft_config=lora_config)
         grpo.set_reference_policy(reference_update_tracker=1)
-    AcceleratorState._reset_state(True)
+    grpo.clean_up()
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -3735,6 +3736,7 @@ def test_grpo_exception_on_recompile(
     )
     with pytest.raises(NotImplementedError):
         grpo.recompile()
+    grpo.clean_up()
 
 
 def check_ref_adapater_is_same_as_actor_after_learning(grpo):

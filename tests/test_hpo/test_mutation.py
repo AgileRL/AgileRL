@@ -76,6 +76,15 @@ def create_bert_networks_multi_agent(device):
     )
 
 
+@pytest.fixture(autouse=True)
+def cleanup_after_test():
+    yield
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+    AcceleratorState._reset_state(True)
+
+
 @pytest.fixture(scope="function")
 def bert_network(device):
     return create_bert_network(device)
@@ -1512,6 +1521,13 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
             for param_group in agent.optimizer.optimizer.param_groups:
                 assert param_group["lr"] == agent.lr
 
+        for mut_agent, old_agent in zip(mutated_population, new_population):
+            mut_agent.clean_up()
+            old_agent.clean_up()
+        AcceleratorState._reset_state(True)
+        gc.collect()
+        torch.cuda.empty_cache()
+
 
 @pytest.mark.parametrize("mutation_type", ["architecture", "parameters", "activation"])
 @pytest.mark.parametrize("algo", ["GRPO", "DPO"])
@@ -1584,6 +1600,10 @@ def test_mutations_warns_on_llm_algorithm(
         assert old.mut is None
         assert individual.mut == "None"
 
+    for mut_agent, old_agent in zip(mutated_population, new_population):
+        mut_agent.clean_up()
+        old_agent.clean_up()
+    AcceleratorState._reset_state(True)
     del mutations
     del population
     del mutated_population
