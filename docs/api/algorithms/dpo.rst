@@ -1,6 +1,6 @@
 .. _dpo:
 
-Direct Policy Optimization (DPO)
+Direct Preference Optimization (DPO)
 ================================
 
 `DPO <https://arxiv.org/pdf/2305.18290>`_ (Direct Preference Optimization) is an elegant simplification of :ref:`RLHF<_rlhf>` (Reinforcement Learning from Human Feedback)
@@ -9,19 +9,24 @@ that makes preference learning more computationally efficient, especially for la
 The two key innovations are:
 
 * **Eliminating the reward model:** Instead of training a separate reward model to score outputs (which requires additional compute and memory), DPO directly optimizes the policy using preference data. It reparameterizes the reward function implicitly through the policy itself, deriving a closed-form solution for the optimal policy.
-* **Preference-based optimization:** DPO treats the preference learning problem as a classification task over pairs of responses. It maximizes the likelihood that preferred responses are ranked higher than rejected ones under the current policy, relative to a reference policy. This approach eliminates the need for sampling and reward model queries during training.
+* **Preference-based optimization:** DPO t reats the preference learning problem as a classification task over pairs of responses. It maximizes the likelihood that preferred responses are ranked higher than rejected ones under the current policy, relative to a reference policy. This approach eliminates the need for sampling and reward model queries during training.
 
 These changes are particularly valuable for LLM training because they reduce computational overhead by removing the
 need for a separate reward model and RL training loop, provide more stable training dynamics by avoiding the complexities
 of reinforcement learning, and they simplify implementation while achieving comparable or better performance than traditional RLHF.
 
 Example
-=======
+-------
 
 .. code-block:: python
 
   from agilerl.algorithms import DPO
   from agilerl.utils.llm_utils import PreferenceGym
+  from accelerate import Accelerator
+  from datasets import load_dataset
+  from peft import get_peft_model
+  from transformers import AutoModelForCausalLM, AutoTokenizer
+  import torch
 
   # Instantiate the model and the associated tokenizer
   model = AutoModelForCausalLM.from_pretrained(
@@ -45,7 +50,7 @@ Example
     data_batch_size_per_gpu=16,
     accelerator=accelerator,
   )
-  
+
   # Instantiate the agent
   agent = DPO(
     env.observation_space,
@@ -73,7 +78,7 @@ To train a DPO agent on a single preference gym environment, use the :ref:`finet
   from agilerl.training.train_llm import finetune_llm_preference
 
   finetune_llm_preference(
-    [agent], å
+    [agent],
     env,
     num_epochs=1,
     checkpoint_steps=250,

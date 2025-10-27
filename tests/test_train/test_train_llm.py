@@ -4,6 +4,7 @@ import pytest
 import torch
 from accelerate import Accelerator
 
+from agilerl.algorithms import DPO, GRPO
 from agilerl.training.train_llm import (
     finetune_llm,
     finetune_llm_preference,
@@ -660,4 +661,38 @@ def test_finetune_llm_preference_break_on_num_epochs():
             accelerator=None,
             num_epochs=2,
             checkpoint_steps=3,
+        )
+
+
+def test_finetune_llm_preference_value_error_if_algo_not_dpo():
+    # Create mock agent
+    mock_agent = MagicMock(spec=DPO)
+    mock_agent.algo = "DPO"
+
+    with pytest.raises(
+        ValueError,
+        match="The algorithm must be DPO for preference-based reinforcement learning.",
+    ):
+        finetune_llm_preference(
+            pop=[mock_agent],
+            env=MagicMock(),
+            evaluation_interval=2,
+            accelerator=None,
+        )
+
+
+def test_finetune_llm_value_error_if_algo_not_grpo():
+    # Create mock agent
+    mock_agent = MagicMock(spec=GRPO)
+    mock_agent.algo = "DPO"
+
+    with pytest.raises(
+        ValueError,
+        match="The algorithm must be GRPO for preference-based reinforcement learning.",
+    ):
+        finetune_llm(
+            pop=[mock_agent],
+            env=MagicMock(),
+            evaluation_interval=2,
+            accelerator=None,
         )

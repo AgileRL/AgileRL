@@ -5,7 +5,7 @@ LLM Finetuning
 
 Reinforcement learning (RL) has emerged as a powerful technique for improving reasoning capabilities in Large Language Models.
 Reinforcement learning has been used in LLM post-training for several years now, initially through techniques like RLHF (Reinforcement Learning from Human Feedback)
-which leverages human preferences to guide LLM responses, RLAIF (Reinforcement Learning from AI Feedback) which leverages AI feedback to guide LLM responses, and 
+which leverages human preferences to guide LLM responses, RLAIF (Reinforcement Learning from AI Feedback) which leverages AI feedback to guide LLM responses, and
 more recently through RLVR (Reinforcement Learning with Verifiable Rewards) a technique that uses ground truth answers to score LLM responses and leads to the
 development of reasoning capabilities. Models like DeepSeek-R1 and OpenAI's o1 exemplify this approach, demonstrating how RL can be used to develop LLMs with superior
 reasoning abilities without relying on traditional supervised fine-tuning. Through training with reinforcement learning, models
@@ -20,11 +20,7 @@ develop *agency* and can be described as **agents**.
    * - :ref:`GRPO<grpo>`
      - :ref:`LLM reasoning with GRPO<grpo_tutorial>`
    * - :ref:`DPO<dpo>`
-     - :ref:`LLM reasoning with DPO<dpo_tutorial>`
-
-.. _rl_for_preference_learning:
-
-
+     - --
 
 .. _rl_for_reasoning:
 

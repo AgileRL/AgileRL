@@ -7,6 +7,7 @@ from accelerate import Accelerator
 from tqdm import trange
 
 import wandb
+from agilerl.algorithms import DPO, GRPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.typing import PopulationType
@@ -41,12 +42,12 @@ def finetune_llm(
     num_epochs: Optional[int] = None,
 ):
     """
-    Finetunes a population of GRPOs on a HuggingFaceGym environment.
+    Finetunes a population of GRPOs on a ReasoningGym environment.
 
     :param pop: Population of GRPOs to finetune
     :type pop: list[GRPO]
-    :param env: HuggingFaceGym environment to finetune on
-    :type env: HuggingFaceGym
+    :param env: ReasoningGym environment to finetune on
+    :type env: ReasoningGym
     :param init_hp: Initial hyperparameters for the population
     :type init_hp: dict, optional
     :param save_elite: Whether to save the elite model, defaults to None
@@ -105,6 +106,12 @@ def finetune_llm(
         assert (
             mutation.activation_mut == 0
         ), "Activation mutation is not allowed for LLM finetuning."
+
+    if not isinstance(pop[0].algo, GRPO):
+        raise ValueError(
+            "The algorithm must be GRPO for preference-based reinforcement learning."
+            f"Got {type(pop[0].algo)} instead."
+        )
 
     if init_hp is None:
         init_hp = {}
@@ -447,6 +454,12 @@ def finetune_llm_preference(
         assert (
             mutation.activation_mut == 0
         ), "Activation mutation is not allowed for LLM finetuning."
+
+    if not isinstance(pop[0].algo, DPO):
+        raise ValueError(
+            "The algorithm must be DPO for preference-based reinforcement learning."
+            f"Got {type(pop[0].algo)} instead."
+        )
 
     if init_hp is None:
         init_hp = {}
