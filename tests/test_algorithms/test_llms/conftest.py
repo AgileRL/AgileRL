@@ -19,6 +19,7 @@ dist_env = dict(
     LOCAL_RANK="0",
     WORLD_SIZE="1",
     PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True",
+    CUDA_VISIBLE_DEVICES="0",
 )
 
 
