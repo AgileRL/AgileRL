@@ -792,6 +792,7 @@ def test_grpo_save_load_checkpoint_vllm(
             vllm_config=VLLMConfig(gpu_memory_utilization=0.05, max_num_seqs=1),
             accelerator=accelerator,
             use_separate_reference_adapter=use_separate_reference_adapter,
+            max_output_tokens=max_tokens,
         )
         new_grpo.load_checkpoint(tmpdir)
 
@@ -1054,6 +1055,7 @@ def test_init_grpo_vllm_with_tp_gt_one(
             ),
             accelerator=accelerator,
             use_separate_reference_adapter=use_separate_reference_adapter,
+            max_output_tokens=max_tokens,
         )
         assert grpo.tp_group == "tp_group_calculated"
     grpo.clean_up()
@@ -1128,6 +1130,7 @@ def test_init_grpo_vllm_tp_value_error(
             ),
             accelerator=accelerator,
             use_separate_reference_adapter=use_separate_reference_adapter,
+            max_output_tokens=max_tokens,
         )
 
 
@@ -1164,6 +1167,7 @@ def test_init_grpo_scheduler_warning_no_accelerator(
             accelerator=None,
             use_separate_reference_adapter=use_separate_reference_adapter,
             reduce_memory_peak=reduce_memory_peak,
+            max_output_tokens=20,
         )
 
 
@@ -1231,6 +1235,59 @@ def test_init_grpo_batch_size_value_error(
     "use_vllm, pretrained_model_name_or_path",
     [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
 )
+@pytest.mark.parametrize("reduce_memory_peak", [True, False])
+@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+def test_init_grpo_max_model_len_and_max_output_tokens_none_error(
+    accelerator_factory,
+    model_factory,
+    config,
+    use_deepspeed_optimizer,
+    vocab_size,
+    input_size,
+    max_tokens,
+    group_size,
+    use_separate_reference_adapter,
+    use_vllm,
+    pretrained_model_name_or_path,
+    reduce_memory_peak,
+    micro_batch_size_per_gpu,
+):
+    accelerator = accelerator_factory(use_deepspeed_optimizer, config)
+    with pytest.raises(
+        ValueError, match="Either max_output_tokens or max_model_len must be specified"
+    ):
+        GRPO(
+            gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
+            gym.spaces.Box(low=0, high=vocab_size - 1),
+            actor_network=model_factory(pretrained_model_name_or_path),
+            pad_token_id=vocab_size - 1,
+            batch_size=17,
+            pad_token="<pad>",
+            accelerator=accelerator,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            group_size=group_size,
+            cosine_lr_schedule_config=CosineLRScheduleConfig(
+                num_epochs=10, warmup_proportion=0.05
+            ),
+            use_vllm=use_vllm,
+            use_separate_reference_adapter=use_separate_reference_adapter,
+            reduce_memory_peak=reduce_memory_peak,
+            max_output_tokens=None,
+            max_model_len=None,
+        )
+
+
+@pytest.mark.parametrize("config", [deepspeed_config_stage_2])
+@pytest.mark.parametrize("use_deepspeed_optimizer", [False])
+@pytest.mark.parametrize("vocab_size", [1000])
+@pytest.mark.parametrize("input_size", [10])
+@pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize("group_size", [5])
+@pytest.mark.parametrize("use_separate_reference_adapter", [False])
+@pytest.mark.parametrize(
+    "use_vllm, pretrained_model_name_or_path",
+    [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
+)
 @pytest.mark.parametrize("reduce_memory_peak", [False])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_init_grpo_batch_size_grad_accum_error(
@@ -1273,6 +1330,7 @@ def test_init_grpo_batch_size_grad_accum_error(
             accelerator=accelerator,
             use_separate_reference_adapter=use_separate_reference_adapter,
             reduce_memory_peak=reduce_memory_peak,
+            max_output_tokens=max_tokens,
         )
 
 
@@ -1399,6 +1457,7 @@ def test_init_grpo_zero3_warning(
             ),
             accelerator=accelerator,
             use_separate_reference_adapter=use_separate_reference_adapter,
+            max_output_tokens=max_tokens,
         )
     grpo.clean_up()
 
@@ -1452,6 +1511,7 @@ def test_init_grpo_lr_warning(
             max_grad_norm=0.1,
             accelerator=accelerator,
             use_separate_reference_adapter=use_separate_reference_adapter,
+            max_output_tokens=max_tokens,
         )
         gc.collect()
         torch.cuda.empty_cache()

@@ -119,7 +119,7 @@ class GRPO(LLMAlgorithm):
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
         reduce_memory_peak: bool = False,
-        max_output_tokens: int | None = None,
+        max_output_tokens: int | None = 1024,
         min_output_tokens: Optional[int] = None,
         max_model_len: Optional[int] = None,
         lora_config: Optional[LoraConfig] = None,
@@ -192,12 +192,15 @@ class GRPO(LLMAlgorithm):
         self.top_p = top_p
         self.top_k = top_k
         self.min_p = min_p
+        if max_output_tokens is None and max_model_len is None:
+            raise ValueError(
+                "Either max_output_tokens or max_model_len must be specified"
+            )
         self.max_output_tokens = max_output_tokens
         self.min_output_tokens = min_output_tokens
         self.max_model_len = (
             max_model_len if max_model_len is not None else max_output_tokens + 512
         )
-
         self.generation_config = GenerationConfig(
             do_sample=True,
             temperature=temperature,
