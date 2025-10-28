@@ -18,7 +18,29 @@ from agilerl.typing import PreferencePrompts, ReasoningPrompts
 
 
 class HuggingFaceGym(gym.Env, ABC):
-    """Abstract base class for HuggingFace Gymnasium environments."""
+    """Abstract base class for HuggingFace Gymnasium environments.
+
+    :param train_dataset: Train dataset to be loaded from HuggingFace datasets.
+    :type train_dataset: Dataset
+    :param test_dataset: Test dataset to be loaded from HuggingFace datasets.
+    :type test_dataset: Dataset
+    :param tokenizer: Tokenizer to be used for encoding and decoding the promåpts.
+    :type tokenizer: AutoTokenizer
+    :param custom_collate_fn: Custom collate function to be used for creating the batch, defaults to None
+    :type custom_collate_fn: Callable, optional
+    :param apply_chat_template_fn: Function to apply the chat template to the batch of questions and answers, defaults to None
+    :type apply_chat_template_fn: Callable, optional
+    :param data_batch_size_per_gpu: DataLoader batch size, defaults to 8
+    :type data_batch_size_per_gpu: int, optional
+    :param max_context_length: Maximum context length, defaults to None
+    :type max_context_length: int | None, optional
+    :param min_completion_length: Minimum completion length, defaults to None
+    :type min_completion_length: int, optional
+    :param accelerator: Accelerator to be used for training, defaults to None
+    :type accelerator: Accelerator, optional
+    :param seed: Seed for the random number generator, defaults to 42
+    :type seed: int, optional
+    """
 
     def __init__(
         self,
@@ -32,30 +54,47 @@ class HuggingFaceGym(gym.Env, ABC):
             Callable[[str, str, AutoTokenizer], BatchEncoding] | None
         ) = None,
         data_batch_size_per_gpu: int = 8,
+        max_context_length: int | None = None,
+        min_completion_length: int = None,
         accelerator: Accelerator | None = None,
+        seed: int = 42,
     ) -> None:
 
         self.name = train_dataset.info.dataset_name
         self.tokenizer = tokenizer
         self.data_batch_size_per_gpu = data_batch_size_per_gpu
         self.accelerator = accelerator
+        self.min_completion_length = (
+            0 if min_completion_length is None else min_completion_length
+        )
+        self.max_context_length = max_context_length
+        self.seed = seed
+        generator = torch.Generator().manual_seed(seed)
         if custom_collate_fn is None:
             collate_kwargs = {"tokenizer": tokenizer}
             if apply_chat_template_fn is not None:
                 collate_kwargs["apply_chat_template_fn"] = apply_chat_template_fn
             custom_collate_fn = self.create_collate_fn(**collate_kwargs)
         dataloader_kwargs = {"collate_fn": custom_collate_fn}
+        train_dataset = self._filter_dataset_by_max_context_length(
+            train_dataset, "train dataset"
+        )
+        test_dataset = self._filter_dataset_by_max_context_length(
+            test_dataset, "test dataset"
+        )
         self.train_dataloader = DataLoader(
             train_dataset,
             batch_size=data_batch_size_per_gpu,
             shuffle=True,
             **dataloader_kwargs,
+            generator=generator,
         )
         self.test_dataloader = DataLoader(
             test_dataset,
             batch_size=data_batch_size_per_gpu,
             shuffle=False,
             **dataloader_kwargs,
+            generator=generator,
         )
         self.dataset_size = {
             "train": len(train_dataset),
@@ -143,6 +182,37 @@ class HuggingFaceGym(gym.Env, ABC):
             else self.train_dataloader_iter
         )
 
+    def _filter_dataset_by_max_context_length(
+        self,
+        dataset: Dataset,
+        dataset_type: str | None = None,
+    ) -> Dataset:
+        """
+        Filter the dataset by the max context length.
+
+        :param dataset: Dataset to be filtered.
+        :type dataset: Dataset
+        :return: Filtered train and test datasets.
+        :rtype: tuple[Dataset, Dataset]
+        """
+        dataset_type = "dataset" if dataset_type is None else dataset_type
+        if self.max_context_length is None:
+            return dataset
+        filter_keyword = "prompt" if "prompt" in dataset.features.keys() else "question"
+        filtered_dataset = dataset.filter(
+            lambda x: len(self.tokenizer.encode(x[filter_keyword]))
+            <= self.max_context_length - self.min_completion_length
+        )
+        if len(filtered_dataset) == 0:
+            raise ValueError(
+                f"No samples left in the {dataset_type} after filtering by the max context length constraint, use a larger max context length."
+            )
+        if (dataset_difference := len(dataset) - len(filtered_dataset)) > 0:
+            warnings.warn(
+                f"{dataset_difference} samples were filtered out of the {dataset_type} due to the max context length constraint."
+            )
+        return filtered_dataset
+
 
 class ReasoningGym(HuggingFaceGym):
     """Class to convert HuggingFace datasets into Gymnasium style environment.
@@ -161,6 +231,12 @@ class ReasoningGym(HuggingFaceGym):
     :type custom_collate_fn: Callable, optional
     :param accelerator: Accelerator to be used for training, defaults to None
     :type accelerator: Accelerator, optional
+    :param max_context_length: Maximum context length, defaults to None
+    :type max_context_length: int | None, optional
+    :param min_completion_length: Minimum completion length, defaults to 128
+    :type min_completion_length: int, optional
+    :param seed: Seed for the random number generator, defaults to 42
+    :type seed: int, optional
     """
 
     def __init__(
@@ -174,6 +250,8 @@ class ReasoningGym(HuggingFaceGym):
         custom_collate_fn: Callable | None = None,
         accelerator: Accelerator | None = None,
         return_raw_completions: bool = False,
+        max_context_length: int | None = None,
+        seed: int = 42,
     ) -> None:
         assert {"question", "answer"}.issubset(
             set(train_dataset.features.keys())
@@ -183,13 +261,16 @@ class ReasoningGym(HuggingFaceGym):
         ), "Train dataset must contain 'question' and 'answer' features."
 
         super().__init__(
-            train_dataset,
-            test_dataset,
-            tokenizer,
-            custom_collate_fn,
-            apply_chat_template_fn,
-            data_batch_size_per_gpu,
-            accelerator,
+            train_dataset=train_dataset,
+            test_dataset=test_dataset,
+            tokenizer=tokenizer,
+            custom_collate_fn=custom_collate_fn,
+            apply_chat_template_fn=apply_chat_template_fn,
+            data_batch_size_per_gpu=data_batch_size_per_gpu,
+            max_context_length=max_context_length,
+            min_completion_length=0,
+            accelerator=accelerator,
+            seed=seed,
         )
         self.reward_fn = reward_fn
         self.return_raw_completions = return_raw_completions
@@ -349,6 +430,10 @@ class PreferenceGym(HuggingFaceGym):
     :type custom_collate_fn: Callable, optional
     :param accelerator: Accelerator to be used for training, defaults to None
     :type accelerator: Accelerator, optional
+    :param max_context_length: Maximum context length, defaults to None
+    :type max_context_length: int | None, optional
+    :param min_completion_length: Minimum completion length, defaults to 128
+    :type min_completion_length: int, optional
     """
 
     def __init__(
@@ -358,6 +443,9 @@ class PreferenceGym(HuggingFaceGym):
         tokenizer: AutoTokenizer,
         data_batch_size_per_gpu: int = 8,
         accelerator: Accelerator | None = None,
+        max_context_length: int | None = None,
+        min_completion_length: int | None = None,
+        seed: int = 42,
     ):
         super().__init__(
             train_dataset=train_dataset,
@@ -366,7 +454,10 @@ class PreferenceGym(HuggingFaceGym):
             custom_collate_fn=None,
             apply_chat_template_fn=None,
             data_batch_size_per_gpu=data_batch_size_per_gpu,
+            max_context_length=max_context_length,
+            min_completion_length=min_completion_length,
             accelerator=accelerator,
+            seed=seed,
         )
         assert {"prompt", "chosen", "rejected"}.issubset(
             set(train_dataset.features.keys())
@@ -412,6 +503,7 @@ class PreferenceGym(HuggingFaceGym):
     def create_collate_fn(
         self,
         tokenizer: AutoTokenizer,
+        max_context_length: int | None = None,
     ) -> Callable[[list[dict[str, Any]]], dict[str, Any]]:
         """
         Create a collate function that applies the chat template to the batch of questions and answers.
@@ -444,6 +536,12 @@ class PreferenceGym(HuggingFaceGym):
             max_len = max(
                 max(len(ids) for ids in chosen_enc["input_ids"]),
                 max(len(ids) for ids in rejected_enc["input_ids"]),
+            )
+
+            max_len = (
+                min(max_len, self.max_context_length)
+                if self.max_context_length is not None
+                else max_len
             )
 
             # Now pad both encodings to the same target length

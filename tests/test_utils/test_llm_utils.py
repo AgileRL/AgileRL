@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 from accelerate import Accelerator
 from accelerate.state import AcceleratorState
+from datasets import Dataset as Datasets
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer
 
@@ -770,3 +771,70 @@ def test_get_state_dict():
     for key, value in state_dict.items():
         assert isinstance(key, str)
         assert isinstance(value, torch.Tensor)
+
+
+def test_preference_gym_prompt_longer_than_max_context_length_dataset():
+    train_dataset = Datasets.from_dict(
+        {
+            "prompt": ["This is a prompt that is longer than the max context length."],
+            "chosen": ["This is an answer."],
+            "rejected": ["This is an answer."],
+        }
+    )
+    test_dataset = Datasets.from_dict(
+        {
+            "prompt": ["This is a normal length prompt"],
+            "chosen": ["This is an answer."],
+            "rejected": ["This is an answer."],
+        }
+    )
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    data_batch_size = 8
+    with pytest.raises(
+        ValueError,
+        match="No samples left in the train dataset after filtering by the max context length constraint, use a larger max context length.",
+    ):
+        PreferenceGym(
+            train_dataset=train_dataset,
+            test_dataset=test_dataset,
+            tokenizer=tokenizer,
+            data_batch_size_per_gpu=data_batch_size,
+            max_context_length=5,
+            min_completion_length=1,
+        )
+
+
+def test_preference_gym_prompt_longer_than_max_context_length_dataset():
+    train_dataset = Datasets.from_dict(
+        {
+            "prompt": [
+                "This is a prompt that is longer than the max context length. This prompt really is a lot longer than the other one.",
+                "This is a prompt that is shorter.",
+            ],
+            "chosen": ["This is an answer.", "This is an answer."],
+            "rejected": ["This is an answer.", "This is an answer."],
+        }
+    )
+    test_dataset = Datasets.from_dict(
+        {
+            "prompt": ["This is a normal length prompt"],
+            "chosen": ["This is an answer."],
+            "rejected": ["This is an answer."],
+        }
+    )
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    data_batch_size = 8
+    with pytest.warns(
+        UserWarning,
+        match=r"1 samples were filtered out of the train dataset due to the max context length constraint.",
+    ):
+        env = PreferenceGym(
+            train_dataset=train_dataset,
+            test_dataset=test_dataset,
+            tokenizer=tokenizer,
+            data_batch_size_per_gpu=data_batch_size,
+            max_context_length=10,
+            min_completion_length=1,
+        )
+    assert len(env.train_dataloader) == 1
+    assert len(env.test_dataloader) == 1
