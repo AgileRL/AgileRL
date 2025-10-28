@@ -119,7 +119,7 @@ class GRPO(LLMAlgorithm):
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
         reduce_memory_peak: bool = False,
-        max_output_tokens: int = 1024,
+        max_output_tokens: int | None = None,
         min_output_tokens: Optional[int] = None,
         max_model_len: Optional[int] = None,
         lora_config: Optional[LoraConfig] = None,

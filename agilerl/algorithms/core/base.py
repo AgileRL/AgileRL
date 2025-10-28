@@ -2601,7 +2601,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.llm.reset_prefix_cache()
 
     def _generate_with_vllm_colocate(
-        self, prompts: list[tuple[str, int]], group_size: int
+        self, prompts: list[dict[str, int]], group_size: int
     ) -> list[torch.Tensor]:
 
         # I need to make the following happen
@@ -2617,6 +2617,18 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             for text in prompts_text
         ]
 
+        # max_output_tokens now acts as a global
+        max_token_cap = (
+            self.max_output_tokens
+            if self.max_output_tokens is not None
+            else self.max_model_len
+        )
+
+        max_output_tokens = [
+            min(max_token_cap, self.max_model_len - len(prompt_id))
+            for prompt_id in prompts_ids
+        ]
+
         generation_kwargs = {
             "n": 1,  # vLLM on each GPU generates only 1 in colocate mode
             "repetition_penalty": self.repetition_penalty,
@@ -2624,12 +2636,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             "top_p": self.top_p,
             "top_k": -1 if self.top_k is None else self.top_k,
             "min_p": 0.0 if self.min_p is None else self.min_p,
-            "max_tokens": self.max_output_tokens,
             "min_tokens": (
                 0 if self.min_output_tokens is None else self.min_output_tokens
             ),
         }
-        sampling_params = SamplingParams(**generation_kwargs)
+        sampling_params = [
+            SamplingParams(**generation_kwargs, max_tokens=max_output_token)
+            for max_output_token in max_output_tokens
+        ]
 
         if self.vllm_config.tensor_parallel_size > 1:
 
