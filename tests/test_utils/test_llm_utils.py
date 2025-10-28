@@ -773,7 +773,7 @@ def test_get_state_dict():
         assert isinstance(value, torch.Tensor)
 
 
-def test_preference_gym_prompt_longer_than_max_context_length_dataset():
+def test_preference_gym_max_context_length_error():
     train_dataset = Datasets.from_dict(
         {
             "prompt": ["This is a prompt that is longer than the max context length."],
@@ -804,7 +804,7 @@ def test_preference_gym_prompt_longer_than_max_context_length_dataset():
         )
 
 
-def test_preference_gym_prompt_longer_than_max_context_length_dataset():
+def test_preference_gym_max_context_length_warning():
     train_dataset = Datasets.from_dict(
         {
             "prompt": [
@@ -840,7 +840,7 @@ def test_preference_gym_prompt_longer_than_max_context_length_dataset():
     assert len(env.test_dataloader) == 1
 
 
-def test_reasoning_gym_prompt_longer_than_max_context_length_dataset():
+def test_reasoning_gym_max_context_length_warning():
     train_dataset = Datasets.from_dict(
         {
             "question": [
