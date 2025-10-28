@@ -838,3 +838,38 @@ def test_preference_gym_prompt_longer_than_max_context_length_dataset():
         )
     assert len(env.train_dataloader) == 1
     assert len(env.test_dataloader) == 1
+
+
+def test_reasoning_gym_prompt_longer_than_max_context_length_dataset():
+    train_dataset = Datasets.from_dict(
+        {
+            "question": [
+                "This is a prompt that is longer than the max context length. This prompt really is a lot longer than the other one.",
+                "This is a prompt that is shorter.",
+            ],
+            "answer": ["This is an answer.", "This is an answer."],
+        }
+    )
+    test_dataset = Datasets.from_dict(
+        {
+            "question": ["This is a normal length prompt"],
+            "answer": ["This is an answer."],
+        }
+    )
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    data_batch_size = 8
+    with pytest.warns(
+        UserWarning,
+        match=r"1 samples were filtered out of the train dataset due to the max context length constraint.",
+    ):
+        env = ReasoningGym(
+            train_dataset=train_dataset,
+            test_dataset=test_dataset,
+            tokenizer=tokenizer,
+            reward_fn=dummy_reward_fn,
+            apply_chat_template_fn=dummy_chat_template_fn,
+            data_batch_size_per_gpu=data_batch_size,
+            max_context_length=10,
+        )
+    assert len(env.train_dataloader) == 1
+    assert len(env.test_dataloader) == 1
