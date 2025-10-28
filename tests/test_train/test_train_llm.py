@@ -15,7 +15,7 @@ from agilerl.training.train_llm import (
 def test_finetune_llm_reasoning_basic_training_loop(use_accelerator):
     """Test the basic training loop in finetune_llm_reasoning."""
     # Create mock agent
-    mock_agent = MagicMock()
+    mock_agent = MagicMock(spec=GRPO)
     mock_agent.fitness = [0.0]
     mock_agent.local_rank = "0"  # Main process
     mock_agent.get_action.return_value = (
@@ -24,6 +24,11 @@ def test_finetune_llm_reasoning_basic_training_loop(use_accelerator):
     )
     mock_agent.learn.return_value = (0.5, 0.2)
     mock_agent.test.return_value = torch.tensor([0.8])
+    mock_agent.algo = "GRPO"
+    mock_agent.batch_size = 32
+    mock_agent.steps = [10]
+    mock_agent.scores = [0.0]
+    mock_agent.pretrained_model_name_or_path = "Qwen/Qwen2.5-0.5B"
 
     # Create mock environment - use MagicMock for special methods
     mock_env = MagicMock()
@@ -64,7 +69,7 @@ def test_finetune_llm_reasoning_basic_training_loop(use_accelerator):
 def test_finetune_llm_reasoning_with_wandb_and_checkpoints(use_accelerator):
     """Test finetune_llm_reasoning with wandb logging and checkpointing enabled."""
     # Create mock agent
-    mock_agent = MagicMock()
+    mock_agent = MagicMock(spec=GRPO)
     mock_agent.algo = "GRPO"
     mock_agent.registry = MagicMock()
     mock_agent.registry.hp_config = MagicMock()
@@ -77,6 +82,11 @@ def test_finetune_llm_reasoning_with_wandb_and_checkpoints(use_accelerator):
     )
     mock_agent.learn.return_value = (0.5, 0.2)
     mock_agent.test.return_value = torch.tensor([0.8])
+    mock_agent.batch_size = 32
+    mock_agent.steps = [10]
+    mock_agent.scores = [0.0]
+    mock_agent.pretrained_model_name_or_path = "Qwen/Qwen2.5-0.5B"
+    mock_agent.lr = 0.01
 
     # Create mock environment - use MagicMock for special methods
     mock_env = MagicMock()
@@ -129,7 +139,8 @@ def test_finetune_llm_reasoning_with_wandb_and_checkpoints(use_accelerator):
 def test_finetune_llm_reasoning_evolvable_training_loop(use_accelerator):
     """Test the basic training loop in finetune_llm_reasoning."""
     # Create mock agent
-    mock_agent = MagicMock()
+    mock_agent = MagicMock(spec=GRPO)
+    mock_agent.algo = "GRPO"
     mock_agent.fitness = [0.0]
     mock_agent.local_rank = "0"  # Main process
     mock_agent.get_action.return_value = (
@@ -138,6 +149,9 @@ def test_finetune_llm_reasoning_evolvable_training_loop(use_accelerator):
     )
     mock_agent.learn.return_value = (0.5, 0.2)
     mock_agent.test.return_value = torch.tensor([0.8])
+    mock_agent.batch_size = 32
+    mock_agent.steps = [10]
+    mock_agent.scores = [0.0]
 
     # Create mock environment - use MagicMock for special methods
     mock_env = MagicMock()
@@ -191,7 +205,9 @@ def test_finetune_llm_reasoning_evo_steps_not_set(finetune_fn):
     """Test that finetune_llm_reasoning raises a ValueError if evo_steps is not set."""
     with pytest.raises(ValueError) as evo_steps_not_set_error:
         finetune_fn(
-            pop=[MagicMock()],
+            pop=[
+                MagicMock(spec=(GRPO if finetune_fn == finetune_llm_reasoning else DPO))
+            ],
             env=MagicMock(),
             evo_steps=None,
             accelerator=None,
@@ -212,7 +228,9 @@ def test_finetune_llm_reasoning_value_error_if_evo_steps_not_set(finetune_fn):
 
     with pytest.raises(ValueError) as evo_steps_not_set_error:
         finetune_llm_reasoning(
-            pop=[MagicMock()],
+            pop=[
+                MagicMock(spec=(GRPO if finetune_fn == finetune_llm_reasoning else DPO))
+            ],
             env=MagicMock(),
             evo_steps=None,
             accelerator=None,
@@ -228,7 +246,8 @@ def test_finetune_llm_reasoning_value_error_if_evo_steps_not_set(finetune_fn):
 def test_finetune_llm_reasoning_warning_num_epochs_and_max_steps():
     """Test that finetune_llm_reasoning raises a warning if evo_steps is not set."""
     # Create mock agent
-    mock_agent = MagicMock()
+    mock_agent = MagicMock(spec=GRPO)
+    mock_agent.algo = "GRPO"
     mock_agent.fitness = [0.0]
     mock_agent.local_rank = "0"  # Main process
     mock_agent.get_action.return_value = (
@@ -237,6 +256,9 @@ def test_finetune_llm_reasoning_warning_num_epochs_and_max_steps():
     )
     mock_agent.learn.return_value = (0.5, 0.2)
     mock_agent.test.return_value = torch.tensor([0.8])
+    mock_agent.batch_size = 32
+    mock_agent.steps = [10]
+    mock_agent.scores = [0.0]
 
     # Create mock environment - use MagicMock for special methods
     mock_env = MagicMock()
@@ -273,7 +295,8 @@ def test_finetune_llm_reasoning_warning_num_epochs_and_max_steps():
 
 def test_finetune_llm_reasoning_max_steps_set_from_num_epochs():
     # Create mock agent
-    mock_agent = MagicMock()
+    mock_agent = MagicMock(spec=GRPO)
+    mock_agent.algo = "GRPO"
     mock_agent.fitness = [0.0]
     mock_agent.local_rank = "0"  # Main process
     mock_agent.get_action.return_value = (
@@ -282,6 +305,9 @@ def test_finetune_llm_reasoning_max_steps_set_from_num_epochs():
     )
     mock_agent.learn.return_value = (0.5, 0.2)
     mock_agent.test.return_value = torch.tensor([0.8])
+    mock_agent.batch_size = 32
+    mock_agent.steps = [10]
+    mock_agent.scores = [0.0]
 
     # Create mock environment - use MagicMock for special methods
     mock_env = MagicMock()
@@ -323,7 +349,8 @@ def test_finetune_llm_reasoning_max_steps_set_from_num_epochs():
 def test_finetune_llm_reasoning_break_on_num_epochs():
     # Create mock agent
     # Create mock agent
-    mock_agent = MagicMock()
+    mock_agent = MagicMock(spec=GRPO)
+    mock_agent.algo = "GRPO"
     mock_agent.fitness = [0.0]
     mock_agent.local_rank = "0"  # Main process
     mock_agent.get_action.return_value = (
@@ -332,6 +359,9 @@ def test_finetune_llm_reasoning_break_on_num_epochs():
     )
     mock_agent.learn.return_value = (0.5, 0.2)
     mock_agent.test.return_value = torch.tensor([0.8])
+    mock_agent.batch_size = 32
+    mock_agent.steps = [10]
+    mock_agent.scores = [0.0]
 
     # Create mock environment - use MagicMock for special methods
     mock_env = MagicMock()
@@ -374,12 +404,16 @@ def test_finetune_llm_reasoning_break_on_num_epochs():
 def test_finetune_llm_preference_basic_training_loop(use_accelerator):
     """Test the basic training loop in finetune_llm."""
     # Create mock agent
-    mock_agent = MagicMock()
+    mock_agent = MagicMock(spec=DPO)
+    mock_agent.algo = "DPO"
     mock_agent.fitness = [0.0]
     mock_agent.local_rank = "0"  # Main process
     mock_agent.get_action = MagicMock()
     mock_agent.learn.return_value = (0.5, 0.2, 0.1)
     mock_agent.test.return_value = 0.87
+    mock_agent.batch_size = 32
+    mock_agent.steps = [10]
+    mock_agent.scores = [0.0]
 
     # Create mock environment - use MagicMock for special methods
     mock_env = MagicMock()
@@ -427,7 +461,7 @@ def test_finetune_llm_preference_with_wandb_and_checkpoints(use_accelerator):
     """Test finetune_llm with wandb logging and checkpointing enabled."""
 
     # Create mock agent
-    mock_agent = MagicMock()
+    mock_agent = MagicMock(spec=DPO)
     mock_agent.algo = "DPO"
     mock_agent.registry = MagicMock()
     mock_agent.registry.hp_config = MagicMock()
@@ -435,6 +469,11 @@ def test_finetune_llm_preference_with_wandb_and_checkpoints(use_accelerator):
     mock_agent.fitness = [0.0]
     mock_agent.learn.return_value = (0.5, 0.2, 0.1)
     mock_agent.test.return_value = 0.87
+    mock_agent.batch_size = 32
+    mock_agent.steps = [10]
+    mock_agent.scores = [0.0]
+    mock_agent.pretrained_model_name_or_path = "Qwen/Qwen2.5-0.5B"
+    mock_agent.lr = 0.001
 
     # Create mock environment - use MagicMock for special methods
     mock_env = MagicMock()
@@ -496,7 +535,7 @@ def test_finetune_llm_preference_with_wandb_and_checkpoints(use_accelerator):
 def test_finetune_llm_preference_evolvable_training_loop(use_accelerator):
     """Test the basic training loop in finetune_llm."""
     # Create mock agent
-    mock_agent = MagicMock()
+    mock_agent = MagicMock(spec=DPO)
     mock_agent.algo = "DPO"
     mock_agent.registry = MagicMock()
     mock_agent.registry.hp_config = MagicMock()
@@ -504,6 +543,9 @@ def test_finetune_llm_preference_evolvable_training_loop(use_accelerator):
     mock_agent.fitness = [0.0]
     mock_agent.learn.return_value = (0.5, 0.2, 0.1)
     mock_agent.test.return_value = 0.87
+    mock_agent.batch_size = 32
+    mock_agent.steps = [10]
+    mock_agent.scores = [0.0]
 
     # Create mock environment - use MagicMock for special methods
     mock_env = MagicMock()
@@ -561,7 +603,7 @@ def test_finetune_llm_preference_evolvable_training_loop(use_accelerator):
 def test_finetune_llm_preference_warning_num_epochs_and_max_steps():
     """Test that finetune_llm raises a warning if evo_steps is not set."""
     # Create mock agent
-    mock_agent = MagicMock()
+    mock_agent = MagicMock(spec=DPO)
     mock_agent.algo = "DPO"
     mock_agent.registry = MagicMock()
     mock_agent.registry.hp_config = MagicMock()
@@ -569,6 +611,9 @@ def test_finetune_llm_preference_warning_num_epochs_and_max_steps():
     mock_agent.fitness = [0.0]
     mock_agent.learn.return_value = (0.5, 0.2, 0.1)
     mock_agent.test.return_value = 0.87
+    mock_agent.batch_size = 32
+    mock_agent.steps = [10]
+    mock_agent.scores = [0.0]
 
     # Create mock environment - use MagicMock for special methods
     mock_env = MagicMock()
@@ -614,7 +659,7 @@ def test_finetune_llm_preference_warning_num_epochs_and_max_steps():
 
 def test_finetune_llm_preference_break_on_num_epochs():
     # Create mock agent
-    mock_agent = MagicMock()
+    mock_agent = MagicMock(spec=DPO)
     mock_agent.algo = "DPO"
     mock_agent.registry = MagicMock()
     mock_agent.registry.hp_config = MagicMock()
@@ -622,6 +667,9 @@ def test_finetune_llm_preference_break_on_num_epochs():
     mock_agent.fitness = [0.0]
     mock_agent.learn.return_value = (0.5, 0.2, 0.1)
     mock_agent.test.return_value = 0.87
+    mock_agent.batch_size = 32
+    mock_agent.steps = [10]
+    mock_agent.scores = [0.0]
 
     # Create mock environment - use MagicMock for special methods
     mock_env = MagicMock()
@@ -670,9 +718,12 @@ def test_finetune_llm_preference_break_on_num_epochs():
 
 def test_finetune_llm_preference_value_error_if_algo_not_dpo():
     # Create mock agent
-    mock_agent = MagicMock(spec=DPO)
-    mock_agent.algo = "DPO"
-
+    mock_agent = MagicMock(spec=GRPO)
+    mock_agent.algo = "GRPO"
+    mock_agent.pretrained_model_name_or_path = "Qwen/Qwen2.5-0.5B"
+    mock_agent.batch_size = 32
+    mock_agent.steps = [10]
+    mock_agent.scores = [0.0]
     with pytest.raises(
         ValueError,
         match="The algorithm must be DPO for preference-based reinforcement learning.",
@@ -687,12 +738,15 @@ def test_finetune_llm_preference_value_error_if_algo_not_dpo():
 
 def test_finetune_llm_reasoning_value_error_if_algo_not_grpo():
     # Create mock agent
-    mock_agent = MagicMock(spec=GRPO)
+    mock_agent = MagicMock(spec=DPO)
     mock_agent.algo = "DPO"
-
+    mock_agent.pretrained_model_name_or_path = "Qwen/Qwen2.5-0.5B"
+    mock_agent.batch_size = 32
+    mock_agent.steps = [10]
+    mock_agent.scores = [0.0]
     with pytest.raises(
         ValueError,
-        match="The algorithm must be GRPO for preference-based reinforcement learning.",
+        match="The algorithm must be GRPO for reasoning-based reinforcement learning.",
     ):
         finetune_llm_reasoning(
             pop=[mock_agent],
