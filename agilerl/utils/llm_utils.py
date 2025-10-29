@@ -510,13 +510,15 @@ class PreferenceGym(HuggingFaceGym):
 
         :param tokenizer: Tokenizer to be used for encoding and decoding the prompts.
         :type tokenizer: AutoTokenizer
-        :param apply_chat_template_fn: Function to apply the chat template to the batch of questions and answers.
-        :type apply_chat_template_fn: Callable[[str, str, AutoTokenizer], BatchEncoding]
+        :param max_context_length: Maximum context length, defaults to None
+        :type max_context_length: int | None, optional
         :return: Collate function that applies the chat template to the batch of questions and answers.
         :rtype: Callable[[list[dict[str, Any]]], dict[str, Any]]
         """
 
         def collate_fn(batch: list[dict[str, str]]) -> dict[str, str]:
+            print("INSIDE COLLATE FN")
+            print("Batch size: ", len(batch))
 
             prompts = [item["prompt"] for item in batch]
             chosen = [item["chosen"] for item in batch]
@@ -527,10 +529,14 @@ class PreferenceGym(HuggingFaceGym):
                 prompts, truncation=True, padding=False, add_special_tokens=True
             )
             prompt_lengths = [len(ids) for ids in prompt_encodings["input_ids"]]
+            print("Prompt lengths: ", prompt_lengths)
 
             # Tokenize without padding
             chosen_enc = tokenizer(prompts, chosen, truncation=True, padding=False)
             rejected_enc = tokenizer(prompts, rejected, truncation=True, padding=False)
+
+            print("Chosen lens: ", [len(ids) for ids in chosen_enc["input_ids"]])
+            print("Rejected lens: ", [len(ids) for ids in rejected_enc["input_ids"]])
 
             # Compute the joint max length across both
             max_len = max(
@@ -538,11 +544,15 @@ class PreferenceGym(HuggingFaceGym):
                 max(len(ids) for ids in rejected_enc["input_ids"]),
             )
 
+            print("Max len: ", max_len)
+
             max_len = (
                 min(max_len, self.max_context_length)
                 if self.max_context_length is not None
                 else max_len
             )
+
+            print("Max len after min operation: ", max_len)
 
             # Now pad both encodings to the same target length
             chosen_enc = tokenizer.pad(
