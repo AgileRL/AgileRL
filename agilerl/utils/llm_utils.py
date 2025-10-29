@@ -532,8 +532,20 @@ class PreferenceGym(HuggingFaceGym):
             print("Prompt lengths: ", prompt_lengths)
 
             # Tokenize without padding
-            chosen_enc = tokenizer(prompts, chosen, truncation=True, padding=False)
-            rejected_enc = tokenizer(prompts, rejected, truncation=True, padding=False)
+            chosen_enc = tokenizer(
+                prompts,
+                chosen,
+                max_length=self.max_context_length,
+                truncation=True,
+                padding=False,
+            )
+            rejected_enc = tokenizer(
+                prompts,
+                rejected,
+                max_length=self.max_context_length,
+                truncation=True,
+                padding=False,
+            )
 
             print("Chosen lens: ", [len(ids) for ids in chosen_enc["input_ids"]])
             print("Rejected lens: ", [len(ids) for ids in rejected_enc["input_ids"]])
