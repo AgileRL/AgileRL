@@ -517,8 +517,6 @@ class PreferenceGym(HuggingFaceGym):
         """
 
         def collate_fn(batch: list[dict[str, str]]) -> dict[str, str]:
-            print("INSIDE COLLATE FN")
-            print("Batch size: ", len(batch))
 
             prompts = [item["prompt"] for item in batch]
             chosen = [item["chosen"] for item in batch]
@@ -529,7 +527,6 @@ class PreferenceGym(HuggingFaceGym):
                 prompts, truncation=True, padding=False, add_special_tokens=True
             )
             prompt_lengths = [len(ids) for ids in prompt_encodings["input_ids"]]
-            print("Prompt lengths: ", prompt_lengths)
 
             # Tokenize without padding
             chosen_enc = tokenizer(
@@ -547,24 +544,17 @@ class PreferenceGym(HuggingFaceGym):
                 padding=False,
             )
 
-            print("Chosen lens: ", [len(ids) for ids in chosen_enc["input_ids"]])
-            print("Rejected lens: ", [len(ids) for ids in rejected_enc["input_ids"]])
-
             # Compute the joint max length across both
             max_len = max(
                 max(len(ids) for ids in chosen_enc["input_ids"]),
                 max(len(ids) for ids in rejected_enc["input_ids"]),
             )
 
-            print("Max len: ", max_len)
-
             max_len = (
                 min(max_len, self.max_context_length)
                 if self.max_context_length is not None
                 else max_len
             )
-
-            print("Max len after min operation: ", max_len)
 
             # Now pad both encodings to the same target length
             chosen_enc = tokenizer.pad(
