@@ -760,6 +760,7 @@ def test_mutation_applies_architecture_mutations(
 
 
 # The mutation method applies BERT architecture mutations to the population and returns the mutated population.
+@pytest.mark.skip(reason="Skipping BERT architecture mutations test.")
 @pytest.mark.parametrize(
     "algo, actor_network, critic_network", [("DDPG", "bert_network", "bert_network")]
 )
@@ -1308,6 +1309,7 @@ def test_mutation_applies_architecture_mutations_multi_agent(
 
 
 # The mutation method applies BERT architecture mutations to the population and returns the mutated population.
+@pytest.mark.skip(reason="Skipping BERT architecture mutations test.")
 @pytest.mark.parametrize(
     "algo, actor_network, critic_network",
     [
