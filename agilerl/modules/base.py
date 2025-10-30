@@ -363,7 +363,6 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         :rtype: dict[str, Any]
         """
         constructor_args = inspect.signature(self.__init__).parameters
-
         try:
             return {k: getattr(self, k) for k in constructor_args.keys()}
         except AttributeError as e:

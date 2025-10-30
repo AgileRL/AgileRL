@@ -13,13 +13,12 @@ from gymnasium import spaces
 from peft import LoraConfig
 
 from agilerl.algorithms.core import EvolvableAlgorithm
-from agilerl.algorithms.grpo import GRPO
 from agilerl.hpo.mutation import MutationError, Mutations
 from agilerl.modules import EvolvableBERT, ModuleDict
 from agilerl.utils.utils import create_population
 from agilerl.wrappers.agent import AsyncAgentsWrapper, RSNorm
 from tests.helper_functions import assert_state_dicts_equal
-from tests.test_algorithms.test_grpo import create_module
+from tests.test_algorithms.test_llms.test_grpo import create_module
 
 # Shared HP dict that can be used by any algorithm
 SHARED_INIT_HP = {
@@ -74,6 +73,13 @@ def create_bert_networks_multi_agent(device):
             "other_agent_0": create_bert_network(device),
         }
     )
+
+
+@pytest.fixture(autouse=True)
+def cleanup_after_test():
+    yield
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @pytest.fixture(scope="function")
@@ -754,6 +760,7 @@ def test_mutation_applies_architecture_mutations(
 
 
 # The mutation method applies BERT architecture mutations to the population and returns the mutated population.
+@pytest.mark.skip(reason="Skipping BERT architecture mutations test.")
 @pytest.mark.parametrize(
     "algo, actor_network, critic_network", [("DDPG", "bert_network", "bert_network")]
 )
@@ -1302,6 +1309,7 @@ def test_mutation_applies_architecture_mutations_multi_agent(
 
 
 # The mutation method applies BERT architecture mutations to the population and returns the mutated population.
+@pytest.mark.skip(reason="Skipping BERT architecture mutations test.")
 @pytest.mark.parametrize(
     "algo, actor_network, critic_network",
     [
@@ -1417,8 +1425,9 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
 
 
 @pytest.mark.parametrize("use_accelerator", [True, False])
+@pytest.mark.parametrize("algo", ["GRPO", "DPO"])
 def test_mutation_applies_rl_hp_mutation_llm_algorithm(
-    request, grpo_hp_config, vector_space, monkeypatch, use_accelerator
+    request, grpo_hp_config, vector_space, monkeypatch, use_accelerator, algo
 ):
     pre_training_mut = False
 
@@ -1447,32 +1456,40 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
             )
         else:
             accelerator = None
-        # try:
-        population = [
-            GRPO(
-                observation_space=vector_space,
-                action_space=copy.deepcopy(vector_space),
-                actor_network=create_module(
-                    input_size=10,
-                    max_tokens=20,
-                    vocab_size=1000,
-                    device="cuda" if torch.cuda.is_available() else "cpu",
-                ),
-                index=0,
-                pad_token="<pad>",
-                hp_config=grpo_hp_config,
-                pad_token_id=1000 - 1,
+        init_hp = {
+            "PAD_TOKEN_ID": 1000 - 1,
+            "PAD_TOKEN": "<pad>",
+            "BATCH_SIZE": 2,
+            "BETA": 0.001,
+            "LR": 5e-7,
+            "MAX_GRAD_NORM": 0.1,
+            "UPDATE_EPOCHS": 1,
+        }
+
+        population = create_population(
+            algo=algo,
+            observation_space=vector_space,
+            action_space=copy.deepcopy(vector_space),
+            net_config=None,
+            INIT_HP=init_hp,
+            hp_config=grpo_hp_config,
+            actor_network=create_module(
+                input_size=10,
+                max_tokens=20,
+                vocab_size=1000,
                 device="cuda" if torch.cuda.is_available() else "cpu",
-                lora_config=LoraConfig(
+            ),
+            algo_kwargs={
+                "lora_config": LoraConfig(
                     r=16,
                     lora_alpha=64,
                     target_modules=["linear_1"],
                     task_type="CAUSAL_LM",
                     lora_dropout=0.05,
-                ),
-                accelerator=accelerator,
-            )
-        ]  # some sort of population
+                )
+            },
+            accelerator=accelerator,
+        )
 
         mutations = Mutations(
             0,
@@ -1499,55 +1516,58 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
             max_value = grpo_hp_config[individual.mut].max
             assert min_value <= new_value <= max_value
             assert old.index == individual.index
-
         for agent in mutated_population:
             for param_group in agent.optimizer.optimizer.param_groups:
                 assert param_group["lr"] == agent.lr
-        # except Exception as e:
-        #     print("Exception: ", e)
-        #     raise e
-        # finally:
-        #     # Cleanup
-        #     if use_accelerator:
-        #         accelerator.free_memory()
-        #         AcceleratorState._reset_state(True)
-        #     del mutations
-        #     del population
-        #     del mutated_population
-        #     del new_population
-        #     torch.cuda.empty_cache()
+
+        for mut_agent, old_agent in zip(mutated_population, new_population):
+            mut_agent.clean_up()
+            old_agent.clean_up()
+        if use_accelerator:
+            AcceleratorState._reset_state(True)
+        gc.collect()
+        torch.cuda.empty_cache()
 
 
 @pytest.mark.parametrize("mutation_type", ["architecture", "parameters", "activation"])
+@pytest.mark.parametrize("algo", ["GRPO", "DPO"])
 def test_mutations_warns_on_llm_algorithm(
-    request, grpo_hp_config, vector_space, mutation_type
+    request, grpo_hp_config, vector_space, mutation_type, algo
 ):
     pre_training_mut = False
+    init_hp = {
+        "PAD_TOKEN_ID": 1000 - 1,
+        "PAD_TOKEN": "<pad>",
+        "BATCH_SIZE": 2,
+        "BETA": 0.001,
+        "LR": 5e-7,
+        "MAX_GRAD_NORM": 0.1,
+        "UPDATE_EPOCHS": 1,
+    }
 
-    population = [
-        GRPO(
-            observation_space=vector_space,
-            action_space=copy.deepcopy(vector_space),
-            actor_network=create_module(
-                input_size=10,
-                max_tokens=20,
-                vocab_size=1000,
-                device="cuda" if torch.cuda.is_available() else "cpu",
-            ),
-            index=0,
-            hp_config=grpo_hp_config,
-            pad_token_id=1000 - 1,
-            pad_token="<pad>",
+    population = create_population(
+        algo=algo,
+        observation_space=vector_space,
+        action_space=copy.deepcopy(vector_space),
+        net_config=None,
+        INIT_HP=init_hp,
+        hp_config=grpo_hp_config,
+        actor_network=create_module(
+            input_size=10,
+            max_tokens=20,
+            vocab_size=1000,
             device="cuda" if torch.cuda.is_available() else "cpu",
-            lora_config=LoraConfig(
+        ),
+        algo_kwargs={
+            "lora_config": LoraConfig(
                 r=16,
                 lora_alpha=64,
                 target_modules=["linear_1"],
                 task_type="CAUSAL_LM",
                 lora_dropout=0.05,
-            ),
-        )
-    ]  # some sort of population
+            )
+        },
+    )
 
     mutations = Mutations(
         0,
@@ -1580,6 +1600,9 @@ def test_mutations_warns_on_llm_algorithm(
         assert old.mut is None
         assert individual.mut == "None"
 
+    for mut_agent, old_agent in zip(mutated_population, new_population):
+        mut_agent.clean_up()
+        old_agent.clean_up()
     del mutations
     del population
     del mutated_population

@@ -10,8 +10,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.training.train_llm import finetune_llm
-from agilerl.utils.llm_utils import HuggingFaceGym
+from agilerl.training.train_llm import finetune_llm_reasoning
+from agilerl.utils.llm_utils import ReasoningGym
 from agilerl.utils.utils import create_population
 
 MODEL_PATH = "Qwen/Qwen2.5-1.5B"
@@ -160,7 +160,7 @@ def main(init_hp, mut_p):
     # Convert the HuggingFace dataset into a Gymnasium environment
     accelerator = Accelerator()
 
-    env = HuggingFaceGym(
+    env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
@@ -214,7 +214,7 @@ def main(init_hp, mut_p):
         accelerator=accelerator,
     )
 
-    finetune_llm(
+    finetune_llm_reasoning(
         pop=pop,
         env=env,
         init_hp=init_hp,

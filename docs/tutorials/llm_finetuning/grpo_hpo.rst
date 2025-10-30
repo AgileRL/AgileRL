@@ -28,8 +28,8 @@ Dependencies
     from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
-    from agilerl.training.train_llm import finetune_llm
-    from agilerl.utils.llm_utils import HuggingFaceGym
+    from agilerl.training.train_llm import finetune_llm_reasoning
+    from agilerl.utils.llm_utils import ReasoningGym
     from agilerl.utils.utils import create_population
 
 Defining Hyperparameters
@@ -76,12 +76,7 @@ unlike the rest of the AgileRL framework, we can only tune the RL hyperparameter
             "ELITISM": True,
             "POP_SIZE": 4,
             "EVAL_LOOP": 1,
-            "USE_VLLM": True,
-            "VLLM_CONFIG": {
-                "tensor_parallel_size": 1,
-                "gpu_memory_utilization": 0.4,
-                "max_num_seqs": 8,
-            },
+            "USE_VLLM": False, # vLLM is not recommended with population based HPO due to its increased memory usage
         }
 
 Defining our Base Model and Dataset
@@ -151,7 +146,7 @@ become very good at taking actions to solve tasks - to develop *agency*. Since w
 with reinforcement learning, it becomes an agent through this process.
 
 We must create a reinforcement learning environment in which our agent can explore possible
-solutions and learn to optimise rewards. AgileRL provides a :class:`HuggingFaceGym <agilerl.utils.llm_utils.HuggingFaceGym>`
+solutions and learn to optimise rewards. AgileRL provides a :class:`ReasoningGym <agilerl.utils.llm_utils.ReasoningGym>`
 class that wraps a Hugging Face dataset and converts it into a reinforcement learning, gymnasium-style environment.
 
 So, how does the environment know how to reward an agent for its outputs? Well, we must define a *reward_function*
@@ -234,7 +229,7 @@ for displaying these behaviours, the agent itself discovers the best way to achi
 Now we have defined our reward functions, we must also design our prompt. This forms the input given
 to the agent and provides the context necessary to complete the task. This is a task-specific feature,
 and different reasoning problems will require different chat templates, although they can follow a similar
-format. Combining all these components, we can now initialise the HuggingFaceGym object.
+format. Combining all these components, we can now initialise the ReasoningGym object.
 
 .. collapse:: Convert HuggingFace Dataset to Gymnasium Environment
 
@@ -269,7 +264,7 @@ format. Combining all these components, we can now initialise the HuggingFaceGym
         accelerator = Accelerator()
 
         # Convert the HuggingFace dataset into a Gymnasium environment
-        env = HuggingFaceGym(
+        env = ReasoningGym(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
@@ -359,11 +354,11 @@ The ``Mutations()`` class is used to mutate agents with pre-set probabilities. T
 
 Training and Saving an Agent
 ----------------------------
-The simplest way to train an AgileRL agent is to use the :meth:`finetune_llm() <agilerl.training.train_llm.finetune_llm>` function.
+The simplest way to train an AgileRL agent is to use the :meth:`finetune_llm_reasoning() <agilerl.training.train_llm.finetune_llm_reasoning>` function.
 
 .. code-block:: python
 
-    finetune_llm(
+    finetune_llm_reasoning(
         pop=pop,
         env=env,
         init_hp=init_hp,
@@ -433,7 +428,7 @@ Example config file:
 Using a Custom Training Loop
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 If we wanted to have more control over the training process, it is also possible to write our own custom
-training loops to train our agents. The training loop below can be used alternatively to the above ``finetune_llm``
+training loops to train our agents. The training loop below can be used alternatively to the above ``finetune_llm_reasoning``
 function and is an example of how we might choose to make use of a population of AgileRL agents in our own training loop.
 
 .. collapse:: Custom Training Loop

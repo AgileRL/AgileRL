@@ -11,8 +11,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.training.train_llm import finetune_llm
-from agilerl.utils.llm_utils import HuggingFaceGym
+from agilerl.training.train_llm import finetune_llm_reasoning
+from agilerl.utils.llm_utils import ReasoningGym
 from agilerl.utils.utils import create_population
 
 MODEL_PATH = "Qwen/Qwen2.5-3B"
@@ -24,7 +24,6 @@ def create_model(pretrained_model_name_or_path):
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         torch_dtype=torch.bfloat16,
         attn_implementation="sdpa",
-        device_map="auto",
     )
 
     lora_config = LoraConfig(
@@ -148,14 +147,7 @@ def main(init_hp, mut_p):
 
     # Convert the HuggingFace dataset into a Gymnasium environment
     accelerator = Accelerator()
-    accelerator.state.deepspeed_plugin.deepspeed_config["activation_checkpointing"] = {
-        "partition_activations": True,
-        "cpu_checkpointing": True,
-        "synchronize_checkpoint_boundary": True,
-        "number_checkpoints": 2,
-    }
-
-    env = HuggingFaceGym(
+    env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
@@ -168,6 +160,9 @@ def main(init_hp, mut_p):
 
     init_hp["PAD_TOKEN_ID"] = tokenizer.eos_token_id
     init_hp["PAD_TOKEN"] = tokenizer.eos_token
+    init_hp["ZERO_STAGE"] = accelerator.state.deepspeed_plugin.deepspeed_config[
+        "zero_optimization"
+    ]["stage"]
 
     hp_config = HyperparameterConfig(
         beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),
@@ -209,7 +204,7 @@ def main(init_hp, mut_p):
         accelerator=accelerator,
     )
 
-    finetune_llm(
+    finetune_llm_reasoning(
         pop=pop,
         env=env,
         init_hp=init_hp,
@@ -228,9 +223,6 @@ def main(init_hp, mut_p):
 
 
 if __name__ == "__main__":
-    import os
-
-    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     with open("configs/training/grpo.yaml") as file:
         config = yaml.safe_load(file)
     init_hp = config["INIT_HP"]

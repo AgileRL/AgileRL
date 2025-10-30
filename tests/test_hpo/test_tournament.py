@@ -16,7 +16,7 @@ from tests.helper_functions import (
     generate_multi_agent_discrete_spaces,
     generate_random_box_space,
 )
-from tests.test_algorithms.test_grpo import create_module
+from tests.test_algorithms.test_llms.test_grpo import create_module
 
 # Shared HP dict that can be used by any algorithm
 INIT_HP = {
@@ -326,7 +326,7 @@ def test_language_model_tournament(use_accelerator, elitism, num_processes):
         GRPO(
             observation_space=observation_space,
             action_space=action_space,
-            actor_network=clone_llm(actor_network),
+            actor_network=clone_llm(actor_network, 0),
             pad_token_id=INIT_HP.get("PAD_TOKEN_ID"),
             pad_token="<pad>",
             hp_config=None,

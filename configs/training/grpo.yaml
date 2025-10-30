@@ -21,18 +21,14 @@ INIT_HP:
     CLIP_COEF: 0.2
     MAX_GRAD_NORM: 0.1
     UPDATE_EPOCHS: 1
-    GROUP_SIZE: 8
+    GROUP_SIZE: 6
     TEMPERATURE: 0.9
-    CALC_POSITION_EMBEDDINGS: true
+    CALC_POSITION_EMBEDDINGS: false
     MIN_OUTPUT_TOKENS:
-    MAX_OUTPUT_TOKENS: 1024
+    MAX_OUTPUT_TOKENS: 512
     COSINE_lR_SCHEDULER:
     TOURN_SIZE: 2
     ELITISM: true
     POP_SIZE: 1
     EVAL_LOOP: 1
-    USE_VLLM: true
-    VLLM_CONFIG:
-        tensor_parallel_size: 1
-        gpu_memory_utilization: 0.4
-        max_num_seqs: 8
+    USE_VLLM: false
