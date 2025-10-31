@@ -9,12 +9,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import tqdm
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl.algorithms import (
     CQN,
     DDPG,
@@ -630,8 +630,6 @@ def create_population(
                     if idx != 0
                     else actor_network
                 ),
-                pad_token_id=INIT_HP.get("PAD_TOKEN_ID"),
-                pad_token=INIT_HP.get("PAD_TOKEN"),
                 hp_config=hp_config,
                 index=idx,
                 batch_size=INIT_HP.get("BATCH_SIZE", 2),

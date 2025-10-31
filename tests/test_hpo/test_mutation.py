@@ -1486,7 +1486,9 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
                     target_modules=["linear_1"],
                     task_type="CAUSAL_LM",
                     lora_dropout=0.05,
-                )
+                ),
+                "pad_token_id": 1000 - 1,
+                "pad_token": "<pad>",
             },
             accelerator=accelerator,
         )
@@ -1565,7 +1567,9 @@ def test_mutations_warns_on_llm_algorithm(
                 target_modules=["linear_1"],
                 task_type="CAUSAL_LM",
                 lora_dropout=0.05,
-            )
+            ),
+            "pad_token_id": 1000 - 1,
+            "pad_token": "<pad>",
         },
     )
 
