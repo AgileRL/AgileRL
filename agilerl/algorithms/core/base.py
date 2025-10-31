@@ -96,7 +96,11 @@ from agilerl.utils.evolvable_networks import (
     is_image_space,
     is_vector_space,
 )
-from agilerl.utils.llm_utils import DummyOptimizer, gather_if_zero3
+from agilerl.utils.llm_utils import (
+    DummyOptimizer,
+    create_model_from_name_or_path,
+    gather_if_zero3,
+)
 
 __all__ = ["EvolvableAlgorithm", "RLAlgorithm", "MultiAgentRLAlgorithm"]
 
@@ -1812,7 +1816,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         lora_config: LoraConfig | None,
         use_separate_reference_adapter: bool,
         model_name: str | None = None,
-        actor_network: PreTrainedModel | None = None
+        actor_network: PreTrainedModel | None = None,
         micro_batch_size_per_gpu: int | None = None,
         cosine_lr_schedule_config: Optional[CosineLRScheduleConfig] = None,
         hp_config: Optional[HyperparameterConfig] = None,
@@ -1820,10 +1824,13 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         device: Union[str, torch.device] = "cpu",
         accelerator: Optional[Accelerator] = None,
         name: Optional[str] = None,
-        model_config: dict[str, Any ] | PretrainedConfig | None = None
+        model_config: dict[str, Any] | PretrainedConfig | None = None,
+        gradient_checkpointing: bool = True,
     ):
         if model_name is None and actor_network is None:
-            raise ValueError("At least one of model_name or actor_network must be provided.")
+            raise ValueError(
+                "At least one of model_name or actor_network must be provided."
+            )
         if (
             accelerator is not None
             and cosine_lr_schedule_config is not None
@@ -1836,13 +1843,15 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             cosine_lr_schedule_config = None
 
         super().__init__(index, hp_config, device, accelerator, None, name)
-      
+        self.gradient_checkpointing = gradient_checkpointing
         self.zero_stage = None
         self.reference_update_tracker = 0  # Updated every time the reference policy is updated which is updated each time we pass through the train dataset
         self.calc_position_embeddings = calc_position_embeddings
         self.pad_token_id = pad_token_id
         self.pad_token = pad_token
-        self.pretrained_model_name_or_path = model_name if model_name is not None else actor_network.name_or_path
+        self.pretrained_model_name_or_path = (
+            model_name if model_name is not None else actor_network.name_or_path
+        )
         self.model_config = model_config
 
         if not clone and reduce_memory_peak and micro_batch_size_per_gpu is not None:
@@ -1872,7 +1881,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         if lora_config is None and not isinstance(actor_network, PeftModel):
             warnings.warn(
-                "No LoRA config provided. Using default LoRA configuration for RL finetuning."
+                "No LoRA config provided. AgileRL can only be used to finetune adapters at present. Using default LoRA configuration for RL finetuning."
             )
             lora_config = LoraConfig(
                 r=16,
@@ -2127,15 +2136,17 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 if not is_dummy_optimizer
                 else type(self.actor.optimizer)
             )
-            self.actor.module.gradient_checkpointing_enable(
-                gradient_checkpointing_kwargs={"use_reentrant": False}
-            )
+            if self.gradient_checkpointing:
+                self.actor.module.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False}
+                )
         else:
             assert (
                 self.actor is not None
             ), "Actor is set to None, please check that the actor is defined."
             self.actor = self.actor.to(self.device)
-            self.actor.gradient_checkpointing_enable()
+            if self.gradient_checkpointing:
+                self.actor.gradient_checkpointing_enable()
 
     def clean_up(self) -> None:
         """Clean up the algorithm."""
@@ -2405,9 +2416,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """
 
         if base_model is None:
-            base_model = create_model_from_name_or_path(self.pretrained_model_name_or_path)
-        
-        
+            base_model = create_model_from_name_or_path(
+                self.pretrained_model_name_or_path
+            )
+
         if isinstance(base_model, PeftModel) and add_adapters:
             # Handles backwards compatibility with user providing a peft model as the actor network
             if self.lora_config is None:

@@ -16,26 +16,6 @@ MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "HumanLLMs/Human-Like-DPO-Dataset"
 
 
-def create_model(pretrained_model_name_or_path):
-    model = AutoModelForCausalLM.from_pretrained(
-        pretrained_model_name_or_path=pretrained_model_name_or_path,
-        torch_dtype=torch.bfloat16,
-        attn_implementation="sdpa",
-    )
-
-    lora_config = LoraConfig(
-        r=16,
-        lora_alpha=64,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-        lora_dropout=0.05,
-        bias="none",
-    )
-
-    model = get_peft_model(model, lora_config, adapter_name="actor")
-
-    return model
-
-
 def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
     raw_dataset = load_dataset(dataset_name, split="train").shuffle(seed=42)
     train_test_split = raw_dataset.train_test_split(test_size=0.1)
@@ -65,7 +45,14 @@ def main(init_hp, mut_p):
     init_hp["ZERO_STAGE"] = accelerator.state.deepspeed_plugin.deepspeed_config[
         "zero_optimization"
     ]["stage"]
-    from gymnasium import spaces
+
+    lora_config = LoraConfig(
+        r=16,
+        lora_alpha=64,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+        lora_dropout=0.05,
+        bias="none",
+    )
 
     pop = [
         DPO(
@@ -75,6 +62,7 @@ def main(init_hp, mut_p):
             batch_size=init_hp["BATCH_SIZE"],
             beta=init_hp["BETA"],
             update_epochs=init_hp["UPDATE_EPOCHS"],
+            lora_config=lora_config,
             accelerator=accelerator if idx == 0 else Accelerator(),
         )
         for idx, _ in enumerate(range(init_hp["POP_SIZE"]))
@@ -106,7 +94,7 @@ def main(init_hp, mut_p):
         save_elite=True,
         elite_path="saved_llms",
         wb=True,
-        evo_steps=1000,
+        evo_steps=5,
         tournament=tournament,
         mutation=mutations,
         wandb_api_key=None,

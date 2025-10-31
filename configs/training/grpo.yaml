@@ -15,7 +15,6 @@ MUTATION_PARAMS:
 INIT_HP:
     ALGO: GRPO
     BATCH_SIZE: 16
-    REDUCE_MEMORY_PEAK: true
     BETA: 0.001
     LR: 0.000005
     CLIP_COEF: 0.2
@@ -23,12 +22,9 @@ INIT_HP:
     UPDATE_EPOCHS: 1
     GROUP_SIZE: 6
     TEMPERATURE: 0.9
-    CALC_POSITION_EMBEDDINGS: false
-    MIN_OUTPUT_TOKENS:
-    MAX_OUTPUT_TOKENS: 512
+    MAX_MODEL_LEN: 1024  # Maximum context length for the model
     COSINE_lR_SCHEDULER:
     TOURN_SIZE: 2
     ELITISM: true
-    POP_SIZE: 1
+    POP_SIZE: 2
     EVAL_LOOP: 1
-    USE_VLLM: false

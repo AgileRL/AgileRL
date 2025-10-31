@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import gymnasium as gym
 import numpy as np
@@ -11,6 +11,7 @@ from accelerate.state import AcceleratorState
 from datasets import Dataset as Datasets
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer
+from transformers.tokenization_utils_base import BatchEncoding
 
 from agilerl.utils.llm_utils import (
     DummyOptimizer,
@@ -19,6 +20,13 @@ from agilerl.utils.llm_utils import (
     gather_if_zero3,
     get_state_dict,
 )
+
+DUMMY_CONVERSATION_TEMPLATE = [
+    {
+        "role": "system",
+        "content": "question: {q}\nanswer: {a}",
+    },
+]
 
 
 class DummyTokenizer:
@@ -126,24 +134,25 @@ def preference_dataset(num_samples):
 
 @pytest.mark.parametrize("num_samples", [200])
 @pytest.mark.parametrize("use_accelerator", [True, False])
-def test_reasoning_face_gym_init(
+def test_reasoning_gym_init(
     reasoning_dataset, accelerator_factory, num_samples, use_accelerator
 ):
     train_dataset, test_dataset = reasoning_dataset
-    tokenizer = DummyTokenizer()
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
     data_batch_size = 8
     env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
         reward_fn=dummy_reward_fn,
-        apply_chat_template_fn=dummy_chat_template_fn,
+        conversation_template=DUMMY_CONVERSATION_TEMPLATE,
         data_batch_size_per_gpu=data_batch_size,
         accelerator=accelerator_factory(use_accelerator),
     )
     assert env.name == "dummy_dataset"
     assert callable(env.reward_fn)
-    assert isinstance(env.tokenizer, DummyTokenizer)
+    assert hasattr(env, "tokenizer")
+    assert env.tokenizer is not None
     assert isinstance(env.train_dataloader, DataLoader)
     assert isinstance(env.test_dataloader, DataLoader)
     assert list(next(env.train_dataloader_iter).keys()) == [
@@ -153,10 +162,6 @@ def test_reasoning_face_gym_init(
     ]
     assert env.dataloader == env.train_dataloader_iter
     assert not env.reset_called
-    assert isinstance(env.observation_space, gym.spaces.Space)
-    assert np.all(env.observation_space.high == tokenizer.vocab_size - 1)
-    assert isinstance(env.action_space, gym.spaces.Space)
-    assert np.all(env.action_space.high == tokenizer.vocab_size - 1)
     assert not env.evaluation_mode
     assert env.data_batch_size_per_gpu == data_batch_size
 
@@ -164,18 +169,18 @@ def test_reasoning_face_gym_init(
 @pytest.mark.parametrize("num_samples", [200])
 @pytest.mark.parametrize("eval_mode", [True, False])
 @pytest.mark.parametrize("return_raw_completions", [True, False])
-def test_reasoning_face_gym_step(
+def test_reasoning_gym_step(
     reasoning_dataset, num_samples, eval_mode, return_raw_completions
 ):
     train_dataset, test_dataset = reasoning_dataset
-    tokenizer = DummyTokenizer()
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
     data_batch_size = 8
     env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
         reward_fn=dummy_reward_fn,
-        apply_chat_template_fn=dummy_chat_template_fn,
+        conversation_template=DUMMY_CONVERSATION_TEMPLATE,
         data_batch_size_per_gpu=data_batch_size,
         return_raw_completions=return_raw_completions,
     )
@@ -204,18 +209,18 @@ def test_reasoning_face_gym_step(
 @pytest.mark.parametrize("num_samples", [200])
 @pytest.mark.parametrize("reset_dataloaders", [True, False])
 @pytest.mark.parametrize("return_raw_completions", [True, False])
-def test_reasoning_face_gym_reset(
+def test_reasoning_gym_reset(
     reasoning_dataset, num_samples, reset_dataloaders, return_raw_completions
 ):
     train_dataset, test_dataset = reasoning_dataset
-    tokenizer = DummyTokenizer()
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
     data_batch_size = 8
     env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
         reward_fn=dummy_reward_fn,
-        apply_chat_template_fn=dummy_chat_template_fn,
+        conversation_template=DUMMY_CONVERSATION_TEMPLATE,
         data_batch_size_per_gpu=data_batch_size,
         return_raw_completions=return_raw_completions,
     )
@@ -239,18 +244,18 @@ def test_reasoning_face_gym_reset(
 
 @pytest.mark.parametrize("num_samples", [200])
 @pytest.mark.parametrize("reset_dataloaders", [True, False])
-def test_reasoning_face_gym_reset_dataloaders(
+def test_reasoning_gym_reset_dataloaders(
     reasoning_dataset, num_samples, reset_dataloaders
 ):
     train_dataset, test_dataset = reasoning_dataset
-    tokenizer = DummyTokenizer()
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
     data_batch_size = 8
     env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
         reward_fn=dummy_reward_fn,
-        apply_chat_template_fn=dummy_chat_template_fn_custom,
+        conversation_template=DUMMY_CONVERSATION_TEMPLATE,
         data_batch_size_per_gpu=data_batch_size,
     )
     first_data_point = next(
@@ -273,14 +278,14 @@ def test_reasoning_face_gym_reset_dataloaders(
 @pytest.mark.parametrize("num_samples", [200])
 def test_reset_warning(reasoning_dataset, num_samples):
     train_dataset, test_dataset = reasoning_dataset
-    tokenizer = DummyTokenizer()
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
     data_batch_size = 8
     env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
         reward_fn=dummy_reward_fn,
-        apply_chat_template_fn=dummy_chat_template_fn,
+        conversation_template=DUMMY_CONVERSATION_TEMPLATE,
         data_batch_size_per_gpu=data_batch_size,
     )
     with pytest.warns():
@@ -289,16 +294,16 @@ def test_reset_warning(reasoning_dataset, num_samples):
 
 
 @pytest.mark.parametrize("num_samples", [200])
-def test_reasoning_face_gym_len(reasoning_dataset, num_samples):
+def test_reasoning_gym_len(reasoning_dataset, num_samples):
     train_dataset, test_dataset = reasoning_dataset
-    tokenizer = DummyTokenizer()
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
     data_batch_size = 8
     env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
         reward_fn=dummy_reward_fn,
-        apply_chat_template_fn=dummy_chat_template_fn,
+        conversation_template=DUMMY_CONVERSATION_TEMPLATE,
         data_batch_size_per_gpu=data_batch_size,
     )
     env.reset()
@@ -311,14 +316,10 @@ def test_reasoning_face_gym_len(reasoning_dataset, num_samples):
 def test_create_chat_collate_fn(reasoning_dataset, num_samples):
     """Test the create_chat_collate_fn method."""
     # Create a mock tokenizer
-    mock_tokenizer = MagicMock()
-
-    # Create a mock chat template function
-    def mock_chat_template(question, answer, tokenizer):
-        return {"input_ids": [1, 2, 3], "attention_mask": [1, 1, 1]}
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
 
     train_dataset, test_dataset = reasoning_dataset
-    tokenizer = DummyTokenizer()
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
     data_batch_size = 8
 
     env = ReasoningGym(
@@ -326,12 +327,12 @@ def test_create_chat_collate_fn(reasoning_dataset, num_samples):
         test_dataset=test_dataset,
         tokenizer=tokenizer,
         reward_fn=dummy_reward_fn,
-        apply_chat_template_fn=dummy_chat_template_fn,
+        conversation_template=DUMMY_CONVERSATION_TEMPLATE,
         data_batch_size_per_gpu=data_batch_size,
     )
 
     # Create the collate function
-    collate_fn = env.create_collate_fn(mock_tokenizer, mock_chat_template)
+    collate_fn = env.create_collate_fn(tokenizer)
 
     # Create a sample batch
     batch = [
@@ -355,11 +356,11 @@ def test_create_chat_collate_fn(reasoning_dataset, num_samples):
 
     # Verify each tokenized prompt
     for prompt in result["tokenized_prompts"]:
-        assert isinstance(prompt, dict)
+        assert isinstance(prompt, BatchEncoding)
         assert "input_ids" in prompt
         assert "attention_mask" in prompt
-        assert prompt["input_ids"] == [1, 2, 3]
-        assert prompt["attention_mask"] == [1, 1, 1]
+        assert isinstance(prompt["input_ids"], torch.Tensor)
+        assert isinstance(prompt["attention_mask"], torch.Tensor)
 
 
 @pytest.mark.parametrize("num_samples", [20])
@@ -368,13 +369,13 @@ def test_reset_dataloaders_when_train_dataloader_exhausted(
     reasoning_dataset, num_samples, data_batch_size
 ):
     train_dataset, test_dataset = reasoning_dataset
-    tokenizer = DummyTokenizer()
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
     env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
         reward_fn=dummy_reward_fn,
-        apply_chat_template_fn=dummy_chat_template_fn,
+        conversation_template=DUMMY_CONVERSATION_TEMPLATE,
         data_batch_size_per_gpu=data_batch_size,
     )
     total_sampled = 0
@@ -391,13 +392,13 @@ def test_not_reset_dataloaders_when_test_dataloader_exhausted(
     reasoning_dataset, num_samples, data_batch_size
 ):
     train_dataset, test_dataset = reasoning_dataset
-    tokenizer = DummyTokenizer()
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
     env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
         reward_fn=dummy_reward_fn,
-        apply_chat_template_fn=dummy_chat_template_fn,
+        conversation_template=DUMMY_CONVERSATION_TEMPLATE,
         data_batch_size_per_gpu=data_batch_size,
     )
     total_sampled = 0
@@ -530,10 +531,6 @@ def test_preference_gym_init(
     ]
     assert env.dataloader == env.train_dataloader_iter
     assert not env.reset_called
-    assert isinstance(env.observation_space, gym.spaces.Space)
-    assert np.all(env.observation_space.high == tokenizer.vocab_size - 1)
-    assert isinstance(env.action_space, gym.spaces.Space)
-    assert np.all(env.action_space.high == tokenizer.vocab_size - 1)
     assert not env.evaluation_mode
     assert env.data_batch_size_per_gpu == data_batch_size
 
@@ -867,7 +864,7 @@ def test_reasoning_gym_max_context_length_warning():
             test_dataset=test_dataset,
             tokenizer=tokenizer,
             reward_fn=dummy_reward_fn,
-            apply_chat_template_fn=dummy_chat_template_fn,
+            conversation_template=DUMMY_CONVERSATION_TEMPLATE,
             data_batch_size_per_gpu=data_batch_size,
             max_context_length=10,
         )
