@@ -126,6 +126,7 @@ def main(init_hp, mut_p):
         data_batch_size_per_gpu=10,
         accelerator=accelerator,
         return_raw_completions=USE_VLLM,
+        max_context_length=init_hp["MAX_MODEL_LEN"],
     )
 
     hp_config = HyperparameterConfig(

@@ -18,6 +18,7 @@ from agilerl.utils.utils import create_population
 MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 USE_VLLM = True
+MAX_CONTEXT_LENGTH = 1024
 
 
 def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
@@ -123,6 +124,7 @@ def main(init_hp, mut_p):
         conversation_template=conversation_template,
         data_batch_size_per_gpu=10,
         accelerator=accelerator,
+        max_context_length=MAX_CONTEXT_LENGTH,
         return_raw_completions=USE_VLLM,
     )
 
@@ -152,6 +154,7 @@ def main(init_hp, mut_p):
         "use_vllm": USE_VLLM,
         "pad_token_id": tokenizer.pad_token_id,
         "pad_token": tokenizer.pad_token,
+        "max_model_len": MAX_CONTEXT_LENGTH,
     }
 
     pop = create_population(
@@ -192,7 +195,7 @@ def main(init_hp, mut_p):
         save_elite=True,
         elite_path="saved_llms",
         max_reward=2.0,
-        evo_steps=1,
+        evo_steps=10,
         mutation=mutations,
         tournament=tournament,
         accelerator=accelerator,

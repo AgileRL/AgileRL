@@ -221,9 +221,11 @@ class HuggingFaceGym(gym.Env, ABC):
         :rtype: tuple[Dataset, Dataset]
         """
         dataset_type = "dataset" if dataset_type is None else dataset_type
-        if self.max_context_length is None:
-            return dataset
         filter_keyword = "prompt" if "prompt" in dataset.features.keys() else "question"
+        if self.max_context_length is None or not isinstance(
+            dataset[0][filter_keyword], str
+        ):
+            return dataset
         filtered_dataset = dataset.filter(
             lambda x: len(self.tokenizer.encode(x[filter_keyword]))
             <= self.max_context_length - self.min_completion_length

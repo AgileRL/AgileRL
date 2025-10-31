@@ -15,6 +15,7 @@ from agilerl.utils.llm_utils import ReasoningGym
 MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 USE_VLLM = True
+MAX_CONTEXT_LENGTH = 1024
 
 
 def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
@@ -130,7 +131,8 @@ def main():
         conversation_template=conversation_template,
         data_batch_size_per_gpu=10,
         accelerator=accelerator,
-        return_raw_completions=USE_VLLM,
+        return_raw_completions=USE_VLLM,  # This is necessary for vLLM to work
+        max_context_length=MAX_CONTEXT_LENGTH,
     )
 
     # Define the LoRA configuration
@@ -157,7 +159,7 @@ def main():
         pad_token=tokenizer.eos_token,
         lora_config=lora_config,
         batch_size=16,
-        max_model_len=1024,
+        max_model_len=MAX_CONTEXT_LENGTH,
         group_size=8,
         accelerator=accelerator,
         use_vllm=USE_VLLM,
