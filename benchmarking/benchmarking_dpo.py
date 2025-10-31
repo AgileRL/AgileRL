@@ -69,9 +69,7 @@ def main(init_hp, mut_p):
 
     pop = [
         DPO(
-            observation_space=spaces.Box(low=0, high=tokenizer.vocab_size - 1),
-            action_space=spaces.Box(low=0, high=tokenizer.vocab_size - 1),
-            actor_network=create_model(pretrained_model_name_or_path=MODEL_PATH),
+            model_name=MODEL_PATH,
             pad_token_id=init_hp["PAD_TOKEN_ID"],
             pad_token=init_hp["PAD_TOKEN"],
             batch_size=init_hp["BATCH_SIZE"],

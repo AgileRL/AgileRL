@@ -97,11 +97,11 @@ class GRPO(LLMAlgorithm):
 
     def __init__(
         self,
-        observation_space: spaces.Space,
-        action_space: spaces.Space,
-        actor_network: PreTrainedModel,
         pad_token_id: int,
         pad_token: str,
+        model_name: str | None = None,
+        actor_network: PreTrainedModel | None = None,
+        model_config: dict[str, Any ] | None = None,
         hp_config: Optional[HyperparameterConfig] = None,
         index: int = 0,
         batch_size: int = 16,
@@ -140,9 +140,6 @@ class GRPO(LLMAlgorithm):
             else ("cuda" if torch.cuda.is_available() else "cpu")
         )
         super().__init__(
-            observation_space,
-            action_space,
-            actor_network,
             index=index,
             batch_size=batch_size,
             lr=lr,
@@ -155,6 +152,9 @@ class GRPO(LLMAlgorithm):
             pad_token=pad_token,
             lora_config=lora_config,
             use_separate_reference_adapter=use_separate_reference_adapter,
+            model_name=model_name,
+            actor_network=actor_network,
+            model_config=model_config,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
             cosine_lr_schedule_config=cosine_lr_schedule_config,
             wrap=wrap,

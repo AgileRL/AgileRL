@@ -37,6 +37,7 @@ from torch._dynamo import OptimizedModule
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import SequentialLR
+from transformers import PretrainedConfig
 from transformers.modeling_utils import PreTrainedModel
 from vllm import LLM, SamplingParams
 
@@ -1782,8 +1783,6 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 class LLMAlgorithm(EvolvableAlgorithm, ABC):
     """Base object for all LLM algorithms in the AgileRL framework.
 
-    :param observation_space: The observation space of the environment.
-    :type observation_space: gymnasium.spaces.Space
     :param action_space: The action space of the environment.
     :type action_space: gymnasium.spaces.Space
     :param index: The index of the algorithm.
@@ -1800,9 +1799,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     def __init__(
         self,
-        observation_space: spaces.Space,
-        action_space: spaces.Space,
-        actor_network: PreTrainedModel,
         index: int,
         batch_size: int,
         lr: float,
@@ -1815,6 +1811,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         pad_token: str,
         lora_config: LoraConfig | None,
         use_separate_reference_adapter: bool,
+        model_name: str | None = None,
+        actor_network: PreTrainedModel | None = None
         micro_batch_size_per_gpu: int | None = None,
         cosine_lr_schedule_config: Optional[CosineLRScheduleConfig] = None,
         hp_config: Optional[HyperparameterConfig] = None,
@@ -1822,7 +1820,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         device: Union[str, torch.device] = "cpu",
         accelerator: Optional[Accelerator] = None,
         name: Optional[str] = None,
+        model_config: dict[str, Any ] | PretrainedConfig | None = None
     ):
+        if model_name is None and actor_network is None:
+            raise ValueError("At least one of model_name or actor_network must be provided.")
         if (
             accelerator is not None
             and cosine_lr_schedule_config is not None
@@ -1835,20 +1836,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             cosine_lr_schedule_config = None
 
         super().__init__(index, hp_config, device, accelerator, None, name)
-        assert isinstance(
-            observation_space, spaces.Space
-        ), "Observation space must be an instance of gymnasium.spaces.Space."
-        assert isinstance(
-            action_space, spaces.Space
-        ), "Action space must be an instance of gymnasium.spaces.Space."
-
-        self.observation_space = observation_space
-        self.action_space = action_space
+      
         self.zero_stage = None
         self.reference_update_tracker = 0  # Updated every time the reference policy is updated which is updated each time we pass through the train dataset
         self.calc_position_embeddings = calc_position_embeddings
         self.pad_token_id = pad_token_id
         self.pad_token = pad_token
+        self.pretrained_model_name_or_path = model_name if model_name is not None else actor_network.name_or_path
+        self.model_config = model_config
 
         if not clone and reduce_memory_peak and micro_batch_size_per_gpu is not None:
             raise ValueError(
@@ -1881,16 +1876,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             )
             lora_config = LoraConfig(
                 r=16,
-                lora_alpha=64,
-                target_modules=[
-                    "q_proj",
-                    "k_proj",
-                    "v_proj",
-                    "o_proj",
-                    "up_proj",
-                    "down_proj",
-                    "gate_proj",
-                ],
+                lora_alpha=32,
+                target_modules="all-linear",
                 task_type="CAUSAL_LM",
                 lora_dropout=0.05,
             )
@@ -1908,7 +1895,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         else:
             self.max_grad_norm = max_grad_norm
         self.reduce_memory_peak = reduce_memory_peak
-        self.pretrained_model_name_or_path = actor_network.name_or_path
 
         if self.accelerator is not None:
             self.zero_stage = self.accelerator.state.deepspeed_plugin.deepspeed_config[
@@ -2408,7 +2394,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self.reference_update_tracker += 1
 
     def _initialize_actors(
-        self, base_model: PreTrainedModel, add_adapters: bool = True
+        self, base_model: PreTrainedModel | None, add_adapters: bool = True
     ):
         """Initialize the actor network.
 
@@ -2418,6 +2404,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :type add_adapters: bool, optional
         """
 
+        if base_model is None:
+            base_model = create_model_from_name_or_path(self.pretrained_model_name_or_path)
+        
+        
         if isinstance(base_model, PeftModel) and add_adapters:
             # Handles backwards compatibility with user providing a peft model as the actor network
             if self.lora_config is None:
