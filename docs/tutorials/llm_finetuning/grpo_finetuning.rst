@@ -172,7 +172,7 @@ for displaying these behaviours, the agent itself discovers the best way to achi
 Now we have defined our reward functions, we must also design our prompt. This forms the input given
 to the agent and provides the context necessary to complete the task. This is a task-specific feature,
 and different reasoning problems will require different conversation templates, although they can follow a similar
-format. We define the conversation template as follows (using ``q`` and ``a`` as placeholders for the question and answer data)
+format. We define the conversation template as follows (using ``question`` and ``answer`` as placeholders for the question and answer data)
 and then instantiate the ``ReasoningGym`` object which converts a Hugging Face dataset into a Gymnasium-style environment.
 
 .. collapse:: Convert HuggingFace Dataset to Gymnasium Environment
@@ -187,7 +187,7 @@ and then instantiate the ``ReasoningGym`` object which converts a Hugging Face d
             {
                 "role": "user",
                 "content": (
-                    "Using each number in this list only once {q}, create an equation that equals {a}. You "
+                    "Using each number in this list only once {question}, create an equation that equals {answer}. You "
                     "can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. "
                     "And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>."
                 )

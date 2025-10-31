@@ -22,7 +22,7 @@ from agilerl.utils.llm_utils import (
 DUMMY_CONVERSATION_TEMPLATE = [
     {
         "role": "system",
-        "content": "question: {q}\nanswer: {a}",
+        "content": "question: {question}\nanswer: {answer}",
     },
 ]
 

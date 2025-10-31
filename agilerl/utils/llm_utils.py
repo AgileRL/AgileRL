@@ -20,8 +20,8 @@ from agilerl.typing import PreferencePrompts, ReasoningPrompts
 
 def apply_chat_template(
     conversation_template: list[dict[str, str]],
-    q: str,
-    a: str,
+    question: str,
+    answer: str,
     tokenizer: AutoTokenizer,
 ) -> BatchEncoding:
     """
@@ -29,17 +29,20 @@ def apply_chat_template(
 
     :param conversation_template: The conversation template to be tokenized.
     :type conversation_template: list[dict[str, str]]
-    :param q: The question to be tokenized.
-    :type q: str
-    :param a: The answer to be tokenized.
-    :type a: str
+    :param question: The question to be tokenized.
+    :type question: str
+    :param answer: The answer to be tokenized.
+    :type answer: str
     :param tokenizer: The tokenizer to be used.
     :type tokenizer: AutoTokenizer
     :return: The tokenized prompt.
     :rtype: BatchEncoding
     """
     formatted_conversation = [
-        {"role": msg["role"], "content": msg["content"].format(q=q, a=a)}
+        {
+            "role": msg["role"],
+            "content": msg["content"].format(question=question, answer=answer),
+        }
         for msg in conversation_template
     ]
     updated_prompt = tokenizer.apply_chat_template(
