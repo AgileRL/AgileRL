@@ -1,6 +1,5 @@
 from unittest.mock import MagicMock
 
-import gymnasium as gym
 import pytest
 from accelerate import Accelerator
 from accelerate.state import AcceleratorState
@@ -278,12 +277,6 @@ def test_returns_best_agent_and_new_population_without_elitism_multi_agent():
 def test_language_model_tournament(use_accelerator, elitism, num_processes):
     AcceleratorState._reset_state(True)
     tournament_selection = TournamentSelection(3, elitism, 4, 2)
-    observation_space = gym.spaces.Box(low=0, high=1000 - 1, shape=(1,))
-    action_space = gym.spaces.Box(
-        low=0,
-        high=1000 - 1,
-        shape=(20,),
-    )
     population_size = 4
 
     init_hp = {
