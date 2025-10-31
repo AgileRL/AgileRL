@@ -7,7 +7,6 @@ from types import SimpleNamespace
 from typing import Optional
 from unittest.mock import MagicMock, PropertyMock, patch
 
-import gymnasium as gym
 import pytest
 import torch
 import torch.nn as nn

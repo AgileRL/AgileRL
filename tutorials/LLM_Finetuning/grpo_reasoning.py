@@ -1,6 +1,5 @@
 import re
 
-import torch
 from accelerate import Accelerator
 from datasets import load_dataset
 from peft import LoraConfig

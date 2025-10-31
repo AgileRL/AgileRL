@@ -1,6 +1,5 @@
 import re
 
-import torch
 import yaml
 from accelerate import Accelerator
 from datasets import load_dataset

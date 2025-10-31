@@ -5,7 +5,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
-from gymnasium import spaces
 from peft import LoraConfig
 from transformers import PreTrainedModel
 

@@ -6,7 +6,6 @@ import torch
 from accelerate import Accelerator
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
-from gymnasium import spaces
 from peft import LoraConfig, PeftModel
 from transformers import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel

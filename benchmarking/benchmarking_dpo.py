@@ -1,10 +1,9 @@
-import torch
 import yaml
 from accelerate import Accelerator
 from datasets import load_dataset
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig
 from torch.utils.data import Dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 
 from agilerl.algorithms.dpo import DPO
 from agilerl.hpo.mutation import Mutations

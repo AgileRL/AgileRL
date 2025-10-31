@@ -36,7 +36,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules import EvolvableModule
 from agilerl.typing import BPTTSequenceType, GymSpaceType, PopulationType
-from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig, clone_llm
+from agilerl.utils.algo_utils import CosineLRScheduleConfig, clone_llm
 from agilerl.utils.llm_utils import DummyOptimizer, get_state_dict
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 

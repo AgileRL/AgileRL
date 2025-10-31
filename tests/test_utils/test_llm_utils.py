@@ -1,8 +1,6 @@
 from contextlib import contextmanager
 from unittest.mock import patch
 
-import gymnasium as gym
-import numpy as np
 import pytest
 import torch
 import torch.nn as nn

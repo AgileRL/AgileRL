@@ -1,7 +1,6 @@
 import copy
 import gc
 
-import gymnasium as gym
 import pytest
 import torch
 from accelerate import Accelerator
