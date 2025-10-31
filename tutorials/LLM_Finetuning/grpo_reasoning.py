@@ -3,15 +3,16 @@ import re
 import torch
 from accelerate import Accelerator
 from datasets import load_dataset
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig
 from torch.utils.data import Dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 
 from agilerl.algorithms import GRPO
 from agilerl.training.train_llm import finetune_llm_reasoning
+from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import ReasoningGym
 
-MODEL_PATH = "Qwen/Qwen2.5-3B"
+MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 USE_VLLM = True
 
@@ -160,6 +161,7 @@ def main():
         group_size=8,
         accelerator=accelerator,
         use_vllm=USE_VLLM,
+        vllm_config=VLLMConfig(sleep_mode=True, max_num_seqs=4),
     )
     finetune_llm_reasoning(
         pop=[agent],

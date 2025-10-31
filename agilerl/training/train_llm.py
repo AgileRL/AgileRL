@@ -3,10 +3,10 @@ from typing import Any, Optional
 
 import numpy as np
 import torch.distributed as dist
-import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import DPO, GRPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -115,7 +115,7 @@ def finetune_llm_reasoning(
 
     if init_hp is None:
         init_hp = {}
-        init_hp["BATCH_SIZE_PER_GPU"] = pop[0].batch_size
+        init_hp["BATCH_SIZE_PER_GPU"] = pop[0].batch_size_per_process
         init_hp["ALGO"] = pop[0].algo
     data_increment = (
         getattr(dist, "get_world_size", lambda: 1)() if dist.is_initialized() else 1
@@ -463,7 +463,7 @@ def finetune_llm_preference(
 
     if init_hp is None:
         init_hp = {}
-        init_hp["BATCH_SIZE_PER_GPU"] = pop[0].batch_size
+        init_hp["BATCH_SIZE_PER_GPU"] = pop[0].batch_size_per_process
         init_hp["ALGO"] = pop[0].algo
 
     data_increment = accelerator.num_processes if accelerator is not None else 1

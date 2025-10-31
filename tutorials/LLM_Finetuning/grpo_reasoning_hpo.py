@@ -3,18 +3,19 @@ import re
 import torch
 from accelerate import Accelerator
 from datasets import load_dataset
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig
 from torch.utils.data import Dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_llm import finetune_llm_reasoning
+from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import ReasoningGym
 from agilerl.utils.utils import create_population
 
-MODEL_PATH = "Qwen/Qwen2.5-1.5B"
+MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 USE_VLLM = True
 
@@ -146,6 +147,7 @@ def main(init_hp, mut_p):
             bias="none",
         ),
         "use_vllm": USE_VLLM,
+        "vllm_config": VLLMConfig(sleep_mode=False, max_num_seqs=4),
         "pad_token_id": tokenizer.pad_token_id,
         "pad_token": tokenizer.pad_token,
     }
@@ -217,8 +219,7 @@ if __name__ == "__main__":
 
     INIT_HP = {
         "ALGO": "GRPO",
-        "BATCH_SIZE_PER_GPU": 1,
-        "REDUCE_MEMORY_PEAK": True,
+        "BATCH_SIZE": 16,
         "BETA": 0.001,
         "LR": 0.000005,
         "CLIP_COEF": 0.2,
@@ -226,10 +227,7 @@ if __name__ == "__main__":
         "UPDATE_EPOCHS": 1,
         "GROUP_SIZE": 8,
         "TEMPERATURE": 0.9,
-        "CALC_POSITION_EMBEDDINGS": True,
-        "MIN_OUTPUT_TOKENS": None,
-        "MAX_OUTPUT_TOKENS": 1024,
-        "COSINE_lR_SCHEDULER": None,
+        "MAX_MODEL_LEN": 1024,
         "TOURN_SIZE": 2,
         "ELITISM": True,
         "POP_SIZE": 4,

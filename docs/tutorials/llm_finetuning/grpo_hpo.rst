@@ -45,22 +45,21 @@ unlike the rest of the AgileRL framework, we can only tune the RL hyperparameter
     .. code-block:: python
 
         MUTATION_PARAMS = {
-                "NO_MUT": 0.1,
-                "RL_HP_MUT": 0.6,
-                "MUT_SD": 0.1,
-                "RAND_SEED": 42,
-                "MIN_LR": 0.0000001,
-                "MAX_LR": 0.00001,
-                "MIN_BETA": 0.0001,
-                "MAX_BETA": 0.01,
-                "MIN_GROUP_SIZE": 4,
-                "MAX_GROUP_SIZE": 12
-            }
+            "NO_MUT": 0.1,
+            "RL_HP_MUT": 0.6,
+            "MUT_SD": 0.1,
+            "RAND_SEED": 42,
+            "MIN_LR": 0.0000001,
+            "MAX_LR": 0.00001,
+            "MIN_BETA": 0.0001,
+            "MAX_BETA": 0.01,
+            "MIN_GROUP_SIZE": 4,
+            "MAX_GROUP_SIZE": 12,
+        }
 
         INIT_HP = {
             "ALGO": "GRPO",
-            "BATCH_SIZE_PER_GPU": 1,
-            "REDUCE_MEMORY_PEAK": True,
+            "BATCH_SIZE": 16,
             "BETA": 0.001,
             "LR": 0.000005,
             "CLIP_COEF": 0.2,
@@ -68,15 +67,11 @@ unlike the rest of the AgileRL framework, we can only tune the RL hyperparameter
             "UPDATE_EPOCHS": 1,
             "GROUP_SIZE": 8,
             "TEMPERATURE": 0.9,
-            "CALC_POSITION_EMBEDDINGS": True,
-            "MIN_OUTPUT_TOKENS": None,
-            "MAX_OUTPUT_TOKENS": 1024,
-            "COSINE_lR_SCHEDULER": None,
+            "MAX_MODEL_LEN": 1024,
             "TOURN_SIZE": 2,
             "ELITISM": True,
             "POP_SIZE": 4,
             "EVAL_LOOP": 1,
-            "USE_VLLM": False, # vLLM is not recommended with population based HPO due to its increased memory usage
         }
 
 Defining our Base Model and Dataset
@@ -86,7 +81,7 @@ In this tutorial, we use the open-source transformers and datasets libraries fro
 `Hugging Face <https://huggingface.co/models>`_ to download our pretrained model weights and training data.
 There are a huge number of models and datasets hosted on Hugging Face, and different ones can easily be
 substituted in. In this tutorial, to keep things simple, we will use a 1.5 billion parameter Qwen
-model, and the Countdown dataset, and initialise them as follows:
+model, and the Countdown dataset:
 
 .. collapse:: Model and Dataset Initialisation
 
@@ -94,30 +89,6 @@ model, and the Countdown dataset, and initialise them as follows:
 
         MODEL_PATH = "Qwen/Qwen2.5-1.5B"
         DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
-
-        def create_model(pretrained_model_name_or_path):
-            model = AutoModelForCausalLM.from_pretrained(
-                pretrained_model_name_or_path=pretrained_model_name_or_path,
-                torch_dtype=torch.bfloat16,
-                attn_implementation="flash_attention_2",
-            )
-            peft_config = LoraConfig(
-                r=16,
-                lora_alpha=64,
-                target_modules=[
-                    "q_proj",
-                    "k_proj",
-                    "v_proj",
-                    "o_proj",
-                    "up_proj",
-                    "down_proj",
-                    "gate_proj",
-                ],
-                task_type="CAUSAL_LM",
-                lora_dropout=0.05,
-            )
-            model = get_peft_model(model, peft_config)
-            return model
 
         def make_dataset(dataset_name: str) -> Tuple[Dataset, Dataset]:
             raw_dataset = (
@@ -135,8 +106,6 @@ model, and the Countdown dataset, and initialise them as follows:
         tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
         tokenizer.pad_token_id = tokenizer.eos_token_id
         train_dataset, test_dataset = make_dataset(DATASET)
-        INIT_HP["PAD_TOKEN_ID"] = tokenizer.pad_token_id
-        INIT_HP["PAD_TOKEN"] = tokenizer.eos_token
 
 Create the Reasoning Environment
 --------------------------------
@@ -228,37 +197,25 @@ for displaying these behaviours, the agent itself discovers the best way to achi
 
 Now we have defined our reward functions, we must also design our prompt. This forms the input given
 to the agent and provides the context necessary to complete the task. This is a task-specific feature,
-and different reasoning problems will require different chat templates, although they can follow a similar
-format. Combining all these components, we can now initialise the ReasoningGym object.
+and different reasoning problems will require different conversation templates, although they can follow a similar
+format. We define the conversation template as follows (using ``q`` and ``a`` as placeholders for the question and answer data)
+and then instantiate the ``ReasoningGym`` object which converts a Hugging Face dataset into a Gymnasium-style environment.
 
 .. collapse:: Convert HuggingFace Dataset to Gymnasium Environment
 
     .. code-block:: python
 
-        def countdown_chat_template(q, a, tokenizer):
-            conversation = [
-                {
-                    "role": "system",
-                    "content": "You are a helpful assistant. You first think about the reasoning process in your mind and then provide the user with the answer.",
-                },
-                {
-                    "role": "user",
-                    "content": f"Using each number in this list only once {q}, create an equation that equals {a}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
-                },
-                {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
-            ]
-            updated_prompt = tokenizer.apply_chat_template(
-                conversation, tokenize=False, continue_final_message=True
-            )
-            tokenized_prompt = tokenizer(
-                [updated_prompt],
-                return_tensors="pt",
-                padding=True,
-                padding_side="left",
-                return_attention_mask=True,
-            )
-            return tokenized_prompt
-
+        conversation = [
+            {
+                "role": "system",
+                "content": "You are a helpful assistant. You first think about the reasoning process in your mind and then provide the user with the answer.",
+            },
+            {
+                "role": "user",
+                "content": "Using each number in this list only once {q}, create an equation that equals {a}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
+            },
+            {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
+        ]
 
         # Define accelerators for distributed training
         accelerator = Accelerator()
@@ -269,9 +226,10 @@ format. Combining all these components, we can now initialise the ReasoningGym o
             test_dataset=test_dataset,
             tokenizer=tokenizer,
             reward_fn=combined_rewards,
-            apply_chat_template_fn=countdown_chat_template,
+            conversation_template=conversation_template,
             data_batch_size_per_gpu=10,
             accelerator=accelerator,
+            return_raw_completions=True, # This is necessary for vLLM to work
         )
 
 
@@ -296,16 +254,33 @@ training in this tutorial, we use deepspeed and accelerate.
         group_size=RLParameter(min=mut_p["MIN_GROUP_SIZE"], max=mut_p["MAX_GROUP_SIZE"], dtype=int),
     )
 
+    # Define the algorithm kwargs
+    algo_kwargs = {
+        "model_name": MODEL_PATH,
+        "lora_config": LoraConfig(
+            r=16,
+            lora_alpha=64,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+            lora_dropout=0.05,
+            bias="none",
+        ),
+        "use_vllm": True,
+        "vllm_config": VLLMConfig(
+            sleep_mode=False,
+            max_num_seqs=4
+        ),
+        "pad_token_id": tokenizer.pad_token_id,
+        "pad_token": tokenizer.pad_token,
+    }
+
     pop = create_population(
         algo=init_hp["ALGO"],
-        observation_space=env.observation_space,
-        action_space=env.action_space,
-        actor_network=model,
         net_config=None,
-        INIT_HP=INIT_HP,
+        INIT_HP=init_hp,
         hp_config=hp_config,
         population_size=init_hp["POP_SIZE"],
         accelerator=accelerator,
+        algo_kwargs=algo_kwargs,
     )
 
 Creating Mutations and Tournament Objects
@@ -571,7 +546,7 @@ Load fine-tuned LLM into vLLM Engine for inference
     from vllm import LLM
 
     llm = LLM(
-        model="Qwen/Qwen2.5-3B",
+        model=MODEL_PATH,
         tensor_parallel_size=1,
         gpu_memory_utilization=0.9,
         max_num_seqs=1024,
@@ -586,7 +561,7 @@ Load fine-tuned LLM into vLLM Engine for inference
         temperature=0.0,
         top_p=1.0,
         top_k=-1,
-        max_tokens=max_output_tokens,
+        max_tokens=1024,
         seed=42,
     )
 
