@@ -1862,7 +1862,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self._configure_batch_size(
             batch_size, clone, reduce_memory_peak, micro_batch_size_per_gpu
         )
-
+        self.batch_size = self.batch_size_per_process * (
+            self.accelerator.num_processes if self.accelerator is not None else 1
+        )
         if self.accelerator is not None:
             if (
                 self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
