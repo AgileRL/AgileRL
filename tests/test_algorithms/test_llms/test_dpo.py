@@ -1,7 +1,6 @@
 import copy
 import gc
 
-import gymnasium as gym
 import pytest
 import torch
 from accelerate import Accelerator
@@ -72,6 +71,7 @@ def dpo_factory():
         pretrained_model_name_or_path,
         reduce_memory_peak,
         micro_batch_size_per_gpu,
+        from_name=False,
     ):
         gc.collect()
         torch.cuda.empty_cache()
@@ -80,12 +80,6 @@ def dpo_factory():
         accelerator = accelerator_factory(use_deepspeed_optimizer, config)
         if not use_deepspeed_optimizer and accelerator is not None:
             accelerator.state.deepspeed_plugin.deepspeed_config.pop("optimizer", None)
-        observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
-        action_space = gym.spaces.Box(
-            low=0,
-            high=vocab_size - 1,
-            shape=(20,),
-        )
         if pretrained_model_name_or_path is not None:
             actor = model_factory(pretrained_model_name_or_path)
             target_modules = [
@@ -113,9 +107,8 @@ def dpo_factory():
             lora_dropout=0.05,
         )
         dpo = DPO(
-            observation_space=observation_space,
-            action_space=action_space,
-            actor_network=actor,
+            actor_network=actor if not from_name else None,
+            model_name=pretrained_model_name_or_path if from_name else None,
             pad_token_id=vocab_size - 1,
             pad_token="<pad>",
             lora_config=lora_config,
@@ -154,6 +147,7 @@ def dpo_factory():
 @pytest.mark.parametrize("data_batch_size", [4])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+@pytest.mark.parametrize("from_name", [True, False])
 def test_init_dpo(
     dpo_factory,
     accelerator_factory,
@@ -168,6 +162,7 @@ def test_init_dpo(
     data_batch_size,
     reduce_memory_peak,
     micro_batch_size_per_gpu,
+    from_name,
 ):
     dpo = dpo_factory(
         accelerator_factory,
@@ -181,9 +176,8 @@ def test_init_dpo(
         pretrained_model_name_or_path,
         reduce_memory_peak,
         micro_batch_size_per_gpu,
+        from_name=from_name,
     )
-    assert isinstance(dpo.observation_space, gym.spaces.Box)
-    assert isinstance(dpo.action_space, gym.spaces.Box)
     assert dpo.batch_size_per_process == 16 if not reduce_memory_peak else 1
     assert dpo.beta == 0.001
     assert dpo.lr == 1e-4 if use_deepspeed_optimizer else 1e-5, dpo.lr == 1e-4
@@ -212,6 +206,35 @@ def test_init_dpo(
     else:
         assert isinstance(dpo.actor, torch.nn.Module)
     dpo.clean_up()
+    AcceleratorState._reset_state(True)
+
+
+@pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
+@pytest.mark.parametrize("vocab_size", [100])
+@pytest.mark.parametrize("reduce_memory_peak", [True])
+@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+def test_init_dpo_model_name_none_actor_network_none(
+    use_separate_reference_adapter,
+    vocab_size,
+    reduce_memory_peak,
+    micro_batch_size_per_gpu,
+):
+    with pytest.raises(
+        ValueError,
+        match="At least one of model_name or actor_network must be provided.",
+    ):
+        DPO(
+            actor_network=None,
+            model_name=None,
+            pad_token_id=vocab_size - 1,
+            pad_token="<pad>",
+            accelerator=None,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            use_separate_reference_adapter=use_separate_reference_adapter,
+            reduce_memory_peak=reduce_memory_peak,
+            micro_batch_size_per_gpu=micro_batch_size_per_gpu,
+        )
+
     AcceleratorState._reset_state(True)
 
 

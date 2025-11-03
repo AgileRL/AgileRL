@@ -7,7 +7,6 @@ from types import SimpleNamespace
 from typing import Optional
 from unittest.mock import MagicMock, PropertyMock, patch
 
-import gymnasium as gym
 import pytest
 import torch
 import torch.nn as nn
@@ -294,6 +293,7 @@ def grpo_factory():
         reduce_memory_peak,
         micro_batch_size_per_gpu,
         sleep_mode=False,
+        from_name=False,
     ):
         gc.collect()
         torch.cuda.empty_cache()
@@ -302,12 +302,6 @@ def grpo_factory():
         accelerator = accelerator_factory(use_deepspeed_optimizer, config)
         if not use_deepspeed_optimizer and accelerator is not None:
             accelerator.state.deepspeed_plugin.deepspeed_config.pop("optimizer", None)
-        observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
-        action_space = gym.spaces.Box(
-            low=0,
-            high=vocab_size - 1,
-            shape=(20,),
-        )
         if use_vllm:
             lora_config = None
             vllm_config = VLLMConfig(
@@ -345,9 +339,8 @@ def grpo_factory():
             )
             vllm_config = None
         grpo = GRPO(
-            observation_space,
-            action_space,
-            actor_network=actor,
+            actor_network=actor if not from_name else None,
+            model_name=pretrained_model_name_or_path if from_name else None,
             lr=1e-5,
             pad_token_id=vocab_size - 1,
             pad_token="<pad>",
@@ -776,8 +769,6 @@ def test_grpo_save_load_checkpoint_vllm(
     with tempfile.TemporaryDirectory() as tmpdir:
         grpo.save_checkpoint(tmpdir)
         new_grpo = GRPO(
-            gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
-            gym.spaces.Box(low=0, high=vocab_size - 1),
             actor_network=model_factory(pretrained_model_name_or_path),
             pad_token_id=vocab_size - 1,
             pad_token="<pad>",
@@ -904,6 +895,7 @@ def test_grpo_test_vllm(
 @pytest.mark.parametrize(
     "reduce_memory_peak, micro_batch_size_per_gpu", [(True, None), (False, 2)]
 )
+@pytest.mark.parametrize("from_name", [True, False])
 def test_init_grpo_with_accelerator(
     grpo_factory,
     accelerator_factory,
@@ -919,6 +911,7 @@ def test_init_grpo_with_accelerator(
     pretrained_model_name_or_path,
     reduce_memory_peak,
     micro_batch_size_per_gpu,
+    from_name,
 ):
     grpo = grpo_factory(
         accelerator_factory,
@@ -934,11 +927,10 @@ def test_init_grpo_with_accelerator(
         pretrained_model_name_or_path,
         reduce_memory_peak,
         micro_batch_size_per_gpu,
+        from_name=from_name,
     )
 
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-    assert isinstance(grpo.observation_space, gym.spaces.Box)
-    assert isinstance(grpo.action_space, gym.spaces.Box)
     assert grpo.batch_size_per_process == 16 if not reduce_memory_peak else 1
     assert grpo.beta == 0.001
     assert grpo.lr == 1e-4 if use_deepspeed_optimizer else 1e-5, grpo.lr == 1e-4
@@ -1037,8 +1029,6 @@ def test_init_grpo_vllm_with_tp_gt_one(
         vllm.LLM, "__new__", return_value=mock_instance
     ):
         grpo = GRPO(
-            gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
-            gym.spaces.Box(low=0, high=vocab_size - 1),
             actor_network=model_factory(pretrained_model_name_or_path),
             pad_token_id=vocab_size - 1,
             pad_token="<pad>",
@@ -1112,8 +1102,6 @@ def test_init_grpo_vllm_tp_value_error(
         match="Tensor parallel size 2 must be a multiple of the number of processes 1.",
     ):
         GRPO(
-            gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
-            gym.spaces.Box(low=0, high=vocab_size - 1),
             actor_network=model_factory(pretrained_model_name_or_path),
             pad_token_id=vocab_size - 1,
             pad_token="<pad>",
@@ -1153,8 +1141,6 @@ def test_init_grpo_scheduler_warning_no_accelerator(
 ):
     with pytest.warns(UserWarning):
         GRPO(
-            gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
-            gym.spaces.Box(low=0, high=vocab_size - 1),
             actor_network=model_factory(pretrained_model_name_or_path),
             pad_token_id=vocab_size - 1,
             pad_token="<pad>",
@@ -1206,8 +1192,6 @@ def test_init_grpo_batch_size_value_error(
         return_value=2,
     ):
         GRPO(
-            gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
-            gym.spaces.Box(low=0, high=vocab_size - 1),
             actor_network=model_factory(pretrained_model_name_or_path),
             pad_token_id=vocab_size - 1,
             batch_size=17,
@@ -1257,8 +1241,6 @@ def test_init_grpo_max_model_len_and_max_output_tokens_none_error(
         ValueError, match="Either max_output_tokens or max_model_len must be specified"
     ):
         GRPO(
-            gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
-            gym.spaces.Box(low=0, high=vocab_size - 1),
             actor_network=model_factory(pretrained_model_name_or_path),
             pad_token_id=vocab_size - 1,
             batch_size=17,
@@ -1315,8 +1297,6 @@ def test_init_grpo_batch_size_grad_accum_error(
             "gradient_accumulation_steps"
         ] = 7
         GRPO(
-            gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
-            gym.spaces.Box(low=0, high=vocab_size - 1),
             actor_network=model_factory(pretrained_model_name_or_path),
             pad_token_id=vocab_size - 1,
             batch_size=16,
@@ -1382,8 +1362,6 @@ def test_init_grpo_with_no_accelerator(
         reduce_memory_peak,
         micro_batch_size_per_gpu,
     )
-    assert isinstance(grpo.observation_space, gym.spaces.Box)
-    assert isinstance(grpo.action_space, gym.spaces.Box)
     assert grpo.batch_size_per_process == 16
     assert grpo.beta == 0.001
     assert grpo.lr == 1e-5
@@ -1423,15 +1401,7 @@ def test_init_grpo_zero3_warning(
         input_size = 10
         max_tokens = 20
         group_size = 5
-        observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
-        action_space = gym.spaces.Box(
-            low=0,
-            high=vocab_size - 1,
-            shape=(20,),
-        )
         grpo = GRPO(
-            observation_space,
-            action_space,
             actor_network=create_module(
                 input_size=input_size,
                 max_tokens=max_tokens,
@@ -1475,12 +1445,6 @@ def test_init_grpo_lr_warning(
         input_size = 10
         max_tokens = 20
         group_size = 5
-        observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
-        action_space = gym.spaces.Box(
-            low=0,
-            high=vocab_size - 1,
-            shape=(20,),
-        )
         lora_config = LoraConfig(
             r=16,
             lora_alpha=64,
@@ -1489,8 +1453,6 @@ def test_init_grpo_lr_warning(
             lora_dropout=0.05,
         )
         grpo = GRPO(
-            observation_space,
-            action_space,
             actor_network=create_module(
                 input_size=input_size,
                 max_tokens=max_tokens,
@@ -1532,12 +1494,6 @@ def test_init_grpo_max_grad_norm_warning(
         input_size = 10
         max_tokens = 20
         group_size = 5
-        observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
-        action_space = gym.spaces.Box(
-            low=0,
-            high=vocab_size - 1,
-            shape=(20,),
-        )
         lora_config = LoraConfig(
             r=16,
             lora_alpha=64,
@@ -1546,8 +1502,6 @@ def test_init_grpo_max_grad_norm_warning(
             lora_dropout=0.05,
         )
         GRPO(
-            observation_space,
-            action_space,
             actor_network=create_module(
                 input_size=input_size,
                 max_tokens=max_tokens,
@@ -1586,12 +1540,6 @@ def test_init_grpo_scheduler_warning(
         input_size = 10
         max_tokens = 20
         group_size = 5
-        observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
-        action_space = gym.spaces.Box(
-            low=0,
-            high=vocab_size - 1,
-            shape=(20,),
-        )
         lora_config = LoraConfig(
             r=16,
             lora_alpha=64,
@@ -1600,8 +1548,6 @@ def test_init_grpo_scheduler_warning(
             lora_dropout=0.05,
         )
         GRPO(
-            observation_space,
-            action_space,
             actor_network=create_module(
                 input_size=input_size,
                 max_tokens=max_tokens,
@@ -1645,12 +1591,6 @@ def test_init_grpo_micro_batch_size_per_gpu_value_error(
         input_size = 10
         max_tokens = 20
         group_size = 5
-        observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
-        action_space = gym.spaces.Box(
-            low=0,
-            high=vocab_size - 1,
-            shape=(20,),
-        )
         lora_config = LoraConfig(
             r=16,
             lora_alpha=64,
@@ -1659,8 +1599,6 @@ def test_init_grpo_micro_batch_size_per_gpu_value_error(
             lora_dropout=0.05,
         )
         GRPO(
-            observation_space,
-            action_space,
             actor_network=create_module(
                 input_size=input_size,
                 max_tokens=max_tokens,
@@ -1712,12 +1650,6 @@ def test_init_grpo_micro_batch_size_per_gpu_division_error(
         input_size = 10
         max_tokens = 20
         group_size = 5
-        observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
-        action_space = gym.spaces.Box(
-            low=0,
-            high=vocab_size - 1,
-            shape=(20,),
-        )
         lora_config = LoraConfig(
             r=16,
             lora_alpha=64,
@@ -1726,8 +1658,6 @@ def test_init_grpo_micro_batch_size_per_gpu_division_error(
             lora_dropout=0.05,
         )
         GRPO(
-            observation_space,
-            action_space,
             actor_network=create_module(
                 input_size=input_size,
                 max_tokens=max_tokens,
@@ -1823,8 +1753,6 @@ def test_get_action_grpo_vllm_multiple_gpus(
     ):
 
         grpo = GRPO(
-            gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
-            gym.spaces.Box(low=0, high=vocab_size - 1),
             actor_network=model_factory(pretrained_model_name_or_path),
             lr=0.1,
             pad_token_id=vocab_size - 1,
@@ -2373,8 +2301,6 @@ def test_grpo_save_load_checkpoint(
     with tempfile.TemporaryDirectory() as tmpdir:
         grpo.save_checkpoint(tmpdir, weights_only=weights_only)
         new_grpo = GRPO(
-            gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
-            gym.spaces.Box(low=0, high=vocab_size - 1),
             actor_network=model_factory(pretrained_model_name_or_path),
             pad_token_id=vocab_size - 1,
             pad_token="<pad>",
@@ -2533,8 +2459,6 @@ def test_grpo_save_load_distributed_actor(
     )
     grpo_optim_state_dict.pop("loss_scaler", None)
     new_grpo = GRPO(
-        gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
-        gym.spaces.Box(low=0, high=vocab_size - 1),
         actor_network=model_factory(pretrained_model_name_or_path),
         pad_token_id=vocab_size - 1,
         pad_token="<pad>",
@@ -2650,8 +2574,6 @@ def test_grpo_save_load_distributed_actor_vllm(
     )
     grpo_optim_state_dict.pop("loss_scaler", None)
     new_grpo = GRPO(
-        gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,)),
-        gym.spaces.Box(low=0, high=vocab_size - 1),
         actor_network=model_factory(pretrained_model_name_or_path),
         pad_token_id=vocab_size - 1,
         pad_token="<pad>",
@@ -3255,40 +3177,34 @@ def test_init_grpo_lora_config_warning(
     accelerator_factory, config, use_deepspeed_optimizer
 ):
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-    with pytest.warns(UserWarning):
+    with pytest.warns(
+        UserWarning,
+        match=r"No LoRA config provided. AgileRL can only be used to finetune adapters at present. Using default LoRA configuration for RL finetuning.",
+    ):
         gc.collect()
         vocab_size = 1000
         input_size = 10
         max_tokens = 20
         group_size = 5
-        observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
-        action_space = gym.spaces.Box(
-            low=0,
-            high=vocab_size - 1,
-            shape=(20,),
-        )
-        with pytest.raises(ValueError):
-            GRPO(
-                observation_space,
-                action_space,
-                actor_network=create_module(
-                    input_size=input_size,
-                    max_tokens=max_tokens,
-                    vocab_size=vocab_size,
-                    device="cuda" if torch.cuda.is_available() else "cpu",
-                ),
-                lr=0.1,
-                pad_token_id=vocab_size - 1,
-                pad_token="<pad>",
+        GRPO(
+            actor_network=create_module(
+                input_size=input_size,
+                max_tokens=max_tokens,
+                vocab_size=vocab_size,
                 device="cuda" if torch.cuda.is_available() else "cpu",
-                group_size=group_size,
-                cosine_lr_schedule_config=(
-                    None
-                    if accelerator is not None
-                    else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
-                ),
-                accelerator=accelerator,
-            )
+            ),
+            lr=0.1,
+            pad_token_id=vocab_size - 1,
+            pad_token="<pad>",
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            group_size=group_size,
+            cosine_lr_schedule_config=(
+                None
+                if accelerator is not None
+                else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+            ),
+            accelerator=accelerator,
+        )
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -3499,15 +3415,7 @@ def test_grpo_ref_actor_is_same_as_actor_after_learning_reference_adapater(
     )
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     gc.collect()
-    observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
-    action_space = gym.spaces.Box(
-        low=0,
-        high=vocab_size - 1,
-        shape=(20,),
-    )
     grpo = GRPO(
-        observation_space,
-        action_space,
         actor_network=create_module(
             input_size=input_size,
             max_tokens=max_tokens,
@@ -3580,12 +3488,6 @@ def test_grpo_set_reference_policy_with_wrong_adapter_name(
         input_size = 10
         max_tokens = 20
         group_size = 5
-        observation_space = gym.spaces.Box(low=0, high=vocab_size - 1, shape=(1,))
-        action_space = gym.spaces.Box(
-            low=0,
-            high=vocab_size - 1,
-            shape=(20,),
-        )
         lora_config = LoraConfig(
             r=16,
             lora_alpha=64,
@@ -3594,8 +3496,6 @@ def test_grpo_set_reference_policy_with_wrong_adapter_name(
             lora_dropout=0.05,
         )
         grpo = GRPO(
-            observation_space,
-            action_space,
             actor_network=create_module(
                 input_size=input_size,
                 max_tokens=max_tokens,

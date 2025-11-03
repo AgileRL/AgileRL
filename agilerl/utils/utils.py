@@ -36,7 +36,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules import EvolvableModule
 from agilerl.typing import BPTTSequenceType, GymSpaceType, PopulationType
-from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig, clone_llm
+from agilerl.utils.algo_utils import CosineLRScheduleConfig, clone_llm
 from agilerl.utils.llm_utils import DummyOptimizer, get_state_dict
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
@@ -213,10 +213,10 @@ def default_progress_bar(
 
 def create_population(
     algo: str,
-    observation_space: GymSpaceType,
-    action_space: GymSpaceType,
     net_config: Optional[dict[str, Any]],
     INIT_HP: dict[str, Any],
+    observation_space: GymSpaceType | None = None,
+    action_space: GymSpaceType | None = None,
     hp_config: Optional[HyperparameterConfig] = None,
     actor_network: Optional[EvolvableModule] = None,
     critic_network: Optional[EvolvableModule] = None,
@@ -233,14 +233,14 @@ def create_population(
 
     :param algo: RL algorithm
     :type algo: str
-    :param observation_space: Observation space
-    :type observation_space: spaces.Space
-    :param action_space: Action space
-    :type action_space: spaces.Space
     :param net_config: Network configuration
     :type net_config: dict or None
     :param INIT_HP: Initial hyperparameters
     :type INIT_HP: dict
+    :param observation_space: Observation space
+    :type observation_space: spaces.Space
+    :param action_space: Action space
+    :type action_space: spaces.Space
     :param hp_config: Choice of algorithm hyperparameters to mutate during training, defaults to None
     :type hp_config: HyperparameterConfig, optional
     :param actor_network: Custom actor network, defaults to None
@@ -572,23 +572,23 @@ def create_population(
     elif algo == "GRPO":
         for idx in range(population_size):
             agent = GRPO(
-                observation_space=observation_space,
-                action_space=action_space,
                 actor_network=(
-                    clone_llm(
-                        actor_network,
-                        zero_stage=INIT_HP.get("ZERO_STAGE", 0),
-                        state_dict=(
-                            actor_network.state_dict()
-                            if accelerator is None
-                            else get_state_dict(actor_network)
-                        ),
+                    (
+                        clone_llm(
+                            actor_network,
+                            zero_stage=INIT_HP.get("ZERO_STAGE", 0),
+                            state_dict=(
+                                actor_network.state_dict()
+                                if accelerator is None
+                                else get_state_dict(actor_network)
+                            ),
+                        )
+                        if idx != 0
+                        else actor_network
                     )
-                    if idx != 0
-                    else actor_network
+                    if actor_network is not None
+                    else None
                 ),
-                pad_token_id=INIT_HP.get("PAD_TOKEN_ID"),
-                pad_token=INIT_HP.get("PAD_TOKEN"),
                 hp_config=hp_config,
                 index=idx,
                 batch_size=INIT_HP.get("BATCH_SIZE", 2),
@@ -601,7 +601,7 @@ def create_population(
                 temperature=INIT_HP.get("TEMPERATURE", 0.9),
                 calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
                 reduce_memory_peak=INIT_HP.get("REDUCE_MEMORY_PEAK", False),
-                max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS", 1024),
+                max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS", None),
                 min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS", None),
                 cosine_lr_schedule_config=(
                     CosineLRScheduleConfig(**INIT_HP.get("COSINE_lR_SCHEDULER", None))
@@ -610,23 +610,13 @@ def create_population(
                 ),
                 accelerator=Accelerator() if accelerator else None,
                 device=device,
-                use_separate_reference_adapter=False,
                 max_model_len=INIT_HP.get("MAX_MODEL_LEN", None),
-                use_vllm=INIT_HP.get("USE_VLLM", False),
-                vllm_config=(
-                    VLLMConfig(**INIT_HP.get("VLLM_CONFIG"))
-                    if INIT_HP.get("VLLM_CONFIG", None) is not None
-                    and INIT_HP.get("USE_VLLM", False)
-                    else None
-                ),
                 **algo_kwargs,
             )
             population.append(agent)
     elif algo == "DPO":
         for idx in range(population_size):
             agent = DPO(
-                observation_space=observation_space,
-                action_space=action_space,
                 actor_network=(
                     clone_llm(
                         actor_network,
@@ -640,8 +630,6 @@ def create_population(
                     if idx != 0
                     else actor_network
                 ),
-                pad_token_id=INIT_HP.get("PAD_TOKEN_ID"),
-                pad_token=INIT_HP.get("PAD_TOKEN"),
                 hp_config=hp_config,
                 index=idx,
                 batch_size=INIT_HP.get("BATCH_SIZE", 2),

@@ -1328,6 +1328,13 @@ class VLLMConfig:
     max_num_seqs: int = 8
     sleep_mode: bool = False
 
+    def __post_init__(self):
+        if self.sleep_mode:
+            warnings.warn(
+                """VLLM sleep mode cannot be used with populations of agents on a single device. To use sleep mode, ensure,
+                you are training a single agent or, alternatively, use a different device for each agent."""
+            )
+
 
 def create_warmup_cosine_scheduler(
     optimizer: torch.optim.Optimizer,

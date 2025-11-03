@@ -25,6 +25,7 @@ def test_finetune_llm_reasoning_basic_training_loop(use_accelerator):
     mock_agent.learn.return_value = (0.5, 0.2)
     mock_agent.test.return_value = torch.tensor([0.8])
     mock_agent.algo = "GRPO"
+    mock_agent.batch_size_per_process = 32
     mock_agent.batch_size = 32
     mock_agent.steps = [10]
     mock_agent.scores = [0.0]
@@ -82,6 +83,7 @@ def test_finetune_llm_reasoning_with_wandb_and_checkpoints(use_accelerator):
     )
     mock_agent.learn.return_value = (0.5, 0.2)
     mock_agent.test.return_value = torch.tensor([0.8])
+    mock_agent.batch_size_per_process = 32
     mock_agent.batch_size = 32
     mock_agent.steps = [10]
     mock_agent.scores = [0.0]
@@ -149,6 +151,7 @@ def test_finetune_llm_reasoning_evolvable_training_loop(use_accelerator):
     )
     mock_agent.learn.return_value = (0.5, 0.2)
     mock_agent.test.return_value = torch.tensor([0.8])
+    mock_agent.batch_size_per_process = 32
     mock_agent.batch_size = 32
     mock_agent.steps = [10]
     mock_agent.scores = [0.0]
@@ -256,6 +259,7 @@ def test_finetune_llm_reasoning_warning_num_epochs_and_max_steps():
     )
     mock_agent.learn.return_value = (0.5, 0.2)
     mock_agent.test.return_value = torch.tensor([0.8])
+    mock_agent.batch_size_per_process = 32
     mock_agent.batch_size = 32
     mock_agent.steps = [10]
     mock_agent.scores = [0.0]
@@ -305,6 +309,7 @@ def test_finetune_llm_reasoning_max_steps_set_from_num_epochs():
     )
     mock_agent.learn.return_value = (0.5, 0.2)
     mock_agent.test.return_value = torch.tensor([0.8])
+    mock_agent.batch_size_per_process = 32
     mock_agent.batch_size = 32
     mock_agent.steps = [10]
     mock_agent.scores = [0.0]
@@ -359,6 +364,7 @@ def test_finetune_llm_reasoning_break_on_num_epochs():
     )
     mock_agent.learn.return_value = (0.5, 0.2)
     mock_agent.test.return_value = torch.tensor([0.8])
+    mock_agent.batch_size_per_process = 32
     mock_agent.batch_size = 32
     mock_agent.steps = [10]
     mock_agent.scores = [0.0]
@@ -412,6 +418,7 @@ def test_finetune_llm_preference_basic_training_loop(use_accelerator):
     mock_agent.learn.return_value = (0.5, 0.2, 0.1)
     mock_agent.test.return_value = 0.87
     mock_agent.batch_size = 32
+    mock_agent.batch_size_per_process = 32
     mock_agent.steps = [10]
     mock_agent.scores = [0.0]
 
@@ -470,6 +477,7 @@ def test_finetune_llm_preference_with_wandb_and_checkpoints(use_accelerator):
     mock_agent.learn.return_value = (0.5, 0.2, 0.1)
     mock_agent.test.return_value = 0.87
     mock_agent.batch_size = 32
+    mock_agent.batch_size_per_process = 32
     mock_agent.steps = [10]
     mock_agent.scores = [0.0]
     mock_agent.pretrained_model_name_or_path = "Qwen/Qwen2.5-0.5B"
@@ -544,6 +552,7 @@ def test_finetune_llm_preference_evolvable_training_loop(use_accelerator):
     mock_agent.learn.return_value = (0.5, 0.2, 0.1)
     mock_agent.test.return_value = 0.87
     mock_agent.batch_size = 32
+    mock_agent.batch_size_per_process = 32
     mock_agent.steps = [10]
     mock_agent.scores = [0.0]
 
@@ -612,6 +621,7 @@ def test_finetune_llm_preference_warning_num_epochs_and_max_steps():
     mock_agent.learn.return_value = (0.5, 0.2, 0.1)
     mock_agent.test.return_value = 0.87
     mock_agent.batch_size = 32
+    mock_agent.batch_size_per_process = 32
     mock_agent.steps = [10]
     mock_agent.scores = [0.0]
 
@@ -668,6 +678,7 @@ def test_finetune_llm_preference_break_on_num_epochs():
     mock_agent.learn.return_value = (0.5, 0.2, 0.1)
     mock_agent.test.return_value = 0.87
     mock_agent.batch_size = 32
+    mock_agent.batch_size_per_process = 32
     mock_agent.steps = [10]
     mock_agent.scores = [0.0]
 
@@ -721,6 +732,7 @@ def test_finetune_llm_preference_value_error_if_algo_not_dpo():
     mock_agent = MagicMock(spec=GRPO)
     mock_agent.algo = "GRPO"
     mock_agent.pretrained_model_name_or_path = "Qwen/Qwen2.5-0.5B"
+    mock_agent.batch_size_per_process = 32
     mock_agent.batch_size = 32
     mock_agent.steps = [10]
     mock_agent.scores = [0.0]
@@ -741,6 +753,7 @@ def test_finetune_llm_reasoning_value_error_if_algo_not_grpo():
     mock_agent = MagicMock(spec=DPO)
     mock_agent.algo = "DPO"
     mock_agent.pretrained_model_name_or_path = "Qwen/Qwen2.5-0.5B"
+    mock_agent.batch_size_per_process = 32
     mock_agent.batch_size = 32
     mock_agent.steps = [10]
     mock_agent.scores = [0.0]

@@ -1,12 +1,11 @@
 import gc
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 import torch
 from accelerate import Accelerator
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
-from gymnasium import spaces
 from peft import LoraConfig, PeftModel
 from transformers import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
@@ -33,12 +32,16 @@ DeepSpeedOptimizerType = Union[
 class GRPO(LLMAlgorithm):
     """The GRPO algorithm class. GRPO paper: https://arxiv.org/pdf/2402.03300
 
-    :param observation_space: Observation space of the environment
-    :type observation_space: gym.spaces.Space
-    :param action_space: Action space of the environment
-    :type action_space: gym.spaces.Space
+    :param pad_token_id: Pad token id
+    :type pad_token_id: int
+    :param pad_token: Pad token
+    :type pad_token: str
+    :param model_name: Model name
+    :type model_name: str, optional
     :param actor_network: HuggingFace LLM
     :type actor_network: PreTrainedModel
+    :param model_config: Model configuration, to be used when creating the model from a name or path
+    :type model_config: dict[str, Any], optional
     :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
     :type hp_config: HyperparameterConfig, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
@@ -93,15 +96,17 @@ class GRPO(LLMAlgorithm):
     :type vllm_config: VLLMConfig, optional
     :param seed: Seed for the random number generator, defaults to 42
     :type seed: int, optional
+    :param gradient_checkpointing: Flag to indicate if gradient checkpointing should be used, defaults to True
+    :type gradient_checkpointing: bool, optional
     """
 
     def __init__(
         self,
-        observation_space: spaces.Space,
-        action_space: spaces.Space,
-        actor_network: PreTrainedModel,
         pad_token_id: int,
         pad_token: str,
+        model_name: str | None = None,
+        actor_network: PreTrainedModel | None = None,
+        model_config: dict[str, Any] | None = None,
         hp_config: Optional[HyperparameterConfig] = None,
         index: int = 0,
         batch_size: int = 16,
@@ -132,6 +137,7 @@ class GRPO(LLMAlgorithm):
         use_vllm: bool = False,
         vllm_config: Optional[VLLMConfig] = None,
         seed: int = 42,
+        gradient_checkpointing: bool = True,
     ) -> None:
 
         device = (
@@ -140,9 +146,6 @@ class GRPO(LLMAlgorithm):
             else ("cuda" if torch.cuda.is_available() else "cpu")
         )
         super().__init__(
-            observation_space,
-            action_space,
-            actor_network,
             index=index,
             batch_size=batch_size,
             lr=lr,
@@ -155,6 +158,9 @@ class GRPO(LLMAlgorithm):
             pad_token=pad_token,
             lora_config=lora_config,
             use_separate_reference_adapter=use_separate_reference_adapter,
+            model_name=model_name,
+            actor_network=actor_network,
+            model_config=model_config,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
             cosine_lr_schedule_config=cosine_lr_schedule_config,
             wrap=wrap,
@@ -162,6 +168,7 @@ class GRPO(LLMAlgorithm):
             device=device,
             accelerator=accelerator,
             name="GRPO",
+            gradient_checkpointing=gradient_checkpointing,
         )
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
@@ -179,9 +186,10 @@ class GRPO(LLMAlgorithm):
         assert (
             update_epochs >= 1
         ), "Policy update epochs must be greater than or equal to one."
-        assert isinstance(
-            actor_network, (PeftModel, PreTrainedModel)
-        ), "Actor network must be a PeftModel or PreTrainedModel"
+        if actor_network is not None:
+            assert isinstance(
+                actor_network, (PeftModel, PreTrainedModel)
+            ), "Actor network must be a PeftModel or PreTrainedModel"
 
         self.clip_coef = clip_coef
         self.update_epochs = update_epochs

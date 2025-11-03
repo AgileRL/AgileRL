@@ -1,10 +1,9 @@
-import torch
 import yaml
 from accelerate import Accelerator
 from datasets import load_dataset
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig
 from torch.utils.data import Dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 
 from agilerl.algorithms.dpo import DPO
 from agilerl.hpo.mutation import Mutations
@@ -14,26 +13,6 @@ from agilerl.utils.llm_utils import PreferenceGym
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "HumanLLMs/Human-Like-DPO-Dataset"
-
-
-def create_model(pretrained_model_name_or_path):
-    model = AutoModelForCausalLM.from_pretrained(
-        pretrained_model_name_or_path=pretrained_model_name_or_path,
-        torch_dtype=torch.bfloat16,
-        attn_implementation="sdpa",
-    )
-
-    lora_config = LoraConfig(
-        r=16,
-        lora_alpha=64,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-        lora_dropout=0.05,
-        bias="none",
-    )
-
-    model = get_peft_model(model, lora_config, adapter_name="actor")
-
-    return model
 
 
 def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
@@ -65,18 +44,24 @@ def main(init_hp, mut_p):
     init_hp["ZERO_STAGE"] = accelerator.state.deepspeed_plugin.deepspeed_config[
         "zero_optimization"
     ]["stage"]
-    from gymnasium import spaces
+
+    lora_config = LoraConfig(
+        r=16,
+        lora_alpha=64,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+        lora_dropout=0.05,
+        bias="none",
+    )
 
     pop = [
         DPO(
-            observation_space=spaces.Box(low=0, high=tokenizer.vocab_size - 1),
-            action_space=spaces.Box(low=0, high=tokenizer.vocab_size - 1),
-            actor_network=create_model(pretrained_model_name_or_path=MODEL_PATH),
+            model_name=MODEL_PATH,
             pad_token_id=init_hp["PAD_TOKEN_ID"],
             pad_token=init_hp["PAD_TOKEN"],
             batch_size=init_hp["BATCH_SIZE"],
             beta=init_hp["BETA"],
             update_epochs=init_hp["UPDATE_EPOCHS"],
+            lora_config=lora_config,
             accelerator=accelerator if idx == 0 else Accelerator(),
         )
         for idx, _ in enumerate(range(init_hp["POP_SIZE"]))
@@ -108,7 +93,7 @@ def main(init_hp, mut_p):
         save_elite=True,
         elite_path="saved_llms",
         wb=True,
-        evo_steps=1000,
+        evo_steps=5,
         tournament=tournament,
         mutation=mutations,
         wandb_api_key=None,

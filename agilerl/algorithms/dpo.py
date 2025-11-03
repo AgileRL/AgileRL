@@ -1,10 +1,10 @@
 import gc
+from typing import Any
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
-from gymnasium import spaces
 from peft import LoraConfig
 from transformers import PreTrainedModel
 
@@ -16,13 +16,62 @@ from agilerl.utils.llm_utils import PreferenceGym
 
 
 class DPO(LLMAlgorithm):
+    """The DPO algorithm class. DPO paper: https://arxiv.org/pdf/2305.18290
+
+    :param pad_token_id: Pad token id
+    :type pad_token_id: int
+    :param pad_token: Pad token
+    :type pad_token: str
+    :param model_name: Model name
+    :type model_name: str, optional
+    :param actor_network: HuggingFace LLM
+    :type actor_network: PreTrainedModel
+    :param model_config: Model configuration, to be used when creating the model from a name or path
+    :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
+    :type hp_config: HyperparameterConfig, optional
+    :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
+    :type index: int, optional
+    :param batch_size: Batch size for training, defaults to 16
+    :type batch_size: int, optional
+    :param lr: Learning rate, defaults to 0.000005
+    :type lr: float, optional
+    :param beta: Beta parameter for DPO, defaults to 0.001
+    :type beta: float, optional
+    :param max_grad_norm: Maximum gradient norm, defaults to 0.1
+    :type max_grad_norm: float, optional
+    :param update_epochs: Number of update epochs, defaults to 1
+    :type update_epochs: int, optional
+    :param calc_position_embeddings: Flag to indicate if position embeddings should be calculated, defaults to True
+    :type calc_position_embeddings: bool, optional
+    :param micro_batch_size_per_gpu: Micro batch size per GPU, defaults to None
+    :type micro_batch_size_per_gpu: int, optional
+    :param reduce_memory_peak: Flag to indicate if memory peak should be reduced, defaults to False
+    :type reduce_memory_peak: bool, optional
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
+    :type device: str, optional
+    :param lora_config: Config for LoRA, defaults to None
+    :type lora_config: LoraConfig, optional
+    :param accelerator: Accelerator for distributed computing, defaults to None
+    :type accelerator: accelerate.Accelerator(), optional
+    :param wrap: Wrap models for distributed training upon creation, defaults to True
+    :type wrap: bool, optional
+    :param clone: Flag to indicate if the instantiation is a cloning, defaults to False
+    :type clone: bool, optional
+    :param use_separate_reference_adapter: Flag to indicate if the reference policy should have a separate adapter, defaults to False
+    :type use_separate_reference_adapter: bool, optional
+    :param seed: Seed for the random number generator, defaults to 42
+    :type seed: int, optional
+    :param gradient_checkpointing: Flag to indicate if gradient checkpointing should be used, defaults to True
+    :type gradient_checkpointing: bool, optional
+    """
+
     def __init__(
         self,
-        observation_space: spaces.Space,
-        action_space: spaces.Space,
-        actor_network: PreTrainedModel,
         pad_token_id: int,
         pad_token: str,
+        model_name: str | None = None,
+        actor_network: PreTrainedModel | None = None,
+        model_config: dict[str, Any] | None = None,
         hp_config: HyperparameterConfig | None = None,
         index: int = 0,
         batch_size: int = 16,
@@ -40,6 +89,7 @@ class DPO(LLMAlgorithm):
         clone: bool = False,
         use_separate_reference_adapter: bool = False,
         seed: int = 42,
+        gradient_checkpointing: bool = True,
     ):
         device = (
             f"cuda:{accelerator.process_index}"
@@ -47,9 +97,6 @@ class DPO(LLMAlgorithm):
             else ("cuda" if torch.cuda.is_available() else "cpu")
         )
         super().__init__(
-            observation_space,
-            action_space,
-            actor_network,
             index=index,
             batch_size=batch_size,
             lr=lr,
@@ -62,6 +109,9 @@ class DPO(LLMAlgorithm):
             pad_token=pad_token,
             lora_config=lora_config,
             use_separate_reference_adapter=use_separate_reference_adapter,
+            model_name=model_name,
+            actor_network=actor_network,
+            model_config=model_config,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
             cosine_lr_schedule_config=None,
             hp_config=hp_config,
@@ -69,6 +119,7 @@ class DPO(LLMAlgorithm):
             device=device,
             accelerator=accelerator,
             name="DPO",
+            gradient_checkpointing=gradient_checkpointing,
         )
         self.beta = beta
         self.temperature = (

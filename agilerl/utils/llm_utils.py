@@ -11,10 +11,51 @@ import torch.nn as nn
 from accelerate import Accelerator
 from datasets import Dataset
 from torch.utils.data import DataLoader
-from transformers import AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers.modeling_utils import PreTrainedModel
 from transformers.tokenization_utils_base import BatchEncoding
 
 from agilerl.typing import PreferencePrompts, ReasoningPrompts
+
+
+def apply_chat_template(
+    conversation_template: list[dict[str, str]],
+    question: str,
+    answer: str,
+    tokenizer: AutoTokenizer,
+) -> BatchEncoding:
+    """
+    Create and tokenize a chat template for a reaosning task.
+
+    :param conversation_template: The conversation template to be tokenized.
+    :type conversation_template: list[dict[str, str]]
+    :param question: The question to be tokenized.
+    :type question: str
+    :param answer: The answer to be tokenized.
+    :type answer: str
+    :param tokenizer: The tokenizer to be used.
+    :type tokenizer: AutoTokenizer
+    :return: The tokenized prompt.
+    :rtype: BatchEncoding
+    """
+    formatted_conversation = [
+        {
+            "role": msg["role"],
+            "content": msg["content"].format(question=question, answer=answer),
+        }
+        for msg in conversation_template
+    ]
+    updated_prompt = tokenizer.apply_chat_template(
+        formatted_conversation, tokenize=False, continue_final_message=True
+    )
+    tokenized_prompt = tokenizer(
+        [updated_prompt],
+        return_tensors="pt",
+        padding=True,
+        padding_side="left",
+        return_attention_mask=True,
+    )
+    return tokenized_prompt
 
 
 class HuggingFaceGym(gym.Env, ABC):
@@ -28,8 +69,8 @@ class HuggingFaceGym(gym.Env, ABC):
     :type tokenizer: AutoTokenizer
     :param custom_collate_fn: Custom collate function to be used for creating the batch, defaults to None
     :type custom_collate_fn: Callable, optional
-    :param apply_chat_template_fn: Function to apply the chat template to the batch of questions and answers, defaults to None
-    :type apply_chat_template_fn: Callable, optional
+    :param conversation_template: A structured conversation that acts as a base pattern for each data point.
+    :type conversation_template: list[dict[str, str]]
     :param data_batch_size_per_gpu: DataLoader batch size, defaults to 8
     :type data_batch_size_per_gpu: int, optional
     :param max_context_length: Maximum context length, defaults to None
@@ -47,12 +88,7 @@ class HuggingFaceGym(gym.Env, ABC):
         train_dataset: Dataset,
         test_dataset: Dataset,
         tokenizer: AutoTokenizer,
-        custom_collate_fn: (
-            Callable[[list[dict[str, Any]]], dict[str, Any]] | None
-        ) = None,
-        apply_chat_template_fn: (
-            Callable[[str, str, AutoTokenizer], BatchEncoding] | None
-        ) = None,
+        conversation_template: list[dict[str, str]],
         data_batch_size_per_gpu: int = 8,
         max_context_length: int | None = None,
         min_completion_length: int = None,
@@ -70,11 +106,8 @@ class HuggingFaceGym(gym.Env, ABC):
         self.max_context_length = max_context_length
         self.seed = seed
         generator = torch.Generator().manual_seed(seed)
-        if custom_collate_fn is None:
-            collate_kwargs = {"tokenizer": tokenizer}
-            if apply_chat_template_fn is not None:
-                collate_kwargs["apply_chat_template_fn"] = apply_chat_template_fn
-            custom_collate_fn = self.create_collate_fn(**collate_kwargs)
+        self.conversation_template = conversation_template
+        custom_collate_fn = self.create_collate_fn(tokenizer)
         dataloader_kwargs = {"collate_fn": custom_collate_fn}
         train_dataset = self._filter_dataset_by_max_context_length(
             train_dataset, "train dataset"
@@ -107,11 +140,6 @@ class HuggingFaceGym(gym.Env, ABC):
         self.test_dataloader_iter = iter(self.test_dataloader)
         self.dataloader = self.train_dataloader_iter
         self.reset_called = False
-        self.observation_space = gym.spaces.Box(low=0, high=tokenizer.vocab_size - 1)
-        self.action_space = gym.spaces.Box(
-            low=0,
-            high=tokenizer.vocab_size - 1,
-        )
         self.evaluation_mode = False
         self.num_epochs = 0
 
@@ -196,9 +224,11 @@ class HuggingFaceGym(gym.Env, ABC):
         :rtype: tuple[Dataset, Dataset]
         """
         dataset_type = "dataset" if dataset_type is None else dataset_type
-        if self.max_context_length is None:
-            return dataset
         filter_keyword = "prompt" if "prompt" in dataset.features.keys() else "question"
+        if self.max_context_length is None or not isinstance(
+            dataset[0][filter_keyword], str
+        ):
+            return dataset
         filtered_dataset = dataset.filter(
             lambda x: len(self.tokenizer.encode(x[filter_keyword]))
             <= self.max_context_length - self.min_completion_length
@@ -225,10 +255,10 @@ class ReasoningGym(HuggingFaceGym):
     :type tokenizer: AutoTokenizer
     :param reward_fn: Reward function for evaluating completions.
     :type reward_fn: Callable[..., float]
+    :param conversation_template: A structured conversation that acts as a base pattern for each data point.
+    :type conversation_template: list[dict[str, str]]
     :param data_batch_size_per_gpu: DataLoader batch size, defaults to 8
     :type data_batch_size_per_gpu: int, optional
-    :param custom_collate_fn: Custom collate fxwunction to be used for creating the batch, defaults to None
-    :type custom_collate_fn: Callable, optional
     :param accelerator: Accelerator to be used for training, defaults to None
     :type accelerator: Accelerator, optional
     :param max_context_length: Maximum context length, defaults to None
@@ -245,9 +275,8 @@ class ReasoningGym(HuggingFaceGym):
         test_dataset: Dataset,
         tokenizer: AutoTokenizer,
         reward_fn: Callable[[str, str, str], float],
-        apply_chat_template_fn: Callable[[str, str, AutoTokenizer], BatchEncoding],
+        conversation_template: list[dict[str, str]],
         data_batch_size_per_gpu: int = 8,
-        custom_collate_fn: Callable | None = None,
         accelerator: Accelerator | None = None,
         return_raw_completions: bool = False,
         max_context_length: int | None = None,
@@ -264,8 +293,7 @@ class ReasoningGym(HuggingFaceGym):
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
-            custom_collate_fn=custom_collate_fn,
-            apply_chat_template_fn=apply_chat_template_fn,
+            conversation_template=conversation_template,
             data_batch_size_per_gpu=data_batch_size_per_gpu,
             max_context_length=max_context_length,
             min_completion_length=0,
@@ -382,15 +410,12 @@ class ReasoningGym(HuggingFaceGym):
     def create_collate_fn(
         self,
         tokenizer: AutoTokenizer,
-        apply_chat_template_fn: Callable[[str, str, AutoTokenizer], BatchEncoding],
     ) -> Callable[[list[dict[str, Any]]], dict[str, Any]]:
         """
         Create a collate function that applies the chat template to the batch of questions and answers.
 
         :param tokenizer: Tokenizer to be used for encoding and decoding the prompts.
         :type tokenizer: AutoTokenizer
-        :param apply_chat_template_fn: Function to apply the chat template to the batch of questions and answers.
-        :type apply_chat_template_fn: Callable[[str, str, AutoTokenizer], BatchEncoding]
         :return: Collate function that applies the chat template to the batch of questions and answers.
         :rtype: Callable[[list[dict[str, Any]]], dict[str, Any]]
         """
@@ -402,7 +427,7 @@ class ReasoningGym(HuggingFaceGym):
 
             # Apply chat template to all samples
             tokenized_prompts = [
-                apply_chat_template_fn(q, a, tokenizer)
+                apply_chat_template(self.conversation_template, q, a, tokenizer)
                 for q, a in zip(questions, answers)
             ]
 
@@ -451,8 +476,7 @@ class PreferenceGym(HuggingFaceGym):
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
-            custom_collate_fn=None,
-            apply_chat_template_fn=None,
+            conversation_template=None,
             data_batch_size_per_gpu=data_batch_size_per_gpu,
             max_context_length=max_context_length,
             min_completion_length=min_completion_length,
@@ -667,3 +691,27 @@ def get_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
 
     with gather_if_zero3(3, list(model.parameters()), modifier_rank=0):
         return model.state_dict()
+
+
+def create_model_from_name_or_path(
+    model_name_or_path: str, model_config: dict[str, Any] | None = None
+) -> PreTrainedModel:
+    """
+    Create a model from a name or path.
+
+    :param model_name_or_path: The name or path of the model to create.
+    :type model_name_or_path: str
+    :param model_config: The configuration of the model to create.
+    :type model_config: dict[str, Any ] | None
+    :return: The created model.
+    :rtype: PreTrainedModel
+    """
+    if model_config is None:
+        model_config = {
+            "torch_dtype": torch.bfloat16,
+            "attn_implementation": "sdpa",
+        }
+    model = AutoModelForCausalLM.from_pretrained(
+        pretrained_model_name_or_path=model_name_or_path, **model_config
+    )
+    return model

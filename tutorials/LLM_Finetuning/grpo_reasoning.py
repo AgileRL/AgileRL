@@ -1,68 +1,20 @@
 import re
 
-import torch
 from accelerate import Accelerator
 from datasets import load_dataset
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig
 from torch.utils.data import Dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 
 from agilerl.algorithms import GRPO
 from agilerl.training.train_llm import finetune_llm_reasoning
+from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import ReasoningGym
 
-MODEL_PATH = "Qwen/Qwen2.5-3B"
+MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
-
-
-def create_model(pretrained_model_name_or_path):
-    model = AutoModelForCausalLM.from_pretrained(
-        pretrained_model_name_or_path=pretrained_model_name_or_path,
-        torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
-    )
-    peft_config = LoraConfig(
-        r=16,
-        lora_alpha=64,
-        target_modules=[
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",
-            "up_proj",
-            "down_proj",
-            "gate_proj",
-        ],
-        task_type="CAUSAL_LM",
-        lora_dropout=0.05,
-    )
-    model = get_peft_model(model, peft_config)
-    return model
-
-
-def countdown_chat_template(q, a, tokenizer):
-    conversation = [
-        {
-            "role": "system",
-            "content": "You are a helpful assistant. You first think about the reasoning process in your mind and then provide the user with the answer.",
-        },
-        {
-            "role": "user",
-            "content": f"Using each number in this list only once {q}, create an equation that equals {a}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
-        },
-        {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
-    ]
-    updated_prompt = tokenizer.apply_chat_template(
-        conversation, tokenize=False, continue_final_message=True
-    )
-    tokenized_prompt = tokenizer(
-        [updated_prompt],
-        return_tensors="pt",
-        padding=True,
-        padding_side="left",
-        return_attention_mask=True,
-    )
-    return tokenized_prompt
+USE_VLLM = True
+MAX_CONTEXT_LENGTH = 1024
 
 
 def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
@@ -149,7 +101,6 @@ def combined_rewards(completion, solution, prompt):
 
 def main():
     # Instantiate the model and the associated tokenizer
-    model = create_model(pretrained_model_name_or_path=MODEL_PATH)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
@@ -157,30 +108,61 @@ def main():
     # Convert the HuggingFace dataset into a Gymnasium environment
     accelerator = Accelerator()
 
+    # Define the conversation template
+    conversation_template = [
+        {
+            "role": "system",
+            "content": "You are a helpful assistant. You first think about the reasoning process in your mind and then provide the user with the answer.",
+        },
+        {
+            "role": "user",
+            "content": "Using each number in this list only once {question}, create an equation that equals {answer}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
+        },
+        {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
+    ]
+
     # Convert the HuggingFace dataset into a Gymnasium environment
     env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
         reward_fn=combined_rewards,
-        apply_chat_template_fn=countdown_chat_template,
+        conversation_template=conversation_template,
         data_batch_size_per_gpu=10,
         accelerator=accelerator,
+        return_raw_completions=USE_VLLM,  # This is necessary for vLLM to work
+        max_context_length=MAX_CONTEXT_LENGTH,
+    )
+
+    # Define the LoRA configuration
+    lora_config = LoraConfig(
+        r=16,
+        lora_alpha=64,
+        target_modules=[
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "up_proj",
+            "down_proj",
+            "gate_proj",
+        ],
+        task_type="CAUSAL_LM",
+        lora_dropout=0.05,
     )
 
     # Instantiate the grpo agent
     agent = GRPO(
-        env.observation_space,
-        env.action_space,
-        actor_network=model,
+        model_name=MODEL_PATH,
         pad_token_id=tokenizer.eos_token_id,
         pad_token=tokenizer.eos_token,
-        batch_size=4,
-        max_output_tokens=1024,
-        group_size=12,
-        reduce_memory_peak=True,
+        lora_config=lora_config,
+        batch_size=16,
+        max_model_len=MAX_CONTEXT_LENGTH,
+        group_size=8,
         accelerator=accelerator,
-        use_vllm=True,
+        use_vllm=USE_VLLM,
+        vllm_config=VLLMConfig(sleep_mode=True, max_num_seqs=4),
     )
     finetune_llm_reasoning(
         pop=[agent],
