@@ -1,68 +1,23 @@
 import re
 
-import torch
 import yaml
 from accelerate import Accelerator
 from datasets import load_dataset
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig
 from torch.utils.data import Dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.training.train_llm import finetune_llm
-from agilerl.utils.llm_utils import HuggingFaceGym
+from agilerl.training.train_llm import finetune_llm_reasoning
+from agilerl.utils.llm_utils import ReasoningGym
 from agilerl.utils.utils import create_population
 
-MODEL_PATH = "Qwen/Qwen2.5-3B"
+MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
-
-
-def create_model(pretrained_model_name_or_path):
-    model = AutoModelForCausalLM.from_pretrained(
-        pretrained_model_name_or_path=pretrained_model_name_or_path,
-        torch_dtype=torch.bfloat16,
-        attn_implementation="sdpa",
-        device_map="auto",
-    )
-
-    lora_config = LoraConfig(
-        r=16,
-        lora_alpha=64,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-        lora_dropout=0.05,
-        bias="none",
-    )
-
-    model = get_peft_model(model, lora_config, adapter_name="actor")
-
-    return model
-
-
-def countdown_chat_template(q, a, tokenizer):
-    conversation = [
-        {
-            "role": "system",
-            "content": "You are a helpful assistant. You first think about the reasoning process in your mind and then provide the user with the answer.",
-        },
-        {
-            "role": "user",
-            "content": f"Using each number in this list only once {q}, create an equation that equals {a}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
-        },
-        {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
-    ]
-    updated_prompt = tokenizer.apply_chat_template(
-        conversation, tokenize=False, continue_final_message=True
-    )
-    tokenized_prompt = tokenizer(
-        [updated_prompt],
-        return_tensors="pt",
-        padding=True,
-        padding_side="left",
-        return_attention_mask=True,
-    )
-    return tokenized_prompt
+USE_VLLM = True
+MAX_CONTEXT_LENGTH = 1024
 
 
 def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
@@ -141,33 +96,41 @@ def combined_rewards(completion, solution, prompt):
 
 def main(init_hp, mut_p):
     # Instantiate the model and the associated tokenizer
-    model = create_model(pretrained_model_name_or_path=MODEL_PATH)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
 
+    # Define a conversation template for the reasoning task, refer to questions and answers as q and a respectively
+    conversation_template = [
+        {
+            "role": "system",
+            "content": "You are a helpful assistant. You first think about the reasoning process in your mind and then provide the user with the answer.",
+        },
+        {
+            "role": "user",
+            "content": "Using each number in this list only once {question}, create an equation that equals {answer}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
+        },
+        {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
+    ]
+
     # Convert the HuggingFace dataset into a Gymnasium environment
     accelerator = Accelerator()
-    accelerator.state.deepspeed_plugin.deepspeed_config["activation_checkpointing"] = {
-        "partition_activations": True,
-        "cpu_checkpointing": True,
-        "synchronize_checkpoint_boundary": True,
-        "number_checkpoints": 2,
-    }
-
-    env = HuggingFaceGym(
+    env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
         reward_fn=combined_rewards,
-        apply_chat_template_fn=countdown_chat_template,
+        conversation_template=conversation_template,
         data_batch_size_per_gpu=10,
         accelerator=accelerator,
-        return_raw_completions=init_hp.get("USE_VLLM", False),
+        max_context_length=MAX_CONTEXT_LENGTH,
+        return_raw_completions=USE_VLLM,
     )
 
-    init_hp["PAD_TOKEN_ID"] = tokenizer.eos_token_id
-    init_hp["PAD_TOKEN"] = tokenizer.eos_token
+    # Add the zero stage to the initialization hyperparameters
+    init_hp["ZERO_STAGE"] = accelerator.state.deepspeed_plugin.deepspeed_config[
+        "zero_optimization"
+    ]["stage"]
 
     hp_config = HyperparameterConfig(
         beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),
@@ -176,19 +139,32 @@ def main(init_hp, mut_p):
             min=mut_p["MIN_GROUP_SIZE"], max=mut_p["MAX_GROUP_SIZE"], dtype=int
         ),
     )
+
+    # Define the algorithm kwargs
+    algo_kwargs = {
+        "model_name": MODEL_PATH,
+        "lora_config": LoraConfig(
+            r=16,
+            lora_alpha=64,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+            lora_dropout=0.05,
+            bias="none",
+        ),
+        "use_vllm": USE_VLLM,
+        "pad_token_id": tokenizer.pad_token_id,
+        "pad_token": tokenizer.pad_token,
+        "max_model_len": MAX_CONTEXT_LENGTH,
+    }
+
     pop = create_population(
         algo=init_hp["ALGO"],
-        observation_space=env.observation_space,
-        action_space=env.action_space,
         net_config=None,
-        actor_network=model,
         INIT_HP=init_hp,
         hp_config=hp_config,
         population_size=init_hp["POP_SIZE"],
         accelerator=accelerator,
+        algo_kwargs=algo_kwargs,
     )
-
-    del model
 
     tournament = TournamentSelection(
         init_hp["TOURN_SIZE"],
@@ -209,7 +185,7 @@ def main(init_hp, mut_p):
         accelerator=accelerator,
     )
 
-    finetune_llm(
+    finetune_llm_reasoning(
         pop=pop,
         env=env,
         init_hp=init_hp,
@@ -218,7 +194,7 @@ def main(init_hp, mut_p):
         save_elite=True,
         elite_path="saved_llms",
         max_reward=2.0,
-        evo_steps=1,
+        evo_steps=10,
         mutation=mutations,
         tournament=tournament,
         accelerator=accelerator,
@@ -228,9 +204,6 @@ def main(init_hp, mut_p):
 
 
 if __name__ == "__main__":
-    import os
-
-    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     with open("configs/training/grpo.yaml") as file:
         config = yaml.safe_load(file)
     init_hp = config["INIT_HP"]

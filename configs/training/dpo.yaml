@@ -1,4 +1,19 @@
 ---
+INIT_HP:
+    ALGO: DPO
+    BATCH_SIZE: 16
+    BETA: 0.001
+    UPDATE_EPOCHS: 1
+    MAX_GRAD_NORM: 0.1
+    REDUCE_MEMORY_PEAK: false
+    CALC_POSITION_EMBEDDINGS: true
+    USE_SEPARATE_REFERENCE_ADAPTER: true
+    SEED: 42
+    TOURN_SIZE: 2
+    ELITISM: true
+    POP_SIZE: 4
+    EVAL_LOOP: 1
+
 MUTATION_PARAMS:
     NO_MUT: 0.1                          # No mutation
     RL_HP_MUT: 0.6                       # Learning HP mutation
@@ -10,21 +25,3 @@ MUTATION_PARAMS:
     MAX_BETA: 0.01
     MIN_GROUP_SIZE: 4
     MAX_GROUP_SIZE: 12
-
-
-INIT_HP:
-    ALGO: GRPO
-    BATCH_SIZE: 16
-    BETA: 0.001
-    LR: 0.000005
-    CLIP_COEF: 0.2
-    MAX_GRAD_NORM: 0.1
-    UPDATE_EPOCHS: 1
-    GROUP_SIZE: 6
-    TEMPERATURE: 0.9
-    MAX_MODEL_LEN: 1024  # Maximum context length for the model
-    COSINE_lR_SCHEDULER:
-    TOURN_SIZE: 2
-    ELITISM: true
-    POP_SIZE: 2
-    EVAL_LOOP: 1

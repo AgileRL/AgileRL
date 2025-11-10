@@ -42,6 +42,7 @@ from agilerl.typing import (
     SupportedObsSpaces,
     TorchObsType,
 )
+from agilerl.utils.llm_utils import gather_if_zero3
 
 PreTrainedModelType = Union[PeftModel, PreTrainedModel]
 
@@ -1325,6 +1326,14 @@ class VLLMConfig:
     tensor_parallel_size: int = 1
     gpu_memory_utilization: float = 0.3
     max_num_seqs: int = 8
+    sleep_mode: bool = False
+
+    def __post_init__(self):
+        if self.sleep_mode:
+            warnings.warn(
+                """VLLM sleep mode cannot be used with populations of agents on a single device. To use sleep mode, ensure,
+                you are training a single agent or, alternatively, use a different device for each agent."""
+            )
 
 
 def create_warmup_cosine_scheduler(
@@ -1571,12 +1580,15 @@ def is_peft_model(model: nn.Module) -> bool:
 
 def clone_llm(
     original_model: PreTrainedModelType | DummyEvolvable,
+    zero_stage: int,
     state_dict: Optional[dict[str, torch.Tensor]] = None,
 ) -> PreTrainedModelType:
     """Clone the actor.
 
     :param original_model: Model to clone
     :type original_model: PreTrainedModelType
+    :param zero_stage: Zero stage to use, defaults to 0
+    :type zero_stage: int, optional
     :param state_dict: State dict to load, defaults to None
     :type state_dict: Optional[dict[str, torch.Tensor]], optional
     :return: Cloned model
@@ -1590,30 +1602,30 @@ def clone_llm(
             original_model = original_model.module
         case _:
             raise ValueError(f"Invalid 'original_model' type: {type(original_model)}")
+    with gather_if_zero3(zero_stage, list(original_model.parameters())):
+        model_config = original_model.config
+        base_model = original_model.model
+        model = type(base_model)(model_config)
+        # Get all adapter names
 
-    model_config = original_model.config
-    base_model = original_model.model
-    model = type(base_model)(model_config)
-    # Get all adapter names
+        if hasattr(original_model, "peft_config"):
+            adapter_names = list(original_model.peft_config.keys())
 
-    if hasattr(original_model, "peft_config"):
-        adapter_names = list(original_model.peft_config.keys())
+            if len(adapter_names) > 1:
+                warnings.warn(
+                    "Multiple adapters detected. Only the first adapter will be used for RL finetuning."
+                )
+            # Add first adapter using get_peft_model
+            first_adapter = adapter_names[0]
+            first_config = original_model.peft_config[first_adapter]
+            model = get_peft_model(model, first_config, adapter_name=first_adapter)
 
-        if len(adapter_names) > 1:
-            warnings.warn(
-                "Multiple adapters detected. Only the first adapter will be used for RL finetuning."
-            )
-        # Add first adapter using get_peft_model
-        first_adapter = adapter_names[0]
-        first_config = original_model.peft_config[first_adapter]
-        model = get_peft_model(model, first_config, adapter_name=first_adapter)
+            # Add remaining adapters using add_adapter
+            for adapter_name in adapter_names[1:]:
+                peft_config = original_model.peft_config[adapter_name]
+                model.add_adapter(peft_config=peft_config, adapter_name=adapter_name)
+            model.disable_adapter()
 
-        # Add remaining adapters using add_adapter
-        for adapter_name in adapter_names[1:]:
-            peft_config = original_model.peft_config[adapter_name]
-            model.add_adapter(peft_config=peft_config, adapter_name=adapter_name)
-        model.disable_adapter()
-
-    if state_dict is not None:
-        model.load_state_dict(state_dict, strict=False)
+        if state_dict is not None:
+            model.load_state_dict(state_dict, strict=False)
     return model

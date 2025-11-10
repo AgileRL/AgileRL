@@ -199,3 +199,16 @@
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+
+---
+
+THIRD-PARTY SOFTWARE NOTICES AND INFORMATION
+
+This project incorporates code from the following third-party software:
+
+TRL (Transformer Reinforcement Learning)
+Copyright 2020-2025 The HuggingFace Team
+Licensed under Apache License 2.0
+https://github.com/huggingface/trl
+
+Portions of the GRPO implementation use code patterns adapted from TRL's GRPOTrainer.

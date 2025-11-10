@@ -1,4 +1,4 @@
 LLM Utils
 =========
 
-.. autoclass:: agilerl.utils.llm_utils.HuggingFaceGym
+.. autoclass:: agilerl.utils.llm_utils.ReasoningGym

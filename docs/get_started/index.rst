@@ -40,10 +40,10 @@ To install the ``nightly`` version of AgileRL with the latest features, use:
    @media (max-width: 750px) {
       .tiles_2 {
          display: grid;
-         grid-template-columns: 100%; /* 2 columns */
-         grid-auto-rows: 0% 50% 50% 0%; /* 2 rows */
+         grid-template-columns: 100%; /* 1 column */
+         grid-auto-rows: auto; /* auto rows */
          gap: 25px; /* Adjust the gap between tiles */
-         margin-top: 0px; /*48px;*/
+         margin-top: 0px;
          margin-bottom: 58px;
          width: 100%;
          align-content: center;
@@ -53,11 +53,11 @@ To install the ``nightly`` version of AgileRL with the latest features, use:
 
       .tiles_3 {
          display: grid;
-         grid-template-columns: 100%; /* 3 columns */
-         grid-auto-rows: 33%; /* 2 rows */
+         grid-template-columns: 100%; /* 1 column */
+         grid-auto-rows: auto; /* auto rows */
          gap: 25px; /* Adjust the gap between tiles */
          margin-top: 48px;
-         margin-bottom: 72px;
+         margin-bottom: 25px;
          width: 100%;
          align-content: start;
          height: auto;
@@ -68,13 +68,13 @@ To install the ``nightly`` version of AgileRL with the latest features, use:
    @media (min-width: 750px) {
       .tiles_2 {
          display: grid;
-         grid-template-columns: 16.5% 33% 33% 16.5%; /* 2 columns */
+         grid-template-columns: 33% 33% 33%; /* 3 columns */
          grid-auto-rows: 100%; /* 2 rows */
          gap: 25px; /* Adjust the gap between tiles */
-         margin-top: 0px; /*48px;*/
-         margin-bottom: 58px;
+         margin-top: 48px;
+         margin-bottom: 25px;
          width: 100%;
-         align-content: center;
+         align-content: start;
          height: auto;
          min-height: 185px;
       }
@@ -84,7 +84,7 @@ To install the ``nightly`` version of AgileRL with the latest features, use:
          grid-auto-rows: 100%; /* 2 rows */
          gap: 25px; /* Adjust the gap between tiles */
          margin-top: 48px;
-         margin-bottom: 25px;/*58px;*/
+         margin-bottom: 58px;
          width: 100%;
          align-content: start;
          height: auto;
@@ -178,7 +178,6 @@ To install the ``nightly`` version of AgileRL with the latest features, use:
       </a>
    </div>
    <div class="tiles_2 article">
-      <div></div>
       <a href="../multi_agent_training/index.html" class="tile multi-agent">
          <h2>Multi Agent</h2>
          <p>
@@ -190,6 +189,13 @@ To install the ``nightly`` version of AgileRL with the latest features, use:
          <h2>Contextual Bandits</h2>
          <p>
                Algorithms: NeuralUCB, NeuralTS
+               <!-- Add more algorithms as needed -->
+         </p>
+      </a>
+      <a href="../llm_finetuning/index.html" class="tile llm-finetuning">
+         <h2>LLM Finetuning</h2>
+         <p>
+               Algorithms: DPO, GRPO
                <!-- Add more algorithms as needed -->
          </p>
       </a>

@@ -21,7 +21,7 @@ from agilerl.utils.evolvable_networks import get_default_encoder_config
 from agilerl.utils.utils import make_multi_agent_vect_envs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import assert_not_equal_state_dict, assert_state_dicts_equal
-from tests.test_algorithms.test_maddpg import DummyMultiEnv
+from tests.test_algorithms.test_multi_agent.test_maddpg import DummyMultiEnv
 
 
 class MultiAgentCNNActor(nn.Module):
