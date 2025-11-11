@@ -9,7 +9,7 @@ that makes preference learning more computationally efficient, especially for la
 The two key innovations are:
 
 * **Eliminating the reward model:** Instead of training a separate reward model to score outputs (which requires additional compute and memory), DPO directly optimizes the policy using preference data. It reparameterizes the reward function implicitly through the policy itself, deriving a closed-form solution for the optimal policy.
-* **Preference-based optimization:** DPO t reats the preference learning problem as a classification task over pairs of responses. It maximizes the likelihood that preferred responses are ranked higher than rejected ones under the current policy, relative to a reference policy. This approach eliminates the need for sampling and reward model queries during training.
+* **Preference-based optimization:** DPO treats the preference learning problem as a classification task over pairs of responses. It maximizes the likelihood that preferred responses are ranked higher than rejected ones under the current policy, relative to a reference policy. This approach eliminates the need for sampling and reward model queries during training.
 
 These changes are particularly valuable for LLM training because they reduce computational overhead by removing the
 need for a separate reward model and RL training loop, provide more stable training dynamics by avoiding the complexities
