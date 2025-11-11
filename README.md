@@ -106,11 +106,12 @@ We are constantly updating our tutorials to showcase the latest features of Agil
   | ---------- | --------- |
   | [Bandits](https://docs.agilerl.com/en/latest/bandits/index.html) | [Neural Contextual Bandits with UCB-based Exploration (NeuralUCB)](https://docs.agilerl.com/en/latest/api/algorithms/neural_ucb.html) <br> [Neural Contextual Bandits with Thompson Sampling (NeuralTS)](https://docs.agilerl.com/en/latest/api/algorithms/neural_ts.html) |
 
-  ### LLM Reasoning Algorithms
+  ### LLM Fine-tuning Algorithms
 
   | RL         | Algorithm |
   | ---------- | --------- |
   | [On-Policy](https://docs.agilerl.com/en/latest/llm_finetuning/index.html) | [Group Relative Policy Optimization (GRPO)](https://docs.agilerl.com/en/latest/api/algorithms/grpo.html)
+  | [Off-Policy](https://docs.agilerl.com/en/latest/llm_finetuning/index.html) | [Direct Preference Optimization (DPO)](https://docs.agilerl.com/en/latest/api/algorithms/dpo.html)
 
 
 ## Train an Agent to Beat a Gym Environment

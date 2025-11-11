@@ -503,6 +503,7 @@ def test_add_channels(
         ([1, 16, 16], [256], [3], [1], 10, None, None),
         ([3, 128, 128], [8, 8, 8], [2, 2, 2], [2, 2, 2], 1, 0, 2),
         ([1, 64], [256], [3], [1], 10, None, None),  # Conv1D case
+        ([1, 16, 16], [3], [3], [1], 10, 0, 8),  # exceeds min_channel_size
     ],
 )
 def test_remove_channels(
