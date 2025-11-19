@@ -894,24 +894,15 @@ def test_grpo_test_vllm(
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize("group_size", [5])
-@pytest.mark.parametrize("use_separate_reference_adapter", [
-    False, 
-    True
-])
+@pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
     [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
 )
 @pytest.mark.parametrize(
-    "reduce_memory_peak, micro_batch_size_per_gpu", [
-        (True, None), 
-        (False, 2)
-    ]
+    "reduce_memory_peak, micro_batch_size_per_gpu", [(True, None), (False, 2)]
 )
-@pytest.mark.parametrize("from_name", [
-    True, 
-    False
-])
+@pytest.mark.parametrize("from_name", [True, False])
 def test_init_grpo_with_accelerator(
     deepspeed_env,
     grpo_factory,
@@ -1417,7 +1408,10 @@ def test_init_grpo_with_no_accelerator(
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
 def test_init_grpo_zero3_warning(
     deepspeed_env,
-    accelerator_factory, config, use_deepspeed_optimizer, use_separate_reference_adapter
+    accelerator_factory,
+    config,
+    use_deepspeed_optimizer,
+    use_separate_reference_adapter,
 ):
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with pytest.warns(UserWarning):
@@ -1462,7 +1456,10 @@ def test_init_grpo_zero3_warning(
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
 def test_init_grpo_lr_warning(
     deepspeed_env,
-    accelerator_factory, config, use_deepspeed_optimizer, use_separate_reference_adapter
+    accelerator_factory,
+    config,
+    use_deepspeed_optimizer,
+    use_separate_reference_adapter,
 ):
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with pytest.warns(UserWarning):
@@ -1512,7 +1509,10 @@ def test_init_grpo_lr_warning(
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
 def test_init_grpo_max_grad_norm_warning(
     deepspeed_env,
-    accelerator_factory, config, use_deepspeed_optimizer, use_separate_reference_adapter
+    accelerator_factory,
+    config,
+    use_deepspeed_optimizer,
+    use_separate_reference_adapter,
 ):
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with pytest.warns(UserWarning):
@@ -1559,7 +1559,10 @@ def test_init_grpo_max_grad_norm_warning(
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
 def test_init_grpo_scheduler_warning(
     deepspeed_env,
-    accelerator_factory, config, use_deepspeed_optimizer, use_separate_reference_adapter
+    accelerator_factory,
+    config,
+    use_deepspeed_optimizer,
+    use_separate_reference_adapter,
 ):
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with pytest.warns(UserWarning):
@@ -3223,8 +3226,7 @@ def test_load_distributed_actor_warning(
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("config", [None])
 def test_init_grpo_lora_config_warning(
-    deepspeed_env,
-    accelerator_factory, config, use_deepspeed_optimizer
+    deepspeed_env, accelerator_factory, config, use_deepspeed_optimizer
 ):
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with pytest.warns(

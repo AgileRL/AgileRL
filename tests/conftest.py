@@ -1,11 +1,11 @@
 import gc
+import socket
 
 import numpy as np
 import pytest
 import torch
 import torch.nn as nn
 from gymnasium import spaces
-import socket
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from tests.helper_functions import (
@@ -280,10 +280,12 @@ dist_env = dict(
     CUDA_VISIBLE_DEVICES="0",
 )
 
+
 def get_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
         return s.getsockname()[1]
+
 
 @pytest.fixture
 def deepspeed_env():

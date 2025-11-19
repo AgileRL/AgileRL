@@ -1,7 +1,5 @@
 import copy
 import gc
-import os
-from unittest import mock
 
 import numpy as np
 import pytest
@@ -13,7 +11,7 @@ from gymnasium import spaces
 from peft import LoraConfig
 
 from agilerl.algorithms.core import EvolvableAlgorithm
-from agilerl.algorithms.core.registry import RLParameter, HyperparameterConfig
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import MutationError, Mutations
 from agilerl.modules import EvolvableBERT, ModuleDict
 from agilerl.utils.utils import create_population
@@ -1425,21 +1423,32 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
     del mutations, population
 
 
-@pytest.mark.parametrize("use_accelerator, use_deepspeed_optimizer", [
-    (True, True),
-    (True, False),
-    (False, False),
-    ])
-@pytest.mark.parametrize("algo", [
-    "GRPO", 
-    "DPO"
-    ])
-@pytest.mark.parametrize("hp_to_mutate", [
-    "lr", 
-    # "max_grad_norm"
-    ])
+@pytest.mark.parametrize(
+    "use_accelerator, use_deepspeed_optimizer",
+    [
+        (True, True),
+        (True, False),
+        (False, False),
+    ],
+)
+@pytest.mark.parametrize("algo", ["GRPO", "DPO"])
+@pytest.mark.parametrize(
+    "hp_to_mutate",
+    [
+        "lr",
+        # "max_grad_norm"
+    ],
+)
 def test_mutation_applies_rl_hp_mutation_llm_algorithm(
-    request, vector_space, monkeypatch, use_accelerator, use_deepspeed_optimizer, algo, hp_to_mutate, grpo_hp_config, deepspeed_env
+    request,
+    vector_space,
+    monkeypatch,
+    use_accelerator,
+    use_deepspeed_optimizer,
+    algo,
+    hp_to_mutate,
+    grpo_hp_config,
+    deepspeed_env,
 ):
 
     if hp_to_mutate == "lr":
@@ -1459,7 +1468,7 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
             "zero_optimization": {
                 "stage": 2,
             },
-            "gradient_clipping": 0.3,          
+            "gradient_clipping": 0.3,
         }
         if use_deepspeed_optimizer:
             deepspeed_config["optimizer"] = {
@@ -1469,7 +1478,7 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
                     "betas": [0.9, 0.999],
                     "eps": 1e-8,
                     "weight_decay": 0.01,
-                }
+                },
             }
         accelerator = Accelerator(
             deepspeed_plugin=DeepSpeedPlugin(hf_ds_config=deepspeed_config),
@@ -1532,7 +1541,6 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
     new_population = [agent.clone(wrap=False) for agent in population]
     mutated_population = mutations.mutation(new_population, pre_training_mut)
 
-    
     print("mutated lr: ", [agent.lr for agent in mutated_population])
 
     assert len(mutated_population) == len(population)
@@ -1546,11 +1554,20 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
         assert min_value <= new_value <= max_value
         assert old.index == individual.index
     for agent in mutated_population:
-        opt = agent.actor.optimizer if (use_deepspeed_optimizer and use_accelerator) else agent.optimizer.optimizer
+        opt = (
+            agent.actor.optimizer
+            if (use_deepspeed_optimizer and use_accelerator)
+            else agent.optimizer.optimizer
+        )
         for param_group in opt.param_groups:
             assert param_group["lr"] == agent.lr
         if use_accelerator:
-            assert agent.accelerator.state.deepspeed_plugin.deepspeed_config["gradient_clipping"] == agent.max_grad_norm
+            assert (
+                agent.accelerator.state.deepspeed_plugin.deepspeed_config[
+                    "gradient_clipping"
+                ]
+                == agent.max_grad_norm
+            )
     for mut_agent, old_agent in zip(mutated_population, new_population):
         mut_agent.clean_up()
         old_agent.clean_up()

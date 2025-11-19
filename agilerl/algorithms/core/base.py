@@ -1900,13 +1900,15 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.use_separate_reference_adapter = use_separate_reference_adapter
         self.cosine_lr_schedule_config = cosine_lr_schedule_config
 
-        if max_grad_norm and (accelerator is not None): 
+        if max_grad_norm and (accelerator is not None):
             if accelerator.is_main_process:
                 warnings.warn(
                     "Argument 'max_grad_norm' will overwrite the equivalent value set for 'gradient_clipping' in the deepspeed config."
                 )
-            self.accelerator.state.deepspeed_plugin.deepspeed_config["gradient_clipping"] = max_grad_norm
-            
+            self.accelerator.state.deepspeed_plugin.deepspeed_config[
+                "gradient_clipping"
+            ] = max_grad_norm
+
         self.max_grad_norm = max_grad_norm
         self.reduce_memory_peak = reduce_memory_peak
 
@@ -2960,22 +2962,23 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """Synchronizes max_grad_norm with DeepSpeed gradient_clipping config.
         Registered as a mutation hook to ensure consistency after mutations.
         """
-        if self.accelerator is None: 
-            return 
+        if self.accelerator is None:
+            return
 
-        if "gradient_clipping" not in self.accelerator.state.deepspeed_plugin.deepspeed_config:
+        if (
+            "gradient_clipping"
+            not in self.accelerator.state.deepspeed_plugin.deepspeed_config
+        ):
             return
 
         ds_config = self.accelerator.state.deepspeed_plugin.deepspeed_config
         if ds_config["gradient_clipping"] != self.max_grad_norm:
-            self.accelerator.state.deepspeed_plugin.deepspeed_config["gradient_clipping"] = self.max_grad_norm
+            self.accelerator.state.deepspeed_plugin.deepspeed_config[
+                "gradient_clipping"
+            ] = self.max_grad_norm
 
         if hasattr(self.actor, "optimizer"):
             if hasattr(self.actor.optimizer, "grad_clip"):
                 self.actor.optimizer.grad_clip = self.max_grad_norm
             if hasattr(self.actor.optimizer, "clip_grad"):
                 self.actor.optimizer.clip_grad = self.max_grad_norm
-
-        
-
-
