@@ -601,14 +601,16 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         )
         optimizer = opt.optimizer if hasattr(opt, "optimizer") else None
 
-        if isinstance(opt, DeepSpeedOptimizerWrapper):
-            if isinstance(opt.optimizer, DummyOptimizer):
-                opt = getattr(
+        if isinstance(self, LLMAlgorithm):
+            if hasattr(self.actor, "optimizer"):
+                optimizer = getattr(
                     getattr(self, "actor"), "optimizer"
                 )  # If the optimizer is defined in the deepspeed config, we do this
+            else:
+                optimizer = opt.optimizer
 
             self.accelerator, self.lr_scheduler = LLMAlgorithm.update_lr(
-                opt,
+                optimizer,
                 lr=getattr(self, config.lr),
                 accelerator=self.accelerator,
                 scheduler_config=self.cosine_lr_schedule_config,
@@ -1898,14 +1900,20 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.use_separate_reference_adapter = use_separate_reference_adapter
         self.cosine_lr_schedule_config = cosine_lr_schedule_config
 
-        if max_grad_norm and (accelerator is not None) and accelerator.is_main_process:
-            warnings.warn(
-                "Argument 'max_grad_norm' will be overwritten by the 'gradient_clipping' value set in the deepspeed config."
-            )
-            self.max_grad_norm = None
-        else:
-            self.max_grad_norm = max_grad_norm
+        if max_grad_norm and (accelerator is not None):
+            if accelerator.is_main_process:
+                warnings.warn(
+                    "Argument 'max_grad_norm' will overwrite the equivalent value set for 'gradient_clipping' in the deepspeed config."
+                )
+            self.accelerator.state.deepspeed_plugin.deepspeed_config[
+                "gradient_clipping"
+            ] = max_grad_norm
+
+        self.max_grad_norm = max_grad_norm
         self.reduce_memory_peak = reduce_memory_peak
+
+        if self.accelerator is not None:
+            self.register_mutation_hook(self._sync_deepspeed_gradient_clipping)
 
         if self.accelerator is not None:
             self.zero_stage = self.accelerator.state.deepspeed_plugin.deepspeed_config[
@@ -2949,3 +2957,28 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
+
+    def _sync_deepspeed_gradient_clipping(self) -> None:
+        """Synchronizes max_grad_norm with DeepSpeed gradient_clipping config.
+        Registered as a mutation hook to ensure consistency after mutations.
+        """
+        if self.accelerator is None:
+            return
+
+        if (
+            "gradient_clipping"
+            not in self.accelerator.state.deepspeed_plugin.deepspeed_config
+        ):
+            return
+
+        ds_config = self.accelerator.state.deepspeed_plugin.deepspeed_config
+        if ds_config["gradient_clipping"] != self.max_grad_norm:
+            self.accelerator.state.deepspeed_plugin.deepspeed_config[
+                "gradient_clipping"
+            ] = self.max_grad_norm
+
+        if hasattr(self.actor, "optimizer"):
+            if hasattr(self.actor.optimizer, "grad_clip"):
+                self.actor.optimizer.grad_clip = self.max_grad_norm
+            if hasattr(self.actor.optimizer, "clip_grad"):
+                self.actor.optimizer.clip_grad = self.max_grad_norm

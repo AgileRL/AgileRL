@@ -1,7 +1,5 @@
 import copy
 import gc
-import os
-from unittest import mock
 
 import numpy as np
 import pytest
@@ -13,6 +11,7 @@ from gymnasium import spaces
 from peft import LoraConfig
 
 from agilerl.algorithms.core import EvolvableAlgorithm
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import MutationError, Mutations
 from agilerl.modules import EvolvableBERT, ModuleDict
 from agilerl.utils.utils import create_population
@@ -1424,112 +1423,158 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
     del mutations, population
 
 
-@pytest.mark.parametrize("use_accelerator", [True, False])
+@pytest.mark.parametrize(
+    "use_accelerator, use_deepspeed_optimizer",
+    [
+        (True, True),
+        (True, False),
+        (False, False),
+    ],
+)
 @pytest.mark.parametrize("algo", ["GRPO", "DPO"])
+@pytest.mark.parametrize(
+    "hp_to_mutate",
+    [
+        "lr",
+        # "max_grad_norm"
+    ],
+)
 def test_mutation_applies_rl_hp_mutation_llm_algorithm(
-    request, grpo_hp_config, vector_space, monkeypatch, use_accelerator, algo
+    request,
+    vector_space,
+    monkeypatch,
+    use_accelerator,
+    use_deepspeed_optimizer,
+    algo,
+    hp_to_mutate,
+    grpo_hp_config,
+    deepspeed_env,
 ):
+
+    if hp_to_mutate == "lr":
+        grpo_hp_config = grpo_hp_config
+    elif hp_to_mutate == "max_grad_norm":
+        grpo_hp_config = HyperparameterConfig(
+            max_grad_norm=RLParameter(min=0.1, max=1.0),
+        )
+
     pre_training_mut = False
 
-    with mock.patch.dict(os.environ, clear=True):
-        if use_accelerator:
-            AcceleratorState._reset_state(True)
-            env_vars = {
-                "ACCELERATE_USE_DEEPSPEED": "true",
-                "MASTER_ADDR": "localhost",
-                "MASTER_PORT": "10999",
-                "RANK": "0",
-                "LOCAL_RANK": "0",
-                "WORLD_SIZE": "1",
-            }
-            for key, value in env_vars.items():
-                monkeypatch.setenv(key, value)
+    if use_accelerator:
+        AcceleratorState._reset_state(True)
 
-            deepspeed_config = {
-                "gradient_accumulation_steps": 1,
-                "zero_optimization": {
-                    "stage": 2,
+        deepspeed_config = {
+            "gradient_accumulation_steps": 1,
+            "zero_optimization": {
+                "stage": 2,
+            },
+            "gradient_clipping": 0.3,
+        }
+        if use_deepspeed_optimizer:
+            deepspeed_config["optimizer"] = {
+                "type": "AdamW",
+                "params": {
+                    "lr": 1e-4,  # Smaller learning rate
+                    "betas": [0.9, 0.999],
+                    "eps": 1e-8,
+                    "weight_decay": 0.01,
                 },
             }
-            accelerator = Accelerator(
-                deepspeed_plugin=DeepSpeedPlugin(hf_ds_config=deepspeed_config),
-            )
-        else:
-            accelerator = None
-        init_hp = {
-            "PAD_TOKEN_ID": 1000 - 1,
-            "PAD_TOKEN": "<pad>",
-            "BATCH_SIZE": 2,
-            "BETA": 0.001,
-            "LR": 5e-7,
-            "MAX_GRAD_NORM": 0.1,
-            "UPDATE_EPOCHS": 1,
-            "MAX_MODEL_LEN": 100,
-        }
-
-        population = create_population(
-            algo=algo,
-            observation_space=vector_space,
-            action_space=copy.deepcopy(vector_space),
-            net_config=None,
-            INIT_HP=init_hp,
-            hp_config=grpo_hp_config,
-            actor_network=create_module(
-                input_size=10,
-                max_tokens=20,
-                vocab_size=1000,
-                device="cuda" if torch.cuda.is_available() else "cpu",
+        accelerator = Accelerator(
+            deepspeed_plugin=DeepSpeedPlugin(hf_ds_config=deepspeed_config),
+        )
+    else:
+        accelerator = None
+    init_hp = {
+        "PAD_TOKEN_ID": 1000 - 1,
+        "PAD_TOKEN": "<pad>",
+        "BATCH_SIZE": 2,
+        "BETA": 0.001,
+        "LR": 0.001,
+        "MAX_GRAD_NORM": 0.5,
+        "UPDATE_EPOCHS": 1,
+        "MAX_MODEL_LEN": 100,
+    }
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    population = create_population(
+        algo=algo,
+        observation_space=vector_space,
+        action_space=copy.deepcopy(vector_space),
+        net_config=None,
+        INIT_HP=init_hp,
+        hp_config=grpo_hp_config,
+        actor_network=create_module(
+            input_size=10,
+            max_tokens=20,
+            vocab_size=1000,
+            device=device,
+        ),
+        algo_kwargs={
+            "lora_config": LoraConfig(
+                r=16,
+                lora_alpha=64,
+                target_modules=["linear_1"],
+                task_type="CAUSAL_LM",
+                lora_dropout=0.05,
             ),
-            algo_kwargs={
-                "lora_config": LoraConfig(
-                    r=16,
-                    lora_alpha=64,
-                    target_modules=["linear_1"],
-                    task_type="CAUSAL_LM",
-                    lora_dropout=0.05,
-                ),
-                "pad_token_id": 1000 - 1,
-                "pad_token": "<pad>",
-            },
-            accelerator=accelerator,
+            "pad_token_id": 1000 - 1,
+            "pad_token": "<pad>",
+        },
+        accelerator=accelerator,
+        device=device,
+    )
+
+    mutations = Mutations(
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        device=device,
+        accelerator=accelerator,
+    )
+
+    print("original lr: ", [agent.lr for agent in population])
+
+    new_population = [agent.clone(wrap=False) for agent in population]
+    mutated_population = mutations.mutation(new_population, pre_training_mut)
+
+    print("mutated lr: ", [agent.lr for agent in mutated_population])
+
+    assert len(mutated_population) == len(population)
+    for old, individual in zip(population, mutated_population):
+        available_mutations = grpo_hp_config.names()
+        assert individual.mut in available_mutations
+
+        new_value = getattr(individual, individual.mut)
+        min_value = grpo_hp_config[individual.mut].min
+        max_value = grpo_hp_config[individual.mut].max
+        assert min_value <= new_value <= max_value
+        assert old.index == individual.index
+    for agent in mutated_population:
+        opt = (
+            agent.actor.optimizer
+            if (use_deepspeed_optimizer and use_accelerator)
+            else agent.optimizer.optimizer
         )
-
-        mutations = Mutations(
-            0,
-            0,
-            0,
-            0,
-            0,
-            1,
-            0.1,
-            device="cuda" if torch.cuda.is_available() else "cpu",
-            accelerator=accelerator,
-        )
-
-        new_population = [agent.clone(wrap=False) for agent in population]
-        mutated_population = mutations.mutation(new_population, pre_training_mut)
-
-        assert len(mutated_population) == len(population)
-        for old, individual in zip(population, mutated_population):
-            available_mutations = grpo_hp_config.names()
-            assert individual.mut in available_mutations
-
-            new_value = getattr(individual, individual.mut)
-            min_value = grpo_hp_config[individual.mut].min
-            max_value = grpo_hp_config[individual.mut].max
-            assert min_value <= new_value <= max_value
-            assert old.index == individual.index
-        for agent in mutated_population:
-            for param_group in agent.optimizer.optimizer.param_groups:
-                assert param_group["lr"] == agent.lr
-
-        for mut_agent, old_agent in zip(mutated_population, new_population):
-            mut_agent.clean_up()
-            old_agent.clean_up()
+        for param_group in opt.param_groups:
+            assert param_group["lr"] == agent.lr
         if use_accelerator:
-            AcceleratorState._reset_state(True)
-        gc.collect()
-        torch.cuda.empty_cache()
+            assert (
+                agent.accelerator.state.deepspeed_plugin.deepspeed_config[
+                    "gradient_clipping"
+                ]
+                == agent.max_grad_norm
+            )
+    for mut_agent, old_agent in zip(mutated_population, new_population):
+        mut_agent.clean_up()
+        old_agent.clean_up()
+    if use_accelerator:
+        AcceleratorState._reset_state(True)
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @pytest.mark.parametrize("mutation_type", ["architecture", "parameters", "activation"])

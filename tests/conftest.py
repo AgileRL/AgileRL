@@ -1,4 +1,5 @@
 import gc
+import socket
 
 import numpy as np
 import pytest
@@ -190,7 +191,7 @@ def default_hp_config():
 @pytest.fixture(scope="session")
 def grpo_hp_config():
     yield HyperparameterConfig(
-        lr=RLParameter(min=6.25e-5, max=1e-2),
+        lr=RLParameter(min=0.00001, max=1),
     )
 
 
@@ -266,3 +267,48 @@ class EvoDummyRNG:
 @pytest.fixture(scope="session")
 def dummy_rng():
     return EvoDummyRNG()
+
+
+dist_env = dict(
+    ACCELERATE_USE_DEEPSPEED="true",
+    MASTER_ADDR="localhost",
+    MASTER_PORT="10999",
+    RANK="0",
+    LOCAL_RANK="0",
+    WORLD_SIZE="1",
+    PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True",
+    CUDA_VISIBLE_DEVICES="0",
+)
+
+
+def get_free_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
+
+@pytest.fixture
+def deepspeed_env():
+    import os
+
+    dynamic_dist_env = dist_env.copy()
+    dynamic_dist_env["MASTER_PORT"] = str(get_free_port())
+    existing_vars = {}
+    for key, value in dynamic_dist_env.items():
+        key = key.upper()
+        if key in os.environ:
+            existing_vars[key] = os.environ[key]
+        os.environ[key] = str(value)
+
+    try:
+        yield
+    finally:
+        for key in dynamic_dist_env:
+            key = key.upper()
+            if key in existing_vars:
+                # restore previous value
+                os.environ[key] = existing_vars[key]
+            else:
+                os.environ.pop(key, None)
+        gc.collect()
+        torch.cuda.empty_cache()

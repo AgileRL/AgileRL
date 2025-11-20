@@ -149,6 +149,7 @@ def dpo_factory():
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 @pytest.mark.parametrize("from_name", [True, False])
 def test_init_dpo(
+    deepspeed_env,
     dpo_factory,
     accelerator_factory,
     model_factory,
@@ -181,7 +182,7 @@ def test_init_dpo(
     assert dpo.batch_size_per_process == 16 if not reduce_memory_peak else 1
     assert dpo.beta == 0.001
     assert dpo.lr == 1e-4 if use_deepspeed_optimizer else 1e-5, dpo.lr == 1e-4
-    assert dpo.max_grad_norm is None if config is not None else 0.1
+    assert dpo.max_grad_norm == 0.1
     assert dpo.update_epochs == 1
     assert dpo.temperature == 1
     assert dpo.calc_position_embeddings
@@ -260,6 +261,7 @@ def test_init_dpo_model_name_none_actor_network_none(
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_dpo_get_action(
+    deepspeed_env,
     dpo_factory,
     accelerator_factory,
     model_factory,
@@ -314,6 +316,7 @@ def test_dpo_get_action(
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_dpo_learn(
+    deepspeed_env,
     dpo_factory,
     accelerator_factory,
     model_factory,
@@ -420,6 +423,7 @@ def test_dpo_learn(
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_dpo_test(
+    deepspeed_env,
     dpo_factory,
     accelerator_factory,
     model_factory,

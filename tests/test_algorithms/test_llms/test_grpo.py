@@ -380,6 +380,7 @@ def grpo_factory():
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_clean_up_vllm(
+    deepspeed_env,
     grpo_factory,
     model_factory,
     accelerator_factory,
@@ -440,6 +441,7 @@ def test_grpo_clean_up_vllm(
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_move_model_to_vllm(
+    deepspeed_env,
     grpo_factory,
     model_factory,
     accelerator_factory,
@@ -519,6 +521,7 @@ def test_grpo_move_model_to_vllm(
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_move_model_to_vllm_original_module(
+    deepspeed_env,
     grpo_factory,
     model_factory,
     accelerator_factory,
@@ -580,6 +583,7 @@ def test_grpo_move_model_to_vllm_original_module(
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_get_action_grpo(
+    deepspeed_env,
     grpo_factory,
     accelerator_factory,
     model_factory,
@@ -657,6 +661,7 @@ def test_get_action_grpo(
 @patch("agilerl.algorithms.core.base.LLM")
 def test_get_action_grpo_vllm_sleep_mode(
     MockLLM,
+    deepspeed_env,
     grpo_factory,
     accelerator_factory,
     model_factory,
@@ -734,6 +739,7 @@ def test_get_action_grpo_vllm_sleep_mode(
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_save_load_checkpoint_vllm(
+    deepspeed_env,
     grpo_factory,
     accelerator_factory,
     model_factory,
@@ -835,6 +841,7 @@ def test_grpo_save_load_checkpoint_vllm(
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_test_vllm(
+    deepspeed_env,
     grpo_factory,
     accelerator_factory,
     model_factory,
@@ -897,6 +904,7 @@ def test_grpo_test_vllm(
 )
 @pytest.mark.parametrize("from_name", [True, False])
 def test_init_grpo_with_accelerator(
+    deepspeed_env,
     grpo_factory,
     accelerator_factory,
     model_factory,
@@ -935,7 +943,7 @@ def test_init_grpo_with_accelerator(
     assert grpo.beta == 0.001
     assert grpo.lr == 1e-4 if use_deepspeed_optimizer else 1e-5, grpo.lr == 1e-4
     assert grpo.clip_coef == 0.2
-    assert grpo.max_grad_norm is None
+    assert grpo.max_grad_norm == 0.1
     assert grpo.update_epochs == 1
     assert grpo.group_size == group_size
     assert grpo.temperature == 0.9
@@ -989,6 +997,7 @@ def test_init_grpo_with_accelerator(
     "reduce_memory_peak, micro_batch_size_per_gpu", [(True, None), (False, 2)]
 )
 def test_init_grpo_vllm_with_tp_gt_one(
+    deepspeed_env,
     accelerator_factory,
     model_factory,
     vocab_size,
@@ -1065,6 +1074,7 @@ def test_init_grpo_vllm_with_tp_gt_one(
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_init_grpo_vllm_tp_value_error(
+    deepspeed_env,
     accelerator_factory,
     model_factory,
     vocab_size,
@@ -1131,6 +1141,7 @@ def test_init_grpo_vllm_tp_value_error(
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 def test_init_grpo_scheduler_warning_no_accelerator(
+    deepspeed_env,
     model_factory,
     vocab_size,
     group_size,
@@ -1171,6 +1182,7 @@ def test_init_grpo_scheduler_warning_no_accelerator(
 @pytest.mark.parametrize("reduce_memory_peak", [True, False])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_init_grpo_batch_size_value_error(
+    deepspeed_env,
     accelerator_factory,
     model_factory,
     config,
@@ -1222,6 +1234,7 @@ def test_init_grpo_batch_size_value_error(
 @pytest.mark.parametrize("reduce_memory_peak", [True, False])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_init_grpo_max_model_len_and_max_output_tokens_none_error(
+    deepspeed_env,
     accelerator_factory,
     model_factory,
     config,
@@ -1273,6 +1286,7 @@ def test_init_grpo_max_model_len_and_max_output_tokens_none_error(
 @pytest.mark.parametrize("reduce_memory_peak", [False])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_init_grpo_batch_size_grad_accum_error(
+    deepspeed_env,
     accelerator_factory,
     model_factory,
     config,
@@ -1332,6 +1346,7 @@ def test_init_grpo_batch_size_grad_accum_error(
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_init_grpo_with_no_accelerator(
+    deepspeed_env,
     grpo_factory,
     accelerator_factory,
     model_factory,
@@ -1392,7 +1407,11 @@ def test_init_grpo_with_no_accelerator(
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
 def test_init_grpo_zero3_warning(
-    accelerator_factory, config, use_deepspeed_optimizer, use_separate_reference_adapter
+    deepspeed_env,
+    accelerator_factory,
+    config,
+    use_deepspeed_optimizer,
+    use_separate_reference_adapter,
 ):
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with pytest.warns(UserWarning):
@@ -1436,7 +1455,11 @@ def test_init_grpo_zero3_warning(
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
 def test_init_grpo_lr_warning(
-    accelerator_factory, config, use_deepspeed_optimizer, use_separate_reference_adapter
+    deepspeed_env,
+    accelerator_factory,
+    config,
+    use_deepspeed_optimizer,
+    use_separate_reference_adapter,
 ):
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with pytest.warns(UserWarning):
@@ -1485,7 +1508,11 @@ def test_init_grpo_lr_warning(
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
 def test_init_grpo_max_grad_norm_warning(
-    accelerator_factory, config, use_deepspeed_optimizer, use_separate_reference_adapter
+    deepspeed_env,
+    accelerator_factory,
+    config,
+    use_deepspeed_optimizer,
+    use_separate_reference_adapter,
 ):
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with pytest.warns(UserWarning):
@@ -1531,7 +1558,11 @@ def test_init_grpo_max_grad_norm_warning(
 @pytest.mark.parametrize("use_deepspeed_optimizer", [True])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
 def test_init_grpo_scheduler_warning(
-    accelerator_factory, config, use_deepspeed_optimizer, use_separate_reference_adapter
+    deepspeed_env,
+    accelerator_factory,
+    config,
+    use_deepspeed_optimizer,
+    use_separate_reference_adapter,
 ):
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with pytest.warns(UserWarning):
@@ -1577,6 +1608,7 @@ def test_init_grpo_scheduler_warning(
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [2])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 def test_init_grpo_micro_batch_size_per_gpu_value_error(
+    deepspeed_env,
     accelerator_factory,
     config,
     use_deepspeed_optimizer,
@@ -1635,6 +1667,7 @@ def test_init_grpo_micro_batch_size_per_gpu_value_error(
 @pytest.mark.parametrize("reduce_memory_peak", [False])
 @pytest.mark.parametrize("batch_size", [16])
 def test_init_grpo_micro_batch_size_per_gpu_division_error(
+    deepspeed_env,
     accelerator_factory,
     config,
     use_deepspeed_optimizer,
@@ -1702,6 +1735,7 @@ def test_init_grpo_micro_batch_size_per_gpu_division_error(
 @pytest.mark.parametrize("data_batch_size", [8])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2])
 def test_get_action_grpo_vllm_multiple_gpus(
+    deepspeed_env,
     accelerator_factory,
     model_factory,
     config,
@@ -1814,6 +1848,7 @@ def test_get_action_grpo_vllm_multiple_gpus(
 )
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_calculate_advantage(
+    deepspeed_env,
     grpo_factory,
     accelerator_factory,
     model_factory,
@@ -1871,6 +1906,7 @@ def test_calculate_advantage(
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_calculate_kl_divergence(
+    deepspeed_env,
     grpo_factory,
     accelerator_factory,
     model_factory,
@@ -1927,6 +1963,7 @@ def test_calculate_kl_divergence(
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_loss(
+    deepspeed_env,
     grpo_factory,
     accelerator_factory,
     model_factory,
@@ -1987,6 +2024,7 @@ def test_grpo_loss(
 @pytest.mark.parametrize("batch_size", [6])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_learn(
+    deepspeed_env,
     grpo_factory,
     accelerator_factory,
     model_factory,
@@ -2079,6 +2117,7 @@ def test_grpo_learn(
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_get_logprobs(
+    deepspeed_env,
     grpo_factory,
     accelerator_factory,
     model_factory,
@@ -2133,6 +2172,7 @@ def test_get_logprobs(
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_get_backward_pass_with_scheduler(
+    deepspeed_env,
     grpo_factory,
     accelerator_factory,
     model_factory,
@@ -2187,6 +2227,7 @@ def test_get_backward_pass_with_scheduler(
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_value_error_with_nan_loss(
+    deepspeed_env,
     grpo_factory,
     model_factory,
     accelerator_factory,
@@ -2265,6 +2306,7 @@ def test_grpo_load():
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 @pytest.mark.parametrize("weights_only", [False, True])
 def test_grpo_save_load_checkpoint(
+    deepspeed_env,
     grpo_factory,
     accelerator_factory,
     model_factory,
@@ -2363,6 +2405,7 @@ def test_grpo_save_load_checkpoint(
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_save_load_distributed_actor_no_accelerator(
+    deepspeed_env,
     grpo_factory,
     model_factory,
     accelerator_factory,
@@ -2418,6 +2461,7 @@ def test_save_load_distributed_actor_no_accelerator(
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_save_load_distributed_actor(
+    deepspeed_env,
     grpo_factory,
     accelerator_factory,
     model_factory,
@@ -2533,6 +2577,7 @@ def test_grpo_save_load_distributed_actor(
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_save_load_distributed_actor_vllm(
+    deepspeed_env,
     grpo_factory,
     accelerator_factory,
     model_factory,
@@ -2646,6 +2691,7 @@ def test_grpo_save_load_distributed_actor_vllm(
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_clone_with_accelerator(
+    deepspeed_env,
     grpo_factory,
     accelerator_factory,
     model_factory,
@@ -2747,6 +2793,7 @@ def test_grpo_clone_with_accelerator(
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 @patch("agilerl.algorithms.core.base.LLM", DummyVLLM)
 def test_grpo_clone_with_accelerator_vllm(
+    deepspeed_env,
     grpo_factory,
     accelerator_factory,
     model_factory,
@@ -2852,6 +2899,7 @@ def test_grpo_clone_with_accelerator_vllm(
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_test(
+    deepspeed_env,
     grpo_factory,
     accelerator_factory,
     model_factory,
@@ -2965,6 +3013,7 @@ def test_clone_llm_peft_raises_error():
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_clean_up(
+    deepspeed_env,
     grpo_factory,
     model_factory,
     accelerator_factory,
@@ -3021,6 +3070,7 @@ def test_grpo_clean_up(
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_preprocess_observation(
+    deepspeed_env,
     grpo_factory,
     model_factory,
     accelerator_factory,
@@ -3075,6 +3125,7 @@ def test_grpo_preprocess_observation(
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_load_distributed_actor_value_error(
+    deepspeed_env,
     grpo_factory,
     model_factory,
     accelerator_factory,
@@ -3131,6 +3182,7 @@ def test_load_distributed_actor_value_error(
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_load_distributed_actor_warning(
+    deepspeed_env,
     grpo_factory,
     model_factory,
     accelerator_factory,
@@ -3174,7 +3226,7 @@ def test_load_distributed_actor_warning(
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("config", [None])
 def test_init_grpo_lora_config_warning(
-    accelerator_factory, config, use_deepspeed_optimizer
+    deepspeed_env, accelerator_factory, config, use_deepspeed_optimizer
 ):
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with pytest.warns(
@@ -3230,6 +3282,7 @@ def test_init_grpo_lora_config_warning(
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_update_lr(
+    deepspeed_env,
     grpo_factory,
     model_factory,
     accelerator_factory,
@@ -3308,6 +3361,7 @@ def test_grpo_update_lr(
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_set_reference_policy(
+    deepspeed_env,
     grpo_factory,
     model_factory,
     accelerator_factory,
@@ -3383,6 +3437,7 @@ def test_set_reference_policy(
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_ref_actor_is_same_as_actor_after_learning_reference_adapater(
+    deepspeed_env,
     grpo_factory,
     model_factory,
     accelerator_factory,
@@ -3469,6 +3524,7 @@ def test_grpo_ref_actor_is_same_as_actor_after_learning_reference_adapater(
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 def test_grpo_set_reference_policy_with_wrong_adapter_name(
+    deepspeed_env,
     accelerator_factory,
     config,
     use_deepspeed_optimizer,
@@ -3539,6 +3595,7 @@ def test_grpo_set_reference_policy_with_wrong_adapter_name(
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_exception_on_recompile(
+    deepspeed_env,
     grpo_factory,
     accelerator_factory,
     model_factory,
