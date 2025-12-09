@@ -27,19 +27,12 @@ import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list, set_seed
-from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
-from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 from gymnasium import spaces
-from peft import LoraConfig, PeftModel, get_peft_model, set_peft_model_state_dict
-from safetensors.torch import load_file
 from tensordict import TensorDict
 from torch._dynamo import OptimizedModule
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import SequentialLR
-from transformers import PretrainedConfig
-from transformers.modeling_utils import PreTrainedModel
-from vllm import LLM, SamplingParams
 
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import (
@@ -96,11 +89,22 @@ from agilerl.utils.evolvable_networks import (
     is_image_space,
     is_vector_space,
 )
-from agilerl.utils.llm_utils import (
-    DummyOptimizer,
-    create_model_from_name_or_path,
-    gather_if_zero3,
-)
+try:
+    from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
+    from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
+    from vllm import LLM, SamplingParams
+    from transformers import PretrainedConfig
+    from transformers.modeling_utils import PreTrainedModel
+    from peft import LoraConfig, PeftModel, get_peft_model, set_peft_model_state_dict
+    from safetensors.torch import load_file
+    from agilerl.utils.llm_utils import (
+        DummyOptimizer,
+        create_model_from_name_or_path,
+        gather_if_zero3,
+    )
+    HAS_LLM_DEPENDENCIES = True
+except ImportError:
+    HAS_LLM_DEPENDENCIES = False
 
 __all__ = ["EvolvableAlgorithm", "RLAlgorithm", "MultiAgentRLAlgorithm"]
 
