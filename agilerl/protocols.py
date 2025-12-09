@@ -300,6 +300,7 @@ class AgentWrapper(Protocol, Generic[T_EvolvableAlgorithm]):
         self, experiences: tuple[Iterable[ObservationType], ...], **kwargs
     ) -> None: ...
 
+
 @runtime_checkable
 class LoraConfigProtocol(Protocol):
     """
@@ -307,6 +308,7 @@ class LoraConfigProtocol(Protocol):
 
     LoRA configuration is used to configure the LoRA module.
     """
+
     r: int
     lora_alpha: int
     target_modules: str
@@ -327,21 +329,21 @@ class PretrainedConfigProtocol(Protocol):
     hidden_size: int
     num_attention_heads: int
     num_hidden_layers: int
-    
+
     def to_dict(self) -> dict[str, Any]: ...
     def to_json_string(self) -> str: ...
     def save_pretrained(self, save_directory: str, **kwargs: Any) -> None: ...
-    
+
     @classmethod
     def from_pretrained(
-        cls,
-        pretrained_model_name_or_path: str,
-        **kwargs: Any
+        cls, pretrained_model_name_or_path: str, **kwargs: Any
     ) -> "PretrainedConfigProtocol": ...
-    
+
     @classmethod
-    def from_dict(cls, config_dict: dict[str, Any], **kwargs: Any) -> "PretrainedConfigProtocol": ...
-    
+    def from_dict(
+        cls, config_dict: dict[str, Any], **kwargs: Any
+    ) -> "PretrainedConfigProtocol": ...
+
     @classmethod
     def from_json_file(cls, json_file: str) -> "PretrainedConfigProtocol": ...
 
@@ -426,8 +428,5 @@ class PeftModelProtocol(Protocol):
 
     @classmethod
     def from_pretrained(
-        cls,
-        base_model: PreTrainedModelProtocol,
-        adapter_path: str,
-        **kwargs: Any
+        cls, base_model: PreTrainedModelProtocol, adapter_path: str, **kwargs: Any
     ) -> "PeftModelProtocol": ...

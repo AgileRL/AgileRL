@@ -4,18 +4,18 @@ from typing import Any, Optional, Union
 import torch.nn as nn
 from torch.optim import Optimizer
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.protocols import EvolvableAlgorithm
 from agilerl.typing import OptimizerType, StateDict
 from agilerl.utils.algo_utils import DummyOptimizer
-from agilerl import HAS_LLM_DEPENDENCIES
 
 if HAS_LLM_DEPENDENCIES:
     from peft import PeftModel
+
     PeftModelType = PeftModel
 else:
     PeftModelType = "PeftModel"
-
 
 
 ModuleList = list[EvolvableModule]

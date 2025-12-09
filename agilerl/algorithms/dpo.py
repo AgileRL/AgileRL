@@ -8,12 +8,10 @@ from accelerate import Accelerator
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.protocols import LoraConfigProtocol, PreTrainedModelProtocol
 from agilerl.typing import ExperiencesType, LLMObsType
 from agilerl.utils.algo_utils import get_experiences_samples
 from agilerl.utils.llm_utils import PreferenceGym
-from agilerl.protocols import (
-    LoraConfigProtocol, PreTrainedModelProtocol
-)
 
 
 class DPO(LLMAlgorithm):
@@ -57,7 +55,7 @@ class DPO(LLMAlgorithm):
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     :param clone: Flag to indicate if the instantiation is a cloning, defaults to False
-    :type clone: bool, optional 
+    :type clone: bool, optional
     :param use_separate_reference_adapter: Flag to indicate if the reference policy should have a separate adapter, defaults to False
     :type use_separate_reference_adapter: bool, optional
     :param seed: Seed for the random number generator, defaults to 42

@@ -13,14 +13,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from gymnasium import spaces
+
 # from peft import PeftModel, get_peft_model
 from tensordict import TensorDict, from_module
 from tensordict.nn import CudaGraphModule
 from torch._dynamo import OptimizedModule
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
-# from transformers import PreTrainedModel
 
+# from agilerl.utils.llm_utils import gather_if_zero3
+from agilerl import HAS_LLM_DEPENDENCIES
+
+# from transformers import PreTrainedModel
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.protocols import (
     EvolvableAttributeType,
@@ -42,14 +46,13 @@ from agilerl.typing import (
     SupportedObsSpaces,
     TorchObsType,
 )
-# from agilerl.utils.llm_utils import gather_if_zero3
-
-from agilerl import HAS_LLM_DEPENDENCIES
 
 if HAS_LLM_DEPENDENCIES:
     from peft import PeftModel
     from transformers import PreTrainedModel
+
     from agilerl.utils.llm_utils import gather_if_zero3
+
     PreTrainedModelType = Union[PeftModel, PreTrainedModel]
 else:
     PreTrainedModelType = Union["PeftModel", "PreTrainedModel"]
@@ -1637,6 +1640,7 @@ def clone_llm(
         if state_dict is not None:
             model.load_state_dict(state_dict, strict=False)
     return model
+
 
 class DummyOptimizer:
     """

@@ -1,4 +1,3 @@
-
 import copy
 import warnings
 from abc import ABC, abstractmethod
@@ -10,15 +9,17 @@ import torch
 import torch.nn as nn
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
-from agilerl.typing import PreferencePrompts, ReasoningPrompts
+
 from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl.typing import PreferencePrompts, ReasoningPrompts
 
 if HAS_LLM_DEPENDENCIES:
-    from datasets import Dataset
     import deepspeed
+    from datasets import Dataset
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from transformers.modeling_utils import PreTrainedModel
     from transformers.tokenization_utils_base import BatchEncoding
+
     AutoTokenizer = AutoTokenizer
 else:
     AutoTokenizer = Any
@@ -621,6 +622,7 @@ class PreferenceGym(HuggingFaceGym):
             }
 
         return collate_fn
+
 
 @contextmanager
 def gather_if_zero3(

@@ -1,7 +1,9 @@
 from agilerl import HAS_LLM_DEPENDENCIES
 
 if not HAS_LLM_DEPENDENCIES:
-    raise ImportError("LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`.")
+    raise ImportError(
+        "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`."
+    )
 
 import yaml
 from accelerate import Accelerator

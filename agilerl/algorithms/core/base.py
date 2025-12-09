@@ -34,6 +34,7 @@ from torch.nn.utils import clip_grad_norm_
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import SequentialLR
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
@@ -45,14 +46,14 @@ from agilerl.modules.configs import MlpNetConfig
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.protocols import (
     AgentWrapper,
-    PreTrainedModelProtocol,
     EvolvableAttributeDict,
     EvolvableAttributeType,
     EvolvableModule,
-    ModuleDict,
     LoraConfigProtocol,
-    PretrainedConfigProtocol,
+    ModuleDict,
     PeftModelProtocol,
+    PretrainedConfigProtocol,
+    PreTrainedModelProtocol,
 )
 from agilerl.typing import (
     ActionType,
@@ -71,6 +72,7 @@ from agilerl.typing import (
 )
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
+    DummyOptimizer,
     VLLMConfig,
     check_supported_space,
     chkpt_attribute_to_device,
@@ -85,7 +87,6 @@ from agilerl.utils.algo_utils import (
     recursive_check_module_attrs,
     stack_and_pad_experiences,
     stack_experiences,
-    DummyOptimizer
 )
 from agilerl.utils.evolvable_networks import (
     compile_model,
@@ -95,14 +96,13 @@ from agilerl.utils.evolvable_networks import (
     is_vector_space,
 )
 
-from agilerl import HAS_LLM_DEPENDENCIES
-
 if HAS_LLM_DEPENDENCIES:
     from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
     from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
     from peft import LoraConfig, get_peft_model, set_peft_model_state_dict
     from safetensors.torch import load_file
     from vllm import LLM, SamplingParams
+
     from agilerl.utils.llm_utils import (
         create_model_from_name_or_path,
         gather_if_zero3,
@@ -1836,7 +1836,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         gradient_checkpointing: bool = True,
     ):
         if not HAS_LLM_DEPENDENCIES:
-            raise ImportError("LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`.")
+            raise ImportError(
+                "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`."
+            )
 
         if model_name is None and actor_network is None:
             raise ValueError(

@@ -1,8 +1,8 @@
 import copy
 import gc
+from unittest import mock
 
 import pytest
-from unittest import mock
 import torch
 from accelerate import Accelerator
 from accelerate.state import AcceleratorState
@@ -23,6 +23,7 @@ from tests.test_algorithms.test_llms.test_grpo import (
     deepspeed_config_stage_1,
     deepspeed_config_stage_2,
 )
+
 
 @pytest.fixture
 def preference_dataset_factory():
@@ -486,8 +487,12 @@ def test_dpo_test(
 
 
 def test_dpo_no_llm_dependencies(dpo_factory, model_factory, accelerator_factory):
-    with mock.patch("agilerl.algorithms.core.base.HAS_LLM_DEPENDENCIES", False), \
-     pytest.raises(ImportError, match="LLM dependencies are not installed. Please install them using \`pip install agilerl\[llm\]\`."):
+    with mock.patch(
+        "agilerl.algorithms.core.base.HAS_LLM_DEPENDENCIES", False
+    ), pytest.raises(
+        ImportError,
+        match=r"LLM dependencies are not installed. Please install them using \`pip install agilerl\[llm\]\`.",
+    ):
         dpo_factory(
             accelerator_factory=accelerator_factory,
             model_factory=model_factory,

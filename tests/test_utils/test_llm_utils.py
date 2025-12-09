@@ -11,13 +11,13 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer
 from transformers.tokenization_utils_base import BatchEncoding
 
+from agilerl.utils.algo_utils import DummyOptimizer
 from agilerl.utils.llm_utils import (
     PreferenceGym,
     ReasoningGym,
     gather_if_zero3,
     get_state_dict,
 )
-from agilerl.utils.algo_utils import DummyOptimizer
 
 DUMMY_CONVERSATION_TEMPLATE = [
     {

@@ -4,10 +4,17 @@ from typing import Any, Optional, Union
 import numpy as np
 import torch
 from accelerate import Accelerator
-# from transformers.modeling_utils import PreTrainedModel
 
+from agilerl import HAS_LLM_DEPENDENCIES
+
+# from transformers.modeling_utils import PreTrainedModel
 from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.protocols import (
+    LoraConfigProtocol,
+    PeftModelProtocol,
+    PreTrainedModelProtocol,
+)
 from agilerl.typing import ExperiencesType, LLMObsType
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
@@ -15,15 +22,10 @@ from agilerl.utils.algo_utils import (
     get_experiences_samples,
     stack_and_pad_experiences,
 )
-from agilerl.protocols import (
-    LoraConfigProtocol,
-    PeftModelProtocol,
-    PreTrainedModelProtocol,
-)
 from agilerl.utils.llm_utils import (
     ReasoningGym,
 )
-from agilerl import HAS_LLM_DEPENDENCIES
+
 if HAS_LLM_DEPENDENCIES:
     from transformers import GenerationConfig
 
