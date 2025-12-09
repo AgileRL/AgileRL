@@ -13,8 +13,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from gymnasium import spaces
-
-# from peft import PeftModel, get_peft_model
 from tensordict import TensorDict, from_module
 from tensordict.nn import CudaGraphModule
 from torch._dynamo import OptimizedModule
@@ -48,7 +46,7 @@ from agilerl.typing import (
 )
 
 if HAS_LLM_DEPENDENCIES:
-    from peft import PeftModel
+    from peft import PeftModel, get_peft_model
     from transformers import PreTrainedModel
 
     from agilerl.utils.llm_utils import gather_if_zero3
