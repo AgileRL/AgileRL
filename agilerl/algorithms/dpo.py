@@ -5,14 +5,15 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
-from peft import LoraConfig
-from transformers import PreTrainedModel
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.typing import ExperiencesType, LLMObsType
 from agilerl.utils.algo_utils import get_experiences_samples
 from agilerl.utils.llm_utils import PreferenceGym
+from agilerl.protocols import (
+    LoraConfigProtocol, PreTrainedModelProtocol
+)
 
 
 class DPO(LLMAlgorithm):
@@ -25,7 +26,7 @@ class DPO(LLMAlgorithm):
     :param model_name: Model name
     :type model_name: str, optional
     :param actor_network: HuggingFace LLM
-    :type actor_network: PreTrainedModel
+    :type actor_network: PreTrainedModelProtocol
     :param model_config: Model configuration, to be used when creating the model from a name or path
     :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
     :type hp_config: HyperparameterConfig, optional
@@ -50,13 +51,13 @@ class DPO(LLMAlgorithm):
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param lora_config: Config for LoRA, defaults to None
-    :type lora_config: LoraConfig, optional
+    :type lora_config: LoraConfigProtocol, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     :param clone: Flag to indicate if the instantiation is a cloning, defaults to False
-    :type clone: bool, optional
+    :type clone: bool, optional 
     :param use_separate_reference_adapter: Flag to indicate if the reference policy should have a separate adapter, defaults to False
     :type use_separate_reference_adapter: bool, optional
     :param seed: Seed for the random number generator, defaults to 42
@@ -70,7 +71,7 @@ class DPO(LLMAlgorithm):
         pad_token_id: int,
         pad_token: str,
         model_name: str | None = None,
-        actor_network: PreTrainedModel | None = None,
+        actor_network: PreTrainedModelProtocol | None = None,
         model_config: dict[str, Any] | None = None,
         hp_config: HyperparameterConfig | None = None,
         index: int = 0,
@@ -83,7 +84,7 @@ class DPO(LLMAlgorithm):
         micro_batch_size_per_gpu: int | None = None,
         reduce_memory_peak: bool = False,
         device: str = "cpu",
-        lora_config: LoraConfig | None = None,
+        lora_config: LoraConfigProtocol | None = None,
         accelerator: Accelerator | None = None,
         wrap: bool = True,
         clone: bool = False,

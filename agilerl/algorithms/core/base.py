@@ -45,10 +45,14 @@ from agilerl.modules.configs import MlpNetConfig
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.protocols import (
     AgentWrapper,
+    PreTrainedModelProtocol,
     EvolvableAttributeDict,
     EvolvableAttributeType,
     EvolvableModule,
     ModuleDict,
+    LoraConfigProtocol,
+    PretrainedConfigProtocol,
+    PeftModelProtocol,
 )
 from agilerl.typing import (
     ActionType,
@@ -81,6 +85,7 @@ from agilerl.utils.algo_utils import (
     recursive_check_module_attrs,
     stack_and_pad_experiences,
     stack_experiences,
+    DummyOptimizer
 )
 from agilerl.utils.evolvable_networks import (
     compile_model,
@@ -90,24 +95,18 @@ from agilerl.utils.evolvable_networks import (
     is_vector_space,
 )
 
-try:
+from agilerl import HAS_LLM_DEPENDENCIES
+
+if HAS_LLM_DEPENDENCIES:
     from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
     from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
-    from peft import LoraConfig, PeftModel, get_peft_model, set_peft_model_state_dict
+    from peft import LoraConfig, get_peft_model, set_peft_model_state_dict
     from safetensors.torch import load_file
-    from transformers import PretrainedConfig
-    from transformers.modeling_utils import PreTrainedModel
     from vllm import LLM, SamplingParams
-
     from agilerl.utils.llm_utils import (
-        DummyOptimizer,
         create_model_from_name_or_path,
         gather_if_zero3,
     )
-
-    HAS_LLM_DEPENDENCIES = True
-except ImportError:
-    HAS_LLM_DEPENDENCIES = False
 
 __all__ = ["EvolvableAlgorithm", "RLAlgorithm", "MultiAgentRLAlgorithm"]
 
@@ -1822,10 +1821,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         seed: int,
         pad_token_id: int,
         pad_token: str,
-        lora_config: LoraConfig | None,
+        lora_config: LoraConfigProtocol | None,
         use_separate_reference_adapter: bool,
         model_name: str | None = None,
-        actor_network: PreTrainedModel | None = None,
+        actor_network: PreTrainedModelProtocol | None = None,
         micro_batch_size_per_gpu: int | None = None,
         cosine_lr_schedule_config: Optional[CosineLRScheduleConfig] = None,
         hp_config: Optional[HyperparameterConfig] = None,
@@ -1833,9 +1832,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         device: Union[str, torch.device] = "cpu",
         accelerator: Optional[Accelerator] = None,
         name: Optional[str] = None,
-        model_config: dict[str, Any] | PretrainedConfig | None = None,
+        model_config: dict[str, Any] | PretrainedConfigProtocol | None = None,
         gradient_checkpointing: bool = True,
     ):
+        if not HAS_LLM_DEPENDENCIES:
+            raise ImportError("LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`.")
+
         if model_name is None and actor_network is None:
             raise ValueError(
                 "At least one of model_name or actor_network must be provided."
@@ -1890,7 +1892,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     )
                     lr = optim_lr
 
-        if lora_config is None and not isinstance(actor_network, PeftModel):
+        if lora_config is None and not isinstance(actor_network, PeftModelProtocol):
             warnings.warn(
                 "No LoRA config provided. AgileRL can only be used to finetune adapters at present. Using default LoRA configuration for RL finetuning."
             )
@@ -2056,7 +2058,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 device_map="auto"
             )
             tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B")
-            model = PeftModel.from_pretrained(base_model, path)
+            model = PeftModelProtocol.from_pretrained(base_model, path)
             """
         )
 
@@ -2229,8 +2231,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             input_args["wrap"] = False
             input_args["clone"] = True
 
-            actor: PeftModel = cast(
-                PeftModel,
+            actor: PeftModelProtocol = cast(
+                PeftModelProtocol,
                 (
                     self.accelerator.unwrap_model(self.actor)
                     if self.accelerator is not None
@@ -2422,12 +2424,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self.reference_update_tracker += 1
 
     def _initialize_actors(
-        self, base_model: PreTrainedModel | None, add_adapters: bool = True
+        self, base_model: PreTrainedModelProtocol | None, add_adapters: bool = True
     ):
         """Initialize the actor network.
 
         :param base_model: Base model
-        :type base_model: PreTrainedModel
+        :type base_model: PreTrainedModelProtocol
         :param add_adapters: Flag to indicate if adapters should be added to the model, defaults to True
         :type add_adapters: bool, optional
         """
@@ -2437,7 +2439,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 self.pretrained_model_name_or_path
             )
 
-        if isinstance(base_model, PeftModel) and add_adapters:
+        if isinstance(base_model, PeftModelProtocol) and add_adapters:
             # Handles backwards compatibility with user providing a peft model as the actor network
             if self.lora_config is None:
                 adapter_name = list(base_model.peft_config.keys())
@@ -2447,7 +2449,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if "default" in list(base_model.peft_config.keys()):
                 base_model.peft_config.pop("default")
 
-        self.actor: PeftModel = (
+        self.actor: PeftModelProtocol = (
             get_peft_model(base_model, self.lora_config, adapter_name="actor")
             if add_adapters
             else base_model
@@ -2596,7 +2598,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def _move_model_to_vllm(self) -> None:
         """Move the deepspeed model to vllm."""
 
-        # TODO: Add support for ZeRO Stage 3
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
         model_ref = self.accelerator.unwrap_model(self.actor)

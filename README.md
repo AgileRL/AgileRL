@@ -48,6 +48,17 @@ git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
 pip install -e .
 ```
 
+Should you wish to finetune LLMs using our RFT algorithms, please make sure you 
+install agilerl with additional LLM dependencies ("datasets", "deepspeed", "peft", "transformers", "vllm"):
+
+```bash
+pip install agilerl[llm]
+```
+Or in development mode:
+```bash
+pip install -e .[llm]
+```
+
 To install the ``nightly`` version of AgileRL with the latest features, use:
 
 ```bash

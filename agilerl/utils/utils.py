@@ -36,8 +36,8 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules import EvolvableModule
 from agilerl.typing import BPTTSequenceType, GymSpaceType, PopulationType
-from agilerl.utils.algo_utils import CosineLRScheduleConfig, clone_llm
-from agilerl.utils.llm_utils import DummyOptimizer, get_state_dict
+from agilerl.utils.algo_utils import CosineLRScheduleConfig, clone_llm, DummyOptimizer
+from agilerl.utils.llm_utils import get_state_dict
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 SupportedObservationSpace = Union[
@@ -1052,3 +1052,5 @@ def consolidate_mutations(population: list[LLMAlgorithm]) -> None:
                 agent.accelerator,
                 agent.cosine_lr_schedule_config,
             )
+
+

@@ -2,19 +2,27 @@ import inspect
 from typing import Any, Optional, Union
 
 import torch.nn as nn
-from peft import PeftModel
 from torch.optim import Optimizer
 
 from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.protocols import EvolvableAlgorithm
 from agilerl.typing import OptimizerType, StateDict
-from agilerl.utils.llm_utils import DummyOptimizer
+from agilerl.utils.algo_utils import DummyOptimizer
+from agilerl import HAS_LLM_DEPENDENCIES
+
+if HAS_LLM_DEPENDENCIES:
+    from peft import PeftModel
+    PeftModelType = PeftModel
+else:
+    PeftModelType = "PeftModel"
+
+
 
 ModuleList = list[EvolvableModule]
 _Optimizer = Union[
     type[OptimizerType], dict[str, type[OptimizerType]], type[DummyOptimizer]
 ]
-_Module = Union[EvolvableModule, ModuleDict, ModuleList, PeftModel]
+_Module = Union[EvolvableModule, ModuleDict, ModuleList, PeftModelType]
 
 
 def init_from_multiple(

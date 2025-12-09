@@ -1,5 +1,9 @@
-import re
+from agilerl import HAS_LLM_DEPENDENCIES
 
+if not HAS_LLM_DEPENDENCIES:
+    raise ImportError("LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`.")
+
+import re
 import yaml
 from accelerate import Accelerator
 from datasets import load_dataset
@@ -131,6 +135,7 @@ def main(init_hp, mut_p):
     init_hp["ZERO_STAGE"] = accelerator.state.deepspeed_plugin.deepspeed_config[
         "zero_optimization"
     ]["stage"]
+    init_hp["MAX_MODEL_LEN"] = MAX_CONTEXT_LENGTH
 
     hp_config = HyperparameterConfig(
         beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),
@@ -153,7 +158,6 @@ def main(init_hp, mut_p):
         "use_vllm": USE_VLLM,
         "pad_token_id": tokenizer.pad_token_id,
         "pad_token": tokenizer.pad_token,
-        "max_model_len": MAX_CONTEXT_LENGTH,
     }
 
     pop = create_population(
