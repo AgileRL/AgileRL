@@ -279,7 +279,6 @@ def create_module(input_size, max_tokens, vocab_size, device):
 @pytest.fixture(scope="function")
 def grpo_factory():
     created_agents = []
-    vllm_cleanup_called = False
 
     def generate_grpo(
         accelerator_factory,
