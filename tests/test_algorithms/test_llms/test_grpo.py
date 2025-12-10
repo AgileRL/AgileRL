@@ -388,7 +388,9 @@ def grpo_factory():
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+@patch("agilerl.algorithms.core.base.LLM")
 def test_grpo_clean_up_vllm(
+    MockLLM,
     deepspeed_env,
     grpo_factory,
     model_factory,
@@ -407,6 +409,17 @@ def test_grpo_clean_up_vllm(
     reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
+    mock_instance = MagicMock(spec=vllm.LLM)
+    mock_instance.generate = MagicMock(
+        return_value=[MagicMock(outputs=[MagicMock(text="Generated text")])]
+    )
+    mock_instance.sleep = MagicMock()
+    mock_instance.wake_up = MagicMock()
+    mock_instance.shutdown = MagicMock()
+    mock_instance.llm_engine = MagicMock()
+    mock_instance.llm_engine.model_executor = MagicMock()
+    MockLLM.return_value = mock_instance
+    
     grpo = grpo_factory(
         accelerator_factory,
         model_factory,
