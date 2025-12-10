@@ -419,7 +419,7 @@ def test_grpo_clean_up_vllm(
     mock_instance.llm_engine = MagicMock()
     mock_instance.llm_engine.model_executor = MagicMock()
     MockLLM.return_value = mock_instance
-    
+
     grpo = grpo_factory(
         accelerator_factory,
         model_factory,
