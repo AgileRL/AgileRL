@@ -305,7 +305,7 @@ def grpo_factory():
         if use_vllm:
             lora_config = None
             vllm_config = VLLMConfig(
-                gpu_memory_utilization=0.2, max_num_seqs=1, sleep_mode=sleep_mode
+                gpu_memory_utilization=0.05, max_num_seqs=1, sleep_mode=sleep_mode
             )
 
             actor = model_factory(pretrained_model_name_or_path)
