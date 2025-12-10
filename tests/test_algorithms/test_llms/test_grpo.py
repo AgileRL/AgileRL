@@ -375,6 +375,7 @@ def grpo_factory():
     torch.cuda.empty_cache()
     del created_agents
 
+
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [True])
 @pytest.mark.parametrize("use_separate_reference_adapter", [True])
