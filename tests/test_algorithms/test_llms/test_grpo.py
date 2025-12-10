@@ -371,7 +371,6 @@ def grpo_factory():
     for grpo in created_agents:
         grpo.clean_up()
     gc.collect()
-    cleanup_dist_env_and_memory()
     del created_agents
 
 
