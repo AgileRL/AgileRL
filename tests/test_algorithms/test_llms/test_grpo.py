@@ -278,6 +278,7 @@ def create_module(input_size, max_tokens, vocab_size, device):
 
 @pytest.fixture(scope="function")
 def grpo_factory():
+    created_agents = []
     def generate_grpo(
         accelerator_factory,
         model_factory,
@@ -305,7 +306,7 @@ def grpo_factory():
         if use_vllm:
             lora_config = None
             vllm_config = VLLMConfig(
-                gpu_memory_utilization=0.1, max_num_seqs=1, sleep_mode=sleep_mode
+                gpu_memory_utilization=0.2, max_num_seqs=1, sleep_mode=sleep_mode
             )
 
             actor = model_factory(pretrained_model_name_or_path)
@@ -361,9 +362,30 @@ def grpo_factory():
             reduce_memory_peak=reduce_memory_peak,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         )
+        created_agents.append(grpo)
         return grpo
 
-    return generate_grpo
+    yield generate_grpo
+    # Cleanup after test completes
+    for grpo in created_agents:
+        try:
+            grpo.clean_up()
+        except:
+            pass
+        del grpo
+    
+    gc.collect()
+    torch.cuda.empty_cache()
+    
+    try:
+        from vllm.distributed.parallel_groups import destroy_model_parallel
+        destroy_model_parallel()
+    except:
+        pass
+    del created_agents
+
+
+
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
