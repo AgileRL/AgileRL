@@ -506,4 +506,6 @@ def test_dpo_no_llm_dependencies(dpo_factory, model_factory, accelerator_factory
             reduce_memory_peak=False,
             micro_batch_size_per_gpu=None,
             from_name=False,
-        )
+        ).clean_up()
+    AcceleratorState._reset_state(True)
+
