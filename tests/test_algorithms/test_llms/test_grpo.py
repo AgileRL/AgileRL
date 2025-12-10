@@ -363,27 +363,18 @@ def grpo_factory():
             reduce_memory_peak=reduce_memory_peak,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         )
-        created_agents.append(grpo)
+        created_agents.append(grpo) # noqa: F821
         return grpo
 
     yield generate_grpo
     # Cleanup after test completes
     for grpo in created_agents:
-        try:
-            grpo.clean_up()
-        except:
-            pass
-        del grpo
-
+        grpo.clean_up()
     gc.collect()
     torch.cuda.empty_cache()
 
-    try:
-        from vllm.distributed.parallel_groups import destroy_model_parallel
-
-        destroy_model_parallel()
-    except:
-        pass
+    from vllm.distributed.parallel_groups import destroy_model_parallel
+    destroy_model_parallel()
     del created_agents
 
 
