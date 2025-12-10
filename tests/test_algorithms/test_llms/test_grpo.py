@@ -728,10 +728,13 @@ def test_get_action_grpo_vllm_sleep_mode(
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [True])
-@pytest.mark.parametrize("use_separate_reference_adapter", [
-    True, 
-    # False
-])
+@pytest.mark.parametrize(
+    "use_separate_reference_adapter",
+    [
+        True,
+        # False
+    ],
+)
 @pytest.mark.parametrize("vocab_size", [1000])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
