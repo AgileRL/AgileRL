@@ -56,7 +56,7 @@ pip install agilerl[llm]
 ```
 Or in development mode:
 ```bash
-pip install -e .[llm]
+pip install -e ".[llm]"
 ```
 
 To install the ``nightly`` version of AgileRL with the latest features, use:

@@ -371,11 +371,7 @@ def grpo_factory():
     for grpo in created_agents:
         grpo.clean_up()
     gc.collect()
-    torch.cuda.empty_cache()
-
-    from vllm.distributed.parallel_groups import destroy_model_parallel
-
-    destroy_model_parallel()
+    cleanup_dist_env_and_memory()
     del created_agents
 
 
