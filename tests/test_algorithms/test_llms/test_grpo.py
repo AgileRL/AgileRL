@@ -279,6 +279,7 @@ def create_module(input_size, max_tokens, vocab_size, device):
 @pytest.fixture(scope="function")
 def grpo_factory():
     created_agents = []
+
     def generate_grpo(
         accelerator_factory,
         model_factory,
@@ -373,19 +374,17 @@ def grpo_factory():
         except:
             pass
         del grpo
-    
+
     gc.collect()
     torch.cuda.empty_cache()
-    
+
     try:
         from vllm.distributed.parallel_groups import destroy_model_parallel
+
         destroy_model_parallel()
     except:
         pass
     del created_agents
-
-
-
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
