@@ -1,6 +1,5 @@
 import copy
 import gc
-from unittest import mock
 
 import pytest
 import torch
@@ -483,28 +482,4 @@ def test_dpo_test(
     fitness = dpo.test(env)
     assert isinstance(fitness, float)
     dpo.clean_up()
-    AcceleratorState._reset_state(True)
-
-
-def test_dpo_no_llm_dependencies(dpo_factory, model_factory, accelerator_factory):
-    with mock.patch(
-        "agilerl.algorithms.core.base.HAS_LLM_DEPENDENCIES", False
-    ), pytest.raises(
-        ImportError,
-        match=r"LLM dependencies are not installed. Please install them using \`pip install agilerl\[llm\]\`.",
-    ):
-        dpo_factory(
-            accelerator_factory=accelerator_factory,
-            model_factory=model_factory,
-            config=None,
-            use_deepspeed_optimizer=False,
-            vocab_size=100,
-            input_size=10,
-            max_tokens=20,
-            use_separate_reference_adapter=False,
-            pretrained_model_name_or_path="trl-internal-testing/tiny-Qwen2ForCausalLM-2.5",
-            reduce_memory_peak=False,
-            micro_batch_size_per_gpu=None,
-            from_name=False,
-        ).clean_up()
     AcceleratorState._reset_state(True)

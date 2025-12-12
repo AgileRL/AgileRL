@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
+from unittest import mock
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
@@ -278,8 +279,6 @@ def create_module(input_size, max_tokens, vocab_size, device):
 
 @pytest.fixture(scope="function")
 def grpo_factory():
-    created_agents = []
-
     def generate_grpo(
         accelerator_factory,
         model_factory,
@@ -363,16 +362,9 @@ def grpo_factory():
             reduce_memory_peak=reduce_memory_peak,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         )
-        created_agents.append(grpo)  # noqa: F821
         return grpo
 
     yield generate_grpo
-    # Cleanup after test completes
-    for grpo in created_agents:
-        grpo.clean_up()
-    gc.collect()
-    torch.cuda.empty_cache()
-    del created_agents
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -3678,3 +3670,29 @@ def check_ref_adapater_is_same_as_actor_after_learning(grpo):
             ref_param = None
             actor_param = None
     return True
+
+
+def test_grpo_no_llm_dependencies(grpo_factory, model_factory, accelerator_factory):
+    with mock.patch(
+        "agilerl.algorithms.core.base.HAS_LLM_DEPENDENCIES", False
+    ), pytest.raises(
+        ImportError,
+        match=r"LLM dependencies are not installed. Please install them using \`pip install agilerl\[llm\]\`.",
+    ):
+        grpo_factory(
+            accelerator_factory=accelerator_factory,
+            model_factory=model_factory,
+            config=None,
+            use_deepspeed_optimizer=False,
+            vocab_size=30,
+            input_size=5,
+            max_tokens=10,
+            use_separate_reference_adapter=False,
+            pretrained_model_name_or_path=None,
+            reduce_memory_peak=False,
+            micro_batch_size_per_gpu=None,
+            from_name=False,
+            group_size=2,
+            use_vllm=False,
+        ).clean_up()
+    AcceleratorState._reset_state(True)
