@@ -369,6 +369,110 @@ def grpo_factory():
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [True])
+@pytest.mark.parametrize(
+    "use_separate_reference_adapter",
+    [True, False],
+)
+@pytest.mark.parametrize("vocab_size", [1000])
+@pytest.mark.parametrize("input_size", [10])
+@pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize("group_size", [5])
+@pytest.mark.parametrize(
+    "use_vllm, pretrained_model_name_or_path", [(True, "facebook/opt-125m")]
+)
+@pytest.mark.parametrize("reduce_memory_peak", [True])
+@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+def test_grpo_save_load_checkpoint_vllm(
+    deepspeed_env,
+    grpo_factory,
+    accelerator_factory,
+    model_factory,
+    config,
+    use_deepspeed_optimizer,
+    use_separate_reference_adapter,
+    vocab_size,
+    input_size,
+    max_tokens,
+    group_size,
+    use_vllm,
+    pretrained_model_name_or_path,
+    tmpdir,
+    reduce_memory_peak,
+    micro_batch_size_per_gpu,
+):
+    grpo = grpo_factory(
+        accelerator_factory,
+        model_factory,
+        config,
+        use_deepspeed_optimizer,
+        vocab_size,
+        input_size,
+        max_tokens,
+        group_size,
+        use_separate_reference_adapter,
+        use_vllm,
+        pretrained_model_name_or_path,
+        reduce_memory_peak,
+        micro_batch_size_per_gpu,
+    )
+    accelerator = accelerator_factory(use_deepspeed_optimizer, config)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        grpo.save_checkpoint(tmpdir)
+        new_grpo = GRPO(
+            actor_network=model_factory(pretrained_model_name_or_path),
+            pad_token_id=vocab_size - 1,
+            pad_token="<pad>",
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            group_size=group_size,
+            cosine_lr_schedule_config=(
+                None
+                if accelerator is not None
+                else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+            ),
+            use_vllm=use_vllm,
+            vllm_config=VLLMConfig(gpu_memory_utilization=0.05, max_num_seqs=1),
+            accelerator=accelerator,
+            use_separate_reference_adapter=use_separate_reference_adapter,
+            max_output_tokens=max_tokens,
+        )
+        new_grpo.load_checkpoint(tmpdir)
+
+        assert isinstance(new_grpo.actor, DeepSpeedEngine)
+        assert isinstance(new_grpo.actor.base_model, (PeftModel, LoraModel))
+
+        for attr in EvolvableAlgorithm.inspect_attributes(grpo):
+            if not attr.startswith("_") and not attr.startswith("__"):
+                if attr == "rng":
+                    assert hasattr(new_grpo, attr)
+                elif attr == "actor":
+                    for param, new_param in zip(
+                        grpo.actor.parameters(), new_grpo.actor.parameters()
+                    ):
+                        assert torch.equal(param, new_param)
+                elif attr == "optimizer":
+                    for param, new_param in zip(
+                        grpo.optimizer.parameters(), new_grpo.optimizer.parameters()
+                    ):
+                        assert torch.equal(param, new_param)
+                elif attr == "accelerator" or attr == "lr_scheduler":
+                    assert (
+                        getattr(new_grpo, attr).__class__.__name__
+                        == getattr(grpo, attr).__class__.__name__
+                    )
+                elif attr == "llm":
+                    assert hasattr(new_grpo, attr) and isinstance(new_grpo.llm, LLM)
+                elif not isinstance(getattr(grpo, attr), torch.Tensor):
+                    assert getattr(new_grpo, attr) == getattr(
+                        grpo, attr
+                    ), f"Attribute {attr} is not equal"
+                else:
+                    assert torch.equal(getattr(new_grpo, attr), getattr(grpo, attr))
+    new_grpo.clean_up()
+    grpo.clean_up()
+
+
+@pytest.mark.parametrize("config", [deepspeed_config_stage_2])
+@pytest.mark.parametrize("use_deepspeed_optimizer", [True])
 @pytest.mark.parametrize("use_separate_reference_adapter", [True])
 @pytest.mark.parametrize("vocab_size", [100])
 @pytest.mark.parametrize("input_size", [10])
@@ -526,7 +630,6 @@ def test_grpo_move_model_to_vllm(
         grpo._move_model_to_vllm()
 
     grpo.clean_up()
-    # cleanup_dist_env_and_memory()
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -547,7 +650,7 @@ def test_grpo_move_model_to_vllm(
 @pytest.mark.parametrize("data_batch_size", [4])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-def test_get_action_grpo(
+def test_get_action_grpo_including_vllm(
     deepspeed_env,
     grpo_factory,
     accelerator_factory,
@@ -693,110 +796,6 @@ def test_get_action_grpo_vllm_sleep_mode(
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [True])
-@pytest.mark.parametrize(
-    "use_separate_reference_adapter",
-    [True, False],
-)
-@pytest.mark.parametrize("vocab_size", [1000])
-@pytest.mark.parametrize("input_size", [10])
-@pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize("group_size", [5])
-@pytest.mark.parametrize(
-    "use_vllm, pretrained_model_name_or_path", [(True, "facebook/opt-125m")]
-)
-@pytest.mark.parametrize("reduce_memory_peak", [True])
-@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-def test_grpo_save_load_checkpoint_vllm(
-    deepspeed_env,
-    grpo_factory,
-    accelerator_factory,
-    model_factory,
-    config,
-    use_deepspeed_optimizer,
-    use_separate_reference_adapter,
-    vocab_size,
-    input_size,
-    max_tokens,
-    group_size,
-    use_vllm,
-    pretrained_model_name_or_path,
-    tmpdir,
-    reduce_memory_peak,
-    micro_batch_size_per_gpu,
-):
-    grpo = grpo_factory(
-        accelerator_factory,
-        model_factory,
-        config,
-        use_deepspeed_optimizer,
-        vocab_size,
-        input_size,
-        max_tokens,
-        group_size,
-        use_separate_reference_adapter,
-        use_vllm,
-        pretrained_model_name_or_path,
-        reduce_memory_peak,
-        micro_batch_size_per_gpu,
-    )
-    accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-    with tempfile.TemporaryDirectory() as tmpdir:
-        grpo.save_checkpoint(tmpdir)
-        new_grpo = GRPO(
-            actor_network=model_factory(pretrained_model_name_or_path),
-            pad_token_id=vocab_size - 1,
-            pad_token="<pad>",
-            device="cuda" if torch.cuda.is_available() else "cpu",
-            group_size=group_size,
-            cosine_lr_schedule_config=(
-                None
-                if accelerator is not None
-                else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
-            ),
-            use_vllm=use_vllm,
-            vllm_config=VLLMConfig(gpu_memory_utilization=0.05, max_num_seqs=1),
-            accelerator=accelerator,
-            use_separate_reference_adapter=use_separate_reference_adapter,
-            max_output_tokens=max_tokens,
-        )
-        new_grpo.load_checkpoint(tmpdir)
-
-        assert isinstance(new_grpo.actor, DeepSpeedEngine)
-        assert isinstance(new_grpo.actor.base_model, (PeftModel, LoraModel))
-
-        for attr in EvolvableAlgorithm.inspect_attributes(grpo):
-            if not attr.startswith("_") and not attr.startswith("__"):
-                if attr == "rng":
-                    assert hasattr(new_grpo, attr)
-                elif attr == "actor":
-                    for param, new_param in zip(
-                        grpo.actor.parameters(), new_grpo.actor.parameters()
-                    ):
-                        assert torch.equal(param, new_param)
-                elif attr == "optimizer":
-                    for param, new_param in zip(
-                        grpo.optimizer.parameters(), new_grpo.optimizer.parameters()
-                    ):
-                        assert torch.equal(param, new_param)
-                elif attr == "accelerator" or attr == "lr_scheduler":
-                    assert (
-                        getattr(new_grpo, attr).__class__.__name__
-                        == getattr(grpo, attr).__class__.__name__
-                    )
-                elif attr == "llm":
-                    assert hasattr(new_grpo, attr) and isinstance(new_grpo.llm, LLM)
-                elif not isinstance(getattr(grpo, attr), torch.Tensor):
-                    assert getattr(new_grpo, attr) == getattr(
-                        grpo, attr
-                    ), f"Attribute {attr} is not equal"
-                else:
-                    assert torch.equal(getattr(new_grpo, attr), getattr(grpo, attr))
-    new_grpo.clean_up()
-    grpo.clean_up()
-
-
-@pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-@pytest.mark.parametrize("use_deepspeed_optimizer", [True])
 @pytest.mark.parametrize("use_separate_reference_adapter", [True])
 @pytest.mark.parametrize("vocab_size", [1000])
 @pytest.mark.parametrize("input_size", [10])
@@ -845,7 +844,6 @@ def test_grpo_test_vllm(
     fitnesses = grpo.test(env)
     assert isinstance(fitnesses, torch.Tensor)
     grpo.clean_up()
-    # cleanup_dist_env_and_memory()
 
 
 @pytest.mark.parametrize(
