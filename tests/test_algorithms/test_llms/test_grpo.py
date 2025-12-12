@@ -25,11 +25,6 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.generation.configuration_utils import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
 from vllm import LLM
-from vllm.distributed import (
-    cleanup_dist_env_and_memory,
-    init_distributed_environment,
-    initialize_model_parallel,
-)
 
 from agilerl.algorithms import GRPO
 from agilerl.algorithms.core.base import (

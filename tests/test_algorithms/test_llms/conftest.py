@@ -13,8 +13,6 @@ from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM
 from vllm.distributed import (
     cleanup_dist_env_and_memory,
-    init_distributed_environment,
-    initialize_model_parallel,
 )
 
 
