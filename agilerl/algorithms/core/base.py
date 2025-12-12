@@ -1807,6 +1807,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     :type accelerator: Optional[Accelerator]
     :param name: The name of the algorithm.
     :type name: Optional[str]
+    :param model_config: The configuration for the model.
+    :type model_config: dict[str, Any] | PretrainedConfig | None
+    :param gradient_checkpointing: Whether to use gradient checkpointing.
+    :type gradient_checkpointing: bool
     """
 
     def __init__(

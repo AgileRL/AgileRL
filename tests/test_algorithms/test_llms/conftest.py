@@ -1,6 +1,8 @@
 import gc
 import random
 
+import deepspeed.comm.comm as ds_comm
+import deepspeed.utils.groups as ds_groups
 import numpy as np
 import pytest
 import torch
@@ -9,6 +11,11 @@ from accelerate.state import AcceleratorState
 from accelerate.utils import DeepSpeedPlugin
 from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM
+from vllm.distributed import (
+    cleanup_dist_env_and_memory,
+    init_distributed_environment,
+    initialize_model_parallel,
+)
 
 
 def cleanup_vllm_instances():
@@ -48,18 +55,16 @@ def cleanup_vllm_instances():
 
 @pytest.fixture(autouse=True)
 def cleanup_after_test(request):
-    test_name = request.node.name
-    before = torch.cuda.memory_allocated() / 1e9
     yield
-    cleanup_vllm_instances()
+    cleanup_dist_env_and_memory()
+    for attr in dir(ds_groups):
+        if attr.startswith("_") and attr.endswith("_GROUP"):
+            setattr(ds_groups, attr, None)
+    ds_comm.cdb = None
     gc.collect()
     torch.cuda.empty_cache()
     torch.cuda.synchronize()
     AcceleratorState._reset_state(True)
-    after = torch.cuda.memory_allocated() / 1e9
-    delta = after - before
-    if delta > 0.5:  # More than 500MB leaked
-        print(f"\n⚠️  {test_name}: {before:.2f}GB → {after:.2f}GB (Δ {delta:+.2f}GB)")
 
 
 @pytest.fixture(autouse=True)

@@ -25,7 +25,11 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.generation.configuration_utils import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
 from vllm import LLM
-from vllm.distributed.parallel_state import destroy_model_parallel
+from vllm.distributed import (
+    cleanup_dist_env_and_memory,
+    init_distributed_environment,
+    initialize_model_parallel,
+)
 
 from agilerl.algorithms import GRPO
 from agilerl.algorithms.core.base import (
@@ -362,6 +366,7 @@ def grpo_factory():
             max_model_len=max_tokens + 5,
             reduce_memory_peak=reduce_memory_peak,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
+            enforce_eager=False,
         )
         return grpo
 
@@ -527,7 +532,7 @@ def test_grpo_move_model_to_vllm(
         grpo._move_model_to_vllm()
 
     grpo.clean_up()
-    destroy_model_parallel()
+    # cleanup_dist_env_and_memory()
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -846,6 +851,7 @@ def test_grpo_test_vllm(
     fitnesses = grpo.test(env)
     assert isinstance(fitnesses, torch.Tensor)
     grpo.clean_up()
+    # cleanup_dist_env_and_memory()
 
 
 @pytest.mark.parametrize(
