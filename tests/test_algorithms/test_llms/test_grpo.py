@@ -307,7 +307,7 @@ def grpo_factory():
         if use_vllm:
             lora_config = None
             vllm_config = VLLMConfig(
-                gpu_memory_utilization=0.05, max_num_seqs=1, sleep_mode=sleep_mode
+                gpu_memory_utilization=0.2, max_num_seqs=1, sleep_mode=sleep_mode
             )
 
             actor = model_factory(pretrained_model_name_or_path)
@@ -514,60 +514,8 @@ def test_grpo_move_model_to_vllm(
             assert torch.allclose(
                 param.to(torch.bfloat16), merged_model_ref.state_dict()[name]
             )
-    grpo.clean_up()
-    destroy_model_parallel()
 
-
-@pytest.mark.parametrize(
-    "config",
-    [
-        deepspeed_config_stage_2,
-    ],
-)
-@pytest.mark.parametrize("use_deepspeed_optimizer", [False])
-@pytest.mark.parametrize("use_separate_reference_adapter", [True])
-@pytest.mark.parametrize("vocab_size", [100])
-@pytest.mark.parametrize("input_size", [10])
-@pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize("group_size", [5])
-@pytest.mark.parametrize(
-    "use_vllm, pretrained_model_name_or_path",
-    [(True, "facebook/opt-125m")],
-)
-@pytest.mark.parametrize("reduce_memory_peak", [True])
-@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-def test_grpo_move_model_to_vllm_original_module(
-    deepspeed_env,
-    grpo_factory,
-    model_factory,
-    accelerator_factory,
-    config,
-    use_deepspeed_optimizer,
-    use_separate_reference_adapter,
-    vocab_size,
-    input_size,
-    max_tokens,
-    group_size,
-    use_vllm,
-    pretrained_model_name_or_path,
-    reduce_memory_peak,
-    micro_batch_size_per_gpu,
-):
-    grpo = grpo_factory(
-        accelerator_factory,
-        model_factory,
-        config,
-        use_deepspeed_optimizer,
-        vocab_size,
-        input_size,
-        max_tokens,
-        group_size,
-        use_separate_reference_adapter,
-        use_vllm,
-        pretrained_model_name_or_path,
-        reduce_memory_peak,
-        micro_batch_size_per_gpu,
-    )
+    # Test with original_module
     fake_named_params = [
         (
             "base_model.model.model.decoder.layers.0.self_attn_layer_norm.weight.original_module",
@@ -577,6 +525,7 @@ def test_grpo_move_model_to_vllm_original_module(
     model_ref = grpo.accelerator.unwrap_model(grpo.actor)
     with patch.object(model_ref, "named_parameters", return_value=fake_named_params):
         grpo._move_model_to_vllm()
+
     grpo.clean_up()
     destroy_model_parallel()
 
