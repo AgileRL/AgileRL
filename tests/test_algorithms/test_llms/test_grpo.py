@@ -25,6 +25,7 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.generation.configuration_utils import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
 from vllm import LLM
+from vllm.distributed.parallel_state import destroy_model_parallel
 
 from agilerl.algorithms import GRPO
 from agilerl.algorithms.core.base import (
@@ -364,7 +365,7 @@ def grpo_factory():
         )
         return grpo
 
-    yield generate_grpo
+    return generate_grpo
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -514,6 +515,7 @@ def test_grpo_move_model_to_vllm(
                 param.to(torch.bfloat16), merged_model_ref.state_dict()[name]
             )
     grpo.clean_up()
+    destroy_model_parallel()
 
 
 @pytest.mark.parametrize(
@@ -576,6 +578,7 @@ def test_grpo_move_model_to_vllm_original_module(
     with patch.object(model_ref, "named_parameters", return_value=fake_named_params):
         grpo._move_model_to_vllm()
     grpo.clean_up()
+    destroy_model_parallel()
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -744,10 +747,7 @@ def test_get_action_grpo_vllm_sleep_mode(
 @pytest.mark.parametrize("use_deepspeed_optimizer", [True])
 @pytest.mark.parametrize(
     "use_separate_reference_adapter",
-    [
-        True,
-        # False
-    ],
+    [True, False],
 )
 @pytest.mark.parametrize("vocab_size", [1000])
 @pytest.mark.parametrize("input_size", [10])
@@ -1818,7 +1818,9 @@ def test_get_action_grpo_vllm_multiple_gpus(
             ),
             use_vllm=use_vllm,
             vllm_config=VLLMConfig(
-                gpu_memory_utilization=0.05, tensor_parallel_size=tensor_parallel_size
+                gpu_memory_utilization=0.05,
+                tensor_parallel_size=tensor_parallel_size,
+                max_num_seqs=1,
             ),
             max_grad_norm=0.1,
             accelerator=accelerator,
