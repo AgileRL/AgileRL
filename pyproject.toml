@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "agilerl"
-version = "2.4.1.dev1"
+version = "2.4.1.dev2"
 
 description = "AgileRL is a deep reinforcement learning library focused on improving RL development through RLOps."
 authors = ["Nick Ustaran-Anderegg <dev@agilerl.com>"]
@@ -9,9 +9,8 @@ readme = "README.md"
 exclude = ["tutorials"]
 
 [tool.poetry.dependencies]
-python = "^3.10"
+python = ">=3.10,<3.13"
 accelerate = "^1.7.0"
-deepspeed = "^0.17.1"
 dill = "^0.3.7"
 fastrand = "^1.3.0"
 flatten_dict = "^0.4.2"
@@ -24,7 +23,6 @@ minari = "^0.5.2"
 numpy = "^1.26.4"
 omegaconf = "^2.3.0"
 pandas = "^2.2.3"
-peft = "^0.15.2"
 pettingzoo = "^1.23.1"
 jax = { version = "^0.4.31", extras = ["cpu"] }
 pre-commit = "^3.4.0"
@@ -37,9 +35,12 @@ termcolor = "^1.1.0"
 torch = "2.7.1"
 tensordict = "^0.8"
 tqdm = "^4.66.4"
-transformers = "^4.48.1"
 ucimlrepo = "^0.0.3"
 wandb = "^0.17.6"
+datasets = "4.4.1"
+deepspeed = "^0.17.1"
+peft = "^0.18.0"
+transformers = "^4.57.1"
 vllm = "0.10.0"
 
 [tool.pytest.ini_options]
