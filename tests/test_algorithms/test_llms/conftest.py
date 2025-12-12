@@ -56,11 +56,12 @@ def cleanup_vllm_instances():
 @pytest.fixture(autouse=True)
 def cleanup_after_test(request):
     yield
-    cleanup_dist_env_and_memory()
-    for attr in dir(ds_groups):
-        if attr.startswith("_") and attr.endswith("_GROUP"):
-            setattr(ds_groups, attr, None)
-    ds_comm.cdb = None
+    if "vllm" in request.node.name:
+        cleanup_dist_env_and_memory()
+        for attr in dir(ds_groups):
+            if attr.startswith("_") and attr.endswith("_GROUP"):
+                setattr(ds_groups, attr, None)
+        ds_comm.cdb = None
     gc.collect()
     torch.cuda.empty_cache()
     torch.cuda.synchronize()

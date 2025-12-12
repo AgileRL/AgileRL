@@ -366,7 +366,6 @@ def grpo_factory():
             max_model_len=max_tokens + 5,
             reduce_memory_peak=reduce_memory_peak,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
-            enforce_eager=False,
         )
         return grpo
 
