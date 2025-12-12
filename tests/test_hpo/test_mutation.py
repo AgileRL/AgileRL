@@ -78,7 +78,9 @@ def create_bert_networks_multi_agent(device):
 def cleanup_after_test():
     yield
     gc.collect()
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
 
 
 @pytest.fixture(scope="function")
@@ -141,9 +143,10 @@ def init_pop(
         torch_compiler=torch_compiler,
     )
     yield pop
+    for agent in pop:
+        del agent
     del pop
     gc.collect()
-    torch.cuda.empty_cache()
 
 
 # The constructor initializes all the attributes of the Mutations class correctly.
@@ -961,8 +964,6 @@ def test_mutation_applies_no_mutations_multi_agent(init_pop, device, accelerator
     del population
     del mutated_population
 
-    torch.cuda.empty_cache()  # Free up GPU memory
-
 
 # The mutation method applies RL hyperparameter mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
@@ -1297,8 +1298,6 @@ def test_mutation_applies_architecture_mutations_multi_agent(
             assert old.index == individual.index
 
         del new_population, mutated_population
-        gc.collect()
-        torch.cuda.empty_cache()
 
     del mutations
 
@@ -1417,9 +1416,6 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
             assert old.index == individual.index
 
         del new_population, mutated_population
-        gc.collect()
-        torch.cuda.empty_cache()
-
     del mutations, population
 
 
@@ -1573,8 +1569,6 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
         old_agent.clean_up()
     if use_accelerator:
         AcceleratorState._reset_state(True)
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 @pytest.mark.parametrize("mutation_type", ["architecture", "parameters", "activation"])
