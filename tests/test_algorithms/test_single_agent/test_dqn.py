@@ -92,6 +92,7 @@ def test_initialize_dqn(
     expected_opt_cls = AcceleratedOptimizer if accelerator else optim.Adam
     assert isinstance(dqn.optimizer.optimizer, expected_opt_cls)
     assert isinstance(dqn.criterion, nn.MSELoss)
+    dqn.clean_up()
 
 
 # Can initialize DQN with an actor network
@@ -134,6 +135,7 @@ def test_initialize_dqn_with_actor_network_make_evo(
     assert dqn.double is False
     assert isinstance(dqn.optimizer.optimizer, optim.Adam)
     assert isinstance(dqn.criterion, nn.MSELoss)
+    dqn.clean_up()
 
 
 @pytest.mark.parametrize(
@@ -184,6 +186,7 @@ def test_initialize_dqn_with_actor_network_evo_net(
     assert dqn.double is False
     assert isinstance(dqn.optimizer.optimizer, optim.Adam)
     assert isinstance(dqn.criterion, nn.MSELoss)
+    dqn.clean_up()
 
 
 def test_initialize_dqn_with_incorrect_actor_net_type(vector_space, discrete_space):
@@ -232,6 +235,7 @@ def test_returns_expected_action_epsilon_greedy(
 
     assert action.is_integer()
     assert action >= 0 and action < action_space.n
+    dqn.clean_up()
 
 
 # Returns the expected action when given a state observation and action mask.
@@ -254,6 +258,7 @@ def test_returns_expected_action_mask(vector_space, discrete_space):
 
     assert action.is_integer()
     assert action == 1
+    dqn.clean_up()
 
 
 def test_returns_expected_action_mask_vectorized(vector_space, discrete_space):
@@ -272,6 +277,7 @@ def test_returns_expected_action_mask_vectorized(vector_space, discrete_space):
     action = dqn.get_action(state, epsilon, action_mask)
 
     assert np.array_equal(action, [1, 0])
+    dqn.clean_up()
 
 
 def test_dqn_optimizer_parameters(vector_space, discrete_space):
@@ -300,6 +306,7 @@ def test_dqn_optimizer_parameters(vector_space, discrete_space):
             not_updated.append(name)
 
     assert not not_updated, f"The following parameters weren't updated:\n{not_updated}"
+    dqn.clean_up()
 
 
 # learns from experiences and updates network parameters
@@ -350,6 +357,7 @@ def test_learns_from_experiences(
     assert actor == dqn.actor
     assert actor_target == dqn.actor_target
     assert actor_pre_learn_sd != str(dqn.actor.state_dict())
+    dqn.clean_up()
 
 
 # Updates target network parameters with soft update
@@ -397,6 +405,7 @@ def test_soft_update(vector_space, discrete_space):
         torch.allclose(expected_param, target_param)
         for expected_param, target_param in zip(expected_params, target_params)
     )
+    dqn.clean_up()
 
 
 # Runs algorithm test loop
@@ -409,6 +418,7 @@ def test_algorithm_test_loop(observation_space, discrete_space, num_envs, reques
     agent = DQN(observation_space=observation_space, action_space=discrete_space)
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
+    agent.clean_up()
 
 
 # Clones the agent and returns an identical agent.
@@ -437,6 +447,8 @@ def test_clone_returns_identical_agent(vector_space, discrete_space):
     assert clone_agent.scores == dqn.scores
     assert clone_agent.tensor_attribute == dqn.tensor_attribute
     assert clone_agent.tensor_test == dqn.tensor_test
+    dqn.clean_up()
+    clone_agent.clean_up()
 
     accelerator = Accelerator()
     dqn = DQN(vector_space, discrete_space, accelerator=accelerator)
@@ -459,6 +471,8 @@ def test_clone_returns_identical_agent(vector_space, discrete_space):
     assert clone_agent.fitness == dqn.fitness
     assert clone_agent.steps == dqn.steps
     assert clone_agent.scores == dqn.scores
+    dqn.clean_up()
+    clone_agent.clean_up()
 
     accelerator = Accelerator()
     dqn = DQN(vector_space, discrete_space, accelerator=accelerator, wrap=False)
@@ -481,6 +495,8 @@ def test_clone_returns_identical_agent(vector_space, discrete_space):
     assert clone_agent.fitness == dqn.fitness
     assert clone_agent.steps == dqn.steps
     assert clone_agent.scores == dqn.scores
+    dqn.clean_up()
+    clone_agent.clean_up()
 
 
 def test_clone_new_index(vector_space, discrete_space):
@@ -488,6 +504,8 @@ def test_clone_new_index(vector_space, discrete_space):
     clone_agent = dqn.clone(index=100)
 
     assert clone_agent.index == 100
+    dqn.clean_up()
+    clone_agent.clean_up()
 
 
 def test_clone_after_learning(vector_space, discrete_space):
@@ -528,3 +546,5 @@ def test_clone_after_learning(vector_space, discrete_space):
     assert clone_agent.fitness == dqn.fitness
     assert clone_agent.steps == dqn.steps
     assert clone_agent.scores == dqn.scores
+    dqn.clean_up()
+    clone_agent.clean_up()

@@ -74,15 +74,6 @@ def create_bert_networks_multi_agent(device):
     )
 
 
-@pytest.fixture(autouse=True)
-def cleanup_after_test():
-    yield
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
-
-
 @pytest.fixture(scope="function")
 def bert_network(device):
     return create_bert_network(device)

@@ -310,5 +310,3 @@ def deepspeed_env():
                 os.environ[key] = existing_vars[key]
             else:
                 os.environ.pop(key, None)
-        gc.collect()
-        torch.cuda.empty_cache()

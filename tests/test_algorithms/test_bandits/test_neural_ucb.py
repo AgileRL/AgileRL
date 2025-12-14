@@ -87,6 +87,7 @@ def test_initialize_bandit(observation_space, encoder_cls, accelerator, request)
     expected_optimizer = AcceleratedOptimizer if accelerator else optim.Adam
     assert isinstance(bandit.optimizer.optimizer, expected_optimizer)
     assert isinstance(bandit.criterion, nn.MSELoss)
+    bandit.clean_up()
 
 
 # Can initialize NeuralUCB with an actor network
@@ -124,6 +125,7 @@ def test_initialize_bandit_with_actor_network(
     assert bandit.steps == [0]
     assert isinstance(bandit.optimizer.optimizer, optim.Adam)
     assert isinstance(bandit.criterion, nn.MSELoss)
+    bandit.clean_up()
 
 
 def test_initialize_bandit_with_incorrect_actor_network(vector_space, discrete_space):
@@ -163,6 +165,7 @@ def test_initialize_bandit_with_evo_nets(vector_space, discrete_space):
     assert bandit.steps == [0]
     assert isinstance(bandit.optimizer.optimizer, optim.Adam)
     assert isinstance(bandit.criterion, nn.MSELoss)
+    bandit.clean_up()
 
 
 def test_initialize_neuralucb_with_incorrect_actor_net_type(
@@ -189,6 +192,7 @@ def test_returns_expected_action(vector_space, discrete_space):
 
     assert action.is_integer()
     assert action >= 0 and action < discrete_space.n
+    bandit.clean_up()
 
 
 # Returns the expected action when given a state observation and action mask.
@@ -204,6 +208,7 @@ def test_returns_expected_action_mask(vector_space, discrete_space):
 
     assert action.is_integer()
     assert action == 1
+    bandit.clean_up()
 
 
 # learns from experiences and updates network parameters
@@ -244,6 +249,7 @@ def test_learns_from_experiences(
     assert loss >= 0.0
     assert actor == bandit.actor
     assert actor_pre_learn_sd != str(bandit.actor.state_dict())
+    bandit.clean_up()
 
 
 # Runs algorithm test loop
@@ -256,6 +262,7 @@ def test_algorithm_test_loop(observation_space, discrete_space, request):
     agent = NeuralUCB(observation_space=observation_space, action_space=discrete_space)
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
+    agent.clean_up()
 
 
 # Clones the agent and returns an identical agent.
@@ -287,6 +294,8 @@ def test_clone_returns_identical_agent(observation_space, discrete_space, reques
     assert clone_agent.tensor_test == bandit.tensor_test
     assert clone_agent.numpy_attribute == bandit.numpy_attribute
     assert clone_agent.numpy_test == bandit.numpy_test
+    bandit.clean_up()
+    clone_agent.clean_up()
 
     accelerator = Accelerator()
     bandit = NeuralUCB(observation_space, discrete_space, accelerator=accelerator)
@@ -308,6 +317,8 @@ def test_clone_returns_identical_agent(observation_space, discrete_space, reques
     assert clone_agent.fitness == bandit.fitness
     assert clone_agent.steps == bandit.steps
     assert clone_agent.scores == bandit.scores
+    bandit.clean_up()
+    clone_agent.clean_up()
 
     accelerator = Accelerator()
     bandit = NeuralUCB(
@@ -331,12 +342,16 @@ def test_clone_returns_identical_agent(observation_space, discrete_space, reques
     assert clone_agent.fitness == bandit.fitness
     assert clone_agent.steps == bandit.steps
     assert clone_agent.scores == bandit.scores
+    bandit.clean_up()
+    clone_agent.clean_up()
 
 
 def test_clone_new_index(vector_space, discrete_space):
     bandit = NeuralUCB(vector_space, discrete_space)
     clone_agent = bandit.clone(index=100)
     assert clone_agent.index == 100
+    bandit.clean_up()
+    clone_agent.clean_up()
 
 
 def test_clone_after_learning(vector_space, discrete_space):
@@ -367,6 +382,8 @@ def test_clone_after_learning(vector_space, discrete_space):
     assert clone_agent.fitness == bandit.fitness
     assert clone_agent.steps == bandit.steps
     assert clone_agent.scores == bandit.scores
+    bandit.clean_up()
+    clone_agent.clean_up()
 
 
 # TODO: Will be deprecated in the future
@@ -402,3 +419,5 @@ def test_clone_with_make_evo(
     assert clone_agent.fitness == bandit.fitness
     assert clone_agent.steps == bandit.steps
     assert clone_agent.scores == bandit.scores
+    bandit.clean_up()
+    clone_agent.clean_up()

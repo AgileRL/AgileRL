@@ -1159,7 +1159,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :rtype: None
         """
         for evo_attr in self.evolvable_attributes().values():
-            print(f"Deleting {evo_attr}")
             del evo_attr
 
 
