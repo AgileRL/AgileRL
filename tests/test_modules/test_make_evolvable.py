@@ -66,6 +66,7 @@ def simple_mlp():
     )
     yield network
     del network
+    gc.collect()
 
 
 @pytest.fixture
@@ -75,6 +76,7 @@ def simple_mlp_2():
     )
     yield network
     del network
+    gc.collect()
 
 
 @pytest.fixture
@@ -91,6 +93,7 @@ def mlp_norm_layers():
     )
     yield network
     del network
+    gc.collect()
 
 
 @pytest.fixture
@@ -113,6 +116,7 @@ def simple_cnn():
     )
     yield network
     del network
+    gc.collect()
 
 
 @pytest.fixture
@@ -137,6 +141,7 @@ def cnn_norm_layers():
     )
     yield network
     del network
+    gc.collect()
 
 
 @pytest.fixture
@@ -144,6 +149,7 @@ def two_arg_cnn():
     network = TwoArgCNN()
     yield network
     del network
+    gc.collect()
 
 
 @pytest.fixture
