@@ -7,10 +7,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import wandb
 from torch.nn import functional as F
 from tqdm import tqdm
 
+import wandb
 from agilerl.data.rl_data import DataPoint
 from agilerl.modules.gpt import EvolvableGPT
 from agilerl.modules.mlp import EvolvableMLP
@@ -1222,6 +1222,20 @@ class ILQL(nn.Module):
         self.scores = checkpoint["scores"]
         self.fitness = checkpoint["fitness"]
         self.steps = checkpoint["steps"]
+
+    def clean_up(self) -> None:
+        """Clean up the networks"""
+        del self.model
+        del self.actor
+        del self.actor_target
+        del self.v
+        del self.q
+        del self.target_q
+        del self.pi
+        del self.optimizer
+        if self.double_q:
+            del self.q2
+            del self.target_q2
 
 
 class ILQL_Policy:
