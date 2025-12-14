@@ -1151,6 +1151,17 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         return self
 
+    def clean_up(self) -> None:
+        """
+        Clean up the algorithm by deleting the networks and optimizers.
+
+        :return: None
+        :rtype: None
+        """
+        for evo_attr in self.evolvable_attributes().values():
+            print(f"Deleting {evo_attr}")
+            del evo_attr
+
 
 class RLAlgorithm(EvolvableAlgorithm, ABC):
     """Base object for all single-agent algorithms in the AgileRL framework.
