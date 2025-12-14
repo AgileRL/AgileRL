@@ -536,8 +536,6 @@ def test_grpo_clean_up_vllm(
     assert grpo.optimizer is None
     assert grpo.lr_scheduler is None
     del grpo
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 @pytest.mark.parametrize(
@@ -1465,8 +1463,6 @@ def test_init_grpo_lr_warning(
             use_separate_reference_adapter=use_separate_reference_adapter,
             max_output_tokens=max_tokens,
         )
-        gc.collect()
-        torch.cuda.empty_cache()
     assert grpo.lr == 1e-4 if use_deepspeed_optimizer else 0.1
     grpo.clean_up()
 
@@ -1517,8 +1513,6 @@ def test_init_grpo_max_grad_norm_warning(
             accelerator=accelerator,
             use_separate_reference_adapter=use_separate_reference_adapter,
         )
-        gc.collect()
-        torch.cuda.empty_cache()
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_1_with_scheduler])
@@ -1565,8 +1559,6 @@ def test_init_grpo_scheduler_warning(
             accelerator=accelerator,
             use_separate_reference_adapter=use_separate_reference_adapter,
         )
-        gc.collect()
-        torch.cuda.empty_cache()
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -1623,8 +1615,6 @@ def test_init_grpo_micro_batch_size_per_gpu_value_error(
             "Cannot specify micro_batch_size_per_gpu when reduce_memory_peak is True."
             in str(e.value)
         )
-        gc.collect()
-        torch.cuda.empty_cache()
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -1684,8 +1674,6 @@ def test_init_grpo_micro_batch_size_per_gpu_division_error(
         f"When specifying micro_batch_size_per_gpu, batch_size ({batch_size}) must be divisible by the product of the number of processes ({accelerator.num_processes}) and micro_batch_size_per_gpu ({micro_batch_size_per_gpu})."
         in str(e.value)
     )
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -3020,8 +3008,6 @@ def test_grpo_clean_up(
     assert grpo.optimizer is None
     assert grpo.lr_scheduler is None
     del grpo
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 @pytest.mark.parametrize("config", [None])
@@ -3226,8 +3212,6 @@ def test_init_grpo_lora_config_warning(
             ),
             accelerator=accelerator,
         )
-        gc.collect()
-        torch.cuda.empty_cache()
 
 
 @pytest.mark.parametrize(

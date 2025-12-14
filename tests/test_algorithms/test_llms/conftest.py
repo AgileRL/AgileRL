@@ -16,41 +16,6 @@ from vllm.distributed import (
 )
 
 
-def cleanup_vllm_instances():
-    """Clean up vLLM LLM instances and engines"""
-    import vllm
-    import vllm.engine.llm_engine
-
-    # Clean global engine
-    if hasattr(vllm, "_global_llm_engine"):
-        try:
-            vllm._global_llm_engine.shutdown()
-        except Exception:
-            pass
-        del vllm._global_llm_engine
-
-    # Clean any cached engines
-    if hasattr(vllm.engine.llm_engine, "_cached_engines"):
-        for engine in vllm.engine.llm_engine._cached_engines.values():
-            try:
-                engine.shutdown()
-            except Exception:
-                pass
-        vllm.engine.llm_engine._cached_engines.clear()
-
-    # Clean LLM class instances
-    if hasattr(vllm, "LLM"):
-        # Clear any class-level caches
-        if hasattr(vllm.LLM, "_instances"):
-            for instance in vllm.LLM._instances:
-                try:
-                    if hasattr(instance, "llm_engine"):
-                        instance.llm_engine.shutdown()
-                except Exception:
-                    pass
-            vllm.LLM._instances.clear()
-
-
 @pytest.fixture(autouse=True)
 def cleanup_after_test(request):
     yield
@@ -61,8 +26,8 @@ def cleanup_after_test(request):
                 setattr(ds_groups, attr, None)
         ds_comm.cdb = None
     gc.collect()
-    torch.cuda.empty_cache()
     torch.cuda.synchronize()
+    torch.cuda.empty_cache()
     AcceleratorState._reset_state(True)
 
 
