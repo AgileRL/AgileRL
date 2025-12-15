@@ -2186,6 +2186,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def clean_up(self) -> None:
         """Clean up the algorithm."""
         if self.accelerator is not None:
+            # Free up GPU memory occupied by parameters
+            self.actor.empty_partition_cache()
+            self.actor.destroy()
             (
                 self.actor,
                 self.optimizer,
@@ -2209,10 +2212,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if hasattr(self, "llm"):
             del self.llm.llm_engine.model_executor
             del self.llm
-
         gc.collect()
         torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
         torch.cuda.synchronize()
 
     def clone(self, index: Optional[int] = None, wrap: bool = True):
