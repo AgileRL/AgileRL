@@ -18,7 +18,7 @@ jobs:
     build:
         runs-on: gha-runner-scale-set
         container:
-            image: europe-west4-docker.pkg.dev/arena-gke-02/gke-arena-europe-west4-repo/ray-worker:py310-cu128-runner-b1
+            image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-devel
             options: --user root
         # todo: test on different python versions!
         # strategy:

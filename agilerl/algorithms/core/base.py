@@ -2187,8 +2187,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """Clean up the algorithm."""
         if self.accelerator is not None:
             # Free up GPU memory occupied by parameters
-            self.actor.empty_partition_cache()
-            self.actor.destroy()
+            if hasattr(self.actor, "empty_partition_cache"):
+                self.actor.empty_partition_cache()
+            if hasattr(self.actor, "destroy"):
+                self.actor.destroy()
             (
                 self.actor,
                 self.optimizer,
