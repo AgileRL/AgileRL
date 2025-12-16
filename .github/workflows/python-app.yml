@@ -3,7 +3,7 @@ name: Python application
 
 on:
     push:
-        branches: [main]
+        branches: [main, nightly]
         paths:
             - agilerl/**
     pull_request:
