@@ -6,8 +6,6 @@ import torch
 from accelerate import Accelerator
 
 from agilerl import HAS_LLM_DEPENDENCIES
-
-# from transformers.modeling_utils import PreTrainedModel
 from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.protocols import (

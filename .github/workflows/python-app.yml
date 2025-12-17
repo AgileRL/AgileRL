@@ -37,7 +37,6 @@ jobs:
                   # Use uv for faster downloads
                   pip install uv
                   uv pip install --system ruff pytest pytest-cov black codespell yamlfmt isort pyupgrade
-                  uv pip install --system -r requirements.txt
                   uv pip install --system -e .[llm]
             - name: Run black
               run: |

@@ -19,10 +19,7 @@ from torch._dynamo import OptimizedModule
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
-# from agilerl.utils.llm_utils import gather_if_zero3
 from agilerl import HAS_LLM_DEPENDENCIES
-
-# from transformers import PreTrainedModel
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.protocols import (
     EvolvableAttributeType,
