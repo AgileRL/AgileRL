@@ -27,20 +27,14 @@ import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list, set_seed
-from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
-from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 from gymnasium import spaces
-from peft import LoraConfig, PeftModel, get_peft_model, set_peft_model_state_dict
-from safetensors.torch import load_file
 from tensordict import TensorDict
 from torch._dynamo import OptimizedModule
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import SequentialLR
-from transformers import PretrainedConfig
-from transformers.modeling_utils import PreTrainedModel
-from vllm import LLM, SamplingParams
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
@@ -55,7 +49,11 @@ from agilerl.protocols import (
     EvolvableAttributeDict,
     EvolvableAttributeType,
     EvolvableModule,
+    LoraConfigProtocol,
     ModuleDict,
+    PeftModelProtocol,
+    PretrainedConfigProtocol,
+    PreTrainedModelProtocol,
 )
 from agilerl.typing import (
     ActionType,
@@ -74,6 +72,7 @@ from agilerl.typing import (
 )
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
+    DummyOptimizer,
     VLLMConfig,
     check_supported_space,
     chkpt_attribute_to_device,
@@ -96,11 +95,18 @@ from agilerl.utils.evolvable_networks import (
     is_image_space,
     is_vector_space,
 )
-from agilerl.utils.llm_utils import (
-    DummyOptimizer,
-    create_model_from_name_or_path,
-    gather_if_zero3,
-)
+
+if HAS_LLM_DEPENDENCIES:
+    from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
+    from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
+    from peft import LoraConfig, get_peft_model, set_peft_model_state_dict
+    from safetensors.torch import load_file
+    from vllm import LLM, SamplingParams
+
+    from agilerl.utils.llm_utils import (
+        create_model_from_name_or_path,
+        gather_if_zero3,
+    )
 
 __all__ = ["EvolvableAlgorithm", "RLAlgorithm", "MultiAgentRLAlgorithm"]
 
@@ -1145,6 +1151,16 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         return self
 
+    def clean_up(self) -> None:
+        """
+        Clean up the algorithm by deleting the networks and optimizers.
+
+        :return: None
+        :rtype: None
+        """
+        for evo_attr in self.evolvable_attributes().values():
+            del evo_attr
+
 
 class RLAlgorithm(EvolvableAlgorithm, ABC):
     """Base object for all single-agent algorithms in the AgileRL framework.
@@ -1801,6 +1817,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     :type accelerator: Optional[Accelerator]
     :param name: The name of the algorithm.
     :type name: Optional[str]
+    :param model_config: The configuration for the model.
+    :type model_config: dict[str, Any] | PretrainedConfig | None
+    :param gradient_checkpointing: Whether to use gradient checkpointing.
+    :type gradient_checkpointing: bool
     """
 
     def __init__(
@@ -1815,10 +1835,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         seed: int,
         pad_token_id: int,
         pad_token: str,
-        lora_config: LoraConfig | None,
+        lora_config: LoraConfigProtocol | None,
         use_separate_reference_adapter: bool,
         model_name: str | None = None,
-        actor_network: PreTrainedModel | None = None,
+        actor_network: PreTrainedModelProtocol | None = None,
         micro_batch_size_per_gpu: int | None = None,
         cosine_lr_schedule_config: Optional[CosineLRScheduleConfig] = None,
         hp_config: Optional[HyperparameterConfig] = None,
@@ -1826,9 +1846,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         device: Union[str, torch.device] = "cpu",
         accelerator: Optional[Accelerator] = None,
         name: Optional[str] = None,
-        model_config: dict[str, Any] | PretrainedConfig | None = None,
+        model_config: dict[str, Any] | PretrainedConfigProtocol | None = None,
         gradient_checkpointing: bool = True,
     ):
+        if not HAS_LLM_DEPENDENCIES:
+            raise ImportError(
+                "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`."
+            )
+
         if model_name is None and actor_network is None:
             raise ValueError(
                 "At least one of model_name or actor_network must be provided."
@@ -1883,7 +1908,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     )
                     lr = optim_lr
 
-        if lora_config is None and not isinstance(actor_network, PeftModel):
+        if lora_config is None and not isinstance(actor_network, PeftModelProtocol):
             warnings.warn(
                 "No LoRA config provided. AgileRL can only be used to finetune adapters at present. Using default LoRA configuration for RL finetuning."
             )
@@ -2049,7 +2074,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 device_map="auto"
             )
             tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B")
-            model = PeftModel.from_pretrained(base_model, path)
+            model = PeftModelProtocol.from_pretrained(base_model, path)
             """
         )
 
@@ -2161,6 +2186,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def clean_up(self) -> None:
         """Clean up the algorithm."""
         if self.accelerator is not None:
+            # Free up GPU memory occupied by parameters
+            if hasattr(self.actor, "empty_partition_cache"):
+                self.actor.empty_partition_cache()
+            if hasattr(self.actor, "destroy"):
+                self.actor.destroy()
             (
                 self.actor,
                 self.optimizer,
@@ -2184,10 +2214,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if hasattr(self, "llm"):
             del self.llm.llm_engine.model_executor
             del self.llm
-
         gc.collect()
         torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
         torch.cuda.synchronize()
 
     def clone(self, index: Optional[int] = None, wrap: bool = True):
@@ -2222,8 +2250,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             input_args["wrap"] = False
             input_args["clone"] = True
 
-            actor: PeftModel = cast(
-                PeftModel,
+            actor: PeftModelProtocol = cast(
+                PeftModelProtocol,
                 (
                     self.accelerator.unwrap_model(self.actor)
                     if self.accelerator is not None
@@ -2415,12 +2443,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self.reference_update_tracker += 1
 
     def _initialize_actors(
-        self, base_model: PreTrainedModel | None, add_adapters: bool = True
+        self, base_model: PreTrainedModelProtocol | None, add_adapters: bool = True
     ):
         """Initialize the actor network.
 
         :param base_model: Base model
-        :type base_model: PreTrainedModel
+        :type base_model: PreTrainedModelProtocol
         :param add_adapters: Flag to indicate if adapters should be added to the model, defaults to True
         :type add_adapters: bool, optional
         """
@@ -2430,7 +2458,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 self.pretrained_model_name_or_path
             )
 
-        if isinstance(base_model, PeftModel) and add_adapters:
+        if isinstance(base_model, PeftModelProtocol) and add_adapters:
             # Handles backwards compatibility with user providing a peft model as the actor network
             if self.lora_config is None:
                 adapter_name = list(base_model.peft_config.keys())
@@ -2440,7 +2468,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if "default" in list(base_model.peft_config.keys()):
                 base_model.peft_config.pop("default")
 
-        self.actor: PeftModel = (
+        self.actor: PeftModelProtocol = (
             get_peft_model(base_model, self.lora_config, adapter_name="actor")
             if add_adapters
             else base_model
@@ -2589,7 +2617,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def _move_model_to_vllm(self) -> None:
         """Move the deepspeed model to vllm."""
 
-        # TODO: Add support for ZeRO Stage 3
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
         model_ref = self.accelerator.unwrap_model(self.actor)

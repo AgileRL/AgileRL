@@ -11,8 +11,8 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer
 from transformers.tokenization_utils_base import BatchEncoding
 
+from agilerl.utils.algo_utils import DummyOptimizer
 from agilerl.utils.llm_utils import (
-    DummyOptimizer,
     PreferenceGym,
     ReasoningGym,
     gather_if_zero3,

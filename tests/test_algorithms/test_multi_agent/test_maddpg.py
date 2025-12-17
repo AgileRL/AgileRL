@@ -336,6 +336,7 @@ def test_initialize_maddpg_with_net_config(
         assert isinstance(critic_optimizer, expected_optimizer_cls)
 
     assert isinstance(maddpg.criterion, nn.MSELoss)
+    maddpg.clean_up()
 
 
 # TODO: This will be deprecated in the future
@@ -415,6 +416,7 @@ def test_initialize_maddpg_with_mlp_networks(
         for critic_optimizer in maddpg.critic_optimizers.values()
     )
     assert isinstance(maddpg.criterion, nn.MSELoss)
+    maddpg.clean_up()
 
 
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
@@ -450,6 +452,7 @@ def test_initialize_maddpg_with_mlp_networks_gumbel_softmax(
         torch_compiler=compile_mode,
     )
     assert maddpg.torch_compiler == "default"
+    maddpg.clean_up()
 
 
 # TODO: This will be deprecated in the future
@@ -528,6 +531,7 @@ def test_initialize_maddpg_with_cnn_networks(
         for critic_optimizer in maddpg.critic_optimizers.values()
     )
     assert isinstance(maddpg.criterion, nn.MSELoss)
+    maddpg.clean_up()
 
 
 @pytest.mark.parametrize("accelerator", [None, Accelerator()])
@@ -617,6 +621,7 @@ def test_initialize_maddpg_with_evo_networks(
         for critic_optimizer in maddpg.critic_optimizers.values()
     )
     assert isinstance(maddpg.criterion, nn.MSELoss)
+    maddpg.clean_up()
 
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
@@ -626,7 +631,7 @@ def test_initialize_maddpg_with_incorrect_evo_networks(
     evo_actors = []
     evo_critics = []
     with pytest.raises(AssertionError):
-        maddpg = MADDPG(
+        MADDPG(
             observation_spaces=ma_vector_space,
             action_spaces=ma_discrete_space,
             agent_ids=["agent_0", "agent_1", "other_agent_0"],
@@ -634,7 +639,6 @@ def test_initialize_maddpg_with_incorrect_evo_networks(
             critic_networks=evo_critics,
             torch_compiler=compile_mode,
         )
-        assert maddpg
 
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
@@ -693,6 +697,7 @@ def test_maddpg_init_torch_compiler_no_error(
         assert maddpg.torch_compiler == "default"
     else:
         assert isinstance(maddpg, MADDPG)
+    maddpg.clean_up()
 
 
 @pytest.mark.parametrize("mode", (1, True, "max-autotune-no-cudagraphs"))
@@ -770,6 +775,7 @@ def test_maddpg_get_action(
         for idx, env_action in enumerate(list(processed_action.values())):
             for action in env_action:
                 assert action <= action_spaces[idx].n - 1
+    maddpg.clean_up()
     maddpg = None
 
 
@@ -794,6 +800,7 @@ def test_maddpg_get_action_action_masking_exception(
     with pytest.raises(AssertionError):
         maddpg.set_training_mode(training)
         _, raw_action = maddpg.get_action(state)
+    maddpg.clean_up()
 
 
 @pytest.mark.parametrize("training", [False, True])
@@ -820,6 +827,7 @@ def test_maddpg_get_action_action_masking(
     maddpg.set_training_mode(training)
     action, _ = maddpg.get_action(state, info)
     assert all(i in [1, 3] for i in action.values())
+    maddpg.clean_up()
 
 
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space", "ma_image_space"])
@@ -891,6 +899,7 @@ def test_get_action_distributed(
             )
             for action in env_action:
                 assert action <= action_dim - 1
+    maddpg.clean_up()
 
 
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
@@ -936,6 +945,7 @@ def test_maddpg_get_action_agent_masking(
         assert np.array_equal(
             action["agent_0"], np.array([[0, 1, 0, 1, 0, 1]])
         ), action["agent_0"]
+    maddpg.clean_up()
 
 
 @pytest.mark.parametrize("training", [False, True])
@@ -991,6 +1001,7 @@ def test_maddpg_get_action_vectorized_agent_masking(
         assert np.isclose(
             action["agent_0"], info["agent_0"]["env_defined_actions"]
         ).all(), action["agent_0"]
+    maddpg.clean_up()
 
 
 @pytest.mark.parametrize(
@@ -1060,6 +1071,7 @@ def test_maddpg_learns_from_experiences(
         assert_not_equal_state_dict(
             critics_pre_learn_sd[agent_id], updated_critic.state_dict()
         )
+    maddpg.clean_up()
 
 
 def no_sync(self):
@@ -1113,6 +1125,7 @@ def test_maddpg_soft_update(device, compile_mode, ma_vector_space, ma_discrete_s
             torch.allclose(expected_param, target_param)
             for expected_param, target_param in zip(expected_params, target_params)
         )
+    maddpg.clean_up()
 
 
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space", "ma_image_space"])
@@ -1157,6 +1170,7 @@ def test_maddpg_algorithm_test_loop(
         assert isinstance(mean_score, np.ndarray)
         assert len(mean_score) == 3
     env.close()
+    maddpg.clean_up()
 
 
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
@@ -1246,6 +1260,8 @@ def test_maddpg_clone_returns_identical_agent(
         assert_state_dicts_equal(
             clone_critic_target.state_dict(), critic_target.state_dict()
         )
+    maddpg.clean_up()
+    clone_agent.clean_up()
 
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
@@ -1261,6 +1277,8 @@ def test_clone_new_index(compile_mode, ma_vector_space, ma_discrete_space):
     clone_agent = maddpg.clone(index=100)
 
     assert clone_agent.index == 100
+    maddpg.clean_up()
+    clone_agent.clean_up()
 
 
 @pytest.mark.parametrize("compile_mode", [None])
@@ -1343,3 +1361,5 @@ def test_clone_after_learning(compile_mode, ma_vector_space):
         clone_critic_opt = clone_agent.critic_optimizers.optimizer[agent_id]
         critic_opt = maddpg.critic_optimizers.optimizer[agent_id]
         assert str(clone_critic_opt) == str(critic_opt)
+    maddpg.clean_up()
+    clone_agent.clean_up()

@@ -299,3 +299,134 @@ class AgentWrapper(Protocol, Generic[T_EvolvableAlgorithm]):
     def learn(
         self, experiences: tuple[Iterable[ObservationType], ...], **kwargs
     ) -> None: ...
+
+
+@runtime_checkable
+class LoraConfigProtocol(Protocol):
+    """
+    "Protocol for LoRA configuration.
+
+    LoRA configuration is used to configure the LoRA module.
+    """
+
+    r: int
+    lora_alpha: int
+    target_modules: str
+    task_type: str
+    lora_dropout: float
+
+
+@runtime_checkable
+class PretrainedConfigProtocol(Protocol):
+    """Protocol for HuggingFace pre-trained model configuration.
+
+    Defines the interface for model configuration objects from HuggingFace transformers.
+    These configs store model architecture parameters and can be converted to/from dictionaries.
+    """
+
+    # Common model architecture attributes (these are examples - actual configs may have more)
+    vocab_size: int
+    hidden_size: int
+    num_attention_heads: int
+    num_hidden_layers: int
+
+    def to_dict(self) -> dict[str, Any]: ...
+    def to_json_string(self) -> str: ...
+    def save_pretrained(self, save_directory: str, **kwargs: Any) -> None: ...
+
+    @classmethod
+    def from_pretrained(
+        cls, pretrained_model_name_or_path: str, **kwargs: Any
+    ) -> "PretrainedConfigProtocol": ...
+
+    @classmethod
+    def from_dict(
+        cls, config_dict: dict[str, Any], **kwargs: Any
+    ) -> "PretrainedConfigProtocol": ...
+
+    @classmethod
+    def from_json_file(cls, json_file: str) -> "PretrainedConfigProtocol": ...
+
+
+@runtime_checkable
+class GenerationConfigProtocol(Protocol):
+    """Protocol for text generation configuration.
+
+    Used to configure parameters for text generation in language models.
+    """
+
+    do_sample: bool
+    temperature: float
+    max_length: Optional[int]
+    max_new_tokens: Optional[int]
+    min_new_tokens: Optional[int]
+    pad_token_id: int
+    repetition_penalty: float
+    top_p: float
+    top_k: int
+    min_p: float
+
+
+@runtime_checkable
+class PreTrainedModelProtocol(Protocol):
+    """Protocol for HuggingFace pre-trained models.
+
+    Defines the interface for pre-trained transformer models from HuggingFace.
+    These models support text generation, state management, and device operations.
+    """
+
+    device: DeviceType
+    config: Any
+
+    def eval(self) -> "PreTrainedModelProtocol": ...
+    def train(self, mode: bool = True) -> "PreTrainedModelProtocol": ...
+    def generate(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        generation_config: Optional["GenerationConfigProtocol"] = None,
+        **kwargs: Any
+    ) -> torch.Tensor: ...
+    def forward(self, *args: Any, **kwargs: Any) -> Any: ...
+    def parameters(self) -> Generator: ...
+    def state_dict(self) -> dict[str, Any]: ...
+    def load_state_dict(
+        self, state_dict: dict[str, Any], strict: bool = True
+    ) -> None: ...
+    def to(self, device: DeviceType) -> "PreTrainedModelProtocol": ...
+
+
+@runtime_checkable
+class PeftModelProtocol(Protocol):
+    """Protocol for PEFT (Parameter-Efficient Fine-Tuning) models.
+
+    PEFT models wrap pre-trained models with adapters for efficient fine-tuning.
+    They extend PreTrainedModel functionality with adapter-specific operations.
+    """
+
+    device: DeviceType
+    config: Any
+    peft_config: dict[str, Any]
+    base_model: PreTrainedModelProtocol
+
+    def eval(self) -> "PeftModelProtocol": ...
+    def train(self, mode: bool = True) -> "PeftModelProtocol": ...
+    def generate(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        generation_config: Optional["GenerationConfigProtocol"] = None,
+        **kwargs: Any
+    ) -> torch.Tensor: ...
+    def forward(self, *args: Any, **kwargs: Any) -> Any: ...
+    def parameters(self) -> Generator: ...
+    def state_dict(self) -> dict[str, Any]: ...
+    def load_state_dict(
+        self, state_dict: dict[str, Any], strict: bool = True
+    ) -> None: ...
+    def to(self, device: DeviceType) -> "PeftModelProtocol": ...
+
+    @classmethod
+    def from_pretrained(
+        cls, base_model: PreTrainedModelProtocol, adapter_path: str, **kwargs: Any
+    ) -> "PeftModelProtocol": ...

@@ -4,18 +4,28 @@ from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from typing import Any, Callable, Generator
 
-import deepspeed
 import gymnasium as gym
 import torch
 import torch.nn as nn
 from accelerate import Accelerator
-from datasets import Dataset
 from torch.utils.data import DataLoader
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from transformers.modeling_utils import PreTrainedModel
-from transformers.tokenization_utils_base import BatchEncoding
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.typing import PreferencePrompts, ReasoningPrompts
+
+if HAS_LLM_DEPENDENCIES:
+    import deepspeed
+    from datasets import Dataset
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers.modeling_utils import PreTrainedModel
+    from transformers.tokenization_utils_base import BatchEncoding
+
+    AutoTokenizer = AutoTokenizer
+else:
+    AutoTokenizer = Any
+    PreTrainedModel = Any
+    BatchEncoding = Any
+    Dataset = Any
 
 
 def apply_chat_template(
@@ -612,47 +622,6 @@ class PreferenceGym(HuggingFaceGym):
             }
 
         return collate_fn
-
-
-class DummyOptimizer:
-    """
-    Placeholder optimizer class to pass to the OptimizerWrapper when the optimizer is defined in the deepspeed config.
-    """
-
-    def __init__(self, params: list[torch.Tensor], lr: float, **kwargs) -> None:
-        """
-        Sentinel class to use for the optimizer when the optimizer is defined in the deepspeed config.
-
-        :param params: Parameters to optimize.
-        :type params: list[torch.Tensor]
-        :param lr: Learning rate.
-        :type lr: float
-        """
-        pass
-
-    def step(self, closure=None):
-        raise RuntimeError(
-            "DummyOptimizer is a placeholder optimizer and should not be used."
-            "Please ensure you are calling accelerator.prepare() on the optimizer."
-        )
-
-    def zero_grad(self):
-        raise RuntimeError(
-            "DummyOptimizer is a placeholder optimizer and should not be used."
-            "Please ensure you are calling accelerator.prepare() on the optimizer."
-        )
-
-    def state_dict(self):
-        raise RuntimeError(
-            "DummyOptimizer is a placeholder optimizer and should not be used."
-            "Please ensure you are calling accelerator.prepare() on the optimizer."
-        )
-
-    def load_state_dict(self, state_dict):
-        raise RuntimeError(
-            "DummyOptimizer is a placeholder optimizer and should not be used."
-            "Please ensure you are calling accelerator.prepare() on the optimizer."
-        )
 
 
 @contextmanager

@@ -125,6 +125,7 @@ def test_initialize_ddpg(observation_space, encoder_cls, accelerator, request):
     assert isinstance(ddpg.critic_target.encoder, encoder_cls)
     assert isinstance(ddpg.critic_optimizer.optimizer, expected_opt_cls)
     assert isinstance(ddpg.criterion, nn.MSELoss)
+    ddpg.clean_up()
 
 
 # Can initialize ddpg with an actor network
@@ -181,6 +182,7 @@ def test_initialize_ddpg_with_actor_network(
     assert isinstance(ddpg.actor_optimizer.optimizer, optim.Adam)
     assert isinstance(ddpg.critic_optimizer.optimizer, optim.Adam)
     assert isinstance(ddpg.criterion, nn.MSELoss)
+    ddpg.clean_up()
 
 
 def test_initialize_ddpg_with_actor_network_evo_net(vector_space):
@@ -214,6 +216,8 @@ def test_initialize_ddpg_with_actor_network_evo_net(vector_space):
     assert isinstance(ddpg.actor_optimizer.optimizer, optim.Adam)
     assert isinstance(ddpg.critic_optimizer.optimizer, optim.Adam)
     assert isinstance(ddpg.criterion, nn.MSELoss)
+    ddpg.clean_up()
+    ddpg.clean_up()
 
 
 def test_initialize_ddpg_with_incorrect_actor_net(vector_space):
@@ -284,6 +288,7 @@ def test_initialize_ddpg_with_actor_network_no_critic(
     assert isinstance(ddpg.actor_optimizer.optimizer, optim.Adam)
     assert isinstance(ddpg.critic_optimizer.optimizer, optim.Adam)
     assert isinstance(ddpg.criterion, nn.MSELoss)
+    ddpg.clean_up()
 
 
 @pytest.mark.parametrize(
@@ -312,6 +317,7 @@ def test_returns_expected_action_training(observation_space, request, action_dty
     for act in action:
         assert isinstance(act, np.float32)
         assert -1 <= act <= 1
+    ddpg.clean_up()
 
     # Test with accelerator
     ddpg = DDPG(observation_space, action_space, accelerator=accelerator)
@@ -323,6 +329,7 @@ def test_returns_expected_action_training(observation_space, request, action_dty
     for act in action:
         assert isinstance(act, np.float32)
         assert -1 <= act <= 1
+    ddpg.clean_up()
 
     # Test without OU noise
     ddpg = DDPG(
@@ -336,6 +343,7 @@ def test_returns_expected_action_training(observation_space, request, action_dty
     for act in action:
         assert isinstance(act, np.float32)
         assert -1 <= act <= 1
+    ddpg.clean_up()
 
 
 # learns from experiences and updates network parameters
@@ -391,6 +399,7 @@ def test_learns_from_experiences(observation_space, accelerator, request):
     assert critic == ddpg.critic
     assert critic_target == ddpg.critic_target
     assert_not_equal_state_dict(critic_pre_learn_sd, ddpg.critic.state_dict())
+    ddpg.clean_up()
 
 
 # Updates target network parameters with soft update
@@ -454,6 +463,7 @@ def test_soft_update():
         torch.allclose(expected_param, target_param)
         for expected_param, target_param in zip(expected_params, target_params)
     )
+    ddpg.clean_up()
 
 
 # Runs algorithm test loop
@@ -470,6 +480,7 @@ def test_algorithm_test_loop(observation_space, num_envs, request):
     agent = DDPG(observation_space=observation_space, action_space=action_space)
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
+    agent.clean_up()
 
 
 # Clones the agent and returns an identical agent.
@@ -514,6 +525,8 @@ def test_clone_returns_identical_agent(observation_space, request):
     assert clone_agent.steps == ddpg.steps
     assert clone_agent.scores == ddpg.scores
     assert clone_agent.tensor_attribute == ddpg.tensor_attribute
+    ddpg.clean_up()
+    clone_agent.clean_up()
 
     accelerator = Accelerator()
     ddpg = DDPG(observation_space, action_space, accelerator=accelerator)
@@ -547,6 +560,8 @@ def test_clone_returns_identical_agent(observation_space, request):
     assert clone_agent.fitness == ddpg.fitness
     assert clone_agent.steps == ddpg.steps
     assert clone_agent.scores == ddpg.scores
+    ddpg.clean_up()
+    clone_agent.clean_up()
 
     accelerator = Accelerator()
     ddpg = DDPG(observation_space, action_space, accelerator=accelerator, wrap=False)
@@ -580,6 +595,8 @@ def test_clone_returns_identical_agent(observation_space, request):
     assert clone_agent.fitness == ddpg.fitness
     assert clone_agent.steps == ddpg.steps
     assert clone_agent.scores == ddpg.scores
+    ddpg.clean_up()
+    clone_agent.clean_up()
 
 
 def test_clone_new_index():
@@ -590,6 +607,8 @@ def test_clone_new_index():
     clone_agent = ddpg.clone(index=100)
 
     assert clone_agent.index == 100
+    ddpg.clean_up()
+    clone_agent.clean_up()
 
 
 def test_clone_after_learning():
@@ -632,6 +651,8 @@ def test_clone_after_learning():
     assert clone_agent.fitness == ddpg.fitness
     assert clone_agent.steps == ddpg.steps
     assert clone_agent.scores == ddpg.scores
+    ddpg.clean_up()
+    clone_agent.clean_up()
 
 
 @pytest.mark.parametrize(
@@ -677,3 +698,4 @@ def test_multi_dim_clamp(min, max, action, expected_result, vector_space, device
     clamped_actions = ddpg.multi_dim_clamp(min, max, input).type(torch.float32)
     expected_result = torch.tensor(expected_result)
     assert clamped_actions.dtype == expected_result.dtype
+    ddpg.clean_up()

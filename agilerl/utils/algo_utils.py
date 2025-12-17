@@ -13,14 +13,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from gymnasium import spaces
-from peft import PeftModel, get_peft_model
 from tensordict import TensorDict, from_module
 from tensordict.nn import CudaGraphModule
 from torch._dynamo import OptimizedModule
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
-from transformers import PreTrainedModel
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.protocols import (
     EvolvableAttributeType,
@@ -42,9 +41,16 @@ from agilerl.typing import (
     SupportedObsSpaces,
     TorchObsType,
 )
-from agilerl.utils.llm_utils import gather_if_zero3
 
-PreTrainedModelType = Union[PeftModel, PreTrainedModel]
+if HAS_LLM_DEPENDENCIES:
+    from peft import PeftModel, get_peft_model
+    from transformers import PreTrainedModel
+
+    from agilerl.utils.llm_utils import gather_if_zero3
+
+    PreTrainedModelType = Union[PeftModel, PreTrainedModel]
+else:
+    PreTrainedModelType = Union["PeftModel", "PreTrainedModel"]
 
 
 def check_supported_space(observation_space: GymSpaceType) -> None:
@@ -1629,3 +1635,44 @@ def clone_llm(
         if state_dict is not None:
             model.load_state_dict(state_dict, strict=False)
     return model
+
+
+class DummyOptimizer:
+    """
+    Placeholder optimizer class to pass to the OptimizerWrapper when the optimizer is defined in the deepspeed config.
+    """
+
+    def __init__(self, params: list[torch.Tensor], lr: float, **kwargs) -> None:
+        """
+        Sentinel class to use for the optimizer when the optimizer is defined in the deepspeed config.
+
+        :param params: Parameters to optimize.
+        :type params: list[torch.Tensor]
+        :param lr: Learning rate.
+        :type lr: float
+        """
+        pass
+
+    def step(self, closure=None):
+        raise RuntimeError(
+            "DummyOptimizer is a placeholder optimizer and should not be used."
+            "Please ensure you are calling accelerator.prepare() on the optimizer."
+        )
+
+    def zero_grad(self):
+        raise RuntimeError(
+            "DummyOptimizer is a placeholder optimizer and should not be used."
+            "Please ensure you are calling accelerator.prepare() on the optimizer."
+        )
+
+    def state_dict(self):
+        raise RuntimeError(
+            "DummyOptimizer is a placeholder optimizer and should not be used."
+            "Please ensure you are calling accelerator.prepare() on the optimizer."
+        )
+
+    def load_state_dict(self, state_dict):
+        raise RuntimeError(
+            "DummyOptimizer is a placeholder optimizer and should not be used."
+            "Please ensure you are calling accelerator.prepare() on the optimizer."
+        )

@@ -3,7 +3,7 @@ name: Python application
 
 on:
     push:
-        branches: [main]
+        branches: [main, nightly]
         paths:
             - agilerl/**
     pull_request:
@@ -18,7 +18,7 @@ jobs:
     build:
         runs-on: gha-runner-scale-set
         container:
-            image: europe-west4-docker.pkg.dev/arena-gke-02/gke-arena-europe-west4-repo/ray-worker:py310-cu128-runner-b1
+            image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-devel
             options: --user root
         # todo: test on different python versions!
         # strategy:
@@ -37,8 +37,7 @@ jobs:
                   # Use uv for faster downloads
                   pip install uv
                   uv pip install --system ruff pytest pytest-cov black codespell yamlfmt isort pyupgrade
-                  uv pip install --system -r requirements.txt
-                  uv pip install --system -e .
+                  uv pip install --system -e .[llm]
             - name: Run black
               run: |
                   black .

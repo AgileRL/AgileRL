@@ -9,7 +9,7 @@ from torch.optim import Optimizer
 
 from agilerl.protocols import EvolvableAlgorithm
 from agilerl.typing import NetworkType
-from agilerl.utils.llm_utils import DummyOptimizer
+from agilerl.utils.algo_utils import DummyOptimizer
 
 
 @dataclass

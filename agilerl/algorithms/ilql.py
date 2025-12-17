@@ -1223,6 +1223,20 @@ class ILQL(nn.Module):
         self.fitness = checkpoint["fitness"]
         self.steps = checkpoint["steps"]
 
+    def clean_up(self) -> None:
+        """Clean up the networks"""
+        del self.model
+        del self.actor
+        del self.actor_target
+        del self.v
+        del self.q
+        del self.target_q
+        del self.pi
+        del self.optimizer
+        if self.double_q:
+            del self.q2
+            del self.target_q2
+
 
 class ILQL_Policy:
     def __init__(self, iql_model: ILQL, kind: str, **generation_kwargs) -> None:
