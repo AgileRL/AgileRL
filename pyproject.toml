@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "agilerl"
-version = "2.4.1.dev2"
+version = "2.4.1.dev3"
 
 description = "AgileRL is a deep reinforcement learning library focused on improving RL development through RLOps."
 authors = ["Nick Ustaran-Anderegg <dev@agilerl.com>"]
@@ -25,7 +25,7 @@ omegaconf = "^2.3.0"
 pandas = "^2.2.3"
 pettingzoo = "^1.23.1"
 jax = { version = "^0.4.31", extras = ["cpu"] }
-packaging = "25.0"
+packaging = ">=20.0"
 pre-commit = "^3.4.0"
 pygame = "^2.6.0"
 pymunk = "^6.2.0"
