@@ -67,6 +67,7 @@ def test_ilql_init():
     assert algo.cql_temp == 1.0
     assert algo.weight_decay == 0.0
     assert algo.device == "cpu"
+    algo.clean_up()
 
 
 def test_forward():
@@ -142,6 +143,7 @@ def test_forward():
         assert outputs["vs"].shape == (1, 5)
         assert outputs["target_vs"].shape == (1, 5)
         assert outputs["logits"].shape == (1, 5, 35)
+    algo.clean_up()
 
 
 def test_get_loss():
@@ -210,6 +212,7 @@ def test_get_loss():
 
     assert "loss" in loss_dict.keys()
     assert "advantage_hist" in loss_dict.keys()
+    algo.clean_up()
 
 
 def test_prepare_inputs():
@@ -272,6 +275,7 @@ def test_prepare_inputs():
     assert "tokens" in items.keys()
     assert "state_idxs" in items.keys()
     assert "action_idxs" in items.keys()
+    algo.clean_up()
 
 
 def test_get_scores():
@@ -330,6 +334,7 @@ def test_get_scores():
     initial_score = algo.initial_score(items)
 
     assert initial_score[0].shape == (1, 35)
+    algo.clean_up()
 
 
 def test_soft_update():
@@ -393,6 +398,7 @@ def test_soft_update():
         torch.allclose(expected_param, target_param)
         for expected_param, target_param in zip(expected_params, target_params)
     )
+    algo.clean_up()
 
 
 def test_hard_update():
@@ -424,6 +430,7 @@ def test_hard_update():
     assert_state_dicts_equal(algo.q.state_dict(), algo.target_q.state_dict())
     assert_state_dicts_equal(algo.q2.state_dict(), algo.target_q2.state_dict())
     assert_state_dicts_equal(algo.actor_target.state_dict(), algo.model.state_dict())
+    algo.clean_up()
 
 
 def test_clone():
@@ -486,6 +493,8 @@ def test_clone():
         algo.actor_target.state_dict(), clone.actor_target.state_dict()
     )
     assert_state_dicts_equal(algo.model.state_dict(), clone.model.state_dict())
+    algo.clean_up()
+    clone.clean_up()
 
 
 def test_save_load_checkpoint(tmpdir):
@@ -590,6 +599,7 @@ def test_save_load_checkpoint(tmpdir):
     assert algo.cql_temp == 1.0
     assert algo.weight_decay == 0.0
     assert algo.device == "cpu"
+    algo.clean_up()
 
 
 def test_init_policy():
@@ -623,6 +633,7 @@ def test_init_policy():
     assert policy.generation_kwargs == {}
     assert policy.kls_all == []
     assert policy.logprobs_all == []
+    algo.clean_up()
 
 
 def test_act():
@@ -668,3 +679,4 @@ def test_act():
     action = policy.act(lang_obs)
 
     assert isinstance(action, str)
+    algo.clean_up()

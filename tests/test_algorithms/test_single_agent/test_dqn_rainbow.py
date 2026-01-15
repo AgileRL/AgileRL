@@ -88,6 +88,7 @@ def test_initialize_dqn(
     assert isinstance(dqn.actor_target.encoder, encoder_cls)
     expected_opt_cls = AcceleratedOptimizer if accelerator else optim.Adam
     assert isinstance(dqn.optimizer.optimizer, expected_opt_cls)
+    dqn.clean_up()
 
 
 @pytest.mark.parametrize(
@@ -139,6 +140,7 @@ def test_initialize_dqn_with_actor_network_evo_net(
         assert isinstance(dqn.optimizer.optimizer, AcceleratedOptimizer)
     else:
         assert isinstance(dqn.optimizer.optimizer, optim.Adam)
+    dqn.clean_up()
 
 
 def test_initialize_dqn_with_incorrect_actor_net_type(
@@ -226,6 +228,7 @@ def test_returns_expected_action(
 
     assert action.is_integer()
     assert action == 1
+    dqn.clean_up()
 
 
 def test_returns_expected_action_mask_vectorized(vector_space, discrete_space):
@@ -239,6 +242,7 @@ def test_returns_expected_action_mask_vectorized(vector_space, discrete_space):
     action = dqn.get_action(state, action_mask)
 
     assert np.array_equal(action, [1, 0])
+    dqn.clean_up()
 
 
 @pytest.mark.parametrize(
@@ -291,6 +295,7 @@ def test_learns_from_experiences(
     assert_not_equal_state_dict(
         actor_target_pre_learn_sd, dqn.actor_target.state_dict()
     )
+    dqn.clean_up()
 
 
 @pytest.mark.parametrize("accelerator", [None, Accelerator()])
@@ -367,6 +372,7 @@ def test_learns_from_experiences_n_step(
     assert_not_equal_state_dict(
         actor_target_pre_learn_sd, dqn.actor_target.state_dict()
     )
+    dqn.clean_up()
 
 
 # learns from experiences and updates network parameters
@@ -428,6 +434,7 @@ def test_learns_from_experiences_per(
     assert_not_equal_state_dict(
         actor_target_pre_learn_sd, dqn.actor_target.state_dict()
     )
+    dqn.clean_up()
 
 
 # learns from experiences and updates network parameters
@@ -506,6 +513,7 @@ def test_learns_from_experiences_per_n_step(
     assert_not_equal_state_dict(
         actor_target_pre_learn_sd, dqn.actor_target.state_dict()
     )
+    dqn.clean_up()
 
 
 # Updates target network parameters with soft update
@@ -551,6 +559,7 @@ def test_soft_update(vector_space, discrete_space):
         torch.allclose(expected_param, target_param)
         for expected_param, target_param in zip(expected_params, target_params)
     )
+    dqn.clean_up()
 
 
 # Runs algorithm test loop
@@ -563,6 +572,7 @@ def test_algorithm_test_loop(num_envs, observation_space, discrete_space, reques
     agent = RainbowDQN(observation_space=observation_space, action_space=discrete_space)
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
+    agent.clean_up()
 
 
 # Clones the agent and returns an identical agent.
@@ -599,6 +609,8 @@ def test_clone_returns_identical_agent(observation_space, discrete_space, reques
     assert clone_agent.scores == dqn.scores
     assert clone_agent.tensor_attribute == dqn.tensor_attribute
     assert clone_agent.tensor_test == dqn.tensor_test
+    dqn.clean_up()
+    clone_agent.clean_up()
 
     accelerator = Accelerator()
     dqn = RainbowDQN(observation_space, discrete_space, accelerator=accelerator)
@@ -624,6 +636,8 @@ def test_clone_returns_identical_agent(observation_space, discrete_space, reques
     assert clone_agent.fitness == dqn.fitness
     assert clone_agent.steps == dqn.steps
     assert clone_agent.scores == dqn.scores
+    dqn.clean_up()
+    clone_agent.clean_up()
 
     accelerator = Accelerator()
     dqn = RainbowDQN(
@@ -652,6 +666,8 @@ def test_clone_returns_identical_agent(observation_space, discrete_space, reques
     assert clone_agent.fitness == dqn.fitness
     assert clone_agent.steps == dqn.steps
     assert clone_agent.scores == dqn.scores
+    dqn.clean_up()
+    clone_agent.clean_up()
 
 
 def test_clone_new_index(vector_space, discrete_space):
@@ -659,6 +675,8 @@ def test_clone_new_index(vector_space, discrete_space):
     clone_agent = dqn.clone(index=100)
 
     assert clone_agent.index == 100
+    dqn.clean_up()
+    clone_agent.clean_up()
 
 
 def test_clone_after_learning(vector_space, discrete_space):
@@ -692,3 +710,5 @@ def test_clone_after_learning(vector_space, discrete_space):
     assert clone_agent.fitness == rainbow_dqn.fitness
     assert clone_agent.steps == rainbow_dqn.steps
     assert clone_agent.scores == rainbow_dqn.scores
+    rainbow_dqn.clean_up()
+    clone_agent.clean_up()

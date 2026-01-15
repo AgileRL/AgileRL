@@ -1,0 +1,8 @@
+---
+version: 2
+updates:
+    - package-ecosystem: poetry
+      directory: /
+      schedule:
+          interval: weekly
+      target-branch: nightly

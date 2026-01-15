@@ -1,17 +1,18 @@
 import gc
-from typing import Any, Optional, Union
+from typing import Any, Optional
 
 import numpy as np
 import torch
 from accelerate import Accelerator
-from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
-from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
-from peft import LoraConfig, PeftModel
-from transformers import GenerationConfig
-from transformers.modeling_utils import PreTrainedModel
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.protocols import (
+    LoraConfigProtocol,
+    PeftModelProtocol,
+    PreTrainedModelProtocol,
+)
 from agilerl.typing import ExperiencesType, LLMObsType
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
@@ -23,10 +24,8 @@ from agilerl.utils.llm_utils import (
     ReasoningGym,
 )
 
-DeepSpeedOptimizerType = Union[
-    DeepSpeedZeroOptimizer,  # ZeRO Stage 1 & 2 optimizer
-    DeepSpeedZeroOptimizer_Stage3,  # ZeRO Stage 3 optimizer
-]
+if HAS_LLM_DEPENDENCIES:
+    from transformers import GenerationConfig
 
 
 class GRPO(LLMAlgorithm):
@@ -39,7 +38,7 @@ class GRPO(LLMAlgorithm):
     :param model_name: Model name
     :type model_name: str, optional
     :param actor_network: HuggingFace LLM
-    :type actor_network: PreTrainedModel
+    :type actor_network: PreTrainedModelProtocol
     :param model_config: Model configuration, to be used when creating the model from a name or path
     :type model_config: dict[str, Any], optional
     :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
@@ -77,7 +76,7 @@ class GRPO(LLMAlgorithm):
     :param max_model_len: Maximum context window length, defaults to None
     :type max_model_len: int, optional
     :param lora_config: Config for LoRA, defaults to None
-    :type lora_config: LoraConfig, optional
+    :type lora_config: LoraConfigProtocol, optional
     :param cosine_lr_schedule_config: Config for cosine lr scheduling, defaults to None
     :type cosine_lr_schedule_config: CosineLRScheduleConfig, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -105,7 +104,7 @@ class GRPO(LLMAlgorithm):
         pad_token_id: int,
         pad_token: str,
         model_name: str | None = None,
-        actor_network: PreTrainedModel | None = None,
+        actor_network: PreTrainedModelProtocol | None = None,
         model_config: dict[str, Any] | None = None,
         hp_config: Optional[HyperparameterConfig] = None,
         index: int = 0,
@@ -127,7 +126,7 @@ class GRPO(LLMAlgorithm):
         max_output_tokens: int | None = 1024,
         min_output_tokens: Optional[int] = None,
         max_model_len: Optional[int] = None,
-        lora_config: Optional[LoraConfig] = None,
+        lora_config: Optional[LoraConfigProtocol] = None,
         cosine_lr_schedule_config: Optional[CosineLRScheduleConfig] = None,
         accelerator: Optional[Accelerator] = None,
         device: str = "cpu",
@@ -188,8 +187,8 @@ class GRPO(LLMAlgorithm):
         ), "Policy update epochs must be greater than or equal to one."
         if actor_network is not None:
             assert isinstance(
-                actor_network, (PeftModel, PreTrainedModel)
-            ), "Actor network must be a PeftModel or PreTrainedModel"
+                actor_network, (PeftModelProtocol, PreTrainedModelProtocol)
+            ), "Actor network must be a PeftModelProtocol or PreTrainedModelProtocol"
 
         self.clip_coef = clip_coef
         self.update_epochs = update_epochs

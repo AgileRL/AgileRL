@@ -1,7 +1,9 @@
 import copy
 import glob
 import os
+import sys
 from collections import OrderedDict
+from typing import ForwardRef, Union
 from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
@@ -798,3 +800,20 @@ def test_remove_nested_files():
     assert not os.path.exists("test_dir/nested_dir")
 
     os.rmdir("test_dir/")
+
+
+def test_algo_utils_fallback_pretrained_model_type_when_no_llm_dependencies():
+    """Test that algo_utils sets PreTrainedModelType to string union when HAS_LLM_DEPENDENCIES is False."""
+    original_module = sys.modules.pop("agilerl.utils.algo_utils", None)
+
+    try:
+        # Patch HAS_LLM_DEPENDENCIES before reimporting
+        with patch("agilerl.HAS_LLM_DEPENDENCIES", False):
+            # Reimport the module - it will see HAS_LLM_DEPENDENCIES as False
+            import agilerl.utils.algo_utils as algo_utils_reloaded
+
+            expected = Union[ForwardRef("PeftModel"), ForwardRef("PreTrainedModel")]
+            assert algo_utils_reloaded.PreTrainedModelType == expected
+    finally:
+        # Restore original module to avoid affecting other tests
+        sys.modules["agilerl.utils.algo_utils"] = original_module

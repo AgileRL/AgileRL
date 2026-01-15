@@ -143,3 +143,5 @@ data/wordle.zip
 
 # WandB
 wandb/
+
+uv.lock

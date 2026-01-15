@@ -131,6 +131,7 @@ def test_initialize_td3(
     assert isinstance(td3.critic_target_2.encoder, encoder_cls)
     assert isinstance(td3.critic_2_optimizer.optimizer, expected_opt_cls)
     assert isinstance(td3.criterion, nn.MSELoss)
+    td3.clean_up()
 
 
 # Can initialize td3 with an actor network
@@ -193,6 +194,7 @@ def test_initialize_td3_with_actor_network(
     assert isinstance(td3.critic_1_optimizer.optimizer, optim.Adam)
     assert isinstance(td3.critic_2_optimizer.optimizer, optim.Adam)
     assert isinstance(td3.criterion, nn.MSELoss)
+    td3.clean_up()
 
 
 # Can initialize td3 with an actor network
@@ -253,6 +255,7 @@ def test_initialize_td3_with_actor_network_no_critics(
     assert isinstance(td3.critic_1_optimizer.optimizer, optim.Adam)
     assert isinstance(td3.critic_2_optimizer.optimizer, optim.Adam)
     assert isinstance(td3.criterion, nn.MSELoss)
+    td3.clean_up()
 
 
 # Can initialize td3 with an actor network
@@ -312,6 +315,7 @@ def test_initialize_td3_with_actor_network_cnn(
     assert isinstance(td3.critic_1_optimizer.optimizer, optim.Adam)
     assert isinstance(td3.critic_2_optimizer.optimizer, optim.Adam)
     assert isinstance(td3.criterion, nn.MSELoss)
+    td3.clean_up()
 
 
 @pytest.mark.parametrize(
@@ -331,6 +335,7 @@ def test_returns_expected_action_training(observation_space, request):
     for act in action:
         assert isinstance(act, np.float32)
         assert -1 <= act <= 1
+    td3.clean_up()
 
     td3 = TD3(
         observation_space,
@@ -345,6 +350,7 @@ def test_returns_expected_action_training(observation_space, request):
     for act in action:
         assert isinstance(act, np.float32)
         assert -1 <= act <= 1
+    td3.clean_up()
 
     td3 = TD3(
         observation_space,
@@ -360,6 +366,7 @@ def test_returns_expected_action_training(observation_space, request):
     for act in action:
         assert isinstance(act, np.float32)
         assert -1 <= act <= 1
+    td3.clean_up()
 
 
 # Returns the expected action from float64 input
@@ -374,6 +381,7 @@ def test_returns_expected_action_float64(discrete_space):
     for act in action:
         assert isinstance(act, np.float32)
         assert -1 <= act <= 1
+    td3.clean_up()
 
     td3 = TD3(discrete_space, action_space)
     state = np.array([1]).astype(np.float64)
@@ -384,6 +392,7 @@ def test_returns_expected_action_float64(discrete_space):
     for act in action:
         assert isinstance(act, np.float32)
         assert -1 <= act <= 1
+    td3.clean_up()
 
     td3 = TD3(discrete_space, action_space, O_U_noise=False)
     state = np.array([1]).astype(np.float64)
@@ -394,6 +403,7 @@ def test_returns_expected_action_float64(discrete_space):
     for act in action:
         assert isinstance(act, np.float32)
         assert -1 <= act <= 1
+    td3.clean_up()
 
 
 # learns from experiences and updates network parameters
@@ -465,6 +475,7 @@ def test_learns_from_experiences(
     assert critic_2 == td3.critic_2
     assert critic_target_2 == td3.critic_target_2
     assert_not_equal_state_dict(critic_2_pre_learn_sd, td3.critic_2.state_dict())
+    td3.clean_up()
 
 
 # Updates target network parameters with soft update
@@ -540,6 +551,7 @@ def test_soft_update(vector_space):
         torch.allclose(expected_param, target_param)
         for expected_param, target_param in zip(expected_params, target_params)
     )
+    td3.clean_up()
 
 
 # Runs algorithm test loop
@@ -552,6 +564,7 @@ def test_algorithm_test_loop(observation_space, vector_space, num_envs, request)
     agent = TD3(observation_space, vector_space)
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
+    agent.clean_up()
 
 
 # Clones the agent and returns an identical agent.
@@ -607,6 +620,8 @@ def test_clone_returns_identical_agent(observation_space, vector_space, request)
     assert clone_agent.scores == td3.scores
     assert clone_agent.tensor_attribute == td3.tensor_attribute
     assert clone_agent.tensor_test == td3.tensor_test
+    td3.clean_up()
+    clone_agent.clean_up()
 
     accelerator = Accelerator()
     td3 = TD3(observation_space, vector_space, accelerator=accelerator)
@@ -651,6 +666,8 @@ def test_clone_returns_identical_agent(observation_space, vector_space, request)
     assert clone_agent.fitness == td3.fitness
     assert clone_agent.steps == td3.steps
     assert clone_agent.scores == td3.scores
+    td3.clean_up()
+    clone_agent.clean_up()
 
     accelerator = Accelerator()
     td3 = TD3(observation_space, vector_space, accelerator=accelerator, wrap=False)
@@ -695,6 +712,8 @@ def test_clone_returns_identical_agent(observation_space, vector_space, request)
     assert clone_agent.fitness == td3.fitness
     assert clone_agent.steps == td3.steps
     assert clone_agent.scores == td3.scores
+    td3.clean_up()
+    clone_agent.clean_up()
 
 
 def test_clone_new_index(vector_space):
@@ -702,6 +721,8 @@ def test_clone_new_index(vector_space):
     clone_agent = td3.clone(index=100)
 
     assert clone_agent.index == 100
+    td3.clean_up()
+    clone_agent.clean_up()
 
 
 def test_clone_after_learning(vector_space):
@@ -756,6 +777,8 @@ def test_clone_after_learning(vector_space):
     assert clone_agent.fitness == td3.fitness
     assert clone_agent.steps == td3.steps
     assert clone_agent.scores == td3.scores
+    td3.clean_up()
+    clone_agent.clean_up()
 
 
 @pytest.mark.parametrize("observation_space", ["vector_space"])
@@ -795,6 +818,7 @@ def test_initialize_td3_with_actor_network_evo_net(
     assert isinstance(td3.critic_1_optimizer.optimizer, optim.Adam)
     assert isinstance(td3.critic_2_optimizer.optimizer, optim.Adam)
     assert isinstance(td3.criterion, nn.MSELoss)
+    td3.clean_up()
 
 
 def test_initialize_td3_with_incorrect_actor_net(vector_space):
@@ -852,3 +876,4 @@ def test_multi_dim_clamp(vector_space, min, max, action, expected_result, device
     clamped_actions = td3.multi_dim_clamp(min, max, input).type(torch.float32)
     expected_result = torch.tensor(expected_result)
     assert clamped_actions.dtype == expected_result.dtype
+    td3.clean_up()

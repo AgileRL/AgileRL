@@ -116,6 +116,7 @@ def test_initialize_cqn(observation_space, encoder_cls, accelerator, request):
     expected_opt_cls = AcceleratedOptimizer if accelerator else optim.Adam
     assert isinstance(cqn.optimizer.optimizer, expected_opt_cls)
     assert isinstance(cqn.criterion, nn.MSELoss)
+    cqn.clean_up()
 
 
 # Can initialize cqn with an actor network
@@ -157,6 +158,7 @@ def test_initialize_cqn_with_make_evo(
     assert cqn.steps == [0]
     assert isinstance(cqn.optimizer.optimizer, optim.Adam)
     assert isinstance(cqn.criterion, nn.MSELoss)
+    cqn.clean_up()
 
 
 @pytest.mark.parametrize(
@@ -206,6 +208,7 @@ def test_initialize_cqn_with_actor_network_evo_net(
     assert cqn.steps == [0]
     assert isinstance(cqn.optimizer.optimizer, optim.Adam)
     assert isinstance(cqn.criterion, nn.MSELoss)
+    cqn.clean_up()
 
 
 def test_init_with_incorrect_actor_net(vector_space):
@@ -241,6 +244,7 @@ def test_returns_expected_action_epsilon_greedy(vector_space):
 
     assert action.is_integer()
     assert action >= 0 and action < action_space.n
+    cqn.clean_up()
 
 
 # Returns the expected action when given a state observation and action mask.
@@ -264,6 +268,7 @@ def test_returns_expected_action_mask(vector_space):
 
     assert action.is_integer()
     assert action == 1
+    cqn.clean_up()
 
 
 # learns from experiences and updates network parameters
@@ -298,6 +303,7 @@ def test_learns_from_experiences(vector_space):
     assert_not_equal_state_dict(
         actor_target_pre_learn_sd, cqn.actor_target.state_dict()
     )
+    cqn.clean_up()
 
 
 # handles double Q-learning
@@ -340,6 +346,7 @@ def test_handles_double_q_learning(discrete_space):
     assert_not_equal_state_dict(
         actor_target_pre_learn_sd, cqn.actor_target.state_dict()
     )
+    cqn.clean_up()
 
 
 # Updates target network parameters with soft update
@@ -388,6 +395,7 @@ def test_soft_update(vector_space):
         torch.allclose(expected_param, target_param)
         for expected_param, target_param in zip(expected_params, target_params)
     )
+    cqn.clean_up()
 
 
 # Runs algorithm test loop
@@ -402,6 +410,7 @@ def test_algorithm_test_loop(observation_space, num_envs, request):
     agent = CQN(observation_space=observation_space, action_space=action_space)
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
+    agent.clean_up()
 
 
 # Clones the agent and returns an identical agent.
@@ -436,6 +445,8 @@ def test_clone_returns_identical_agent(observation_space, request):
     assert clone_agent.scores == cqn.scores
     assert clone_agent.tensor_attribute == cqn.tensor_attribute
     assert clone_agent.tensor_test == cqn.tensor_test
+    cqn.clean_up()
+    clone_agent.clean_up()
 
     accelerator = Accelerator()
     cqn = CQN(observation_space, action_space, accelerator=accelerator)
@@ -462,6 +473,8 @@ def test_clone_returns_identical_agent(observation_space, request):
     assert clone_agent.fitness == cqn.fitness
     assert clone_agent.steps == cqn.steps
     assert clone_agent.scores == cqn.scores
+    cqn.clean_up()
+    clone_agent.clean_up()
 
     accelerator = Accelerator()
     cqn = CQN(observation_space, action_space, accelerator=accelerator, wrap=False)
@@ -488,6 +501,8 @@ def test_clone_returns_identical_agent(observation_space, request):
     assert clone_agent.fitness == cqn.fitness
     assert clone_agent.steps == cqn.steps
     assert clone_agent.scores == cqn.scores
+    cqn.clean_up()
+    clone_agent.clean_up()
 
 
 def test_clone_new_index(vector_space):
@@ -497,3 +512,5 @@ def test_clone_new_index(vector_space):
     clone_agent = cqn.clone(index=100)
 
     assert clone_agent.index == 100
+    cqn.clean_up()
+    clone_agent.clean_up()

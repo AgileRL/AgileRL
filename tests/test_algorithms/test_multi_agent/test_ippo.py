@@ -378,6 +378,7 @@ def test_loop(
     else:
         assert isinstance(mean_score, np.ndarray)
         assert len(mean_score) == 2
+    ippo.clean_up()
 
 
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
@@ -487,6 +488,8 @@ def test_clone_new_index(compile_mode, ma_vector_space, ma_discrete_space):
     clone_agent = ippo.clone(index=100)
 
     assert clone_agent.index == 100
+    ippo.clean_up()
+    clone_agent.clean_up()
 
 
 @pytest.mark.parametrize("compile_mode", [None])
@@ -564,6 +567,8 @@ def test_clone_after_learning(compile_mode, ma_vector_space, ma_discrete_space):
         critic_opt = ippo.critic_optimizers[shared_id]
         clone_critic_opt = clone_agent.critic_optimizers[shared_id]
         assert str(clone_critic_opt) == str(critic_opt)
+    ippo.clean_up()
+    clone_agent.clean_up()
 
 
 @pytest.mark.parametrize("compile_mode", [None])
@@ -858,6 +863,7 @@ def test_ippo_learns_from_hardcoded_vectorized_experiences_mlp(
 
         old_critic_state_dict = critics_pre_learn_sd[shared_id]
         assert_not_equal_state_dict(old_critic_state_dict, updated_critic.state_dict())
+    ippo.clean_up()
 
 
 def no_sync(self):
@@ -919,6 +925,7 @@ def test_ippo_get_action_agent_masking(
         assert np.array_equal(
             actions["agent_0"], np.array([[0, 1, 0, 1, 0, 1]])
         ), actions["agent_0"]
+    ippo.clean_up()
 
 
 @pytest.mark.parametrize(
@@ -992,6 +999,7 @@ def test_ippo_get_action(
         assert agent_id in log_probs
         assert agent_id in dist_entropy
         assert agent_id in state_values
+    ippo.clean_up()
 
 
 @pytest.mark.parametrize(
@@ -1072,6 +1080,7 @@ def test_ippo_get_action_action_masking_exception(
     )
     with pytest.raises(AssertionError):
         actions, log_probs, dist_entropy, state_values = ippo.get_action(obs=state)
+    ippo.clean_up()
 
 
 def test_ippo_get_action_action_masking(ma_vector_space, ma_discrete_space, device):
@@ -1098,6 +1107,7 @@ def test_ippo_get_action_action_masking(ma_vector_space, ma_discrete_space, devi
     for agent_id, action_array in actions.items():
         for action in action_array:
             assert action in [1, 3]
+    ippo.clean_up()
 
 
 @pytest.mark.parametrize(
@@ -1123,6 +1133,7 @@ def test_ippo_init_torch_compiler_no_error(ma_vector_space, ma_discrete_space, m
         assert ippo.torch_compiler == mode
     else:
         assert isinstance(ippo, IPPO)
+    ippo.clean_up()
 
 
 @pytest.mark.parametrize("mode", (1, True, "max-autotune-no-cudagraphs"))
@@ -1215,6 +1226,7 @@ def test_initialize_ippo_with_net_config(
         for critic_optimizer in ippo.critic_optimizers.values()
     )
     assert isinstance(ippo.criterion, nn.MSELoss)
+    ippo.clean_up()
 
 
 # TODO: This will be deprecated in the future
@@ -1344,6 +1356,7 @@ def test_initialize_ippo_with_mlp_networks_gumbel_softmax(
         torch_compiler="reduce-overhead",
     )
     assert ippo.torch_compiler == "reduce-overhead"
+    ippo.clean_up()
 
 
 # TODO: This will be deprecated in the future
@@ -1546,6 +1559,7 @@ def test_initialize_ippo_with_evo_networks(
     assert ippo.fitness == []
     assert ippo.steps == [0]
     assert isinstance(ippo.criterion, nn.MSELoss)
+    ippo.clean_up()
 
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
@@ -1684,6 +1698,7 @@ def test_grouped_outputs_functions(ma_vector_space, ma_discrete_space):
             rtol=1e-5,
             atol=1e-5,
         )
+    agent.clean_up()
 
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])

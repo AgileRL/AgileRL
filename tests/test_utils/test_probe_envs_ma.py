@@ -625,7 +625,6 @@ def test_policy_q_learning_with_probe_env_mlp():
         env, MADDPG, algo_args, memory, learn_steps, device
     )
     gc.collect()
-    torch.cuda.empty_cache()
 
 
 def test_policy_q_learning_with_probe_env_cnn():
@@ -667,7 +666,6 @@ def test_policy_q_learning_with_probe_env_cnn():
         env, MADDPG, algo_args, memory, learn_steps, device
     )
     gc.collect()
-    torch.cuda.empty_cache()
 
 
 @pytest.mark.parametrize(
@@ -698,7 +696,6 @@ def test_on_policy_learning_with_probe_env_mlp(Env, discrete):
         env, IPPO, algo_args, learn_steps, device, discrete=discrete
     )
     gc.collect()
-    torch.cuda.empty_cache()
 
 
 @pytest.mark.parametrize(

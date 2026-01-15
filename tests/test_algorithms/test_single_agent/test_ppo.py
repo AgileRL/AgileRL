@@ -194,6 +194,7 @@ def test_initialize_ppo(
     assert isinstance(ppo.critic.encoder, encoder_cls)
     expected_optimizer = AcceleratedOptimizer if accelerator else optim.Adam
     assert isinstance(ppo.optimizer.optimizer, expected_optimizer)
+    ppo.clean_up()
 
 
 # Can initialize ppo with an actor network
@@ -256,6 +257,7 @@ def test_initialize_ppo_with_make_evo(
     assert ppo.steps == [0]
     assert isinstance(ppo.optimizer.optimizer, optim.Adam)
     assert ppo.num_envs == 1
+    ppo.clean_up()
 
 
 def test_initialize_ppo_with_incorrect_actor_net(vector_space, discrete_space):
@@ -357,6 +359,7 @@ def test_returns_expected_action(
     assert isinstance(action_logprob, torch.Tensor)
     assert isinstance(dist_entropy, torch.Tensor)
     assert isinstance(state_values, torch.Tensor)
+    build_ppo.clean_up()
 
 
 @pytest.mark.parametrize(
@@ -425,6 +428,7 @@ def test_returns_expected_action_recurrent(
     assert isinstance(action_logprob, torch.Tensor)
     assert isinstance(dist_entropy, torch.Tensor)
     assert isinstance(state_values, torch.Tensor)
+    build_ppo.clean_up()
 
 
 def test_ppo_optimizer_parameters(vector_space, discrete_space):
@@ -454,6 +458,7 @@ def test_ppo_optimizer_parameters(vector_space, discrete_space):
             not_updated.append(name)
 
     assert not not_updated, f"The following parameters weren't updated:\n{not_updated}"
+    ppo.clean_up()
 
 
 @pytest.mark.parametrize("observation_space", ["vector_space"])
@@ -469,6 +474,7 @@ def test_returns_expected_action_mask_vectorized(
     action_mask = np.stack([np.array([0, 1]), np.array([1, 0])])
     action, _, _, _ = build_ppo.get_action(state, action_mask=action_mask)
     assert np.array_equal(action, [1, 0]), action
+    build_ppo.clean_up()
 
 
 @pytest.mark.parametrize(
@@ -522,6 +528,7 @@ def test_learns_from_experiences(
     assert loss >= 0.0
     assert actor == ppo.actor
     assert_not_equal_state_dict(actor_pre_learn_sd, ppo.actor.state_dict())
+    ppo.clean_up()
 
 
 # Runs algorithm test loop
@@ -539,6 +546,7 @@ def test_algorithm_test_loop(observation_space, discrete_space, num_envs, reques
     agent = PPO(observation_space=observation_space, action_space=discrete_space)
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
+    agent.clean_up()
 
 
 # Clones the agent and returns an identical agent.
@@ -654,6 +662,8 @@ def test_clone_new_index(vector_space, discrete_space):
     ppo = PPO(vector_space, discrete_space)
     clone_agent = ppo.clone(index=100)
     assert clone_agent.index == 100
+    ppo.clean_up()
+    clone_agent.clean_up()
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"], ids=lambda d: f"device={d}")
@@ -897,6 +907,7 @@ def test_ppo_with_rollout_buffer(observation_space, action_space, request):
         assert ppo.rollout_buffer.hidden_state_architecture == expected_separate
         assert ppo.rollout_buffer.recurrent
         assert not ppo.share_encoders
+        ppo.clean_up()
 
 
 # Test PPO learning with rollout buffer
@@ -994,6 +1005,7 @@ def test_ppo_learn_with_rollout_buffer(
 
     assert isinstance(loss, float)
     assert loss >= 0.0
+    ppo.clean_up()
 
 
 # Test PPO with hidden states
@@ -1049,6 +1061,7 @@ def test_ppo_with_hidden_states(
         64,
     )  # (directions, num_envs, hidden_size)
     assert next_hidden.get("shared_encoder_c", None).shape == (1, 1, 64)
+    ppo.clean_up()
 
 
 # Test PPO with hidden states
@@ -1085,6 +1098,7 @@ def test_ppo_with_hidden_states_multiple_obs(vector_space, discrete_space):
     assert next_hidden is not None
     assert next_hidden.get("shared_encoder_h", None).shape == (1, num_envs, 64)
     assert next_hidden.get("shared_encoder_c", None).shape == (1, num_envs, 64)
+    ppo.clean_up()
 
 
 # Test PPO with hidden states
@@ -1126,6 +1140,7 @@ def test_ppo_with_hidden_states_multiple_envs():
     assert next_hidden is not None
     assert next_hidden.get("shared_encoder_h", None).shape == (1, num_envs, 64)
     assert next_hidden.get("shared_encoder_c", None).shape == (1, num_envs, 64)
+    ppo.clean_up()
     env.close()
 
 
@@ -1190,6 +1205,7 @@ def test_ppo_with_hidden_states_multiple_envs_collect_rollouts():
 
     assert isinstance(loss, float)
     assert loss >= 0.0
+    ppo.clean_up()
     env.close()
 
 
@@ -1260,6 +1276,7 @@ def test_ppo_with_hidden_states_multiple_envs_collect_rollouts_and_test():
 
     # Test test loop
     ppo.test(test_env)
+    ppo.clean_up()
     env.close()
     test_env.close()
 
@@ -1327,3 +1344,4 @@ def test_ppo_collect_rollouts(
     assert ppo.scores == ppo.scores
     assert ppo.fitness == ppo.fitness
     assert ppo.steps == ppo.steps
+    ppo.clean_up()

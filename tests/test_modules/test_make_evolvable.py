@@ -213,6 +213,7 @@ def test_instantiation_with_rainbow():
   )
 )"""
     )
+    del network, evolvable_network
 
 
 ######### Test forward #########
@@ -246,6 +247,7 @@ def test_forward_method(
             )
     output_shape = actual_output.shape
     assert output_shape == expected_result
+    del network, evolvable_network
 
 
 @pytest.mark.parametrize(
@@ -283,6 +285,7 @@ def test_forward_method_rainbow(
             )
     output_shape = actual_output.shape
     assert output_shape == expected_result
+    del evolvable_network
 
 
 # The forward() method can handle different types of input tensors (e.g., numpy array, torch tensor).
@@ -295,6 +298,7 @@ def test_forward_method_with_different_input_types(simple_mlp):
         output2 = evolvable_network.forward(numpy_array)
     assert isinstance(output1, torch.Tensor)
     assert isinstance(output2, torch.Tensor)
+    del evolvable_network
 
 
 # The forward() method can handle different types of normalization layers (e.g., BatchNorm2d, InstanceNorm3d).
@@ -313,6 +317,7 @@ def test_forward_with_different_normalization_layers():
         output = evolvable_network.forward(input_tensor)
     assert isinstance(output, torch.Tensor)
     assert str(unpack_network(evolvable_network)) == str(unpack_network(network))
+    del network, evolvable_network
 
 
 def test_reset_noise():
@@ -323,6 +328,7 @@ def test_reset_noise():
     evolvable_mlp.reset_noise()
     assert isinstance(evolvable_mlp.value_net[0], NoisyLinear)
     assert isinstance(evolvable_mlp.advantage_net[0], NoisyLinear)
+    del network, evolvable_mlp
 
 
 ######### Test detect architecture function #########
@@ -338,6 +344,7 @@ def test_detect_architecture_mlp_simple(device):
     )
     assert evolvable_net.mlp_layer_info == {"activation_layers": {0: "ReLU", 1: "ReLU"}}
     assert str(unpack_network(net)) == str(unpack_network(evolvable_net))
+    del net, evolvable_net
 
 
 def test_detect_architecture_medium(device):
@@ -347,6 +354,7 @@ def test_detect_architecture_medium(device):
     evolvable_net = MakeEvolvable(net, torch.randn(1, 4), device=device)
     assert evolvable_net.mlp_layer_info == {"activation_layers": {1: "ReLU", 2: "Tanh"}}
     assert str(unpack_network(net)) == str(unpack_network(evolvable_net))
+    del net, evolvable_net
 
 
 def test_detect_architecture_complex(device):
@@ -364,6 +372,7 @@ def test_detect_architecture_complex(device):
         "norm_layers": {0: "LayerNorm"},
     }, evolvable_net.mlp_layer_info
     assert str(unpack_network(net)) == str(unpack_network(evolvable_net))
+    del net, evolvable_net
 
 
 # Test if network after detect arch has the same arch as original network
@@ -380,6 +389,7 @@ def test_detect_architecture_networks_the_same(network, input_tensor, device, re
     network = request.getfixturevalue(network)
     evolvable_network = MakeEvolvable(network, input_tensor, device=device)
     assert str(unpack_network(network)) == str(unpack_network(evolvable_network))
+    del network, evolvable_network
 
 
 def test_detect_architecure_exception(device):
@@ -392,12 +402,14 @@ def test_detect_architecure_exception(device):
     )
     with pytest.raises(Exception):
         MakeEvolvable(net, torch.randn(1, 4), device=device)
+    del net
 
 
 def test_detect_architecture_empty_hidden_size(device):
     net = nn.Sequential(nn.Linear(2, 10))
     with pytest.raises(TypeError):
         MakeEvolvable(net, torch.randn(1, 2), device=device)
+    del net
 
 
 def test_detect_architecure_different_acitvations(device):
@@ -406,6 +418,7 @@ def test_detect_architecure_different_acitvations(device):
     )
     with pytest.raises(TypeError):
         MakeEvolvable(net, torch.randn(1, 2), device=device)
+    del net
 
 
 ######### Test add_mlp_layer #########
@@ -431,6 +444,7 @@ def test_add_mlp_layer_simple(simple_mlp, device):
     for key, param in new_feature_net.named_parameters():
         if key in feature_net_dict.keys():
             assert torch.equal(param, feature_net_dict[key])
+    del evolvable_network
 
 
 def test_add_mlp_layer_medium(device):
@@ -453,6 +467,7 @@ def test_add_mlp_layer_medium(device):
     for key, param in new_feature_net.named_parameters():
         if key in feature_net_dict.keys():
             assert torch.equal(param, feature_net_dict[key])
+    del network, evolvable_network
 
 
 def test_add_mlp_layer_complex(device):
@@ -482,6 +497,7 @@ def test_add_mlp_layer_complex(device):
     for key, param in new_feature_net.named_parameters():
         if key in feature_net_dict.keys():
             assert torch.equal(param, feature_net_dict[key])
+    del net, evolvable_network
 
 
 def test_add_mlp_layer_else_statement(device):
@@ -494,6 +510,7 @@ def test_add_mlp_layer_else_statement(device):
     initial_num_layers = len(evolvable_network.hidden_size)
     evolvable_network.add_mlp_layer()
     assert initial_num_layers == len(evolvable_network.hidden_size)
+    del network, evolvable_network
 
 
 ######### Test remove_mlp_layer #########
@@ -515,6 +532,7 @@ def test_remove_mlp_layer_simple(simple_mlp_2, device):
     for key, param in new_feature_net.named_parameters():
         if key in feature_net_dict.keys():
             torch.testing.assert_close(param, feature_net_dict[key])
+    del evolvable_network
 
 
 def test_remove_mlp_layer_medium(device):
@@ -537,6 +555,7 @@ def test_remove_mlp_layer_medium(device):
     for key, param in new_feature_net.named_parameters():
         if key in feature_net_dict.keys():
             assert torch.equal(param, feature_net_dict[key])
+    del network, evolvable_network
 
 
 def test_remove_mlp_layer_complex(device):
@@ -567,6 +586,7 @@ def test_remove_mlp_layer_complex(device):
     for key, param in new_feature_net.named_parameters():
         if key in feature_net_dict.keys():
             assert torch.equal(param, feature_net_dict[key])
+    del net, evolvable_network
 
 
 def test_remove_mlp_layer_else_statement(device):
@@ -579,6 +599,7 @@ def test_remove_mlp_layer_else_statement(device):
     initial_num_layers = len(evolvable_network.hidden_size)
     evolvable_network.remove_mlp_layer()
     assert initial_num_layers == len(evolvable_network.hidden_size)
+    del network, evolvable_network
 
 
 def test_remove_mlp_layer_no_output_activation(device):
@@ -601,6 +622,7 @@ def test_remove_mlp_layer_no_output_activation(device):
     for key, param in new_feature_net.named_parameters():
         if key in feature_net_dict.keys():
             assert torch.equal(param, feature_net_dict[key])
+    del net, evolvable_network
 
 
 ######### Test add_mlp_node #########
@@ -617,6 +639,7 @@ def test_add_mlp_node_fixed(simple_mlp, device):
     assert evolvable_network.hidden_size[hidden_layer] == 18
     assert result["hidden_layer"] == hidden_layer
     assert result["numb_new_nodes"] == numb_new_nodes
+    del evolvable_network
 
 
 ######### Test remove_mlp_node #########
@@ -638,6 +661,8 @@ def test_remove_mlp_node(simple_mlp_2, device):
 
     # Check that the number of nodes in the first hidden layer has decreased by 5
     assert evolvable_network.hidden_size[0] == 123
+
+    del evolvable_network
 
 
 def test_remove_mlp_node_no_arg(device):
@@ -663,6 +688,7 @@ def test_remove_mlp_node_no_arg(device):
         evolvable_network.hidden_size[hidden_layer]
         == original_hidden_size[hidden_layer] - numb_new_nodes
     )
+    del mlp, evolvable_network
 
 
 ######### Test add_cnn_layer #########
@@ -686,6 +712,7 @@ def test_make_evo_add_cnn_layer(simple_cnn, device):
             1: {"name": "MaxPool2d", "kernel": 2, "stride": 2, "padding": 0},
         },
     }, evolvable_network.cnn_layer_info
+    del evolvable_network
 
 
 def test_make_evo_add_cnn_layer_multi(two_arg_cnn, device):
@@ -698,6 +725,7 @@ def test_make_evo_add_cnn_layer_multi(two_arg_cnn, device):
     original_channels = copy.deepcopy(evolvable_cnn.channel_size)
     evolvable_cnn.add_cnn_layer()
     assert len(original_channels) + 1 == len(evolvable_cnn.channel_size)
+    del evolvable_cnn
 
 
 def test_make_evo_add_cnn_layer_no_activation(device):
@@ -713,6 +741,7 @@ def test_make_evo_add_cnn_layer_no_activation(device):
     original_channels = copy.deepcopy(evolvable_cnn.channel_size)
     evolvable_cnn.add_cnn_layer()
     assert len(original_channels) + 1 == len(evolvable_cnn.channel_size)
+    del cnn, evolvable_cnn
 
 
 def test_make_evo_add_cnn_layer_else_statement(simple_cnn, device):
@@ -722,6 +751,7 @@ def test_make_evo_add_cnn_layer_else_statement(simple_cnn, device):
     original_channels = copy.deepcopy(evolvable_cnn.channel_size)
     evolvable_cnn.add_cnn_layer()
     assert len(original_channels) == len(evolvable_cnn.channel_size)
+    del evolvable_cnn
 
 
 ######### Test remove_cnn_layer #########
@@ -744,6 +774,7 @@ def test_remove_cnn_layer(simple_cnn, device):
             0: {"name": "MaxPool2d", "kernel": 2, "stride": 2, "padding": 0}
         },
     }, evolvable_network.cnn_layer_info
+    del evolvable_network
 
 
 def test_remove_cnn_layer_no_activation(device):
@@ -760,6 +791,7 @@ def test_remove_cnn_layer_no_activation(device):
     original_channels = copy.deepcopy(evolvable_cnn.channel_size)
     evolvable_cnn.remove_cnn_layer()
     assert len(original_channels) - 1 == len(evolvable_cnn.channel_size)
+    del cnn, evolvable_cnn
 
 
 def test_remove_cnn_layer_else_statement(simple_cnn, device):
@@ -769,6 +801,7 @@ def test_remove_cnn_layer_else_statement(simple_cnn, device):
     original_channels = copy.deepcopy(evolvable_cnn.channel_size)
     evolvable_cnn.remove_cnn_layer()
     assert len(original_channels) == len(evolvable_cnn.channel_size)
+    del evolvable_cnn
 
 
 ######### Test add_cnn_channel #########
@@ -782,6 +815,7 @@ def test_make_evo_add_cnn_channel(simple_cnn, device):
         hidden_layer=layer, numb_new_channels=numb_new_channels
     )
     assert evolvable_network.channel_size[layer] == original_channel_size + 16
+    del evolvable_network
 
 
 ######### Test remove_cnn_channel #########
@@ -811,6 +845,7 @@ def test_remove_cnn_channel(device):
         evolvable_network.channel_size[hidden_layer]
         == original_channel_size[hidden_layer] - numb_new_channels
     )
+    del cnn, evolvable_network
 
 
 def test_remove_cnn_channel_specified_hidden_layer(device):
@@ -838,6 +873,7 @@ def test_remove_cnn_channel_specified_hidden_layer(device):
         evolvable_network.channel_size[layer]
         == original_channel_size[layer] - numb_new_channels
     )
+    del cnn, evolvable_network
 
 
 ######### Test change_cnn_kernel #########
@@ -859,6 +895,7 @@ def test_change_cnn_kernel(simple_cnn, device):
         (3, 3),
         (3, 3),
     ], evolvable_network.kernel_size
+    del evolvable_network
 
 
 def test_change_cnn_kernel_else_statement(device):
@@ -879,6 +916,7 @@ def test_change_cnn_kernel_else_statement(device):
     # Check if kernel size has changed
     assert len(evolvable_network.kernel_size) == 2
     assert len(evolvable_network.kernel_size[-1]) == 2
+    del network, evolvable_network
 
 
 def test_change_kernel_multi_single_arg(device):
@@ -902,6 +940,7 @@ def test_change_kernel_multi_single_arg(device):
         (1, 3, 3),
         (1, 3, 3),
     ], evolvable_cnn.kernel_size
+    del network, evolvable_cnn
 
 
 def test_change_kernel_multi_single_arg_else_statement(device):
@@ -919,6 +958,7 @@ def test_change_kernel_multi_single_arg_else_statement(device):
     evolvable_cnn.change_cnn_kernel()
     assert len(evolvable_cnn.kernel_size) == 2
     assert len(evolvable_cnn.kernel_size[-1]) == 3
+    del network, evolvable_cnn
 
 
 def test_change_kernel_multi_two_arg(two_arg_cnn, device):
@@ -935,6 +975,7 @@ def test_change_kernel_multi_two_arg(two_arg_cnn, device):
         (2, 3, 3),
         (1, 3, 3),
     ], evolvable_cnn.kernel_size
+    del evolvable_cnn
 
 
 ######### Test recreate_nets #########
@@ -954,6 +995,7 @@ def test_recreate_nets_parameters_preserved(simple_mlp, device):
     for key, param in new_feature_net.named_parameters():
         if key in feature_net_dict.keys():
             assert torch.equal(param, feature_net_dict[key])
+    del evolvable_network
 
 
 def test_recreate_nets_parameters_preserved_rainbow(simple_mlp, device):
@@ -991,6 +1033,7 @@ def test_recreate_nets_parameters_preserved_rainbow(simple_mlp, device):
     for key, param in new_advantage_net.named_parameters():
         if key in advantage_net_dict.keys():
             assert torch.equal(param, advantage_net_dict[key])
+    del evolvable_network
 
 
 def test_recreate_nets_parameters_shrink_preserved(device):
@@ -1012,6 +1055,7 @@ def test_recreate_nets_parameters_shrink_preserved(device):
     for key, param in new_feature_net.named_parameters():
         if key in feature_net_dict.keys():
             torch.testing.assert_close(param, feature_net_dict[key])
+    del network, evolvable_network
 
 
 ######### Test clone #########
@@ -1046,3 +1090,4 @@ def test_clone_method_with_equal_state_dicts(
     clone_network = evolvable_network.clone()
     assert isinstance(clone_network, MakeEvolvable)
     assert_state_dicts_equal(evolvable_network.state_dict(), clone_network.state_dict())
+    del evolvable_network, clone_network
