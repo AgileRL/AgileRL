@@ -1,3 +1,4 @@
+import sys
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -149,7 +150,6 @@ class MockMultiAgentAlgorithm(MultiAgentRLAlgorithm):
 
 
 class TestOptimizerWrapper:
-
     def test_init_single_network(self):
         """Test initializing with a single network like in DQN."""
         network = MockEvolvableNetwork()
@@ -826,3 +826,19 @@ class TestOptimizerWrapper:
             count += 1
 
         assert count == 3
+
+
+def test_optimizer_wrapper_fallback_peft_type_when_no_llm_dependencies():
+    """Test that optimizer_wrapper sets PeftModelType to string when HAS_LLM_DEPENDENCIES is False."""
+    original_module = sys.modules.pop("agilerl.algorithms.core.optimizer_wrapper", None)
+
+    try:
+        # Patch HAS_LLM_DEPENDENCIES before reimporting
+        with patch("agilerl.HAS_LLM_DEPENDENCIES", False):
+            # Reimport the module - it will see HAS_LLM_DEPENDENCIES as False
+            import agilerl.algorithms.core.optimizer_wrapper as optimizer_wrapper_reloaded
+
+            assert optimizer_wrapper_reloaded.PeftModelType == "PeftModel"
+    finally:
+        # Restore original module to avoid affecting other tests
+        sys.modules["agilerl.algorithms.core.optimizer_wrapper"] = original_module

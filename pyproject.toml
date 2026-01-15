@@ -57,6 +57,11 @@ env = ["PYTHONHASHSEED=0", "VLLM_ATTENTION_BACKEND=XFORMERS", "VLLM_USE_FLASHINF
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
 
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
+
 [tool.black]
 line-length = 88
 

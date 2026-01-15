@@ -1,4 +1,6 @@
+import sys
 from contextlib import contextmanager
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -868,3 +870,24 @@ def test_reasoning_gym_max_context_length_warning():
         )
     assert len(env.train_dataloader) == 1
     assert len(env.test_dataloader) == 1
+
+
+def test_llm_utils_fallback_types_when_no_llm_dependencies():
+    """Test that llm_utils sets type aliases to Any when HAS_LLM_DEPENDENCIES is False."""
+    # Remove the module from cache to force reimport
+    original_module = sys.modules.pop("agilerl.utils.llm_utils", None)
+
+    try:
+        # Patch HAS_LLM_DEPENDENCIES before reimporting
+        with patch("agilerl.HAS_LLM_DEPENDENCIES", False):
+            # Reimport the module - it will see HAS_LLM_DEPENDENCIES as False
+            import agilerl.utils.llm_utils as llm_utils_reloaded
+
+            # Verify the fallback type aliases are set to Any
+            assert llm_utils_reloaded.AutoTokenizer is Any
+            assert llm_utils_reloaded.PreTrainedModel is Any
+            assert llm_utils_reloaded.BatchEncoding is Any
+            assert llm_utils_reloaded.Dataset is Any
+    finally:
+        # Restore original module to avoid affecting other tests
+        sys.modules["agilerl.utils.llm_utils"] = original_module

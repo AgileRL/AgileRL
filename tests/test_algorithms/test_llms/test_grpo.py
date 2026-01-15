@@ -311,7 +311,6 @@ def grpo_factory():
 
             actor = model_factory(pretrained_model_name_or_path)
         else:
-
             if pretrained_model_name_or_path is not None:
                 actor = model_factory(pretrained_model_name_or_path)
                 target_modules = [
@@ -777,13 +776,14 @@ def test_get_action_grpo_vllm_sleep_mode(
         micro_batch_size_per_gpu,
         sleep_mode,
     )
-    with patch.object(
-        grpo, "_move_model_to_vllm"
-    ) as mock_move_model_to_vllm, patch.object(
-        grpo,
-        "_generate_with_vllm_colocate",
-        return_value=[torch.ones(1, 10), torch.ones(1, 10)],
-    ) as mock_generate_with_vllm_colocate:
+    with (
+        patch.object(grpo, "_move_model_to_vllm") as mock_move_model_to_vllm,
+        patch.object(
+            grpo,
+            "_generate_with_vllm_colocate",
+            return_value=[torch.ones(1, 10), torch.ones(1, 10)],
+        ) as mock_generate_with_vllm_colocate,
+    ):
         grpo.get_action(torch.ones(1, 10), training)
         mock_move_model_to_vllm.assert_called()
         mock_generate_with_vllm_colocate.assert_called()
@@ -989,18 +989,19 @@ def test_init_grpo_vllm_with_tp_gt_one(
     mock_instance.llm_engine = MagicMock()
     mock_instance.llm_engine.model_executor = MagicMock()
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-    with patch.object(
-        torch.distributed,
-        "new_subgroups_by_enumeration",
-        return_value=("tp_group_calculated", None),
-    ), patch(
-        "accelerate.Accelerator.num_processes",
-        new_callable=PropertyMock,
-        return_value=2,
-    ), patch.object(
-        vllm.LLM, "__init__", return_value=None
-    ), patch.object(
-        vllm.LLM, "__new__", return_value=mock_instance
+    with (
+        patch.object(
+            torch.distributed,
+            "new_subgroups_by_enumeration",
+            return_value=("tp_group_calculated", None),
+        ),
+        patch(
+            "accelerate.Accelerator.num_processes",
+            new_callable=PropertyMock,
+            return_value=2,
+        ),
+        patch.object(vllm.LLM, "__init__", return_value=None),
+        patch.object(vllm.LLM, "__new__", return_value=mock_instance),
     ):
         grpo = GRPO(
             actor_network=model_factory(pretrained_model_name_or_path),
@@ -1066,15 +1067,18 @@ def test_init_grpo_vllm_tp_value_error(
     mock_instance.llm_engine = MagicMock()
     mock_instance.llm_engine.model_executor = MagicMock()
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-    with patch.object(
-        torch.distributed,
-        "new_subgroups_by_enumeration",
-        return_value=("tp_group_calculated", None),
-    ), patch.object(vllm.LLM, "__init__", return_value=None), patch.object(
-        vllm.LLM, "__new__", return_value=mock_instance
-    ), pytest.raises(
-        ValueError,
-        match="Tensor parallel size 2 must be a multiple of the number of processes 1.",
+    with (
+        patch.object(
+            torch.distributed,
+            "new_subgroups_by_enumeration",
+            return_value=("tp_group_calculated", None),
+        ),
+        patch.object(vllm.LLM, "__init__", return_value=None),
+        patch.object(vllm.LLM, "__new__", return_value=mock_instance),
+        pytest.raises(
+            ValueError,
+            match="Tensor parallel size 2 must be a multiple of the number of processes 1.",
+        ),
     ):
         GRPO(
             actor_network=model_factory(pretrained_model_name_or_path),
@@ -1163,10 +1167,13 @@ def test_init_grpo_batch_size_value_error(
     micro_batch_size_per_gpu,
 ):
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-    with pytest.raises(ValueError), patch(
-        "accelerate.Accelerator.num_processes",
-        new_callable=PropertyMock,
-        return_value=2,
+    with (
+        pytest.raises(ValueError),
+        patch(
+            "accelerate.Accelerator.num_processes",
+            new_callable=PropertyMock,
+            return_value=2,
+        ),
     ):
         GRPO(
             actor_network=model_factory(pretrained_model_name_or_path),
@@ -1267,10 +1274,13 @@ def test_init_grpo_batch_size_grad_accum_error(
     micro_batch_size_per_gpu,
 ):
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-    with pytest.raises(ValueError), patch(
-        "accelerate.Accelerator.num_processes",
-        new_callable=PropertyMock,
-        return_value=2,
+    with (
+        pytest.raises(ValueError),
+        patch(
+            "accelerate.Accelerator.num_processes",
+            new_callable=PropertyMock,
+            return_value=2,
+        ),
     ):
         accelerator.state.deepspeed_plugin.deepspeed_config[
             "gradient_accumulation_steps"
@@ -1706,41 +1716,45 @@ def test_get_action_grpo_vllm_multiple_gpus(
     pretrained_model_name_or_path,
     tensor_parallel_size,
 ):
-
     def mock_all_gather_object(gathered_prompts_ids, prompts_ids, group):
         for idx, _ in enumerate(gathered_prompts_ids):
             gathered_prompts_ids[idx] = prompts_ids
 
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
 
-    with patch("agilerl.algorithms.core.base.LLM", DummyVLLM), patch.object(
-        torch.distributed,
-        "new_subgroups_by_enumeration",
-        return_value=("tp_group_calculated", None),
-    ), patch(
-        "accelerate.Accelerator.num_processes",
-        new_callable=PropertyMock,
-        return_value=2,
-    ), patch(
-        "accelerate.Accelerator.num_processes",
-        new_callable=PropertyMock,
-        return_value=2,
-    ), patch.object(
-        torch.distributed,
-        "new_subgroups_by_enumeration",
-        return_value=("tp_group_calculated", None),
-    ), patch(
-        "accelerate.Accelerator.num_processes",
-        new_callable=PropertyMock,
-        return_value=2,
-    ), patch(
-        "agilerl.algorithms.grpo.GRPO._move_model_to_vllm", return_value=None
-    ), patch.object(
-        torch.distributed, "all_gather_object", side_effect=mock_all_gather_object
-    ), patch.object(
-        torch.distributed, "get_rank", return_value=0
+    with (
+        patch("agilerl.algorithms.core.base.LLM", DummyVLLM),
+        patch.object(
+            torch.distributed,
+            "new_subgroups_by_enumeration",
+            return_value=("tp_group_calculated", None),
+        ),
+        patch(
+            "accelerate.Accelerator.num_processes",
+            new_callable=PropertyMock,
+            return_value=2,
+        ),
+        patch(
+            "accelerate.Accelerator.num_processes",
+            new_callable=PropertyMock,
+            return_value=2,
+        ),
+        patch.object(
+            torch.distributed,
+            "new_subgroups_by_enumeration",
+            return_value=("tp_group_calculated", None),
+        ),
+        patch(
+            "accelerate.Accelerator.num_processes",
+            new_callable=PropertyMock,
+            return_value=2,
+        ),
+        patch("agilerl.algorithms.grpo.GRPO._move_model_to_vllm", return_value=None),
+        patch.object(
+            torch.distributed, "all_gather_object", side_effect=mock_all_gather_object
+        ),
+        patch.object(torch.distributed, "get_rank", return_value=0),
     ):
-
         grpo = GRPO(
             actor_network=model_factory(pretrained_model_name_or_path),
             lr=0.1,
@@ -2233,9 +2247,10 @@ def test_grpo_value_error_with_nan_loss(
     def mock_grpo_loss(*args, **kwargs):
         return torch.tensor(float("nan")), torch.tensor(1.0)
 
-    with patch.object(grpo, "_grpo_loss", side_effect=mock_grpo_loss), pytest.raises(
-        ValueError
-    ) as value_error:
+    with (
+        patch.object(grpo, "_grpo_loss", side_effect=mock_grpo_loss),
+        pytest.raises(ValueError) as value_error,
+    ):
         grpo.learn((completions, action_masks, rewards))
     assert "Loss is not finite" in str(value_error.value)
     grpo.clean_up()
@@ -3606,11 +3621,12 @@ def check_ref_adapater_is_same_as_actor_after_learning(grpo):
 
 
 def test_grpo_no_llm_dependencies(grpo_factory, model_factory, accelerator_factory):
-    with mock.patch(
-        "agilerl.algorithms.core.base.HAS_LLM_DEPENDENCIES", False
-    ), pytest.raises(
-        ImportError,
-        match=r"LLM dependencies are not installed. Please install them using \`pip install agilerl\[llm\]\`.",
+    with (
+        mock.patch("agilerl.algorithms.core.base.HAS_LLM_DEPENDENCIES", False),
+        pytest.raises(
+            ImportError,
+            match=r"LLM dependencies are not installed. Please install them using \`pip install agilerl\[llm\]\`.",
+        ),
     ):
         grpo_factory(
             accelerator_factory=accelerator_factory,
@@ -3629,3 +3645,157 @@ def test_grpo_no_llm_dependencies(grpo_factory, model_factory, accelerator_facto
             use_vllm=False,
         ).clean_up()
     AcceleratorState._reset_state(True)
+
+
+def test_returns_early_when_accelerator_is_none(self):
+    """Test that the method returns early when accelerator is None."""
+    # Create a mock LLMAlgorithm instance with accelerator=None
+    mock_algorithm = MagicMock(spec=LLMAlgorithm)
+    mock_algorithm.accelerator = None
+    mock_algorithm.max_grad_norm = 1.0
+
+    # Use spec=[] to prevent auto-creation of attributes.
+    # If the code tries to access .optimizer after the early return check,
+    # it would raise an AttributeError.
+    mock_algorithm.actor = MagicMock(spec=[])
+
+    # Should return early without error (return None)
+    result = LLMAlgorithm._sync_deepspeed_gradient_clipping(mock_algorithm)
+
+    assert result is None
+
+
+def test_returns_early_when_gradient_clipping_not_in_config(self):
+    """Test that the method returns early when gradient_clipping is not in deepspeed config."""
+    # Create a mock accelerator with deepspeed config that doesn't have gradient_clipping
+    mock_ds_plugin = MagicMock()
+    mock_ds_plugin.deepspeed_config = {"zero_optimization": {"stage": 2}}
+
+    mock_state = MagicMock()
+    mock_state.deepspeed_plugin = mock_ds_plugin
+
+    mock_accelerator = MagicMock()
+    mock_accelerator.state = mock_state
+
+    mock_algorithm = MagicMock(spec=LLMAlgorithm)
+    mock_algorithm.accelerator = mock_accelerator
+    mock_algorithm.max_grad_norm = 1.0
+    mock_algorithm.actor = MagicMock()
+
+    LLMAlgorithm._sync_deepspeed_gradient_clipping(mock_algorithm)
+
+    # Verify that the config was not modified (gradient_clipping should not be added)
+    assert "gradient_clipping" not in mock_ds_plugin.deepspeed_config
+
+
+def test_updates_gradient_clipping_when_different_from_max_grad_norm(self):
+    """Test that gradient_clipping is updated when it differs from max_grad_norm."""
+    # Create a mock accelerator with deepspeed config that has gradient_clipping
+    mock_ds_plugin = MagicMock()
+    mock_ds_plugin.deepspeed_config = {
+        "zero_optimization": {"stage": 2},
+        "gradient_clipping": 0.5,
+    }
+
+    mock_state = MagicMock()
+    mock_state.deepspeed_plugin = mock_ds_plugin
+
+    mock_accelerator = MagicMock()
+    mock_accelerator.state = mock_state
+
+    mock_algorithm = MagicMock(spec=LLMAlgorithm)
+    mock_algorithm.accelerator = mock_accelerator
+    mock_algorithm.max_grad_norm = 1.0
+    mock_algorithm.actor = MagicMock(spec=[])  # No optimizer attribute
+
+    LLMAlgorithm._sync_deepspeed_gradient_clipping(mock_algorithm)
+
+    # Verify that gradient_clipping was updated to match max_grad_norm
+    assert mock_ds_plugin.deepspeed_config["gradient_clipping"] == 1.0
+
+
+def test_does_not_update_gradient_clipping_when_same_as_max_grad_norm(self):
+    """Test that gradient_clipping is not modified when it matches max_grad_norm."""
+    mock_ds_plugin = MagicMock()
+    mock_ds_plugin.deepspeed_config = {
+        "zero_optimization": {"stage": 2},
+        "gradient_clipping": 1.0,
+    }
+
+    mock_state = MagicMock()
+    mock_state.deepspeed_plugin = mock_ds_plugin
+
+    mock_accelerator = MagicMock()
+    mock_accelerator.state = mock_state
+
+    mock_algorithm = MagicMock(spec=LLMAlgorithm)
+    mock_algorithm.accelerator = mock_accelerator
+    mock_algorithm.max_grad_norm = 1.0
+    mock_algorithm.actor = MagicMock(spec=[])  # No optimizer attribute
+
+    LLMAlgorithm._sync_deepspeed_gradient_clipping(mock_algorithm)
+
+    # Verify gradient_clipping is still the same
+    assert mock_ds_plugin.deepspeed_config["gradient_clipping"] == 1.0
+
+
+def test_updates_actor_optimizer_grad_clip(self):
+    """Test that actor.optimizer.grad_clip is updated when it exists."""
+    mock_ds_plugin = MagicMock()
+    mock_ds_plugin.deepspeed_config = {
+        "zero_optimization": {"stage": 2},
+        "gradient_clipping": 0.5,
+    }
+
+    mock_state = MagicMock()
+    mock_state.deepspeed_plugin = mock_ds_plugin
+
+    mock_accelerator = MagicMock()
+    mock_accelerator.state = mock_state
+
+    mock_optimizer = MagicMock()
+    mock_optimizer.grad_clip = 0.5
+
+    mock_actor = MagicMock()
+    mock_actor.optimizer = mock_optimizer
+
+    mock_algorithm = MagicMock(spec=LLMAlgorithm)
+    mock_algorithm.accelerator = mock_accelerator
+    mock_algorithm.max_grad_norm = 1.0
+    mock_algorithm.actor = mock_actor
+
+    LLMAlgorithm._sync_deepspeed_gradient_clipping(mock_algorithm)
+
+    # Verify that optimizer grad_clip was updated
+    assert mock_optimizer.grad_clip == 1.0
+
+
+def test_updates_actor_optimizer_clip_grad(self):
+    """Test that actor.optimizer.clip_grad is updated when it exists."""
+    mock_ds_plugin = MagicMock()
+    mock_ds_plugin.deepspeed_config = {
+        "zero_optimization": {"stage": 2},
+        "gradient_clipping": 0.5,
+    }
+
+    mock_state = MagicMock()
+    mock_state.deepspeed_plugin = mock_ds_plugin
+
+    mock_accelerator = MagicMock()
+    mock_accelerator.state = mock_state
+
+    mock_optimizer = MagicMock()
+    mock_optimizer.clip_grad = 0.5
+
+    mock_actor = MagicMock()
+    mock_actor.optimizer = mock_optimizer
+
+    mock_algorithm = MagicMock(spec=LLMAlgorithm)
+    mock_algorithm.accelerator = mock_accelerator
+    mock_algorithm.max_grad_norm = 1.0
+    mock_algorithm.actor = mock_actor
+
+    LLMAlgorithm._sync_deepspeed_gradient_clipping(mock_algorithm)
+
+    # Verify that optimizer clip_grad was updated
+    assert mock_optimizer.clip_grad == 1.0
