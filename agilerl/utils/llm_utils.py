@@ -105,7 +105,6 @@ class HuggingFaceGym(gym.Env, ABC):
         accelerator: Accelerator | None = None,
         seed: int = 42,
     ) -> None:
-
         self.name = train_dataset.info.dataset_name
         self.tokenizer = tokenizer
         self.data_batch_size_per_gpu = data_batch_size_per_gpu
@@ -431,7 +430,6 @@ class ReasoningGym(HuggingFaceGym):
         """
 
         def collate_fn(batch):
-
             questions = [item["question"] for item in batch]
             answers = [item["answer"] for item in batch]
 
@@ -551,7 +549,6 @@ class PreferenceGym(HuggingFaceGym):
         """
 
         def collate_fn(batch: list[dict[str, str]]) -> dict[str, str]:
-
             prompts = [item["prompt"] for item in batch]
             chosen = [item["chosen"] for item in batch]
             rejected = [item["rejected"] for item in batch]

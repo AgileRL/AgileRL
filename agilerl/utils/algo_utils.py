@@ -6,7 +6,7 @@ from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from functools import singledispatch
 from numbers import Number
-from typing import Any, Optional, Union
+from typing import Any, ForwardRef, Optional, Union
 
 import numpy as np
 import torch
@@ -50,7 +50,7 @@ if HAS_LLM_DEPENDENCIES:
 
     PreTrainedModelType = Union[PeftModel, PreTrainedModel]
 else:
-    PreTrainedModelType = Union["PeftModel", "PreTrainedModel"]
+    PreTrainedModelType = Union[ForwardRef("PeftModel"), ForwardRef("PreTrainedModel")]
 
 
 def check_supported_space(observation_space: GymSpaceType) -> None:
