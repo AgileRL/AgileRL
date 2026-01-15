@@ -3647,16 +3647,11 @@ def test_grpo_no_llm_dependencies(grpo_factory, model_factory, accelerator_facto
     AcceleratorState._reset_state(True)
 
 
-def test_returns_early_when_accelerator_is_none(self):
+def test_sync_deepspeed_returns_early_when_accelerator_is_none():
     """Test that the method returns early when accelerator is None."""
-    # Create a mock LLMAlgorithm instance with accelerator=None
     mock_algorithm = MagicMock(spec=LLMAlgorithm)
     mock_algorithm.accelerator = None
     mock_algorithm.max_grad_norm = 1.0
-
-    # Use spec=[] to prevent auto-creation of attributes.
-    # If the code tries to access .optimizer after the early return check,
-    # it would raise an AttributeError.
     mock_algorithm.actor = MagicMock(spec=[])
 
     # Should return early without error (return None)
@@ -3665,9 +3660,8 @@ def test_returns_early_when_accelerator_is_none(self):
     assert result is None
 
 
-def test_returns_early_when_gradient_clipping_not_in_config(self):
+def test_sync_deepspeed_returns_early_when_gradient_clipping_not_in_config():
     """Test that the method returns early when gradient_clipping is not in deepspeed config."""
-    # Create a mock accelerator with deepspeed config that doesn't have gradient_clipping
     mock_ds_plugin = MagicMock()
     mock_ds_plugin.deepspeed_config = {"zero_optimization": {"stage": 2}}
 
@@ -3688,9 +3682,8 @@ def test_returns_early_when_gradient_clipping_not_in_config(self):
     assert "gradient_clipping" not in mock_ds_plugin.deepspeed_config
 
 
-def test_updates_gradient_clipping_when_different_from_max_grad_norm(self):
+def test_sync_deepspeed_updates_gradient_clipping_when_different():
     """Test that gradient_clipping is updated when it differs from max_grad_norm."""
-    # Create a mock accelerator with deepspeed config that has gradient_clipping
     mock_ds_plugin = MagicMock()
     mock_ds_plugin.deepspeed_config = {
         "zero_optimization": {"stage": 2},
@@ -3714,7 +3707,7 @@ def test_updates_gradient_clipping_when_different_from_max_grad_norm(self):
     assert mock_ds_plugin.deepspeed_config["gradient_clipping"] == 1.0
 
 
-def test_does_not_update_gradient_clipping_when_same_as_max_grad_norm(self):
+def test_sync_deepspeed_does_not_update_when_same():
     """Test that gradient_clipping is not modified when it matches max_grad_norm."""
     mock_ds_plugin = MagicMock()
     mock_ds_plugin.deepspeed_config = {
@@ -3739,7 +3732,7 @@ def test_does_not_update_gradient_clipping_when_same_as_max_grad_norm(self):
     assert mock_ds_plugin.deepspeed_config["gradient_clipping"] == 1.0
 
 
-def test_updates_actor_optimizer_grad_clip(self):
+def test_sync_deepspeed_updates_actor_optimizer_grad_clip():
     """Test that actor.optimizer.grad_clip is updated when it exists."""
     mock_ds_plugin = MagicMock()
     mock_ds_plugin.deepspeed_config = {
@@ -3770,7 +3763,7 @@ def test_updates_actor_optimizer_grad_clip(self):
     assert mock_optimizer.grad_clip == 1.0
 
 
-def test_updates_actor_optimizer_clip_grad(self):
+def test_sync_deepspeed_updates_actor_optimizer_clip_grad():
     """Test that actor.optimizer.clip_grad is updated when it exists."""
     mock_ds_plugin = MagicMock()
     mock_ds_plugin.deepspeed_config = {
