@@ -194,9 +194,7 @@ def test_instantiation_with_rainbow():
         network, input_tensor, support=support, rainbow=True
     )
     assert isinstance(evolvable_network, MakeEvolvable)
-    assert (
-        str(evolvable_network)
-        == """MakeEvolvable(
+    assert str(evolvable_network) == """MakeEvolvable(
   (feature_net): Sequential(
     (feature_linear_layer_0): Linear(in_features=3, out_features=128, bias=True)
     (feature_activation_0): ReLU()
@@ -212,7 +210,6 @@ def test_instantiation_with_rainbow():
     (advantage_linear_layer_output): NoisyLinear(in_features=8, out_features=102)
   )
 )"""
-    )
     del network, evolvable_network
 
 

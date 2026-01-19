@@ -2063,8 +2063,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         accelerator: Optional[Accelerator] = None,
     ) -> None:
         raise NotImplementedError(
-            "The load class method is not supported for this algorithm class."
-            """
+            "The load class method is not supported for this algorithm class." """
             To load a saved LLM, please load the model as follows, and then re-instantiate the GRPO
             class, using the pre-trained model.
 

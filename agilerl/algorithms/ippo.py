@@ -671,7 +671,7 @@ class IPPO(MultiAgentRLAlgorithm):
         :param action_space: Action space for the agent
         :type action_space: gymnasium.spaces
         """
-        (states, actions, log_probs, rewards, dones, values, next_state, next_done) = (
+        states, actions, log_probs, rewards, dones, values, next_state, next_done = (
             experiences
         )
 
