@@ -2,7 +2,8 @@
 
 ### Thank you for taking the time to contribute to AgileRL! 🤖🎉
 
-Contributions are really valuable to AgileRL, and we are grateful to the community for your support. We are happy to have you here!<br>
+Contributions are really valuable to AgileRL, and we are grateful to the community for your support. We are happy to have you here! AgileRL powers real-world AI systems, and your contributions directly impact the tools that researchers and engineers depend on every day.
+
 In this guide you will get an overview of the contribution workflow from opening an issue, creating a PR, reviewing, and merging the PR.
 
 If you have any questions, please raise them on our [Discord](https://discord.gg/eB8HyTA2ux).
@@ -20,26 +21,27 @@ There are many ways to contribute, from writing tutorials or blog posts, improvi
 All members of the AgileRL community are expected to follow the [Code of Conduct](https://github.com/AgileRL/AgileRL/blob/main/CODE_OF_CONDUCT.md).
 
 ## Your First Contribution
-AgileRL is nascent, and so there is a lot of scope to contribute on what you find interesting. You can have a big impact on the framework now and get involved in our exciting early development.
-Please feel free to suggest new, crazy ideas and have a go at the coolest RL implementations you can think of.
-We expect the GitHub Issue tracker to fill up with bugs, improvements and feature requests, so please take a look there too.
 
-Some early suggestions for contributions we think would add value to AgileRL include adding more RL algorithms and evolvable network types, parallelising and benchmarking training, writing documentation, and general improvements to current implementations.
+There is a lot of scope to contribute on what you find interesting, and your
+contributions can have a real impact on the framework.
 
-Contributing to an open source project for the first time? You can learn how from this great resource, https://www.firsttimersonly.com/.
+We always appreciate new algorithms, features, and improvements for RL and LLM training. Whether you want to implement a cutting-edge paper, optimize existing code, or improve our docs - there's room for it all. Feel free to suggest new ideas and check the GitHub Issue tracker for bugs, improvements, and feature requests.
+
+Contributing to an open source project for the first time? You can learn how from [this great resource](https://www.firsttimersonly.com/).
 
 ## Getting started
 ### How to contribute
 If you've noticed a bug or have a feature request, [make one](https://github.com/agilerl/agilerl/issues/new)! It's generally best if you get confirmation of your bug or approval for your feature request this way before starting to code.
 
-For something that is bigger than a one or two line fix:
+To make a code contribution:
 
 1. Create your own fork of the code.
-2. Do the changes in your fork.
-4. Run the tests by running `pytest tests`
+2. Create a new branch from the `nightly` branch for your changes.
+3. Do the changes in your fork.
+4. Run the tests with `pytest tests`
 5. Make the test pass.
 6. Commit your changes. Please use an appropriate commit prefix. If your pull request fixes an issue specify it in the commit message.
-7. Push to your fork and submit a pull request. Please provide us with some explanation of why you made the changes you made. For new features make sure to explain a standard use case to us.
+7. Push to your fork and submit a pull request **to the `nightly` branch**. Please provide us with some explanation of why you made the changes you made. For new features make sure to explain a standard use case to us.
 
 #### Pre-commit hooks
 Checks will be run automatically by the CI on code pushed to the AgileRL repository. These checks can also be run locally with the following steps:
@@ -58,7 +60,9 @@ When filing an issue, make sure to answer these five questions:
 - What operating system and processor architecture are you using?
 - What did you do?
 - What did you expect to see?
-- What did you see instead? General questions should go to the [AgileRL Discord](https://discord.gg/eB8HyTA2ux) instead of the issue tracker.
+- What did you see instead?
+
+General questions should go to the [AgileRL Discord](https://discord.gg/eB8HyTA2ux) instead of the issue tracker.
 
 ## How to suggest a feature or enhancement
 The AgileRL philosophy is to provide streamlined tooling for reinforcement learning development, to make it easier and faster to create incredible models.
