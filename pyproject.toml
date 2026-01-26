@@ -33,7 +33,7 @@ redis = "^4.4.4"
 scipy = "^1.12.0"
 SuperSuit = "^3.9.0"
 termcolor = "^1.1.0"
-torch = "2.7.1"
+torch = "2.9.0"
 tensordict = "^0.8"
 tqdm = "^4.66.4"
 ucimlrepo = "^0.0.3"
@@ -42,7 +42,7 @@ datasets = {version = "4.4.1", optional = true}
 deepspeed = { version = "^0.17.1", optional = true }
 peft = { version = "^0.18.0", optional = true }
 transformers = { version = "^4.57.1", optional = true }
-vllm = { version = "0.10.0", optional = true }
+vllm = { version = "0.13.0", optional = true }
 
 [tool.poetry.extras]
 llm = ["datasets", "deepspeed", "peft", "transformers", "vllm"]
