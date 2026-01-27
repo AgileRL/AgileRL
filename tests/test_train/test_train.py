@@ -1847,13 +1847,12 @@ def test_wandb_init_log(env, population_off_policy, tournament, mutations, memor
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_off_policy.wandb.login") as _, patch(
-        "agilerl.training.train_off_policy.wandb.init"
-    ) as mock_wandb_init, patch(
-        "agilerl.training.train_off_policy.wandb.log"
-    ) as mock_wandb_log, patch(
-        "agilerl.training.train_off_policy.wandb.finish"
-    ) as mock_wandb_finish:
+    with (
+        patch("agilerl.training.train_off_policy.wandb.login") as _,
+        patch("agilerl.training.train_off_policy.wandb.init") as mock_wandb_init,
+        patch("agilerl.training.train_off_policy.wandb.log") as mock_wandb_log,
+        patch("agilerl.training.train_off_policy.wandb.finish") as mock_wandb_finish,
+    ):
         # Call the function that should trigger wandb.init
         agilerl.training.train_off_policy.train_off_policy(
             env,
@@ -1927,13 +1926,12 @@ def test_wandb_init_log_distributed(
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_off_policy.wandb.login") as _, patch(
-        "agilerl.training.train_off_policy.wandb.init"
-    ) as mock_wandb_init, patch(
-        "agilerl.training.train_off_policy.wandb.log"
-    ) as mock_wandb_log, patch(
-        "agilerl.training.train_off_policy.wandb.finish"
-    ) as mock_wandb_finish:
+    with (
+        patch("agilerl.training.train_off_policy.wandb.login") as _,
+        patch("agilerl.training.train_off_policy.wandb.init") as mock_wandb_init,
+        patch("agilerl.training.train_off_policy.wandb.log") as mock_wandb_log,
+        patch("agilerl.training.train_off_policy.wandb.finish") as mock_wandb_finish,
+    ):
         # Call the function that should trigger wandb.init
         agilerl.training.train_off_policy.train_off_policy(
             env,
@@ -1996,11 +1994,12 @@ def test_early_stop_wandb(env, population_off_policy, tournament, mutations, mem
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_off_policy.wandb.login") as _, patch(
-        "agilerl.training.train_off_policy.wandb.init"
-    ) as _, patch("agilerl.training.train_off_policy.wandb.log") as _, patch(
-        "agilerl.training.train_off_policy.wandb.finish"
-    ) as mock_wandb_finish:
+    with (
+        patch("agilerl.training.train_off_policy.wandb.login") as _,
+        patch("agilerl.training.train_off_policy.wandb.init") as _,
+        patch("agilerl.training.train_off_policy.wandb.log") as _,
+        patch("agilerl.training.train_off_policy.wandb.finish") as mock_wandb_finish,
+    ):
         # Call the function that should trigger wandb.init
         agilerl.training.train_off_policy.train_off_policy(
             env,
@@ -2348,13 +2347,12 @@ def test_wandb_init_log_on_policy(
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_on_policy.wandb.login") as _, patch(
-        "agilerl.training.train_on_policy.wandb.init"
-    ) as mock_wandb_init, patch(
-        "agilerl.training.train_on_policy.wandb.log"
-    ) as mock_wandb_log, patch(
-        "agilerl.training.train_on_policy.wandb.finish"
-    ) as mock_wandb_finish:
+    with (
+        patch("agilerl.training.train_on_policy.wandb.login") as _,
+        patch("agilerl.training.train_on_policy.wandb.init") as mock_wandb_init,
+        patch("agilerl.training.train_on_policy.wandb.log") as mock_wandb_log,
+        patch("agilerl.training.train_on_policy.wandb.finish") as mock_wandb_finish,
+    ):
         # Call the function that should trigger wandb.init
         agilerl.training.train_on_policy.train_on_policy(
             env,
@@ -2405,11 +2403,12 @@ def test_early_stop_wandb_on_policy(env, population_on_policy, tournament, mutat
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_on_policy.wandb.login") as _, patch(
-        "agilerl.training.train_on_policy.wandb.init"
-    ) as _, patch("agilerl.training.train_on_policy.wandb.log") as _, patch(
-        "agilerl.training.train_on_policy.wandb.finish"
-    ) as mock_wandb_finish:
+    with (
+        patch("agilerl.training.train_on_policy.wandb.login") as _,
+        patch("agilerl.training.train_on_policy.wandb.init") as _,
+        patch("agilerl.training.train_on_policy.wandb.log") as _,
+        patch("agilerl.training.train_on_policy.wandb.finish") as mock_wandb_finish,
+    ):
         # Call the function that should trigger wandb.init
         agilerl.training.train_on_policy.train_on_policy(
             env,
@@ -2836,13 +2835,18 @@ def test_train_multi_wandb_init_log(
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_multi_agent_off_policy.wandb.login") as _, patch(
-        "agilerl.training.train_multi_agent_off_policy.wandb.init"
-    ) as mock_wandb_init, patch(
-        "agilerl.training.train_multi_agent_off_policy.wandb.log"
-    ) as mock_wandb_log, patch(
-        "agilerl.training.train_multi_agent_off_policy.wandb.finish"
-    ) as mock_wandb_finish:
+    with (
+        patch("agilerl.training.train_multi_agent_off_policy.wandb.login") as _,
+        patch(
+            "agilerl.training.train_multi_agent_off_policy.wandb.init"
+        ) as mock_wandb_init,
+        patch(
+            "agilerl.training.train_multi_agent_off_policy.wandb.log"
+        ) as mock_wandb_log,
+        patch(
+            "agilerl.training.train_multi_agent_off_policy.wandb.finish"
+        ) as mock_wandb_finish,
+    ):
         if accelerator_flag:
             accelerator = Accelerator()
         else:
@@ -2910,13 +2914,18 @@ def test_train_multi_wandb_init_log_on_policy(
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_multi_agent_on_policy.wandb.login") as _, patch(
-        "agilerl.training.train_multi_agent_on_policy.wandb.init"
-    ) as mock_wandb_init, patch(
-        "agilerl.training.train_multi_agent_on_policy.wandb.log"
-    ) as mock_wandb_log, patch(
-        "agilerl.training.train_multi_agent_on_policy.wandb.finish"
-    ) as mock_wandb_finish:
+    with (
+        patch("agilerl.training.train_multi_agent_on_policy.wandb.login") as _,
+        patch(
+            "agilerl.training.train_multi_agent_on_policy.wandb.init"
+        ) as mock_wandb_init,
+        patch(
+            "agilerl.training.train_multi_agent_on_policy.wandb.log"
+        ) as mock_wandb_log,
+        patch(
+            "agilerl.training.train_multi_agent_on_policy.wandb.finish"
+        ) as mock_wandb_finish,
+    ):
         if accelerator_flag:
             accelerator = Accelerator()
         else:
@@ -2980,13 +2989,14 @@ def test_multi_agent_early_stop(
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_multi_agent_off_policy.wandb.login") as _, patch(
-        "agilerl.training.train_multi_agent_off_policy.wandb.init"
-    ) as _, patch(
-        "agilerl.training.train_multi_agent_off_policy.wandb.log"
-    ) as _, patch(
-        "agilerl.training.train_multi_agent_off_policy.wandb.finish"
-    ) as mock_wandb_finish:
+    with (
+        patch("agilerl.training.train_multi_agent_off_policy.wandb.login") as _,
+        patch("agilerl.training.train_multi_agent_off_policy.wandb.init") as _,
+        patch("agilerl.training.train_multi_agent_off_policy.wandb.log") as _,
+        patch(
+            "agilerl.training.train_multi_agent_off_policy.wandb.finish"
+        ) as mock_wandb_finish,
+    ):
         # Call the function that should trigger wandb.init
         agilerl.training.train_multi_agent_off_policy.train_multi_agent_off_policy(
             multi_env,
@@ -3038,11 +3048,14 @@ def test_multi_agent_early_stop_on_policy(
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_multi_agent_on_policy.wandb.login") as _, patch(
-        "agilerl.training.train_multi_agent_on_policy.wandb.init"
-    ) as _, patch("agilerl.training.train_multi_agent_on_policy.wandb.log") as _, patch(
-        "agilerl.training.train_multi_agent_on_policy.wandb.finish"
-    ) as mock_wandb_finish:
+    with (
+        patch("agilerl.training.train_multi_agent_on_policy.wandb.login") as _,
+        patch("agilerl.training.train_multi_agent_on_policy.wandb.init") as _,
+        patch("agilerl.training.train_multi_agent_on_policy.wandb.log") as _,
+        patch(
+            "agilerl.training.train_multi_agent_on_policy.wandb.finish"
+        ) as mock_wandb_finish,
+    ):
         # Call the function that should trigger wandb.init
         agilerl.training.train_multi_agent_on_policy.train_multi_agent_on_policy(
             multi_env,
@@ -3643,13 +3656,12 @@ def test_train_offline_wandb_calls(
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_offline.wandb.login") as _, patch(
-        "agilerl.training.train_offline.wandb.init"
-    ) as mock_wandb_init, patch(
-        "agilerl.training.train_offline.wandb.log"
-    ) as mock_wandb_log, patch(
-        "agilerl.training.train_offline.wandb.finish"
-    ) as mock_wandb_finish:
+    with (
+        patch("agilerl.training.train_offline.wandb.login") as _,
+        patch("agilerl.training.train_offline.wandb.init") as mock_wandb_init,
+        patch("agilerl.training.train_offline.wandb.log") as mock_wandb_log,
+        patch("agilerl.training.train_offline.wandb.finish") as mock_wandb_finish,
+    ):
         # Call the function that should trigger wandb.init
         agilerl.training.train_offline.train_offline(
             env,
@@ -3710,11 +3722,12 @@ def test_train_offline_early_stop(
             "ACT_MUT": 0.2,
             "RL_HP_MUT": 0.2,
         }
-        with patch("agilerl.training.train_offline.wandb.login") as _, patch(
-            "agilerl.training.train_offline.wandb.init"
-        ) as _, patch("agilerl.training.train_offline.wandb.log") as _, patch(
-            "agilerl.training.train_offline.wandb.finish"
-        ) as mock_wandb_finish:
+        with (
+            patch("agilerl.training.train_offline.wandb.login") as _,
+            patch("agilerl.training.train_offline.wandb.init") as _,
+            patch("agilerl.training.train_offline.wandb.log") as _,
+            patch("agilerl.training.train_offline.wandb.finish") as mock_wandb_finish,
+        ):
             # Call the function that should trigger wandb.init
             agilerl.training.train_offline.train_offline(
                 env,
@@ -4347,13 +4360,12 @@ def test_bandit_wandb_init_log(
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_bandits.wandb.login") as _, patch(
-        "agilerl.training.train_bandits.wandb.init"
-    ) as mock_wandb_init, patch(
-        "agilerl.training.train_bandits.wandb.log"
-    ) as mock_wandb_log, patch(
-        "agilerl.training.train_bandits.wandb.finish"
-    ) as mock_wandb_finish:
+    with (
+        patch("agilerl.training.train_bandits.wandb.login") as _,
+        patch("agilerl.training.train_bandits.wandb.init") as mock_wandb_init,
+        patch("agilerl.training.train_bandits.wandb.log") as mock_wandb_log,
+        patch("agilerl.training.train_bandits.wandb.finish") as mock_wandb_finish,
+    ):
         # Call the function that should trigger wandb.init
         agilerl.training.train_bandits.train_bandits(
             bandit_env,
@@ -4430,13 +4442,12 @@ def test_bandit_wandb_init_log_distributed(
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_bandits.wandb.login") as _, patch(
-        "agilerl.training.train_bandits.wandb.init"
-    ) as mock_wandb_init, patch(
-        "agilerl.training.train_bandits.wandb.log"
-    ) as mock_wandb_log, patch(
-        "agilerl.training.train_bandits.wandb.finish"
-    ) as mock_wandb_finish:
+    with (
+        patch("agilerl.training.train_bandits.wandb.login") as _,
+        patch("agilerl.training.train_bandits.wandb.init") as mock_wandb_init,
+        patch("agilerl.training.train_bandits.wandb.log") as mock_wandb_log,
+        patch("agilerl.training.train_bandits.wandb.finish") as mock_wandb_finish,
+    ):
         # Call the function that should trigger wandb.init
         agilerl.training.train_bandits.train_bandits(
             bandit_env,
@@ -4504,11 +4515,12 @@ def test_bandit_early_stop_wandb(
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_bandits.wandb.login") as _, patch(
-        "agilerl.training.train_bandits.wandb.init"
-    ) as _, patch("agilerl.training.train_bandits.wandb.log") as _, patch(
-        "agilerl.training.train_bandits.wandb.finish"
-    ) as mock_wandb_finish:
+    with (
+        patch("agilerl.training.train_bandits.wandb.login") as _,
+        patch("agilerl.training.train_bandits.wandb.init") as _,
+        patch("agilerl.training.train_bandits.wandb.log") as _,
+        patch("agilerl.training.train_bandits.wandb.finish") as mock_wandb_finish,
+    ):
         # Call the function that should trigger wandb.init
         agilerl.training.train_bandits.train_bandits(
             bandit_env,
