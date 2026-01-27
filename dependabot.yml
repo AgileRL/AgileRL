@@ -1,7 +1,7 @@
 ---
 version: 2
 updates:
-    - package-ecosystem: poetry
+    - package-ecosystem: uv
       directory: /
       schedule:
           interval: weekly
