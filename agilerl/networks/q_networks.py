@@ -248,7 +248,7 @@ class RainbowQNetwork(EvolvableNetwork):
             num_atoms=self.num_atoms,
             support=self.support,
             device=self.device,
-            **net_config
+            **net_config,
         )
 
     def forward(
@@ -279,7 +279,7 @@ class RainbowQNetwork(EvolvableNetwork):
             num_atoms=self.num_atoms,
             support=self.support,
             device=self.device,
-            **self.head_net.net_config
+            **self.head_net.net_config,
         )
 
         self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net)

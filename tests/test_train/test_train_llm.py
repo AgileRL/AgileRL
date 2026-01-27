@@ -39,9 +39,11 @@ def test_finetune_llm_reasoning_basic_training_loop(use_accelerator):
     mock_env.data_batch_size_per_gpu = 1
 
     # Mock other dependencies
-    with patch("agilerl.training.train_llm.trange"), patch(
-        "agilerl.training.train_llm.aggregate_metrics_across_gpus"
-    ) as mock_agg, patch("agilerl.training.train_llm.save_llm_checkpoint"):
+    with (
+        patch("agilerl.training.train_llm.trange"),
+        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.training.train_llm.save_llm_checkpoint"),
+    ):
 
         mock_agg.return_value = 0.5
         finetune_llm_reasoning(
@@ -98,15 +100,13 @@ def test_finetune_llm_reasoning_with_wandb_and_checkpoints(use_accelerator):
     mock_env.data_batch_size_per_gpu = 1
 
     # Mock dependencies
-    with patch("agilerl.training.train_llm.trange") as mock_trange, patch(
-        "agilerl.training.train_llm.init_wandb"
-    ) as mock_init_wandb, patch(
-        "agilerl.training.train_llm.wandb"
-    ) as mock_wandb, patch(
-        "agilerl.training.train_llm.aggregate_metrics_across_gpus"
-    ) as mock_agg, patch(
-        "agilerl.training.train_llm.save_llm_checkpoint"
-    ) as mock_save:
+    with (
+        patch("agilerl.training.train_llm.trange") as mock_trange,
+        patch("agilerl.training.train_llm.init_wandb") as mock_init_wandb,
+        patch("agilerl.training.train_llm.wandb") as mock_wandb,
+        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
+    ):
 
         # Configure mocks
         mock_pbar = Mock()
@@ -170,11 +170,14 @@ def test_finetune_llm_reasoning_evolvable_training_loop(use_accelerator):
     mutation.activation_mut = 0
 
     # Mock other dependencies
-    with patch("agilerl.training.train_llm.trange"), patch(
-        "agilerl.training.train_llm.aggregate_metrics_across_gpus"
-    ) as mock_agg, patch("agilerl.training.train_llm.save_llm_checkpoint"), patch(
-        "agilerl.training.train_llm.tournament_selection_and_mutation"
-    ) as mock_tournament_selection_and_mutation:
+    with (
+        patch("agilerl.training.train_llm.trange"),
+        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        patch(
+            "agilerl.training.train_llm.tournament_selection_and_mutation"
+        ) as mock_tournament_selection_and_mutation,
+    ):
 
         mock_tournament_selection_and_mutation.return_value = [mock_agent]
 
@@ -272,11 +275,14 @@ def test_finetune_llm_reasoning_warning_num_epochs_and_max_steps():
     mock_env.data_batch_size_per_gpu = 1
 
     # Mock other dependencies
-    with patch("agilerl.training.train_llm.trange"), patch(
-        "agilerl.training.train_llm.aggregate_metrics_across_gpus"
-    ) as mock_agg, patch("agilerl.training.train_llm.save_llm_checkpoint"), patch(
-        "agilerl.training.train_llm.tournament_selection_and_mutation"
-    ) as mock_tournament_selection_and_mutation:
+    with (
+        patch("agilerl.training.train_llm.trange"),
+        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        patch(
+            "agilerl.training.train_llm.tournament_selection_and_mutation"
+        ) as mock_tournament_selection_and_mutation,
+    ):
 
         mock_tournament_selection_and_mutation.return_value = [mock_agent]
 
@@ -328,13 +334,13 @@ def test_finetune_llm_reasoning_max_steps_set_from_num_epochs():
     mutation.activation_mut = 0
 
     # Mock other dependencies
-    with patch("agilerl.training.train_llm.trange"), patch(
-        "agilerl.training.train_llm.init_wandb"
-    ), patch("agilerl.training.train_llm.wandb"), patch(
-        "agilerl.training.train_llm.aggregate_metrics_across_gpus"
-    ) as mock_agg, patch(
-        "agilerl.training.train_llm.save_llm_checkpoint"
-    ) as mock_save:
+    with (
+        patch("agilerl.training.train_llm.trange"),
+        patch("agilerl.training.train_llm.init_wandb"),
+        patch("agilerl.training.train_llm.wandb"),
+        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
+    ):
 
         mock_agg.return_value = 0.5
         finetune_llm_reasoning(
@@ -383,12 +389,12 @@ def test_finetune_llm_reasoning_break_on_num_epochs():
     mutation.activation_mut = 0
 
     # Mock other dependencies
-    with patch("agilerl.training.train_llm.trange"), patch(
-        "agilerl.training.train_llm.init_wandb"
-    ), patch("agilerl.training.train_llm.wandb"), patch(
-        "agilerl.training.train_llm.aggregate_metrics_across_gpus"
-    ) as mock_agg, patch(
-        "agilerl.training.train_llm.save_llm_checkpoint"
+    with (
+        patch("agilerl.training.train_llm.trange"),
+        patch("agilerl.training.train_llm.init_wandb"),
+        patch("agilerl.training.train_llm.wandb"),
+        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.training.train_llm.save_llm_checkpoint"),
     ):
 
         mock_env.num_epochs = 2
@@ -440,9 +446,11 @@ def test_finetune_llm_preference_basic_training_loop(use_accelerator):
     mock_env.data_batch_size_per_gpu = 1
 
     # Mock other dependencies
-    with patch("agilerl.training.train_llm.trange"), patch(
-        "agilerl.training.train_llm.aggregate_metrics_across_gpus"
-    ) as mock_agg, patch("agilerl.training.train_llm.save_llm_checkpoint"):
+    with (
+        patch("agilerl.training.train_llm.trange"),
+        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.training.train_llm.save_llm_checkpoint"),
+    ):
 
         mock_agg.return_value = 0.5
         finetune_llm_preference(
@@ -501,15 +509,13 @@ def test_finetune_llm_preference_with_wandb_and_checkpoints(use_accelerator):
     mock_env.data_batch_size_per_gpu = 1
 
     # Mock dependencies
-    with patch("agilerl.training.train_llm.trange") as mock_trange, patch(
-        "agilerl.training.train_llm.init_wandb"
-    ) as mock_init_wandb, patch(
-        "agilerl.training.train_llm.wandb"
-    ) as mock_wandb, patch(
-        "agilerl.training.train_llm.aggregate_metrics_across_gpus"
-    ) as mock_agg, patch(
-        "agilerl.training.train_llm.save_llm_checkpoint"
-    ) as mock_save:
+    with (
+        patch("agilerl.training.train_llm.trange") as mock_trange,
+        patch("agilerl.training.train_llm.init_wandb") as mock_init_wandb,
+        patch("agilerl.training.train_llm.wandb") as mock_wandb,
+        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
+    ):
 
         # Configure mocks
         mock_pbar = Mock()
@@ -580,11 +586,14 @@ def test_finetune_llm_preference_evolvable_training_loop(use_accelerator):
     mutation.activation_mut = 0
 
     # Mock other dependencies
-    with patch("agilerl.training.train_llm.trange"), patch(
-        "agilerl.training.train_llm.aggregate_metrics_across_gpus"
-    ) as mock_agg, patch("agilerl.training.train_llm.save_llm_checkpoint"), patch(
-        "agilerl.training.train_llm.tournament_selection_and_mutation"
-    ) as mock_tournament_selection_and_mutation:
+    with (
+        patch("agilerl.training.train_llm.trange"),
+        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        patch(
+            "agilerl.training.train_llm.tournament_selection_and_mutation"
+        ) as mock_tournament_selection_and_mutation,
+    ):
 
         mock_tournament_selection_and_mutation.return_value = [mock_agent]
 
@@ -643,11 +652,14 @@ def test_finetune_llm_preference_warning_num_epochs_and_max_steps():
     mock_env.data_batch_size_per_gpu = 1
 
     # Mock other dependencies
-    with patch("agilerl.training.train_llm.trange"), patch(
-        "agilerl.training.train_llm.aggregate_metrics_across_gpus"
-    ) as mock_agg, patch("agilerl.training.train_llm.save_llm_checkpoint"), patch(
-        "agilerl.training.train_llm.tournament_selection_and_mutation"
-    ) as mock_tournament_selection_and_mutation:
+    with (
+        patch("agilerl.training.train_llm.trange"),
+        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        patch(
+            "agilerl.training.train_llm.tournament_selection_and_mutation"
+        ) as mock_tournament_selection_and_mutation,
+    ):
 
         mock_tournament_selection_and_mutation.return_value = [mock_agent]
 
@@ -706,12 +718,12 @@ def test_finetune_llm_preference_break_on_num_epochs():
     mutation.activation_mut = 0
 
     # Mock other dependencies
-    with patch("agilerl.training.train_llm.trange"), patch(
-        "agilerl.training.train_llm.init_wandb"
-    ), patch("agilerl.training.train_llm.wandb"), patch(
-        "agilerl.training.train_llm.aggregate_metrics_across_gpus"
-    ) as mock_agg, patch(
-        "agilerl.training.train_llm.save_llm_checkpoint"
+    with (
+        patch("agilerl.training.train_llm.trange"),
+        patch("agilerl.training.train_llm.init_wandb"),
+        patch("agilerl.training.train_llm.wandb"),
+        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.training.train_llm.save_llm_checkpoint"),
     ):
 
         mock_env.num_epochs = 2
