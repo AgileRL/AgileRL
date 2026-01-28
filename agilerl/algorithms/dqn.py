@@ -184,23 +184,7 @@ class DQN(RLAlgorithm):
 
     def init_hook(self) -> None:
         """Resets module parameters for the detached and target networks."""
-        param_vals: TensorDict = from_module(self.actor).detach()
-
-        # NOTE: This removes the target params from the computation graph which
-        # reduces memory overhead and speeds up training, however these won't
-        # appear in the modules parameters
-        target_params: TensorDict = param_vals.clone().lock_()
-
-        # This hook is prompted after performing architecture mutations on policy / evaluation
-        # networks, which will fail since the target network is a shared network that won't be
-        # reintiialized until the end. We can bypass the error safely for this reason.
-        try:
-            target_params.to_module(self.actor_target)
-        except KeyError:
-            pass
-        finally:
-            self.param_vals = param_vals
-            self.target_params = target_params
+        self.actor_target.load_state_dict(self.actor.state_dict())
 
     def get_action(
         self,
@@ -260,8 +244,10 @@ class DQN(RLAlgorithm):
         :return: Selected action(s) as tensor
         :rtype: torch.Tensor
         """
+        self.actor.eval()
         with torch.no_grad():
             q_values = self.actor(obs)
+        self.actor.train()
 
         # Masked random actions
         masked_random_values = torch.rand_like(q_values) * action_mask

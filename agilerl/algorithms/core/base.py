@@ -652,6 +652,9 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :type training: bool
         """
         self.training = training
+        for name, network in self.evolvable_attributes(networks_only=True).items():
+            if "actor" in name:
+                network.train(mode=training)
 
     def get_lr_names(self) -> list[str]:
         """Returns the learning rates of the algorithm."""
