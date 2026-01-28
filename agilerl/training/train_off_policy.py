@@ -5,11 +5,11 @@ from typing import Any, Optional, Union
 
 import gymnasium as gym
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from tensordict import TensorDictBase
 from torch.utils.data import DataLoader
 
+import wandb
 from agilerl.algorithms import DDPG, DQN, TD3, RainbowDQN
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.components import (
@@ -145,7 +145,7 @@ def train_off_policy(
     assert isinstance(max_steps, int), "Number of steps must be an integer."
     assert isinstance(evo_steps, int), "Evolution frequency must be an integer."
     assert isinstance(eps_start, float), "Starting epsilon must be a float."
-    assert isinstance(eps_end, float), "Final value of epsilone must be a float."
+    assert isinstance(eps_end, float), "Final value of epsilon must be a float."
     assert isinstance(eps_decay, float), "Epsilon decay rate must be a float."
     if target is not None:
         assert isinstance(
