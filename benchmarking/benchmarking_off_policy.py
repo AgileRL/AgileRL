@@ -6,7 +6,6 @@ from agilerl.components import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules.dummy import DummyEvolvable
-from agilerl.modules.mlp import EvolvableMLP
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.utils.algo_utils import (
     get_input_size_from_space,
@@ -29,13 +28,10 @@ from benchmarking.networks import BasicNetActorDQN
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
     # Set device
-    device = (
-        "cuda"
-        if torch.cuda.is_available()
-        else ("mps" if torch.backends.mps.is_available() else "cpu")
-    )
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     print("============ AgileRL ============")
-    print("DEVICE: ", device)
+    print(f"DEVICE: {device}")
 
     env = make_vect_envs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
 
@@ -72,12 +68,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
             hidden_sizes=[64, 64],
             output_size=action_dim,
         )
-        actor = EvolvableMLP(
-            num_inputs=state_dim[0],
-            num_outputs=action_dim,
-            hidden_size=[64, 64],
-            device=device,
-        )
+        actor = DummyEvolvable(BasicNetActorDQN, actor_kwargs, device=device)
         critic = None
     else:
         actor = None
@@ -154,8 +145,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
         eps_end=INIT_HP["EPS_END"] if "EPS_END" in INIT_HP else 0.01,
         eps_decay=INIT_HP["EPS_DECAY"] if "EPS_DECAY" in INIT_HP else 0.999,
         target=INIT_HP["TARGET_SCORE"],
-        tournament=None,
-        mutation=None,
+        tournament=tournament,
+        mutation=mutations,
         wb=INIT_HP["WANDB"],
     )
 
@@ -169,9 +160,9 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
 
 
 if __name__ == "__main__":
-    with open("configs/training/dqn/dqn.yaml") as file:
+    with open("configs/training/ddpg/ddpg.yaml") as file:
         config = yaml.safe_load(file)
     INIT_HP = config["INIT_HP"]
     MUTATION_PARAMS = config["MUTATION_PARAMS"]
     NET_CONFIG = config["NET_CONFIG"]
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=True)
+    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False)
