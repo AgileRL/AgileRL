@@ -7,14 +7,14 @@ INIT_HP:
     # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     CHANNELS_LAST: false
     NUM_ENVS: 16               # No. parallel environments for training
-    BATCH_SIZE: 64             # Batch size
+    BATCH_SIZE: 128             # Batch size
     CUDAGRAPHS: false           # Cudagraph optimizations
-    LR: 0.001                  # Learning rate
+    LR: 6.3e-4                  # Learning rate
     MAX_STEPS: 1_000_000       # Max no. steps
     TARGET_SCORE: 200.         # Early training stop at avg score of last 100 episodes
     GAMMA: 0.99                # Discount factor
-    MEMORY_SIZE: 100000        # Max memory buffer size
-    LEARN_STEP: 1              # Learning frequency
+    MEMORY_SIZE: 50000        # Max memory buffer size
+    LEARN_STEP: 4              # Learning frequency
     TAU: 0.001                 # For soft update of target parameters
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
@@ -22,8 +22,11 @@ INIT_HP:
     EVO_STEPS: 10_000          # Evolution frequency
     EVAL_STEPS:                # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
-    LEARNING_DELAY: 1000       # Steps before learning
-    WANDB: false                # Log with Weights and Biases
+    LEARNING_DELAY: 0       # Steps before learning
+    WANDB: true                # Log with Weights and Biases
+    EPS_DECAY: 0.99           # Epsilon decay
+    EPS_START: 1.0             # Epsilon start
+    EPS_END: 0.1              # Epsilon end
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation
@@ -42,11 +45,12 @@ MUTATION_PARAMS:
     MIN_LEARN_STEP: 1
     MAX_LEARN_STEP: 10
 
+
 NET_CONFIG:
-    latent_dim: 64
+    latent_dim: 128
 
     encoder_config:
-        hidden_size: [64]
+        hidden_size: [256]
 
     head_config:
-        hidden_size: [64]
+        hidden_size: [256]
