@@ -20,6 +20,7 @@ from vllm.distributed import (
 def cleanup_after_test(request):
     yield
     if "vllm" in request.node.name:
+        gc.collect()
         cleanup_dist_env_and_memory()
         for attr in dir(ds_groups):
             if attr.startswith("_") and attr.endswith("_GROUP"):

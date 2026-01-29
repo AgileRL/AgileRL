@@ -54,3 +54,13 @@ repos:
     #   rev: 0.27.0
     #   hooks:
     #       - id: check-github-workflows
+    - repo: local
+      hooks:
+          - id: uv-lock
+            name: uv lock
+            entry: >
+                bash -c 'uv lock --check || { echo "uv.lock is out of sync. Run uv lock"; exit 1; } &&
+                git diff --exit-code uv.lock || { echo "uv.lock has unstaged changes. Run git add uv.lock"; exit 1; }'
+            language: system
+            files: ^pyproject\.toml$
+            pass_filenames: false
