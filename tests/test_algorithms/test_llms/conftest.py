@@ -17,6 +17,7 @@ from vllm.distributed.parallel_state import destroy_model_parallel
 
 from tests.utils import (
     force_gpu_memory_release,
+    wait_for_gpu_memory_to_clear,
 )
 
 
@@ -29,6 +30,9 @@ def use_fresh_cache():
 
 @pytest.fixture(autouse=True)
 def cleanup_after_test(request):
+
+    if torch.cuda.is_available() and (num_gpus := torch.cuda.device_count()) > 0:
+        wait_for_gpu_memory_to_clear(devices=list(range(num_gpus)), threshold_ratio=0.2)
 
     yield
 
