@@ -78,6 +78,7 @@ parallel = true
 branch = true
 source = ["agilerl"]
 concurrency = ["multiprocessing"]
+sigterm = true
 
 [tool.coverage.report]
 exclude_lines = [

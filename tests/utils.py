@@ -35,32 +35,26 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
         with suppress(RuntimeError):
             mp.set_start_method("spawn")
 
-        # Get the module
-        module_name = f.__module__
-
         # Create a process with environment variable set
         env = os.environ.copy()
         env["RUNNING_IN_SUBPROCESS"] = "1"
-        env["COVERAGE_PROCESS_START"] = os.path.join(str(AGILERL_PATH), ".coveragerc")
+        env["COVERAGE_PROCESS_START"] = os.path.join(
+            str(AGILERL_PATH), "pyproject.toml"
+        )
 
         with tempfile.TemporaryDirectory() as tempdir:
             output_filepath = os.path.join(tempdir, "new_process.tmp")
 
             # `cloudpickle` allows pickling complex functions directly
-            input_bytes = cloudpickle.dumps((f, output_filepath))
+            payload = (f, args, kwargs, output_filepath)
+            input_bytes = cloudpickle.dumps(payload)
 
             repo_root = str(AGILERL_PATH.resolve())
 
             env = dict(env or os.environ)
             env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
 
-            # Check if running under coverage and configure subprocess coverage
-            # coverage_config = AGILERL_PATH / "pyproject.toml"
-            # if os.environ.get("COVERAGE_RUN") or os.environ.get("COVERAGE_PROCESS_START"):
-            #     env["COVERAGE_PROCESS_START"] = str(coverage_config)
-            #     cmd = [sys.executable, "-m", "coverage", "run", f"--rcfile={coverage_config}", "-m", module_name]
-            # else:
-            cmd = [sys.executable, "-m", module_name]
+            cmd = [sys.executable, "-m", "tests.subprocess_runner"]
 
             returned = subprocess.run(
                 cmd, input=input_bytes, capture_output=True, env=env

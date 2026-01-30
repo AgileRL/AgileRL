@@ -871,24 +871,31 @@ def test_grpo_test_vllm(
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize("group_size", [5])
-@pytest.mark.parametrize("use_separate_reference_adapter", [
-    # False, 
-    True
-    ])
+@pytest.mark.parametrize(
+    "use_separate_reference_adapter",
+    [
+        # False,
+        True
+    ],
+)
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
     [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
 )
 @pytest.mark.parametrize(
-    "reduce_memory_peak, micro_batch_size_per_gpu", [
-        # (True, None), 
+    "reduce_memory_peak, micro_batch_size_per_gpu",
+    [
+        # (True, None),
         (False, 2)
-        ]
+    ],
 )
-@pytest.mark.parametrize("from_name", [
-    # True, 
-    False
-])
+@pytest.mark.parametrize(
+    "from_name",
+    [
+        # True,
+        False
+    ],
+)
 def test_init_grpo_with_accelerator(
     deepspeed_env,
     grpo_factory,
