@@ -5,13 +5,11 @@ import gc
 import os
 import subprocess
 import sys
-import tempfile
 import time
 from contextlib import suppress
 from pathlib import Path
 from typing import Callable
 
-import cloudpickle
 import torch
 from typing_extensions import ParamSpec
 
@@ -21,7 +19,11 @@ _P = ParamSpec("_P")
 
 
 def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]:
-    """Decorator to spawn a new process for each test function."""
+    """Decorator to spawn a new process for each test function.
+
+    Runs the test in a fresh subprocess via pytest to ensure clean GPU state.
+    Coverage is collected via sitecustomize.py when COVERAGE_PROCESS_START is set.
+    """
 
     @functools.wraps(f)
     def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> None:
@@ -42,32 +44,32 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
             str(AGILERL_PATH), "pyproject.toml"
         )
 
-        with tempfile.TemporaryDirectory() as tempdir:
-            output_filepath = os.path.join(tempdir, "new_process.tmp")
+        repo_root = str(AGILERL_PATH.resolve())
+        env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
 
-            # `cloudpickle` allows pickling complex functions directly
-            payload = (f, args, kwargs, output_filepath)
-            input_bytes = cloudpickle.dumps(payload)
+        # Get module file path and test name to run pytest with specific test
+        module_file = sys.modules[f.__module__].__file__
+        test_name = f.__name__
 
-            repo_root = str(AGILERL_PATH.resolve())
+        cmd = [
+            sys.executable,
+            "-m",
+            "pytest",
+            f"{module_file}::{test_name}",
+            "-v",
+            "-x",
+        ]
 
-            env = dict(env or os.environ)
-            env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
+        returned = subprocess.run(cmd, capture_output=True, env=env)
 
-            cmd = [sys.executable, "-m", "tests.subprocess_runner"]
-
-            returned = subprocess.run(
-                cmd, input=input_bytes, capture_output=True, env=env
-            )
-
-            # check if the subprocess is successful
-            try:
-                returned.check_returncode()
-            except Exception as e:
-                # wrap raised exception to provide more information
-                raise RuntimeError(
-                    f"Error raised in subprocess:\n{returned.stderr.decode()}"
-                ) from e
+        # Check if the subprocess is successful
+        try:
+            returned.check_returncode()
+        except Exception as e:
+            # Wrap raised exception to provide more information
+            raise RuntimeError(
+                f"Error in subprocess:\nstdout:\n{returned.stdout.decode()}\nstderr:\n{returned.stderr.decode()}"
+            ) from e
 
     return wrapper
 
