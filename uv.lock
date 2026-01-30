@@ -101,6 +101,8 @@ llm = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "cloudpickle" },
+    { name = "nvidia-ml-py" },
     { name = "pytest" },
     { name = "pytest-cov" },
 ]
@@ -157,6 +159,8 @@ provides-extras = ["llm", "all"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "cloudpickle", specifier = ">=3.0.0" },
+    { name = "nvidia-ml-py", specifier = ">=12.0.0" },
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "pytest-cov", specifier = ">=7.0.0" },
 ]

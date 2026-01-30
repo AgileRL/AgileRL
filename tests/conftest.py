@@ -1,4 +1,5 @@
 import gc
+import os
 import socket
 
 import numpy as np
@@ -289,7 +290,6 @@ def get_free_port():
 
 @pytest.fixture
 def deepspeed_env():
-    import os
 
     dynamic_dist_env = dist_env.copy()
     dynamic_dist_env["MASTER_PORT"] = str(get_free_port())

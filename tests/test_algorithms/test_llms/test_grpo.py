@@ -34,6 +34,7 @@ from agilerl.algorithms.core.base import (
 )
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig, clone_llm
+from tests.utils import spawn_new_process_for_each_test
 
 deepspeed_base_config = {
     "bf16": {
@@ -366,6 +367,7 @@ def grpo_factory():
     return generate_grpo
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [True])
 @pytest.mark.parametrize(
@@ -468,8 +470,10 @@ def test_grpo_save_load_checkpoint_vllm(
                     assert torch.equal(getattr(new_grpo, attr), getattr(grpo, attr))
     new_grpo.clean_up()
     grpo.clean_up()
+    del grpo, new_grpo
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [True])
 @pytest.mark.parametrize("use_separate_reference_adapter", [True])
@@ -537,6 +541,7 @@ def test_grpo_clean_up_vllm(
     del grpo
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize(
     "config",
     [
@@ -627,8 +632,10 @@ def test_grpo_move_model_to_vllm(
         grpo._move_model_to_vllm()
 
     grpo.clean_up()
+    del grpo
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
@@ -703,8 +710,10 @@ def test_get_action_grpo_including_vllm(
     if grpo.accelerator is None:
         assert not grpo.actor.training
     grpo.clean_up()
+    del grpo
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
@@ -790,8 +799,10 @@ def test_get_action_grpo_vllm_sleep_mode(
     mock_instance.sleep.assert_called()
     mock_instance.wake_up.assert_called()
     grpo.clean_up()
+    del grpo
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [True])
 @pytest.mark.parametrize("use_separate_reference_adapter", [True])
@@ -844,6 +855,7 @@ def test_grpo_test_vllm(
     grpo.clean_up()
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize(
     "config, use_deepspeed_optimizer",
     [
@@ -947,6 +959,7 @@ def test_init_grpo_with_accelerator(
     grpo.clean_up()
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_vllm", [True])
@@ -1026,6 +1039,7 @@ def test_init_grpo_vllm_with_tp_gt_one(
     grpo.clean_up()
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_vllm", [True])
@@ -1101,6 +1115,7 @@ def test_init_grpo_vllm_tp_value_error(
         )
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("vocab_size", [1000])
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False])
@@ -1137,6 +1152,7 @@ def test_init_grpo_scheduler_warning_no_accelerator(
         )
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("vocab_size", [1000])
@@ -1192,6 +1208,7 @@ def test_init_grpo_batch_size_value_error(
         )
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("vocab_size", [1000])
@@ -1244,6 +1261,7 @@ def test_init_grpo_max_model_len_and_max_output_tokens_none_error(
         )
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("vocab_size", [1000])
@@ -1303,6 +1321,7 @@ def test_init_grpo_batch_size_grad_accum_error(
         )
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize(
     "config, use_deepspeed_optimizer",
     [
@@ -1378,6 +1397,7 @@ def test_init_grpo_with_no_accelerator(
     grpo.clean_up()
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_3])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
@@ -1426,6 +1446,7 @@ def test_init_grpo_zero3_warning(
     grpo.clean_up()
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
@@ -1477,6 +1498,7 @@ def test_init_grpo_lr_warning(
     grpo.clean_up()
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
@@ -1525,6 +1547,7 @@ def test_init_grpo_max_grad_norm_warning(
         )
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_1_with_scheduler])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [True])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
@@ -1571,6 +1594,7 @@ def test_init_grpo_scheduler_warning(
         )
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False])
@@ -1627,6 +1651,7 @@ def test_init_grpo_micro_batch_size_per_gpu_value_error(
         )
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False])
@@ -1686,6 +1711,7 @@ def test_init_grpo_micro_batch_size_per_gpu_division_error(
     )
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_separate_reference_adapter", [True])
@@ -1798,6 +1824,7 @@ def test_get_action_grpo_vllm_multiple_gpus(
     grpo.clean_up()
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
@@ -1862,6 +1889,7 @@ def test_calculate_advantage(
     grpo.clean_up()
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
@@ -1920,6 +1948,7 @@ def test_calculate_kl_divergence(
     grpo.clean_up()
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
@@ -1981,6 +2010,7 @@ def test_grpo_loss(
     grpo.clean_up()
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
@@ -2071,6 +2101,7 @@ def test_grpo_learn(
     grpo.clean_up()
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
@@ -2129,6 +2160,7 @@ def test_get_logprobs(
     grpo.clean_up()
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [None])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
@@ -2183,6 +2215,7 @@ def test_get_backward_pass_with_scheduler(
     grpo.clean_up()
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
@@ -2261,6 +2294,7 @@ def test_grpo_load():
         GRPO.load("path")
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize(
     "config, use_deepspeed_optimizer",
     [(deepspeed_config_stage_2, True), (None, False), (deepspeed_config_stage_1, True)],
@@ -2362,6 +2396,7 @@ def test_grpo_save_load_checkpoint(
     new_grpo.clean_up()
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [None])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False])
@@ -2419,6 +2454,7 @@ def test_save_load_distributed_actor_no_accelerator(
     grpo.clean_up()
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2, deepspeed_config_stage_1])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False, True])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
@@ -2533,6 +2569,7 @@ def test_grpo_save_load_distributed_actor(
     new_grpo.clean_up()
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.skip(
     reason="This line adds no additional coverage, methods not dependent on vllm."
 )
@@ -2649,6 +2686,7 @@ def test_grpo_save_load_distributed_actor_vllm(
     new_grpo.clean_up()
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2, deepspeed_config_stage_1])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False, True])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
@@ -2751,6 +2789,7 @@ def test_grpo_clone_with_accelerator(
     new_grpo.clean_up()
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [True])
 @pytest.mark.parametrize("use_separate_reference_adapter", [True])
@@ -2854,6 +2893,7 @@ def test_grpo_clone_with_accelerator_vllm(
     new_grpo.clean_up()
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize(
     "config", [None, deepspeed_config_stage_2, deepspeed_config_stage_1]
 )
@@ -2909,6 +2949,7 @@ def test_grpo_test(
     grpo.clean_up()
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("vocab_size", [1000])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
@@ -2968,6 +3009,7 @@ def test_clone_llm_peft_raises_error():
     assert "Invalid 'original_model' type: <class 'int'>" in str(e.value)
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize(
     "config", [None, deepspeed_config_stage_2, deepspeed_config_stage_1]
 )
@@ -3025,6 +3067,7 @@ def test_grpo_clean_up(
     del grpo
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [None])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False, True])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
@@ -3080,6 +3123,7 @@ def test_grpo_preprocess_observation(
     grpo.clean_up()
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [None])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False, True])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
@@ -3137,6 +3181,7 @@ def test_load_distributed_actor_value_error(
     grpo.clean_up()
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [None])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False, True])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
@@ -3193,6 +3238,7 @@ def test_load_distributed_actor_warning(
     grpo.clean_up()
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("config", [None])
 def test_init_grpo_lora_config_warning(
@@ -3229,6 +3275,7 @@ def test_init_grpo_lora_config_warning(
         )
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize(
     "config",
     [
@@ -3313,6 +3360,7 @@ def test_grpo_update_lr(
     grpo.clean_up()
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize(
     "config", [None, deepspeed_config_stage_2, deepspeed_config_stage_1]
 )
@@ -3389,6 +3437,7 @@ def test_set_reference_policy(
     grpo.clean_up()
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize(
     "config", [None, deepspeed_config_stage_2, deepspeed_config_stage_1]
 )
@@ -3477,6 +3526,7 @@ def test_grpo_ref_actor_is_same_as_actor_after_learning_reference_adapater(
     grpo.clean_up()
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize(
     "config", [None, deepspeed_config_stage_2, deepspeed_config_stage_1]
 )
@@ -3545,6 +3595,7 @@ def test_grpo_set_reference_policy_with_wrong_adapter_name(
     grpo.clean_up()
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False])

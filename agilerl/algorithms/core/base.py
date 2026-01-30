@@ -2214,8 +2214,17 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 None,
                 None,
             )
-        if hasattr(self, "llm"):
-            del self.llm.llm_engine.model_executor
+        if hasattr(self, "llm") and self.llm is not None:
+            # Properly shutdown vLLM engine
+            if hasattr(self.llm, "llm_engine"):
+                engine = self.llm.llm_engine
+                if hasattr(engine, "engine_core") and hasattr(
+                    engine.engine_core, "shutdown"
+                ):
+                    engine.engine_core.shutdown()
+                # Delete model_executor for v0 compatibility
+                if hasattr(engine, "model_executor"):
+                    del engine.model_executor
             del self.llm
         gc.collect()
         torch.cuda.empty_cache()

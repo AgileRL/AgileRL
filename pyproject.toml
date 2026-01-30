@@ -58,6 +58,8 @@ all = [
 dev = [
     "pytest>=9.0.2",
     "pytest-cov>=7.0.0",
+    "nvidia-ml-py>=12.0.0",  # For GPU memory monitoring in tests
+    "cloudpickle>=3.0.0",  # For exception serialization in forked tests
 ]
 docs = [
     "furo>=2025.12.19",
@@ -69,7 +71,19 @@ docs = [
 
 [tool.pytest.ini_options]
 # Deterministic ordering for tests; useful for pytest-xdist.
-env = ["PYTHONHASHSEED=0", "VLLM_ATTENTION_BACKEND=XFORMERS", "VLLM_USE_FLASHINFER_SAMPLER=0"]
+env = ["PYTHONHASHSEED=0", "VLLM_ATTENTION_BACKEND=XFORMERS", "VLLM_USE_FLASHINFER_SAMPLER=0", "AGILERL_TEST_CLEAN_GPU_MEMORY=1"]
+
+[tool.coverage.run]
+parallel = true
+branch = true
+source = ["agilerl"]
+concurrency = ["multiprocessing"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+]
 
 [build-system]
 requires = ["hatchling"]
