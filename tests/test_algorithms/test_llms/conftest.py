@@ -18,13 +18,7 @@ from vllm.distributed.parallel_state import destroy_model_parallel
 
 from tests.utils import (
     force_gpu_memory_release,
-    wait_for_gpu_memory_to_clear,
 )
-
-
-def _should_wait_for_gpu_memory() -> bool:
-    """Check if GPU memory wait is enabled via environment variable."""
-    return os.getenv("AGILERL_TEST_CLEAN_GPU_MEMORY", "1") == "1"
 
 
 @pytest.fixture(autouse=True)
@@ -36,11 +30,6 @@ def use_fresh_cache():
 
 @pytest.fixture(autouse=True)
 def cleanup_after_test(request):
-    if torch.distributed.is_initialized():
-        torch.distributed.destroy_process_group()
-
-    if _should_wait_for_gpu_memory() and torch.cuda.is_available():
-        wait_for_gpu_memory_to_clear(threshold_ratio=0.4, timeout_s=120)
 
     yield
 

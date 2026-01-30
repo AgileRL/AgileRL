@@ -41,6 +41,7 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
         # Create a process with environment variable set
         env = os.environ.copy()
         env["RUNNING_IN_SUBPROCESS"] = "1"
+        env["COVERAGE_PROCESS_START"] = os.path.join(str(AGILERL_PATH), ".coveragerc")
 
         with tempfile.TemporaryDirectory() as tempdir:
             output_filepath = os.path.join(tempdir, "new_process.tmp")
