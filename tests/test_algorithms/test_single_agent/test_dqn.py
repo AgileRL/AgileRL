@@ -396,11 +396,11 @@ def test_soft_update(vector_space, discrete_space):
 
     eval_params = list(dqn.actor.parameters())
     target_params = list(dqn.actor_target.parameters())
+    assert len(eval_params) == len(target_params)
     expected_params = [
         dqn.tau * eval_param + (1.0 - dqn.tau) * target_param
         for eval_param, target_param in zip(eval_params, target_params)
     ]
-
     assert all(
         torch.allclose(expected_param, target_param)
         for expected_param, target_param in zip(expected_params, target_params)

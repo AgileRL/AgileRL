@@ -331,7 +331,7 @@ class ILQL(nn.Module):
             tok_emb=input_embeddings,
             attn_mask=input_attn_mask,
             pos=position_ids,
-            **qv_kwargs
+            **qv_kwargs,
         )
         hidden_states = model_hidden_states[-1][:, prefix_t:, :]
 
@@ -345,7 +345,7 @@ class ILQL(nn.Module):
                 tok_emb=target_input_embeddings,
                 attn_mask=input_attn_mask,
                 pos=position_ids,
-                **target_kwargs
+                **target_kwargs,
             )
         target_hidden_states = target_hidden_states[-1][:, prefix_t:, :]
 
@@ -373,7 +373,7 @@ class ILQL(nn.Module):
                         tok_emb=policy_input_embeddings,
                         attn_mask=input_attn_mask,
                         pos=position_ids,
-                        **policy_kwargs
+                        **policy_kwargs,
                     )
             else:
                 (
@@ -385,7 +385,7 @@ class ILQL(nn.Module):
                     tok_emb=policy_input_embeddings,
                     attn_mask=input_attn_mask,
                     pos=position_ids,
-                    **policy_kwargs
+                    **policy_kwargs,
                 )
             policy_hidden_states = policy_hidden_states[-1][:, prefix_t:, :]
 
@@ -626,7 +626,7 @@ class ILQL(nn.Module):
         qv_kwargs=None,
         policy_kwargs=None,
         target_kwargs=None,
-        **kwargs
+        **kwargs,
     ):
         prepared_inputs = self.prepare_inputs(items)
         tokens, attn_mask = prepared_inputs["tokens"], prepared_inputs["attn_mask"]

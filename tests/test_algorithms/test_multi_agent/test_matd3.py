@@ -1272,7 +1272,7 @@ def test_matd3_algorithm_test_loop(
             **dict(
                 observation_spaces=observation_spaces[0],
                 action_spaces=ma_discrete_space,
-            )
+            ),
         )
     else:
         env = DummyMultiEnv(observation_spaces[0], ma_discrete_space)

@@ -55,7 +55,7 @@ class BC_LM(nn.Module):
         prefix_embs: Optional[torch.Tensor] = None,
         prefix_attn_mask: Optional[torch.Tensor] = None,
         remove_prefix_position_embs: bool = False,
-        **kwargs
+        **kwargs,
     ):
         # tokens – b,t
         # attn_mask – b,t
@@ -83,7 +83,7 @@ class BC_LM(nn.Module):
             tok_emb=input_embeddings,
             attn_mask=input_attn_mask,
             pos=position_ids,
-            **kwargs
+            **kwargs,
         )
         return model_outputs, model_past_key_values
 

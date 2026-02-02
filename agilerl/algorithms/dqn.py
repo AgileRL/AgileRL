@@ -7,7 +7,6 @@ import torch._dynamo
 import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
-from tensordict import TensorDict, from_module
 from tensordict.nn import CudaGraphModule
 
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
@@ -144,8 +143,8 @@ class DQN(RLAlgorithm):
             self.actor = create_actor()
             self.actor_target = create_actor()
 
-        # Copy over actor weights to target
-        self.init_hook()
+        # Initialize target network (same pattern as DDPG; post-mutation sync via reinit_shared_networks)
+        self.actor_target.load_state_dict(self.actor.state_dict())
 
         # Initialize optimizer with OptimizerWrapper
         self.optimizer = OptimizerWrapper(
@@ -172,7 +171,7 @@ class DQN(RLAlgorithm):
             self.update = CudaGraphModule(self.update)
             self._get_action = CudaGraphModule(self._get_action)
 
-        # Register DQN network groups and mutation hook
+        # Register DQN network groups
         self.register_network_group(
             NetworkGroup(
                 eval_network=self.actor,
@@ -180,27 +179,6 @@ class DQN(RLAlgorithm):
                 policy=True,
             )
         )
-        self.register_mutation_hook(self.init_hook)
-
-    def init_hook(self) -> None:
-        """Resets module parameters for the detached and target networks."""
-        param_vals: TensorDict = from_module(self.actor).detach()
-
-        # NOTE: This removes the target params from the computation graph which
-        # reduces memory overhead and speeds up training, however these won't
-        # appear in the modules parameters
-        target_params: TensorDict = param_vals.clone().lock_()
-
-        # This hook is prompted after performing architecture mutations on policy / evaluation
-        # networks, which will fail since the target network is a shared network that won't be
-        # reintiialized until the end. We can bypass the error safely for this reason.
-        try:
-            target_params.to_module(self.actor_target)
-        except KeyError:
-            pass
-        finally:
-            self.param_vals = param_vals
-            self.target_params = target_params
 
     def get_action(
         self,
@@ -260,8 +238,10 @@ class DQN(RLAlgorithm):
         :return: Selected action(s) as tensor
         :rtype: torch.Tensor
         """
+        self.actor.eval()
         with torch.no_grad():
             q_values = self.actor(obs)
+        self.actor.train()
 
         # Masked random actions
         masked_random_values = torch.rand_like(q_values) * action_mask
