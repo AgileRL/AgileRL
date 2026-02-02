@@ -7,7 +7,6 @@ import torch._dynamo
 import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
-from tensordict import TensorDict, from_module
 from tensordict.nn import CudaGraphModule
 
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
