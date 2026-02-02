@@ -143,8 +143,8 @@ class DQN(RLAlgorithm):
             self.actor = create_actor()
             self.actor_target = create_actor()
 
-        # Copy over actor weights to target
-        self.init_hook()
+        # Initialize target network (same pattern as DDPG; post-mutation sync via reinit_shared_networks)
+        self.actor_target.load_state_dict(self.actor.state_dict())
 
         # Initialize optimizer with OptimizerWrapper
         self.optimizer = OptimizerWrapper(
@@ -171,7 +171,7 @@ class DQN(RLAlgorithm):
             self.update = CudaGraphModule(self.update)
             self._get_action = CudaGraphModule(self._get_action)
 
-        # Register DQN network groups and mutation hook
+        # Register DQN network groups
         self.register_network_group(
             NetworkGroup(
                 eval_network=self.actor,
@@ -179,11 +179,6 @@ class DQN(RLAlgorithm):
                 policy=True,
             )
         )
-        self.register_mutation_hook(self.init_hook)
-
-    def init_hook(self) -> None:
-        """Resets module parameters for the detached and target networks."""
-        self.actor_target.load_state_dict(self.actor.state_dict())
 
     def get_action(
         self,
