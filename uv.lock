@@ -117,8 +117,8 @@ requires-dist = [
     { name = "accelerate", specifier = ">=1.7.0" },
     { name = "datasets", marker = "extra == 'all'", specifier = "==4.4.1" },
     { name = "datasets", marker = "extra == 'llm'", specifier = "==4.4.1" },
-    { name = "deepspeed", marker = "extra == 'all'", specifier = ">=0.17.1" },
-    { name = "deepspeed", marker = "extra == 'llm'", specifier = ">=0.17.1" },
+    { name = "deepspeed", marker = "extra == 'all'", specifier = "~=0.17.1" },
+    { name = "deepspeed", marker = "extra == 'llm'", specifier = "~=0.17.1" },
     { name = "dill", specifier = ">=0.3.7" },
     { name = "fastrand", specifier = ">=1.3.0" },
     { name = "flatten-dict", specifier = ">=0.4.2" },
@@ -133,8 +133,8 @@ requires-dist = [
     { name = "omegaconf", specifier = ">=2.3.0" },
     { name = "packaging", specifier = ">=20.0" },
     { name = "pandas", specifier = ">=2.2.3" },
-    { name = "peft", marker = "extra == 'all'", specifier = ">=0.18.0" },
-    { name = "peft", marker = "extra == 'llm'", specifier = ">=0.18.0" },
+    { name = "peft", marker = "extra == 'all'", specifier = "~=0.18.0" },
+    { name = "peft", marker = "extra == 'llm'", specifier = "~=0.18.0" },
     { name = "pettingzoo", specifier = ">=1.23.1" },
     { name = "pre-commit", specifier = ">=3.4.0" },
     { name = "pygame", specifier = ">=2.6.0" },
@@ -146,11 +146,11 @@ requires-dist = [
     { name = "termcolor", specifier = ">=1.1.0" },
     { name = "torch", specifier = "==2.7.1" },
     { name = "tqdm", specifier = ">=4.66.4" },
-    { name = "transformers", marker = "extra == 'all'", specifier = ">=4.57.1" },
-    { name = "transformers", marker = "extra == 'llm'", specifier = ">=4.57.1" },
+    { name = "transformers", marker = "extra == 'all'", specifier = "~=4.57.1" },
+    { name = "transformers", marker = "extra == 'llm'", specifier = "~=4.57.1" },
     { name = "ucimlrepo", specifier = ">=0.0.3" },
-    { name = "vllm", marker = "extra == 'all'", specifier = "==0.10.0" },
-    { name = "vllm", marker = "extra == 'llm'", specifier = "==0.10.0" },
+    { name = "vllm", marker = "extra == 'all'", specifier = "~=0.10.0" },
+    { name = "vllm", marker = "extra == 'llm'", specifier = "~=0.10.0" },
     { name = "wandb", specifier = ">=0.17.6" },
 ]
 provides-extras = ["llm", "all"]
@@ -934,7 +934,7 @@ wheels = [
 
 [[package]]
 name = "deepspeed"
-version = "0.18.5"
+version = "0.17.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "einops" },
@@ -949,7 +949,7 @@ dependencies = [
     { name = "torch" },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ca/0a/97f1896665690fb6199342284a6afb96cdfe10603f5edf83d1386ecfd081/deepspeed-0.18.5.tar.gz", hash = "sha256:fa35e6e0f50c9a377854b58bd445bf4fb809f2a6a2896099e7cce6b75d10a3d1", size = 1626650, upload-time = "2026-01-30T18:22:45.331Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d4/a9/6130c78d84980ed636092be1a262d6429d539105724e675b6f65ef74a05e/deepspeed-0.17.6.tar.gz", hash = "sha256:b3318064ee5798e8a27d201ea8b888f0439973c4eac9af9ab381dd1862ebdf45", size = 1592402, upload-time = "2025-09-19T19:57:50.473Z" }
 
 [[package]]
 name = "depyf"
