@@ -366,6 +366,10 @@ def grpo_factory():
     return generate_grpo
 
 
+# NOTE: we may need to run some of these tests isolated in their own subprocesses to enable clean and
+# complete GPU cleanup.
+
+
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [True])
 @pytest.mark.parametrize(
