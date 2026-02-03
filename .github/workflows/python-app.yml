@@ -6,10 +6,12 @@ on:
         branches: [main, nightly]
         paths:
             - agilerl/**
+            - pyproject.toml
     pull_request:
         branches: [main, nightly]
         paths:
             - agilerl/**
+            - pyproject.toml
 
 permissions:
     contents: read
