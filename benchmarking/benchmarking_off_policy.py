@@ -6,6 +6,7 @@ from agilerl.components import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules.dummy import DummyEvolvable
+from agilerl.modules.mlp import EvolvableMLP
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.utils.algo_utils import (
     get_input_size_from_space,
@@ -64,11 +65,12 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
     if use_net:
         # Currently set up for DQN
         actor_kwargs = dict(
-            input_size=state_dim[0],
-            hidden_sizes=[64, 64],
-            output_size=action_dim,
+            num_inputs=state_dim[0],
+            num_outputs=action_dim,
+            hidden_size=[64, 64],
+            activation="ReLU",
         )
-        actor = DummyEvolvable(BasicNetActorDQN, actor_kwargs, device=device)
+        actor = EvolvableMLP(**actor_kwargs, device=device)
         critic = None
     else:
         actor = None
