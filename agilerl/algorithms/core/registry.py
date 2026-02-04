@@ -247,7 +247,7 @@ class NetworkGroup:
     """Dataclass for storing a group of networks. This consists of an evaluation network (i.e.
     a network that is optimized during training) and, optionally, some other networks that
     share parameters with the evaluation network (e.g. the target network in DQN). If the
-    networks are passed as an agilerl.modules.base.ModuleDict, we assume that the networks
+    networks are passed as an `agilerl.modules.base.ModuleDict` object, we assume that the networks
     are part of a multiagent setting.
 
     :param eval_network: The evaluation network.

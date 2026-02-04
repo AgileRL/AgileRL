@@ -1,11 +1,9 @@
 import re
 
 from accelerate import Accelerator
-from datasets import load_dataset
-from peft import LoraConfig
 from torch.utils.data import Dataset
-from transformers import AutoTokenizer
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -13,6 +11,15 @@ from agilerl.training.train_llm import finetune_llm_reasoning
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import ReasoningGym
 from agilerl.utils.utils import create_population
+
+if HAS_LLM_DEPENDENCIES:
+    from datasets import load_dataset
+    from peft import LoraConfig
+    from transformers import AutoTokenizer
+else:
+    raise ImportError(
+        "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`."
+    )
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"

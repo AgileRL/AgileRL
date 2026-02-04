@@ -110,17 +110,28 @@ class DeterministicActor(EvolvableNetwork):
         self.build_network_head(head_config)
         self.output_activation = head_config.get("output_activation", output_activation)
 
+    def unscale_action(self, action: torch.Tensor) -> torch.Tensor:
+        """Unscale an action to the original action space.
+
+        :param action: Action outputted by the network.
+        :type action: torch.Tensor
+        :return: Unscaled action.
+        :rtype: torch.Tensor
+        """
+        return self.action_low + (self.action_high - self.action_low) * action
+
     @torch.compiler.disable
     @staticmethod
-    def rescale_action(
+    def scale_action(
         action: torch.Tensor,
         low: torch.Tensor,
         high: torch.Tensor,
         output_activation: Optional[str] = None,
     ) -> torch.Tensor:
-        """Rescale an action to the original action space.
+        """Rescale an action from the bounds of the output activation function to
+        the that of the action space [low, high].
 
-        :param action: Action.
+        :param action: Action outputted by the network.
         :type action: torch.Tensor
         :param low: Minimum action.
         :type low: torch.Tensor
@@ -128,7 +139,7 @@ class DeterministicActor(EvolvableNetwork):
         :type high: torch.Tensor
         :param output_activation: Output activation function.
         :type output_activation: Optional[str]
-        :return: Rescaled action.
+        :return: Scaled action.
         :rtype: torch.Tensor
         """
         if output_activation in ["Tanh", "Softsign"]:
@@ -175,7 +186,7 @@ class DeterministicActor(EvolvableNetwork):
 
         # Action scaling only relevant for continuous action spaces
         if isinstance(self.action_space, spaces.Box) and self.clip_actions:
-            action = DeterministicActor.rescale_action(
+            action = DeterministicActor.scale_action(
                 action=action,
                 low=self.action_low,
                 high=self.action_high,

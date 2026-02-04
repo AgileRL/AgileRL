@@ -7,9 +7,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from gymnasium import spaces
-from scipy.ndimage import gaussian_filter1d
 from tensordict import TensorDict
-from ucimlrepo import fetch_ucirepo
+
+from tutorials.utils import require_package
+
+with require_package():
+    from scipy.ndimage import gaussian_filter1d
+    from ucimlrepo import fetch_ucirepo
 
 from agilerl.algorithms import NeuralTS
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter

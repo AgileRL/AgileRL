@@ -221,7 +221,8 @@ class DDPG(RLAlgorithm):
             else:
                 critic_head_config = MlpNetConfig(hidden_size=[64])
 
-            critic_net_config = copy.deepcopy(net_config)
+            critic_net_config: dict[str, Any] = copy.deepcopy(net_config)
+            critic_net_config.pop("clip_actions", None)
             critic_net_config["head_config"] = critic_head_config
 
             def create_actor():
