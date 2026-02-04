@@ -1498,8 +1498,10 @@ def test_train_off_policy_agent_calls_made_rainbow(
 def test_train_off_policy_save_elite_warning(
     env, population_off_policy, tournament, mutations, memory
 ):
-    warning_string = "'save_elite' set to False but 'elite_path' has been defined, elite will not\
+    warning_string = (
+        "'save_elite' set to False but 'elite_path' has been defined, elite will not\
                       be saved unless 'save_elite' is set to True."
+    )
     with pytest.warns(match=warning_string):
         pop, pop_fitnesses = train_off_policy(
             env,
@@ -2137,8 +2139,10 @@ def test_train_on_policy_save_elite_warning(
     tournament,
     mutations,
 ):
-    warning_string = "'save_elite' set to False but 'elite_path' has been defined, elite will not\
+    warning_string = (
+        "'save_elite' set to False but 'elite_path' has been defined, elite will not\
                       be saved unless 'save_elite' is set to True."
+    )
     with pytest.warns(match=warning_string):
         pop, pop_fitnesses = train_on_policy(
             env,
@@ -2703,8 +2707,10 @@ def test_train_multi_agent_on_policy_rgb_vectorized(
 def test_train_multi_save_elite_warning(
     multi_env, population_multi_agent, on_policy, multi_memory, tournament, mutations
 ):
-    warning_string = "'save_elite' set to False but 'elite_path' has been defined, elite will not\
+    warning_string = (
+        "'save_elite' set to False but 'elite_path' has been defined, elite will not\
                       be saved unless 'save_elite' is set to True."
+    )
     with pytest.warns(match=warning_string):
         pop, pop_fitnesses = train_multi_agent_off_policy(
             multi_env,
@@ -2730,8 +2736,10 @@ def test_train_multi_save_elite_warning(
 def test_train_multi_save_elite_warning_on_policy(
     multi_env, population_multi_agent, on_policy, multi_memory, tournament, mutations
 ):
-    warning_string = "'save_elite' set to False but 'elite_path' has been defined, elite will not\
+    warning_string = (
+        "'save_elite' set to False but 'elite_path' has been defined, elite will not\
                       be saved unless 'save_elite' is set to True."
+    )
     with pytest.warns(match=warning_string):
         pop, pop_fitnesses = train_multi_agent_on_policy(
             multi_env,
@@ -3567,8 +3575,10 @@ def test_train_offline_save_elite_warning(
     offline_init_hp,
     dummy_h5py_data,
 ):
-    warning_string = "'save_elite' set to False but 'elite_path' has been defined, elite will not\
+    warning_string = (
+        "'save_elite' set to False but 'elite_path' has been defined, elite will not\
                       be saved unless 'save_elite' is set to True."
+    )
     with pytest.warns(match=warning_string):
         pop, pop_fitness = train_offline(
             env,
@@ -4057,8 +4067,10 @@ def test_train_bandit_agent_calls_made(
 def test_train_bandit_save_elite_warning(
     bandit_env, population_bandit, tournament, mutations, bandit_memory
 ):
-    warning_string = "'save_elite' set to False but 'elite_path' has been defined, elite will not\
+    warning_string = (
+        "'save_elite' set to False but 'elite_path' has been defined, elite will not\
                       be saved unless 'save_elite' is set to True."
+    )
     with pytest.warns(match=warning_string):
         pop, pop_fitnesses = train_bandits(
             bandit_env,
