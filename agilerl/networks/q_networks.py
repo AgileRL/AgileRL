@@ -1,3 +1,4 @@
+import warnings
 from dataclasses import asdict
 from typing import Any, Optional, Union
 
@@ -10,7 +11,11 @@ from agilerl.modules.configs import MlpNetConfig, NetConfig
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.custom_modules import DuelingDistributionalMLP
 from agilerl.typing import ArrayOrTensor, NetConfigType, TorchObsType
-from agilerl.utils.evolvable_networks import get_default_encoder_config, is_image_space
+from agilerl.utils.evolvable_networks import (
+    get_default_encoder_config,
+    is_image_space,
+    is_mlp_net_config,
+)
 
 
 class QNetwork(EvolvableNetwork):
@@ -313,9 +318,6 @@ class ContinuousQNetwork(EvolvableNetwork):
     :type simba: bool
     :param recurrent: Whether to use a recurrent network. Defaults to False.
     :type recurrent: bool
-    :param normalize_actions: Whether to normalize the actions. Defaults to False. This is set to True if
-        the encoder has nn.LayerNorm layers.
-    :type normalize_actions: bool
     :param device: Device to use for the network.
     :type device: str
     :param random_seed: Random seed to use for the network. Defaults to None.
@@ -338,10 +340,21 @@ class ContinuousQNetwork(EvolvableNetwork):
         latent_dim: int = 32,
         simba: bool = False,
         recurrent: bool = False,
-        normalize_actions: bool = False,
         device: str = "cpu",
         random_seed: Optional[int] = None,
     ):
+        # NOTE: Need to disable layer normalization for the encoder since we're
+        # concatenating the actions to the latent space and we don't want to do the same
+        # to these so as to not lose scale information
+        if encoder_config is None:
+            encoder_config = get_default_encoder_config(
+                observation_space,
+                simba=simba,
+                recurrent=recurrent,
+                layer_norm=False,
+            )
+        elif is_mlp_net_config(encoder_config):
+            encoder_config["layer_norm"] = False
 
         super().__init__(
             observation_space,
@@ -363,33 +376,7 @@ class ContinuousQNetwork(EvolvableNetwork):
             head_config["output_activation"] = None
 
         self.num_actions = spaces.flatdim(action_space)
-
-        # If the encoder has nn.LayerNorm layers, we normalize the actions for
-        # better training stability
-        # see https://github.com/AgileRL/AgileRL/issues/337
-        self.normalize_actions = normalize_actions or self._check_normalize_actions()
-
-        # Build value network
-        self.build_network_head(head_config)
-
-    def _check_normalize_actions(self) -> bool:
-        """Checks if the actions should be normalized.
-
-        :return: Whether to normalize the actions.
-        :rtype: bool
-        """
-        if isinstance(self.encoder, EvolvableMLP):
-            return self.encoder.layer_norm
-
-        # NOTE: In multi-input encoders, normalizing actions is only relevant if
-        # we specify `vector_space_mlp=True` in the encoder config.
-        elif (
-            isinstance(self.encoder, EvolvableMultiInput)
-            and "vector_mlp" in self.encoder.feature_net
-        ):
-            return self.encoder.feature_net["vector_mlp"].layer_norm
-
-        return False
+        self.build_network_head(head_config)  # Build value network
 
     def build_network_head(self, net_config: NetConfigType) -> None:
         """Builds the head of the network.
@@ -422,10 +409,6 @@ class ContinuousQNetwork(EvolvableNetwork):
 
         # Extract features from the observation
         latent = self.extract_features(obs)
-
-        # Normalize actions
-        if self.normalize_actions:
-            actions = nn.functional.layer_norm(actions, [actions.size(-1)])
 
         x = torch.cat([latent, actions], dim=-1)
         return self.head_net(x)

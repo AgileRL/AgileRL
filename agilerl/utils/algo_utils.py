@@ -538,11 +538,7 @@ def format_shared_critic_encoder(encoder_configs: NetConfigType) -> dict[str, An
     for encoder_key, config in encoder_configs.items():
         if encoder_key == "mlp_config":
             encoder_config[encoder_key] = config
-
-            # If we have homogeneous agents, we can process the raw observations with an EvolvableMLP
-            encoder_config["vector_space_mlp"] = len(encoder_configs) == 1
             encoder_config["latent_dim"] = config.get("hidden_size", [32])[-1]
-            encoder_config["output_layernorm"] = config.get("layer_norm", False)
         else:
             encoder_config["init_dicts"][encoder_key] = config
 

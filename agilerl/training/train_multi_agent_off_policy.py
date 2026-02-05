@@ -5,11 +5,11 @@ from datetime import datetime
 from typing import Any, Optional
 
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from pettingzoo import ParallelEnv
 from torch.utils.data import DataLoader
 
+import wandb
 from agilerl.algorithms import MADDPG, MATD3
 from agilerl.components.data import ReplayDataset
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
@@ -523,6 +523,14 @@ def train_multi_agent_off_policy(
 
         if verbose:
             if sum_scores:
+                mean_scores = [
+                    (
+                        "%.2f" % mean_score
+                        if not isinstance(mean_score, str)
+                        else mean_score
+                    )
+                    for mean_score in mean_scores
+                ]
                 fitness = ["%.2f" % fitness for fitness in fitnesses]
                 avg_fitness = ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
                 avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]

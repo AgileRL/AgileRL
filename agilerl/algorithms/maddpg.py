@@ -304,14 +304,19 @@ class MADDPG(MultiAgentRLAlgorithm):
 
             clip_actions = self.torch_compiler is None
 
-            def create_actor(agent_id):
-                return DeterministicActor(
+            def create_actor(agent_id: str) -> DeterministicActor:
+                actor: DeterministicActor = DeterministicActor(
                     self.possible_observation_spaces[agent_id],
                     self.possible_action_spaces[agent_id],
                     device=self.device,
                     clip_actions=clip_actions,
                     **copy.deepcopy(agent_configs[agent_id]),
                 )
+
+                # NOTE: Need to disable encoder mutations since we use a
+                # different encoder type for the critic
+                actor.encoder.disable_mutations()
+                return actor
 
             # Critic uses observations + actions of all agents to predict Q-value
             def create_critic():

@@ -21,6 +21,10 @@ from agilerl.utils.algo_utils import (
     obs_channels_to_first,
     share_encoder_parameters,
 )
+from agilerl.utils.evolvable_networks import (
+    get_default_encoder_config,
+    is_mlp_net_config,
+)
 
 
 class TD3(RLAlgorithm):
@@ -226,7 +230,26 @@ class TD3(RLAlgorithm):
 
         else:
             net_config = {} if net_config is None else net_config
-            critic_net_config = copy.deepcopy(net_config)
+
+            # NOTE: Set layer_norm=False for encoder config, since critic automatically
+            # does this the actor should too to allow encoder sharing
+            encoder_config = net_config.get("encoder_config", None)
+            if encoder_config is not None:
+                if is_mlp_net_config(encoder_config):
+                    encoder_config["layer_norm"] = False
+            else:
+                simba = net_config.get("simba", False)
+                recurrent = net_config.get("recurrent", False)
+                encoder_config = get_default_encoder_config(
+                    observation_space,
+                    simba=simba,
+                    recurrent=recurrent,
+                    layer_norm=False,
+                )
+
+            net_config["encoder_config"] = encoder_config
+
+            # Set output activation to None for critic head config
             head_config = net_config.get("head_config", None)
             if head_config is not None:
                 critic_head_config = copy.deepcopy(head_config)
@@ -234,6 +257,7 @@ class TD3(RLAlgorithm):
             else:
                 critic_head_config = MlpNetConfig(hidden_size=[64])
 
+            critic_net_config = copy.deepcopy(net_config)
             critic_net_config["head_config"] = critic_head_config
 
             def create_actor():
@@ -320,13 +344,18 @@ class TD3(RLAlgorithm):
             isinstance(net, EvolvableNetwork)
             for net in [self.actor, self.critic_1, self.critic_2]
         ):
-            share_encoder_parameters(
-                self.actor,
-                self.critic_1,
-                self.critic_2,
-                self.critic_target_1,
-                self.critic_target_2,
-            )
+            try:
+                share_encoder_parameters(
+                    self.actor,
+                    self.critic_1,
+                    self.critic_2,
+                    self.critic_target_1,
+                    self.critic_target_2,
+                )
+            except KeyError as e:
+                raise KeyError(
+                    f"Found incompatible encoder architectures: {e} not found in shared network."
+                ) from e
         else:
             warnings.warn(
                 "Encoder sharing is disabled as actor or critic is not an EvolvableNetwork."
