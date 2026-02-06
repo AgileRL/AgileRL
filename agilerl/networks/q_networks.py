@@ -3,10 +3,9 @@ from dataclasses import asdict
 from typing import Any, Optional, Union
 
 import torch
-import torch.nn as nn
 from gymnasium import spaces
 
-from agilerl.modules import EvolvableMLP, EvolvableModule, EvolvableMultiInput
+from agilerl.modules import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig, NetConfig
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.custom_modules import DuelingDistributionalMLP
@@ -357,7 +356,7 @@ class ContinuousQNetwork(EvolvableNetwork):
             if encoder_config.get("layer_norm", False):
                 warnings.warn(
                     "Layer normalization is not supported for the encoder of DDPG networks. Disabling it. "
-                    "See GitHub PR: https://github.com/agilerl/agilerl/pull/insert_pr_number for more details."
+                    "See GitHub PR for more details: https://github.com/AgileRL/AgileRL/pull/469"
                 )
 
             encoder_config["layer_norm"] = False
