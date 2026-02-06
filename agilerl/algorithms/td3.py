@@ -241,7 +241,7 @@ class TD3(RLAlgorithm):
                     if encoder_config.get("layer_norm", False):
                         warnings.warn(
                             "Layer normalization is not supported for the encoder of TD3 networks. Disabling it. "
-                            "See GitHub PR for more details: https://github.com/agilerl/agilerl/pull/insert_pr_number"
+                            "See GitHub PR for more details: https://github.com/AgileRL/AgileRL/pull/469"
                         )
                     encoder_config["layer_norm"] = False
             else:
