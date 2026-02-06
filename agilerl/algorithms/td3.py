@@ -15,9 +15,10 @@ from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.q_networks import ContinuousQNetwork
-from agilerl.typing import ExperiencesType, GymEnvType, NumpyObsType
+from agilerl.typing import ExperiencesType, GymEnvType, ObservationType
 from agilerl.utils.algo_utils import (
     make_safe_deepcopies,
+    multi_dim_clamp,
     obs_channels_to_first,
     share_encoder_parameters,
 )
@@ -184,8 +185,12 @@ class TD3(RLAlgorithm):
         self.theta = theta
         self.dt = dt
         self.learn_counter = 0
-        self.action_low = action_space.low.astype(np.float32)
-        self.action_high = action_space.high.astype(np.float32)
+        self.action_low = torch.as_tensor(
+            self.action_space.low, device=self.device, dtype=torch.float32
+        )
+        self.action_high = torch.as_tensor(
+            self.action_space.high, device=self.device, dtype=torch.float32
+        )
 
         # Exploration noise
         self.expl_noise = (
@@ -361,56 +366,38 @@ class TD3(RLAlgorithm):
                 "Encoder sharing is disabled as actor or critic is not an EvolvableNetwork."
             )
 
-    def multi_dim_clamp(self, min: Any, max: Any, input: torch.Tensor) -> torch.Tensor:
-        """Multi-dimensional clamp function
-
-        :param min: Minimum value to clamp to, can be a scalar or array-like
-        :type min: Any
-        :param max: Maximum value to clamp to, can be a scalar or array-like
-        :type max: Any
-        :param input: Input tensor to be clamped
-        :type input: torch.Tensor
-        :return: Clamped tensor
-        :rtype: torch.Tensor
-        """
-        if not isinstance(min, np.ndarray) and not isinstance(max, np.ndarray):
-            return torch.clamp(input, min, max)
-
-        device = self.device if self.accelerator is None else self.accelerator.device
-        min = torch.from_numpy(min).to(device) if isinstance(min, np.ndarray) else min
-        max = torch.from_numpy(max).to(device) if isinstance(max, np.ndarray) else max
-
-        if isinstance(max, torch.Tensor) and isinstance(min, (int, float)):
-            min = torch.full_like(max, min).to(self.device)
-        if isinstance(min, torch.Tensor) and isinstance(max, (int, float)):
-            max = torch.full_like(min, max).to(self.device)
-
-        return torch.max(torch.min(input, max), min)
-
-    def get_action(self, obs: NumpyObsType, training: bool = True) -> np.ndarray:
+    def get_action(self, obs: ObservationType, training: bool = True) -> np.ndarray:
         """Returns the next action to take in the environment. If training, random noise
         is added to the action to promote exploration.
 
         :param obs: Environment observation, or multiple observations in a batch
-        :type obs: numpy.ndarray[float], dict, tuple
+        :type obs: numpy.ndarray[float]
         :param training: Agent is training, use exploration noise, defaults to True
         :type training: bool, optional
         :return: Action
         :rtype: numpy.ndarray[float]
         """
         obs = self.preprocess_observation(obs)
-
         self.actor.eval()
         with torch.no_grad():
-            action = self.actor(obs)
-
-        action = action.cpu().data.numpy()
+            action: torch.Tensor = self.actor(obs)
 
         self.actor.train()
-        if training:
-            action += self.action_noise()
 
-        return action.clip(self.action_low, self.action_high)
+        # Add noise for exploration
+        if training:
+            action = action.cpu().data.numpy()
+            action = (action + self.action_noise()).clip(-1, 1)
+            return action
+
+        # Action scaled to action space bounds if not training
+        action = DeterministicActor.rescale_action(
+            action=action,
+            low=self.action_low,
+            high=self.action_high,
+            output_activation=self.actor.output_activation,
+        )
+        return action.cpu().data.numpy()
 
     def action_noise(self) -> np.ndarray:
         """Create action noise for exploration, either Ornstein Uhlenbeck or
@@ -437,7 +424,11 @@ class TD3(RLAlgorithm):
         return noise.astype(np.float32)
 
     def reset_action_noise(self, indices: np.ndarray) -> None:
-        """Reset action noise."""
+        """Reset action noise.
+
+        :param indices: Indices to reset
+        :type indices: np.ndarray
+        """
         self.current_noise[indices] = self.mean_noise[indices]
 
     def learn(
@@ -473,10 +464,10 @@ class TD3(RLAlgorithm):
         with torch.no_grad():
             next_actions = self.actor_target(next_obs)
             noise = actions.data.normal_(0, policy_noise)
-            noise = self.multi_dim_clamp(-noise_clip, noise_clip, noise.to(self.device))
+            noise = multi_dim_clamp(-noise_clip, noise_clip, noise.to(self.device))
             next_actions = next_actions + noise
-            next_actions = self.multi_dim_clamp(
-                self.action_space.low, self.action_space.high, next_actions
+            next_actions = multi_dim_clamp(
+                self.action_low, self.action_high, next_actions
             )
 
             # Compute the target, y_j, making use of twin critic networks
@@ -566,6 +557,7 @@ class TD3(RLAlgorithm):
                 while not np.all(finished):
                     if swap_channels:
                         obs = obs_channels_to_first(obs)
+
                     action = self.get_action(obs, training=False)
                     obs, reward, done, trunc, _ = env.step(action)
                     step += 1

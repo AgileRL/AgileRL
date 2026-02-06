@@ -347,21 +347,22 @@ class DDPG(RLAlgorithm):
         with torch.no_grad():
             action: torch.Tensor = self.actor(obs)
 
-        action = action.cpu().data.numpy()
         self.actor.train()
 
         # Add noise for exploration
         if training:
+            action = action.cpu().data.numpy()
             action = (action + self.action_noise()).clip(-1, 1)
             return action
 
-        # Return action scaled to action space bounds if not training
-        return DeterministicActor.rescale_action(
+        # Action scaled to action space bounds if not training
+        action = DeterministicActor.rescale_action(
             action=action,
             low=self.action_low,
             high=self.action_high,
             output_activation=self.actor.output_activation,
         )
+        return action.cpu().data.numpy()
 
     def action_noise(self) -> np.ndarray:
         """Create action noise for exploration, either Ornstein Uhlenbeck or from a normal distribution.

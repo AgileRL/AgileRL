@@ -302,19 +302,15 @@ class MADDPG(MultiAgentRLAlgorithm):
                 "max_latent_dim": max_latent_dim,
             }
 
-            clip_actions = self.torch_compiler is None
-
             def create_actor(agent_id: str) -> DeterministicActor:
                 actor: DeterministicActor = DeterministicActor(
                     self.possible_observation_spaces[agent_id],
                     self.possible_action_spaces[agent_id],
                     device=self.device,
-                    clip_actions=clip_actions,
                     **copy.deepcopy(agent_configs[agent_id]),
                 )
 
-                # NOTE: Need to disable encoder mutations since we use a
-                # different encoder type for the critic
+                # NOTE: Need to disable encoder mutations since we use a different encoder type for the critic
                 actor.encoder.disable_mutations()
                 return actor
 
@@ -447,10 +443,8 @@ class MADDPG(MultiAgentRLAlgorithm):
                 with torch.no_grad():
                     actions = actor(obs)
 
-            # Need to rescale actions outside of forward pass if using torch.compile
-            if self.torch_compiler is not None and isinstance(
-                self.possible_action_spaces[agent_id], spaces.Box
-            ):
+            # Rescale actions to action space bounds
+            if isinstance(self.possible_action_spaces[agent_id], spaces.Box):
                 actions = DeterministicActor.rescale_action(
                     action=actions,
                     low=actor.action_low,

@@ -142,7 +142,6 @@ class DeterministicActor(EvolvableNetwork):
 
         self.build_network_head(head_config)  # Build network head
 
-    @torch.compiler.disable
     @staticmethod
     def rescale_action(
         action: torch.Tensor,
@@ -357,7 +356,7 @@ class StochasticActor(EvolvableNetwork):
         )
 
     def scale_action(self, action: torch.Tensor) -> torch.Tensor:
-        """Scale the action to the action space.
+        """Scale the action from [-1, 1] to the action space bounds [low, high].
 
         :param action: Action.
         :type action: torch.Tensor
