@@ -16,3 +16,8 @@ def get_extra_dependencies(package: str, extra: str) -> list[str]:
 
 LLM_PACKAGES = get_extra_dependencies("agilerl", "llm")
 HAS_LLM_DEPENDENCIES = all(find_spec(pkg) is not None for pkg in LLM_PACKAGES)
+
+try:
+    __version__ = metadata("agilerl")["version"]
+except KeyError:
+    __version__ = "unknown"

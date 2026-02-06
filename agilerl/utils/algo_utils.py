@@ -188,7 +188,7 @@ def get_hidden_states_shape_from_model(model: nn.Module) -> dict[str, int]:
     :rtype: dict[str, int]
     """
     hidden_state_architecture = {}
-    for name, module in model.named_modules():
+    for _, module in model.named_modules():
         if hasattr(module, "hidden_state_architecture"):
             hidden_state_architecture.update(
                 {
@@ -198,6 +198,32 @@ def get_hidden_states_shape_from_model(model: nn.Module) -> dict[str, int]:
             )
 
     return hidden_state_architecture
+
+
+def multi_dim_clamp(
+    min: float | torch.Tensor, max: float | torch.Tensor, input: torch.Tensor
+) -> torch.Tensor:
+    """Multi-dimensional clamp function
+
+    :param min: Minimum value or array of minimum values
+    :type min: float | torch.Tensor
+    :param max: Maximum value or array of maximum values
+    :type max: float | torch.Tensor
+    :param input: Input tensor to be clamped
+    :type input: torch.Tensor
+    :return: Clamped tensor
+    :rtype: torch.Tensor
+    """
+    if not type(min) == type(max):
+        raise TypeError(
+            f"min and max must be of the same type, got {type(min)} and {type(max)} instead."
+        )
+
+    if not isinstance(min, torch.Tensor) and not isinstance(max, torch.Tensor):
+        return torch.clamp(input, min, max)
+
+    clamped: torch.Tensor = torch.max(torch.min(input, max), min)
+    return clamped.to(input.dtype)
 
 
 def extract_sequences_from_episode(

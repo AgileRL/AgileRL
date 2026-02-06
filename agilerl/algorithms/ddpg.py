@@ -198,8 +198,12 @@ class DDPG(RLAlgorithm):
         self.theta = theta
         self.dt = dt
         self.learn_counter = 0
-        self.action_low = action_space.low.astype(np.float32)
-        self.action_high = action_space.high.astype(np.float32)
+        self.action_low = torch.as_tensor(
+            self.action_space.low, device=self.device, dtype=torch.float32
+        )
+        self.action_high = torch.as_tensor(
+            self.action_space.high, device=self.device, dtype=torch.float32
+        )
 
         if actor_network is not None and critic_network is not None:
             if not isinstance(actor_network, EvolvableModule):
@@ -349,8 +353,9 @@ class DDPG(RLAlgorithm):
         # Add noise for exploration
         if training:
             action = (action + self.action_noise()).clip(-1, 1)
+            return action
 
-        # Return action scaled to action space bounds
+        # Return action scaled to action space bounds if not training
         return DeterministicActor.rescale_action(
             action=action,
             low=self.action_low,
@@ -420,9 +425,8 @@ class DDPG(RLAlgorithm):
             noise = multi_dim_clamp(-noise_clip, noise_clip, noise)
             next_actions = next_actions + noise
             next_actions = multi_dim_clamp(
-                self.action_space.low, self.action_space.high, next_actions
+                self.action_low, self.action_high, next_actions
             )
-
             q_value_next_state = self.critic_target(next_obs, next_actions)
 
         y_j = rewards + ((1 - dones) * self.gamma * q_value_next_state)
