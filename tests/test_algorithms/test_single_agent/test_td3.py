@@ -557,11 +557,14 @@ def test_soft_update(vector_space):
 # Runs algorithm test loop
 @pytest.mark.parametrize("observation_space", ["vector_space", "image_space"])
 @pytest.mark.parametrize("num_envs", [1, 3])
-def test_algorithm_test_loop(observation_space, vector_space, num_envs, request):
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_algorithm_test_loop(
+    observation_space, vector_space, num_envs, device, request
+):
     observation_space = request.getfixturevalue(observation_space)
     vect = num_envs > 1
     env = DummyEnv(state_size=observation_space.shape, vect=vect, num_envs=num_envs)
-    agent = TD3(observation_space, vector_space)
+    agent = TD3(observation_space, vector_space, device=device)
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
     agent.clean_up()

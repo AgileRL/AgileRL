@@ -129,8 +129,6 @@ class DeterministicActor(EvolvableNetwork):
                 else:
                     output_activation = user_output_activation
 
-        head_config["output_activation"] = output_activation
-
         self.output_activation = output_activation
 
         if head_config is None:

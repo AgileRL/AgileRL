@@ -469,7 +469,8 @@ def test_soft_update():
 # Runs algorithm test loop
 @pytest.mark.parametrize("observation_space", ["vector_space", "image_space"])
 @pytest.mark.parametrize("num_envs", [1, 3])
-def test_algorithm_test_loop(observation_space, num_envs, request):
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_algorithm_test_loop(observation_space, num_envs, device, request):
     action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
     observation_space = request.getfixturevalue(observation_space)
 
@@ -477,7 +478,9 @@ def test_algorithm_test_loop(observation_space, num_envs, request):
     env = DummyEnv(state_size=observation_space.shape, vect=vect, num_envs=num_envs)
 
     # env = make_vect_envs("CartPole-v1", num_envs=num_envs)
-    agent = DDPG(observation_space=observation_space, action_space=action_space)
+    agent = DDPG(
+        observation_space=observation_space, action_space=action_space, device=device
+    )
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
     agent.clean_up()

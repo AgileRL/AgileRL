@@ -394,12 +394,12 @@ class TD3(RLAlgorithm):
 
         # Action scaled to action space bounds if not training
         action = DeterministicActor.rescale_action(
-            action=action,
+            action=action.cpu(),
             low=self.action_low,
             high=self.action_high,
             output_activation=self.actor.output_activation,
         )
-        return action.cpu().data.numpy()
+        return action.data.numpy()
 
     def action_noise(self) -> np.ndarray:
         """Create action noise for exploration, either Ornstein Uhlenbeck or
@@ -485,7 +485,7 @@ class TD3(RLAlgorithm):
             q_value_2, y_j
         )
 
-        # critic loss backprop
+        # Critic loss backprop
         self.critic_1_optimizer.zero_grad()
         self.critic_2_optimizer.zero_grad()
         if self.accelerator is not None:
@@ -496,7 +496,7 @@ class TD3(RLAlgorithm):
         self.critic_1_optimizer.step()
         self.critic_2_optimizer.step()
 
-        # update actor and targets every policy_freq learn steps
+        # Update actor and targets every policy_freq learn steps
         self.learn_counter += 1
         if self.learn_counter % self.policy_freq == 0:
             policy_actions = self.actor(obs)
@@ -504,7 +504,7 @@ class TD3(RLAlgorithm):
             # Compute actor loss
             actor_loss = -self.critic_1(obs, policy_actions).mean()
 
-            # actor loss backprop
+            # Actor loss backprop
             self.actor_optimizer.zero_grad()
             if self.accelerator is not None:
                 self.accelerator.backward(actor_loss)
@@ -513,7 +513,7 @@ class TD3(RLAlgorithm):
 
             self.actor_optimizer.step()
 
-            # Add in a soft update for both critic_targets
+            # Soft update for both critic targets
             self.soft_update(self.actor, self.actor_target)
             self.soft_update(self.critic_1, self.critic_target_1)
             self.soft_update(self.critic_2, self.critic_target_2)
@@ -523,7 +523,13 @@ class TD3(RLAlgorithm):
             return None, critic_loss.item()
 
     def soft_update(self, net: EvolvableModule, target: EvolvableModule) -> None:
-        """Soft updates target network."""
+        """Soft updates target network parameters.
+
+        :param net: Network to be updated
+        :type net: EvolvableModule
+        :param target: Target network
+        :type target: EvolvableModule
+        """
         for eval_param, target_param in zip(net.parameters(), target.parameters()):
             target_param.data.copy_(
                 self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
