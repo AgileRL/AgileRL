@@ -165,6 +165,14 @@ To configure the architecture of the network's encoder / head, pass a kwargs dic
 Full arguments can be found in the documentation of :ref:`EvolvableMLP<mlp>`, :ref:`EvolvableCNN<cnn>`, and
 :ref:`EvolvableMultiInput<multi_input>`.
 
+.. note::
+  MADDPG uses **decentralized actors** and **centralized critics**. Encoder mutations are disabled for
+  the actor networks because the encoder architectures differ between actors and critics: the critics
+  use :ref:`EvolvableMultiInput<multi_input>` to handle the combined observation spaces of all
+  subagents, while each actor uses an individual evolvable module (e.g. MLP, CNN) tailored to that
+  agent's observation space. We can therefore not ensure that the same mutation can be applied
+  between actors and critics, like we do generally in other algorithms.
+
 For discrete / vector observations:
 
 .. code-block:: python

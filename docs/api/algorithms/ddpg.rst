@@ -27,10 +27,12 @@ Example
 
 .. code-block:: python
 
-  import gymnasium as gym
+  import torch
   from agilerl.utils.utils import make_vect_envs
   from agilerl.components.replay_buffer import ReplayBuffer
+  from agilerl.components.data import Transition
   from agilerl.algorithms.ddpg import DDPG
+  from agilerl.networks.actors import DeterministicActor
 
   # Create environment and Experience Replay Buffer
   num_envs = 1
@@ -46,7 +48,14 @@ Example
 
   obs, info = env.reset()  # Reset environment at start of episode
   while True:
-      action = agent.get_action(obs, training=True)    # Get next action from agent
+      action = agent.get_action(obs, training=True)  # Get next action from agent (raw + noise)
+      # Rescale action from network output bounds to env action space
+      action = DeterministicActor.rescale_action(
+          action=torch.from_numpy(action),
+          low=agent.action_low,
+          high=agent.action_high,
+          output_activation=agent.actor.output_activation,
+      ).numpy()
       next_obs, reward, done, _, _ = env.step(action)   # Act in environment
 
       # Save experience to replay buffer
@@ -65,6 +74,24 @@ Example
       if len(memory) >= agent.batch_size:
           experiences = memory.sample(agent.batch_size) # Sample replay buffer
           agent.learn(experiences)    # Learn according to agent's RL algorithm
+
+.. note::
+  In the loop above, actions are rescaled after :meth:`get_action` using the static method
+  :meth:`DeterministicActor.rescale_action <agilerl.networks.actors.DeterministicActor.rescale_action>`.
+  This maps the actor's output (in the range implied by its output activation, e.g. ``[-1, 1]`` for
+  Tanh) to the environment's action space ``[action_low, action_high]``. When using
+  ``get_action(..., training=True)`` for exploration, the agent returns actions in the activation
+  range; rescaling to the env space is required before :meth:`env.step`. When not in training mode,
+  the agent applies this rescaling internally.
+
+Custom actor networks
+---------------------
+
+DDPG allows actor networks that are not :ref:`DeterministicActor <actors>`. If you use a custom actor,
+it must define an attribute **output_activation** (a string) set to one of the allowed output
+activations: ``"Tanh"``, ``"Softsign"``, ``"Sigmoid"``, ``"Softmax"``, or ``"GumbelSoftmax"``. This
+is used by :meth:`DeterministicActor.rescale_action <agilerl.networks.actors.DeterministicActor.rescale_action>`
+to map network outputs to the environment action space correctly.
 
 Neural Network Configuration
 ----------------------------
