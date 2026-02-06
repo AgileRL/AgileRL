@@ -1,4 +1,5 @@
-from typing import ClassVar, Optional, Union
+import warnings
+from typing import ClassVar, Optional
 
 import torch
 from gymnasium import spaces
@@ -112,22 +113,23 @@ class DeterministicActor(EvolvableNetwork):
             self.action_low, self.action_high = None, None
 
         # Set output activation based on action space
-        if head_config is not None and "output_activation" in head_config:
-            output_activation = head_config["output_activation"]
-        elif isinstance(action_space, spaces.Box):
+        if isinstance(action_space, spaces.Box):
             output_activation = "Tanh"
         elif isinstance(action_space, spaces.Discrete):
             output_activation = "GumbelSoftmax"
-        else:
-            raise ValueError(
-                f"Action space must be either Box or Discrete, but got {type(action_space)} instead."
-            )
 
-        if output_activation not in self._allowed_output_activations:
-            raise ValueError(
-                f"Output activation must be one of the following: {', '.join(self._allowed_output_activations)}. "
-                f"Got {output_activation} instead."
-            )
+        if head_config is not None:
+            if "output_activation" in head_config:
+                user_output_activation = head_config["output_activation"]
+                if user_output_activation not in self._allowed_output_activations:
+                    warnings.warn(
+                        f"Output activation must be one of the following: {', '.join(self._allowed_output_activations)}. "
+                        f"Got {user_output_activation} instead. Using default output activation."
+                    )
+                else:
+                    output_activation = user_output_activation
+
+        head_config["output_activation"] = output_activation
 
         self.output_activation = output_activation
 
