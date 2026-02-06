@@ -5,6 +5,7 @@ from typing import Any, Optional, Union
 
 import gymnasium as gym
 import numpy as np
+import torch
 from accelerate import Accelerator
 from tensordict import TensorDictBase
 from torch.utils.data import DataLoader
@@ -267,11 +268,12 @@ def train_off_policy(
 
                     # Need to pass scaled action to environment
                     action = DeterministicActor.rescale_action(
-                        action=raw_action,
+                        action=torch.from_numpy(raw_action),
                         low=agent.action_low,
                         high=agent.action_high,
                         output_activation=agent.actor.output_activation,
                     )
+                    action = action.cpu().numpy()
 
                 if isinstance(agent, (DQN, RainbowDQN)):
                     for a in action:

@@ -199,12 +199,8 @@ class DDPG(RLAlgorithm):
         self.theta = theta
         self.dt = dt
         self.learn_counter = 0
-        self.action_low = torch.as_tensor(
-            self.action_space.low, device=self.device, dtype=torch.float32
-        )
-        self.action_high = torch.as_tensor(
-            self.action_space.high, device=self.device, dtype=torch.float32
-        )
+        self.action_low = torch.as_tensor(self.action_space.low, dtype=torch.float32)
+        self.action_high = torch.as_tensor(self.action_space.high, dtype=torch.float32)
 
         if actor_network is not None and critic_network is not None:
             if not isinstance(actor_network, EvolvableModule):
@@ -365,12 +361,12 @@ class DDPG(RLAlgorithm):
 
         # Action scaled to action space bounds if not training
         action = DeterministicActor.rescale_action(
-            action=action,
+            action=action.cpu(),
             low=self.action_low,
             high=self.action_high,
             output_activation=self.actor.output_activation,
         )
-        return action.cpu().data.numpy()
+        return action.data.numpy()
 
     def action_noise(self) -> np.ndarray:
         """Create action noise for exploration, either Ornstein Uhlenbeck or from a normal distribution.

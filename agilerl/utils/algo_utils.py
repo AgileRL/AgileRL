@@ -221,6 +221,9 @@ def multi_dim_clamp(
 
     if not isinstance(min, torch.Tensor) and not isinstance(max, torch.Tensor):
         return torch.clamp(input, min, max)
+    elif (min.device != input.device) and (max.device != input.device):
+        min = min.to(input.device)
+        max = max.to(input.device)
 
     clamped: torch.Tensor = torch.max(torch.min(input, max), min)
     return clamped.to(input.dtype)
