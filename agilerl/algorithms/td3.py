@@ -185,12 +185,8 @@ class TD3(RLAlgorithm):
         self.theta = theta
         self.dt = dt
         self.learn_counter = 0
-        self.action_low = torch.as_tensor(
-            self.action_space.low, device=self.device, dtype=torch.float32
-        )
-        self.action_high = torch.as_tensor(
-            self.action_space.high, device=self.device, dtype=torch.float32
-        )
+        self.action_low = torch.as_tensor(self.action_space.low, dtype=torch.float32)
+        self.action_high = torch.as_tensor(self.action_space.high, dtype=torch.float32)
 
         # Exploration noise
         self.expl_noise = (
@@ -245,7 +241,7 @@ class TD3(RLAlgorithm):
                     if encoder_config.get("layer_norm", False):
                         warnings.warn(
                             "Layer normalization is not supported for the encoder of TD3 networks. Disabling it. "
-                            "See GitHub PR: https://github.com/agilerl/agilerl/pull/insert_pr_number for more details."
+                            "See GitHub PR for more details: https://github.com/agilerl/agilerl/pull/insert_pr_number"
                         )
                     encoder_config["layer_norm"] = False
             else:

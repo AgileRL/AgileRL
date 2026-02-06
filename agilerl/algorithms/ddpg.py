@@ -231,7 +231,7 @@ class DDPG(RLAlgorithm):
                     if encoder_config.get("layer_norm", False):
                         warnings.warn(
                             "Layer normalization is not supported for the encoder of DDPG networks. Disabling it. "
-                            "See GitHub PR: https://github.com/agilerl/agilerl/pull/insert_pr_number for more details."
+                            "See GitHub PR for more details: https://github.com/agilerl/agilerl/pull/insert_pr_number"
                         )
                     encoder_config["layer_norm"] = False
             else:
