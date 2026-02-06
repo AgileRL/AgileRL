@@ -512,11 +512,12 @@ def test_tournament_selection_and_mutation_language_model():
     accelerator.is_main_process = True
     accelerator.wait_for_everyone = Mock()
 
-    with patch(
-        "agilerl.utils.utils.save_llm_checkpoint"
-    ) as mock_save_llm_checkpoint, patch(
-        "agilerl.utils.utils.consolidate_mutations"
-    ) as mock_consolidate_mutations:
+    with (
+        patch("agilerl.utils.utils.save_llm_checkpoint") as mock_save_llm_checkpoint,
+        patch(
+            "agilerl.utils.utils.consolidate_mutations"
+        ) as mock_consolidate_mutations,
+    ):
         output_pop = tournament_selection_and_mutation(
             population,
             tournament,

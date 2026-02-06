@@ -145,7 +145,7 @@ def train_off_policy(
     assert isinstance(max_steps, int), "Number of steps must be an integer."
     assert isinstance(evo_steps, int), "Evolution frequency must be an integer."
     assert isinstance(eps_start, float), "Starting epsilon must be a float."
-    assert isinstance(eps_end, float), "Final value of epsilone must be a float."
+    assert isinstance(eps_end, float), "Final value of epsilon must be a float."
     assert isinstance(eps_decay, float), "Epsilon decay rate must be a float."
     if target is not None:
         assert isinstance(

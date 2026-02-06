@@ -597,8 +597,8 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
         :return: Learning information
         :rtype: Any
         """
-        (states, actions, log_probs, rewards, dones, values, next_state, next_done) = (
-            map(self.stack_experiences, experiences)
+        states, actions, log_probs, rewards, dones, values, next_state, next_done = map(
+            self.stack_experiences, experiences
         )
 
         # Handle case where we haven't collected a next state for each sub-agent
