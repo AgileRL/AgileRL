@@ -29,6 +29,7 @@ from agilerl.utils.algo_utils import (
     key_in_nested_dict,
     make_safe_deepcopies,
     maybe_add_batch_dim,
+    multi_dim_clamp,
     obs_channels_to_first,
     obs_to_tensor,
     preprocess_observation,
@@ -67,6 +68,77 @@ def test_stack_and_pad_experiences_with_padding():
     assert torch.equal(
         stacked_tensor_2, torch.tensor([[10, 11, 12, 99, 99], [13, 14, 15, 16, 17]])
     )
+
+
+@pytest.mark.parametrize(
+    "min_val, max_val, action, expected_result, device",
+    [
+        (0.0, 1.0, [1.1, 0.75, -1], [1.0, 0.75, 0.0], "cpu"),
+        (0.5, 1.0, [0, 0, 0.2], [0.5, 0.5, 0.5], "cpu"),  # 0.2 < 0.5 so clamped to 0.5
+        (0.0, 0.75, [1.0, 0.75, 0.1], [0.75, 0.75, 0.1], "cpu"),
+        (0.0, 1.0, [1.1, 0.75, -1], [1.0, 0.75, 0.0], "cuda"),
+        (0.5, 1.0, [0, 0, 0.2], [0.5, 0.5, 0.5], "cuda"),
+        (0.0, 0.75, [1.0, 0.75, 0.1], [0.75, 0.75, 0.1], "cuda"),
+    ],
+)
+def test_multi_dim_clamp_scalar_bounds(
+    min_val, max_val, action, expected_result, device
+):
+    """multi_dim_clamp with float min/max uses torch.clamp path."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    input_tensor = torch.tensor(action, dtype=torch.float32, device=device)
+    result = multi_dim_clamp(min_val, max_val, input_tensor)
+    expected = torch.tensor(expected_result, dtype=torch.float32, device=device)
+    assert result.dtype == expected.dtype
+    assert torch.allclose(result, expected)
+
+
+@pytest.mark.parametrize(
+    "min_val, max_val, action, expected_result, device",
+    [
+        (
+            [-1, -1, -1],
+            [1, 1, 1],
+            [[-2, 1, 0.25], [1.5, -1, 0.75]],
+            [[-1, 1, 0.25], [1, -1, 0.75]],
+            "cpu",
+        ),
+        ([0.5, 0, 0.1], [1, 1, 1], [0, 0, 0.2], [0.5, 0, 0.2], "cpu"),
+        ([0, 0, 0], [0.75, 1.0, 0.1], [1.0, 0.75, 0.1], [0.75, 0.75, 0.1], "cpu"),
+        (
+            [-1, -1, -1],
+            [1, 1, 1],
+            [[-2, 1, 0.25], [1.5, -1, 0.75]],
+            [[-1, 1, 0.25], [1, -1, 0.75]],
+            "cuda",
+        ),
+        ([0.5, 0, 0.1], [1, 1, 1], [0, 0, 0.2], [0.5, 0, 0.2], "cuda"),
+        ([0, 0, 0], [0.75, 1.0, 0.1], [1.0, 0.75, 0.1], [0.75, 0.75, 0.1], "cuda"),
+    ],
+)
+def test_multi_dim_clamp_tensor_bounds(
+    min_val, max_val, action, expected_result, device
+):
+    """multi_dim_clamp with both min and max as tensors (on same device as input)."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    input_tensor = torch.tensor(action, dtype=torch.float32, device=device)
+    min_t = torch.tensor(min_val, dtype=torch.float32, device=device)
+    max_t = torch.tensor(max_val, dtype=torch.float32, device=device)
+    result = multi_dim_clamp(min_t, max_t, input_tensor)
+    expected = torch.tensor(expected_result, dtype=torch.float32, device=device)
+    assert result.dtype == expected.dtype
+    assert torch.allclose(result, expected)
+
+
+def test_multi_dim_clamp_preserves_input_dtype():
+    """multi_dim_clamp preserves input tensor dtype when using tensor bounds."""
+    input_tensor = torch.tensor([0.5, 0.5], dtype=torch.float32)
+    min_t = torch.tensor([0.0, 0.0], dtype=torch.float32)
+    max_t = torch.tensor([1.0, 1.0], dtype=torch.float32)
+    result = multi_dim_clamp(min_t, max_t, input_tensor)
+    assert result.dtype == input_tensor.dtype
 
 
 def test_neg_inf_in_low():

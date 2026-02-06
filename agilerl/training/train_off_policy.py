@@ -5,6 +5,7 @@ from typing import Any, Optional, Union
 
 import gymnasium as gym
 import numpy as np
+import torch
 import wandb
 from accelerate import Accelerator
 from tensordict import TensorDictBase
@@ -21,6 +22,7 @@ from agilerl.components.data import ReplayDataset, Transition
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.networks.actors import DeterministicActor
 from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
     default_progress_bar,
@@ -236,7 +238,7 @@ def train_off_policy(
         pop_episode_scores = []
         pop_fps = []
         for agent_idx, agent in enumerate(pop):  # Loop through population
-            state, info = env.reset()  # Reset environment at start of episode
+            obs, info = env.reset()  # Reset environment at start of episode
             scores = np.zeros(num_envs)
             completed_episode_scores, losses = [], []
             steps = 0
@@ -250,19 +252,28 @@ def train_off_policy(
             start_time = time.time()
             for idx_step in range(evo_steps // num_envs):
                 if swap_channels:
-                    state = obs_channels_to_first(state)
+                    obs = obs_channels_to_first(obs)
 
                 # Get next action from agent
                 if isinstance(agent, DQN):
                     action_mask = info.get("action_mask", None)
-                    action = agent.get_action(state, epsilon, action_mask=action_mask)
+                    action = agent.get_action(obs, epsilon, action_mask=action_mask)
                     # Decay epsilon for exploration
                     epsilon = max(eps_end, epsilon * eps_decay)
                 elif isinstance(agent, RainbowDQN):
                     action_mask = info.get("action_mask", None)
-                    action = agent.get_action(state, action_mask=action_mask)
+                    action = agent.get_action(obs, action_mask=action_mask)
                 else:
-                    action = agent.get_action(state)
+                    raw_action = agent.get_action(obs)
+
+                    # Need to pass scaled action to environment
+                    action = DeterministicActor.rescale_action(
+                        action=torch.from_numpy(raw_action),
+                        low=agent.action_low,
+                        high=agent.action_high,
+                        output_activation=agent.actor.output_activation,
+                    )
+                    action = action.cpu().numpy()
 
                 if isinstance(agent, (DQN, RainbowDQN)):
                     for a in action:
@@ -274,7 +285,7 @@ def train_off_policy(
                     action = action[0]
 
                 # Act in environment
-                next_state, reward, done, trunc, info = env.step(action)
+                next_obs, reward, done, trunc, info = env.step(action)
                 scores += np.array(reward)
 
                 if not is_vectorised:
@@ -296,15 +307,19 @@ def train_off_policy(
                 steps += num_envs
 
                 # Save experience to replay buffer
-                next_state = (
-                    obs_channels_to_first(next_state) if swap_channels else next_state
+                next_obs = (
+                    obs_channels_to_first(next_obs) if swap_channels else next_obs
                 )
 
+                # Save network output in buffer
+                if isinstance(agent, (DDPG, TD3)):
+                    action = raw_action
+
                 transition: TensorDictBase = Transition(
-                    obs=state,
+                    obs=obs,
                     action=action,
                     reward=reward,
-                    next_obs=next_state,
+                    next_obs=next_obs,
                     done=done,
                 )
                 if not is_vectorised:
@@ -400,7 +415,7 @@ def train_off_policy(
                 if loss is not None:
                     losses.append(loss)
 
-                state = next_state
+                obs = next_obs
 
             pbar.update(evo_steps // len(pop))
 

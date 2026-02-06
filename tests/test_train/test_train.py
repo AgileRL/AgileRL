@@ -105,6 +105,15 @@ class DummyAgentOffPolicy:
         self.fitness = []
         self.mut = "mutation"
         self.index = 1
+        # Attributes required by train_off_policy for continuous action agents (DDPG/TD3)
+        self.action_low = torch.as_tensor(
+            [-1.0] * self.action_size, dtype=torch.float32
+        )
+        self.action_high = torch.as_tensor(
+            [1.0] * self.action_size, dtype=torch.float32
+        )
+        self.actor = MagicMock()
+        self.actor.output_activation = "Tanh"
 
     def set_training_mode(self, training):
         self.training = training
@@ -674,11 +683,26 @@ def mocked_agent_off_policy(env, algo):
     mock_agent.fitness = []
     mock_agent.mut = "mutation"
     mock_agent.index = 1
-    mock_agent.get_action.side_effect = (
-        lambda state, *args, **kwargs: np.random.randint(
-            env.action_size, size=(env.n_envs,)
+    if algo in [DDPG, TD3]:
+        mock_agent.action_low = torch.as_tensor(
+            [-1.0] * mock_agent.action_size, dtype=torch.float32
         )
-    )
+        mock_agent.action_high = torch.as_tensor(
+            [1.0] * mock_agent.action_size, dtype=torch.float32
+        )
+        mock_agent.actor = MagicMock()
+        mock_agent.actor.output_activation = "Tanh"
+        mock_agent.get_action.side_effect = (
+            lambda state, *args, **kwargs: np.random.randn(
+                env.n_envs, mock_agent.action_size
+            ).astype(np.float32)
+        )
+    else:
+        mock_agent.get_action.side_effect = (
+            lambda state, *args, **kwargs: np.random.randint(
+                env.action_size, size=(env.n_envs,)
+            )
+        )
     mock_agent.test.side_effect = lambda *args, **kwargs: np.random.uniform(0, 400)
     if algo in [RainbowDQN]:
         mock_agent.learn.side_effect = lambda experiences, **kwargs: (

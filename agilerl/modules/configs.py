@@ -181,6 +181,7 @@ class MultiInputNetConfig(NetConfig):
                 kernel_size=[3, 3],
                 stride_size=[1, 1],
                 output_activation="ReLU",
+                layer_norm=False,
             )
         if self.mlp_config is not None:
             assert isinstance(
@@ -190,4 +191,5 @@ class MultiInputNetConfig(NetConfig):
             self.mlp_config = MlpNetConfig(
                 hidden_size=[64, 64],
                 output_activation="ReLU",
+                layer_norm=False,
             )

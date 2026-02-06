@@ -557,11 +557,14 @@ def test_soft_update(vector_space):
 # Runs algorithm test loop
 @pytest.mark.parametrize("observation_space", ["vector_space", "image_space"])
 @pytest.mark.parametrize("num_envs", [1, 3])
-def test_algorithm_test_loop(observation_space, vector_space, num_envs, request):
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_algorithm_test_loop(
+    observation_space, vector_space, num_envs, device, request
+):
     observation_space = request.getfixturevalue(observation_space)
     vect = num_envs > 1
     env = DummyEnv(state_size=observation_space.shape, vect=vect, num_envs=num_envs)
-    agent = TD3(observation_space, vector_space)
+    agent = TD3(observation_space, vector_space, device=device)
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
     agent.clean_up()
@@ -832,48 +835,3 @@ def test_initialize_td3_with_incorrect_actor_net(vector_space):
             critic_networks=critic_networks,
         )
         assert td3
-
-
-@pytest.mark.parametrize(
-    "min, max, action, expected_result, device",
-    [
-        (0, 1, [1.1, 0.75, -1], [1.0, 0.75, 0], "cpu"),
-        ([0.5, 0, 0.1], 1, [0, 0, 0.2], [0.5, 0, 0.2], "cpu"),
-        (0, [0.75, 1.0, 0.1], [1.0, 0.75, 0.1], [0.75, 0.75, 0.1], "cpu"),
-        (
-            [-1, -1, -1],
-            [1, 1, 1],
-            [[-2, 1, 0.25], [1.5, -1, 0.75]],
-            [[-1, 1, 0.25], [1, -1, 0.75]],
-            "cpu",
-        ),
-        (0, 1, [1.1, 0.75, -1], [1.0, 0.75, 0], "cuda"),
-        ([0.5, 0, 0.1], 1, [0, 0, 0.2], [0.5, 0, 0.2], "cuda"),
-        (0, [0.75, 1.0, 0.1], [1.0, 0.75, 0.1], [0.75, 0.75, 0.1], "cuda"),
-        (
-            [-1, -1, -1],
-            [1, 1, 1],
-            [[-2, 1, 0.25], [1.5, -1, 0.75]],
-            [[-1, 1, 0.25], [1, -1, 0.75]],
-            "cuda",
-        ),
-    ],
-)
-def test_multi_dim_clamp(vector_space, min, max, action, expected_result, device):
-    if device == "cuda" and not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-
-    if isinstance(min, list):
-        min = np.array(min)
-    if isinstance(max, list):
-        max = np.array(max)
-    td3 = TD3(
-        vector_space,
-        copy.deepcopy(vector_space),
-        device=device,
-    )
-    input = torch.tensor(action, dtype=torch.float32).to(device)
-    clamped_actions = td3.multi_dim_clamp(min, max, input).type(torch.float32)
-    expected_result = torch.tensor(expected_result)
-    assert clamped_actions.dtype == expected_result.dtype
-    td3.clean_up()
