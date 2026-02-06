@@ -53,7 +53,7 @@ wheels = [
 
 [[package]]
 name = "agilerl"
-version = "2.4.2"
+version = "2.4.3.dev0"
 source = { editable = "." }
 dependencies = [
     { name = "accelerate" },
@@ -139,7 +139,7 @@ requires-dist = [
     { name = "peft", marker = "extra == 'all'", specifier = "~=0.18.0" },
     { name = "peft", marker = "extra == 'llm'", specifier = "~=0.18.0" },
     { name = "pettingzoo", specifier = "~=1.23.1" },
-    { name = "pre-commit", specifier = "~=3.4.0" },
+    { name = "pre-commit", specifier = "~=3.8.0" },
     { name = "pygame", specifier = "~=2.6.0" },
     { name = "pymunk", specifier = "~=6.2.0" },
     { name = "redis", specifier = "~=4.4.4" },
@@ -3024,7 +3024,7 @@ wheels = [
 
 [[package]]
 name = "pre-commit"
-version = "3.4.0"
+version = "3.8.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cfgv" },
@@ -3033,9 +3033,9 @@ dependencies = [
     { name = "pyyaml" },
     { name = "virtualenv" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/56/a5/cb576829ab7c94e768221cf0629e0da8519e744d993e0c99a6ae9803babd/pre_commit-3.4.0.tar.gz", hash = "sha256:6bbd5129a64cad4c0dfaeeb12cd8f7ea7e15b77028d985341478c8af3c759522", size = 177006, upload-time = "2023-09-02T17:09:41.966Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/64/10/97ee2fa54dff1e9da9badbc5e35d0bbaef0776271ea5907eccf64140f72f/pre_commit-3.8.0.tar.gz", hash = "sha256:8bb6494d4a20423842e198980c9ecf9f96607a07ea29549e180eef9ae80fe7af", size = 177815, upload-time = "2024-07-28T19:59:01.538Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/58/56/3b24f8641c39021218ca16115a9cd88512ae16eab790513e832a36269e90/pre_commit-3.4.0-py2.py3-none-any.whl", hash = "sha256:96d529a951f8b677f730a7212442027e8ba53f9b04d217c4c67dc56c393ad945", size = 203701, upload-time = "2023-09-02T17:09:40.215Z" },
+    { url = "https://files.pythonhosted.org/packages/07/92/caae8c86e94681b42c246f0bca35c059a2f0529e5b92619f6aba4cf7e7b6/pre_commit-3.8.0-py2.py3-none-any.whl", hash = "sha256:9a90a53bf82fdd8778d58085faf8d83df56e40dfe18f45b19446e26bf1b3a63f", size = 204643, upload-time = "2024-07-28T19:58:59.335Z" },
 ]
 
 [[package]]
