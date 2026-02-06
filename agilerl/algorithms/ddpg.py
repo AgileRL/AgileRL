@@ -18,6 +18,7 @@ from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.typing import (
     ExperiencesType,
     GymEnvType,
+    NetConfigType,
     ObservationType,
 )
 from agilerl.utils.algo_utils import (
@@ -226,9 +227,16 @@ class DDPG(RLAlgorithm):
 
             # NOTE: Set layer_norm=False for encoder config, since critic automatically
             # does this the actor should too to allow encoder sharing
-            encoder_config = net_config.get("encoder_config", None)
+            encoder_config: NetConfigType | None = net_config.get(
+                "encoder_config", None
+            )
             if encoder_config is not None:
                 if is_mlp_net_config(encoder_config):
+                    if encoder_config.get("layer_norm", False):
+                        warnings.warn(
+                            "Layer normalization is not supported for the encoder of DDPG networks. Disabling it. "
+                            "See GitHub PR: https://github.com/agilerl/agilerl/pull/insert_pr_number for more details."
+                        )
                     encoder_config["layer_norm"] = False
             else:
                 simba = net_config.get("simba", False)

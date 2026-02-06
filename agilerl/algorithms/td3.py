@@ -15,7 +15,7 @@ from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.q_networks import ContinuousQNetwork
-from agilerl.typing import ExperiencesType, GymEnvType, ObservationType
+from agilerl.typing import ExperiencesType, GymEnvType, NetConfigType, ObservationType
 from agilerl.utils.algo_utils import (
     make_safe_deepcopies,
     multi_dim_clamp,
@@ -232,15 +232,21 @@ class TD3(RLAlgorithm):
                     actor_network, critic_networks[0], critic_networks[1]
                 )
             )
-
         else:
             net_config = {} if net_config is None else net_config
 
             # NOTE: Set layer_norm=False for encoder config, since critic automatically
             # does this the actor should too to allow encoder sharing
-            encoder_config = net_config.get("encoder_config", None)
+            encoder_config: NetConfigType | None = net_config.get(
+                "encoder_config", None
+            )
             if encoder_config is not None:
                 if is_mlp_net_config(encoder_config):
+                    if encoder_config.get("layer_norm", False):
+                        warnings.warn(
+                            "Layer normalization is not supported for the encoder of TD3 networks. Disabling it. "
+                            "See GitHub PR: https://github.com/agilerl/agilerl/pull/insert_pr_number for more details."
+                        )
                     encoder_config["layer_norm"] = False
             else:
                 simba = net_config.get("simba", False)

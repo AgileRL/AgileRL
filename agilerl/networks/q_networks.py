@@ -354,6 +354,12 @@ class ContinuousQNetwork(EvolvableNetwork):
                 layer_norm=False,
             )
         elif is_mlp_net_config(encoder_config):
+            if encoder_config.get("layer_norm", False):
+                warnings.warn(
+                    "Layer normalization is not supported for the encoder of DDPG networks. Disabling it. "
+                    "See GitHub PR: https://github.com/agilerl/agilerl/pull/insert_pr_number for more details."
+                )
+
             encoder_config["layer_norm"] = False
 
         super().__init__(
