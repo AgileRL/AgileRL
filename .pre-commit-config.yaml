@@ -35,7 +35,7 @@ repos:
                 - --skip=*.css,*.js,*.map,*.scss,*.svg
                 - --ignore-words-list=magent,pres,roate
     - repo: https://github.com/astral-sh/ruff-pre-commit
-      rev: v0.14.14
+      rev: v0.15.0
       hooks:
           - id: ruff-check
             args:
@@ -53,6 +53,6 @@ repos:
           - id: yamlfmt
     - repo: https://github.com/astral-sh/uv-pre-commit
       # uv version.
-      rev: 0.9.28
+      rev: 0.10.0
       hooks:
           - id: uv-lock
