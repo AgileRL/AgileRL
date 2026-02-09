@@ -185,8 +185,8 @@ class TD3(RLAlgorithm):
         self.theta = theta
         self.dt = dt
         self.learn_counter = 0
-        self.action_low = torch.as_tensor(self.action_space.low, dtype=torch.float32)
-        self.action_high = torch.as_tensor(self.action_space.high, dtype=torch.float32)
+        self.action_low = torch.as_tensor(action_space.low, dtype=torch.float32)
+        self.action_high = torch.as_tensor(action_space.high, dtype=torch.float32)
 
         # Exploration noise
         self.expl_noise = (

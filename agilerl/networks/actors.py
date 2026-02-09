@@ -107,8 +107,8 @@ class DeterministicActor(EvolvableNetwork):
         )
 
         if isinstance(action_space, spaces.Box):
-            self.action_low = torch.as_tensor(action_space.low, device=self.device)
-            self.action_high = torch.as_tensor(action_space.high, device=self.device)
+            self.action_low = torch.as_tensor(action_space.low, dtype=torch.float32)
+            self.action_high = torch.as_tensor(action_space.high, dtype=torch.float32)
         else:
             self.action_low, self.action_high = None, None
 

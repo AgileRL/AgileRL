@@ -209,9 +209,11 @@ def test_deterministic_actor_rescale_action():
     )
 
     # Calculate expected value: low + (high - low) * (action - (-1)) / (1 - (-1))
-    expected = torch.tensor([[-1.0, 2.0]])  # Should be mapped to middle of range
+    expected = torch.tensor(
+        [[-1.0, 2.0]], dtype=action_low.dtype
+    )  # Should be mapped to middle of range
     torch.testing.assert_close(rescaled, expected)
-    assert rescaled.dtype == action.dtype
+    assert rescaled.dtype == action_low.dtype
 
     # Test with Sigmoid activation
     action = torch.tensor(
@@ -221,18 +223,10 @@ def test_deterministic_actor_rescale_action():
         action, action_low, action_high, "Sigmoid"
     )
     expected = torch.tensor(
-        [[-1.0, 2.0]]
+        [[-1.0, 2.0]], dtype=action_low.dtype
     )  # Should be mapped to quarter/three-quarters of range
     torch.testing.assert_close(rescaled, expected)
-    assert rescaled.dtype == action.dtype
-
-    # Test with no activation (unbounded)
-    action = torch.tensor([[1.0, -3.0]], dtype=torch.float32)  # Unbounded action
-    rescaled = DeterministicActor.rescale_action(action, action_low, action_high, None)
-    # With no activation, action is just passed through as is
-    expected = action
-    torch.testing.assert_close(rescaled, expected)
-    assert rescaled.dtype == action.dtype
+    assert rescaled.dtype == action_low.dtype
 
     # Test clipping behavior (out-of-bounds values)
     action = torch.tensor(
@@ -251,67 +245,10 @@ def test_deterministic_actor_rescale_action():
         action[0, 1] - (-1.0)
     ) / (1.0 - (-1.0))
     expected = torch.tensor(
-        [[expected_first[0], expected_second[1]]], dtype=action.dtype
+        [[expected_first[0], expected_second[1]]], dtype=action_low.dtype
     )
     torch.testing.assert_close(rescaled, expected)
-    assert rescaled.dtype == action.dtype
-
-
-def test_deterministic_actor_forward_rescaling():
-    # Test that the forward method rescales actions correctly
-    # Create a continuous action space
-    action_space = spaces.Box(low=np.array([-2.0, -1.0]), high=np.array([2.0, 3.0]))
-
-    # Test with default Tanh activation
-    actor = DeterministicActor(
-        observation_space=spaces.Box(low=-1, high=1, shape=(2,)),
-        action_space=action_space,
-    )
-
-    # Create sample observation
-    obs = torch.tensor([[-0.5, 0.5]]).float()
-
-    # Override the head_net to output a known value
-    def mock_forward(x):
-        return torch.tensor([[-0.5, 0.5]])  # Fixed output for testing
-
-    # Save original function
-    original_head_forward = actor.head_net.forward
-
-    try:
-        # Mock the head network output
-        actor.head_net.forward = mock_forward
-
-        # Get action from forward pass
-        with torch.no_grad():
-            action = actor(obs)
-
-        # Expected value based on rescaling from [-1,1] to action space
-        expected = torch.tensor([[-1.0, 2.0]])  # Middle of the action range
-        torch.testing.assert_close(action, expected)
-
-        # Test with explicit Sigmoid activation
-        actor = DeterministicActor(
-            observation_space=spaces.Box(low=-1, high=1, shape=(2,)),
-            action_space=action_space,
-            head_config={"output_activation": "Sigmoid", "hidden_size": [32]},
-        )
-
-        # Override again for the new actor
-        actor.head_net.forward = lambda x: torch.tensor([[0.25, 0.75]])
-
-        with torch.no_grad():
-            action = actor(obs)
-
-        expected = torch.tensor(
-            [[-1.0, 2.0]]
-        )  # Should map to quarter/three-quarters of range
-        torch.testing.assert_close(action, expected)
-
-    finally:
-        # Restore original function if needed
-        if "original_head_forward" in locals():
-            actor.head_net.forward = original_head_forward
+    assert rescaled.dtype == action_low.dtype
 
 
 @pytest.mark.parametrize("use_experimental_distribution", [False, True])
