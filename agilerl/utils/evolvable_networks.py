@@ -60,6 +60,17 @@ def compile_model(
     return compiled_model
 
 
+def is_mlp_net_config(config: NetConfigType) -> bool:
+    """Check if the net config is a MLP net config.
+
+    :param config: Net config
+    :type config: NetConfigType
+    :return: True if the net config is a MLP net config, False otherwise
+    :rtype: bool
+    """
+    return "hidden_size" in config and "num_blocks" not in config
+
+
 def is_image_space(space: spaces.Space) -> bool:
     """Check if the space is an image space. We ignore dtype and number of channels
     checks.
@@ -156,7 +167,10 @@ def tuple_to_dict_obs(tuple_obs: tuple) -> dict:
 
 
 def get_default_encoder_config(
-    observation_space: spaces.Space, simba: bool = False, recurrent: bool = False
+    observation_space: spaces.Space,
+    simba: bool = False,
+    recurrent: bool = False,
+    layer_norm: bool = True,
 ) -> NetConfigType:
     """Get the default configuration for the encoder network based on the observation space.
 
@@ -166,28 +180,39 @@ def get_default_encoder_config(
     :type simba: bool
     :param recurrent: Whether to use recurrent encoder.
     :type recurrent: bool
-
+    :param layer_norm: Whether to use layer normalization in MLP encoders.
+    :type layer_norm: bool
     :return: Default configuration for the encoder network.
-    :rtype: dict[str, Any]
+    :rtype: NetConfigType
     """
+    default_oa = "ReLU"
     if isinstance(observation_space, (spaces.Dict, spaces.Tuple)):
-        config = MultiInputNetConfig(output_activation=None)
+        config = MultiInputNetConfig(output_activation=default_oa)
     elif is_image_space(observation_space):
         config = CnnNetConfig(
             channel_size=[32, 32],
             kernel_size=[3, 3],
             stride_size=[1, 1],
-            output_activation=None,
+            output_activation=default_oa,
         )
     elif simba:
-        config = SimBaNetConfig(hidden_size=128, num_blocks=2, output_activation=None)
+        config = SimBaNetConfig(
+            hidden_size=128,
+            num_blocks=2,
+            output_activation=default_oa,
+        )
     elif recurrent:
         config = LstmNetConfig(
-            hidden_state_size=128, num_layers=2, output_activation=None
+            hidden_state_size=128,
+            num_layers=2,
+            output_activation=default_oa,
         )
     else:
         config = MlpNetConfig(
-            hidden_size=[64, 64], output_activation=None, output_vanish=False
+            hidden_size=[64, 64],
+            output_activation=default_oa,
+            layer_norm=layer_norm,
+            output_vanish=False,
         )
 
     return asdict(config)

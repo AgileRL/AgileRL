@@ -28,7 +28,7 @@ INIT_HP:
     EVAL_STEPS:                # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
     LEARNING_DELAY: 10_000     # Steps before learning
-    SHARE_ENCODERS: false       # Share encoders between actor and critic
+    SHARE_ENCODERS: true       # Share encoders between actor and critic
     WANDB: true                # Log with Weights and Biases
 
 MUTATION_PARAMS:

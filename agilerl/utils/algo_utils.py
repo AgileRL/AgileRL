@@ -188,7 +188,7 @@ def get_hidden_states_shape_from_model(model: nn.Module) -> dict[str, int]:
     :rtype: dict[str, int]
     """
     hidden_state_architecture = {}
-    for name, module in model.named_modules():
+    for _, module in model.named_modules():
         if hasattr(module, "hidden_state_architecture"):
             hidden_state_architecture.update(
                 {
@@ -251,6 +251,30 @@ def extract_sequences_from_episode(
             f"Received unrecognized sequence type: {sequence_type}"
         )
     return sequences
+
+
+def multi_dim_clamp(
+    min: float | torch.Tensor, max: float | torch.Tensor, input: torch.Tensor
+) -> torch.Tensor:
+    """Multi-dimensional clamp function
+
+    :param min: Minimum value or array of minimum values
+    :type min: float | torch.Tensor
+    :param max: Maximum value or array of maximum values
+    :type max: float | torch.Tensor
+    :param input: Input tensor to be clamped
+    :type input: torch.Tensor
+    :return: Clamped tensor
+    :rtype: torch.Tensor
+    """
+    if not isinstance(min, torch.Tensor) and not isinstance(max, torch.Tensor):
+        return torch.clamp(input, min, max)
+    elif (min.device != input.device) and (max.device != input.device):
+        min = min.to(input.device)
+        max = max.to(input.device)
+
+    clamped: torch.Tensor = torch.max(torch.min(input, max), min)
+    return clamped.to(input.dtype)
 
 
 def is_image_space(space: spaces.Space) -> bool:
@@ -538,11 +562,7 @@ def format_shared_critic_encoder(encoder_configs: NetConfigType) -> dict[str, An
     for encoder_key, config in encoder_configs.items():
         if encoder_key == "mlp_config":
             encoder_config[encoder_key] = config
-
-            # If we have homogeneous agents, we can process the raw observations with an EvolvableMLP
-            encoder_config["vector_space_mlp"] = len(encoder_configs) == 1
             encoder_config["latent_dim"] = config.get("hidden_size", [32])[-1]
-            encoder_config["output_layernorm"] = config.get("layer_norm", False)
         else:
             encoder_config["init_dicts"][encoder_key] = config
 

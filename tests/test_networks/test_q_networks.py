@@ -469,3 +469,17 @@ def test_continuous_q_network_clone(
     assert_state_dicts_equal(clone.state_dict(), network.state_dict())
     for key, param in clone.named_parameters():
         torch.testing.assert_close(param, original_net_dict[key])
+
+
+def test_continuous_q_network_encoder_layer_norm_warning(vector_space):
+    """ContinuousQNetwork warns and disables layer_norm when encoder_config has layer_norm=True (MLP encoder)."""
+    encoder_config = asdict(MlpNetConfig(hidden_size=[64, 64], layer_norm=True))
+    with pytest.warns(
+        UserWarning,
+        match="Layer normalization is not supported for the encoder of DDPG networks",
+    ):
+        network = ContinuousQNetwork(
+            vector_space, vector_space, encoder_config=encoder_config
+        )
+    # Encoder should still be built; layer_norm was forced to False
+    assert isinstance(network.encoder, EvolvableMLP)
