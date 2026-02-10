@@ -656,3 +656,56 @@ def test_clone_after_learning():
     assert clone_agent.scores == ddpg.scores
     ddpg.clean_up()
     clone_agent.clean_up()
+
+
+def test_share_encoder_parameters_incompatible_architectures_raises_key_error(
+    vector_space,
+):
+    """With share_encoders=True, incompatible actor/critic encoder architectures raise KeyError.
+
+    Actor uses DeterministicActor with layer_norm=True in the encoder; critic uses
+    ContinuousQNetwork (encoder has layer_norm=False). Sharing params then fails because
+    the actor encoder has extra layer_norm parameters not present in the critic.
+    """
+    action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+    observation_space = vector_space
+
+    actor_network = DeterministicActor(
+        observation_space,
+        action_space,
+        encoder_config={"hidden_size": [64, 64], "layer_norm": True},
+    )
+    critic_network = ContinuousQNetwork(observation_space, action_space)
+
+    with pytest.raises(KeyError, match="incompatible encoder architectures"):
+        DDPG(
+            observation_space,
+            action_space,
+            actor_network=actor_network,
+            critic_network=critic_network,
+            share_encoders=True,
+        )
+
+
+def test_share_encoder_parameters_non_evolvable_network_emits_warning(
+    vector_space, simple_mlp, simple_mlp_critic
+):
+    """When share_encoder_parameters() is called with actor/critic that are not EvolvableNetwork, a warning is emitted."""
+    action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+    observation_space = vector_space
+    actor_network = MakeEvolvable(simple_mlp, torch.randn(1, 4))
+    critic_network = MakeEvolvable(simple_mlp_critic, torch.randn(1, 6))
+
+    ddpg = DDPG(
+        observation_space,
+        action_space,
+        actor_network=actor_network,
+        critic_network=critic_network,
+        share_encoders=True,
+    )
+    with pytest.warns(
+        UserWarning,
+        match="Encoder sharing is disabled as actor or critic is not an EvolvableNetwork",
+    ):
+        ddpg.share_encoder_parameters()
+    ddpg.clean_up()
