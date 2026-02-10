@@ -30,11 +30,12 @@ DefaultCnnConfig = CnnNetConfig(
     kernel_size=[3, 3],
     stride_size=[1, 1],
     output_activation="ReLU",
+    layer_norm=False,
 )
 DefaultMlpConfig = MlpNetConfig(
     hidden_size=[64, 64],
     output_activation="ReLU",
-    output_layernorm=True,
+    layer_norm=False,
 )
 
 
@@ -265,12 +266,8 @@ class EvolvableMultiInput(EvolvableModule):
     def _reformat_mlp_config(self, config: dict[str, Any]) -> dict[str, Any]:
         """Reformats the MLP configuration."""
         config["output_vanish"] = False  # Don't want output vanish for encoder
-        config["output_layernorm"] = config.get(
-            "layer_norm", True
-        )  # Add layer norm for output if present generally
-        config["output_activation"] = config.get(
-            "activation", "ReLU"
-        )  # Use same output activation
+        config["output_layernorm"] = config.get("layer_norm", True)
+        config["output_activation"] = config.get("activation", "ReLU")
         return config
 
     def _modify_mlp_config(self) -> None:

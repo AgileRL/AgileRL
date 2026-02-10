@@ -302,16 +302,17 @@ class MADDPG(MultiAgentRLAlgorithm):
                 "max_latent_dim": max_latent_dim,
             }
 
-            clip_actions = self.torch_compiler is None
-
-            def create_actor(agent_id):
-                return DeterministicActor(
+            def create_actor(agent_id: str) -> DeterministicActor:
+                actor: DeterministicActor = DeterministicActor(
                     self.possible_observation_spaces[agent_id],
                     self.possible_action_spaces[agent_id],
                     device=self.device,
-                    clip_actions=clip_actions,
                     **copy.deepcopy(agent_configs[agent_id]),
                 )
+
+                # NOTE: Need to disable encoder mutations since we use a different encoder type for the critic
+                actor.encoder.disable_mutations()
+                return actor
 
             # Critic uses observations + actions of all agents to predict Q-value
             def create_critic():
@@ -431,7 +432,7 @@ class MADDPG(MultiAgentRLAlgorithm):
         # Preprocess observations
         preprocessed_states = self.preprocess_observation(obs)
 
-        action_dict: dict[str, np.ndarray] = {}
+        action_dict: dict[str, torch.Tensor] = {}
         for agent_id, obs in preprocessed_states.items():
             actor = self.actors[agent_id]
             actor.eval()
@@ -442,39 +443,27 @@ class MADDPG(MultiAgentRLAlgorithm):
                 with torch.no_grad():
                     actions = actor(obs)
 
-            # Need to rescale actions outside of forward pass if using torch.compile
-            if self.torch_compiler is not None and isinstance(
-                self.possible_action_spaces[agent_id], spaces.Box
-            ):
-                actions = DeterministicActor.rescale_action(
-                    action=actions,
-                    low=actor.action_low,
-                    high=actor.action_high,
-                    output_activation=actor.output_activation,
-                )
-
             actor.train()
             if self.training:
                 if isinstance(self.possible_action_spaces[agent_id], spaces.Discrete):
-                    min_action, max_action = 0, 1
+                    min_output, max_output = 0, 1
                 else:
-                    min_action = self.possible_action_spaces[agent_id].low
-                    max_action = self.possible_action_spaces[agent_id].high
+                    min_output, max_output = -1, 1
 
                 # Add noise to actions for exploration
                 actions = torch.clamp(
                     actions + self.action_noise(agent_id),
-                    torch.as_tensor(min_action, device=actions.device),
-                    torch.as_tensor(max_action, device=actions.device),
+                    torch.as_tensor(min_output, device=actions.device),
+                    torch.as_tensor(max_output, device=actions.device),
                 )
 
-            action_dict[agent_id] = actions.cpu().numpy()
+            action_dict[agent_id] = actions.cpu()
 
-        # Process agents with discrete actions
+        # Process actions for environment
         processed_action_dict: ArrayDict = OrderedDict()
         for agent_id, space in self.possible_action_spaces.items():
             if isinstance(space, spaces.Discrete):
-                action = action_dict[agent_id]
+                action = action_dict[agent_id].numpy()
                 mask = (
                     1 - np.array(action_masks[agent_id])
                     if action_masks[agent_id] is not None
@@ -496,7 +485,15 @@ class MADDPG(MultiAgentRLAlgorithm):
                         for agent, mask in agent_masks.items()
                     }
             else:
-                processed_action_dict[agent_id] = action_dict[agent_id]
+                # Rescale actions to action space bounds
+                processed_action_dict[agent_id] = DeterministicActor.rescale_action(
+                    action=action_dict[agent_id],
+                    low=actor.action_low,
+                    high=actor.action_high,
+                    output_activation=actor.output_activation,
+                ).numpy()
+
+            action_dict[agent_id] = action_dict[agent_id].numpy()
 
         # If using env_defined_actions replace actions
         if env_defined_actions is not None:

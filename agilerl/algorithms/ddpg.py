@@ -18,12 +18,18 @@ from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.typing import (
     ExperiencesType,
     GymEnvType,
+    NetConfigType,
     ObservationType,
 )
 from agilerl.utils.algo_utils import (
     make_safe_deepcopies,
+    multi_dim_clamp,
     obs_channels_to_first,
     share_encoder_parameters,
+)
+from agilerl.utils.evolvable_networks import (
+    get_default_encoder_config,
+    is_mlp_net_config,
 )
 
 
@@ -193,8 +199,8 @@ class DDPG(RLAlgorithm):
         self.theta = theta
         self.dt = dt
         self.learn_counter = 0
-        self.action_low = action_space.low.astype(np.float32)
-        self.action_high = action_space.high.astype(np.float32)
+        self.action_low = torch.as_tensor(action_space.low, dtype=torch.float32)
+        self.action_high = torch.as_tensor(action_space.high, dtype=torch.float32)
 
         if actor_network is not None and critic_network is not None:
             if not isinstance(actor_network, EvolvableModule):
@@ -214,6 +220,33 @@ class DDPG(RLAlgorithm):
             )
         else:
             net_config = {} if net_config is None else net_config
+
+            # NOTE: Set layer_norm=False for encoder config, since critic automatically
+            # does this the actor should too to allow encoder sharing
+            encoder_config: NetConfigType | None = net_config.get(
+                "encoder_config", None
+            )
+            if encoder_config is not None:
+                if is_mlp_net_config(encoder_config):
+                    if encoder_config.get("layer_norm", False):
+                        warnings.warn(
+                            "Layer normalization is not supported for the encoder of DDPG networks. Disabling it. "
+                            "See GitHub PR for more details: https://github.com/AgileRL/AgileRL/pull/469"
+                        )
+                    encoder_config["layer_norm"] = False
+            else:
+                simba = net_config.get("simba", False)
+                recurrent = net_config.get("recurrent", False)
+                encoder_config = get_default_encoder_config(
+                    observation_space,
+                    simba=simba,
+                    recurrent=recurrent,
+                    layer_norm=False,
+                )
+
+            net_config["encoder_config"] = encoder_config
+
+            # Set output activation to None for critic head config
             head_config = net_config.get("head_config", None)
             if head_config is not None:
                 critic_head_config = copy.deepcopy(head_config)
@@ -221,7 +254,7 @@ class DDPG(RLAlgorithm):
             else:
                 critic_head_config = MlpNetConfig(hidden_size=[64])
 
-            critic_net_config = copy.deepcopy(net_config)
+            critic_net_config: dict[str, Any] = copy.deepcopy(net_config)
             critic_net_config["head_config"] = critic_head_config
 
             def create_actor():
@@ -291,7 +324,12 @@ class DDPG(RLAlgorithm):
         """Shares the encoder parameters between the actor and critic. Registered as a mutation hook
         when share_encoders=True."""
         if all(isinstance(net, EvolvableNetwork) for net in [self.actor, self.critic]):
-            share_encoder_parameters(self.actor, self.critic, self.critic_target)
+            try:
+                share_encoder_parameters(self.actor, self.critic, self.critic_target)
+            except KeyError as e:
+                raise KeyError(
+                    f"Found incompatible encoder architectures: {e} not found in shared network."
+                ) from e
         else:
             warnings.warn(
                 "Encoder sharing is disabled as actor or critic is not an EvolvableNetwork."
@@ -313,17 +351,25 @@ class DDPG(RLAlgorithm):
         with torch.no_grad():
             action: torch.Tensor = self.actor(obs)
 
-        action = action.cpu().data.numpy()
-
         self.actor.train()
-        if training:
-            action += self.action_noise()
 
-        return action.clip(self.action_low, self.action_high)
+        # Add noise for exploration
+        if training:
+            action = action.cpu().data.numpy()
+            action = (action + self.action_noise()).clip(-1, 1)
+            return action
+
+        # Action scaled to action space bounds if not training
+        action = DeterministicActor.rescale_action(
+            action=action.cpu(),
+            low=self.action_low,
+            high=self.action_high,
+            output_activation=self.actor.output_activation,
+        )
+        return action.data.numpy()
 
     def action_noise(self) -> np.ndarray:
-        """Create action noise for exploration, either Ornstein Uhlenbeck or
-            from a normal distribution.
+        """Create action noise for exploration, either Ornstein Uhlenbeck or from a normal distribution.
 
         :return: Action noise
         :rtype: np.ndarray
@@ -345,41 +391,12 @@ class DDPG(RLAlgorithm):
             )
         return noise.astype(np.float32)
 
-    def multi_dim_clamp(
-        self,
-        min: Union[float, np.ndarray],
-        max: Union[float, np.ndarray],
-        input: torch.Tensor,
-    ) -> torch.Tensor:
-        """Multi-dimensional clamp function
-
-        :param min: Minimum value or array of minimum values
-        :type min: Union[float, np.ndarray]
-        :param max: Maximum value or array of maximum values
-        :type max: Union[float, np.ndarray]
-        :param input: Input tensor to be clamped
-        :type input: torch.Tensor
-        :return: Clamped tensor
-        :rtype: torch.Tensor
-        """
-        if not isinstance(min, np.ndarray) and not isinstance(max, np.ndarray):
-            return torch.clamp(input, min, max)
-
-        device = self.device if self.accelerator is None else self.accelerator.device
-        min = torch.from_numpy(min).to(device) if isinstance(min, np.ndarray) else min
-        max = torch.from_numpy(max).to(device) if isinstance(max, np.ndarray) else max
-
-        if isinstance(max, torch.Tensor) and isinstance(min, (int, float)):
-            min = torch.full_like(max, min).to(device)
-        if isinstance(min, torch.Tensor) and isinstance(max, (int, float)):
-            max = torch.full_like(min, max).to(device)
-
-        output = torch.max(torch.min(input, max), min).type(input.dtype)
-
-        return output
-
     def reset_action_noise(self, indices: np.ndarray) -> None:
-        """Reset action noise."""
+        """Reset action noise.
+
+        :param indices: List of indices to reset
+        :type indices: np.ndarray
+        """
         self.current_noise[indices] = self.mean_noise[indices]
 
     def learn(
@@ -410,12 +427,11 @@ class DDPG(RLAlgorithm):
         with torch.no_grad():
             next_actions = self.actor_target(next_obs)
             noise = actions.data.normal_(0, policy_noise)
-            noise = self.multi_dim_clamp(-noise_clip, noise_clip, noise)
+            noise = multi_dim_clamp(-noise_clip, noise_clip, noise)
             next_actions = next_actions + noise
-            next_actions = self.multi_dim_clamp(
-                self.action_space.low, self.action_space.high, next_actions
+            next_actions = multi_dim_clamp(
+                self.action_low, self.action_high, next_actions
             )
-
             q_value_next_state = self.critic_target(next_obs, next_actions)
 
         y_j = rewards + ((1 - dones) * self.gamma * q_value_next_state)

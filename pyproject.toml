@@ -1,6 +1,6 @@
 [project]
 name = "agilerl"
-version = "2.4.3.dev0"
+version = "2.4.3.dev1"
 description = "AgileRL is a deep reinforcement learning library focused on improving RL development through RLOps."
 authors = [{ name = "Nick Ustaran-Anderegg", email = "dev@agilerl.com" }]
 license = "Apache-2.0"
