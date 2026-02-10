@@ -1,4 +1,5 @@
-from typing import Optional, Union
+import warnings
+from typing import ClassVar, Optional
 
 import torch
 from gymnasium import spaces
@@ -11,23 +12,39 @@ from agilerl.typing import ArrayOrTensor, NetConfigType, TorchObsType
 from agilerl.utils.algo_utils import get_output_size_from_space
 
 
+def get_output_bounds(output_activation: str) -> tuple[float, float]:
+    """Get the bounds of the output activation function.
+
+    :param output_activation: Output activation function.
+    :type output_activation: str
+    :return: Bounds of the output activation function.
+    :rtype: tuple[float, float]
+    """
+    if output_activation in ["Tanh", "Softsign"]:
+        return -1.0, 1.0
+    elif output_activation in ["Sigmoid", "Softmax", "GumbelSoftmax"]:
+        return 0.0, 1.0
+    else:
+        raise ValueError(
+            f"Received invalid output activation function: {output_activation}. "
+        )
+
+
 class DeterministicActor(EvolvableNetwork):
     """Deterministic actor network for policy-gradient algorithms. Given an observation,
     it outputs the mean of the action distribution. This is useful for e.g. DDPG, SAC, TD3.
 
     :param observation_space: Observation space of the environment.
     :type observation_space: spaces.Space
-    :param action_space: Action space of the environment
-    :type action_space: Union[spaces.Box, spaces.Discrete]
+    :param action_space: Action space of the environment.
+    :type action_space: spaces.Box | spaces.Discrete
     :param encoder_cls: Encoder class to use for the network. Defaults to None, whereby it is
         automatically built using an AgileRL module according the observation space.
-    :type encoder_cls: Optional[Union[str, type[EvolvableModule]]]
+    :type encoder_cls: str | type[EvolvableModule] | None
     :param encoder_config: Configuration of the encoder network.
     :type encoder_config: NetConfigType
     :param head_config: Configuration of the network MLP head.
-    :type head_config: Optional[NetConfigType]
-    :param clip_actions: Whether to clip the actions to the action space.
-    :type clip_actions: bool
+    :type head_config: NetConfigType | None
     :param min_latent_dim: Minimum dimension of the latent space representation.
     :type min_latent_dim: int
     :param max_latent_dim: Maximum dimension of the latent space representation.
@@ -41,30 +58,39 @@ class DeterministicActor(EvolvableNetwork):
     :param device: Device to use for the network.
     :type device: str
     :param random_seed: Random seed to use for the network. Defaults to None.
-    :type random_seed: Optional[int]
+    :type random_seed: int | None
     :param encoder_name: Name of the encoder network.
     :type encoder_name: str
     """
 
-    supported_spaces = (spaces.Box, spaces.Discrete)
+    supported_spaces: ClassVar[tuple[type[spaces.Space], ...]] = (
+        spaces.Box,
+        spaces.Discrete,
+    )
+    _allowed_output_activations: ClassVar[tuple[str, ...]] = (
+        "Tanh",
+        "Softsign",
+        "Sigmoid",
+        "Softmax",
+        "GumbelSoftmax",
+    )
 
     def __init__(
         self,
         observation_space: spaces.Space,
-        action_space: Union[spaces.Box, spaces.Discrete],
-        encoder_cls: Optional[Union[str, type[EvolvableModule]]] = None,
-        encoder_config: Optional[NetConfigType] = None,
-        head_config: Optional[NetConfigType] = None,
-        clip_actions: bool = True,
+        action_space: spaces.Box | spaces.Discrete,
+        encoder_cls: str | type[EvolvableModule] | None = None,
+        encoder_config: NetConfigType | None = None,
+        head_config: NetConfigType | None = None,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
         latent_dim: int = 32,
         simba: bool = False,
         recurrent: bool = False,
         device: str = "cpu",
-        random_seed: Optional[int] = None,
+        random_seed: int | None = None,
         encoder_name: str = "encoder",
-    ):
+    ) -> None:
         super().__init__(
             observation_space,
             encoder_cls=encoder_cls,
@@ -80,23 +106,30 @@ class DeterministicActor(EvolvableNetwork):
             encoder_name=encoder_name,
         )
 
-        self.clip_actions = clip_actions
         if isinstance(action_space, spaces.Box):
-            self.action_low = torch.as_tensor(action_space.low, device=self.device)
-            self.action_high = torch.as_tensor(action_space.high, device=self.device)
+            self.action_low = torch.as_tensor(action_space.low, dtype=torch.float32)
+            self.action_high = torch.as_tensor(action_space.high, dtype=torch.float32)
         else:
-            self.action_low = None
-            self.action_high = None
+            self.action_low, self.action_high = None, None
 
         # Set output activation based on action space
-        if head_config is not None and "output_activation" in head_config:
-            output_activation = head_config["output_activation"]
-        elif isinstance(action_space, spaces.Box):
+        if isinstance(action_space, spaces.Box):
             output_activation = "Tanh"
         elif isinstance(action_space, spaces.Discrete):
             output_activation = "GumbelSoftmax"
-        else:
-            output_activation = None
+
+        if head_config is not None:
+            if "output_activation" in head_config:
+                user_output_activation = head_config["output_activation"]
+                if user_output_activation not in self._allowed_output_activations:
+                    warnings.warn(
+                        f"Output activation must be one of the following: {', '.join(self._allowed_output_activations)}. "
+                        f"Got {user_output_activation} instead. Using default output activation."
+                    )
+                else:
+                    output_activation = user_output_activation
+
+        self.output_activation = output_activation
 
         if head_config is None:
             head_config = MlpNetConfig(
@@ -107,58 +140,44 @@ class DeterministicActor(EvolvableNetwork):
 
         self.output_size = get_output_size_from_space(self.action_space)
 
-        self.build_network_head(head_config)
-        self.output_activation = head_config.get("output_activation", output_activation)
+        self.build_network_head(head_config)  # Build network head
 
-    def unscale_action(self, action: torch.Tensor) -> torch.Tensor:
-        """Unscale an action to the original action space.
-
-        :param action: Action outputted by the network.
-        :type action: torch.Tensor
-        :return: Unscaled action.
-        :rtype: torch.Tensor
-        """
-        return self.action_low + (self.action_high - self.action_low) * action
-
-    @torch.compiler.disable
     @staticmethod
     def scale_action(
         action: torch.Tensor,
         low: torch.Tensor,
         high: torch.Tensor,
-        output_activation: Optional[str] = None,
+        output_activation: str,
     ) -> torch.Tensor:
-        """Rescale an action from the bounds of the output activation function to
-        the that of the action space [low, high].
+        """Rescale an action from the network output bounds to the action space bounds [low, high].
 
-        :param action: Action outputted by the network.
+        :param action: Action as outputted by the network.
         :type action: torch.Tensor
-        :param low: Minimum action.
+        :param low: Minimum action array.
         :type low: torch.Tensor
-        :param high: Maximum action.
+        :param high: Maximum action array.
         :type high: torch.Tensor
-        :param output_activation: Output activation function.
-        :type output_activation: Optional[str]
-        :return: Scaled action.
+        :param output_activation: Output activation function of the network.
+        :type output_activation: str
+        :return: Action in space bounds [low, high].
         :rtype: torch.Tensor
         """
-        if output_activation in ["Tanh", "Softsign"]:
-            prescaled_min, prescaled_max = -1.0, 1.0
-        elif output_activation in ["Sigmoid", "Softmax", "GumbelSoftmax"]:
-            prescaled_min, prescaled_max = 0.0, 1.0
-        else:
-            # For unbounded network outputs, we just return the action
+        min_output, max_output = get_output_bounds(output_activation)
+
+        # If the action space or network output are unbounded, we just return the action
+        if (
+            min_output is None
+            or max_output is None
+            or low.isinf().any()
+            or high.isinf().any()
+        ):
             return action
 
-        # If the action space is unbounded, we just return the action
-        if low.isinf().any() or high.isinf().any():
-            rescaled_action = action
-        else:
-            rescaled_action = low + (high - low) * (action - prescaled_min) / (
-                prescaled_max - prescaled_min
-            )
-
-        return rescaled_action.to(action.dtype)
+        # [prescaled_min, prescaled_max] -> [low, high]
+        rescaled_action = low + (high - low) * (
+            (action - min_output) / (max_output - min_output)
+        )
+        return rescaled_action.to(low.dtype)
 
     def build_network_head(self, net_config: Optional[NetConfigType] = None) -> None:
         """Builds the head of the network.
@@ -182,18 +201,7 @@ class DeterministicActor(EvolvableNetwork):
         :rtype: torch.Tensor
         """
         latent = self.extract_features(obs)
-        action = self.head_net(latent)
-
-        # Action scaling only relevant for continuous action spaces
-        if isinstance(self.action_space, spaces.Box) and self.clip_actions:
-            action = DeterministicActor.scale_action(
-                action=action,
-                low=self.action_low,
-                high=self.action_high,
-                output_activation=self.output_activation,
-            )
-
-        return action
+        return self.head_net(latent)
 
     def recreate_network(self) -> None:
         """Recreates the network."""
@@ -221,11 +229,11 @@ class StochasticActor(EvolvableNetwork):
     :type action_space: spaces.Space
     :param encoder_cls: Encoder class to use for the network. Defaults to None, whereby it is
         automatically built using an AgileRL module according the observation space.
-    :type encoder_cls: Optional[Union[str, type[EvolvableModule]]]
+    :type encoder_cls: str | type[EvolvableModule] | None
     :param encoder_config: Configuration of the encoder network.
-    :type encoder_config: NetConfigType
+    :type encoder_config: NetConfigType | None
     :param head_config: Configuration of the network MLP head.
-    :type head_config: Optional[NetConfigType]
+    :type head_config: NetConfigType | None
     :param action_std_init: Initial log standard deviation of the action distribution. Defaults to 0.0.
     :type action_std_init: float
     :param squash_output: Whether to squash the output to the action space.
@@ -246,13 +254,13 @@ class StochasticActor(EvolvableNetwork):
         includes several optimizations related to using torch primitives for statistics calculations. Defaults to False.
     :type use_experimental_distribution: bool
     :param random_seed: Random seed to use for the network. Defaults to None.
-    :type random_seed: Optional[int]
+    :type random_seed: int | None
     :param encoder_name: Name of the encoder network.
     :type encoder_name: str
     """
 
     head_net: EvolvableDistribution
-    supported_spaces = (
+    supported_spaces: ClassVar[tuple[type[spaces.Space], ...]] = (
         spaces.Box,
         spaces.Discrete,
         spaces.MultiDiscrete,
@@ -263,9 +271,9 @@ class StochasticActor(EvolvableNetwork):
         self,
         observation_space: spaces.Space,
         action_space: spaces.Space,
-        encoder_cls: Optional[Union[str, type[EvolvableModule]]] = None,
-        encoder_config: Optional[NetConfigType] = None,
-        head_config: Optional[NetConfigType] = None,
+        encoder_cls: str | type[EvolvableModule] | None = None,
+        encoder_config: NetConfigType | None = None,
+        head_config: NetConfigType | None = None,
         action_std_init: float = 0.0,
         squash_output: bool = False,
         min_latent_dim: int = 8,
@@ -275,7 +283,7 @@ class StochasticActor(EvolvableNetwork):
         recurrent: bool = False,
         device: str = "cpu",
         use_experimental_distribution: bool = False,
-        random_seed: Optional[int] = None,
+        random_seed: int | None = None,
         encoder_name: str = "encoder",
     ):
         super().__init__(
@@ -316,8 +324,7 @@ class StochasticActor(EvolvableNetwork):
                 self.action_space.high, device=self.device, dtype=torch.float32
             )
         else:
-            self.action_low = None
-            self.action_high = None
+            self.action_low, self.action_high = None, None
 
         # Wrap the network in an EvolvableDistribution
         if use_experimental_distribution:
@@ -335,11 +342,11 @@ class StochasticActor(EvolvableNetwork):
             device=device,
         )
 
-    def build_network_head(self, net_config: Optional[NetConfigType] = None) -> None:
+    def build_network_head(self, net_config: NetConfigType | None = None) -> None:
         """Builds the head of the network.
 
         :param net_config: Configuration of the head.
-        :type net_config: Optional[ConfigType]
+        :type net_config: NetConfigType | None
         """
         self.head_net = self.create_mlp(
             num_inputs=self.latent_dim,
@@ -349,7 +356,7 @@ class StochasticActor(EvolvableNetwork):
         )
 
     def scale_action(self, action: torch.Tensor) -> torch.Tensor:
-        """Scale the action to the action space.
+        """Scale the action from [-1, 1] to the action space bounds [low, high].
 
         :param action: Action.
         :type action: torch.Tensor
@@ -361,14 +368,14 @@ class StochasticActor(EvolvableNetwork):
         )
 
     def forward(
-        self, obs: TorchObsType, action_mask: Optional[ArrayOrTensor] = None
+        self, obs: TorchObsType, action_mask: ArrayOrTensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Forward pass of the network.
 
         :param obs: Observation input.
         :type obs: TorchObsType
         :param action_mask: Action mask.
-        :type action_mask: Optional[ArrayOrTensor]
+        :type action_mask: ArrayOrTensor | None
         :return: Action and log probability of the action.
         :rtype: tuple[torch.Tensor, torch.Tensor]
         """

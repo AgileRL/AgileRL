@@ -105,6 +105,15 @@ class DummyAgentOffPolicy:
         self.fitness = []
         self.mut = "mutation"
         self.index = 1
+        # Attributes required by train_off_policy for continuous action agents (DDPG/TD3)
+        self.action_low = torch.as_tensor(
+            [-1.0] * self.action_size, dtype=torch.float32
+        )
+        self.action_high = torch.as_tensor(
+            [1.0] * self.action_size, dtype=torch.float32
+        )
+        self.actor = MagicMock()
+        self.actor.output_activation = "Tanh"
 
     def set_training_mode(self, training):
         self.training = training
@@ -674,11 +683,26 @@ def mocked_agent_off_policy(env, algo):
     mock_agent.fitness = []
     mock_agent.mut = "mutation"
     mock_agent.index = 1
-    mock_agent.get_action.side_effect = (
-        lambda state, *args, **kwargs: np.random.randint(
-            env.action_size, size=(env.n_envs,)
+    if algo in [DDPG, TD3]:
+        mock_agent.action_low = torch.as_tensor(
+            [-1.0] * mock_agent.action_size, dtype=torch.float32
         )
-    )
+        mock_agent.action_high = torch.as_tensor(
+            [1.0] * mock_agent.action_size, dtype=torch.float32
+        )
+        mock_agent.actor = MagicMock()
+        mock_agent.actor.output_activation = "Tanh"
+        mock_agent.get_action.side_effect = (
+            lambda state, *args, **kwargs: np.random.randn(
+                env.n_envs, mock_agent.action_size
+            ).astype(np.float32)
+        )
+    else:
+        mock_agent.get_action.side_effect = (
+            lambda state, *args, **kwargs: np.random.randint(
+                env.action_size, size=(env.n_envs,)
+            )
+        )
     mock_agent.test.side_effect = lambda *args, **kwargs: np.random.uniform(0, 400)
     if algo in [RainbowDQN]:
         mock_agent.learn.side_effect = lambda experiences, **kwargs: (
@@ -1498,8 +1522,10 @@ def test_train_off_policy_agent_calls_made_rainbow(
 def test_train_off_policy_save_elite_warning(
     env, population_off_policy, tournament, mutations, memory
 ):
-    warning_string = "'save_elite' set to False but 'elite_path' has been defined, elite will not\
+    warning_string = (
+        "'save_elite' set to False but 'elite_path' has been defined, elite will not\
                       be saved unless 'save_elite' is set to True."
+    )
     with pytest.warns(match=warning_string):
         pop, pop_fitnesses = train_off_policy(
             env,
@@ -2137,8 +2163,10 @@ def test_train_on_policy_save_elite_warning(
     tournament,
     mutations,
 ):
-    warning_string = "'save_elite' set to False but 'elite_path' has been defined, elite will not\
+    warning_string = (
+        "'save_elite' set to False but 'elite_path' has been defined, elite will not\
                       be saved unless 'save_elite' is set to True."
+    )
     with pytest.warns(match=warning_string):
         pop, pop_fitnesses = train_on_policy(
             env,
@@ -2703,8 +2731,10 @@ def test_train_multi_agent_on_policy_rgb_vectorized(
 def test_train_multi_save_elite_warning(
     multi_env, population_multi_agent, on_policy, multi_memory, tournament, mutations
 ):
-    warning_string = "'save_elite' set to False but 'elite_path' has been defined, elite will not\
+    warning_string = (
+        "'save_elite' set to False but 'elite_path' has been defined, elite will not\
                       be saved unless 'save_elite' is set to True."
+    )
     with pytest.warns(match=warning_string):
         pop, pop_fitnesses = train_multi_agent_off_policy(
             multi_env,
@@ -2730,8 +2760,10 @@ def test_train_multi_save_elite_warning(
 def test_train_multi_save_elite_warning_on_policy(
     multi_env, population_multi_agent, on_policy, multi_memory, tournament, mutations
 ):
-    warning_string = "'save_elite' set to False but 'elite_path' has been defined, elite will not\
+    warning_string = (
+        "'save_elite' set to False but 'elite_path' has been defined, elite will not\
                       be saved unless 'save_elite' is set to True."
+    )
     with pytest.warns(match=warning_string):
         pop, pop_fitnesses = train_multi_agent_on_policy(
             multi_env,
@@ -3567,8 +3599,10 @@ def test_train_offline_save_elite_warning(
     offline_init_hp,
     dummy_h5py_data,
 ):
-    warning_string = "'save_elite' set to False but 'elite_path' has been defined, elite will not\
+    warning_string = (
+        "'save_elite' set to False but 'elite_path' has been defined, elite will not\
                       be saved unless 'save_elite' is set to True."
+    )
     with pytest.warns(match=warning_string):
         pop, pop_fitness = train_offline(
             env,
@@ -4057,8 +4091,10 @@ def test_train_bandit_agent_calls_made(
 def test_train_bandit_save_elite_warning(
     bandit_env, population_bandit, tournament, mutations, bandit_memory
 ):
-    warning_string = "'save_elite' set to False but 'elite_path' has been defined, elite will not\
+    warning_string = (
+        "'save_elite' set to False but 'elite_path' has been defined, elite will not\
                       be saved unless 'save_elite' is set to True."
+    )
     with pytest.warns(match=warning_string):
         pop, pop_fitnesses = train_bandits(
             bandit_env,

@@ -1,6 +1,6 @@
 [project]
 name = "agilerl"
-version = "2.4.2.dev0"
+version = "2.4.3.dev1"
 description = "AgileRL is a deep reinforcement learning library focused on improving RL development through RLOps."
 authors = [{ name = "Nick Ustaran-Anderegg", email = "dev@agilerl.com" }]
 license = "Apache-2.0"
@@ -24,7 +24,7 @@ dependencies = [
     "pettingzoo~=1.23.1",
     "jax[cpu]~=0.4.31",
     "packaging>=20.0",
-    "pre-commit~=3.4.0",
+    "pre-commit~=3.8.0",
     "pygame~=2.6.0",
     "pymunk~=6.2.0",
     "redis~=4.4.4",
