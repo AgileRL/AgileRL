@@ -31,12 +31,13 @@ jobs:
             - uses: actions/checkout@v4
             - uses: astral-sh/setup-uv@v7
               with:
+                  enable-cache: true
                   python-version: ${{ matrix.python-version }}
 
             - name: Install dependencies
               run: |
-                  uv pip install ruff pytest pytest-cov black codespell yamlfmt isort pyupgrade
-                  uv sync --locked --all-groups --extra all
+                  uv --system pip install ruff pytest pytest-cov black codespell yamlfmt isort pyupgrade
+                  uv sync --system --locked --all-groups --extra all
 
             - name: Run black
               run: |
@@ -52,7 +53,7 @@ jobs:
                   pyupgrade --py38-plus
             - name: Test with pytest
               run: |
-                  pytest --exitfirst --cov=agilerl --cov-report=xml
+                  uv run pytest --exitfirst --cov=agilerl --cov-report=xml
             - name: Upload coverage reports to Codecov
               uses: codecov/codecov-action@v3
               env:
