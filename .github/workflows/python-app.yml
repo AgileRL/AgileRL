@@ -31,6 +31,9 @@ jobs:
             - uses: astral-sh/setup-uv@v4
 
             - name: Set up Python ${{ matrix.python-version }} with uv
+              env:
+                  # Use workspace for uv cache to avoid filling small /tmp on container
+                  UV_CACHE_DIR: ${{ github.workspace }}/.uv-cache
               run: |
                   # uv downloads the standalone Python binary and creates a venv
                   uv venv .venv --python ${{ matrix.python-version }}
@@ -38,6 +41,8 @@ jobs:
                   echo "$GITHUB_WORKSPACE/.venv/bin" >> $GITHUB_PATH
 
             - name: Install dependencies
+              env:
+                  UV_CACHE_DIR: ${{ github.workspace }}/.uv-cache
               run: |
                   # We don't need --system here because we are using the venv created above
                   uv pip install ruff pytest pytest-cov black codespell yamlfmt isort pyupgrade
