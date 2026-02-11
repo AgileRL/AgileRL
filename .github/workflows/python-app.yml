@@ -28,35 +28,27 @@ jobs:
             options: --user root
         steps:
             - uses: actions/checkout@v4
-
-            - name: Free disk space
-              run: |
-                  apt-get clean || true
-                  rm -rf /var/lib/apt/lists/* || true
-                  df -h
-
             - uses: astral-sh/setup-uv@v4
 
             - name: Set up Python ${{ matrix.python-version }} with uv
               env:
-                  # Use workspace for uv cache to avoid filling small /tmp on container
-                  UV_CACHE_DIR: ${{ github.workspace }}/.uv-cache
+                  # /__w is only ~1GB with ~311MB free; use root overlay (61G free) for cache and venv
+                  UV_CACHE_DIR: /tmp/uv-cache
               run: |
-                  # uv downloads the standalone Python binary and creates a venv
-                  uv venv .venv --python ${{ matrix.python-version }}
-                  # Add the venv to the path so 'python' and 'pytest' refer to this venv
-                  echo "$GITHUB_WORKSPACE/.venv/bin" >> $GITHUB_PATH
+                  # venv on root fs (large disk), not workspace (/__w is tiny)
+                  uv venv /tmp/agilerl-venv --python ${{ matrix.python-version }}
+                  echo "/tmp/agilerl-venv/bin" >> $GITHUB_PATH
 
             - name: Install dependencies
               env:
-                  UV_CACHE_DIR: ${{ github.workspace }}/.uv-cache
+                  UV_CACHE_DIR: /tmp/uv-cache
+                  VIRTUAL_ENV: /tmp/agilerl-venv
+                  PATH: /tmp/agilerl-venv/bin:$PATH
               run: |
-                  # We don't need --system here because we are using the venv created above
                   uv pip install ruff pytest pytest-cov black codespell yamlfmt isort pyupgrade
                   uv pip install -e .[all]
-                  # Free space for tests; venv already has installed packages
                   uv cache clean
-                  rm -rf "$UV_CACHE_DIR"
+                  rm -rf /tmp/uv-cache
             - name: Run black
               run: |
                   black .
