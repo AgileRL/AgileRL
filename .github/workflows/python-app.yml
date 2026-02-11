@@ -35,6 +35,9 @@ jobs:
                   python-version: ${{ matrix.python-version }}
 
             - name: Install dependencies
+              env:
+                  # Use workspace for UV cache so cache and .venv share same filesystem (enables hardlinks, saves space)
+                  UV_CACHE_DIR: ${{ github.workspace }}/.uv-cache
               run: |
                   uv sync --locked --all-groups --extra all
 
