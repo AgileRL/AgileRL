@@ -36,8 +36,6 @@ jobs:
 
             - name: Install dependencies
               run: |
-                  uv venv .venv --python ${{ matrix.python-version }}
-                  uv pip install ruff pytest pytest-cov black codespell yamlfmt isort pyupgrade
                   uv sync --locked --all-groups --extra all
 
             - name: Run black
@@ -45,13 +43,13 @@ jobs:
                   black .
             - name: Spellcheck with codespell
               run: |
-                  codespell --skip=*.css,*.js,*.map,*.scss,*.svg --ignore-words-list=magent,pres,roate
+                  uv run codespell --skip=*.css,*.js,*.map,*.scss,*.svg --ignore-words-list=magent,pres,roate
             - name: Lint with ruff
               run: |
-                  ruff check .
+                  uv run ruff check .
             - name: Run pyupgrade
               run: |
-                  pyupgrade --py38-plus
+                  uv run pyupgrade --py38-plus
             - name: Test with pytest
               run: |
                   uv run pytest --exitfirst --cov=agilerl --cov-report=xml

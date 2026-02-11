@@ -57,6 +57,12 @@ all = [
 dev = [
     "pytest~=9.0.2",
     "pytest-cov~=7.0.0",
+    "ruff",
+    "black",
+    "codespell",
+    "yamlfmt",
+    "isort",
+    "pyupgrade",
 ]
 docs = [
     "furo~=2025.12.19",
