@@ -43,12 +43,12 @@ from agilerl.algorithms.core.registry import (
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.protocols import (
-    AgentWrapper,
+    AgentWrapperProtocol,
     EvolvableAttributeDict,
     EvolvableAttributeType,
-    EvolvableModule,
+    EvolvableModuleProtocol,
     LoraConfigProtocol,
-    ModuleDict,
+    ModuleDictProtocol,
     PeftModelProtocol,
     PretrainedConfigProtocol,
     PreTrainedModelProtocol,
@@ -110,7 +110,7 @@ __all__ = ["EvolvableAlgorithm", "RLAlgorithm", "MultiAgentRLAlgorithm"]
 
 SelfEvolvableAlgorithm = TypeVar("SelfEvolvableAlgorithm", bound="EvolvableAlgorithm")
 SelfRLAlgorithm = TypeVar("SelfRLAlgorithm", bound="RLAlgorithm")
-SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound="AgentWrapper")
+SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound="AgentWrapperProtocol")
 
 
 class _RegistryMeta(type):
@@ -148,6 +148,8 @@ def get_checkpoint_dict(
     :return: A dictionary of the agent's attributes.
     :rtype: dict[str, Any]
     """
+    from agilerl.modules import EvolvableModule
+
     attribute_dict = EvolvableAlgorithm.inspect_attributes(agent)
     attribute_dict["agilerl_version"] = version("agilerl")
     attribute_dict.pop("accelerator", None)
@@ -680,7 +682,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         for hook in self.registry.hooks:
             getattr(self, hook)()
 
-    def get_policy(self) -> EvolvableModule:
+    def get_policy(self) -> EvolvableModuleProtocol:
         """Returns the policy network of the algorithm."""
         for group in self.registry.groups:
             if group.policy:
@@ -907,7 +909,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 setattr(self, name, module_dict_cls(loaded_modules))
             else:
                 init_dict["device"] = self.device
-                loaded_module: EvolvableModule = module_cls(**init_dict)
+                loaded_module: EvolvableModuleProtocol = module_cls(**init_dict)
                 setattr(self, name, loaded_module)
 
         # Apply mutation hooks
@@ -923,7 +925,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             }
             loaded_module = getattr(self, name)
             state_dict = net_dict[f"{name}_state_dict"]
-            if isinstance(loaded_module, ModuleDict):
+            if isinstance(loaded_module, ModuleDictProtocol):
                 for agent_id, mod in loaded_module.items():
                     if state_dict[agent_id]:
                         mod.load_state_dict(state_dict[agent_id])
@@ -1001,6 +1003,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :return: An instance of the algorithm
         :rtype: RLAlgorithm
         """
+        from agilerl.modules import EvolvableModule, ModuleDict
+
         checkpoint: dict[str, Any] = torch.load(
             path, map_location=device, pickle_module=dill, weights_only=False
         )
@@ -1375,6 +1379,8 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
     def _registry_init(self) -> None:
         super()._registry_init()
+
+        from agilerl.modules import ModuleDict
 
         # Additional check to ensure multi-agent networks are initialized with valid keys
         for name, network in self.evolvable_attributes(networks_only=True).items():

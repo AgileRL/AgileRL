@@ -2,8 +2,9 @@ import copy
 import glob
 import os
 import sys
+import types
 from collections import OrderedDict
-from typing import ForwardRef
+from typing import Union, get_args, get_origin
 from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
@@ -884,8 +885,12 @@ def test_algo_utils_fallback_pretrained_model_type_when_no_llm_dependencies():
             # Reimport the module - it will see HAS_LLM_DEPENDENCIES as False
             import agilerl.utils.algo_utils as algo_utils_reloaded
 
-            expected = ForwardRef("PeftModel") | ForwardRef("PreTrainedModel")
-            assert algo_utils_reloaded.PreTrainedModelType == expected
+            pt_type = algo_utils_reloaded.PreTrainedModelType
+            assert get_origin(pt_type) in (types.UnionType, Union)
+            args = get_args(pt_type)
+            assert len(args) == 2
+            forward_names = {getattr(a, "__forward_arg__", None) for a in args}
+            assert forward_names == {"PeftModel", "PreTrainedModel"}
     finally:
         # Restore original module to avoid affecting other tests
         sys.modules["agilerl.utils.algo_utils"] = original_module
