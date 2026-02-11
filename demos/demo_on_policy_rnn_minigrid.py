@@ -6,7 +6,7 @@
 # using a population and a simple evolutionary loop.
 import os
 import shutil
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 import gymnasium as gym
 import imageio
@@ -103,7 +103,7 @@ def run_demo():
     }
 
     # --- Create Environment and Population ---
-    def make_env(render_mode: Optional[str] = None) -> Callable[[], gym.Env]:
+    def make_env(render_mode: str | None = None) -> Callable[[], gym.Env]:
         env = gym.make("MiniGrid-DoorKey-8x8-v0", render_mode=render_mode)
         env = MiniGridObsWrapper(env)
         return env

@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Any
 
 import gymnasium as gym
 import numpy as np
@@ -462,7 +462,7 @@ class SimpleCritic(EvolvableModule):
 
     @mutation(MutationType.NODE)
     def add_node(
-        self, hidden_layer: Optional[int] = None, numb_new_nodes: Optional[int] = None
+        self, hidden_layer: int | None = None, numb_new_nodes: int | None = None
     ) -> dict[str, int]:
         """Adds nodes to hidden layer of neural network.
 
@@ -488,7 +488,7 @@ class SimpleCritic(EvolvableModule):
 
     @mutation(MutationType.NODE)
     def remove_node(
-        self, hidden_layer: Optional[int] = None, numb_new_nodes: Optional[int] = None
+        self, hidden_layer: int | None = None, numb_new_nodes: int | None = None
     ) -> dict[str, int]:
         """Removes nodes from hidden layer of neural network.
 

@@ -1,6 +1,5 @@
 # Mock NetworkGroup for testing (avoids frame inspection issues)
 from dataclasses import dataclass, field
-from typing import Optional, Union
 
 import numpy as np
 import pytest
@@ -23,7 +22,7 @@ class MockNetworkGroup:
     """Mock NetworkGroup for testing purposes."""
 
     eval_network: str
-    shared_networks: Optional[Union[str, list[str]]] = field(default=None)
+    shared_networks: str | list[str] | None = field(default=None)
     policy: bool = field(default=False)
 
     def __hash__(self) -> int:
@@ -415,13 +414,12 @@ class TestNetworkGroup:
         """Test the make_network_group helper function."""
         # Create a simple NetworkGroup directly with string names to avoid frame inspection
         from dataclasses import dataclass, field
-        from typing import Optional, Union
 
         # Create a simplified NetworkGroup for testing
         @dataclass
         class SimpleNetworkGroup:
             eval_network: str
-            shared_networks: Optional[Union[str, list[str]]] = field(default=None)
+            shared_networks: str | list[str] | None = field(default=None)
             policy: bool = field(default=False)
 
         # Test the basic structure
@@ -436,12 +434,11 @@ class TestNetworkGroup:
     def test_make_network_group_with_list(self):
         """Test make_network_group with list of shared networks."""
         from dataclasses import dataclass, field
-        from typing import Optional, Union
 
         @dataclass
         class SimpleNetworkGroup:
             eval_network: str
-            shared_networks: Optional[Union[str, list[str]]] = field(default=None)
+            shared_networks: str | list[str] | None = field(default=None)
             policy: bool = field(default=False)
 
         group = SimpleNetworkGroup(
@@ -457,12 +454,11 @@ class TestNetworkGroup:
     def test_make_network_group_no_shared(self):
         """Test make_network_group with no shared networks."""
         from dataclasses import dataclass, field
-        from typing import Optional, Union
 
         @dataclass
         class SimpleNetworkGroup:
             eval_network: str
-            shared_networks: Optional[Union[str, list[str]]] = field(default=None)
+            shared_networks: str | list[str] | None = field(default=None)
             policy: bool = field(default=False)
 
         group = SimpleNetworkGroup(

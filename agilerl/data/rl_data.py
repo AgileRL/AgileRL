@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -53,9 +53,9 @@ class DataPoint:
     utterance_action_idxs: list[int]
     utterance_rewards: list[float]
     utterance_terminals: list[int]
-    meta: Optional[dict[str, Any]] = None
+    meta: dict[str, Any] | None = None
 
-    def to_tensors(self, device, max_length: Optional[int]):
+    def to_tensors(self, device, max_length: int | None):
         tok = torch.tensor(self.tokens).to(device)
         s = torch.tensor(self.state_idxs).long().to(device)
         a = torch.tensor(self.action_idxs).long().to(device)
@@ -85,7 +85,7 @@ class DataPoint:
         obs: Language_Observation,
         tokenizer: Tokenizer,
         token_reward: TokenReward,
-        meta: Optional[dict[str, Any]] = None,
+        meta: dict[str, Any] | None = None,
     ):
         sequence, terminal = obs.to_sequence()
         obs_meta = obs.metadata()
@@ -160,7 +160,7 @@ class DataPoint:
 
 class RL_Dataset(ABC):
     def __init__(
-        self, tokenizer: Tokenizer, token_reward: TokenReward, max_len: Optional[int]
+        self, tokenizer: Tokenizer, token_reward: TokenReward, max_len: int | None
     ) -> None:
         super().__init__()
         self.tokenizer = tokenizer

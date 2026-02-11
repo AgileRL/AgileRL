@@ -1,6 +1,5 @@
 import copy
 from dataclasses import asdict
-from typing import Union
 
 import numpy as np
 import pytest
@@ -14,7 +13,7 @@ from tests.helper_functions import (
     generate_dict_or_tuple_space,
 )
 
-DictOrTupleSpace = Union[Dict, Tuple]
+DictOrTupleSpace = Dict | Tuple
 
 
 @pytest.fixture(scope="module")

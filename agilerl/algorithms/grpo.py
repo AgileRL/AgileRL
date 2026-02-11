@@ -1,5 +1,5 @@
 import gc
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch
@@ -106,7 +106,7 @@ class GRPO(LLMAlgorithm):
         model_name: str | None = None,
         actor_network: PreTrainedModelProtocol | None = None,
         model_config: dict[str, Any] | None = None,
-        hp_config: Optional[HyperparameterConfig] = None,
+        hp_config: HyperparameterConfig | None = None,
         index: int = 0,
         batch_size: int = 16,
         beta: float = 0.001,
@@ -124,17 +124,17 @@ class GRPO(LLMAlgorithm):
         micro_batch_size_per_gpu: int | None = None,
         reduce_memory_peak: bool = False,
         max_output_tokens: int | None = 1024,
-        min_output_tokens: Optional[int] = None,
-        max_model_len: Optional[int] = None,
-        lora_config: Optional[LoraConfigProtocol] = None,
-        cosine_lr_schedule_config: Optional[CosineLRScheduleConfig] = None,
-        accelerator: Optional[Accelerator] = None,
+        min_output_tokens: int | None = None,
+        max_model_len: int | None = None,
+        lora_config: LoraConfigProtocol | None = None,
+        cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
+        accelerator: Accelerator | None = None,
         device: str = "cpu",
         wrap: bool = True,
         clone: bool = False,
         use_separate_reference_adapter: bool = False,
         use_vllm: bool = False,
-        vllm_config: Optional[VLLMConfig] = None,
+        vllm_config: VLLMConfig | None = None,
         seed: int = 42,
         gradient_checkpointing: bool = True,
     ) -> None:

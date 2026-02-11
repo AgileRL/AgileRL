@@ -1,5 +1,4 @@
 import math
-from typing import Optional, Union
 
 import numpy as np
 import torch
@@ -228,9 +227,9 @@ class EvolvableDistribution(EvolvableWrapper):
     """
 
     wrapped: EvolvableModule
-    dist: Optional[TorchDistribution]
-    mask: Optional[ArrayOrTensor]
-    log_std: Optional[torch.nn.Parameter]
+    dist: TorchDistribution | None
+    mask: ArrayOrTensor | None
+    log_std: torch.nn.Parameter | None
 
     def __init__(
         self,
@@ -394,21 +393,22 @@ class EvolvableDistribution(EvolvableWrapper):
     def forward(
         self,
         latent: torch.Tensor,
-        action_mask: Optional[ArrayOrTensor] = None,
+        action_mask: ArrayOrTensor | None = None,
         sample: bool = True,
-    ) -> Union[
-        tuple[torch.Tensor, torch.Tensor, torch.Tensor], tuple[None, None, torch.Tensor]
-    ]:
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        | tuple[None, None, torch.Tensor]
+    ):
         """Forward pass of the network.
 
         :param latent: Latent space representation.
         :type latent: torch.Tensor
         :param action_mask: Mask to apply to the logits. Defaults to None.
-        :type action_mask: Optional[ArrayOrTensor]
+        :type action_mask: ArrayOrTensor | None
         :param sample: Whether to sample an action or return the mode/mean. Defaults to True.
         :type sample: bool
         :return: Action and log probability of the action.
-        :rtype: Union[tuple[torch.Tensor, torch.Tensor, torch.Tensor], tuple[None, torch.Tensor, torch.Tensor]]
+        :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | tuple[None, torch.Tensor, torch.Tensor]
         """
         logits = self.wrapped(latent)
 
@@ -416,8 +416,7 @@ class EvolvableDistribution(EvolvableWrapper):
             if isinstance(action_mask, (np.ndarray, list)):
                 # Attempt to stack if it's a list of arrays or object array, typical for vectorized envs
                 if isinstance(action_mask, list) or (
-                    isinstance(action_mask, np.ndarray)
-                    and action_mask.dtype == np.object_
+                    isinstance(action_mask, np.ndarray) and action_mask.dtype == object
                 ):
                     try:
                         action_mask = np.stack(action_mask)

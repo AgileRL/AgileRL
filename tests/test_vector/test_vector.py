@@ -458,11 +458,11 @@ def test_step_async_pz_vector_env(use_single_action_space, env_fns):
             assert rewards[agent].ndim == 1
             assert rewards[agent].size == 8
             assert isinstance(terminations[agent], np.ndarray)
-            assert terminations[agent].dtype == np.bool_
+            assert terminations[agent].dtype == bool
             assert terminations[agent].ndim == 1
             assert terminations[agent].size == 8
             assert isinstance(truncations[agent], np.ndarray)
-            assert truncations[agent].dtype == np.bool_
+            assert truncations[agent].dtype == bool
             assert truncations[agent].ndim == 1
             assert truncations[agent].size == 8
         env.close()

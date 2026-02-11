@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -45,7 +45,7 @@ class EvolvableSimBa(EvolvableModule):
     :param name: Name of the network, defaults to 'mlp'
     :type name: str, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
-    :type random_seed: Optional[int]
+    :type random_seed: int | None
     """
 
     def __init__(
@@ -62,7 +62,7 @@ class EvolvableSimBa(EvolvableModule):
         max_mlp_nodes: int = 500,
         device: str = "cpu",
         name: str = "simba",
-        random_seed: Optional[int] = None,
+        random_seed: int | None = None,
     ) -> None:
         super().__init__(device, random_seed)
 
@@ -161,7 +161,7 @@ class EvolvableSimBa(EvolvableModule):
             return self.add_node()
 
     @mutation(MutationType.NODE)
-    def add_node(self, numb_new_nodes: Optional[int] = None) -> dict[str, int]:
+    def add_node(self, numb_new_nodes: int | None = None) -> dict[str, int]:
         """Adds nodes to residual blocks of the neural network.
 
         :param numb_new_nodes: Number of nodes to add, defaults to None
@@ -176,7 +176,7 @@ class EvolvableSimBa(EvolvableModule):
         return {"numb_new_nodes": numb_new_nodes}
 
     @mutation(MutationType.NODE)
-    def remove_node(self, numb_new_nodes: Optional[int] = None) -> dict[str, int]:
+    def remove_node(self, numb_new_nodes: int | None = None) -> dict[str, int]:
         """Removes nodes from hidden layer of neural network.
 
         :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None

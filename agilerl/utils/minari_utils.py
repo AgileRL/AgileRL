@@ -1,5 +1,4 @@
 import os
-from typing import Optional
 
 import h5py
 import minari
@@ -14,12 +13,14 @@ from agilerl.components.replay_buffer import ReplayBuffer
 
 
 def load_minari_dataset(
-    dataset_id: str, accelerator: Optional[Accelerator] = None, remote: bool = False
+    dataset_id: str, accelerator: Accelerator | None = None, remote: bool = False
 ) -> minari.MinariDataset:
     """Load a Minari dataset either from local storage or remote repository.
 
     :param dataset_id: The ID of the Minari dataset to load
+    :type dataset_id: str
     :param accelerator: Optional accelerator for distributed training
+    :type accelerator: Accelerator | None
     :param remote: Whether to load from remote repository. Defaults to False.
     :return: The loaded Minari dataset
     :raises KeyError: If remote=True and dataset_id is not a valid remote dataset
@@ -58,7 +59,7 @@ def load_minari_dataset(
 def minari_to_agile_buffer(
     dataset_id: str,
     memory: ReplayBuffer,
-    accelerator: Optional[Accelerator] = None,
+    accelerator: Accelerator | None = None,
     remote: bool = False,
 ):
     """Convert a Minari dataset to an agile buffer.

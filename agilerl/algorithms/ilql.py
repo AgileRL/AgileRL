@@ -1,16 +1,16 @@
 import copy
 import math
 from collections import defaultdict
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import wandb
 from torch.nn import functional as F
 from tqdm import tqdm
 
+import wandb
 from agilerl.data.rl_data import DataPoint
 from agilerl.modules.gpt import EvolvableGPT
 from agilerl.modules.mlp import EvolvableMLP
@@ -256,9 +256,9 @@ class ILQL(nn.Module):
         tokens: torch.Tensor,
         state_idxs: torch.Tensor,
         action_idxs: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
-        prefix_embs: Optional[torch.Tensor] = None,
-        prefix_attn_mask: Optional[torch.Tensor] = None,
+        attn_mask: torch.Tensor | None = None,
+        prefix_embs: torch.Tensor | None = None,
+        prefix_attn_mask: torch.Tensor | None = None,
         remove_prefix_position_embs: bool = False,
         qv_kwargs=None,
         policy_kwargs=None,
@@ -485,7 +485,7 @@ class ILQL(nn.Module):
         self,
         tokens: torch.Tensor,
         vs: torch.Tensor,
-        qs: Optional[torch.Tensor],
+        qs: torch.Tensor | None,
         state_idxs: torch.Tensor,
         action_idxs: torch.Tensor,
         terminals: torch.Tensor,
@@ -620,8 +620,8 @@ class ILQL(nn.Module):
     def get_qvs(
         self,
         items,
-        prefix_embs: Optional[torch.Tensor] = None,
-        prefix_attn_mask: Optional[torch.Tensor] = None,
+        prefix_embs: torch.Tensor | None = None,
+        prefix_attn_mask: torch.Tensor | None = None,
         remove_prefix_position_embs: bool = False,
         qv_kwargs=None,
         policy_kwargs=None,
@@ -830,24 +830,24 @@ class ILQL(nn.Module):
     def score(
         self,
         tokens: torch.Tensor,
-        attn_mask: Optional[torch.Tensor],
-        state_idxs: Optional[torch.Tensor],
-        action_idxs: Optional[torch.Tensor],
-        prefix_embs: Optional[torch.Tensor] = None,
-        prefix_attn_mask: Optional[torch.Tensor] = None,
+        attn_mask: torch.Tensor | None,
+        state_idxs: torch.Tensor | None,
+        action_idxs: torch.Tensor | None,
+        prefix_embs: torch.Tensor | None = None,
+        prefix_attn_mask: torch.Tensor | None = None,
         remove_prefix_position_embs: bool = False,
         qv_kwargs=None,
         policy_kwargs=None,
         target_kwargs=None,
         beta: float = 1.0,
         exp_weights: bool = False,
-        clip_weight: Optional[float] = None,
+        clip_weight: float | None = None,
         logit_temp: float = 1.0,
-        logit_top_k: Optional[int] = None,
-        logit_top_p: Optional[float] = None,
+        logit_top_k: int | None = None,
+        logit_top_p: float | None = None,
         include_logits: bool = False,
         include_advantage: bool = True,
-        action_mask: Optional[torch.Tensor] = None,
+        action_mask: torch.Tensor | None = None,
     ):
         trivial_value_query = False
         if state_idxs is None or action_idxs is None:
@@ -924,10 +924,10 @@ class ILQL(nn.Module):
         items,
         beta: float = 1.0,
         exp_weights: bool = False,
-        clip_weight: Optional[float] = None,
+        clip_weight: float | None = None,
         logit_temp: float = 1.0,
-        logit_top_k: Optional[int] = None,
-        logit_top_p: Optional[float] = None,
+        logit_top_k: int | None = None,
+        logit_top_p: float | None = None,
         include_logits: bool = False,
         include_advantage: bool = True,
     ) -> torch.Tensor:
@@ -955,10 +955,10 @@ class ILQL(nn.Module):
         items,
         beta: float = 1.0,
         exp_weights: bool = False,
-        clip_weight: Optional[float] = None,
+        clip_weight: float | None = None,
         logit_temp: float = 1.0,
-        logit_top_k: Optional[int] = None,
-        logit_top_p: Optional[float] = None,
+        logit_top_k: int | None = None,
+        logit_top_p: float | None = None,
         include_logits: bool = False,
         include_advantage: bool = True,
     ) -> tuple[torch.Tensor, Any]:
@@ -1267,8 +1267,8 @@ class ILQL_Policy:
         include_adv=True,
         rerank_log_prob_weight: float = 0.0,
         rerank_advantage_weight: float = 0.0,
-        prefix_embs: Optional[torch.Tensor] = None,
-        prefix_attn_mask: Optional[torch.Tensor] = None,
+        prefix_embs: torch.Tensor | None = None,
+        prefix_attn_mask: torch.Tensor | None = None,
         remove_prefix_position_embs: bool = False,
     ):
         assert include_logits or include_adv
@@ -1539,7 +1539,7 @@ class ILQL_Policy:
         state_idxs: torch.Tensor,
         action_idxs: torch.Tensor,
         termination_condition: Callable[[np.ndarray], bool],
-        max_generation_len: Optional[int] = None,
+        max_generation_len: int | None = None,
         beam_width=1,
         temp=1.0,
         top_k=None,
@@ -1549,8 +1549,8 @@ class ILQL_Policy:
         adv_clip=None,
         include_logits=True,
         include_adv=True,
-        prefix_embs: Optional[torch.Tensor] = None,
-        prefix_attn_mask: Optional[torch.Tensor] = None,
+        prefix_embs: torch.Tensor | None = None,
+        prefix_attn_mask: torch.Tensor | None = None,
         remove_prefix_position_embs: bool = False,
     ):
         tokenizer = self.iql_model.dataset.tokenizer
@@ -2057,7 +2057,7 @@ def interact_environment(env, policy, obs):
     return obs, obs_sequence
 
 
-def map_pytree(f: Callable[[Union[np.ndarray, torch.Tensor]], Any], item: Any):
+def map_pytree(f: Callable[[np.ndarray | torch.Tensor], Any], item: Any):
     if isinstance(item, dict):
         return {k: map_pytree(f, v) for k, v in item.items()}
     elif isinstance(item, list) or isinstance(item, set) or isinstance(item, tuple):

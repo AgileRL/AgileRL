@@ -1,17 +1,17 @@
 import os
-from typing import Any, Optional
+from typing import Any
 
 from accelerate import Accelerator
 
 
-def convert_path(path: Optional[str]) -> Optional[str]:
+def convert_path(path: str | None) -> str | None:
     """Converts a path to an absolute path.
 
     :param path: Path to convert.
-    :type path: Optional[str]
+    :type path: str | None
 
     :return: Absolute path.
-    :rtype: Optional[str]
+    :rtype: str | None
     """
     if path is None:
         return None
@@ -36,13 +36,13 @@ def add_system_configs(cfg: dict[str, Any], accelerator: Accelerator) -> dict[st
     return cfg["system"]
 
 
-def to_bin(n: int, pad_to_size: Optional[int] = None) -> list[int]:
+def to_bin(n: int, pad_to_size: int | None = None) -> list[int]:
     """Converts a number to a binary list.
 
     :param n: Number to convert.
     :type n: int
     :param pad_to_size: Size to pad the binary list to.
-    :type pad_to_size: Optional[int]
+    :type pad_to_size: int | None
 
     :return: Binary list.
     :rtype: list[int]

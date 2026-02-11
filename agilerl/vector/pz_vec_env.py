@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 from gymnasium.spaces import Space
@@ -25,7 +25,7 @@ class PettingZooVecEnv:
     """
 
     metadata: dict[str, Any] = {}
-    render_mode: Optional[str] = None
+    render_mode: str | None = None
     closed: bool = False
     num_envs: int
     agents: list[str]
@@ -57,7 +57,7 @@ class PettingZooVecEnv:
         self.single_observation_space = self._get_single_observation_space
 
     def reset(
-        self, seed: Optional[int] = None, options: Optional[dict[str, Any]] = None
+        self, seed: int | None = None, options: dict[str, Any] | None = None
     ) -> dict[str, Any]:
         """
         Reset all the environments and return two dictionaries of batched observations and infos.

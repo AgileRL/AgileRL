@@ -3,7 +3,7 @@ import glob
 import os
 import sys
 from collections import OrderedDict
-from typing import ForwardRef, Union
+from typing import ForwardRef
 from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
@@ -884,7 +884,7 @@ def test_algo_utils_fallback_pretrained_model_type_when_no_llm_dependencies():
             # Reimport the module - it will see HAS_LLM_DEPENDENCIES as False
             import agilerl.utils.algo_utils as algo_utils_reloaded
 
-            expected = Union[ForwardRef("PeftModel"), ForwardRef("PreTrainedModel")]
+            expected = ForwardRef("PeftModel") | ForwardRef("PreTrainedModel")
             assert algo_utils_reloaded.PreTrainedModelType == expected
     finally:
         # Restore original module to avoid affecting other tests

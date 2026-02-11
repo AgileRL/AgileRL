@@ -2,7 +2,7 @@ import copy
 import warnings
 from collections import OrderedDict
 from dataclasses import asdict
-from typing import Any, Optional, Union
+from typing import Any
 
 import numpy as np
 import torch
@@ -34,7 +34,7 @@ from agilerl.utils.algo_utils import (
     obs_channels_to_first,
 )
 
-SupportedActionSpaces = Union[spaces.Discrete, spaces.Box]
+SupportedActionSpaces = spaces.Discrete | spaces.Box
 
 
 class MADDPG(MultiAgentRLAlgorithm):
@@ -43,11 +43,11 @@ class MADDPG(MultiAgentRLAlgorithm):
     Paper: https://arxiv.org/abs/1706.02275
 
     :param observation_spaces: Observation space for each agent
-    :type observation_spaces: Union[list[spaces.Space], spaces.Dict]
+    :type observation_spaces: list[spaces.Space] | spaces.Dict
     :param action_spaces: Action space for each agent
-    :type action_spaces: Union[list[spaces.Space], spaces.Dict]
+    :type action_spaces: list[spaces.Space] | spaces.Dict
     :param agent_ids: Agent ID for each agent
-    :type agent_ids: Optional[list[str]], optional
+    :type agent_ids: list[str] | None, optional
     :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
     :type O_U_noise: bool, optional
     :param vect_noise_dim: Vectorization dimension of environment for action noise, defaults to 1
@@ -96,7 +96,7 @@ class MADDPG(MultiAgentRLAlgorithm):
     :type wrap: bool, optional
     """
 
-    possible_action_spaces: dict[str, Union[spaces.Box, spaces.Discrete]]
+    possible_action_spaces: dict[str, spaces.Box | spaces.Discrete]
 
     actors: MultiAgentModule[DeterministicActor]
     actor_targets: MultiAgentModule[DeterministicActor]
@@ -105,9 +105,9 @@ class MADDPG(MultiAgentRLAlgorithm):
 
     def __init__(
         self,
-        observation_spaces: Union[list[SupportedObsSpaces], spaces.Dict],
-        action_spaces: Union[list[SupportedActionSpaces], spaces.Dict],
-        agent_ids: Optional[list[str]] = None,
+        observation_spaces: list[SupportedObsSpaces] | spaces.Dict,
+        action_spaces: list[SupportedActionSpaces] | spaces.Dict,
+        agent_ids: list[str] | None = None,
         O_U_noise: bool = True,
         expl_noise: float = 0.1,
         vect_noise_dim: int = 1,
@@ -115,21 +115,21 @@ class MADDPG(MultiAgentRLAlgorithm):
         theta: float = 0.15,
         dt: float = 1e-2,
         index: int = 0,
-        hp_config: Optional[HyperparameterConfig] = None,
-        net_config: Optional[dict[str, Any]] = None,
+        hp_config: HyperparameterConfig | None = None,
+        net_config: dict[str, Any] | None = None,
         batch_size: int = 64,
         lr_actor: float = 0.001,
         lr_critic: float = 0.01,
         learn_step: int = 5,
         gamma: float = 0.95,
         tau: float = 0.01,
-        mut: Optional[str] = None,
+        mut: str | None = None,
         normalize_images: bool = True,
-        actor_networks: Optional[MultiAgentModule] = None,
-        critic_networks: Optional[MultiAgentModule] = None,
+        actor_networks: MultiAgentModule | None = None,
+        critic_networks: MultiAgentModule | None = None,
         device: str = "cpu",
-        accelerator: Optional[Any] = None,
-        torch_compiler: Optional[str] = None,
+        accelerator: Any | None = None,
+        torch_compiler: str | None = None,
         wrap: bool = True,
     ):
 
@@ -392,7 +392,7 @@ class MADDPG(MultiAgentRLAlgorithm):
         )
 
     def process_infos(
-        self, infos: Optional[InfosDict]
+        self, infos: InfosDict | None
     ) -> tuple[ArrayDict, ArrayDict, ArrayDict]:
         """
         Process the information, extract env_defined_actions, action_masks and agent_masks
@@ -410,7 +410,7 @@ class MADDPG(MultiAgentRLAlgorithm):
         return action_masks, env_defined_actions, agent_masks
 
     def get_action(
-        self, obs: dict[str, ObservationType], infos: Optional[InfosDict] = None
+        self, obs: dict[str, ObservationType], infos: InfosDict | None = None
     ) -> tuple[ArrayDict, ArrayDict]:
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
@@ -728,7 +728,7 @@ class MADDPG(MultiAgentRLAlgorithm):
         self,
         env: PzEnvType,
         swap_channels: bool = False,
-        max_steps: Optional[int] = None,
+        max_steps: int | None = None,
         loop: int = 3,
         sum_scores: bool = True,
     ) -> float:

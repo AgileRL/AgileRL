@@ -1,5 +1,5 @@
 import random
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch
@@ -60,8 +60,8 @@ class CQN(RLAlgorithm):
         observation_space: spaces.Space,
         action_space: spaces.Space,
         index: int = 0,
-        hp_config: Optional[HyperparameterConfig] = None,
-        net_config: Optional[dict[str, Any]] = None,
+        hp_config: HyperparameterConfig | None = None,
+        net_config: dict[str, Any] | None = None,
         batch_size: int = 64,
         lr: float = 1e-4,
         learn_step: int = 5,
@@ -69,10 +69,10 @@ class CQN(RLAlgorithm):
         tau: float = 1e-3,
         double: bool = False,
         normalize_images: bool = True,
-        mut: Optional[str] = None,
-        actor_network: Optional[EvolvableModule] = None,
+        mut: str | None = None,
+        actor_network: EvolvableModule | None = None,
         device: str = "cpu",
-        accelerator: Optional[Any] = None,
+        accelerator: Any | None = None,
         wrap: bool = True,
     ) -> None:
 
@@ -165,7 +165,7 @@ class CQN(RLAlgorithm):
         self,
         obs: ObservationType,
         epsilon: float = 0,
-        action_mask: Optional[np.ndarray] = None,
+        action_mask: np.ndarray | None = None,
     ) -> np.ndarray:
         """Returns the next action to take in the environment. Epsilon is the
         probability of taking a random action, used for exploration.
@@ -274,7 +274,7 @@ class CQN(RLAlgorithm):
         self,
         env: GymEnvType,
         swap_channels: bool = False,
-        max_steps: Optional[int] = None,
+        max_steps: int | None = None,
         loop: int = 3,
     ):
         """Returns mean test score of agent in environment with epsilon-greedy policy.

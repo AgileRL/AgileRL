@@ -1,5 +1,5 @@
 import warnings
-from typing import ClassVar, Optional
+from typing import ClassVar
 
 import torch
 from gymnasium import spaces
@@ -179,11 +179,11 @@ class DeterministicActor(EvolvableNetwork):
         )
         return rescaled_action.to(low.dtype)
 
-    def build_network_head(self, net_config: Optional[NetConfigType] = None) -> None:
+    def build_network_head(self, net_config: NetConfigType | None = None) -> None:
         """Builds the head of the network.
 
         :param net_config: Configuration of the head.
-        :type net_config: Optional[ConfigType]
+        :type net_config: ConfigType | None
         """
         self.head_net = self.create_mlp(
             num_inputs=self.latent_dim,
@@ -418,8 +418,8 @@ class StochasticActor(EvolvableNetwork):
         )
 
         head_net = EvolvableDistribution(
-            self.action_space,
-            head_net,
+            action_space=self.action_space,
+            network=head_net,
             action_std_init=self.action_std_init,
             squash_output=self.squash_output,
             device=self.device,

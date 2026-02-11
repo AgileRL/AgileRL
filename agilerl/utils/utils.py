@@ -2,19 +2,19 @@ import logging
 import os
 import warnings
 from datetime import datetime
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable
 
 import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import tqdm
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl.algorithms import (
     CQN,
     DDPG,
@@ -40,16 +40,14 @@ from agilerl.utils.algo_utils import CosineLRScheduleConfig, DummyOptimizer, clo
 from agilerl.utils.llm_utils import get_state_dict
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
-SupportedObservationSpace = Union[
-    spaces.Box, spaces.Discrete, spaces.Dict, spaces.Tuple
-]
+SupportedObservationSpace = spaces.Box | spaces.Discrete | spaces.Dict | spaces.Tuple
 
 
 def make_vect_envs(
-    env_name: Optional[str] = None,
+    env_name: str | None = None,
     num_envs=1,
     *,
-    make_env: Optional[Callable] = None,
+    make_env: Callable | None = None,
     should_async_vector: bool = True,
     **env_kwargs,
 ):
@@ -177,7 +175,7 @@ def suppress_verbose_logging() -> None:
 
 def default_progress_bar(
     max_steps: int,
-    accelerator: Optional[Accelerator] = None,
+    accelerator: Accelerator | None = None,
 ) -> tqdm.tqdm:
     """Returns a default progress bar.
 
@@ -213,21 +211,21 @@ def default_progress_bar(
 
 def create_population(
     algo: str,
-    net_config: Optional[dict[str, Any]],
+    net_config: dict[str, Any] | None,
     INIT_HP: dict[str, Any],
     observation_space: GymSpaceType | None = None,
     action_space: GymSpaceType | None = None,
-    hp_config: Optional[HyperparameterConfig] = None,
-    actor_network: Optional[EvolvableModule] = None,
-    critic_network: Optional[EvolvableModule] = None,
-    agent_wrapper: Optional[Callable] = None,
-    wrapper_kwargs: Optional[dict[str, Any]] = None,
+    hp_config: HyperparameterConfig | None = None,
+    actor_network: EvolvableModule | None = None,
+    critic_network: EvolvableModule | None = None,
+    agent_wrapper: Callable | None = None,
+    wrapper_kwargs: dict[str, Any] | None = None,
     population_size: int = 1,
     num_envs: int = 1,
     device: str = "cpu",
-    accelerator: Optional[Any] = None,
-    torch_compiler: Optional[Any] = None,
-    algo_kwargs: Optional[dict[str, Any]] = {},
+    accelerator: Any | None = None,
+    torch_compiler: Any | None = None,
+    algo_kwargs: dict[str, Any] | None = {},
 ) -> PopulationType:
     """Returns population of identical agents.
 
@@ -651,7 +649,7 @@ def save_population_checkpoint(
     population: PopulationType,
     save_path: str,
     overwrite_checkpoints: bool,
-    accelerator: Optional[Accelerator] = None,
+    accelerator: Accelerator | None = None,
 ) -> None:
     """Saves checkpoint of population of agents.
 
@@ -702,11 +700,11 @@ def tournament_selection_and_mutation(
     tournament: TournamentSelection,
     mutation: Mutations,
     env_name: str,
-    algo: Optional[str] = None,
-    elite_path: Optional[str] = None,
+    algo: str | None = None,
+    elite_path: str | None = None,
     save_elite: bool = False,
-    accelerator: Optional[Accelerator] = None,
-    language_model: Optional[bool] = False,
+    accelerator: Accelerator | None = None,
+    language_model: bool | None = False,
 ) -> PopulationType:
     """Performs tournament selection and mutation on a population of agents.
 
@@ -793,12 +791,12 @@ def tournament_selection_and_mutation(
 def init_wandb(
     algo: str,
     env_name: str,
-    init_hyperparams: Optional[dict[str, Any]] = None,
-    mutation_hyperparams: Optional[dict[str, Any]] = None,
-    wandb_api_key: Optional[str] = None,
-    accelerator: Optional[Accelerator] = None,
+    init_hyperparams: dict[str, Any] | None = None,
+    mutation_hyperparams: dict[str, Any] | None = None,
+    wandb_api_key: str | None = None,
+    accelerator: Accelerator | None = None,
     project: str = "AgileRL",
-    addl_args: Optional[dict[str, Any]] = None,
+    addl_args: dict[str, Any] | None = None,
 ) -> None:
     """Initializes wandb for logging hyperparameters and run metadata.
 
@@ -959,7 +957,7 @@ def get_env_defined_actions(info, agents):
 
 
 def gather_tensor(
-    tensor: Union[torch.Tensor, float], accelerator: Accelerator
+    tensor: torch.Tensor | float, accelerator: Accelerator
 ) -> torch.Tensor:
     """Gather tensors from gpus
 
@@ -978,7 +976,7 @@ def gather_tensor(
 
 
 def aggregate_metrics_across_gpus(
-    accelerator: Accelerator, metric_tensor: Union[torch.Tensor, float]
+    accelerator: Accelerator, metric_tensor: torch.Tensor | float
 ) -> float:
     """Aggregate gathered tensors
 

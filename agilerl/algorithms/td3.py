@@ -1,6 +1,6 @@
 import copy
 import warnings
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch
@@ -100,8 +100,8 @@ class TD3(RLAlgorithm):
         theta: float = 0.15,
         dt: float = 1e-2,
         index: int = 0,
-        hp_config: Optional[HyperparameterConfig] = None,
-        net_config: Optional[dict[str, Any]] = None,
+        hp_config: HyperparameterConfig | None = None,
+        net_config: dict[str, Any] | None = None,
         batch_size: int = 64,
         lr_actor: float = 1e-4,
         lr_critic: float = 1e-3,
@@ -109,13 +109,13 @@ class TD3(RLAlgorithm):
         gamma: float = 0.99,
         tau: float = 0.005,
         normalize_images: bool = True,
-        mut: Optional[str] = None,
+        mut: str | None = None,
         policy_freq: int = 2,
-        actor_network: Optional[EvolvableModule] = None,
-        critic_networks: Optional[list[EvolvableModule]] = None,
+        actor_network: EvolvableModule | None = None,
+        critic_networks: list[EvolvableModule] | None = None,
         share_encoders: bool = False,
         device: str = "cpu",
-        accelerator: Optional[Any] = None,
+        accelerator: Any | None = None,
         wrap: bool = True,
     ) -> None:
         super().__init__(
@@ -438,7 +438,7 @@ class TD3(RLAlgorithm):
         experiences: ExperiencesType,
         noise_clip: float = 0.5,
         policy_noise: float = 0.2,
-    ) -> tuple[Optional[float], float]:
+    ) -> tuple[float | None, float]:
         """Updates agent network parameters to learn from experiences.
 
         :param experiences: TensorDict of batched observations, actions, rewards, next_observations, dones.

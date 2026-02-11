@@ -1,6 +1,6 @@
 """Functions for collecting rollouts for on-policy algorithms."""
 
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch
@@ -16,11 +16,11 @@ SupportedOnPolicy = PPO
 def _collect_rollouts(
     agent: SupportedOnPolicy,
     env: GymEnvType,
-    n_steps: Optional[int] = None,
-    last_obs: Optional[np.ndarray] = None,
-    last_done: Optional[np.ndarray] = None,
-    last_scores: Optional[np.ndarray] = None,
-    last_info: Optional[dict[str, Any]] = None,
+    n_steps: int | None = None,
+    last_obs: np.ndarray | None = None,
+    last_done: np.ndarray | None = None,
+    last_scores: np.ndarray | None = None,
+    last_info: dict[str, Any] | None = None,
     *,
     recurrent: bool,
 ) -> tuple[list[float], np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
@@ -31,15 +31,15 @@ def _collect_rollouts(
     :param env: The environment to collect rollouts from.
     :type env: GymEnvType
     :param n_steps: The number of steps to collect rollouts for. Defaults to agent.learn_step if not provided.
-    :type n_steps: Optional[int]
+    :type n_steps: int | None
     :param last_obs: The observation to use for the first step. Defaults to None, where the environment is reset.
-    :type last_obs: Optional[np.ndarray]
+    :type last_obs: np.ndarray | None
     :param last_done: The done flag to use for the first step. Defaults to None, where the environment is reset.
-    :type last_done: Optional[np.ndarray]
+    :type last_done: np.ndarray | None
     :param last_scores: The scores to use for the first step. Defaults to None, where the environment is reset.
-    :type last_scores: Optional[np.ndarray]
+    :type last_scores: np.ndarray | None
     :param last_info: The info for the current step. Defaults to None, where the environment is reset.
-    :type last_info: Optional[dict[str, Any]]
+    :type last_info: dict[str, Any] | None
     :param recurrent: Whether the agent is recurrent.
     :type recurrent: bool
 
@@ -190,7 +190,7 @@ def _collect_rollouts(
 
 
 def collect_rollouts(
-    agent: SupportedOnPolicy, env: GymEnvType, n_steps: Optional[int] = None, **kwargs
+    agent: SupportedOnPolicy, env: GymEnvType, n_steps: int | None = None, **kwargs
 ) -> list[float]:
     """Collect rollouts for non-recurrent on-policy algorithms.
 
@@ -199,7 +199,7 @@ def collect_rollouts(
     :param env: The environment to collect rollouts from.
     :type env: GymEnvType
     :param n_steps: The number of steps to collect rollouts for.
-    :type n_steps: Optional[int]
+    :type n_steps: int | None
 
     :return: The list of scores for the episodes completed in the rollouts
     :rtype: list[float]
@@ -209,7 +209,7 @@ def collect_rollouts(
 
 
 def collect_rollouts_recurrent(
-    agent: SupportedOnPolicy, env: GymEnvType, n_steps: Optional[int] = None, **kwargs
+    agent: SupportedOnPolicy, env: GymEnvType, n_steps: int | None = None, **kwargs
 ) -> list[float]:
     """Collect rollouts for recurrent on-policy algorithms.
 
@@ -218,7 +218,7 @@ def collect_rollouts_recurrent(
     :param env: The environment to collect rollouts from.
     :type env: GymEnvType
     :param n_steps: The number of steps to collect rollouts for.
-    :type n_steps: Optional[int]
+    :type n_steps: int | None
 
     :return: The list of scores for the episodes completed in the rollouts
     :rtype: list[float]

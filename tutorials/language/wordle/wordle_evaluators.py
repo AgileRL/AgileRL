@@ -1,6 +1,6 @@
 import random
 from collections import defaultdict
-from typing import Any, Optional
+from typing import Any
 
 from agilerl.algorithms.ilql import ILQL
 from agilerl.data.rl_data import DataPoint
@@ -42,7 +42,7 @@ class Action_Ranking_Evaluator:
             tuple(state[1]),
         )
 
-    def evaluate(self, model: ILQL, items) -> Optional[dict[str, Any]]:
+    def evaluate(self, model: ILQL, items) -> dict[str, Any] | None:
         assert not model.double_q
         tokens = model.prepare_inputs(items)["tokens"]
         total_correct = [0 for _ in range(N_CHARS + 1)]
@@ -161,7 +161,7 @@ class Action_Ranking_Evaluator_Adversarial:
             tuple(state[1]),
         )
 
-    def evaluate(self, model: ILQL, items) -> Optional[dict[str, Any]]:
+    def evaluate(self, model: ILQL, items) -> dict[str, Any] | None:
         # evaluate Q-values for suboptimal verses expert at the first action
         # evaluate Q-values for expert versus adversarial at the third action
         assert not model.double_q

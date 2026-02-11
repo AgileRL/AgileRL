@@ -1,7 +1,7 @@
 import math
 import warnings
 from collections import OrderedDict
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -53,7 +53,7 @@ class EvolvableBERT(EvolvableModule):
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
-    :type random_seed: Optional[int]
+    :type random_seed: int | None
     """
 
     def __init__(
@@ -76,7 +76,7 @@ class EvolvableBERT(EvolvableModule):
         max_decoder_layers: int = 12,
         device: str = "cpu",
         name: str = "bert",
-        random_seed: Optional[int] = None,
+        random_seed: int | None = None,
     ) -> None:
         super().__init__(device, random_seed)
 
@@ -232,12 +232,12 @@ class EvolvableBERT(EvolvableModule):
         self,
         src: torch.Tensor,
         tgt: torch.Tensor,
-        src_mask: Optional[torch.Tensor] = None,
-        tgt_mask: Optional[torch.Tensor] = None,
-        memory_mask: Optional[torch.Tensor] = None,
-        src_key_padding_mask: Optional[torch.Tensor] = None,
-        tgt_key_padding_mask: Optional[torch.Tensor] = None,
-        memory_key_padding_mask: Optional[torch.Tensor] = None,
+        src_mask: torch.Tensor | None = None,
+        tgt_mask: torch.Tensor | None = None,
+        memory_mask: torch.Tensor | None = None,
+        src_key_padding_mask: torch.Tensor | None = None,
+        tgt_key_padding_mask: torch.Tensor | None = None,
+        memory_key_padding_mask: torch.Tensor | None = None,
         is_causal: bool = False,
     ) -> torch.Tensor:
         """Returns output of neural network.
@@ -247,17 +247,17 @@ class EvolvableBERT(EvolvableModule):
         :param tgt: Decoder input sequence
         :type tgt: torch.Tensor
         :param src_mask: Additive mask for the src sequence, defaults to None
-        :type src_mask: Optional[torch.Tensor], optional
+        :type src_mask: torch.Tensor | None, optional
         :param tgt_mask: Additive mask for the tgt sequence, defaults to None
-        :type tgt_mask: Optional[torch.Tensor], optional
+        :type tgt_mask: torch.Tensor | None, optional
         :param memory_mask: Additive mask for the encoder output, defaults to None
-        :type memory_mask: Optional[torch.Tensor], optional
+        :type memory_mask: torch.Tensor | None, optional
         :param src_key_padding_mask: Tensor mask for src keys per batch, defaults to None
-        :type src_key_padding_mask: Optional[torch.Tensor], optional
+        :type src_key_padding_mask: torch.Tensor | None, optional
         :param tgt_key_padding_mask: Tensor mask for tgt keys per batch, defaults to None
-        :type tgt_key_padding_mask: Optional[torch.Tensor], optional
+        :type tgt_key_padding_mask: torch.Tensor | None, optional
         :param memory_key_padding_mask: Tensor mask for memory keys per batch, defaults to None
-        :type memory_key_padding_mask: Optional[torch.Tensor], optional
+        :type memory_key_padding_mask: torch.Tensor | None, optional
         :param is_causal: Applies a causal mask as mask and ignores attn_mask for computing scaled dot product attention, defaults to False
         :type is_causal: bool, optional
         """
@@ -282,8 +282,8 @@ class EvolvableBERT(EvolvableModule):
     def encode(
         self,
         src: torch.Tensor,
-        src_mask: Optional[torch.Tensor] = None,
-        src_key_padding_mask: Optional[torch.Tensor] = None,
+        src_mask: torch.Tensor | None = None,
+        src_key_padding_mask: torch.Tensor | None = None,
         is_causal: bool = False,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
         """Returns encoded transformer input.
@@ -365,10 +365,10 @@ class EvolvableBERT(EvolvableModule):
         self,
         tgt: torch.Tensor,
         memory: torch.Tensor,
-        tgt_mask: Optional[torch.Tensor] = None,
-        memory_mask: Optional[torch.Tensor] = None,
-        tgt_key_padding_mask: Optional[torch.Tensor] = None,
-        memory_key_padding_mask: Optional[torch.Tensor] = None,
+        tgt_mask: torch.Tensor | None = None,
+        memory_mask: torch.Tensor | None = None,
+        tgt_key_padding_mask: torch.Tensor | None = None,
+        memory_key_padding_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
         """Returns decoded transformer input.
 
@@ -529,9 +529,9 @@ class EvolvableBERT(EvolvableModule):
     @mutation(MutationType.NODE)
     def add_node(
         self,
-        network: Optional[str] = None,
-        hidden_layer: Optional[int] = None,
-        numb_new_nodes: Optional[int] = None,
+        network: str | None = None,
+        hidden_layer: int | None = None,
+        numb_new_nodes: int | None = None,
     ) -> dict[str, Any]:
         """Adds nodes to hidden layer of encoder/decoder.
 
@@ -575,18 +575,18 @@ class EvolvableBERT(EvolvableModule):
     @mutation(MutationType.NODE)
     def remove_node(
         self,
-        network: Optional[str] = None,
-        hidden_layer: Optional[int] = None,
-        numb_new_nodes: Optional[int] = None,
+        network: str | None = None,
+        hidden_layer: int | None = None,
+        numb_new_nodes: int | None = None,
     ) -> dict[str, Any]:
         """Removes nodes from hidden layer of encoder/decoder.
 
         :param network: Network to remove node from, 'encoder' or 'decoder', defaults to None
-        :type network: Optional[str], optional
+        :type network: str | None, optional
         :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None
-        :type hidden_layer: Optional[int], optional
+        :type hidden_layer: int | None, optional
         :param numb_new_nodes: Number of nodes to remove from hidden layer, defaults to None
-        :type numb_new_nodes: Optional[int], optional
+        :type numb_new_nodes: int | None, optional
 
         :return: Dictionary containing hidden layer, number of removed nodes and network
         :rtype: dict[str, Any]
@@ -636,21 +636,21 @@ class EvolvableBERT(EvolvableModule):
 
 
 def _canonical_mask(
-    mask: Optional[torch.Tensor],
+    mask: torch.Tensor | None,
     mask_name: str,
-    other_type: Optional[torch.dtype],
+    other_type: torch.dtype | None,
     other_name: str,
     target_type: torch.dtype,
     check_other: bool = True,
-) -> Optional[torch.Tensor]:
+) -> torch.Tensor | None:
     """Returns canonical mask. Adapted from torch.nn.functional.
 
     :param mask: Input mask tensor
-    :type mask: Optional[torch.Tensor]
+    :type mask: torch.Tensor | None
     :param mask_name: Name of the mask
     :type mask_name: str
     :param other_type: Data type of the other tensor
-    :type other_type: Optional[torch.dtype]
+    :type other_type: torch.dtype | None
     :param other_name: Name of the other tensor
     :type other_name: str
     :param target_type: Target data type for the mask
@@ -658,7 +658,7 @@ def _canonical_mask(
     :param check_other: Flag to check other tensor type, defaults to True
     :type check_other: bool, optional
     :return: Canonical mask tensor
-    :rtype: Optional[torch.Tensor]
+    :rtype: torch.Tensor | None
     """
     if mask is not None:
         _mask_dtype = mask.dtype
@@ -757,7 +757,7 @@ class TokenEmbedding(nn.Module):
         return self.embedding(tokens)
 
 
-def _none_or_dtype(input: Any) -> Optional[torch.dtype]:
+def _none_or_dtype(input: Any) -> torch.dtype | None:
     """Returns None or dtype of input. Adapted from torch.nn.functional.
     :param input: Input to return dtype of
     :type input: Any

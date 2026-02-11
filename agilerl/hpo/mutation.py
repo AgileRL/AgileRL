@@ -3,7 +3,7 @@ import logging
 import warnings
 from collections import OrderedDict
 from functools import wraps
-from typing import Any, Callable, Optional, TypeVar, Union
+from typing import Any, Callable, TypeVar
 
 import fastrand
 import numpy as np
@@ -31,13 +31,13 @@ from agilerl.wrappers.agent import AgentWrapper
 IndividualType = TypeVar("IndividualType", bound=EvolvableAlgorithm)
 MutationsType = TypeVar("MutationsType", bound="Mutations")
 PopulationType = list[IndividualType]
-BanditAlgorithm = Union[NeuralUCB, NeuralTS]
+BanditAlgorithm = NeuralUCB | NeuralTS
 
 torch._dynamo.config.cache_size_limit = 64
 torch._logging.set_logs(dynamo=logging.FATAL)
 
 
-def set_global_seed(seed: Optional[int]) -> None:
+def set_global_seed(seed: int | None) -> None:
     """Set the global seed for random number generators.
 
     :param seed: Random seed for repeatability
@@ -105,7 +105,7 @@ def reinit_shared_networks(mutation_func=None):
     """Decorator to reinitialize shared networks after architecture and parameter mutations.
 
     :param mutation_func: The mutation function to decorate
-    :type mutation_func: Optional[Callable[[IndividualType], IndividualType]]
+    :type mutation_func: Callable[[IndividualType], IndividualType] | None
     :return: The decorated mutation function or decorator
     :rtype: Callable
     """
@@ -213,9 +213,9 @@ class Mutations:
         mutation_sd: float = 0.1,
         activation_selection: list[str] = ["ReLU", "ELU", "GELU"],
         mutate_elite: bool = True,
-        rand_seed: Optional[int] = None,
+        rand_seed: int | None = None,
         device: str = "cpu",
-        accelerator: Optional[Accelerator] = None,
+        accelerator: Accelerator | None = None,
     ):
         assert isinstance(
             no_mutation, (float, int)
@@ -958,20 +958,20 @@ class Mutations:
     def _apply_arch_mutation(
         self,
         network: EvolvableNetworkType,
-        mut_method: Optional[str],
-        applied_mut_dict: Optional[dict[str, Any]] = None,
-    ) -> tuple[Optional[str], MutationReturnType]:
+        mut_method: str | None,
+        applied_mut_dict: dict[str, Any] | None = None,
+    ) -> tuple[str | None, MutationReturnType]:
         """Applies the mutation method to networks and returns mutation data if needed.
 
         :param networks: The networks to apply the mutation to
         :type networks: EvolvableNetworkType
         :param mut_method: The mutation method to apply
-        :type mut_method: Optional[str]
+        :type mut_method: str | None
         :param applied_mut_dict: The mutation dictionary, defaults to None
-        :type applied_mut_dict: Optional[dict[str, Any]], optional
+        :type applied_mut_dict: dict[str, Any] | None, optional
 
         :return: The mutation method name and the mutation dictionary
-        :rtype: tuple[Optional[str], MutationReturnType]
+        :rtype: tuple[str | None, MutationReturnType]
         """
         if not isinstance(network, EvolvableModule):
             raise MutationError(
@@ -1091,7 +1091,7 @@ class Mutations:
 
     def _find_analogous_mutation(
         self, sampled_mutation: str, available_methods: list[str], policy_agent: str
-    ) -> Optional[str]:
+    ) -> str | None:
         """Find an analogous mutation method when exact match is not found.
 
         Tries to match based on bottom-level method and agent ID.
@@ -1104,7 +1104,7 @@ class Mutations:
         :type policy_agent: str
 
         :return: Analogous mutation method if found, None otherwise
-        :rtype: Optional[str]
+        :rtype: str | None
         """
         if not sampled_mutation:
             return None

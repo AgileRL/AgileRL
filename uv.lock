@@ -52,7 +52,7 @@ wheels = [
 
 [[package]]
 name = "agilerl"
-version = "2.4.3.dev1"
+version = "2.5.0.dev0"
 source = { editable = "." }
 dependencies = [
     { name = "accelerate" },
@@ -130,7 +130,7 @@ requires-dist = [
     { name = "jax", extras = ["cpu"], specifier = "~=0.4.31" },
     { name = "matplotlib", specifier = "~=3.9.4,<3.10" },
     { name = "minari", extras = ["all"], specifier = "==0.5.2" },
-    { name = "numpy", specifier = "~=2.2.6" },
+    { name = "numpy", specifier = ">=2.0.0,<3.0" },
     { name = "omegaconf", specifier = "~=2.3.0" },
     { name = "packaging", specifier = ">=20.0" },
     { name = "pandas", specifier = "~=2.2.3" },

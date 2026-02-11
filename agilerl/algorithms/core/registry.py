@@ -1,7 +1,7 @@
 import inspect
 from dataclasses import dataclass, field
 from numbers import Number
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable
 
 import numpy as np
 import torch
@@ -24,12 +24,12 @@ class NetworkConfig:
 
     :type eval_network: bool
     :param optimizer: The name of the optimizer that updates the network.
-    :type optimizer: Optional[str]
+    :type optimizer: str | None
     """
 
     name: str
     eval_network: bool = field(default=False)
-    optimizer: Optional[str] = field(default=None)
+    optimizer: str | None = field(default=None)
 
     def __post_init__(self):
         if self.eval_network and self.optimizer is None:
@@ -58,10 +58,10 @@ class OptimizerConfig:
     """
 
     name: str
-    networks: Union[str, list[str]]
+    networks: str | list[str]
     lr: str
-    optimizer_cls: Union[type[Optimizer], list[type[Optimizer]]]
-    optimizer_kwargs: Union[dict[str, Any], list[dict[str, Any]]]
+    optimizer_cls: type[Optimizer] | list[type[Optimizer]]
+    optimizer_kwargs: dict[str, Any] | list[dict[str, Any]]
 
     def __post_init__(self):
         # Save optimizer_cls as string for serialization
@@ -75,11 +75,11 @@ class OptimizerConfig:
     def __eq__(self, other: "OptimizerConfig") -> bool:
         return self.name == other.name and self.networks == other.networks
 
-    def get_optimizer_cls(self) -> Union[type[Optimizer], dict[str, type[Optimizer]]]:
+    def get_optimizer_cls(self) -> type[Optimizer] | dict[str, type[Optimizer]]:
         """Get the optimizer object/s from the stored configuration.
 
         :return: The optimizer object/s from the stored configuration.
-        :rtype: Union[Optimizer, dict[str, Optimizer]]
+        :rtype: Optimizer | dict[str, Optimizer]
         """
         name_to_cls = {
             "Adam": torch.optim.Adam,
@@ -118,19 +118,19 @@ class RLParameter:
     :param grow_factor: The factor by which the hyperparameter will be grown during mutation. Default is 1.2.
     :type grow_factor: float
     :param dtype: The data type of the hyperparameter. Default is float.
-    :type dtype: Union[type[float], type[int], type[np.ndarray]]
+    :type dtype: type[float] | type[int] | type[np.ndarray]
     :param value: The current value of the hyperparameter. Default is None.
-    :type value: Optional[Union[Number, np.ndarray]]
+    :type value: Number | np.ndarray | None
     """
 
     min: float
     max: float
     shrink_factor: float = 0.8
     grow_factor: float = 1.2
-    dtype: Union[type[float], type[int], type[np.ndarray]] = float
-    value: Optional[Union[Number, np.ndarray]] = field(default=None, init=False)
+    dtype: type[float] | type[int] | type[np.ndarray] = float
+    value: Number | np.ndarray | None = field(default=None, init=False)
 
-    def mutate(self) -> Union[Number, np.ndarray]:
+    def mutate(self) -> Number | np.ndarray:
         """Mutate the hyperparameter value by either growing or shrinking it.
 
         For scalar values (int/float), the mutation applies the grow/shrink factor uniformly.
@@ -138,7 +138,7 @@ class RLParameter:
         of min/max constraints and preservation of the original array's dtype.
 
         :return: The mutated hyperparameter value.
-        :rtype: Union[Number, np.ndarray]
+        :rtype: Number | np.ndarray
         """
         assert self.value is not None, "Hyperparameter value is not set"
 
@@ -253,7 +253,7 @@ class NetworkGroup:
     :param eval_network: The evaluation network.
     :type eval_network: NetworkType
     :param shared_networks: The list of shared networks.
-    :type shared_networks: Optional[NetworkType]
+    :type shared_networks: NetworkType | None
     :param policy: Whether the network is a policy (e.g. the network used to get the actions
         of the agent). There must be one network group in an algorithm which sets this to True.
         Default is False.
@@ -261,7 +261,7 @@ class NetworkGroup:
     """
 
     eval_network: NetworkType
-    shared_networks: Optional[NetworkType] = field(default=None)
+    shared_networks: NetworkType | None = field(default=None)
     policy: bool = field(default=False)
 
     def __post_init__(self):
@@ -307,7 +307,7 @@ class NetworkGroup:
         return current_frame.f_back.f_back.f_back.f_locals["self"]
 
     def _infer_attribute_names(
-        self, container: object, objects: Union[object, list[object]]
+        self, container: object, objects: object | list[object]
     ) -> list[str]:
         """
         Infer attribute names of the networks being optimized.
@@ -315,7 +315,7 @@ class NetworkGroup:
         :param container: The container object to inspect.
         :type container: object
         :param objects: The objects to match.
-        :type objects: Union[object, list[object]]
+        :type objects: object | list[object]
 
         :return: List of attribute names for the networks
         :rtype: list[str]
@@ -336,7 +336,7 @@ class NetworkGroup:
 
 def make_network_group(
     eval_network: str,
-    shared_networks: Optional[Union[str, list[str]]],
+    shared_networks: str | list[str] | None,
     policy: bool = False,
 ) -> NetworkGroup:
     """Make a network group from a given eval network and, optionally, some network/s that
@@ -345,7 +345,7 @@ def make_network_group(
     :param eval_network: The evaluation network.
     :type eval_network: str
     :param shared_networks: The list of shared networks.
-    :type shared_networks: Optional[Union[str, list[str]]]
+    :type shared_networks: str | list[str] | None
     :param policy: Whether the network is a policy (e.g. the network used to get the actions
     of the agent). There must be one network group in an algorithm which sets this to True.
     Default is False.
@@ -374,7 +374,7 @@ class MutationRegistry:
     :type hp_config: HyperparameterConfig
     """
 
-    hp_config: Optional[HyperparameterConfig] = field(default=None)
+    hp_config: HyperparameterConfig | None = field(default=None)
 
     def __post_init__(self):
         self.groups: list[NetworkGroup] = []
@@ -399,12 +399,12 @@ class MutationRegistry:
         )
         return f"Network Groups:\n{groups_str}\n\nOptimizers:\n{optimizers_str}"
 
-    def __eq__(self, other: Optional["MutationRegistry"]) -> bool:
+    def __eq__(self, other: "MutationRegistry" | None) -> bool:
         """Check if two MutationRegistry objects are equal. This involves checking
         that the network groups and optimizer configurations are the same.
 
         :param other: The other MutationRegistry object to compare with.
-        :type other: Optional[MutationRegistry]
+        :type other: MutationRegistry | None
 
         :return: True if the two MutationRegistry objects are equal, False otherwise.
         :rtype: bool
@@ -420,14 +420,14 @@ class MutationRegistry:
         """
         return {config.name: config.networks for config in self.optimizers}
 
-    def policy(self, return_group: bool = False) -> Optional[Union[str, NetworkGroup]]:
+    def policy(self, return_group: bool = False) -> str | NetworkGroup | None:
         """Get the name of the policy network in the registry.
 
         :param return_group: Whether to return the network group instead of just the name.
         :type return_group: bool
 
         :return: The name of the policy network in the registry.
-        :rtype: Optional[Union[str, NetworkGroup]]
+        :rtype: str | NetworkGroup | None
         """
         for group in self.groups:
             if group.policy:

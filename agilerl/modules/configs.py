@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal
 
 import torch
 import yaml
@@ -56,7 +56,7 @@ class NetConfig:
 class MlpNetConfig(NetConfig):
     hidden_size: list[int]
     activation: str = field(default="ReLU")
-    output_activation: Optional[str] = field(default=None)
+    output_activation: str | None = field(default=None)
     min_hidden_layers: int = field(default=1)
     max_hidden_layers: int = field(default=3)
     min_mlp_nodes: int = field(default=16)
@@ -89,7 +89,7 @@ class MlpNetConfig(NetConfig):
 class SimBaNetConfig(NetConfig):
     hidden_size: int
     num_blocks: int
-    output_activation: Optional[str] = field(default=None)
+    output_activation: str | None = field(default=None)
     min_blocks: int = field(default=1)
     max_blocks: int = field(default=4)
     min_mlp_nodes: int = field(default=16)
@@ -113,11 +113,11 @@ class SimBaNetConfig(NetConfig):
 @dataclass
 class CnnNetConfig(NetConfig):
     channel_size: list[int]
-    kernel_size: list[Union[int, tuple[int, ...]]]
+    kernel_size: list[int | tuple[int, ...]]
     stride_size: list[int]
-    sample_input: Optional[torch.Tensor] = field(default=None)
+    sample_input: torch.Tensor | None = field(default=None)
     activation: str = field(default="ReLU")
-    output_activation: Optional[str] = field(default=None)
+    output_activation: str | None = field(default=None)
     block_type: Literal["Conv2d", "Conv3d"] = field(default="Conv2d")
     min_hidden_layers: int = field(default=1)
     max_hidden_layers: int = field(default=6)
@@ -135,7 +135,7 @@ class LstmNetConfig(NetConfig):
     max_hidden_state_size: int = field(default=500)
     min_layers: int = field(default=1)
     max_layers: int = field(default=4)
-    output_activation: Optional[str] = field(default=None)
+    output_activation: str | None = field(default=None)
     dropout: float = field(default=0.0)
 
 
@@ -151,11 +151,11 @@ class MultiInputNetConfig(NetConfig):
     min_latent_dim: int = 8
     max_latent_dim: int = 128
     vector_space_mlp: bool = False
-    output_activation: Optional[str] = field(default=None)
+    output_activation: str | None = field(default=None)
 
     # Network configurations
-    cnn_config: Optional[NetConfigType] = field(default=None)
-    mlp_config: Optional[NetConfigType] = field(default=None)
+    cnn_config: NetConfigType | None = field(default=None)
+    mlp_config: NetConfigType | None = field(default=None)
 
     # Additional settings
     init_dicts: dict[str, dict[str, Any]] = field(default_factory=dict)

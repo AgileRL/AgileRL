@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -45,7 +45,7 @@ class EvolvableResNet(EvolvableModule):
     :param name: Name of the network, defaults to 'resnet'
     :type name: str, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
-    :type random_seed: Optional[int]
+    :type random_seed: int | None
     """
 
     def __init__(
@@ -64,7 +64,7 @@ class EvolvableResNet(EvolvableModule):
         max_channel_size: int = 256,
         device: DeviceType = "cpu",
         name: str = "resnet",
-        random_seed: Optional[int] = None,
+        random_seed: int | None = None,
     ) -> None:
         super().__init__(device, random_seed)
 
@@ -214,14 +214,14 @@ class EvolvableResNet(EvolvableModule):
     @mutation(MutationType.NODE)
     def add_channel(
         self,
-        numb_new_channels: Optional[int] = None,
+        numb_new_channels: int | None = None,
     ) -> dict[str, int]:
         """Remove channel from hidden layer of convolutional neural network.
 
         :param numb_new_channels: Number of channels to add to hidden layer, defaults to None
         :type numb_new_channels: int, optional
         :return: Dictionary containing the hidden layer and number of new channels
-        :rtype: dict[str, Union[int, None]]
+        :rtype: dict[str, int | None]
         """
         if numb_new_channels is None:
             numb_new_channels = self.rng.choice([8, 16, 32])
@@ -235,14 +235,14 @@ class EvolvableResNet(EvolvableModule):
     @mutation(MutationType.NODE, shrink_params=True)
     def remove_channel(
         self,
-        numb_new_channels: Optional[int] = None,
+        numb_new_channels: int | None = None,
     ) -> dict[str, int]:
         """Remove channel from hidden layer of convolutional neural network.
 
         :param numb_new_channels: Number of channels to add to hidden layer, defaults to None
         :type numb_new_channels: int, optional
         :return: Dictionary containing the hidden layer and number of new channels
-        :rtype: dict[str, Union[int, None]]
+        :rtype: dict[str, int | None]
         """
         if numb_new_channels is None:
             numb_new_channels = self.rng.choice([8, 16, 32])

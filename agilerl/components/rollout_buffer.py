@@ -1,6 +1,6 @@
 import warnings
 from collections import OrderedDict
-from typing import Any, Generator, Optional, Union
+from typing import Any, Generator
 
 import numpy as np
 import torch
@@ -68,10 +68,10 @@ class RolloutBuffer:
         gae_lambda: float = 0.95,
         gamma: float = 0.99,
         recurrent: bool = False,
-        hidden_state_architecture: Optional[dict[str, tuple[int, int, int]]] = None,
+        hidden_state_architecture: dict[str, tuple[int, int, int]] | None = None,
         use_gae: bool = True,
         wrap_at_capacity: bool = False,
-        max_seq_len: Optional[int] = None,
+        max_seq_len: int | None = None,
         bptt_sequence_type: BPTTSequenceType = BPTTSequenceType.CHUNKED,
     ):
         self.capacity = capacity
@@ -224,16 +224,16 @@ class RolloutBuffer:
         self,
         obs: ObservationType,
         action: ArrayOrTensor,
-        reward: Union[float, np.ndarray],
-        done: Union[bool, np.ndarray],
-        value: Union[float, np.ndarray],
-        log_prob: Union[float, np.ndarray],
-        next_obs: Optional[ObservationType] = None,
-        hidden_state: Optional[dict[str, ArrayOrTensor]] = None,
-        next_hidden_state: Optional[
-            dict[str, ArrayOrTensor]
-        ] = None,  # Not used if only initial hidden states are stored
-        episode_start: Optional[Union[bool, np.ndarray]] = None,
+        reward: float | np.ndarray,
+        done: bool | np.ndarray,
+        value: float | np.ndarray,
+        log_prob: float | np.ndarray,
+        next_obs: ObservationType | None = None,
+        hidden_state: dict[str, ArrayOrTensor] | None = None,
+        next_hidden_state: (
+            dict[str, ArrayOrTensor] | None
+        ) = None,  # Not used if only initial hidden states are stored
+        episode_start: bool | np.ndarray | None = None,
     ) -> None:
         """
         Add a new batch of observations and associated data from vectorized environments to the buffer.
@@ -243,21 +243,21 @@ class RolloutBuffer:
         :param action: Action batch taken (shape: (num_envs, *action_shape))
         :type action: ArrayOrTensor
         :param reward: Reward batch received (shape: (num_envs,))
-        :type reward: Union[float, np.ndarray]
+        :type reward: float | np.ndarray
         :param done: Done flag batch (shape: (num_envs,))
-        :type done: Union[bool, np.ndarray]
+        :type done: bool | np.ndarray
         :param value: Value estimate batch (shape: (num_envs,))
-        :type value: Union[float, np.ndarray]
+        :type value: float | np.ndarray
         :param log_prob: Log probability batch of the actions (shape: (num_envs,))
-        :type log_prob: Union[float, np.ndarray]
+        :type log_prob: float | np.ndarray
         :param next_obs: Next observation batch (shape: (num_envs, *obs_shape)), defaults to None
-        :type next_obs: Optional[ObservationType]
+        :type next_obs: ObservationType | None
         :param hidden_state: Current hidden state batch (shape: (num_envs, hidden_size)), defaults to None
-        :type hidden_state: Optional[dict[str, ArrayOrTensor]]
+        :type hidden_state: dict[str, ArrayOrTensor] | None
         :param next_hidden_state: Next hidden state batch (shape: (num_envs, hidden_size)), defaults to None
-        :type next_hidden_state: Optional[dict[str, ArrayOrTensor]]
+        :type next_hidden_state: dict[str, ArrayOrTensor] | None
         :param episode_start: Episode start flag batch (shape: (num_envs,)), defaults to None
-        :type episode_start: Optional[Union[bool, np.ndarray]]
+        :type episode_start: bool | np.ndarray | None
         """
         if self.pos == self.capacity:
             if self.wrap_at_capacity:
@@ -436,15 +436,15 @@ class RolloutBuffer:
         self.buffer["returns"][:buffer_size] = torch.from_numpy(returns_np)
 
     def get(
-        self, batch_size: Optional[int] = None
-    ) -> dict[str, Union[np.ndarray, dict[str, np.ndarray]]]:
+        self, batch_size: int | None = None
+    ) -> dict[str, np.ndarray | dict[str, np.ndarray]]:
         """
         Get data from the buffer, flattened and optionally sampled into minibatches.
 
         :param batch_size: Size of the minibatch to sample. If None, returns all data. Defaults to None.
-        :type batch_size: Optional[int]
+        :type batch_size: int | None
         :return: Dictionary containing flattened buffer data arrays.
-        :rtype: dict[str, Union[np.ndarray, dict[str, np.ndarray]]]
+        :rtype: dict[str, np.ndarray | dict[str, np.ndarray]]
         """
         buffer_size = self.capacity if self.full else self.pos
         total_samples = buffer_size * self.num_envs
@@ -478,18 +478,18 @@ class RolloutBuffer:
             return self._convert_td_to_np_dict(flattened_td)
 
     def get_tensor_batch(
-        self, batch_size: Optional[int] = None, device: Optional[str] = None
-    ) -> dict[str, Union[torch.Tensor, dict[str, torch.Tensor]]]:
+        self, batch_size: int | None = None, device: str | None = None
+    ) -> dict[str, torch.Tensor | dict[str, torch.Tensor]]:
         """
         Get data from the buffer as PyTorch tensors, flattened and optionally sampled.
         The output is a TensorDict.
 
         :param batch_size: Size of batch to sample, if None returns all data, defaults to None.
-        :type batch_size: Optional[int]
+        :type batch_size: int | None
         :param device: Device to put tensors on, defaults to None (uses self.device).
-        :type device: Optional[str]
+        :type device: str | None
         :return: TensorDict containing the data.
-        :rtype: dict[str, Union[torch.Tensor, dict[str, torch.Tensor]]]
+        :rtype: dict[str, torch.Tensor | dict[str, torch.Tensor]]
         """
         target_device = device or self.device
         buffer_size = self.capacity if self.full else self.pos
@@ -536,14 +536,14 @@ class RolloutBuffer:
 
     def _convert_td_to_np_dict(
         self, td: TensorDict
-    ) -> dict[str, Union[np.ndarray, dict[str, np.ndarray]]]:
+    ) -> dict[str, np.ndarray | dict[str, np.ndarray]]:
         """
         Convert a TensorDict to a dictionary of numpy arrays.
 
         :param td: TensorDict to convert.
         :type td: TensorDict
         :return: Dictionary of numpy arrays.
-        :rtype: dict[str, Union[np.ndarray, dict[str, np.ndarray]]]
+        :rtype: dict[str, np.ndarray | dict[str, np.ndarray]]
         """
         # Convert the TensorDict to the old dictionary of numpy arrays format
         np_dict = {}
@@ -577,20 +577,20 @@ class RolloutBuffer:
 
     @staticmethod
     def _pad_sequences(
-        sequences: list[Union[torch.Tensor, TensorDict]],
-        target_length: Optional[int] = None,
-    ) -> Union[torch.Tensor, TensorDict]:
+        sequences: list[torch.Tensor | TensorDict],
+        target_length: int | None = None,
+    ) -> torch.Tensor | TensorDict:
         """Pads sequences using zeros. If target_length is provided, the sequences are padded to the target length.
         Otherwise, the sequences are padded to the length of the longest sequence. Results in a tensor of
         shape (B, T, *). We provide the option to pad to a specified target length but in general these should be padded
         to the maximum length of the sequences in the batch (i.e. using `torch.nn.utils.rnn.pad_sequence`).
 
         :param sequences: The sequences to be padded.
-        :type sequences: list[Union[torch.Tensor, TensorDict]]
+        :type sequences: list[torch.Tensor | TensorDict]
         :param target_length: The target length to pad the sequences to. If None, the sequences are padded to the length of the longest sequence.
-        :type target_length: Optional[int]
+        :type target_length: int | None
         :return: The padded sequence.
-        :rtype: Union[torch.Tensor, TensorDict]
+        :rtype: torch.Tensor | TensorDict
         """
         # Handle nested tensors
         if is_tensor_collection(sequences[0]):
@@ -669,13 +669,13 @@ class RolloutBuffer:
 
         return sequences, max_length
 
-    def prepare_sequence_tensors(self, device: Optional[str] = None) -> TensorDict:
+    def prepare_sequence_tensors(self, device: str | None = None) -> TensorDict:
         """Returns a TensorDict with all of the possible sequences in the buffer for the
         observations, actions, and hidden states. We pad the sequences to the same length to obtain
         a TensorDict with batch_size [num_sequences, max_sequence_length] for efficient truncated BPTT.
 
         :param device: Device to put tensors on, defaults to None (uses self.device).
-        :type device: Optional[str]
+        :type device: str | None
         :return: Dictionary with tensor sequences.
         :rtype: TensorDict
         """

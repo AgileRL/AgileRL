@@ -2,7 +2,7 @@ import copy
 import warnings
 from collections import OrderedDict
 from dataclasses import asdict
-from typing import Any, Optional, Union
+from typing import Any
 
 import numpy as np
 import torch
@@ -40,11 +40,11 @@ class MATD3(MultiAgentRLAlgorithm):
     Paper: https://arxiv.org/abs/1910.01465
 
     :param observation_spaces: Observation space for each agent
-    :type observation_spaces: Union[list[spaces.Space], spaces.Dict]
+    :type observation_spaces: list[spaces.Space] | spaces.Dict
     :param action_spaces: Action space for each agent
-    :type action_spaces: Union[list[spaces.Space], spaces.Dict]
+    :type action_spaces: list[spaces.Space] | spaces.Dict
     :param agent_ids: Agent ID for each agent
-    :type agent_ids: Optional[list[str]], optional
+    :type agent_ids: list[str] | None, optional
     :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
     :type O_U_noise: bool, optional
     :param expl_noise: Scale for Ornstein Uhlenbeck action noise, or standard deviation for Gaussian exploration noise
@@ -64,7 +64,7 @@ class MATD3(MultiAgentRLAlgorithm):
     :param policy_freq: Policy update frequency, defaults to 2
     :type policy_freq: int, optional
     :param net_config: Network configuration, defaults to None
-    :type net_config: Optional[dict[str, Any]], optional
+    :type net_config: dict[str, Any] | None, optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
     :param lr_actor: Learning rate for actor optimizer, defaults to 0.001
@@ -80,22 +80,22 @@ class MATD3(MultiAgentRLAlgorithm):
     :param normalize_images: Normalize image observations, defaults to True
     :type normalize_images: bool, optional
     :param mut: Most recent mutation to agent, defaults to None
-    :type mut: Optional[str], optional
+    :type mut: str | None, optional
     :param actor_networks: List of custom actor networks, defaults to None
-    :type actor_networks: Optional[ModuleDict], optional
+    :type actor_networks: ModuleDict | None, optional
     :param critic_networks: List containing two lists of custom critic networks, defaults to None
-    :type critic_networks: Optional[list[ModuleDict]], optional
+    :type critic_networks: list[ModuleDict] | None, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
     :param torch_compiler: The torch compile mode 'default', 'reduce-overhead' or 'max-autotune', defaults to None
-    :type torch_compiler: Optional[str], optional
+    :type torch_compiler: str | None, optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
 
-    possible_action_spaces: dict[str, Union[spaces.Box, spaces.Discrete]]
+    possible_action_spaces: dict[str, spaces.Box | spaces.Discrete]
 
     actors: MultiAgentModule[DeterministicActor]
     actor_targets: MultiAgentModule[DeterministicActor]
@@ -106,9 +106,9 @@ class MATD3(MultiAgentRLAlgorithm):
 
     def __init__(
         self,
-        observation_spaces: Union[list[spaces.Space], spaces.Dict],
-        action_spaces: Union[list[spaces.Space], spaces.Dict],
-        agent_ids: Optional[list[str]] = None,
+        observation_spaces: list[spaces.Space] | spaces.Dict,
+        action_spaces: list[spaces.Space] | spaces.Dict,
+        agent_ids: list[str] | None = None,
         O_U_noise: bool = True,
         expl_noise: float = 0.1,
         vect_noise_dim: int = 1,
@@ -116,9 +116,9 @@ class MATD3(MultiAgentRLAlgorithm):
         theta: float = 0.15,
         dt: float = 1e-2,
         index: int = 0,
-        hp_config: Optional[HyperparameterConfig] = None,
+        hp_config: HyperparameterConfig | None = None,
         policy_freq: int = 2,
-        net_config: Optional[dict[str, Any]] = None,
+        net_config: dict[str, Any] | None = None,
         batch_size: int = 64,
         lr_actor: float = 0.001,
         lr_critic: float = 0.01,
@@ -126,12 +126,12 @@ class MATD3(MultiAgentRLAlgorithm):
         gamma: float = 0.95,
         tau: float = 0.01,
         normalize_images: bool = True,
-        mut: Optional[str] = None,
-        actor_networks: Optional[ModuleDict] = None,
-        critic_networks: Optional[list[ModuleDict]] = None,
+        mut: str | None = None,
+        actor_networks: ModuleDict | None = None,
+        critic_networks: list[ModuleDict] | None = None,
         device: str = "cpu",
-        accelerator: Optional[Any] = None,
-        torch_compiler: Optional[str] = None,
+        accelerator: Any | None = None,
+        torch_compiler: str | None = None,
         wrap: bool = True,
     ):
         super().__init__(
@@ -449,7 +449,7 @@ class MATD3(MultiAgentRLAlgorithm):
         )
 
     def process_infos(
-        self, infos: Optional[InfosDict] = None
+        self, infos: InfosDict | None = None
     ) -> tuple[ArrayDict, ArrayDict, ArrayDict]:
         """
         Process the information, extract env_defined_actions, action_masks and agent_masks
@@ -467,7 +467,7 @@ class MATD3(MultiAgentRLAlgorithm):
         return action_masks, env_defined_actions, agent_masks
 
     def get_action(
-        self, obs: dict[str, ObservationType], infos: Optional[InfosDict] = None
+        self, obs: dict[str, ObservationType], infos: InfosDict | None = None
     ) -> tuple[ArrayDict, ArrayDict]:
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
@@ -674,7 +674,7 @@ class MATD3(MultiAgentRLAlgorithm):
         actions: StandardTensorDict,
         rewards: StandardTensorDict,
         dones: StandardTensorDict,
-    ) -> tuple[Optional[float], float]:
+    ) -> tuple[float | None, float]:
         """
         Inner call to each agent for the learning/algo training steps, up until the soft updates.
         Applies all forward/backward props.
@@ -683,9 +683,9 @@ class MATD3(MultiAgentRLAlgorithm):
         :type agent_id: str
 
         :param stacked_actions: Stacked actions tensor for CNN architecture
-        :type stacked_actions: Optional[torch.Tensor]
+        :type stacked_actions: torch.Tensor | None
         :param stacked_next_actions: Stacked next actions tensor for CNN architecture
-        :type stacked_next_actions: Optional[torch.Tensor]
+        :type stacked_next_actions: torch.Tensor | None
         :param states: Dictionary of current states for each agent
         :type states: dict[str, torch.Tensor]
         :param actions: Dictionary of actions taken by each agent
@@ -696,7 +696,7 @@ class MATD3(MultiAgentRLAlgorithm):
         :type dones: dict[str, torch.Tensor]
 
         :return: Tuple containing actor loss (if applicable) and critic loss
-        :rtype: tuple[Optional[float], float]
+        :rtype: tuple[float | None, float]
         """
         actor = self.actors[agent_id]
         critic_1 = self.critics_1[agent_id]
@@ -815,7 +815,7 @@ class MATD3(MultiAgentRLAlgorithm):
         self,
         env: PzEnvType,
         swap_channels: bool = False,
-        max_steps: Optional[int] = None,
+        max_steps: int | None = None,
         loop: int = 3,
         sum_scores: bool = True,
     ) -> float:

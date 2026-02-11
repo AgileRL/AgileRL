@@ -2,7 +2,7 @@ import inspect
 import warnings
 from copy import deepcopy
 from dataclasses import asdict
-from typing import Any, Optional, TypeVar, Union
+from typing import Any, TypeVar
 
 import numpy as np
 import torch
@@ -27,9 +27,9 @@ from agilerl.utils.algo_utils import get_hidden_states_shape_from_model
 from agilerl.utils.evolvable_networks import get_default_encoder_config, is_image_space
 
 SelfEvolvableNetwork = TypeVar("SelfEvolvableNetwork", bound="EvolvableNetwork")
-DefaultEncoderType = Union[
-    EvolvableCNN, EvolvableMLP, EvolvableMultiInput, EvolvableSimBa, EvolvableLSTM
-]
+DefaultEncoderType = (
+    EvolvableCNN | EvolvableMLP | EvolvableMultiInput | EvolvableSimBa | EvolvableLSTM
+)
 
 
 def assert_correct_mlp_net_config(net_config: dict[str, Any]) -> None:
@@ -147,11 +147,11 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     :type observation_space: spaces.Space
     :param encoder_cls: Encoder class to use for the network. Defaults to None, whereby it is
         automatically built using an AgileRL module according the observation space.
-    :type encoder_cls: Optional[Union[str, type[EvolvableModule]]]
+    :type encoder_cls: str | type[EvolvableModule] | None
     :param encoder_config: Configuration of the encoder. Defaults to None.
-    :type encoder_config: Optional[ConfigType]
+    :type encoder_config: ConfigType | None
     :param action_space: Action space of the environment. Defaults to None.
-    :type action_space: Optional[spaces.Space]
+    :type action_space: spaces.Space | None
     :param min_latent_dim: Minimum dimension of the latent space representation. Defaults to 8.
     :type min_latent_dim: int
     :param max_latent_dim: Maximum dimension of the latent space representation. Defaults to 128.
@@ -166,7 +166,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     :param device: Device to use for the network. Defaults to "cpu".
     :type device: DeviceType
     :param random_seed: Random seed to use for the network. Defaults to None.
-    :type random_seed: Optional[int]
+    :type random_seed: int | None
     """
 
     encoder: EvolvableModule
@@ -180,17 +180,17 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     def __init__(
         self,
         observation_space: spaces.Space,
-        encoder_cls: Optional[Union[str, type[EvolvableModule]]] = None,
-        encoder_config: Optional[NetConfigType] = None,
+        encoder_cls: str | type[EvolvableModule] | None = None,
+        encoder_config: NetConfigType | None = None,
         encoder_name: str = "encoder",
-        action_space: Optional[spaces.Space] = None,
+        action_space: spaces.Space | None = None,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
         latent_dim: int = 32,
         simba: bool = False,
         recurrent: bool = False,
         device: DeviceType = "cpu",
-        random_seed: Optional[int] = None,
+        random_seed: int | None = None,
     ) -> None:
         super().__init__(device, random_seed)
 
@@ -299,8 +299,8 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         return self.forward(*args, **kwargs)
 
     def extract_features(
-        self, x: torch.Tensor, hidden_state: Optional[dict[str, torch.Tensor]] = None
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        self, x: torch.Tensor, hidden_state: dict[str, torch.Tensor] | None = None
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Extract features from the encoder part of the network.
 
         :param x: Input tensor to extract features from
@@ -425,7 +425,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             module.change_activation(activation, output=_output)
 
     @mutation(MutationType.NODE)
-    def add_latent_node(self, numb_new_nodes: Optional[int] = None) -> dict[str, Any]:
+    def add_latent_node(self, numb_new_nodes: int | None = None) -> dict[str, Any]:
         """Add a latent node to the network.
 
         :param numb_new_nodes: Number of new nodes to add, defaults to None
@@ -443,9 +443,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         return {"numb_new_nodes": numb_new_nodes}
 
     @mutation(MutationType.NODE)
-    def remove_latent_node(
-        self, numb_new_nodes: Optional[int] = None
-    ) -> dict[str, Any]:
+    def remove_latent_node(self, numb_new_nodes: int | None = None) -> dict[str, Any]:
         """Remove a latent node from the network.
 
         :param numb_new_nodes: Number of nodes to remove, defaults to None

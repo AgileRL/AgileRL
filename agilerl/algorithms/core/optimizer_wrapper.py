@@ -1,5 +1,5 @@
 import inspect
-from typing import Any, Optional, Union
+from typing import Any
 
 import torch.nn as nn
 from torch.optim import Optimizer
@@ -17,12 +17,9 @@ if HAS_LLM_DEPENDENCIES:
 else:
     PeftModelType = "PeftModel"
 
-
 ModuleList = list[EvolvableModule]
-_Optimizer = Union[
-    type[OptimizerType], dict[str, type[OptimizerType]], type[DummyOptimizer]
-]
-_Module = Union[EvolvableModule, ModuleDict, ModuleList, PeftModelType]
+_Optimizer = type[OptimizerType] | dict[str, type[OptimizerType]] | type[DummyOptimizer]
+_Module = EvolvableModule | ModuleDict | ModuleList | PeftModelType
 
 
 def init_from_multiple(
@@ -95,9 +92,9 @@ class OptimizerWrapper:
         optimizer_cls: _Optimizer,
         networks: _Module,
         lr: float,
-        optimizer_kwargs: Optional[dict[str, Any]] = None,
-        network_names: Optional[list[str]] = None,
-        lr_name: Optional[str] = None,
+        optimizer_kwargs: dict[str, Any] | None = None,
+        network_names: list[str] | None = None,
+        lr_name: str | None = None,
     ) -> None:
 
         self.optimizer_cls = optimizer_cls
@@ -301,7 +298,7 @@ class OptimizerWrapper:
 
         return self.optimizer.state_dict()
 
-    def optimizer_cls_names(self) -> Union[str, dict[str, str]]:
+    def optimizer_cls_names(self) -> str | dict[str, str]:
         """
         Return the names of the optimizers.
         """

@@ -6,7 +6,7 @@ from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from functools import singledispatch
 from numbers import Number
-from typing import Any, ForwardRef, Optional, Union
+from typing import Any, ForwardRef
 
 import numpy as np
 import torch
@@ -48,9 +48,9 @@ if HAS_LLM_DEPENDENCIES:
 
     from agilerl.utils.llm_utils import gather_if_zero3
 
-    PreTrainedModelType = Union[PeftModel, PreTrainedModel]
+    PreTrainedModelType = PeftModel | PreTrainedModel
 else:
-    PreTrainedModelType = Union[ForwardRef("PeftModel"), ForwardRef("PreTrainedModel")]
+    PreTrainedModelType = ForwardRef("PeftModel") | ForwardRef("PreTrainedModel")
 
 
 def check_supported_space(observation_space: GymSpaceType) -> None:
@@ -88,7 +88,7 @@ def check_supported_space(observation_space: GymSpaceType) -> None:
 
 def get_input_size_from_space(
     observation_space: GymSpaceType,
-) -> Union[int, dict[str, int], tuple[int, ...]]:
+) -> int | dict[str, int] | tuple[int, ...]:
     """Returns the dimension of the state space as it pertains to the underlying
     networks (i.e. the input size of the networks).
 
@@ -96,7 +96,7 @@ def get_input_size_from_space(
     :type observation_space: spaces.Space or list[spaces.Space] or dict[str, spaces.Space].
 
     :return: The dimension of the state space.
-    :rtype: Union[int, dict[str, int], tuple[int, ...]]
+    :rtype: int | dict[str, int] | tuple[int, ...]
     """
     if isinstance(observation_space, (list, tuple, spaces.Tuple)):
         return tuple(get_input_size_from_space(space) for space in observation_space)
@@ -121,7 +121,7 @@ def get_input_size_from_space(
 
 def get_output_size_from_space(
     action_space: GymSpaceType,
-) -> Union[int, dict[str, int], tuple[int, ...]]:
+) -> int | dict[str, int] | tuple[int, ...]:
     """Returns the dimension of the action space as it pertains to the underlying
     networks (i.e. the output size of the networks).
 
@@ -129,7 +129,7 @@ def get_output_size_from_space(
     :type action_space: spaces.Space or list[spaces.Space] or dict[str, spaces.Space].
 
     :return: The dimension of the action space.
-    :rtype: Union[int, dict[str, int], tuple[int, ...]]
+    :rtype: int | dict[str, int] | tuple[int, ...]
     """
     if isinstance(action_space, (list, tuple)):
         return tuple(get_output_size_from_space(space) for space in action_space)
@@ -337,12 +337,12 @@ def get_num_actions(space: spaces.Space) -> int:
 
 
 def make_safe_deepcopies(
-    *args: Union[EvolvableModule, list[EvolvableModule]],
+    *args: EvolvableModule | list[EvolvableModule],
 ) -> list[EvolvableModule]:
     """Makes deep copies of EvolvableModule objects and their attributes.
 
     :param args: EvolvableModule or lists of EvolvableModule objects to copy.
-    :type args: Union[EvolvableModule, list[EvolvableModule]].
+    :type args: EvolvableModule | list[EvolvableModule].
 
     :return: Deep copies of the EvolvableModule objects and their attributes.
     :rtype: list[EvolvableModule].
@@ -659,11 +659,11 @@ def obs_channels_to_first(
     """Converts observation space from channels last to channels first format.
 
     :param observation_space: Observation space
-    :type observation_space: Union[spaces.Box, spaces.Dict]
+    :type observation_space: spaces.Box | spaces.Dict
     :param expand_dims: If True, expand the dimensions of the observation, defaults to False
     :type expand_dims: bool, optional
     :return: Observation space with channels first format
-    :rtype: Union[spaces.Box, spaces.Dict]
+    :rtype: spaces.Box | spaces.Dict
     """
     if isinstance(observation, np.ndarray):
         if expand_dims:
@@ -680,16 +680,14 @@ def obs_channels_to_first(
         raise TypeError(f"Expected np.ndarray or dict, got {type(observation)}")
 
 
-def obs_to_tensor(
-    obs: ObservationType, device: Union[str, torch.device]
-) -> TorchObsType:
+def obs_to_tensor(obs: ObservationType, device: str | torch.device) -> TorchObsType:
     """
     Moves the observation to the given device as a PyTorch tensor.
 
     :param obs:
     :type obs: NumpyObsType
     :param device: PyTorch device
-    :type device: Union[str, torch.device]
+    :type device: str | torch.device
     :return: PyTorch tensor of the observation on a desired device.
     :rtype: TorchObsType
     """
@@ -825,9 +823,9 @@ def maybe_add_batch_dim_torch(
 def preprocess_observation(
     observation_space: spaces.Space,
     observation: ObservationType,
-    device: Union[str, torch.device] = "cpu",
+    device: str | torch.device = "cpu",
     normalize_images: bool = True,
-    placeholder_value: Optional[Any] = None,
+    placeholder_value: Any | None = None,
 ) -> TorchObsType:
     """Preprocesses observations for forward pass through neural network.
 
@@ -836,11 +834,11 @@ def preprocess_observation(
     :param observation: Observations of environment
     :type observation: ObservationType
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to "cpu"
-    :type device: Union[str, torch.device], optional
+    :type device: str | torch.device, optional
     :param normalize_images: Normalize images from [0. 255] to [0, 1], defaults to True
     :type normalize_images: bool, optional
     :param placeholder_value: The value to use as placeholder for missing observations, defaults to None.
-    :type placeholder_value: Optional[Any], optional
+    :type placeholder_value: Any | None, optional
 
     :return: Preprocessed observations
     :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or tuple[torch.Tensor[float], ...]
@@ -854,9 +852,9 @@ def preprocess_observation(
 def preprocess_dict_observation(
     observation_space: spaces.Dict,
     observation: dict[str, np.ndarray | torch.Tensor],
-    device: Union[str, torch.device] = "cpu",
+    device: str | torch.device = "cpu",
     normalize_images: bool = True,
-    placeholder_value: Optional[Any] = None,
+    placeholder_value: Any | None = None,
 ) -> dict[str, TorchObsType]:
     """Preprocess dictionary observations.
 
@@ -888,9 +886,9 @@ def preprocess_dict_observation(
 def preprocess_tuple_observation(
     observation_space: spaces.Tuple,
     observation: tuple[np.ndarray | torch.Tensor, ...],
-    device: Union[str, torch.device] = "cpu",
+    device: str | torch.device = "cpu",
     normalize_images: bool = True,
-    placeholder_value: Optional[Any] = None,
+    placeholder_value: Any | None = None,
 ) -> tuple[TorchObsType, ...]:
     """Preprocess tuple observations.
 
@@ -927,9 +925,9 @@ def preprocess_tuple_observation(
 def preprocess_box_observation(
     observation_space: spaces.Box,
     observation: np.ndarray | torch.Tensor,
-    device: Union[str, torch.device] = "cpu",
+    device: str | torch.device = "cpu",
     normalize_images: bool = True,
-    placeholder_value: Optional[Any] = None,
+    placeholder_value: Any | None = None,
 ) -> torch.Tensor:
     """Preprocess box observations (continuous spaces).
 
@@ -961,9 +959,9 @@ def preprocess_box_observation(
 def preprocess_discrete_observation(
     observation_space: spaces.Discrete,
     observation: np.ndarray | torch.Tensor,
-    device: Union[str, torch.device] = "cpu",
+    device: str | torch.device = "cpu",
     normalize_images: bool = True,
-    placeholder_value: Optional[Any] = None,
+    placeholder_value: Any | None = None,
 ) -> torch.Tensor:
     """Preprocess discrete observations.
 
@@ -999,9 +997,9 @@ def preprocess_discrete_observation(
 def preprocess_multidiscrete_observation(
     observation_space: spaces.MultiDiscrete,
     observation: np.ndarray | torch.Tensor,
-    device: Union[str, torch.device] = "cpu",
+    device: str | torch.device = "cpu",
     normalize_images: bool = True,
-    placeholder_value: Optional[Any] = None,
+    placeholder_value: Any | None = None,
 ) -> torch.Tensor:
     """Preprocess multi-discrete observations.
 
@@ -1038,9 +1036,9 @@ def preprocess_multidiscrete_observation(
 def preprocess_multibinary_observation(
     observation_space: spaces.MultiBinary,
     observation: np.ndarray | torch.Tensor,
-    device: Union[str, torch.device] = "cpu",
+    device: str | torch.device = "cpu",
     normalize_images: bool = True,
-    placeholder_value: Optional[Any] = None,
+    placeholder_value: Any | None = None,
 ) -> torch.Tensor:
     """Preprocess multi-binary observations.
 
@@ -1206,9 +1204,9 @@ def stack_experiences(
 
 def stack_and_pad_experiences(
     *experiences: MaybeObsList,
-    padding_values: list[Union[int, float, bool]],
+    padding_values: list[int | float | bool],
     padding_side: str = "right",
-    device: Optional[str] = None,
+    device: str | None = None,
 ) -> tuple[ArrayOrTensor, ...]:
     """Stacks experiences into a single tensor, padding them to the maximum length.
 
@@ -1339,7 +1337,7 @@ class VLLMConfig:
     Note: has the same defaults as the VLLMClient class from trl library.
 
     :param base_url: Base URL of the VLLM server, defaults to None
-    :type base_url: Optional[str], optional
+    :type base_url: str | None, optional
     :param host: Host of the VLLM server, defaults to "0.0.0.0"
     :type host: str, optional
     :param server_port: Server port of the VLLM server, defaults to 8000
@@ -1425,7 +1423,7 @@ def remove_nested_files(files: list[str]) -> None:
 
 def vectorize_experiences_by_agent(
     experiences: ExperiencesType, dim: int = 1
-) -> Union[torch.Tensor, dict[str, torch.Tensor], tuple[torch.Tensor, ...]]:
+) -> torch.Tensor | dict[str, torch.Tensor] | tuple[torch.Tensor, ...]:
     """Reorganizes experiences into a tensor, vectorized by time step
 
     Example input:
@@ -1438,7 +1436,7 @@ def vectorize_experiences_by_agent(
     :param dim: New dimension to stack along
     :type dim: int
     :return: Tensor, dict of tensors, or tuple of tensors of experiences, stacked along provided dimension
-    :rtype: Union[torch.Tensor, dict[str, torch.Tensor], tuple[torch.Tensor, ...]]
+    :rtype: torch.Tensor | dict[str, torch.Tensor] | tuple[torch.Tensor, ...]
     """
     if not experiences:
         return torch.tensor([])
@@ -1582,7 +1580,7 @@ def concatenate_experiences_into_batches(
     :param actions: Whether the experiences are actions, defaults to False
     :type actions: bool, optional
     :return: Tensor, dict of tensors, or tuple of tensors of experiences, stacked along first dimension, with shape (num_experiences, *shape)
-    :rtype: Union[torch.Tensor, dict[str, torch.Tensor], tuple[torch.Tensor, ...]]
+    :rtype: torch.Tensor | dict[str, torch.Tensor] | tuple[torch.Tensor, ...]
     """
     tensors = []
     for agent_id in experiences.keys():
@@ -1607,7 +1605,7 @@ def is_peft_model(model: nn.Module) -> bool:
 def clone_llm(
     original_model: PreTrainedModelType | DummyEvolvable,
     zero_stage: int,
-    state_dict: Optional[dict[str, torch.Tensor]] = None,
+    state_dict: dict[str, torch.Tensor] | None = None,
 ) -> PreTrainedModelType:
     """Clone the actor.
 
@@ -1616,7 +1614,7 @@ def clone_llm(
     :param zero_stage: Zero stage to use, defaults to 0
     :type zero_stage: int, optional
     :param state_dict: State dict to load, defaults to None
-    :type state_dict: Optional[dict[str, torch.Tensor]], optional
+    :type state_dict: dict[str, torch.Tensor] | None, optional
     :return: Cloned model
     """
     match original_model:

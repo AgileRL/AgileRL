@@ -23,6 +23,8 @@ from tests.test_algorithms.test_llms.test_grpo import (
     deepspeed_config_stage_2,
 )
 
+pytestmark = pytest.mark.llm
+
 
 @pytest.fixture
 def preference_dataset_factory():

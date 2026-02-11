@@ -1,7 +1,6 @@
 import math
 import random
 from collections import defaultdict
-from typing import Optional, Union
 
 from tqdm.auto import tqdm
 
@@ -12,9 +11,7 @@ from wordle.wordle_game import Vocabulary
 
 
 class UserPolicy(Policy):
-    def __init__(
-        self, hint_policy: Optional[Policy], vocab: Optional[Union[str, Vocabulary]]
-    ):
+    def __init__(self, hint_policy: Policy | None, vocab: str | Vocabulary | None):
         super().__init__()
         self.vocab = vocab
         if isinstance(self.vocab, str):
@@ -42,7 +39,7 @@ class UserPolicy(Policy):
 
 
 class StartWordPolicy(Policy):
-    def __init__(self, start_words: Optional[list[str]] = None):
+    def __init__(self, start_words: list[str] | None = None):
         super().__init__()
         self.start_words = start_words
         if self.start_words is None:
@@ -90,7 +87,7 @@ class StartWordPolicy(Policy):
 
 class OptimalPolicy(Policy):
     def __init__(
-        self, start_word_policy: Optional[Policy] = None, progress_bar: bool = False
+        self, start_word_policy: Policy | None = None, progress_bar: bool = False
     ):
         super().__init__()
         self.start_word_policy = start_word_policy
@@ -128,7 +125,7 @@ class OptimalPolicy(Policy):
 
 
 class RepeatPolicy(Policy):
-    def __init__(self, start_word_policy: Optional[Policy], first_n: Optional[int]):
+    def __init__(self, start_word_policy: Policy | None, first_n: int | None):
         super().__init__()
         self.first_n = first_n
         self.start_word_policy = start_word_policy
@@ -144,7 +141,7 @@ class RepeatPolicy(Policy):
 
 
 class RandomMixturePolicy(Policy):
-    def __init__(self, prob_smart: float, vocab: Optional[Union[str, Vocabulary]]):
+    def __init__(self, prob_smart: float, vocab: str | Vocabulary | None):
         super().__init__()
         self.vocab = vocab
         if isinstance(self.vocab, str):
@@ -164,7 +161,7 @@ class RandomMixturePolicy(Policy):
 
 
 class WrongPolicy(Policy):
-    def __init__(self, vocab: Union[str, Vocabulary]):
+    def __init__(self, vocab: str | Vocabulary):
         super().__init__()
         self.vocab = vocab
         if isinstance(self.vocab, str):

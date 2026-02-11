@@ -1,7 +1,7 @@
 import copy
 from collections import OrderedDict
 from dataclasses import asdict
-from typing import Any, Optional, TypeVar, Union
+from typing import Any, TypeVar
 
 import torch
 import torch.nn as nn
@@ -19,10 +19,10 @@ from agilerl.utils.evolvable_networks import (
 )
 
 SelfMultiInput = TypeVar("SelfMultiInput", bound="EvolvableMultiInput")
-SupportedEncoderTypes = Union[EvolvableCNN, EvolvableMLP, EvolvableLSTM, SelfMultiInput]
-MultiInputConfigType = Union[ConfigType, dict[str, ConfigType]]
-TupleOrDictSpace = Union[spaces.Tuple, spaces.Dict]
-TupleOrDictObservation = Union[dict[str, ArrayOrTensor], tuple[ArrayOrTensor]]
+SupportedEncoderTypes = EvolvableCNN | EvolvableMLP | EvolvableLSTM | SelfMultiInput
+MultiInputConfigType = ConfigType | dict[str, ConfigType]
+TupleOrDictSpace = spaces.Tuple | spaces.Dict
+TupleOrDictObservation = dict[str, ArrayOrTensor] | tuple[ArrayOrTensor]
 
 # Default configurations for the feature extractors
 DefaultCnnConfig = CnnNetConfig(
@@ -92,7 +92,7 @@ class EvolvableMultiInput(EvolvableModule):
     :param init_dicts: Dictionary of initialization dictionaries for the feature extractors. Default is {}.
     :type init_dicts: dict[str, dict[str, Any]], optional
     :param output_activation: Activation function for the output layer. Default is None.
-    :type output_activation: Optional[str], optional
+    :type output_activation: str | None, optional
     :param min_latent_dim: Minimum dimension of the latent space. Default is 8.
     :type min_latent_dim: int, optional
     :param max_latent_dim: Maximum dimension of the latent space. Default is 128.
@@ -102,7 +102,7 @@ class EvolvableMultiInput(EvolvableModule):
     :param name: Name of the network. Default is "multi_input".
     :type name: str, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
-    :type random_seed: Optional[int]
+    :type random_seed: int | None
     """
 
     feature_net: ModuleDict
@@ -113,16 +113,16 @@ class EvolvableMultiInput(EvolvableModule):
         num_outputs: int,
         latent_dim: int = 32,
         vector_space_mlp: bool = False,
-        cnn_config: Optional[MultiInputConfigType] = None,
-        mlp_config: Optional[MultiInputConfigType] = None,
-        init_dicts: Optional[MultiInputConfigType] = None,
-        output_activation: Optional[str] = None,
+        cnn_config: MultiInputConfigType | None = None,
+        mlp_config: MultiInputConfigType | None = None,
+        init_dicts: MultiInputConfigType | None = None,
+        output_activation: str | None = None,
         output_layernorm: bool = False,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
         device: str = "cpu",
         name: str = "multi_input",
-        random_seed: Optional[int] = None,
+        random_seed: int | None = None,
     ):
         super().__init__(device, random_seed)
 
@@ -478,7 +478,7 @@ class EvolvableMultiInput(EvolvableModule):
             self.output = get_activation(activation)
 
     @mutation(MutationType.NODE)
-    def add_latent_node(self, numb_new_nodes: Optional[int] = None) -> dict[str, Any]:
+    def add_latent_node(self, numb_new_nodes: int | None = None) -> dict[str, Any]:
         """Add a latent node to the network.
 
         :param numb_new_nodes: Number of new nodes to add, defaults to None
@@ -496,9 +496,7 @@ class EvolvableMultiInput(EvolvableModule):
         return {"numb_new_nodes": numb_new_nodes}
 
     @mutation(MutationType.NODE)
-    def remove_latent_node(
-        self, numb_new_nodes: Optional[int] = None
-    ) -> dict[str, Any]:
+    def remove_latent_node(self, numb_new_nodes: int | None = None) -> dict[str, Any]:
         """Remove a latent node from the network.
 
         :param numb_new_nodes: Number of nodes to remove, defaults to None

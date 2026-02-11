@@ -1,6 +1,6 @@
 import warnings
 from collections import OrderedDict
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch
@@ -83,7 +83,7 @@ class MakeEvolvable(EvolvableModule):
         self,
         network: nn.Module,
         input_tensor: torch.Tensor,
-        secondary_input_tensor: Optional[torch.Tensor] = None,
+        secondary_input_tensor: torch.Tensor | None = None,
         num_atoms: int = 51,
         min_hidden_layers: int = 1,
         max_hidden_layers: int = 3,
@@ -95,10 +95,10 @@ class MakeEvolvable(EvolvableModule):
         max_channel_size: int = 256,
         output_vanish: bool = False,
         init_layers: bool = False,
-        support: Optional[torch.Tensor] = None,
+        support: torch.Tensor | None = None,
         rainbow: bool = False,
         device: str = "cpu",
-        accelerator: Optional[Accelerator] = None,
+        accelerator: Accelerator | None = None,
         **kwargs: dict,
     ):
         super().__init__(device)
@@ -290,7 +290,7 @@ class MakeEvolvable(EvolvableModule):
         self,
         network: nn.Module,
         input_tensor: torch.Tensor,
-        secondary_input_tensor: Optional[torch.Tensor] = None,
+        secondary_input_tensor: torch.Tensor | None = None,
     ) -> None:
         """Detect the architecture of a neural network.
 
@@ -494,7 +494,7 @@ class MakeEvolvable(EvolvableModule):
         hidden_size: list[int],
         name: str,
         mlp_activation: str,
-        mlp_output_activation: Optional[str],
+        mlp_output_activation: str | None,
         noisy: bool = False,
         rainbow_feature_net: bool = False,
     ) -> nn.Sequential:
@@ -511,7 +511,7 @@ class MakeEvolvable(EvolvableModule):
         :param mlp_activation: Activation function for hidden layers
         :type mlp_activation: str
         :param mlp_output_activation: Activation function for output layer
-        :type mlp_output_activation: Optional[str]
+        :type mlp_output_activation: str | None
         :param noisy: Whether to use NoisyLinear layers
         :type noisy: bool
         :param rainbow_feature_net: Whether this is a Rainbow DQN feature network
@@ -692,7 +692,7 @@ class MakeEvolvable(EvolvableModule):
 
         return nn.Sequential(net_dict)
 
-    def build_networks(self) -> tuple[nn.Module, nn.Module, Optional[nn.Module]]:
+    def build_networks(self) -> tuple[nn.Module, nn.Module, nn.Module | None]:
         """Creates and returns the feature and value net."""
 
         # Check if any CNN layers otherwise return just a mlp
@@ -897,7 +897,7 @@ class MakeEvolvable(EvolvableModule):
 
     @mutation(MutationType.NODE)
     def add_mlp_node(
-        self, hidden_layer: Optional[int] = None, numb_new_nodes: Optional[int] = None
+        self, hidden_layer: int | None = None, numb_new_nodes: int | None = None
     ) -> dict[str, int]:
         """Adds nodes to hidden layer of value network.
 
@@ -922,7 +922,7 @@ class MakeEvolvable(EvolvableModule):
 
     @mutation(MutationType.NODE)
     def remove_mlp_node(
-        self, hidden_layer: Optional[int] = None, numb_new_nodes: Optional[int] = None
+        self, hidden_layer: int | None = None, numb_new_nodes: int | None = None
     ) -> dict[str, int]:
         """Removes nodes from hidden layer of neural network.
 
@@ -1042,8 +1042,8 @@ class MakeEvolvable(EvolvableModule):
     @mutation(MutationType.NODE)
     def add_cnn_channel(
         self,
-        hidden_layer: Optional[int] = None,
-        numb_new_channels: Optional[int] = None,
+        hidden_layer: int | None = None,
+        numb_new_channels: int | None = None,
     ) -> dict[str, int]:
         """Adds channel to hidden layer of Convolutional Neural Network.
 
@@ -1069,8 +1069,8 @@ class MakeEvolvable(EvolvableModule):
     @mutation(MutationType.NODE, shrink_params=True)
     def remove_cnn_channel(
         self,
-        hidden_layer: Optional[int] = None,
-        numb_new_channels: Optional[int] = None,
+        hidden_layer: int | None = None,
+        numb_new_channels: int | None = None,
     ) -> dict[str, int]:
         """Remove channel from hidden layer of convolutional neural network.
 

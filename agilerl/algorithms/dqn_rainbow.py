@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch
@@ -79,8 +79,8 @@ class RainbowDQN(RLAlgorithm):
         observation_space: spaces.Space,
         action_space: spaces.Space,
         index: int = 0,
-        hp_config: Optional[HyperparameterConfig] = None,
-        net_config: Optional[dict[str, Any]] = None,
+        hp_config: HyperparameterConfig | None = None,
+        net_config: dict[str, Any] | None = None,
         batch_size: int = 64,
         lr: float = 1e-4,
         learn_step: int = 5,
@@ -93,12 +93,12 @@ class RainbowDQN(RLAlgorithm):
         v_max: float = 200,
         noise_std: float = 0.5,
         n_step: int = 3,
-        mut: Optional[str] = None,
+        mut: str | None = None,
         normalize_images: bool = True,
         combined_reward: bool = False,
-        actor_network: Optional[EvolvableModule] = None,
+        actor_network: EvolvableModule | None = None,
         device: str = "cpu",
-        accelerator: Optional[Any] = None,
+        accelerator: Any | None = None,
         wrap: bool = True,
     ) -> None:
         super().__init__(
@@ -183,7 +183,7 @@ class RainbowDQN(RLAlgorithm):
             )
         else:
             net_config = {} if net_config is None else net_config
-            head_config: Optional[dict[str, Any]] = net_config.get("head_config", {})
+            head_config: dict[str, Any] | None = net_config.get("head_config", {})
 
             head_config = MlpNetConfig(
                 hidden_size=head_config.get("hidden_size", [64]),
@@ -233,7 +233,7 @@ class RainbowDQN(RLAlgorithm):
     def get_action(
         self,
         obs: ObservationType,
-        action_mask: Optional[np.ndarray] = None,
+        action_mask: np.ndarray | None = None,
         training: bool = True,
     ) -> np.ndarray:
         """Returns the next action to take in the environment.
@@ -259,7 +259,7 @@ class RainbowDQN(RLAlgorithm):
             # Need to stack if vectorized env
             action_mask = (
                 np.stack(action_mask)
-                if action_mask.dtype == np.object_ or isinstance(action_mask, list)
+                if action_mask.dtype == object or isinstance(action_mask, list)
                 else action_mask
             )
             inv_mask = 1 - action_mask
@@ -357,9 +357,9 @@ class RainbowDQN(RLAlgorithm):
     def learn(
         self,
         experiences: ExperiencesType,
-        n_experiences: Optional[ExperiencesType] = None,
+        n_experiences: ExperiencesType | None = None,
         per: bool = False,
-    ) -> tuple[float, Optional[np.ndarray], Optional[np.ndarray]]:
+    ) -> tuple[float, np.ndarray | None, np.ndarray | None]:
         """Updates agent network parameters to learn from experiences.
 
         :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
@@ -465,7 +465,7 @@ class RainbowDQN(RLAlgorithm):
         self,
         env: GymEnvType,
         swap_channels: bool = False,
-        max_steps: Optional[int] = None,
+        max_steps: int | None = None,
         loop: int = 3,
     ) -> float:
         """Returns mean test score of agent in environment with epsilon-greedy policy.

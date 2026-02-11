@@ -10,6 +10,8 @@ from agilerl.training.train_llm import (
     finetune_llm_reasoning,
 )
 
+pytestmark = pytest.mark.llm
+
 
 @pytest.mark.parametrize("use_accelerator", [True, False])
 def test_finetune_llm_reasoning_basic_training_loop(use_accelerator):

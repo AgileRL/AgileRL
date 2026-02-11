@@ -1,5 +1,5 @@
 import warnings
-from typing import Any, Optional, Union
+from typing import Any
 
 import torch
 from tensordict import TensorDict
@@ -14,33 +14,36 @@ from agilerl.components import (
 from agilerl.components.data import ReplayDataset
 from agilerl.typing import ExperiencesType
 
-BufferType = Union[
-    ReplayBuffer, MultiAgentReplayBuffer, PrioritizedReplayBuffer, MultiStepReplayBuffer
-]
+BufferType = (
+    ReplayBuffer
+    | MultiAgentReplayBuffer
+    | PrioritizedReplayBuffer
+    | MultiStepReplayBuffer
+)
 
 
 class Sampler:
     """Sampler class to handle both standard and distributed training.
 
     :param memory: Replay buffer memory, defaults to None
-    :type memory: Optional[Union[ReplayBuffer, MultiAgentReplayBuffer, PrioritizedReplayBuffer, MultiStepReplayBuffer]], optional
+    :type memory: ReplayBuffer | MultiAgentReplayBuffer | PrioritizedReplayBuffer | MultiStepReplayBuffer | None, optional
     :param dataset: Dataset for distributed sampling, defaults to None
-    :type dataset: Optional[ReplayDataset], optional
+    :type dataset: ReplayDataset | None, optional
     :param dataloader: DataLoader for distributed sampling, defaults to None
-    :type dataloader: Optional[DataLoader], optional
+    :type dataloader: DataLoader | None, optional
     :raises AssertionError: If neither memory nor (dataset and dataloader) are provided
     """
 
     @staticmethod
     def tensordict_collate_fn(
         batch: list[TensorDict],
-    ) -> Union[TensorDict, list[TensorDict]]:
+    ) -> TensorDict | list[TensorDict]:
         """Custom collate function that properly handles TensorDict objects.
 
         :param batch: List of TensorDict objects to collate
         :type batch: list[TensorDict]
         :return: Either a single TensorDict or a list of TensorDicts
-        :rtype: Union[TensorDict, list[TensorDict]]
+        :rtype: TensorDict | list[TensorDict]
         """
         return TensorDict(
             {key: torch.stack([b[key] for b in batch]) for key in batch[0].keys()},
@@ -49,9 +52,9 @@ class Sampler:
 
     def __init__(
         self,
-        memory: Optional[BufferType] = None,
-        dataset: Optional[ReplayDataset] = None,
-        dataloader: Optional[DataLoader] = None,
+        memory: BufferType | None = None,
+        dataset: ReplayDataset | None = None,
+        dataloader: DataLoader | None = None,
     ) -> None:
 
         assert (memory is not None) or (
@@ -150,14 +153,14 @@ class Sampler:
         return self.memory.sample(batch_size, return_idx)
 
     def sample_distributed(
-        self, batch_size: int, return_idx: Optional[bool] = None
+        self, batch_size: int, return_idx: bool | None = None
     ) -> TensorDict:
         """Sample a batch of experiences from the distributed dataset.
 
         :param batch_size: Size of the batch to sample
         :type batch_size: int
         :param return_idx: Not used in distributed sampling, defaults to None
-        :type return_idx: Optional[bool], optional
+        :type return_idx: bool | None, optional
         :return: Sampled batch of experiences
         :rtype: TensorDict
         """
@@ -188,14 +191,14 @@ class Sampler:
 
     @classmethod
     def create_dataloader(
-        cls, dataset: ReplayDataset, batch_size: Optional[int] = None, **kwargs
+        cls, dataset: ReplayDataset, batch_size: int | None = None, **kwargs
     ) -> DataLoader:
         """Helper method to create a DataLoader with the appropriate collate function.
 
         :param dataset: Dataset to create a DataLoader for
         :type dataset: ReplayDataset
         :param batch_size: Batch size for the DataLoader, defaults to None
-        :type batch_size: Optional[int], optional
+        :type batch_size: int | None, optional
         :param kwargs: Additional arguments to pass to the DataLoader
         :return: DataLoader with tensordict_collate_fn
         :rtype: DataLoader
