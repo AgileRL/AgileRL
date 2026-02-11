@@ -26,16 +26,17 @@ jobs:
         container:
             image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-devel
             options: --user root
+        defaults:
+            run:
+                shell: bash
         steps:
             - uses: actions/checkout@v4
             - uses: astral-sh/setup-uv@v4
 
             - name: Set up Python ${{ matrix.python-version }} with uv
               env:
-                  # /__w is only ~1GB with ~311MB free; use root overlay (61G free) for cache and venv
                   UV_CACHE_DIR: /tmp/uv-cache
               run: |
-                  # venv on root fs (large disk), not workspace (/__w is tiny)
                   uv venv /tmp/agilerl-venv --python ${{ matrix.python-version }}
                   echo "/tmp/agilerl-venv/bin" >> $GITHUB_PATH
 
