@@ -37,7 +37,7 @@ jobs:
             - name: Install dependencies
               env:
                   # Use workspace for UV cache so cache and .venv share same filesystem (enables hardlinks, saves space)
-                  UV_CACHE_DIR: ${{ github.workspace }}/.uv-cache
+                  UV_CACHE_DIR: ${{ github.workspace }}/.cache/uv
               run: |
                   uv sync --locked --all-groups --extra all
 
@@ -60,3 +60,6 @@ jobs:
               uses: codecov/codecov-action@v3
               env:
                   CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+            - name: Clean up uv cache
+              run: |
+                  uv cache clean
