@@ -1,6 +1,6 @@
 import copy
 import warnings
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable
 
 import numpy as np
 import torch
@@ -26,6 +26,11 @@ from agilerl.utils.algo_utils import (
     share_encoder_parameters,
     stack_experiences,
 )
+
+ActionReturnType = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+RecurrentActionReturnType = tuple[
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, ArrayOrTensor] | None
+]
 
 
 class PPO(RLAlgorithm):
@@ -101,34 +106,34 @@ class PPO(RLAlgorithm):
         observation_space: spaces.Space,
         action_space: spaces.Space,
         index: int = 0,
-        hp_config: Optional[HyperparameterConfig] = None,
-        net_config: Optional[dict[str, Any]] = None,
+        hp_config: HyperparameterConfig | None = None,
+        net_config: dict[str, Any] | None = None,
         batch_size: int = 64,
         lr: float = 1e-4,
         learn_step: int = 2048,
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
-        mut: Optional[str] = None,
+        mut: str | None = None,
         action_std_init: float = 0.0,
         clip_coef: float = 0.2,
         ent_coef: float = 0.01,
         vf_coef: float = 0.5,
         max_grad_norm: float = 0.5,
-        target_kl: Optional[float] = None,
+        target_kl: float | None = None,
         normalize_images: bool = True,
         update_epochs: int = 4,
-        actor_network: Optional[EvolvableModule] = None,
-        critic_network: Optional[EvolvableModule] = None,
+        actor_network: EvolvableModule | None = None,
+        critic_network: EvolvableModule | None = None,
         share_encoders: bool = True,
         num_envs: int = 1,
         use_rollout_buffer: bool = False,
-        rollout_buffer_config: Optional[dict[str, Any]] = {},
+        rollout_buffer_config: dict[str, Any] | None = {},
         recurrent: bool = False,
         device: str = "cpu",
-        accelerator: Optional[Any] = None,
+        accelerator: Any | None = None,
         wrap: bool = True,
         bptt_sequence_type: BPTTSequenceType = BPTTSequenceType.CHUNKED,
-        max_seq_len: Optional[int] = None,
+        max_seq_len: int | None = None,
     ) -> None:
         super().__init__(
             observation_space,
@@ -370,10 +375,10 @@ class PPO(RLAlgorithm):
     def _get_action_and_values(
         self,
         obs: ArrayOrTensor,
-        action_mask: Optional[ArrayOrTensor] = None,
-        hidden_state: Optional[
-            dict[str, ArrayOrTensor]
-        ] = None,  # Hidden state is a dict for recurrent policies
+        action_mask: ArrayOrTensor | None = None,
+        hidden_state: (
+            dict[str, ArrayOrTensor] | None
+        ) = None,  # Hidden state is a dict for recurrent policies
         *,
         sample: bool = True,
     ) -> tuple[
@@ -381,7 +386,7 @@ class PPO(RLAlgorithm):
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
-        Optional[dict[str, ArrayOrTensor]],
+        dict[str, ArrayOrTensor] | None,
     ]:
         """
         Returns the next action to take in the environment and the values.
@@ -389,13 +394,13 @@ class PPO(RLAlgorithm):
         :param obs: Environment observation, or multiple observations in a batch
         :type obs: ArrayOrTensor
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
-        :type action_mask: Optional[ArrayOrTensor]
+        :type action_mask: ArrayOrTensor | None
         :param hidden_state: Hidden state for recurrent policies, defaults to None
-        :type hidden_state: Optional[dict[str, ArrayOrTensor]]
+        :type hidden_state: dict[str, ArrayOrTensor] | None
         :param sample: Whether to sample an action, defaults to True
         :type sample: bool
         :return: Action, log probability, entropy, state values, and (if recurrent) next hidden state
-        :rtype: tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[dict[str, ArrayOrTensor]]]
+        :rtype: tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor, dict[str, ArrayOrTensor] | None]
         """
         if hidden_state is not None:
             if self.share_encoders:
@@ -490,7 +495,7 @@ class PPO(RLAlgorithm):
         self,
         obs: ArrayOrTensor,
         actions: ArrayOrTensor,
-        hidden_state: Optional[dict[str, ArrayOrTensor]] = None,
+        hidden_state: dict[str, ArrayOrTensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Evaluates the actions.
 
@@ -499,7 +504,7 @@ class PPO(RLAlgorithm):
         :param actions: Actions to evaluate
         :type actions: ArrayOrTensor
         :param hidden_state: Hidden state for recurrent policies, defaults to None. Expected shape: dict with tensors of shape (batch_size, 1, hidden_size).
-        :type hidden_state: Optional[dict[str, ArrayOrTensor]]
+        :type hidden_state: dict[str, ArrayOrTensor] | None
         :return: Log probability, entropy, state values
         :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         """
@@ -521,28 +526,19 @@ class PPO(RLAlgorithm):
     def get_action(
         self,
         obs: ArrayOrTensor,
-        action_mask: Optional[ArrayOrTensor] = None,
-        hidden_state: Optional[dict[str, ArrayOrTensor]] = None,
-    ) -> Union[
-        tuple[
-            np.ndarray,  # action
-            np.ndarray,  # log_prob
-            np.ndarray,  # entropy
-            np.ndarray,  # values
-            Optional[dict[str, ArrayOrTensor]],  # next_hidden_state
-        ],
-        tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],  # non-recurrent case
-    ]:
+        action_mask: ArrayOrTensor | None = None,
+        hidden_state: dict[str, ArrayOrTensor] | None = None,
+    ) -> ActionReturnType | RecurrentActionReturnType:
         """Returns the next action to take in the environment.
 
         :param obs: Environment observation, or multiple observations in a batch
         :type obs: ArrayOrTensor
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
-        :type action_mask: Optional[ArrayOrTensor]
+        :type action_mask: ArrayOrTensor | None
         :param hidden_state: Hidden state for recurrent policies, defaults to None
-        :type hidden_state: Optional[dict[str, ArrayOrTensor]]
+        :type hidden_state: dict[str, ArrayOrTensor] | None
         :return: Action, log probability, entropy, state values, and (if recurrent) next hidden state
-        :rtype: Union[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Optional[dict[str, ArrayOrTensor]]], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]
+        :rtype: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, ArrayOrTensor] | None] | tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
         """
         obs = self.preprocess_observation(obs)
         with torch.no_grad():
@@ -592,12 +588,12 @@ class PPO(RLAlgorithm):
                 values_np,
             )
 
-    def learn(self, experiences: Optional[ExperiencesType] = None) -> float:
+    def learn(self, experiences: ExperiencesType | None = None) -> float:
         """Updates agent network parameters to learn from experiences.
 
         :param experiences: Tuple of batched states, actions, log_probs, rewards, dones, values, next_state, next_done.
                             If use_rollout_buffer=True and experiences=None, uses data from rollout buffer.
-        :type experiences: Optional[ExperiencesType]
+        :type experiences: ExperiencesType | None
         :return: Mean loss value from training.
         :rtype: float
         """
@@ -768,7 +764,7 @@ class PPO(RLAlgorithm):
         return mean_loss
 
     def _learn_from_rollout_buffer_flat(
-        self, buffer_td_external: Optional[TensorDict] = None
+        self, buffer_td_external: TensorDict | None = None
     ) -> float:
         """Learning procedure using flattened samples (no BPTT)."""
         if buffer_td_external is not None:
@@ -1053,10 +1049,10 @@ class PPO(RLAlgorithm):
         self,
         env: GymEnvType,
         swap_channels: bool = False,
-        max_steps: Optional[int] = None,
+        max_steps: int | None = None,
         loop: int = 3,
         vectorized: bool = True,
-        callback: Optional[Callable[[float, dict[str, float]], None]] = None,
+        callback: Callable[[float, dict[str, float]], None] | None = None,
     ) -> float:
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
@@ -1071,7 +1067,7 @@ class PPO(RLAlgorithm):
         :param vectorized: Whether the environment is vectorized, defaults to True
         :type vectorized: bool, optional
         :param callback: Optional callback function that takes the sum of rewards and the last info dictionary as input, defaults to None
-        :type callback: Optional[Callable[[float, dict[str, float]], None]]
+        :type callback: Callable[[float, dict[str, float]], None] | None
 
         :return: Mean test score of agent in environment
         :rtype: float

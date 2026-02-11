@@ -1,5 +1,3 @@
-from typing import Optional
-
 import gymnasium as gym
 import pytest
 import torch
@@ -49,7 +47,7 @@ from tests.helper_functions import (
 
 
 @pytest.fixture
-def action_space(network_cls: type[EvolvableNetwork]) -> Optional[gym.Space]:
+def action_space(network_cls: type[EvolvableNetwork]) -> gym.Space | None:
     if issubclass(
         network_cls, (DeterministicActor, StochasticActor, ContinuousQNetwork)
     ):

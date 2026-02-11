@@ -15,9 +15,7 @@ from typing import (
     Any,
     Callable,
     Iterable,
-    Optional,
     TypeVar,
-    Union,
     cast,
 )
 
@@ -199,14 +197,14 @@ def get_checkpoint_dict(
 
 
 def get_optimizer_cls(
-    optimizer_cls: Union[str, dict[str, str]],
-) -> Union[type[torch.optim.Optimizer], dict[str, type[torch.optim.Optimizer]]]:
+    optimizer_cls: str | dict[str, str],
+) -> type[torch.optim.Optimizer] | dict[str, type[torch.optim.Optimizer]]:
     """Returns the optimizer class from the string or dictionary of optimizer classes.
 
     :param optimizer_cls: The optimizer class or dictionary of optimizer classes.
-    :type optimizer_cls: Union[str, dict[str, str]]
+    :type optimizer_cls: str | dict[str, str]
     :return: The optimizer class or dictionary of optimizer classes.
-    :rtype: Union[type[torch.optim.Optimizer], dict[str, type[torch.optim.Optimizer]]]
+    :rtype: type[torch.optim.Optimizer] | dict[str, type[torch.optim.Optimizer]]
     """
     if isinstance(optimizer_cls, dict):
         optimizer_cls = {
@@ -225,25 +223,25 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
     :param index: The index of the individual.
     :type index: int
     :param hp_config: Hyperparameter configuration for the algorithm, defaults to None.
-    :type hp_config: Optional[HyperparameterConfig], optional
+    :type hp_config: HyperparameterConfig | None, optional
     :param device: Device to run the algorithm on, defaults to "cpu".
-    :type device: Union[str, torch.device], optional
+    :type device: str | torch.device, optional
     :param accelerator: Accelerator object for distributed computing, defaults to None.
-    :type accelerator: Optional[Accelerator], optional
+    :type accelerator: Accelerator | None, optional
     :param torch_compiler: The torch compiler mode to use, defaults to None.
-    :type torch_compiler: Optional[Any], optional
+    :type torch_compiler: Any | None, optional
     :param name: Name of the algorithm, defaults to the class name.
-    :type name: Optional[str], optional
+    :type name: str | None, optional
     """
 
     def __init__(
         self,
         index: int,
-        hp_config: Optional[HyperparameterConfig] = None,
-        device: Union[str, torch.device] = "cpu",
-        accelerator: Optional[Accelerator] = None,
-        torch_compiler: Optional[Any] = None,
-        name: Optional[str] = None,
+        hp_config: HyperparameterConfig | None = None,
+        device: str | torch.device = "cpu",
+        accelerator: Accelerator | None = None,
+        torch_compiler: Any | None = None,
+        name: str | None = None,
     ) -> None:
 
         assert isinstance(index, int), "Agent index must be an integer."
@@ -288,7 +286,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         return self._mut
 
     @mut.setter
-    def mut(self, value: Optional[str]) -> None:
+    def mut(self, value: str | None) -> None:
         """Sets the mutation object of the algorithm."""
         self._mut = value
 
@@ -311,12 +309,12 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
     @abstractmethod
     def get_action(
-        self, obs: Union[ObservationType, MultiAgentObservationType], *args, **kwargs
+        self, obs: ObservationType | MultiAgentObservationType, *args, **kwargs
     ) -> ActionType:
         """Abstract method for getting an action from the algorithm.
 
         :param obs: The observation to get an action for.
-        :type obs: Union[ObservationType, MultiAgentObservationType]
+        :type obs: ObservationType | MultiAgentObservationType
         :param args: Additional arguments to pass to the action function.
         :type args: Any
         :param kwargs: Additional keyword arguments to pass to the action function.
@@ -468,10 +466,10 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         size: int,
         observation_space: GymSpaceType,
         action_space: GymSpaceType,
-        wrapper_cls: Optional[type[SelfAgentWrapper]] = None,
+        wrapper_cls: type[SelfAgentWrapper] | None = None,
         wrapper_kwargs: dict[str, Any] = {},
         **kwargs,
-    ) -> list[Union[SelfEvolvableAlgorithm, SelfAgentWrapper]]:
+    ) -> list[SelfEvolvableAlgorithm | SelfAgentWrapper]:
         """Creates a population of algorithms.
 
         :param size: The size of the population.
@@ -602,7 +600,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :param config: The optimizer configuration.
         :type config: OptimizerConfig
         """
-        opt: Optional[Union[OptimizerWrapper, DeepSpeedOptimizerWrapper]] = getattr(
+        opt: OptimizerWrapper | DeepSpeedOptimizerWrapper | None = getattr(
             self, config.name
         )
         optimizer = opt.optimizer if hasattr(opt, "optimizer") else None
@@ -694,13 +692,13 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
     def reinit_optimizers(
         self,
-        optimizer: Optional[OptimizerConfig] = None,
+        optimizer: OptimizerConfig | None = None,
     ) -> None:
         """Reinitialize the optimizers of an algorithm. If no optimizer is passed, all optimizers are reinitialized.
 
         :param optimizer: The optimizer to reinitialize, defaults to None, in which case
             all optimizers are reinitialized.
-        :type optimizer: Optional[OptimizerConfig], optional
+        :type optimizer: OptimizerConfig | None, optional
         """
         if optimizer is not None:
             self._reinit_opt_from_config(optimizer)
@@ -801,12 +799,12 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             setattr(self, attr, unwrapped_obj)
 
     def clone(
-        self: SelfEvolvableAlgorithm, index: Optional[int] = None, wrap: bool = True
+        self: SelfEvolvableAlgorithm, index: int | None = None, wrap: bool = True
     ) -> SelfEvolvableAlgorithm:
         """Creates a clone of the algorithm.
 
         :param index: The index of the clone, defaults to None
-        :type index: Optional[int], optional
+        :type index: int | None, optional
         :param wrap: If True, wrap the models in the clone with the accelerator, defaults to False
         :type wrap: bool, optional
 
@@ -989,7 +987,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         cls: type[SelfEvolvableAlgorithm],
         path: str,
         device: DeviceType = "cpu",
-        accelerator: Optional[Accelerator] = None,
+        accelerator: Accelerator | None = None,
     ) -> SelfEvolvableAlgorithm:
         """Loads an algorithm from a checkpoint.
 
@@ -998,7 +996,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :param device: Device to load the algorithm on, defaults to 'cpu'
         :type device: str, optional
         :param accelerator: Accelerator object for distributed computing, defaults to None
-        :type accelerator: Optional[Accelerator], optional
+        :type accelerator: Accelerator | None, optional
 
         :return: An instance of the algorithm
         :rtype: RLAlgorithm
@@ -1008,9 +1006,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         )
 
         # Reconstruct evolvable modules in algorithm
-        network_info: Optional[dict[str, dict[str, Any]]] = checkpoint.get(
-            "network_info"
-        )
+        network_info: dict[str, dict[str, Any]] | None = checkpoint.get("network_info")
         if network_info is None:
             raise ValueError(
                 "Network info not found in checkpoint. You may be loading a checkpoint from "
@@ -1039,9 +1035,9 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 loaded_modules[name] = ModuleDictCls()
 
             # Reconstruct the modules
-            module_cls: Union[
-                type[EvolvableModule], dict[str, type[EvolvableModule]]
-            ] = net_dict[f"{name}_cls"]
+            module_cls: type[EvolvableModule] | dict[str, type[EvolvableModule]] = (
+                net_dict[f"{name}_cls"]
+            )
             if isinstance(module_cls, dict):
                 for agent_id, mod_cls in module_cls.items():
                     d = init_dict[agent_id]
@@ -1076,7 +1072,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             net_dict = {
                 k: v for k, v in network_info["modules"].items() if k.startswith(name)
             }
-            loaded_module: Union[EvolvableModule, ModuleDict] = getattr(self, name)
+            loaded_module: EvolvableModule | ModuleDict = getattr(self, name)
             state_dict = net_dict[f"{name}_state_dict"]
             if isinstance(loaded_module, ModuleDict):
                 for agent_id, agent_module in loaded_module.items():
@@ -1177,13 +1173,13 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
     :param learn_step: Learning frequency, defaults to 2048.
     :type learn_step: int, optional
     :param device: Device to run the algorithm on, defaults to "cpu".
-    :type device: Union[str, torch.device], optional
+    :type device: str | torch.device, optional
     :param accelerator: Accelerator object for distributed computing, defaults to None.
-    :type accelerator: Optional[Accelerator], optional
+    :type accelerator: Accelerator | None, optional
     :param normalize_images: If True, normalize images, defaults to True.
     :type normalize_images: bool, optional
     :param name: Name of the algorithm, defaults to the class name.
-    :type name: Optional[str], optional
+    :type name: str | None, optional
     """
 
     def __init__(
@@ -1191,12 +1187,12 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         observation_space: spaces.Space,
         action_space: spaces.Space,
         index: int,
-        hp_config: Optional[HyperparameterConfig] = None,
-        device: Union[str, torch.device] = "cpu",
-        accelerator: Optional[Accelerator] = None,
-        torch_compiler: Optional[Any] = None,
+        hp_config: HyperparameterConfig | None = None,
+        device: str | torch.device = "cpu",
+        accelerator: Accelerator | None = None,
+        torch_compiler: Any | None = None,
         normalize_images: bool = True,
-        name: Optional[str] = None,
+        name: str | None = None,
     ) -> None:
 
         super().__init__(index, hp_config, device, accelerator, torch_compiler, name)
@@ -1230,27 +1226,27 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
     """Base object for all multi-agent algorithms in the AgileRL framework.
 
     :param observation_spaces: The observation spaces of the agent environments.
-    :type observation_spaces: Union[list[spaces.Space], spaces.Dict]
+    :type observation_spaces: list[spaces.Space] | spaces.Dict
     :param action_spaces: The action spaces of the agent environments.
-    :type action_spaces: Union[list[spaces.Space], spaces.Dict]
+    :type action_spaces: list[spaces.Space] | spaces.Dict
     :param index: The index of the individual in the population.
     :type index: int.
     :param agent_ids: The agent IDs of the agents in the environment.
-    :type agent_ids: Optional[list[int]], optional
+    :type agent_ids: list[int] | None, optional
     :param learn_step: Learning frequency, defaults to 2048
     :type learn_step: int, optional
     :param device: Device to run the algorithm on, defaults to "cpu"
     :type device: str, optional
     :param accelerator: Accelerator object for distributed computing, defaults to None
-    :type accelerator: Optional[Accelerator], optional
+    :type accelerator: Accelerator | None, optional
     :param torch_compiler: The torch compiler mode to use, defaults to None
-    :type torch_compiler: Optional[Any], optional
+    :type torch_compiler: Any | None, optional
     :param normalize_images: If True, normalize images, defaults to True
     :type normalize_images: bool, optional
     :param placeholder_value: The value to use as placeholder for missing observations, defaults to -1.
-    :type placeholder_value: Optional[Any], optional
+    :type placeholder_value: Any | None, optional
     :param name: Name of the algorithm, defaults to the class name
-    :type name: Optional[str], optional
+    :type name: str | None, optional
     """
 
     possible_observation_spaces: dict[str, spaces.Space]
@@ -1263,17 +1259,17 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
     def __init__(
         self,
-        observation_spaces: Union[Iterable[spaces.Space], spaces.Dict],
-        action_spaces: Union[Iterable[spaces.Space], spaces.Dict],
+        observation_spaces: Iterable[spaces.Space] | spaces.Dict,
+        action_spaces: Iterable[spaces.Space] | spaces.Dict,
         index: int,
-        agent_ids: Optional[Iterable[int]] = None,
-        hp_config: Optional[HyperparameterConfig] = None,
-        device: Union[str, torch.device] = "cpu",
-        accelerator: Optional[Accelerator] = None,
-        torch_compiler: Optional[Any] = None,
+        agent_ids: Iterable[int] | None = None,
+        hp_config: HyperparameterConfig | None = None,
+        device: str | torch.device = "cpu",
+        accelerator: Accelerator | None = None,
+        torch_compiler: Any | None = None,
         normalize_images: bool = True,
-        placeholder_value: Optional[Any] = -1,
-        name: Optional[str] = None,
+        placeholder_value: Any | None = -1,
+        name: str | None = None,
     ) -> None:
 
         super().__init__(index, hp_config, device, accelerator, torch_compiler, name)
@@ -1465,7 +1461,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         return action_masks
 
     def extract_agent_masks(
-        self, infos: Optional[InfosDict] = None
+        self, infos: InfosDict | None = None
     ) -> tuple[ArrayDict, ArrayDict]:
         """Extract env_defined_actions from info dictionary and determine agent masks
 
@@ -1532,10 +1528,10 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
     def build_net_config(
         self,
-        net_config: Optional[NetConfigType] = None,
+        net_config: NetConfigType | None = None,
         flatten: bool = True,
         return_encoders: bool = False,
-    ) -> Union[NetConfigType, tuple[NetConfigType, dict[str, NetConfigType]]]:
+    ) -> NetConfigType | tuple[NetConfigType, dict[str, NetConfigType]]:
         """Extract an appropriate net config for each sub-agent from the passed net config dictionary. If
         grouped_agents is True, the net config will be built for the grouped agents i.e. through their
         common prefix in their agent_id, whenever the passed net config is None.
@@ -1548,7 +1544,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             single `EvolvableMLP` to process the concatenated vector observations).
 
         :param net_config: Net config dictionary
-        :type net_config: Optional[NetConfigType]
+        :type net_config: NetConfigType | None
         :param flatten: Whether to return a net config for each possible sub-agent, even in grouped settings.
         :type flatten: bool, optional
         :param return_encoders: Whether to return the encoder configs for each sub-agent. Defaults to False.
@@ -1813,13 +1809,13 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     :param index: The index of the algorithm.
     :type index: int
     :param hp_config: The hyperparameter configuration.
-    :type hp_config: Optional[HyperparameterConfig]
+    :type hp_config: HyperparameterConfig | None
     :param device: The device to run the algorithm on.
-    :type device: Union[str, torch.device]
+    :type device: str | torch.device
     :param accelerator: The accelerator to use.
-    :type accelerator: Optional[Accelerator]
+    :type accelerator: Accelerator | None
     :param name: The name of the algorithm.
-    :type name: Optional[str]
+    :type name: str | None
     :param model_config: The configuration for the model.
     :type model_config: dict[str, Any] | PretrainedConfig | None
     :param gradient_checkpointing: Whether to use gradient checkpointing.
@@ -1843,12 +1839,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         model_name: str | None = None,
         actor_network: PreTrainedModelProtocol | None = None,
         micro_batch_size_per_gpu: int | None = None,
-        cosine_lr_schedule_config: Optional[CosineLRScheduleConfig] = None,
-        hp_config: Optional[HyperparameterConfig] = None,
+        cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
+        hp_config: HyperparameterConfig | None = None,
         wrap: bool = True,
-        device: Union[str, torch.device] = "cpu",
-        accelerator: Optional[Accelerator] = None,
-        name: Optional[str] = None,
+        device: str | torch.device = "cpu",
+        accelerator: Accelerator | None = None,
+        name: str | None = None,
         model_config: dict[str, Any] | PretrainedConfigProtocol | None = None,
         gradient_checkpointing: bool = True,
     ):
@@ -2063,7 +2059,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         cls,
         path: str,
         device: DeviceType = "cpu",
-        accelerator: Optional[Accelerator] = None,
+        accelerator: Accelerator | None = None,
     ) -> None:
         raise NotImplementedError(
             "The load class method is not supported for this algorithm class." """
@@ -2080,11 +2076,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             """
         )
 
-    def _select_optim_class(self) -> Union[type[OptimizerType], type[DummyOptimizer]]:
+    def _select_optim_class(self) -> type[OptimizerType] | type[DummyOptimizer]:
         """Select the optimizer class based on the accelerator and deepspeed config.
 
         :return: Optimizer class
-        :rtype: Union[type[torch.optim.Optimizer], type[DummyOptimizer]]
+        :rtype: type[torch.optim.Optimizer] | type[DummyOptimizer]
         """
         if self.accelerator is None:
             return AdamW
@@ -2220,11 +2216,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
 
-    def clone(self, index: Optional[int] = None, wrap: bool = True):
+    def clone(self, index: int | None = None, wrap: bool = True):
         """Creates a clone of the algorithm.
 
         :param index: The index of the clone, defaults to None
-        :type index: Optional[int], optional
+        :type index: int | None, optional
         :param wrap: If True, wrap the models in the clone with the accelerator, defaults to False
         :type wrap: bool, optional
 
@@ -2324,9 +2320,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def update_lr(
         optimizer: torch.optim.Optimizer,  # Deepspeed optimizers are subclasses of torch.optim.Optimizer
         lr: float,
-        accelerator: Optional[Accelerator] = None,
-        scheduler_config: Optional[CosineLRScheduleConfig] = None,
-    ) -> tuple[Optional[Accelerator], Optional[SequentialLR]]:
+        accelerator: Accelerator | None = None,
+        scheduler_config: CosineLRScheduleConfig | None = None,
+    ) -> tuple[Accelerator | None, SequentialLR | None]:
         """Update the learning rate of the optimizer
 
         :param optimizer: Optimizer
@@ -2334,9 +2330,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :param lr: Learning rate
         :type lr: float
         :param accelerator: Accelerator
-        :type accelerator: Optional[Accelerator]
+        :type accelerator: Accelerator | None
         :param scheduler_config: Scheduler configuration
-        :type scheduler_config: Optional[CosineLRScheduleConfig]
+        :type scheduler_config: CosineLRScheduleConfig | None
 
         :return: Tuple of accelerator and scheduler
         :return: Accelerator

@@ -1,7 +1,7 @@
 import random
 from collections import deque, namedtuple
 from numbers import Number
-from typing import Any, Deque, NamedTuple, Optional, Union
+from typing import Any, Deque, NamedTuple
 
 import numpy as np
 import torch
@@ -9,8 +9,8 @@ import torch
 from agilerl.typing import NumpyObsType
 from agilerl.utils.algo_utils import obs_to_tensor
 
-NpTransitionType = Union[Number, np.ndarray, dict[str, np.ndarray]]
-TorchTransitionType = Union[torch.Tensor, dict[str, torch.Tensor]]
+NpTransitionType = Number | np.ndarray | dict[str, np.ndarray]
+TorchTransitionType = torch.Tensor | dict[str, torch.Tensor]
 
 
 class MultiAgentReplayBuffer:
@@ -24,7 +24,7 @@ class MultiAgentReplayBuffer:
     :param agent_ids: Names of all agents that will act in the environment
     :type agent_ids: list[str]
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to None
-    :type device: Optional[str]
+    :type device: str | None
     """
 
     def __init__(
@@ -32,7 +32,7 @@ class MultiAgentReplayBuffer:
         memory_size: int,
         field_names: list[str],
         agent_ids: list[str],
-        device: Optional[str] = None,
+        device: str | None = None,
     ):
         assert memory_size > 0, "Memory size must be greater than zero."
         assert len(field_names) > 0, "Field names must contain at least one field name."
@@ -45,7 +45,7 @@ class MultiAgentReplayBuffer:
             "Experience", field_names=self.field_names
         )
         self.counter: int = 0
-        self.device: Optional[str] = device
+        self.device: str | None = device
         self.agent_ids: list[str] = agent_ids
 
     def __len__(self) -> int:

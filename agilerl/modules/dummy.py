@@ -1,4 +1,4 @@
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 import torch
 import torch.nn as nn
@@ -37,7 +37,7 @@ class DummyEvolvable(EvolvableModule):
         device: DeviceType,
         module: nn.Module | None = None,
         module_fn: Callable[[], nn.Module] | None = None,
-        module_kwargs: Optional[dict[str, Any]] | None = None,
+        module_kwargs: dict[str, Any] | None = None,
     ) -> None:
 
         if module is None and module_fn is None:

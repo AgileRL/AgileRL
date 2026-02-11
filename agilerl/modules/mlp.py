@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -55,7 +55,7 @@ class EvolvableMLP(EvolvableModule):
     :param name: Name of the network, defaults to 'mlp'
     :type name: str, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
-    :type random_seed: Optional[int]
+    :type random_seed: int | None
     """
 
     def __init__(
@@ -78,7 +78,7 @@ class EvolvableMLP(EvolvableModule):
         new_gelu: bool = False,
         device: str = "cpu",
         name: str = "mlp",
-        random_seed: Optional[int] = None,
+        random_seed: int | None = None,
     ):
         super().__init__(device, random_seed)
 
@@ -223,7 +223,7 @@ class EvolvableMLP(EvolvableModule):
         self.recreate_network()
 
     @mutation(MutationType.LAYER)
-    def add_layer(self) -> Optional[dict[str, int]]:
+    def add_layer(self) -> dict[str, int] | None:
         """Adds a hidden layer to neural network. Falls back on ``add_node()`` if ``max_hidden_layers`` reached.
 
         :return: Dictionary containing the hidden layer and number of new nodes.
@@ -236,7 +236,7 @@ class EvolvableMLP(EvolvableModule):
             return self.add_node()
 
     @mutation(MutationType.LAYER)
-    def remove_layer(self) -> Optional[dict[str, int]]:
+    def remove_layer(self) -> dict[str, int] | None:
         """Removes a hidden layer from neural network. Falls back on ``add_node()`` if ``min_hidden_layers`` reached.
 
         :return: Dictionary containing the hidden layer and number of new nodes.
@@ -249,7 +249,7 @@ class EvolvableMLP(EvolvableModule):
 
     @mutation(MutationType.NODE)
     def add_node(
-        self, hidden_layer: Optional[int] = None, numb_new_nodes: Optional[int] = None
+        self, hidden_layer: int | None = None, numb_new_nodes: int | None = None
     ) -> dict[str, int]:
         """Adds nodes to hidden layer of neural network.
 
@@ -277,7 +277,7 @@ class EvolvableMLP(EvolvableModule):
 
     @mutation(MutationType.NODE)
     def remove_node(
-        self, hidden_layer: Optional[int] = None, numb_new_nodes: Optional[int] = None
+        self, hidden_layer: int | None = None, numb_new_nodes: int | None = None
     ) -> dict[str, int]:
         """Removes nodes from hidden layer of neural network.
 

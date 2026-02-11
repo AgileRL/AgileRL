@@ -4,7 +4,6 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Optional
 from unittest import mock
 from unittest.mock import MagicMock, PropertyMock, patch
 
@@ -34,6 +33,8 @@ from agilerl.algorithms.core.base import (
 )
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig, clone_llm
+
+pytestmark = pytest.mark.llm
 
 deepspeed_base_config = {
     "bf16": {
@@ -130,7 +131,7 @@ class DummyMLPPreTrainedModel(PreTrainedModel):
         return self
 
     def forward(
-        self, input_ids: Optional[torch.Tensor] = None, *args, **kwargs
+        self, input_ids: torch.Tensor | None = None, *args, **kwargs
     ) -> tuple[torch.Tensor, ...]:
         input_ids = input_ids.to(self.datatype)
         output = self.linear_2(self.linear_1(input_ids)).reshape(

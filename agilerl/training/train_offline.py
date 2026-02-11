@@ -1,13 +1,13 @@
 import warnings
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 import gymnasium as gym
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 
+import wandb
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.components.data import ReplayDataset, Transition
 from agilerl.components.replay_buffer import ReplayBuffer
@@ -23,7 +23,7 @@ from agilerl.utils.utils import (
     tournament_selection_and_mutation,
 )
 
-InitDictType = Optional[dict[str, Any]]
+InitDictType = dict[str, Any] | None
 PopulationType = list[RLAlgorithm]
 
 
@@ -39,22 +39,22 @@ def train_offline(
     swap_channels: bool = False,
     max_steps: int = 1000000,
     evo_steps: int = 10000,
-    eval_steps: Optional[int] = None,
+    eval_steps: int | None = None,
     eval_loop: int = 1,
-    target: Optional[float] = None,
-    tournament: Optional[TournamentSelection] = None,
-    mutation: Optional[Mutations] = None,
-    checkpoint: Optional[int] = None,
-    checkpoint_path: Optional[str] = None,
+    target: float | None = None,
+    tournament: TournamentSelection | None = None,
+    mutation: Mutations | None = None,
+    checkpoint: int | None = None,
+    checkpoint_path: str | None = None,
     overwrite_checkpoints: bool = False,
     save_elite: bool = False,
-    elite_path: Optional[str] = None,
+    elite_path: str | None = None,
     wb: bool = False,
     verbose: bool = True,
-    accelerator: Optional[Accelerator] = None,
-    minari_dataset_id: Optional[str] = None,
+    accelerator: Accelerator | None = None,
+    minari_dataset_id: str | None = None,
     remote: bool = False,
-    wandb_api_key: Optional[str] = None,
+    wandb_api_key: str | None = None,
 ) -> tuple[PopulationType, list[list[float]]]:
     """The general offline RL training function. Returns trained population of agents and their fitnesses.
 

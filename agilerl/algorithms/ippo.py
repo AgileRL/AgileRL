@@ -1,7 +1,7 @@
 import copy
 import warnings
 from collections import defaultdict
-from typing import Any, Optional, Union
+from typing import Any
 
 import numpy as np
 import torch
@@ -46,11 +46,11 @@ class IPPO(MultiAgentRLAlgorithm):
     Paper: https://arxiv.org/pdf/2011.09533
 
     :param observation_spaces: Observation space for each agent
-    :type observation_spaces: Union[list[spaces.Space], spaces.Dict]
+    :type observation_spaces: list[spaces.Space] | spaces.Dict
     :param action_spaces: Action space for each agent
-    :type action_spaces: Union[list[spaces.Space], spaces.Dict]
+    :type action_spaces: list[spaces.Space] | spaces.Dict
     :param agent_ids: Agent ID for each agent
-    :type agent_ids: Optional[list[str]], optional
+    :type agent_ids: list[str] | None, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
     :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
@@ -107,32 +107,32 @@ class IPPO(MultiAgentRLAlgorithm):
 
     def __init__(
         self,
-        observation_spaces: Union[list[spaces.Space], spaces.Dict],
-        action_spaces: Union[list[spaces.Space], spaces.Dict],
-        agent_ids: Optional[list[str]] = None,
+        observation_spaces: list[spaces.Space] | spaces.Dict,
+        action_spaces: list[spaces.Space] | spaces.Dict,
+        agent_ids: list[str] | None = None,
         index: int = 0,
-        hp_config: Optional[HyperparameterConfig] = None,
-        net_config: Optional[dict[str, Any]] = None,
+        hp_config: HyperparameterConfig | None = None,
+        net_config: dict[str, Any] | None = None,
         batch_size: int = 64,
         lr: float = 1e-4,
         learn_step: int = 2048,
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
-        mut: Optional[str] = None,
+        mut: str | None = None,
         action_std_init: float = 0.0,
         clip_coef: float = 0.2,
         ent_coef: float = 0.01,
         vf_coef: float = 0.5,
         max_grad_norm: float = 0.5,
-        target_kl: Optional[float] = None,
+        target_kl: float | None = None,
         normalize_images: bool = True,
         update_epochs: int = 4,
-        actor_networks: Optional[ModuleDict] = None,
-        critic_networks: Optional[ModuleDict] = None,
-        action_batch_size: Optional[int] = None,
+        actor_networks: ModuleDict | None = None,
+        critic_networks: ModuleDict | None = None,
+        action_batch_size: int | None = None,
         device: str = "cpu",
-        accelerator: Optional[Any] = None,
-        torch_compiler: Optional[str] = None,
+        accelerator: Any | None = None,
+        torch_compiler: str | None = None,
         wrap: bool = True,
     ):
         super().__init__(
@@ -352,7 +352,7 @@ class IPPO(MultiAgentRLAlgorithm):
         )
 
     def process_infos(
-        self, infos: Optional[InfosDict]
+        self, infos: InfosDict | None
     ) -> tuple[ArrayDict, ArrayDict, ArrayDict]:
         """
         Process the information, extract env_defined_actions, action_masks and agent_masks
@@ -450,8 +450,8 @@ class IPPO(MultiAgentRLAlgorithm):
         obs: TorchObsType,
         actor: StochasticActor,
         critic: ValueNetwork,
-        action_mask: Optional[torch.Tensor] = None,
-        batch_size: Optional[int] = None,
+        action_mask: torch.Tensor | None = None,
+        batch_size: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Get actions and values for a batch of grouped observations.
 
@@ -511,7 +511,7 @@ class IPPO(MultiAgentRLAlgorithm):
     def get_action(
         self,
         obs: dict[str, ObservationType],
-        infos: Optional[InfosDict] = None,
+        infos: InfosDict | None = None,
     ) -> tuple[ArrayDict, ArrayDict, ArrayDict, ArrayDict]:
         """Returns the next action to take in the environment.
 
@@ -645,8 +645,8 @@ class IPPO(MultiAgentRLAlgorithm):
     def _learn_individual(
         self,
         experiences: ExperiencesType,
-        actor: Union[EvolvableModule, StochasticActor],
-        critic: Union[EvolvableModule, ValueNetwork],
+        actor: EvolvableModule | StochasticActor,
+        critic: EvolvableModule | ValueNetwork,
         actor_optimizer: OptimizerWrapper,
         critic_optimizer: OptimizerWrapper,
         obs_space: spaces,
@@ -657,7 +657,7 @@ class IPPO(MultiAgentRLAlgorithm):
 
         :param experience: States, actions, log_probs, rewards, dones, values, next_state, next_done in
             that order, organised by shared agent id
-        :type experience: tuple[Union[numpy.ndarray, dict[str, numpy.ndarray]], ...]
+        :type experience: tuple[numpy.ndarray | dict[str, numpy.ndarray], ...]
         :param actor: Actor network
         :type actor: EvolvableModule
         :param critic: Critic network
@@ -832,7 +832,7 @@ class IPPO(MultiAgentRLAlgorithm):
         self,
         env: PzEnvType,
         swap_channels: bool = False,
-        max_steps: Optional[int] = None,
+        max_steps: int | None = None,
         loop: int = 3,
         sum_scores: bool = True,
     ) -> float:

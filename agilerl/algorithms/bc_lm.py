@@ -1,4 +1,4 @@
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable
 
 import numpy as np
 import torch
@@ -22,7 +22,7 @@ class BC_LM(nn.Module):
         self,
         dataset: RL_Dataset,
         net_config,
-        device: Union[torch.device, str] = "cuda",
+        device: torch.device | str = "cuda",
         transition_weight: float = 0.0,
     ):
         super().__init__()
@@ -51,9 +51,9 @@ class BC_LM(nn.Module):
     def forward(
         self,
         tokens: torch.Tensor,
-        attn_mask: Optional[torch.Tensor],
-        prefix_embs: Optional[torch.Tensor] = None,
-        prefix_attn_mask: Optional[torch.Tensor] = None,
+        attn_mask: torch.Tensor | None,
+        prefix_embs: torch.Tensor | None = None,
+        prefix_attn_mask: torch.Tensor | None = None,
         remove_prefix_position_embs: bool = False,
         **kwargs,
     ):
@@ -134,8 +134,8 @@ class BC_LM(nn.Module):
         model_args,
         model_kwargs,
         temp: float = 1.0,
-        top_k: Optional[int] = None,
-        top_p: Optional[float] = None,
+        top_k: int | None = None,
+        top_p: float | None = None,
     ):
         logits, _ = self(*model_args, **model_kwargs)
         logits = process_logits(logits, temp=temp, top_k=top_k, top_p=top_p)
@@ -145,8 +145,8 @@ class BC_LM(nn.Module):
         self,
         items,
         temp: float = 1.0,
-        top_k: Optional[int] = None,
-        top_p: Optional[float] = None,
+        top_k: int | None = None,
+        top_p: float | None = None,
     ) -> torch.Tensor:
         prepared_inputs = self.prepare_inputs(items)
         tokens, attn_mask = prepared_inputs["tokens"], prepared_inputs["attn_mask"]
@@ -165,8 +165,8 @@ class BC_LM(nn.Module):
         self,
         items,
         temp: float = 1.0,
-        top_k: Optional[int] = None,
-        top_p: Optional[float] = None,
+        top_k: int | None = None,
+        top_p: float | None = None,
     ) -> tuple[torch.Tensor, Any]:
         prepared_inputs = self.prepare_inputs(items)
         tokens = prepared_inputs["tokens"]
@@ -187,8 +187,8 @@ class BC_LM(nn.Module):
         tokens: torch.Tensor,
         obs: Any,
         temp: float = 1.0,
-        top_k: Optional[int] = None,
-        top_p: Optional[float] = None,
+        top_k: int | None = None,
+        top_p: float | None = None,
     ) -> tuple[torch.Tensor, Any]:
         scores, model_outputs = self.score(
             (
@@ -221,8 +221,8 @@ class BC_Policy:
         temp=1.0,
         top_k=None,
         top_p=None,
-        prefix_embs: Optional[torch.Tensor] = None,
-        prefix_attn_mask: Optional[torch.Tensor] = None,
+        prefix_embs: torch.Tensor | None = None,
+        prefix_attn_mask: torch.Tensor | None = None,
         remove_prefix_position_embs: bool = False,
     ):
         tokenizer = self.bc_lm.dataset.tokenizer
@@ -356,8 +356,8 @@ class BC_Policy:
         termination_condition: Callable[[np.ndarray], bool],
         beam_width=1,
         max_generation_len=None,
-        prefix_embs: Optional[torch.Tensor] = None,
-        prefix_attn_mask: Optional[torch.Tensor] = None,
+        prefix_embs: torch.Tensor | None = None,
+        prefix_attn_mask: torch.Tensor | None = None,
         remove_prefix_position_embs: bool = False,
     ):
         tokenizer = self.bc_lm.dataset.tokenizer
@@ -603,7 +603,7 @@ def to(item: Any, device: torch.device):
     return map_pytree(lambda x: torch.tensor(x, device=device), item)
 
 
-def map_pytree(f: Callable[[Union[np.ndarray, torch.Tensor]], Any], item: Any):
+def map_pytree(f: Callable[[np.ndarray | torch.Tensor], Any], item: Any):
     if isinstance(item, dict):
         return {k: map_pytree(f, v) for k, v in item.items()}
     elif isinstance(item, list) or isinstance(item, set) or isinstance(item, tuple):

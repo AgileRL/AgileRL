@@ -21,6 +21,8 @@ from agilerl.utils.llm_utils import (
     get_state_dict,
 )
 
+pytestmark = pytest.mark.llm
+
 DUMMY_CONVERSATION_TEMPLATE = [
     {
         "role": "system",

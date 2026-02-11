@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -19,7 +19,7 @@ def _assert_correct_kernel_sizes(
     CNN kernels to have the same value for width and height.
 
     :param sizes: Kernel sizes.
-    :type sizes:  Union[int, tuple[int, ...]]
+    :type sizes:  int | tuple[int, ...]
     """
     for k_size in sizes:
         if len(k_size) == 2 and block_type == "Conv2d":
@@ -51,7 +51,7 @@ def _assert_correct_kernel_sizes(
 class MutableKernelSizes:
     sizes: list[KernelSizeType]
     cnn_block_type: Literal["Conv2d", "Conv3d"]
-    sample_input: Optional[torch.Tensor]
+    sample_input: torch.Tensor | None
     rng: np.random.Generator
 
     def __post_init__(self) -> None:
@@ -146,7 +146,7 @@ class MutableKernelSizes:
         channel_size: list[int],
         stride_size: list[int],
         input_shape: tuple[int],
-        kernel_size: Optional[Union[int, tuple[int, ...]]] = None,
+        kernel_size: int | tuple[int, ...] | None = None,
     ) -> int:
         """Randomly alters convolution kernel of random CNN layer.
 
@@ -234,13 +234,13 @@ class EvolvableCNN(EvolvableModule):
     :param stride_size: Convolution stride size
     :type stride_size: list[int]
     :param sample_input: Sample input tensor, defaults to None
-    :type sample_input: Optional[torch.Tensor], optional
+    :type sample_input: torch.Tensor | None, optional
     :param block_type: Type of convolutional block, either 'Conv1d', 'Conv2d' or 'Conv3d', defaults to 'Conv2d'.
     :type block_type: Literal["Conv1d", "Conv2d", "Conv3d"], optional
     :param activation: CNN activation layer, defaults to 'ReLU'
     :type activation: str, optional
     :param output_activation: MLP output activation layer, defaults to None
-    :type output_activation: Optional[str], optional
+    :type output_activation: str | None, optional
     :param min_hidden_layers: Minimum number of hidden layers the fully connected layer will shrink down to, defaults to 1
     :type min_hidden_layers: int, optional
     :param max_hidden_layers: Maximum number of hidden layers the fully connected layer will expand to, defaults to 6
@@ -258,7 +258,7 @@ class EvolvableCNN(EvolvableModule):
     :param name: Name of the CNN, defaults to 'cnn'
     :type name: str, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
-    :type random_seed: Optional[int]
+    :type random_seed: int | None
     """
 
     def __init__(
@@ -268,10 +268,10 @@ class EvolvableCNN(EvolvableModule):
         channel_size: list[int],
         kernel_size: list[KernelSizeType],
         stride_size: list[int],
-        sample_input: Optional[torch.Tensor] = None,
+        sample_input: torch.Tensor | None = None,
         block_type: Literal["Conv1d", "Conv2d", "Conv3d"] = "Conv2d",
         activation: str = "ReLU",
-        output_activation: Optional[str] = None,
+        output_activation: str | None = None,
         min_hidden_layers: int = 1,
         max_hidden_layers: int = 6,
         min_channel_size: int = 16,
@@ -280,7 +280,7 @@ class EvolvableCNN(EvolvableModule):
         init_layers: bool = True,
         device: str = "cpu",
         name: str = "cnn",
-        random_seed: Optional[int] = None,
+        random_seed: int | None = None,
     ) -> None:
         super().__init__(device, random_seed)
 
@@ -572,7 +572,7 @@ class EvolvableCNN(EvolvableModule):
 
         :return: If maximum number of hidden layers is reached, returns a dictionary containing
         the hidden layer and number of new channels.
-        :rtype: Optional[dict[str, int]]
+        :rtype: dict[str, int] | None
         """
         dims_to_check = (
             self.cnn_output_size[-1:]
@@ -641,12 +641,12 @@ class EvolvableCNN(EvolvableModule):
             return self.add_channel()
 
     @mutation(MutationType.LAYER, shrink_params=True)
-    def remove_layer(self) -> Optional[dict[str, int]]:
+    def remove_layer(self) -> dict[str, int] | None:
         """Removes a hidden layer from convolutional neural network.
 
         :return: If minimum number of hidden layers is reached, returns a dictionary containing
         the hidden layer and number of new channels.
-        :rtype: Optional[dict[str, int]]
+        :rtype: dict[str, int] | None
         """
         if len(self.channel_size) > self.min_hidden_layers:
             self.channel_size = self.channel_size[:-1]
@@ -657,8 +657,8 @@ class EvolvableCNN(EvolvableModule):
 
     @mutation(MutationType.NODE)
     def change_kernel(
-        self, kernel_size: Optional[int] = None, hidden_layer: Optional[int] = None
-    ) -> dict[str, Union[int, None]]:
+        self, kernel_size: int | None = None, hidden_layer: int | None = None
+    ) -> dict[str, int | None]:
         """Randomly alters convolution kernel of random CNN layer.
 
         :param kernel_size: Kernel size to change to, defaults to None
@@ -667,7 +667,7 @@ class EvolvableCNN(EvolvableModule):
         :type hidden_layer: int, optional
 
         :return: Dictionary containing the hidden layer and kernel size
-        :rtype: dict[str, Union[int, None]]
+        :rtype: dict[str, int | None]
         """
         if len(self.channel_size) > 1:
             if hidden_layer is None:
@@ -688,8 +688,8 @@ class EvolvableCNN(EvolvableModule):
     @mutation(MutationType.NODE)
     def add_channel(
         self,
-        hidden_layer: Optional[int] = None,
-        numb_new_channels: Optional[int] = None,
+        hidden_layer: int | None = None,
+        numb_new_channels: int | None = None,
     ) -> dict[str, int]:
         """Adds channel to hidden layer of convolutional neural network.
 
@@ -718,8 +718,8 @@ class EvolvableCNN(EvolvableModule):
     @mutation(MutationType.NODE, shrink_params=True)
     def remove_channel(
         self,
-        hidden_layer: Optional[int] = None,
-        numb_new_channels: Optional[int] = None,
+        hidden_layer: int | None = None,
+        numb_new_channels: int | None = None,
     ) -> dict[str, int]:
         """Remove channel from hidden layer of convolutional neural network.
 
@@ -728,7 +728,7 @@ class EvolvableCNN(EvolvableModule):
         :param numb_new_channels: Number of channels to add to hidden layer, defaults to None
         :type numb_new_channels: int, optional
         :return: Dictionary containing the hidden layer and number of new channels
-        :rtype: dict[str, Union[int, None]]
+        :rtype: dict[str, int | None]
         """
         if hidden_layer is None:
             hidden_layer = self.rng.integers(0, len(self.channel_size))

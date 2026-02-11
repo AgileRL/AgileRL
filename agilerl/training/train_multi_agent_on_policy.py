@@ -2,14 +2,14 @@ import time
 import warnings
 from copy import deepcopy
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from gymnasium import spaces
 from pettingzoo import ParallelEnv
 
+import wandb
 from agilerl.algorithms import IPPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -24,7 +24,7 @@ from agilerl.utils.utils import (
 )
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
-InitDictType = Optional[dict[str, Any]]
+InitDictType = dict[str, Any] | None
 MultiAgentOnPolicyAlgorithms = IPPO
 PopulationType = list[MultiAgentOnPolicyAlgorithms]
 
@@ -40,20 +40,20 @@ def train_multi_agent_on_policy(
     swap_channels: bool = False,
     max_steps: int = 50000,
     evo_steps: int = 25,
-    eval_steps: Optional[int] = None,
+    eval_steps: int | None = None,
     eval_loop: int = 1,
-    target: Optional[float] = None,
-    tournament: Optional[TournamentSelection] = None,
-    mutation: Optional[Mutations] = None,
-    checkpoint: Optional[int] = None,
-    checkpoint_path: Optional[str] = None,
+    target: float | None = None,
+    tournament: TournamentSelection | None = None,
+    mutation: Mutations | None = None,
+    checkpoint: int | None = None,
+    checkpoint_path: str | None = None,
     overwrite_checkpoints: bool = False,
     save_elite: bool = False,
-    elite_path: Optional[str] = None,
+    elite_path: str | None = None,
     wb: bool = False,
     verbose: bool = True,
-    accelerator: Optional[Accelerator] = None,
-    wandb_api_key: Optional[str] = None,
+    accelerator: Accelerator | None = None,
+    wandb_api_key: str | None = None,
 ) -> tuple[PopulationType, list[list[float]]]:
     """The general on-policy multi-agent RL training function. Returns trained population of agents
     and their fitnesses.

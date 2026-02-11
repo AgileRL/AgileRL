@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch
@@ -61,8 +61,8 @@ class NeuralTS(RLAlgorithm):
         observation_space: spaces.Space,
         action_space: spaces.Space,
         index: int = 0,
-        hp_config: Optional[HyperparameterConfig] = None,
-        net_config: Optional[dict[str, Any]] = None,
+        hp_config: HyperparameterConfig | None = None,
+        net_config: dict[str, Any] | None = None,
         gamma: float = 1.0,
         lamb: float = 1.0,
         reg: float = 0.000625,
@@ -70,10 +70,10 @@ class NeuralTS(RLAlgorithm):
         lr: float = 3e-3,
         normalize_images: bool = True,
         learn_step: int = 2,
-        mut: Optional[str] = None,
-        actor_network: Optional[EvolvableModule] = None,
+        mut: str | None = None,
+        actor_network: EvolvableModule | None = None,
         device: str = "cpu",
-        accelerator: Optional[Any] = None,
+        accelerator: Any | None = None,
         wrap: bool = True,
     ):
         super().__init__(
@@ -176,7 +176,7 @@ class NeuralTS(RLAlgorithm):
         )
 
     def get_action(
-        self, obs: ObservationType, action_mask: Optional[np.ndarray] = None
+        self, obs: ObservationType, action_mask: np.ndarray | None = None
     ) -> int:
         """Returns the next action to take in the environment.
 

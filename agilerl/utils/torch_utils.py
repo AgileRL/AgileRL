@@ -1,19 +1,19 @@
 import math
-from typing import Any, Callable, Union
+from typing import Any, Callable
 
 import numpy as np
 import torch
 import torch.nn as nn
 
 
-def map_pytree(f: Callable[[Union[np.ndarray, torch.Tensor]], Any], item: Any):
+def map_pytree(f: Callable[[np.ndarray | torch.Tensor], Any], item: Any):
     """Apply a function to all tensors/arrays in a nested data structure.
 
     Recursively traverses nested dictionaries, lists, tuples, and sets,
     applying the given function to any numpy arrays or PyTorch tensors found.
 
     :param f: Function to apply to arrays/tensors
-    :type f: Callable[[Union[np.ndarray, torch.Tensor]], Any]
+    :type f: Callable[[np.ndarray | torch.Tensor], Any]
     :param item: Nested data structure to traverse
     :type item: Any
     :return: Data structure with function applied to all arrays/tensors

@@ -8,7 +8,6 @@ import os
 import random
 from collections import deque
 from datetime import datetime
-from typing import Optional
 
 import numpy as np
 import torch
@@ -378,7 +377,7 @@ class Opponent:
     def random_opponent(
         self,
         action_mask: list[int],
-        last_opp_move: Optional[int] = None,
+        last_opp_move: int | None = None,
         block_vert_coef: float = 1,
     ) -> int:
         """Takes move for random opponent. If the lesson aims to randomly block vertical
@@ -448,7 +447,7 @@ class Opponent:
 
     def outcome(
         self, action: int, player: int, return_length: bool = False
-    ) -> tuple[bool, Optional[float], bool, Optional[np.ndarray]]:
+    ) -> tuple[bool, float | None, bool, np.ndarray | None]:
         """Takes move for weak rule-based opponent.
 
         :param action: Action to take in environment

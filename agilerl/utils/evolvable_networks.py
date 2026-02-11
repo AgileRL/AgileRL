@@ -1,6 +1,6 @@
 from collections import OrderedDict
 from dataclasses import asdict
-from typing import Literal, Optional, Union
+from typing import Literal
 
 import numpy as np
 import torch
@@ -26,13 +26,13 @@ from agilerl.modules.custom_components import (
 )
 from agilerl.typing import DeviceType, NetConfigType
 
-TupleorInt = Union[tuple[int, ...], int]
+TupleorInt = tuple[int, ...] | int
 
 
 def compile_model(
-    model: Union[nn.Module, ModuleDict[EvolvableModule]],
-    mode: Optional[str] = "default",
-) -> Union[OptimizedModule, ModuleDict[EvolvableModule]]:
+    model: nn.Module | ModuleDict[EvolvableModule],
+    mode: str | None = "default",
+) -> OptimizedModule | ModuleDict[EvolvableModule]:
     """Compiles torch model if not already compiled
 
     :param model: torch model
@@ -339,7 +339,7 @@ def get_normalization(
     return normalization_functions[normalization_name](layer_size, device=device)
 
 
-def get_activation(activation_name: Optional[str], new_gelu: bool = False) -> nn.Module:
+def get_activation(activation_name: str | None, new_gelu: bool = False) -> nn.Module:
     """Returns activation function for corresponding activation name.
 
     :param activation_names: Activation function name
@@ -370,9 +370,9 @@ def get_activation(activation_name: Optional[str], new_gelu: bool = False) -> nn
 
 def get_pooling(
     pooling_name: str,
-    kernel_size: Union[tuple[int, ...], int],
-    stride: Union[tuple[int, ...], int],
-    padding: Union[tuple[int, ...], int],
+    kernel_size: tuple[int, ...] | int,
+    stride: tuple[int, ...] | int,
+    padding: tuple[int, ...] | int,
 ) -> nn.Module:
     """Returns pooling layer for corresponding activation name.
 
@@ -398,7 +398,7 @@ def get_pooling(
     return pooling_functions[pooling_name](kernel_size, stride, padding)
 
 
-LayerType = Union[nn.Module, GumbelSoftmax, NoisyLinear]
+LayerType = nn.Module | GumbelSoftmax | NoisyLinear
 
 
 def layer_init(
@@ -515,7 +515,7 @@ def create_cnn(
     return net_dict
 
 
-MlpLayer = Union[nn.Linear, NoisyLinear, nn.LayerNorm]
+MlpLayer = nn.Linear | NoisyLinear | nn.LayerNorm
 
 
 def create_mlp(
@@ -523,7 +523,7 @@ def create_mlp(
     output_size: int,
     hidden_size: list[int],
     output_vanish: bool,
-    output_activation: Optional[str] = None,
+    output_activation: str | None = None,
     noisy: bool = False,
     init_layers: bool = True,
     layer_norm: bool = False,
@@ -545,7 +545,7 @@ def create_mlp(
     :param output_vanish: Whether to initialize output layer weights to a small value.
     :type output_vanish: bool
     :param output_activation: Activation function for output layer.
-    :type output_activation: Optional[str]
+    :type output_activation: str | None
     :param noisy: Whether to use noisy layers.
     :type noisy: bool, optional
     :param init_layers: Whether to initialize the layers.
@@ -630,7 +630,7 @@ def create_simba(
     output_size: int,
     hidden_size: int,
     num_blocks: int,
-    output_activation: Optional[str] = None,
+    output_activation: str | None = None,
     scale_factor: float = 4.0,
     device: DeviceType = "cpu",
     name: str = "simba",
@@ -648,7 +648,7 @@ def create_simba(
     :param num_blocks: Number of residual blocks.
     :type num_blocks: int
     :param output_activation: Activation function for output layer.
-    :type output_activation: Optional[str]
+    :type output_activation: str | None
     :param scale_factor: Scale factor for the hidden layer.
     :type scale_factor: float, optional
     :param device: Device to use. Defaults to "cpu".

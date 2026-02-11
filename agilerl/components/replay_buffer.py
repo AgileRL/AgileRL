@@ -1,5 +1,5 @@
 from collections import deque
-from typing import Deque, Optional, Union
+from typing import Deque
 
 import torch
 from tensordict import TensorDict, TensorDictBase, is_tensor_collection
@@ -7,7 +7,7 @@ from tensordict import TensorDict, TensorDictBase, is_tensor_collection
 from agilerl.components.segment_tree import MinSegmentTree, SumSegmentTree
 from agilerl.typing import ArrayOrTensor
 
-DataType = Union[dict[str, ArrayOrTensor], TensorDict]
+DataType = dict[str, ArrayOrTensor] | TensorDict
 
 
 class ReplayBuffer:
@@ -16,7 +16,7 @@ class ReplayBuffer:
     :param max_size: Maximum number of transitions to store
     :type max_size: int
     :param device: Device to store the transitions on
-    :type device: Optional[Union[str, torch.device]], optional
+    :type device: str | torch.device | None, optional
     :param dtype: Data type for the tensors
     :type dtype: torch.dtype, optional
     """
@@ -24,7 +24,7 @@ class ReplayBuffer:
     def __init__(
         self,
         max_size: int,
-        device: Union[str, torch.device] = "cpu",
+        device: str | torch.device = "cpu",
         dtype: torch.dtype = torch.float32,
     ) -> None:
         self.max_size = max_size
@@ -35,7 +35,7 @@ class ReplayBuffer:
 
         self._cursor = 0
         self._size = 0
-        self._storage: Optional[TensorDict] = None
+        self._storage: TensorDict | None = None
 
     @property
     def storage(self) -> TensorDict:
@@ -74,7 +74,7 @@ class ReplayBuffer:
         """Add a transition to the buffer.
 
         :param data: Transition to add to the buffer
-        :type data: Union[TensorDict, dict[str, Any]]
+        :type data: TensorDict | dict[str, Any]
         """
         # Initialize storage
         data = data.to(self.device)
@@ -150,7 +150,7 @@ class MultiStepReplayBuffer(ReplayBuffer):
     :param gamma: Discount factor
     :type gamma: float
     :param device: Device to store the transitions on
-    :type device: Optional[Union[str, torch.device]], optional
+    :type device: str | torch.device | None, optional
     :param dtype: Data type for the tensors
     :type dtype: torch.dtype, optional
     """
@@ -160,7 +160,7 @@ class MultiStepReplayBuffer(ReplayBuffer):
         max_size: int,
         n_step: int = 3,
         gamma: float = 0.99,
-        device: Union[str, torch.device] = "cpu",
+        device: str | torch.device = "cpu",
         dtype: torch.dtype = torch.float32,
     ) -> None:
         super().__init__(max_size, device, dtype)
@@ -172,13 +172,13 @@ class MultiStepReplayBuffer(ReplayBuffer):
         self.done_key = None
         self.ns_key = "next_obs"
 
-    def add(self, data: TensorDict) -> Optional[TensorDict]:
+    def add(self, data: TensorDict) -> TensorDict | None:
         """Add a transition to the n-step buffer and potentially to the replay buffer.
 
         :param data: Transition to add to the buffer
         :type data: TensorDict
         :return: First transition in the n-step buffer
-        :rtype: Optional[TensorDict]
+        :rtype: TensorDict | None
         """
         # Add to n-step buffer
         data = data.to(self.device)
@@ -269,7 +269,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
     :param alpha: How much prioritization to use (0 - no prioritization, 1 - full prioritization)
     :type alpha: float
     :param device: Device to store the transitions on.
-    :type device: Optional[Union[str, torch.device]], optional
+    :type device: str | torch.device | None, optional
     :param dtype: Data type for the tensors
     :type dtype: torch.dtype, optional
     """
@@ -278,7 +278,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         self,
         max_size: int,
         alpha: float = 0.6,
-        device: Union[str, torch.device] = "cpu",
+        device: str | torch.device = "cpu",
         dtype: torch.dtype = torch.float32,
     ) -> None:
         super().__init__(max_size, device, dtype)

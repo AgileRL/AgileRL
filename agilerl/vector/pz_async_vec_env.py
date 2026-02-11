@@ -9,7 +9,7 @@ from copy import deepcopy
 from enum import Enum
 from multiprocessing.connection import Connection
 from multiprocessing.sharedctypes import RawArray
-from typing import Any, Callable, Optional, TypeAlias, TypeVar, Union
+from typing import Any, Callable, TypeAlias, TypeVar
 
 import numpy as np
 from gymnasium import logger, spaces
@@ -26,8 +26,8 @@ from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
 AgentID = TypeVar("AgentID")
 ObsType = TypeVar("ObsType")
-PzEnvType = Union[PettingZooVecEnv, ParallelEnv]
-SharedMemoryType: TypeAlias = Union[RawArray, tuple[RawArray, ...], dict[str, RawArray]]
+PzEnvType = PettingZooVecEnv | ParallelEnv
+SharedMemoryType: TypeAlias = RawArray | tuple[RawArray, ...] | dict[str, RawArray]
 
 
 def reshape_observation(
@@ -94,7 +94,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         self,
         env_fns: list[Callable[[], PzEnvType]],
         copy: bool = True,
-        context: Optional[str] = None,
+        context: str | None = None,
     ):
         # Core class attributes
         ctx = mp.get_context(context)
@@ -174,8 +174,8 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
     def reset(
         self,
         *,
-        seed: Optional[int] = None,
-        options: Optional[dict[str, Any]] = None,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
     ) -> tuple[dict[str, NumpyObsType], dict[str, Any]]:
         """
         Reset all the environments and return two dictionaries of batched observations and infos.
@@ -190,8 +190,8 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
 
     def reset_async(
         self,
-        seed: Optional[int] = None,
-        options: Optional[dict[str, Any]] = None,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
     ) -> None:
         """Send calls to the :obj:`reset` methods of the sub-environments.
 
@@ -238,7 +238,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         )
 
     def reset_wait(
-        self, timeout: Optional[float] = None
+        self, timeout: float | None = None
     ) -> tuple[dict[str, NumpyObsType], dict[str, Any]]:
         """Waits for the calls triggered by :meth:`reset_async` to finish and returns the results.
 
@@ -297,7 +297,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
 
         self._state = AsyncState.WAITING_STEP
 
-    def step_wait(self, timeout: Optional[float] = None) -> PzStepReturn:
+    def step_wait(self, timeout: float | None = None) -> PzStepReturn:
         """
         Wait for the calls to :obj:`step` in each sub-environment to finish.
 
@@ -397,7 +397,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
 
         self._state = AsyncState.WAITING_CALL
 
-    def call_wait(self, timeout: Optional[float] = None) -> Any:
+    def call_wait(self, timeout: float | None = None) -> Any:
         """Calls all parent pipes and waits for the results.
 
         :param timeout: Number of seconds before the call to :meth:`call_wait` times out. If ``None`` (default),
@@ -462,7 +462,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         self._raise_if_errors(successes)
 
     def close_extras(
-        self, timeout: Optional[float] = None, terminate: bool = False
+        self, timeout: float | None = None, terminate: bool = False
     ) -> None:
         """
         Close the environments & clean up the extra resources (processes and pipes).
@@ -505,7 +505,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         for process in self.processes:
             process.join()
 
-    def _poll_pipe_envs(self, timeout: Optional[float] = None) -> bool:
+    def _poll_pipe_envs(self, timeout: float | None = None) -> bool:
         self._assert_is_running()
 
         if timeout is None:
@@ -591,7 +591,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
 
             # Get the array mask and if it doesn't already exist then create a zero bool array
             array_mask = vector_infos.get(
-                f"_{key}", np.zeros(self.num_envs, dtype=np.bool_)
+                f"_{key}", np.zeros(self.num_envs, dtype=bool)
             )
             array_mask[env_num] = True
 
@@ -692,7 +692,7 @@ class Observations:
     def items(self) -> Any:
         return self.__iterate_kv()
 
-    def get(self, key: str) -> Optional[np.ndarray]:
+    def get(self, key: str) -> np.ndarray | None:
         try:
             return self.__getitem__(key)
         except KeyError:
@@ -749,7 +749,7 @@ def create_shared_memory(
 def get_placeholder_value(
     agent: str,
     transition_name: str,
-    obs_spaces: Optional[dict[str, spaces.Space]] = None,
+    obs_spaces: dict[str, spaces.Space] | None = None,
 ) -> Any:
     """Used to obtain a placeholder value to return for associated experience when an
     agent is killed or is inactive for the current step.

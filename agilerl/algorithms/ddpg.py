@@ -1,6 +1,6 @@
 import copy
 import warnings
-from typing import Any, Optional, Union
+from typing import Any
 
 import numpy as np
 import torch
@@ -45,7 +45,7 @@ class DDPG(RLAlgorithm):
     :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
     :type O_U_noise: bool, optional
     :param expl_noise: Scale for Ornstein Uhlenbeck action noise, or standard deviation for Gaussian exploration noise, defaults to 0.1
-    :type expl_noise: Union[float, np.ndarray], optional
+    :type expl_noise: float | np.ndarray, optional
     :param vect_noise_dim: Vectorization dimension of environment for action noise, defaults to 1
     :type vect_noise_dim: int, optional
     :param mean_noise: Mean of exploration noise, defaults to 0.0
@@ -59,7 +59,7 @@ class DDPG(RLAlgorithm):
     :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
     :type hp_config: HyperparameterConfig, optional
     :param net_config: Encoder configuration, defaults to None
-    :type net_config: Optional[dict[str, Any]], optional
+    :type net_config: dict[str, Any] | None, optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
     :param lr_actor: Learning rate for actor optimizer, defaults to 1e-4
@@ -75,13 +75,13 @@ class DDPG(RLAlgorithm):
     :param normalize_images: Normalize images flag, defaults to True
     :type normalize_images: bool, optional
     :param mut: Most recent mutation to agent, defaults to None
-    :type mut: Optional[str], optional
+    :type mut: str | None, optional
     :param policy_freq: Frequency of critic network updates compared to policy network, defaults to 2
     :type policy_freq: int, optional
     :param actor_network: Custom actor network, defaults to None
-    :type actor_network: Optional[nn.Module], optional
+    :type actor_network: nn.Module | None, optional
     :param critic_network: Custom critic network, defaults to None
-    :type critic_network: Optional[nn.Module], optional
+    :type critic_network: nn.Module | None, optional
     :param share_encoders: Share encoders between actor and critic, defaults to False
     :type share_encoders: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
@@ -99,14 +99,14 @@ class DDPG(RLAlgorithm):
         observation_space: spaces.Space,
         action_space: spaces.Box,
         O_U_noise: bool = True,
-        expl_noise: Union[float, np.ndarray] = 0.1,
+        expl_noise: float | np.ndarray = 0.1,
         vect_noise_dim: int = 1,
         mean_noise: float = 0.0,
         theta: float = 0.15,
         dt: float = 1e-2,
         index: int = 0,
-        hp_config: Optional[HyperparameterConfig] = None,
-        net_config: Optional[dict[str, Any]] = None,
+        hp_config: HyperparameterConfig | None = None,
+        net_config: dict[str, Any] | None = None,
         batch_size: int = 64,
         lr_actor: float = 1e-4,
         lr_critic: float = 1e-3,
@@ -114,13 +114,13 @@ class DDPG(RLAlgorithm):
         gamma: float = 0.99,
         tau: float = 1e-3,
         normalize_images: bool = True,
-        mut: Optional[str] = None,
+        mut: str | None = None,
         policy_freq: int = 2,
-        actor_network: Optional[EvolvableModule] = None,
-        critic_network: Optional[EvolvableModule] = None,
+        actor_network: EvolvableModule | None = None,
+        critic_network: EvolvableModule | None = None,
         share_encoders: bool = False,
         device: str = "cpu",
-        accelerator: Optional[Any] = None,
+        accelerator: Any | None = None,
         wrap: bool = True,
     ) -> None:
 
@@ -492,7 +492,7 @@ class DDPG(RLAlgorithm):
         self,
         env: GymEnvType,
         swap_channels: bool = False,
-        max_steps: Optional[int] = None,
+        max_steps: int | None = None,
         loop: int = 3,
     ) -> float:
         """Returns mean test score of agent in environment with epsilon-greedy policy.

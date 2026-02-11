@@ -1,4 +1,4 @@
-from typing import Optional, Protocol, Union
+from typing import Protocol
 
 import numpy as np
 import torch
@@ -9,7 +9,7 @@ from agilerl.modules.base import EvolvableModule, EvolvableWrapper
 from agilerl.typing import ArrayOrTensor, DeviceType, NetConfigType
 from agilerl.utils.algo_utils import get_output_size_from_space
 
-DistributionType = Union[Distribution, list[Distribution]]
+DistributionType = Distribution | list[Distribution]
 
 
 def sum_independent_tensor(tensor: torch.Tensor) -> torch.Tensor:
@@ -52,7 +52,7 @@ class DistributionHandler(Protocol):
         """Get the log probability of the action."""
         ...
 
-    def entropy(self, distribution: DistributionType) -> Optional[torch.Tensor]:
+    def entropy(self, distribution: DistributionType) -> torch.Tensor | None:
         """Get the entropy of the action distribution."""
         ...
 
@@ -205,7 +205,7 @@ class TorchDistribution:
     PPO, A2C, TRPO.
 
     :param distribution: Distribution to wrap.
-    :type distribution: Union[Distribution, list[Distribution]]
+    :type distribution: Distribution | list[Distribution]
     :param squash_output: Whether to squash the output to the action space.
     :type squash_output: bool
     """
@@ -282,7 +282,7 @@ class TorchDistribution:
 
         return log_prob
 
-    def entropy(self) -> Optional[torch.Tensor]:
+    def entropy(self) -> torch.Tensor | None:
         """Get the entropy of the action distribution.
 
         :return: Entropy of the action distribution.
@@ -314,9 +314,9 @@ class EvolvableDistribution(EvolvableWrapper):
     """
 
     wrapped: EvolvableModule
-    dist: Optional[TorchDistribution]
-    mask: Optional[ArrayOrTensor]
-    log_std: Optional[torch.nn.Parameter]
+    dist: TorchDistribution | None
+    mask: ArrayOrTensor | None
+    log_std: torch.nn.Parameter | None
 
     def __init__(
         self,
@@ -457,17 +457,18 @@ class EvolvableDistribution(EvolvableWrapper):
     def forward(
         self,
         latent: torch.Tensor,
-        action_mask: Optional[ArrayOrTensor] = None,
+        action_mask: ArrayOrTensor | None = None,
         sample: bool = True,
-    ) -> Union[
-        tuple[torch.Tensor, torch.Tensor, torch.Tensor], tuple[None, None, torch.Tensor]
-    ]:
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        | tuple[None, None, torch.Tensor]
+    ):
         """Forward pass of the network.
 
         :param latent: Latent space representation.
         :type latent: torch.Tensor
         :param action_mask: Mask to apply to the logits. Defaults to None.
-        :type action_mask: Optional[ArrayOrTensor]
+        :type action_mask: ArrayOrTensor | None
         :return: Action and log probability of the action.
         :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         """
@@ -477,7 +478,7 @@ class EvolvableDistribution(EvolvableWrapper):
             if isinstance(action_mask, (np.ndarray, list)):
                 action_mask = (
                     np.stack(action_mask)
-                    if action_mask.dtype == np.object_ or isinstance(action_mask, list)
+                    if action_mask.dtype == object or isinstance(action_mask, list)
                     else action_mask
                 )
 

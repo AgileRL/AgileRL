@@ -1,15 +1,15 @@
 import time
 import warnings
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 import gymnasium as gym
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from tensordict import TensorDict
 from torch.utils.data import DataLoader
 
+import wandb
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.components.data import ReplayDataset
 from agilerl.components.replay_buffer import ReplayBuffer
@@ -24,7 +24,7 @@ from agilerl.utils.utils import (
     tournament_selection_and_mutation,
 )
 
-InitDictType = Optional[dict[str, Any]]
+InitDictType = dict[str, Any] | None
 PopulationType = list[RLAlgorithm]
 
 
@@ -42,18 +42,18 @@ def train_bandits(
     evo_steps: int = 2500,
     eval_steps: int = 500,
     eval_loop: int = 1,
-    target: Optional[float] = None,
-    tournament: Optional[TournamentSelection] = None,
-    mutation: Optional[Mutations] = None,
-    checkpoint: Optional[int] = None,
-    checkpoint_path: Optional[str] = None,
+    target: float | None = None,
+    tournament: TournamentSelection | None = None,
+    mutation: Mutations | None = None,
+    checkpoint: int | None = None,
+    checkpoint_path: str | None = None,
     overwrite_checkpoints: bool = False,
     save_elite: bool = False,
-    elite_path: Optional[str] = None,
+    elite_path: str | None = None,
     wb: bool = False,
     verbose: bool = True,
-    accelerator: Optional[Accelerator] = None,
-    wandb_api_key: Optional[str] = None,
+    accelerator: Accelerator | None = None,
+    wandb_api_key: str | None = None,
 ) -> tuple[PopulationType, list[list[float]]]:
     """The general bandit training function. Returns trained population of agents
     and their fitnesses.

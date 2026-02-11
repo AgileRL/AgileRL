@@ -227,12 +227,13 @@ and uses our custom head. Since we have done most of the work in the head, the i
 
     .. code-block:: python
 
-        from typing import Optional, Dict, Any
+        from typing import Any
         from dataclasses import asdict
 
         import torch
-        from gym import spaces
+        from gymnasium import spaces
 
+        from agilerl.typing import NetConfigType
         from agilerl.networks.base import EvolvableNetwork
         from agilerl.modules.configs import MlpNetConfig
 
@@ -247,20 +248,20 @@ and uses our custom head. Since we have done most of the work in the head, the i
             :param action_space: Action space of the environment
             :type action_space: DiscreteSpace
             :param encoder_config: Configuration of the encoder network.
-            :type encoder_config: ConfigType
+            :type encoder_config: NetConfigType
             :param support: Support for the distributional value function.
             :type support: torch.Tensor
             :param num_atoms: Number of atoms in the distributional value function. Defaults to 51.
             :type num_atoms: int
             :param head_config: Configuration of the network MLP head.
-            :type head_config: Optional[ConfigType]
+            :type head_config: NetConfigType | None
             :param min_latent_dim: Minimum dimension of the latent space representation. Defaults to 8.
             :type min_latent_dim: int
             :param max_latent_dim: Maximum dimension of the latent space representation. Defaults to 128.
             :type max_latent_dim: int
             :param n_agents: Number of agents in the environment. Defaults to None, which corresponds to
                 single-agent environments.
-            :type n_agents: Optional[int]
+            :type n_agents: int | None
             :param latent_dim: Dimension of the latent space representation.
             :type latent_dim: int
             :param device: Device to use for the network.
@@ -274,11 +275,11 @@ and uses our custom head. Since we have done most of the work in the head, the i
                 support: torch.Tensor,
                 num_atoms: int = 51,
                 noise_std: float = 0.5,
-                encoder_config: Optional[ConfigType] = None,
-                head_config: Optional[ConfigType] = None,
+                encoder_config: dict[str, Any] | None = None,
+                head_config: dict[str, Any] | None = None,
                 min_latent_dim: int = 8,
                 max_latent_dim: int = 128,
-                n_agents: Optional[int] = None,
+                n_agents: int | None = None,
                 latent_dim: int = 32,
                 device: str = "cpu",
             ):

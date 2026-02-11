@@ -8,9 +8,7 @@ from typing import (
     Generic,
     Iterable,
     Iterator,
-    Optional,
     TypeVar,
-    Union,
 )
 
 import numpy as np
@@ -37,7 +35,7 @@ def mutation(
     :rtype: Callable[[Callable], MutationMethod]
     """
 
-    def decorator(func: Callable[[Any], Optional[dict[str, Any]]]) -> MutationMethod:
+    def decorator(func: Callable[[Any], dict[str, Any] | None]) -> MutationMethod:
         @wraps(func)
         def wrapper(self, *args, **kwargs):
             return func(self, *args, **kwargs)
@@ -118,7 +116,7 @@ class MutationContext:
             for hook in self.module._mutation_hooks:
                 hook()
 
-    def _resolve_final_mutation_attr(self) -> Optional[str]:
+    def _resolve_final_mutation_attr(self) -> str | None:
         """Resolve the mutation method that was applied last. This is necessary during
         hyperparameter optimization in RL algorithms because it is often convenient to
         apply the same architecture mutation to the different networks in an algorithm
@@ -126,7 +124,7 @@ class MutationContext:
         therefore require similar capacities.
 
         :return: The final mutation attribute.
-        :rtype: Optional[str]
+        :rtype: str | None
         """
         if (
             self.module.last_mutation_attr is not None
@@ -253,13 +251,13 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
     :type device: str
     :param random_seed: The random seed to use for the network. Determines the random number generator
         stored in ``self.rng`` that can be used to sample random numbers in e.g. mutation methods.
-    :type random_seed: Optional[int]
+    :type random_seed: int | None
     """
 
-    _evolvable_modules: dict[str, Optional["EvolvableModule"]]
+    _evolvable_modules: dict[str, "EvolvableModule" | None]
     _mutation_hooks: list[Callable]
 
-    def __init__(self, device: str, random_seed: Optional[int] = None) -> None:
+    def __init__(self, device: str, random_seed: int | None = None) -> None:
         nn.Module.__init__(self)
         self._init_surface_methods()
         self.random_seed = random_seed
@@ -294,11 +292,11 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         return _get_filtered_methods(self, MutationType.NODE)
 
     @property
-    def activation(self) -> Optional[str]:
+    def activation(self) -> str | None:
         return None
 
     @property
-    def last_mutation(self) -> Optional[MutationMethod]:
+    def last_mutation(self) -> MutationMethod | None:
         return self._last_mutation
 
     @last_mutation.setter
@@ -306,7 +304,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         self._last_mutation = value
 
     @property
-    def last_mutation_attr(self) -> Optional[str]:
+    def last_mutation_attr(self) -> str | None:
         return self._last_mutation_attr
 
     @last_mutation_attr.setter
@@ -384,7 +382,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
             "change_activation method must be implemented in order to set the activation function."
         )
 
-    def __setattr__(self, name: str, value: Union[Any, SelfEvolvableModule]) -> None:
+    def __setattr__(self, name: str, value: Any | SelfEvolvableModule) -> None:
         """Set attribute of the network. If the attribute is a module, add its mutation methods
         to the parent module. Otherwise, set the attribute as usual.
 
@@ -440,7 +438,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
                 return mut_method
             raise e
 
-    def get_output_dense(self) -> Optional[nn.Module]:
+    def get_output_dense(self) -> nn.Module | None:
         """Get the output dense layer of the network.
 
         :return: The output dense layer.
@@ -563,12 +561,12 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         """
         self._mutation_hooks.append(hook)
 
-    def disable_mutations(self, mut_type: Optional[MutationType] = None) -> None:
+    def disable_mutations(self, mut_type: MutationType | None = None) -> None:
         """Disable all or some mutation methods from the evolvable module. It recursively
         disables the mutation methods of nested evolvable modules as well.
 
         :param mut_type: The type of mutation method to disable.
-        :type mut_type: Optional[MutationType]
+        :type mut_type: MutationType | None
         """
         if mut_type is None:
             self._layer_mutation_methods = []
@@ -662,14 +660,14 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         return probs
 
     def sample_mutation_method(
-        self, new_layer_prob: float, rng: Optional[Generator] = None
+        self, new_layer_prob: float, rng: Generator | None = None
     ) -> MutationMethod:
         """Sample a mutation method based on the mutation probabilities.
 
         :param new_layer_prob: The probability of selecting a layer mutation method.
         type new_layer_prob: float
         :param rng: The random number generator.
-        type rng: Optional[Generator]
+        type rng: Generator | None
         return: The sampled mutation method.
         rtype: MutationMethod
         """
@@ -773,7 +771,7 @@ class EvolvableWrapper(EvolvableModule):
                 raise AttributeError(f"Duplicate mutation method: {method}")
 
 
-ModuleType = TypeVar("ModuleType", bound=Union[EvolvableModule, nn.Module])
+ModuleType = TypeVar("ModuleType", bound=EvolvableModule | nn.Module)
 
 
 class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleType]):
@@ -781,13 +779,13 @@ class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleType]):
     mutation methods of nested evolvable modules.
 
     :param modules: The modules to add to the dictionary.
-    :type modules: Optional[dict[str, EvolvableModule]]
+    :type modules: dict[str, EvolvableModule] | None
     :param device: The device to use for the modules.
     :type device: str
     """
 
     def __init__(
-        self, modules: Optional[dict[str, EvolvableModule]] = None, device: str = "cpu"
+        self, modules: dict[str, EvolvableModule] | None = None, device: str = "cpu"
     ) -> None:
         super().__init__(device)
         if modules is not None:
@@ -811,7 +809,7 @@ class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleType]):
         ]
 
     @property
-    def activation(self) -> Optional[str]:
+    def activation(self) -> str | None:
         nested_activations = [module.activation for module in self.modules().values()]
         if len(set(nested_activations)) == 1:
             return nested_activations[0]

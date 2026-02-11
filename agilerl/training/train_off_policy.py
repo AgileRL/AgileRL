@@ -1,16 +1,16 @@
 import time
 import warnings
 from datetime import datetime
-from typing import Any, Optional, Union
+from typing import Any
 
 import gymnasium as gym
 import numpy as np
 import torch
-import wandb
 from accelerate import Accelerator
 from tensordict import TensorDictBase
 from torch.utils.data import DataLoader
 
+import wandb
 from agilerl.algorithms import DDPG, DQN, TD3, RainbowDQN
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.components import (
@@ -31,9 +31,9 @@ from agilerl.utils.utils import (
     tournament_selection_and_mutation,
 )
 
-InitDictType = Optional[dict[str, Any]]
+InitDictType = dict[str, Any] | None
 PopulationType = list[RLAlgorithm]
-BufferType = Union[ReplayBuffer, PrioritizedReplayBuffer, MultiStepReplayBuffer]
+BufferType = ReplayBuffer | PrioritizedReplayBuffer | MultiStepReplayBuffer
 
 
 def train_off_policy(
@@ -47,28 +47,28 @@ def train_off_policy(
     swap_channels: bool = False,
     max_steps: int = 1000000,
     evo_steps: int = 10000,
-    eval_steps: Optional[int] = None,
+    eval_steps: int | None = None,
     eval_loop: int = 1,
     learning_delay: int = 0,
     eps_start: float = 1.0,
     eps_end: float = 0.1,
     eps_decay: float = 0.995,
-    target: Optional[float] = None,
+    target: float | None = None,
     n_step: bool = False,
     per: bool = False,
-    n_step_memory: Optional[MultiStepReplayBuffer] = None,
-    tournament: Optional[TournamentSelection] = None,
-    mutation: Optional[Mutations] = None,
-    checkpoint: Optional[int] = None,
-    checkpoint_path: Optional[str] = None,
+    n_step_memory: MultiStepReplayBuffer | None = None,
+    tournament: TournamentSelection | None = None,
+    mutation: Mutations | None = None,
+    checkpoint: int | None = None,
+    checkpoint_path: str | None = None,
     overwrite_checkpoints: bool = False,
     save_elite: bool = False,
-    elite_path: Optional[str] = None,
+    elite_path: str | None = None,
     wb: bool = False,
     verbose: bool = True,
-    accelerator: Optional[Accelerator] = None,
-    wandb_api_key: Optional[str] = None,
-    wandb_kwargs: Optional[dict[str, Any]] = None,
+    accelerator: Accelerator | None = None,
+    wandb_api_key: str | None = None,
+    wandb_kwargs: dict[str, Any] | None = None,
 ) -> tuple[PopulationType, list[list[float]]]:
     """The general online RL training function. Returns trained population of agents
     and their fitnesses.

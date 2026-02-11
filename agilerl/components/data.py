@@ -53,7 +53,7 @@ def to_torch_tensor(data: ArrayOrTensor, dtype=torch.float32) -> torch.Tensor:
     :type dtype: torch.dtype, optional
     :return: Torch tensor.
     """
-    if isinstance(data, (np.ndarray, Number, bool, np.bool_)):
+    if isinstance(data, (np.ndarray, Number, bool)):
         return torch.tensor(data, dtype=dtype)
     elif isinstance(data, torch.Tensor):
         return data.to(dtype=dtype)

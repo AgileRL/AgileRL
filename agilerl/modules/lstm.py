@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -36,7 +36,7 @@ class EvolvableLSTM(EvolvableModule):
     :param name: Name of the network, defaults to 'lstm'
     :type name: str, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
-    :type random_seed: Optional[int]
+    :type random_seed: int | None
     """
 
     def __init__(
@@ -53,7 +53,7 @@ class EvolvableLSTM(EvolvableModule):
         dropout: float = 0.0,
         device: str = "cpu",
         name: str = "lstm",
-        random_seed: Optional[int] = None,
+        random_seed: int | None = None,
     ):
         super().__init__(device, random_seed)
 
@@ -164,14 +164,14 @@ class EvolvableLSTM(EvolvableModule):
     def forward(
         self,
         x: ArrayOrTensor,
-        hidden_state: Optional[dict[str, ArrayOrTensor]] = None,
+        hidden_state: dict[str, ArrayOrTensor] | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Forward pass of the network.
 
         :param x: Input tensor
         :type x: ArrayOrTensor
         :param hidden_state: Dict containing hidden and cell states, defaults to None
-        :type hidden_state: Optional[dict[str, torch.Tensor]]
+        :type hidden_state: dict[str, torch.Tensor] | None
         :return: Output tensor and next hidden state
         :rtype: tuple[torch.Tensor, dict[str, torch.Tensor]]
         """
@@ -248,7 +248,7 @@ class EvolvableLSTM(EvolvableModule):
             return self.add_node()
 
     @mutation(MutationType.NODE)
-    def add_node(self, numb_new_nodes: Optional[int] = None) -> dict[str, int]:
+    def add_node(self, numb_new_nodes: int | None = None) -> dict[str, int]:
         """Increases hidden size of the LSTM.
 
         :param numb_new_nodes: Number of nodes to add to hidden size, defaults to None
@@ -267,7 +267,7 @@ class EvolvableLSTM(EvolvableModule):
         return {"numb_new_nodes": numb_new_nodes}
 
     @mutation(MutationType.NODE)
-    def remove_node(self, numb_new_nodes: Optional[int] = None) -> dict[str, int]:
+    def remove_node(self, numb_new_nodes: int | None = None) -> dict[str, int]:
         """Decreases hidden size of the LSTM.
 
         :param numb_new_nodes: Number of nodes to remove from hidden size, defaults to None

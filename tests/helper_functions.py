@@ -1,6 +1,6 @@
 import random
 from numbers import Number
-from typing import Any, Optional, Union
+from typing import Any
 
 import numpy as np
 import torch
@@ -81,8 +81,8 @@ def assert_not_equal_state_dict(
 
 
 def check_equal_params_ind(
-    before_ind: Union[nn.Module, EvolvableModule],
-    mutated_ind: Union[nn.Module, EvolvableModule],
+    before_ind: nn.Module | EvolvableModule,
+    mutated_ind: nn.Module | EvolvableModule,
 ) -> None:
     before_dict = dict(before_ind.named_parameters())
     after_dict = mutated_ind.named_parameters()
@@ -128,7 +128,7 @@ def check_models_same(model1: nn.Module, model2: nn.Module) -> bool:
 
 
 def generate_random_box_space(
-    shape: tuple[int, ...], low: Optional[Number] = None, high: Optional[Number] = None
+    shape: tuple[int, ...], low: Number | None = None, high: Number | None = None
 ) -> spaces.Box:
     return spaces.Box(
         low=random.randint(0, 5) if low is None else low,
@@ -151,8 +151,8 @@ def generate_dict_or_tuple_space(
     n_vector: int,
     image_shape: tuple[int, ...] = (3, 32, 32),
     vector_shape: tuple[int] = (4,),
-    dict_space: Optional[bool] = True,
-) -> Union[spaces.Dict, spaces.Tuple]:
+    dict_space: bool | None = True,
+) -> spaces.Dict | spaces.Tuple:
 
     if dict_space is None:
         dict_space = True if random.random() < 0.5 else False
@@ -175,8 +175,8 @@ def generate_dict_or_tuple_space(
 def generate_multi_agent_box_spaces(
     n_agents: int,
     shape: tuple[int, ...],
-    low: Optional[Union[Number, list[Number]]] = -1,
-    high: Optional[Union[Number, list[Number]]] = 1,
+    low: Number | list[Number] | None = -1,
+    high: Number | list[Number] | None = 1,
 ) -> list[spaces.Box]:
     if isinstance(low, list):
         assert len(low) == n_agents
@@ -217,8 +217,8 @@ def gen_multi_agent_dict_or_tuple_spaces(
     n_vector: int,
     image_shape: tuple[int, ...] = (3, 16, 16),
     vector_shape: tuple[int] = (4,),
-    dict_space: Optional[bool] = False,
-) -> list[Union[spaces.Dict, spaces.Tuple]]:
+    dict_space: bool | None = False,
+) -> list[spaces.Dict | spaces.Tuple]:
     return [
         generate_dict_or_tuple_space(
             n_image, n_vector, image_shape, vector_shape, dict_space
@@ -229,8 +229,8 @@ def gen_multi_agent_dict_or_tuple_spaces(
 
 def get_sample_from_space(
     space: spaces.Space,
-    batch_size: Optional[int] = None,
-    device: Optional[torch.device] = None,
+    batch_size: int | None = None,
+    device: torch.device | None = None,
 ) -> NumpyObsType:
     """
     Generate a sample from the given space.
@@ -300,7 +300,7 @@ def get_experiences_batch(
     observation_space: spaces.Space,
     action_space: spaces.Space,
     batch_size: int,
-    device: Optional[torch.device] = None,
+    device: torch.device | None = None,
 ) -> TensorDict:
     """
     Generate a batch of experiences from the observation and action spaces.

@@ -1,12 +1,12 @@
 import warnings
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch.distributed as dist
-import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import DPO, GRPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -19,27 +19,27 @@ from agilerl.utils.utils import (
     tournament_selection_and_mutation,
 )
 
-InitDictType = Optional[dict[str, Any]]
+InitDictType = dict[str, Any] | None
 
 
 def finetune_llm_reasoning(
     pop: PopulationType,
     env: ReasoningGym,
-    init_hp: Optional[dict[str, Any]] = None,
-    save_elite: Optional[bool] = None,
-    elite_path: Optional[str] = None,
+    init_hp: dict[str, Any] | None = None,
+    save_elite: bool | None = None,
+    elite_path: str | None = None,
     wb: bool = False,
-    evo_steps: Optional[int] = 20,
-    checkpoint_steps: Optional[int] = None,
-    tournament: Optional[TournamentSelection] = None,
-    mutation: Optional[Mutations] = None,
-    wandb_api_key: Optional[str] = None,
+    evo_steps: int | None = 20,
+    checkpoint_steps: int | None = None,
+    tournament: TournamentSelection | None = None,
+    mutation: Mutations | None = None,
+    wandb_api_key: str | None = None,
     evaluation_interval: int = 10,
-    max_reward: Optional[int] = None,
+    max_reward: int | None = None,
     verbose: bool = True,
-    accelerator: Optional[Accelerator] = None,
-    max_steps: Optional[int] = None,
-    num_epochs: Optional[int] = None,
+    accelerator: Accelerator | None = None,
+    max_steps: int | None = None,
+    num_epochs: int | None = None,
 ):
     """
     Finetunes a population of GRPOs on a ReasoningGym environment.
@@ -413,20 +413,20 @@ def finetune_llm_reasoning(
 def finetune_llm_preference(
     pop: PopulationType,
     env: ReasoningGym,
-    init_hp: Optional[dict[str, Any]] = None,
-    save_elite: Optional[bool] = None,
-    elite_path: Optional[str] = None,
+    init_hp: dict[str, Any] | None = None,
+    save_elite: bool | None = None,
+    elite_path: str | None = None,
     wb: bool = False,
-    evo_steps: Optional[int] = 20,
-    checkpoint_steps: Optional[int] = None,
-    tournament: Optional[TournamentSelection] = None,
-    mutation: Optional[Mutations] = None,
-    wandb_api_key: Optional[str] = None,
+    evo_steps: int | None = 20,
+    checkpoint_steps: int | None = None,
+    tournament: TournamentSelection | None = None,
+    mutation: Mutations | None = None,
+    wandb_api_key: str | None = None,
     evaluation_interval: int = 10,
     verbose: bool = True,
-    accelerator: Optional[Accelerator] = None,
-    max_steps: Optional[int] = None,
-    num_epochs: Optional[int] = None,
+    accelerator: Accelerator | None = None,
+    max_steps: int | None = None,
+    num_epochs: int | None = None,
 ):
     if evo_steps is not None and (tournament is None or mutation is None):
         warnings.warn(

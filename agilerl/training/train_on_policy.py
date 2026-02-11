@@ -1,14 +1,14 @@
 import time
 import warnings
 from datetime import datetime
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 import gymnasium as gym
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from gymnasium import spaces
 
+import wandb
 from agilerl.algorithms import PPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -21,7 +21,7 @@ from agilerl.utils.utils import (
     tournament_selection_and_mutation,
 )
 
-InitDictType = Optional[dict[str, Any]]
+InitDictType = dict[str, Any] | None
 OnPolicyAlgorithms = PPO
 PopulationType = list[OnPolicyAlgorithms]
 
@@ -36,24 +36,24 @@ def train_on_policy(
     swap_channels: bool = False,
     max_steps: int = 1000000,
     evo_steps: int = 10000,
-    eval_steps: Optional[int] = None,
+    eval_steps: int | None = None,
     eval_loop: int = 1,
-    target: Optional[float] = None,
-    tournament: Optional[TournamentSelection] = None,
-    mutation: Optional[Mutations] = None,
-    checkpoint: Optional[int] = None,
-    checkpoint_path: Optional[str] = None,
+    target: float | None = None,
+    tournament: TournamentSelection | None = None,
+    mutation: Mutations | None = None,
+    checkpoint: int | None = None,
+    checkpoint_path: str | None = None,
     overwrite_checkpoints: bool = False,
     save_elite: bool = False,
-    elite_path: Optional[str] = None,
+    elite_path: str | None = None,
     wb: bool = False,
     verbose: bool = True,
-    accelerator: Optional[Accelerator] = None,
-    wandb_api_key: Optional[str] = None,
-    wandb_kwargs: Optional[dict[str, Any]] = None,
-    collect_rollouts_fn: Optional[
-        Callable[[OnPolicyAlgorithms, gym.Env, int], None]
-    ] = None,
+    accelerator: Accelerator | None = None,
+    wandb_api_key: str | None = None,
+    wandb_kwargs: dict[str, Any] | None = None,
+    collect_rollouts_fn: (
+        Callable[[OnPolicyAlgorithms, gym.Env, int], None] | None
+    ) = None,
 ) -> tuple[PopulationType, list[list[float]]]:
     """The general on-policy RL training function. Returns trained population of agents
     and their fitnesses.

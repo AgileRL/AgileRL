@@ -1,7 +1,6 @@
 import inspect
 import math
 from collections import OrderedDict
-from typing import Optional
 
 import numpy as np
 import torch
@@ -43,7 +42,7 @@ class EvolvableGPT(EvolvableModule):
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
-    :type random_seed: Optional[int]
+    :type random_seed: int | None
     """
 
     def __init__(
@@ -61,7 +60,7 @@ class EvolvableGPT(EvolvableModule):
         max_layers: int = 16,
         bias: bool = True,
         device: str = "cpu",
-        random_seed: Optional[int] = None,
+        random_seed: int | None = None,
     ):
         super().__init__(device, random_seed)
 
@@ -205,15 +204,15 @@ class EvolvableGPT(EvolvableModule):
 
     def forward(
         self,
-        idx: Optional[torch.Tensor] = None,
-        tok_emb: Optional[torch.Tensor] = None,
-        targets: Optional[torch.Tensor] = None,
-        attn_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[tuple[torch.Tensor]] = None,
-        pos: Optional[torch.Tensor] = None,
+        idx: torch.Tensor | None = None,
+        tok_emb: torch.Tensor | None = None,
+        targets: torch.Tensor | None = None,
+        attn_mask: torch.Tensor | None = None,
+        past_key_values: tuple[torch.Tensor] | None = None,
+        pos: torch.Tensor | None = None,
         is_causal: bool = True,
     ) -> tuple[
-        torch.Tensor, tuple[torch.Tensor], tuple[torch.Tensor], Optional[torch.Tensor]
+        torch.Tensor, tuple[torch.Tensor], tuple[torch.Tensor], torch.Tensor | None
     ]:
         """Forward pass through evolvable GPT model.
 
@@ -232,7 +231,7 @@ class EvolvableGPT(EvolvableModule):
         :param is_causal: Whether to apply causal mask
         :type is_causal: bool, optional
         :return: Tuple containing logits, all hidden states, presents, and loss
-        :rtype: tuple[torch.Tensor, tuple[torch.Tensor], tuple[torch.Tensor], Optional[torch.Tensor]]
+        :rtype: tuple[torch.Tensor, tuple[torch.Tensor], tuple[torch.Tensor], torch.Tensor | None]
         """
         if idx is not None:
             device = idx.device
@@ -327,8 +326,8 @@ class EvolvableGPT(EvolvableModule):
     def from_pretrained(
         cls,
         model_type: str,
-        override_args: Optional[dict] = None,
-        custom_sd: Optional[str] = None,
+        override_args: dict | None = None,
+        custom_sd: str | None = None,
     ) -> "EvolvableGPT":
         """
         Load a pretrained GPT model with the option to override certain configuration parameters or use a custom state dictionary.
@@ -336,9 +335,9 @@ class EvolvableGPT(EvolvableModule):
         :param model_type: The type of GPT model to load. Must be one of {"gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl"}.
         :type model_type: str
         :param override_args: A dictionary of arguments to override the default configuration. Defaults to None.
-        :type override_args: Optional[dict]
+        :type override_args: dict | None
         :param custom_sd: Path to a custom state dictionary to load. If None, the default pretrained weights are used. Defaults to None.
-        :type custom_sd: Optional[str]
+        :type custom_sd: str | None
         :return: An instance of the EvolvableGPT model with the specified configuration and weights.
         :rtype: EvolvableGPT
         """
@@ -540,7 +539,7 @@ class EvolvableGPT(EvolvableModule):
         idx: torch.Tensor,
         max_new_tokens: int,
         temperature: float = 1.0,
-        top_k: Optional[int] = None,
+        top_k: int | None = None,
     ) -> torch.Tensor:
         """
         Generate a sequence of tokens.
@@ -557,7 +556,7 @@ class EvolvableGPT(EvolvableModule):
         :param temperature: Sampling temperature. Higher values mean more random samples, defaults to 1.0.
         :type temperature: float, optional
         :param top_k: If specified, only consider the top k tokens for sampling, defaults to None.
-        :type top_k: Optional[int], optional
+        :type top_k: int | None, optional
         :return: Generated sequence of indices.
         :rtype: torch.Tensor
         """
@@ -733,8 +732,8 @@ class CausalSelfAttention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
-        layer_past: Optional[tuple[torch.Tensor]] = None,
+        attn_mask: torch.Tensor | None = None,
+        layer_past: tuple[torch.Tensor] | None = None,
         is_causal: bool = True,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor]]:
         """
@@ -743,9 +742,9 @@ class CausalSelfAttention(nn.Module):
         :param x: Input tensor of shape (batch_size, sequence_length, embedding_dim).
         :type x: torch.Tensor
         :param attn_mask: Optional attention mask tensor.
-        :type attn_mask: Optional[torch.Tensor]
+        :type attn_mask: torch.Tensor | None
         :param layer_past: Optional tuple of past key and value tensors for caching.
-        :type layer_past: Optional[tuple[torch.Tensor]]
+        :type layer_past: tuple[torch.Tensor] | None
         :param is_causal: Whether to apply causal mask.
         :type is_causal: bool
         :return: Tuple containing the output tensor and the present key and value tensors.
@@ -855,8 +854,8 @@ class Block(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
-        layer_past: Optional[tuple[torch.Tensor]] = None,
+        attn_mask: torch.Tensor | None = None,
+        layer_past: tuple[torch.Tensor] | None = None,
         is_causal: bool = True,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor]]:
         """
@@ -865,9 +864,9 @@ class Block(nn.Module):
         :param x: Input tensor of shape (batch_size, sequence_length, embedding_dim).
         :type x: torch.Tensor
         :param attn_mask: Optional attention mask tensor.
-        :type attn_mask: Optional[torch.Tensor]
+        :type attn_mask: torch.Tensor | None
         :param layer_past: Optional tuple of past key and value tensors for caching.
-        :type layer_past: Optional[tuple[torch.Tensor]]
+        :type layer_past: tuple[torch.Tensor] | None
         :param is_causal: Whether to apply causal mask.
         :type is_causal: bool
         :return: Tuple containing the output tensor and the present key and value tensors.
