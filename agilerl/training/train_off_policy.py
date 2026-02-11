@@ -6,11 +6,11 @@ from typing import Any
 import gymnasium as gym
 import numpy as np
 import torch
+import wandb
 from accelerate import Accelerator
 from tensordict import TensorDictBase
 from torch.utils.data import DataLoader
 
-import wandb
 from agilerl.algorithms import DDPG, DQN, TD3, RainbowDQN
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.components import (
