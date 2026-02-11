@@ -36,7 +36,7 @@ jobs:
 
             - name: Install dependencies
               run: |
-                  uv --system pip install ruff pytest pytest-cov black codespell yamlfmt isort pyupgrade
+                  uv pip install --system ruff pytest pytest-cov black codespell yamlfmt isort pyupgrade
                   uv sync --system --locked --all-groups --extra all
 
             - name: Run black
