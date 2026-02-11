@@ -58,7 +58,7 @@ Below we show our implementation of our custom head with a distributional duelin
             :param num_outputs: Number of output features.
             :type num_outputs: int
             :param hidden_size: List of hidden layer sizes.
-            :type hidden_size: List[int]
+            :type hidden_size: list[int]
             :param num_atoms: Number of atoms in the distribution.
             :type num_atoms: int
             :param support: Support of the distribution.
@@ -93,7 +93,7 @@ Below we show our implementation of our custom head with a distributional duelin
                 self,
                 num_inputs: int,
                 num_outputs: int,
-                hidden_size: List[int],
+                hidden_size: list[int],
                 num_atoms: int,
                 support: torch.Tensor,
                 noise_std: float = 0.5,
@@ -148,7 +148,7 @@ Below we show our implementation of our custom head with a distributional duelin
                 )
 
             @property
-            def net_config(self) -> Dict[str, Any]:
+            def net_config(self) -> dict[str, Any]:
                 net_config = super().net_config.copy()
                 net_config.pop("num_atoms")
                 net_config.pop("support")
@@ -337,11 +337,11 @@ and uses our custom head. Since we have done most of the work in the head, the i
                 # Build value and advantage networks
                 self.build_network_head(head_config)
 
-            def build_network_head(self, net_config: Dict[str, Any]) -> None:
+            def build_network_head(self, net_config: dict[str, Any]) -> None:
                 """Builds the value and advantage heads of the network based on the passed configuration.
 
                 :param net_config: Configuration of the network head.
-                :type net_config: Dict[str, Any]
+                :type net_config: dict[str, Any]
                 """
                 self.head_net = DuelingDistributionalMLP(
                     num_inputs=self.latent_dim,

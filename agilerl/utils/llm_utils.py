@@ -631,7 +631,7 @@ def gather_if_zero3(
     :param zero_stage: The zero stage
     :type zero_stage: int
     :param params: The parameters to gather
-    :type params: List[torch.Tensor]
+    :type params: list[torch.Tensor]
     :param modifier_rank: The modifier rank
     :type modifier_rank: int | None
     """

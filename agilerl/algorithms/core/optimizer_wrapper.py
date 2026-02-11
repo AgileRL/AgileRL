@@ -6,7 +6,7 @@ from torch.optim import Optimizer
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.modules import EvolvableModule, ModuleDict
-from agilerl.protocols import EvolvableAlgorithm
+from agilerl.protocols import EvolvableAlgorithmProtocol
 from agilerl.typing import OptimizerType, StateDict
 from agilerl.utils.algo_utils import DummyOptimizer
 
@@ -201,7 +201,7 @@ class OptimizerWrapper:
             opt = object.__getattribute__(self, "optimizer")
             return getattr(opt, name)
 
-    def _infer_parent_container(self) -> EvolvableAlgorithm:
+    def _infer_parent_container(self) -> EvolvableAlgorithmProtocol:
         """
         Infer the parent container dynamically using the stack frame.
 

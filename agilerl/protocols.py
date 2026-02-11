@@ -6,11 +6,11 @@ and provide clear contracts for implementing evolvable algorithms, neural networ
 and optimization components.
 
 The key protocols include:
-- EvolvableAlgorithm: Interface for algorithms that can evolve through mutations
-- EvolvableModule: Interface for neural network modules that support mutations
-- EvolvableNetwork: Interface for neural networks with encoder-decoder structure
-- MutationMethod: Interface for mutation operations on networks
-- OptimizerWrapper: Interface for optimizer management
+- EvolvableAlgorithmProtocol: Interface for algorithms that can evolve through mutations
+- EvolvableModuleProtocol: Interface for neural network modules that support mutations
+- EvolvableNetworkProtocol: Interface for neural networks with encoder-decoder structure
+- MutationMethodProtocol: Interface for mutation operations on networks
+- OptimizerWrapperProtocol: Interface for optimizer management
 
 Type aliases are provided for common types used throughout the framework.
 """
@@ -52,7 +52,7 @@ class MutationType(Enum):
 
 
 @runtime_checkable
-class MutationMethod(Protocol):
+class MutationMethodProtocol(Protocol):
     """Protocol for mutation methods that can be applied to evolvable modules.
 
     Mutation methods must have a mutation type and optional recreation kwargs
@@ -66,7 +66,7 @@ class MutationMethod(Protocol):
 
 
 @runtime_checkable
-class OptimizerWrapper(Protocol):
+class OptimizerWrapperProtocol(Protocol):
     """Protocol for optimizer wrapper classes that manage optimization.
 
     Provides a consistent interface for optimizer management across different
@@ -80,7 +80,7 @@ class OptimizerWrapper(Protocol):
 
 
 @runtime_checkable
-class EvolvableModule(Protocol):
+class EvolvableModuleProtocol(Protocol):
     """Protocol for neural network modules that support evolutionary mutations.
 
     Evolvable modules can undergo mutations to their architecture (layers, nodes,
@@ -105,40 +105,48 @@ class EvolvableModule(Protocol):
     def to(self, device: DeviceType) -> None: ...
     def state_dict(self) -> dict[str, Any]: ...
     def disable_mutations(self) -> None: ...
-    def get_mutation_methods(self) -> dict[str, MutationMethod]: ...
+    def get_mutation_methods(self) -> dict[str, MutationMethodProtocol]: ...
     def get_mutation_probs(self, new_layer_prob: float) -> list[float]: ...
     def sample_mutation_method(
         self, new_layer_prob: float, rng: Generator | None
     ) -> str: ...
-    def clone(self) -> "EvolvableModule": ...
+    def clone(self) -> "EvolvableModuleProtocol": ...
     def load_state_dict(
         self, state_dict: dict[str, Any], strict: bool = True
     ) -> None: ...
 
 
 @runtime_checkable
-class EvolvableNetwork(Protocol):
-    """Protocol for neural networks with encoder-decoder architecture.
+class EvolvableNetworkProtocol(EvolvableModuleProtocol, Protocol):
+    """Protocol for evolvable neural networks with encoder-decoder architecture.
 
     Evolvable networks consist of an encoder for feature extraction and
     a head network for task-specific outputs. Both components can evolve
     independently through mutations.
     """
 
-    encoder: EvolvableModule
-    head_net: EvolvableModule
-
     def forward_head(self, latent: torch.Tensor, *args, **kwargs) -> torch.Tensor: ...
     def extract_features(self, x: TorchObsType) -> torch.Tensor: ...
     def build_network_head(self, *args, **kwargs) -> None: ...
+    def add_latent_node(self, numb_new_nodes: int | None = None) -> dict[str, Any]: ...
+    def remove_latent_node(
+        self, numb_new_nodes: int | None = None
+    ) -> dict[str, Any]: ...
+    def recreate_encoder(self) -> None: ...
+    def initialize_hidden_state(
+        self, batch_size: int = 1
+    ) -> dict[str, torch.Tensor]: ...
+    def init_weights_gaussian(
+        self, std_coeff: float = 4.0, output_coeff: float = 2.0
+    ) -> None: ...
     def _build_encoder(self, *args, **kwargs) -> None: ...
 
 
-T = TypeVar("T", bound=EvolvableModule | EvolvableNetwork)
+T = TypeVar("T", bound=EvolvableModuleProtocol | EvolvableNetworkProtocol)
 
 
 @runtime_checkable
-class ModuleDict(Protocol, Generic[T]):
+class ModuleDictProtocol(Protocol, Generic[T]):
     """Protocol for dictionary-like containers of evolvable modules.
 
     Provides access to multiple evolvable modules through a dictionary interface
@@ -152,7 +160,7 @@ class ModuleDict(Protocol, Generic[T]):
     def values(self) -> Iterable[T]: ...
     def items(self) -> Iterable[tuple[str, T]]: ...
     def modules(self) -> dict[str, T]: ...
-    def get_mutation_methods(self) -> dict[str, MutationMethod]: ...
+    def get_mutation_methods(self) -> dict[str, MutationMethodProtocol]: ...
     def filter_mutation_methods(self, method: str) -> None: ...
 
     @property
@@ -163,15 +171,15 @@ class ModuleDict(Protocol, Generic[T]):
     def node_mutation_methods(self) -> list[str]: ...
 
 
-EvolvableNetworkType = EvolvableModule | ModuleDict
-OptimizerType = Optimizer | dict[str, Optimizer] | OptimizerWrapper
+EvolvableNetworkType = EvolvableModuleProtocol | ModuleDictProtocol
+OptimizerType = Optimizer | dict[str, Optimizer] | OptimizerWrapperProtocol
 EvolvableAttributeType = EvolvableNetworkType | OptimizerType
-EvolvableNetworkDict = dict[str, EvolvableNetworkType]
+EvolvableNetworkDict = dict[str, EvolvableNetworkProtocol]
 EvolvableAttributeDict = dict[str, EvolvableAttributeType]
 
 
 @runtime_checkable
-class NetworkConfig(Protocol):
+class NetworkConfigProtocol(Protocol):
     """Protocol for network configuration information.
 
     Stores metadata about networks including their name, evaluation status,
@@ -184,15 +192,15 @@ class NetworkConfig(Protocol):
 
 
 @runtime_checkable
-class NetworkGroup(Protocol):
+class NetworkGroupProtocol(Protocol):
     """Protocol for grouping related networks in an algorithm.
 
     Groups evaluation and shared networks together, indicating whether
     they represent policy networks and if they're used in multi-agent setups.
     """
 
-    eval: EvolvableNetworkType
-    shared: EvolvableNetworkType | list[EvolvableNetworkType] | None
+    eval: EvolvableNetworkProtocol
+    shared: EvolvableNetworkProtocol | list[EvolvableNetworkProtocol] | None
     policy: bool
     multiagent: bool
 
@@ -216,25 +224,27 @@ class OptimizerConfig(Protocol):
 
 
 @runtime_checkable
-class MutationRegistry(Protocol):
+class MutationRegistryProtocol(Protocol):
     """Protocol for registering and managing mutation-related components.
 
     Maintains collections of network groups, optimizers, and hooks that
     are used during the mutation and evolution process.
     """
 
-    groups: list[NetworkGroup]
+    groups: list[NetworkGroupProtocol]
     optimizers: list[OptimizerConfig]
-    hooks: list[Callable]
+    hooks: list[Callable[[], None]]
 
-    def networks(self) -> list[NetworkConfig]: ...
+    def networks(self) -> list[NetworkConfigProtocol]: ...
 
 
-SelfEvolvableAlgorithm = TypeVar("SelfEvolvableAlgorithm", bound="EvolvableAlgorithm")
+SelfEvolvableAlgorithm = TypeVar(
+    "SelfEvolvableAlgorithm", bound="EvolvableAlgorithmProtocol"
+)
 
 
 @runtime_checkable
-class EvolvableAlgorithm(Protocol):
+class EvolvableAlgorithmProtocol(Protocol):
     """Protocol for reinforcement learning algorithms that support evolution.
 
     Evolvable algorithms can undergo mutations to their network architectures
@@ -244,7 +254,7 @@ class EvolvableAlgorithm(Protocol):
 
     device: str | torch.device
     accelerator: Accelerator
-    registry: MutationRegistry
+    registry: MutationRegistryProtocol
     mut: str | None
     index: int
     scores: list[float]
@@ -280,11 +290,11 @@ class EvolvableAlgorithm(Protocol):
 
 
 # Define a TypeVar for EvolvableAlgorithm that can be used for generic typing
-T_EvolvableAlgorithm = TypeVar("T_EvolvableAlgorithm", bound=EvolvableAlgorithm)
+T_EvolvableAlgorithm = TypeVar("T_EvolvableAlgorithm", bound=EvolvableAlgorithmProtocol)
 
 
 @runtime_checkable
-class AgentWrapper(Protocol, Generic[T_EvolvableAlgorithm]):
+class AgentWrapperProtocol(Protocol, Generic[T_EvolvableAlgorithm]):
     """Protocol for wrapper classes that encapsulate evolvable algorithms.
 
     Agent wrappers provide additional functionality around evolvable algorithms
@@ -402,10 +412,7 @@ class PeftModelProtocol(Protocol):
     They extend PreTrainedModel functionality with adapter-specific operations.
     """
 
-    device: DeviceType
-    config: Any
     peft_config: dict[str, Any]
-    base_model: PreTrainedModelProtocol
 
     def eval(self) -> "PeftModelProtocol": ...
     def train(self, mode: bool = True) -> "PeftModelProtocol": ...

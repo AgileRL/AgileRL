@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from torch.optim import Optimizer
 
-from agilerl.protocols import EvolvableAlgorithm
+from agilerl.protocols import EvolvableAlgorithmProtocol
 from agilerl.typing import NetworkType
 from agilerl.utils.algo_utils import DummyOptimizer
 
@@ -293,7 +293,7 @@ class NetworkGroup:
     def __hash__(self) -> int:
         return hash((self.eval_network, self.shared_networks, self.policy))
 
-    def _infer_parent_container(self) -> EvolvableAlgorithm:
+    def _infer_parent_container(self) -> EvolvableAlgorithmProtocol:
         """
         Infer the parent container dynamically using the stack frame.
 

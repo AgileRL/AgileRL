@@ -6,7 +6,7 @@ from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from functools import singledispatch
 from numbers import Number
-from typing import Any, ForwardRef
+from typing import Any, ForwardRef, Union
 
 import numpy as np
 import torch
@@ -23,10 +23,8 @@ from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.protocols import (
     EvolvableAttributeType,
-    EvolvableModule,
-    EvolvableNetwork,
-    ModuleDict,
-    OptimizerWrapper,
+    EvolvableModuleProtocol,
+    EvolvableNetworkProtocol,
 )
 from agilerl.typing import (
     ArrayOrTensor,
@@ -50,7 +48,11 @@ if HAS_LLM_DEPENDENCIES:
 
     PreTrainedModelType = PeftModel | PreTrainedModel
 else:
-    PreTrainedModelType = ForwardRef("PeftModel") | ForwardRef("PreTrainedModel")
+    # Union[] required: ForwardRef does not support | in Python 3.10
+    PreTrainedModelType = Union[
+        ForwardRef("PeftModel"),
+        ForwardRef("PreTrainedModel"),
+    ]
 
 
 def check_supported_space(observation_space: GymSpaceType) -> None:
@@ -154,15 +156,18 @@ def get_output_size_from_space(
 
 
 def share_encoder_parameters(
-    policy: EvolvableNetwork, *others: EvolvableNetwork
+    policy: EvolvableNetworkProtocol, *others: EvolvableNetworkProtocol
 ) -> None:
     """Shares the encoder parameters between the policy and any number of other networks.
 
     :param policy: The policy network whose encoder parameters will be used.
-    :type policy: EvolvableNetwork
+    :type policy: EvolvableNetworkProtocol
     :param others: The other networks whose encoder parameters will be pinned to the policy.
-    :type others: EvolvableNetwork
+    :type others: EvolvableNetworkProtocol
     """
+
+    from agilerl.networks.base import EvolvableNetwork
+
     assert isinstance(policy, EvolvableNetwork), "Policy must be an EvolvableNetwork"
     assert all(
         isinstance(other, EvolvableNetwork) for other in others
@@ -337,15 +342,15 @@ def get_num_actions(space: spaces.Space) -> int:
 
 
 def make_safe_deepcopies(
-    *args: EvolvableModule | list[EvolvableModule],
-) -> list[EvolvableModule]:
+    *args: EvolvableModuleProtocol | list[EvolvableModuleProtocol],
+) -> list[EvolvableModuleProtocol]:
     """Makes deep copies of EvolvableModule objects and their attributes.
 
-    :param args: EvolvableModule or lists of EvolvableModule objects to copy.
-    :type args: EvolvableModule | list[EvolvableModule].
+    :param args: EvolvableModuleProtocol or lists of EvolvableModuleProtocol objects to copy.
+    :type args: EvolvableModuleProtocol | list[EvolvableModuleProtocol].
 
     :return: Deep copies of the EvolvableModule objects and their attributes.
-    :rtype: list[EvolvableModule].
+    :rtype: list[EvolvableModuleProtocol].
     """
     copies = []
     for arg in args:
@@ -376,17 +381,20 @@ def isroutine(obj: object) -> bool:
 
 
 def recursive_check_module_attrs(obj: Any, networks_only: bool = False) -> bool:
-    """Recursively check if the object has any attributes that are EvolvableModule objects or Optimizer's,
+    """Recursively check if the object has any attributes that are EvolvableModuleProtocol objects or Optimizer's,
     excluding metaclasses.
 
-    :param obj: The object to check for EvolvableModule objects or Optimizer's.
+    :param obj: The object to check for EvolvableModuleProtocol objects or Optimizer's.
     :type obj: Any
     :param networks_only: If True, only check for EvolvableModule objects, defaults to False
     :type networks_only: bool, optional
 
-    :return: True if the object has any attributes that are EvolvableModule objects or Optimizer's, False otherwise.
+    :return: True if the object has any attributes that are EvolvableModuleProtocol objects or Optimizer's, False otherwise.
     :rtype: bool
     """
+    from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
+    from agilerl.modules.base import EvolvableModule
+
     check_types = (OptimizedModule, EvolvableModule)
     if not networks_only:
         check_types += (OptimizerWrapper,)
@@ -482,17 +490,21 @@ def module_checkpoint_dict(module: EvolvableAttributeType, name: str) -> dict[st
     :return: A dictionary containing the module's class, init dict, and state dict.
     :rtype: dict[str, Any]
     """
+    from agilerl.modules.base import ModuleDict
+
     if isinstance(module, ModuleDict):
         return module_checkpoint_multiagent(module, name)
 
     return module_checkpoint_single(module, name)
 
 
-def module_checkpoint_single(module: EvolvableModule, name: str) -> dict[str, Any]:
+def module_checkpoint_single(
+    module: EvolvableModuleProtocol, name: str
+) -> dict[str, Any]:
     """Returns a dictionary containing the module's class, init dict, and state dict.
 
     :param module: The module to checkpoint.
-    :type module: EvolvableModule
+    :type module: EvolvableModuleProtocol
     :param name: The name of the attribute to checkpoint.
     :type name: str
     :return: A dictionary containing the module's class, init dict, and state dict.
@@ -517,7 +529,7 @@ def module_checkpoint_multiagent(module: MultiAgentModule, name: str) -> dict[st
     """Returns a dictionary containing the module's class, init dict, and state dict.
 
     :param module: The module to checkpoint.
-    :type module: ModuleDict
+    :type module: ModuleDictProtocol
     :param name: The name of the attribute to checkpoint.
     :type name: str
     :return: A dictionary containing the module's class, init dict, and state dict.

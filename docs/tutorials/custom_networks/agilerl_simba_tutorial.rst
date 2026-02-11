@@ -116,7 +116,7 @@ we show our implementation of the SimBa residual block, as well as the function 
             :return: Residual block.
             :rtype: nn.Sequential
             """
-            net_dict: Dict[str, nn.Module] = OrderedDict()
+            net_dict: dict[str, nn.Module] = OrderedDict()
 
             # Initial dense layer
             net_dict[f"{name}_linear_layer_input"] = nn.Linear(
@@ -171,7 +171,7 @@ mutate its hyperparameters through class methods wrapped by the ``@mutation`` de
             :param num_outputs: Output layer dimension
             :type num_outputs: int
             :param hidden_size: Hidden layer(s) size
-            :type hidden_size: List[int]
+            :type hidden_size: list[int]
             :param num_blocks: Number of residual blocks that compose the network
             :type num_blocks: int
             :param output_activation: Output activation layer, defaults to None

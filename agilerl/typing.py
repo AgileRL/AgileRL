@@ -21,10 +21,10 @@ from torch.nn import Module
 from torch.optim import Optimizer
 
 from agilerl.protocols import (
-    EvolvableAlgorithm,
-    EvolvableModule,
-    EvolvableNetwork,
-    ModuleDict,
+    EvolvableAlgorithmProtocol,
+    EvolvableModuleProtocol,
+    EvolvableNetworkProtocol,
+    ModuleDictProtocol,
 )
 
 # Type variable for module types - bound to Module to ensure all types inherit from it
@@ -109,10 +109,14 @@ PzStepReturn = tuple[
     dict[str, NumpyObsType], ArrayDict, ArrayDict, ArrayDict, dict[str, Any]
 ]
 
-SingleAgentModule = T | EvolvableModule | OptimizedModule | EvolvableNetwork
-MultiAgentModule = ModuleDict[SingleAgentModule[T]]
+SingleAgentModule = (
+    T | EvolvableModuleProtocol | OptimizedModule | EvolvableNetworkProtocol
+)
+MultiAgentModule = ModuleDictProtocol[SingleAgentModule[T]]
 NetworkType = SingleAgentModule[T] | MultiAgentModule[T]
-EvolvableNetworkType = EvolvableModule | ModuleDict[EvolvableModule]
+EvolvableNetworkType = (
+    EvolvableModuleProtocol | ModuleDictProtocol[EvolvableModuleProtocol]
+)
 DeviceType = str | torch.device
 OptimizerType = Optimizer | AcceleratedOptimizer
 ConfigType = IsDataclass | NetConfigType
@@ -121,8 +125,8 @@ StateDict = dict[str, Any] | dict[str, dict[str, Any]]
 SingleAgentMutReturnType = dict[str, Any]
 MultiAgentMutReturnType = dict[str, dict[str, Any]]
 MutationReturnType = SingleAgentMutReturnType | MultiAgentMutReturnType
-PopulationType = list[EvolvableAlgorithm]
-MutationMethod = Callable[[EvolvableAlgorithm], EvolvableAlgorithm]
+PopulationType = list[EvolvableAlgorithmProtocol]
+MutationMethod = Callable[[EvolvableAlgorithmProtocol], EvolvableAlgorithmProtocol]
 ConfigType = IsDataclass | dict[str, Any]
 StateDict = dict[str, Any] | list[dict[str, Any]]
 

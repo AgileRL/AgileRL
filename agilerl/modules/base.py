@@ -18,24 +18,26 @@ from numpy.random import Generator
 from torch._dynamo import OptimizedModule
 
 from agilerl.modules.custom_components import NoisyLinear
-from agilerl.protocols import MutationMethod, MutationType
+from agilerl.protocols import MutationMethodProtocol, MutationType
 
 SelfEvolvableModule = TypeVar("SelfEvolvableModule", bound="EvolvableModule")
 
 
 def mutation(
     mutation_type: MutationType, **recreate_kwargs
-) -> Callable[[Callable], MutationMethod]:
+) -> Callable[[Callable], MutationMethodProtocol]:
     """Decorator to register a method as a mutation function of a specific type. This signals
     that the module should be recreated after the function has been called on the module.
 
     :param mutation_type: The type of mutation function.
     :type mutation_type: MutationType
     :return: The decorator function.
-    :rtype: Callable[[Callable], MutationMethod]
+    :rtype: Callable[[Callable], MutationMethodProtocol]
     """
 
-    def decorator(func: Callable[[Any], dict[str, Any] | None]) -> MutationMethod:
+    def decorator(
+        func: Callable[[Any], dict[str, Any] | None],
+    ) -> MutationMethodProtocol:
         @wraps(func)
         def wrapper(self, *args, **kwargs):
             return func(self, *args, **kwargs)
@@ -67,7 +69,10 @@ class MutationContext:
     """
 
     def __init__(
-        self, module: SelfEvolvableModule, method: MutationMethod, attribute: str
+        self,
+        module: SelfEvolvableModule,
+        method: MutationMethodProtocol,
+        attribute: str,
     ):
         self.module = module
         self.method = method
@@ -147,14 +152,14 @@ class MutationContext:
 
 
 def _mutation_wrapper(
-    module: SelfEvolvableModule, method: MutationMethod, attribute: str
+    module: SelfEvolvableModule, method: MutationMethodProtocol, attribute: str
 ) -> Callable:
     """Wraps mutation methods to use context manager.
 
     :param module: The evolvable module.
     :type module: EvolvableModule
     :param method: The mutation method.
-    :type method: MutationMethod
+    :type method: MutationMethodProtocol
     :param attribute: The mutation attribute.
     :type attribute: str
 
@@ -296,11 +301,11 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         return None
 
     @property
-    def last_mutation(self) -> MutationMethod | None:
+    def last_mutation(self) -> MutationMethodProtocol | None:
         return self._last_mutation
 
     @last_mutation.setter
-    def last_mutation(self, value: MutationMethod) -> None:
+    def last_mutation(self, value: MutationMethodProtocol) -> None:
         self._last_mutation = value
 
     @property
@@ -512,11 +517,11 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
             return [
                 method
                 for method in vars(cls).values()
-                if isinstance(method, MutationMethod)
+                if isinstance(method, MutationMethodProtocol)
             ]
 
         # Check mutation methods in class
-        class_methods: list[MutationMethod] = _fetch_methods(self.__class__)
+        class_methods: list[MutationMethodProtocol] = _fetch_methods(self.__class__)
         layer_methods = []
         node_methods = []
         for method in class_methods:
@@ -531,7 +536,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
                 if base is EvolvableModule:
                     return
 
-                base_methods: list[MutationMethod] = _fetch_methods(base)
+                base_methods: list[MutationMethodProtocol] = _fetch_methods(base)
                 for method in base_methods:
                     if method._mutation_type == MutationType.LAYER:
                         layer_methods.append(method.__name__)
@@ -601,15 +606,15 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         """
         return super().modules()
 
-    def get_mutation_methods(self) -> dict[str, MutationMethod]:
+    def get_mutation_methods(self) -> dict[str, MutationMethodProtocol]:
         """Get all mutation methods for the network as dictionary of method names to
         mutation methods.
 
         :return: A dictionary of mutation methods.
-        :rtype: dict[str, MutationMethod]
+        :rtype: dict[str, MutationMethodProtocol]
         """
 
-        def get_method_from_name(name: str) -> MutationMethod:
+        def get_method_from_name(name: str) -> MutationMethodProtocol:
             if "." not in name:
                 return getattr(self, name)
 
@@ -661,7 +666,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
 
     def sample_mutation_method(
         self, new_layer_prob: float, rng: Generator | None = None
-    ) -> MutationMethod:
+    ) -> MutationMethodProtocol:
         """Sample a mutation method based on the mutation probabilities.
 
         :param new_layer_prob: The probability of selecting a layer mutation method.
@@ -669,7 +674,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         :param rng: The random number generator.
         type rng: Generator | None
         return: The sampled mutation method.
-        rtype: MutationMethod
+        rtype: MutationMethodProtocol
         """
         if not self.mutation_methods:
             raise ValueError(
@@ -864,14 +869,14 @@ class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleType]):
 
         return evo_modules
 
-    def get_mutation_methods(self) -> dict[str, MutationMethod]:
+    def get_mutation_methods(self) -> dict[str, MutationMethodProtocol]:
         """Get all mutation methods for the network.
 
         :return: A dictionary of mutation methods.
-        :rtype: dict[str, MutationMethod]
+        :rtype: dict[str, MutationMethodProtocol]
         """
 
-        def get_method_from_name(name: str) -> MutationMethod:
+        def get_method_from_name(name: str) -> MutationMethodProtocol:
             if "." not in name:
                 return getattr(self, name)
 
