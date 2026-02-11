@@ -1,5 +1,5 @@
 import inspect
-from typing import Any
+from typing import Any, Union
 
 import torch.nn as nn
 from torch.optim import Optimizer
@@ -19,7 +19,7 @@ else:
 
 ModuleList = list[EvolvableModule]
 _Optimizer = type[OptimizerType] | dict[str, type[OptimizerType]] | type[DummyOptimizer]
-_Module = EvolvableModule | ModuleDict | ModuleList | PeftModelType
+_Module = Union[EvolvableModule, ModuleDict, ModuleList, PeftModelType]
 
 
 def init_from_multiple(

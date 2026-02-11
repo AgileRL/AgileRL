@@ -9,7 +9,7 @@ from copy import deepcopy
 from enum import Enum
 from multiprocessing.connection import Connection
 from multiprocessing.sharedctypes import RawArray
-from typing import Any, Callable, TypeAlias, TypeVar
+from typing import Any, Callable, TypeAlias, TypeVar, Union
 
 import numpy as np
 from gymnasium import logger, spaces
@@ -27,7 +27,7 @@ from agilerl.vector.pz_vec_env import PettingZooVecEnv
 AgentID = TypeVar("AgentID")
 ObsType = TypeVar("ObsType")
 PzEnvType = PettingZooVecEnv | ParallelEnv
-SharedMemoryType: TypeAlias = RawArray | tuple[RawArray, ...] | dict[str, RawArray]
+SharedMemoryType: TypeAlias = Union[RawArray, tuple[RawArray, ...], dict[str, RawArray]]
 
 
 def reshape_observation(

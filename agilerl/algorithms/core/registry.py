@@ -1,7 +1,7 @@
 import inspect
 from dataclasses import dataclass, field
 from numbers import Number
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import numpy as np
 import torch
@@ -399,7 +399,7 @@ class MutationRegistry:
         )
         return f"Network Groups:\n{groups_str}\n\nOptimizers:\n{optimizers_str}"
 
-    def __eq__(self, other: "MutationRegistry" | None) -> bool:
+    def __eq__(self, other: Optional["MutationRegistry"]) -> bool:
         """Check if two MutationRegistry objects are equal. This involves checking
         that the network groups and optimizer configurations are the same.
 

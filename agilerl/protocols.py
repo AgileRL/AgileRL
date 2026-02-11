@@ -382,7 +382,7 @@ class PreTrainedModelProtocol(Protocol):
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
-        generation_config: "GenerationConfigProtocol" | None = None,
+        generation_config: GenerationConfigProtocol | None = None,
         **kwargs: Any,
     ) -> torch.Tensor: ...
     def forward(self, *args: Any, **kwargs: Any) -> Any: ...
@@ -413,7 +413,7 @@ class PeftModelProtocol(Protocol):
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
-        generation_config: "GenerationConfigProtocol" | None = None,
+        generation_config: GenerationConfigProtocol | None = None,
         **kwargs: Any,
     ) -> torch.Tensor: ...
     def forward(self, *args: Any, **kwargs: Any) -> Any: ...

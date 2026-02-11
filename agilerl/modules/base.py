@@ -254,8 +254,8 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
     :type random_seed: int | None
     """
 
-    _evolvable_modules: dict[str, "EvolvableModule" | None]
-    _mutation_hooks: list[Callable]
+    _evolvable_modules: dict[str, SelfEvolvableModule]
+    _mutation_hooks: list[Callable[[], None]]
 
     def __init__(self, device: str, random_seed: int | None = None) -> None:
         nn.Module.__init__(self)
@@ -589,7 +589,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
             the evolvable modules. If you need the torch modules, use :meth:`torch_modules()` instead.
 
         :return: A dictionary of network attributes.
-        :rtype: dict[str, Any]
+        :rtype: dict[str, EvolvableModule]
         """
         return self._evolvable_modules
 
@@ -691,6 +691,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         clone = self.__class__(**copy.deepcopy(self.get_init_dict()))
         clone.rng = self.rng
 
+        # Copy mutation methods
         clone._layer_mutation_methods = self._layer_mutation_methods
         clone._node_mutation_methods = self._node_mutation_methods
         for name, module in clone._evolvable_modules.items():
