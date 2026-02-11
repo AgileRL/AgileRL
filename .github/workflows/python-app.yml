@@ -29,6 +29,9 @@ jobs:
 
         steps:
             - uses: actions/checkout@v4
+            - uses: actions/setup-python@v6
+              with:
+                  python-version: ${{ matrix.python-version }}
             - uses: astral-sh/setup-uv@v7
               with:
                   enable-cache: true
@@ -37,7 +40,7 @@ jobs:
             - name: Install dependencies
               run: |
                   uv pip install --system ruff pytest pytest-cov black codespell yamlfmt isort pyupgrade
-                  uv sync --system --locked --all-groups --extra all
+                  uv pip install --system -e .[all]
 
             - name: Run black
               run: |
