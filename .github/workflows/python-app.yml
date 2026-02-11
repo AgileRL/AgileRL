@@ -36,8 +36,9 @@ jobs:
 
             - name: Install dependencies
               run: |
-                  uv pip install --system ruff pytest pytest-cov black codespell yamlfmt isort pyupgrade
-                  uv pip install --system -e .[all]
+                  uv venv .venv --python ${{ matrix.python-version }}
+                  uv pip install ruff pytest pytest-cov black codespell yamlfmt isort pyupgrade
+                  uv sync --locked --all-groups --extra all
 
             - name: Run black
               run: |
