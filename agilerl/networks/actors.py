@@ -143,7 +143,7 @@ class DeterministicActor(EvolvableNetwork):
         self.build_network_head(head_config)  # Build network head
 
     @staticmethod
-    def scale_action(
+    def rescale_action(
         action: torch.Tensor,
         low: torch.Tensor,
         high: torch.Tensor,
@@ -250,9 +250,6 @@ class StochasticActor(EvolvableNetwork):
     :type recurrent: bool
     :param device: Device to use for the network.
     :type device: str
-    :param use_experimental_distribution: Whether to use the experimental distribution implementation, which
-        includes several optimizations related to using torch primitives for statistics calculations. Defaults to False.
-    :type use_experimental_distribution: bool
     :param random_seed: Random seed to use for the network. Defaults to None.
     :type random_seed: int | None
     :param encoder_name: Name of the encoder network.
@@ -282,10 +279,9 @@ class StochasticActor(EvolvableNetwork):
         simba: bool = False,
         recurrent: bool = False,
         device: str = "cpu",
-        use_experimental_distribution: bool = False,
         random_seed: int | None = None,
         encoder_name: str = "encoder",
-    ):
+    ) -> None:
         super().__init__(
             observation_space,
             encoder_cls=encoder_cls,
@@ -301,7 +297,7 @@ class StochasticActor(EvolvableNetwork):
             encoder_name=encoder_name,
         )
 
-        # Require the head to output logits to parameterize a distribution
+        # Require the head to output logits to parameterize a distribution (i.e. no output activation)
         if head_config is None:
             head_config = MlpNetConfig(hidden_size=[32], output_activation=None)
         else:
@@ -310,29 +306,20 @@ class StochasticActor(EvolvableNetwork):
         self.action_std_init = action_std_init
         self.squash_output = squash_output
         self.action_space = action_space
-        self.use_experimental_distribution = use_experimental_distribution
         self.output_size = get_output_size_from_space(self.action_space)
 
-        self.build_network_head(head_config)
-        self.output_activation = None
-
-        if isinstance(self.action_space, spaces.Box):
+        if isinstance(action_space, spaces.Box):
             self.action_low = torch.as_tensor(
-                self.action_space.low, device=self.device, dtype=torch.float32
+                action_space.low, device=self.device, dtype=torch.float32
             )
             self.action_high = torch.as_tensor(
-                self.action_space.high, device=self.device, dtype=torch.float32
+                action_space.high, device=self.device, dtype=torch.float32
             )
         else:
             self.action_low, self.action_high = None, None
 
-        # Wrap the network in an EvolvableDistribution
-        if use_experimental_distribution:
-            from agilerl.networks.distributions_experimental import (
-                EvolvableDistribution,
-            )
-        else:
-            from agilerl.networks.distributions import EvolvableDistribution
+        self.build_network_head(head_config)
+        self.output_activation = None
 
         self.head_net = EvolvableDistribution(
             action_space=action_space,
@@ -355,12 +342,12 @@ class StochasticActor(EvolvableNetwork):
             net_config=net_config,
         )
 
-    def scale_action(self, action: torch.Tensor) -> torch.Tensor:
-        """Scale the action from [-1, 1] to the action space bounds [low, high].
+    def rescale_action(self, action: torch.Tensor) -> torch.Tensor:
+        """Rescale the action from [-1, 1] to the action space bounds [low, high].
 
         :param action: Action.
         :type action: torch.Tensor
-        :return: Scaled action.
+        :return: Rescaled action.
         :rtype: torch.Tensor
         """
         return self.action_low + (
@@ -384,7 +371,7 @@ class StochasticActor(EvolvableNetwork):
 
         # Action scaling only relevant for continuous action spaces with squashing
         if isinstance(self.action_space, spaces.Box) and self.squash_output:
-            action = self.scale_action(action)
+            action = self.rescale_action(action)
 
         return action, log_prob, entropy
 
