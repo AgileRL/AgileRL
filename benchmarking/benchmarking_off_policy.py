@@ -5,7 +5,6 @@ from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.modules.dummy import DummyEvolvable
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.utils.algo_utils import (
@@ -18,7 +17,6 @@ from agilerl.utils.utils import (
     observation_space_channels_to_first,
     print_hyperparams,
 )
-from benchmarking.networks import BasicNetActorDQN
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
