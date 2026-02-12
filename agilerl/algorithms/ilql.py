@@ -6,11 +6,11 @@ from typing import Any
 
 import numpy as np
 import torch
+import wandb
 from torch import nn, optim
 from torch.nn import functional as F
 from tqdm import tqdm
 
-import wandb
 from agilerl.data.rl_data import DataPoint
 from agilerl.modules.gpt import EvolvableGPT
 from agilerl.modules.mlp import EvolvableMLP
