@@ -186,6 +186,70 @@ def test_constructor_initializes_attributes():
     del mutations
 
 
+def test_find_analogous_mutation_returns_none_for_empty_sampled():
+    mutations = Mutations(0, 0, 0, 0, 0, 0, 0.1, device="cpu")
+    assert (
+        mutations._find_analogous_mutation(
+            "", ["agent_0.vector_mlp.add_node"], "agent_0"
+        )
+        is None
+    )
+
+
+def test_find_analogous_mutation_returns_exact_match():
+    mutations = Mutations(0, 0, 0, 0, 0, 0, 0.1, device="cpu")
+    available = ["agent_0.vector_mlp.add_node", "agent_1.vector_mlp.add_node"]
+    assert (
+        mutations._find_analogous_mutation(
+            "agent_0.vector_mlp.add_node", available, "agent_0"
+        )
+        == "agent_0.vector_mlp.add_node"
+    )
+
+
+def test_find_analogous_mutation_returns_analogous_by_policy_agent():
+    mutations = Mutations(0, 0, 0, 0, 0, 0, 0.1, device="cpu")
+    # Sampled from agent_0, look for same bottom-level method with policy_agent in path.
+    # Implementation returns the first match; put agent_1 first so we get the one with policy_agent.
+    available = ["agent_1.vector_mlp.add_node", "agent_0.vector_mlp.add_node"]
+    result = mutations._find_analogous_mutation(
+        "agent_0.encoder.add_node", available, "agent_1"
+    )
+    assert result == "agent_1.vector_mlp.add_node"
+
+
+def test_find_analogous_mutation_returns_analogous_by_vector_mlp():
+    mutations = Mutations(0, 0, 0, 0, 0, 0, 0.1, device="cpu")
+    available = ["agent_0.vector_mlp.add_node"]
+    result = mutations._find_analogous_mutation(
+        "other_module.add_node", available, "agent_0"
+    )
+    assert result == "agent_0.vector_mlp.add_node"
+
+
+def test_find_analogous_mutation_returns_none_when_no_analogous():
+    mutations = Mutations(0, 0, 0, 0, 0, 0, 0.1, device="cpu")
+    available = ["agent_0.vector_mlp.add_channel"]  # different bottom-level method
+    assert (
+        mutations._find_analogous_mutation(
+            "agent_0.encoder.add_node", available, "agent_0"
+        )
+        is None
+    )
+
+
+def test_find_analogous_mutation_returns_none_when_bottom_matches_but_no_agent_or_mlp():
+    mutations = Mutations(0, 0, 0, 0, 0, 0, 0.1, device="cpu")
+    # Method has same bottom-level but neither policy_agent nor 'vector_mlp' in parts
+    available = ["other.add_node"]
+    assert (
+        mutations._find_analogous_mutation(
+            "agent_0.encoder.add_node", available, "agent_0"
+        )
+        is None
+    )
+
+
 # Checks no mutations if all probabilities set to zero
 @pytest.mark.parametrize("algo", ["DQN"])
 @pytest.mark.parametrize(
