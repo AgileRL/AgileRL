@@ -1160,6 +1160,7 @@ def test_ppo_with_hidden_states_multiple_envs_collect_rollouts():
         use_rollout_buffer=True,
         recurrent=True,
         num_envs=num_envs,
+        batch_size=num_envs,
         learn_step=5,
         max_seq_len=5,
         net_config={
@@ -1229,6 +1230,7 @@ def test_ppo_with_hidden_states_multiple_envs_collect_rollouts_and_test():
         use_rollout_buffer=True,
         recurrent=True,
         num_envs=num_envs,
+        batch_size=num_envs,
         learn_step=5,
         max_seq_len=5,
         net_config={
