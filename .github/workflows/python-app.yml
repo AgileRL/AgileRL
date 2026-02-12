@@ -48,7 +48,7 @@ jobs:
 
             - name: Run black
               run: |
-                  black .
+                  uv run black .
             - name: Spellcheck with codespell
               run: |
                   uv run codespell --skip=*.css,*.js,*.map,*.scss,*.svg --ignore-words-list=magent,pres,roate
