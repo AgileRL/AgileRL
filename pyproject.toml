@@ -82,7 +82,7 @@ filterwarnings = [
     "ignore:Activation mutations are not supported for .*:UserWarning:agilerl.hpo.mutation",
     # Pygame warnings
     "ignore:pkg_resources is deprecated",
-    "ignore:Deprecated call to `pkg_resources"
+    "ignore:Deprecated call to `pkg_resources.*"
 ]
 markers = [
     "llm: LLM-related tests (exclude with -m 'not llm')",

@@ -365,7 +365,7 @@ def test_maybe_add_batch_dim():
 
 
 # Create a custom evolvable module class for testing
-class TestEvolvableModule(EvolvableNetwork):
+class DummyEvolvableModule(EvolvableNetwork):
     def __init__(self):
         test_space = spaces.Box(low=0, high=1, shape=(10,))
         super().__init__(test_space)
@@ -392,7 +392,7 @@ class TestEvolvableModule(EvolvableNetwork):
 
 def test_recursive_check_module_attrs():
     # Create a test module
-    module = TestEvolvableModule()
+    module = DummyEvolvableModule()
 
     # The function has complex logic that depends on many aspects
     # Use mocking to make the test pass
@@ -443,22 +443,22 @@ def test_chkpt_attribute_to_device():
 
 def test_make_safe_deepcopies():
     # Create modules for testing
-    module1 = TestEvolvableModule()
-    module2 = TestEvolvableModule()
+    module1 = DummyEvolvableModule()
+    module2 = DummyEvolvableModule()
 
     # Single module
-    with patch("copy.deepcopy", return_value=TestEvolvableModule()):
+    with patch("copy.deepcopy", return_value=DummyEvolvableModule()):
         copied_module = make_safe_deepcopies(module1)
         assert copied_module is not module1
 
     # List of modules
     module_list = [module1, module2]
-    with patch("copy.deepcopy", return_value=TestEvolvableModule()):
+    with patch("copy.deepcopy", return_value=DummyEvolvableModule()):
         copied_list = make_safe_deepcopies(module_list)
         assert len(copied_list) == len(module_list)
 
     # Multiple arguments
-    with patch("copy.deepcopy", return_value=TestEvolvableModule()):
+    with patch("copy.deepcopy", return_value=DummyEvolvableModule()):
         copied1, copied2 = make_safe_deepcopies(module1, module2)
         assert copied1 is not module1
         assert copied2 is not module2
