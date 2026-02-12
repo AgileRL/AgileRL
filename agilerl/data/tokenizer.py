@@ -21,7 +21,9 @@ class Tokenizer(ABC):
 
     @abstractmethod
     def encode(
-        self, str_: str | list[str], **kwargs
+        self,
+        str_: str | list[str],
+        **kwargs,
     ) -> tuple[list[int] | list[list[int]], list[int] | list[list[int]]]:
         pass
 

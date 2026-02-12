@@ -2,8 +2,8 @@ import random
 
 import numpy as np
 import torch
-import torch.nn as nn
 from gymnasium import spaces
+from torch import nn
 from tqdm import trange
 
 
@@ -24,16 +24,19 @@ class ConstantRewardEnv:
         }
 
         self.sample_obs = [
-            {"agent_0": np.array([[0]]), "other_agent_0": np.array([[0]])}
+            {"agent_0": np.array([[0]]), "other_agent_0": np.array([[0]])},
         ]
         self.sample_actions = [
-            {"agent_0": np.array([[0.2, 0.8]]), "other_agent_0": np.array([[0.8, 0.2]])}
+            {
+                "agent_0": np.array([[0.2, 0.8]]),
+                "other_agent_0": np.array([[0.8, 0.2]]),
+            },
         ]
         self.q_values = [
-            {"agent_0": 1.0, "other_agent_0": 0.0}
+            {"agent_0": 1.0, "other_agent_0": 0.0},
         ]  # Correct Q values to learn, s x a table
         self.v_values = [
-            {"agent_0": 1.0, "other_agent_0": 0.0}
+            {"agent_0": 1.0, "other_agent_0": 0.0},
         ]  # Correct V values to learn, s table
         self.policy_values = [None]
 
@@ -68,16 +71,22 @@ class ConstantRewardImageEnv:
         }
 
         self.sample_obs = [
-            {"agent_0": np.zeros((1, 1, 3, 3)), "other_agent_0": np.zeros((1, 1, 3, 3))}
+            {
+                "agent_0": np.zeros((1, 1, 3, 3)),
+                "other_agent_0": np.zeros((1, 1, 3, 3)),
+            },
         ]
         self.sample_actions = [
-            {"agent_0": np.array([[0.2, 0.8]]), "other_agent_0": np.array([[0.8, 0.2]])}
+            {
+                "agent_0": np.array([[0.2, 0.8]]),
+                "other_agent_0": np.array([[0.8, 0.2]]),
+            },
         ]
         self.q_values = [
-            {"agent_0": 1.0, "other_agent_0": 0.0}
+            {"agent_0": 1.0, "other_agent_0": 0.0},
         ]  # Correct Q values to learn, s x a table
         self.v_values = [
-            {"agent_0": 1.0, "other_agent_0": 0.0}
+            {"agent_0": 1.0, "other_agent_0": 0.0},
         ]  # Correct V values to learn, s table
         self.policy_values = [None]
 
@@ -118,16 +127,16 @@ class ConstantRewardContActionsEnv:
         }
 
         self.sample_obs = [
-            {"agent_0": np.array([[0]]), "other_agent_0": np.array([[0]])}
+            {"agent_0": np.array([[0]]), "other_agent_0": np.array([[0]])},
         ]
         self.sample_actions = [
-            {"agent_0": np.array([[0.0]]), "other_agent_0": np.array([[1.0]])}
+            {"agent_0": np.array([[0.0]]), "other_agent_0": np.array([[1.0]])},
         ]
         self.q_values = [
-            {"agent_0": 1.0, "other_agent_0": 0.0}
+            {"agent_0": 1.0, "other_agent_0": 0.0},
         ]  # Correct Q values to learn, s x a table
         self.v_values = [
-            {"agent_0": 1.0, "other_agent_0": 0.0}
+            {"agent_0": 1.0, "other_agent_0": 0.0},
         ]  # Correct V values to learn, s table
         self.policy_values = [None]
 
@@ -162,16 +171,19 @@ class ConstantRewardContActionsImageEnv:
         }
 
         self.sample_obs = [
-            {"agent_0": np.zeros((1, 1, 3, 3)), "other_agent_0": np.zeros((1, 1, 3, 3))}
+            {
+                "agent_0": np.zeros((1, 1, 3, 3)),
+                "other_agent_0": np.zeros((1, 1, 3, 3)),
+            },
         ]
         self.sample_actions = [
-            {"agent_0": np.array([[0.0]]), "other_agent_0": np.array([[1.0]])}
+            {"agent_0": np.array([[0.0]]), "other_agent_0": np.array([[1.0]])},
         ]
         self.q_values = [
-            {"agent_0": 1.0, "other_agent_0": 0.0}
+            {"agent_0": 1.0, "other_agent_0": 0.0},
         ]  # Correct Q values to learn, s x a table
         self.v_values = [
-            {"agent_0": 1.0, "other_agent_0": 0.0}
+            {"agent_0": 1.0, "other_agent_0": 0.0},
         ]  # Correct V values to learn, s table
         self.policy_values = [None]
 
@@ -253,7 +265,7 @@ class ObsDependentRewardEnv:
             [
                 {"agent_0": np.array([0]), "other_agent_0": np.array([0])},
                 {"agent_0": np.array([1]), "other_agent_0": np.array([1])},
-            ]
+            ],
         )
         info = {}
         return self.last_obs, info
@@ -323,7 +335,7 @@ class ObsDependentRewardImageEnv:
             [
                 {"agent_0": np.zeros((1, 3, 3)), "other_agent_0": np.zeros((1, 3, 3))},
                 {"agent_0": np.ones((1, 3, 3)), "other_agent_0": np.ones((1, 3, 3))},
-            ]
+            ],
         )
         info = {}
         return self.last_obs, info
@@ -381,7 +393,7 @@ class ObsDependentRewardContActionsEnv:
             [
                 {"agent_0": np.array([0]), "other_agent_0": np.array([0])},
                 {"agent_0": np.array([1]), "other_agent_0": np.array([1])},
-            ]
+            ],
         )
         info = {}
         return self.last_obs, info
@@ -442,7 +454,7 @@ class ObsDependentRewardContActionsImageEnv:
             [
                 {"agent_0": np.zeros((1, 3, 3)), "other_agent_0": np.zeros((1, 3, 3))},
                 {"agent_0": np.ones((1, 3, 3)), "other_agent_0": np.ones((1, 3, 3))},
-            ]
+            ],
         )
         info = {}
         return self.last_obs, info
@@ -743,11 +755,14 @@ class FixedObsPolicyEnv:
             },
         ]
         self.q_values = [
-            {"agent_0": 1.0, "other_agent_0": 1.0}
+            {"agent_0": 1.0, "other_agent_0": 1.0},
         ]  # Correct Q values to learn, s x a table
         self.v_values = [None]
         self.policy_values = [
-            {"agent_0": np.array([[1.0, 0.0]]), "other_agent_0": np.array([[0.0, 1.0]])}
+            {
+                "agent_0": np.array([[1.0, 0.0]]),
+                "other_agent_0": np.array([[0.0, 1.0]]),
+            },
         ]
 
     def step(self, action):
@@ -800,11 +815,14 @@ class FixedObsPolicyImageEnv:
             },
         ]
         self.q_values = [
-            {"agent_0": 1.0, "other_agent_0": 1.0}
+            {"agent_0": 1.0, "other_agent_0": 1.0},
         ]  # Correct Q values to learn, s x a table
         self.v_values = [None]
         self.policy_values = [
-            {"agent_0": np.array([[1.0, 0.0]]), "other_agent_0": np.array([[0.0, 1.0]])}
+            {
+                "agent_0": np.array([[1.0, 0.0]]),
+                "other_agent_0": np.array([[0.0, 1.0]]),
+            },
         ]
 
     def step(self, action):
@@ -854,11 +872,11 @@ class FixedObsPolicyContActionsEnv:
             {"agent_0": np.array([[1.0]]), "other_agent_0": np.array([[0.0]])},
         ]
         self.q_values = [
-            {"agent_0": 0.0, "other_agent_0": 0.0}
+            {"agent_0": 0.0, "other_agent_0": 0.0},
         ]  # Correct Q values to learn, s x a table
         self.v_values = [None]
         self.policy_values = [
-            {"agent_0": np.array([1.0]), "other_agent_0": np.array([0.0])}
+            {"agent_0": np.array([1.0]), "other_agent_0": np.array([0.0])},
         ]
 
     def step(self, action):
@@ -908,11 +926,11 @@ class FixedObsPolicyContActionsImageEnv:
             {"agent_0": np.array([[1.0]]), "other_agent_0": np.array([[0.0]])},
         ]
         self.q_values = [
-            {"agent_0": 0.0, "other_agent_0": 0.0}
+            {"agent_0": 0.0, "other_agent_0": 0.0},
         ]  # Correct Q values to learn, s x a table
         self.v_values = [None]
         self.policy_values = [
-            {"agent_0": np.array([1.0]), "other_agent_0": np.array([0.0])}
+            {"agent_0": np.array([1.0]), "other_agent_0": np.array([0.0])},
         ]
 
     def step(self, action):
@@ -1022,7 +1040,7 @@ class PolicyEnv:
                 {"agent_0": np.array([1]), "other_agent_0": np.array([1])},
                 {"agent_0": np.array([0]), "other_agent_0": np.array([1])},
                 {"agent_0": np.array([1]), "other_agent_0": np.array([0])},
-            ]
+            ],
         )
         info = {}
         return self.last_obs, info
@@ -1116,7 +1134,7 @@ class PolicyImageEnv:
                 {"agent_0": np.ones((1, 3, 3)), "other_agent_0": np.ones((1, 3, 3))},
                 {"agent_0": np.zeros((1, 3, 3)), "other_agent_0": np.ones((1, 3, 3))},
                 {"agent_0": np.ones((1, 3, 3)), "other_agent_0": np.zeros((1, 3, 3))},
-            ]
+            ],
         )
         info = {}
         return self.last_obs, info
@@ -1239,7 +1257,7 @@ class PolicyContActionsEnv:
                 {"agent_0": np.array([1]), "other_agent_0": np.array([1])},
                 {"agent_0": np.array([0]), "other_agent_0": np.array([1])},
                 {"agent_0": np.array([1]), "other_agent_0": np.array([0])},
-            ]
+            ],
         )
         info = {}
         return self.last_obs, info
@@ -1352,7 +1370,7 @@ class PolicyContActionsImageEnv:
 
         # other_agent_0 should learn the opposite behaviour
         if np.mean(
-            self.last_obs["other_agent_0"]
+            self.last_obs["other_agent_0"],
         ):  # last obs = 1, policy should be [1, 0]
             reward["other_agent_0"] = -((1 - action["other_agent_0"][0]) ** 2) - (
                 (0 - action["other_agent_0"][1]) ** 2
@@ -1374,7 +1392,7 @@ class PolicyContActionsImageEnv:
                 {"agent_0": np.ones((1, 3, 3)), "other_agent_0": np.ones((1, 3, 3))},
                 {"agent_0": np.zeros((1, 3, 3)), "other_agent_0": np.ones((1, 3, 3))},
                 {"agent_0": np.ones((1, 3, 3)), "other_agent_0": np.zeros((1, 3, 3))},
-            ]
+            ],
         )
         info = {}
         return self.last_obs, info
@@ -1508,7 +1526,7 @@ class MultiPolicyEnv:
                 {"agent_0": np.array([1]), "other_agent_0": np.array([1])},
                 {"agent_0": np.array([0]), "other_agent_0": np.array([1])},
                 {"agent_0": np.array([1]), "other_agent_0": np.array([0])},
-            ]
+            ],
         )
         info = {}
         return self.last_obs, info
@@ -1652,7 +1670,7 @@ class MultiPolicyImageEnv:
                 {"agent_0": np.ones((1, 3, 3)), "other_agent_0": np.ones((1, 3, 3))},
                 {"agent_0": np.zeros((1, 3, 3)), "other_agent_0": np.ones((1, 3, 3))},
                 {"agent_0": np.ones((1, 3, 3)), "other_agent_0": np.zeros((1, 3, 3))},
-            ]
+            ],
         )
         info = {}
         return self.last_obs, info
@@ -1665,7 +1683,8 @@ def prepare_ma_states(states, observation_space, device="cpu"):
         if isinstance(agent_space, spaces.Discrete):
             processed_states[agent_id] = (
                 nn.functional.one_hot(
-                    torch.Tensor(state).long(), num_classes=agent_space.n
+                    torch.Tensor(state).long(),
+                    num_classes=agent_space.n,
                 )
                 .float()
                 .squeeze(1)
@@ -1685,7 +1704,12 @@ def prepare_ma_actions(actions, device="cpu"):
 
 
 def check_policy_q_learning_with_probe_env(
-    env, algo_class, algo_args, memory, learn_steps=1000, device="cpu"
+    env,
+    algo_class,
+    algo_args,
+    memory,
+    learn_steps=1000,
+    device="cpu",
 ):
     print(f"Probe environment: {type(env).__name__}")
 
@@ -1708,7 +1732,12 @@ def check_policy_q_learning_with_probe_env(
             agent_id: np.expand_dims(ns, 0) for agent_id, ns in next_state.items()
         }
         memory.save_to_memory(
-            state, raw_action, reward, mem_next_state, done, is_vectorised=True
+            state,
+            raw_action,
+            reward,
+            mem_next_state,
+            done,
+            is_vectorised=True,
         )
         state = next_state
         if done[agent.agent_ids[0]]:
@@ -1727,7 +1756,10 @@ def check_policy_q_learning_with_probe_env(
             actor = agent.actors[agent_id]
             critic = agent.critics[agent_id]
             for sample_obs, sample_action, q_values, policy_values in zip(
-                env.sample_obs, env.sample_actions, env.q_values, env.policy_values
+                env.sample_obs,
+                env.sample_actions,
+                env.q_values,
+                env.policy_values,
             ):
 
                 state = prepare_ma_states(sample_obs, agent.observation_space, device)
@@ -1742,7 +1774,9 @@ def check_policy_q_learning_with_probe_env(
                     # print(agent_id, "q", q_values[agent_id], predicted_q_values)
                     # assert np.allclose(q_values[agent_id], predicted_q_values, atol=0.1):
                     if not np.allclose(
-                        q_values[agent_id], predicted_q_values, atol=0.1
+                        q_values[agent_id],
+                        predicted_q_values,
+                        atol=0.1,
                     ):
                         print(agent_id, "q", q_values[agent_id], predicted_q_values)
 
@@ -1754,7 +1788,9 @@ def check_policy_q_learning_with_probe_env(
                     # print(agent_id, "pol", policy_values[agent_id], predicted_policy_values)
                     # assert np.allclose(policy_values[agent_id], predicted_policy_values, atol=0.1)
                     if not np.allclose(
-                        policy_values[agent_id], predicted_policy_values, atol=0.1
+                        policy_values[agent_id],
+                        predicted_policy_values,
+                        atol=0.1,
                     ):
                         print(
                             agent_id,
@@ -1765,7 +1801,12 @@ def check_policy_q_learning_with_probe_env(
 
 
 def check_on_policy_learning_with_probe_env(
-    env, algo_class, algo_args, learn_steps=1000, device="cpu", discrete=True
+    env,
+    algo_class,
+    algo_args,
+    learn_steps=1000,
+    device="cpu",
+    discrete=True,
 ):
     print(f"Probe environment: {type(env).__name__}")
 
@@ -1804,7 +1845,8 @@ def check_on_policy_learning_with_probe_env(
                 dones[agent_id].append(done[agent_id])
                 values[agent_id].append(value[agent_id])
                 next_done[agent_id] = np.logical_or(
-                    termination[agent_id], truncation[agent_id]
+                    termination[agent_id],
+                    truncation[agent_id],
                 ).astype(np.int8)
 
             next_done = {agent: np.array([n_d]) for agent, n_d in next_done.items()}
@@ -1839,7 +1881,9 @@ def check_on_policy_learning_with_probe_env(
             actor = agent.actors[agent_id]
             critic = agent.critics[agent_id]
             for sample_obs, v_values, policy_values in zip(
-                env.sample_obs, env.v_values, env.policy_values
+                env.sample_obs,
+                env.v_values,
+                env.policy_values,
             ):
                 state = prepare_ma_states(sample_obs, agent.observation_space, device)
 
@@ -1936,7 +1980,12 @@ if __name__ == "__main__":
         }
 
         check_on_policy_learning_with_probe_env(
-            env, IPPO, algo_args, learn_steps, device, discrete=True
+            env,
+            IPPO,
+            algo_args,
+            learn_steps,
+            device,
+            discrete=True,
         )
 
     image_envs = [
@@ -1966,7 +2015,12 @@ if __name__ == "__main__":
         }
 
         check_on_policy_learning_with_probe_env(
-            env, IPPO, algo_args, learn_steps, device, discrete=True
+            env,
+            IPPO,
+            algo_args,
+            learn_steps,
+            device,
+            discrete=True,
         )
 
     cont_vector_envs = [
@@ -1990,7 +2044,12 @@ if __name__ == "__main__":
         }
 
         check_on_policy_learning_with_probe_env(
-            env, IPPO, algo_args, learn_steps, device, discrete=False
+            env,
+            IPPO,
+            algo_args,
+            learn_steps,
+            device,
+            discrete=False,
         )
 
     cont_image_envs = [
@@ -2019,5 +2078,10 @@ if __name__ == "__main__":
         }
 
         check_on_policy_learning_with_probe_env(
-            env, IPPO, algo_args, learn_steps, device, discrete=False
+            env,
+            IPPO,
+            algo_args,
+            learn_steps,
+            device,
+            discrete=False,
         )

@@ -5,11 +5,11 @@ from typing import Any
 
 import gymnasium as gym
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from tensordict import TensorDict
 from torch.utils.data import DataLoader
 
+import wandb
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.components.data import ReplayDataset
 from agilerl.components.replay_buffer import ReplayBuffer
@@ -112,29 +112,32 @@ def train_bandits(
     :type wandb_api_key: str, optional
     """
     assert isinstance(
-        algo, str
+        algo,
+        str,
     ), "'algo' must be the name of the algorithm as a string."
     assert isinstance(max_steps, int), "Number of steps must be an integer."
     assert isinstance(evo_steps, int), "Evolution frequency must be an integer."
     if target is not None:
         assert isinstance(
-            target, (float, int)
+            target,
+            (float, int),
         ), "Target score must be a float or an integer."
     if checkpoint is not None:
         assert isinstance(checkpoint, int), "Checkpoint must be an integer."
     assert isinstance(
-        wb, bool
+        wb,
+        bool,
     ), "'wb' must be a boolean flag, indicating whether to record run with W&B"
     assert isinstance(verbose, bool), "Verbose must be a boolean."
     if save_elite is False and elite_path is not None:
         warnings.warn(
             "'save_elite' set to False but 'elite_path' has been defined, elite will not\
-                      be saved unless 'save_elite' is set to True."
+                      be saved unless 'save_elite' is set to True.",
         )
     if checkpoint is None and checkpoint_path is not None:
         warnings.warn(
             "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
-                      be saved unless 'checkpoint' is defined."
+                      be saved unless 'checkpoint' is defined.",
         )
 
     if wb:
@@ -152,7 +155,9 @@ def train_bandits(
         checkpoint_path.split(".pt")[0]
         if checkpoint_path is not None
         else "{}-EvoHPO-{}-{}".format(
-            env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
+            env_name,
+            algo,
+            datetime.now().strftime("%m%d%Y%H%M%S"),
         )
     )
 
@@ -208,7 +213,7 @@ def train_bandits(
                     {
                         "obs": context,
                         "reward": reward,
-                    }
+                    },
                 )
                 transition = transition.unsqueeze(0)
                 transition.batch_size = [1]
@@ -240,7 +245,10 @@ def train_bandits(
         # Evaluate population
         fitnesses = [
             agent.test(
-                env, swap_channels=swap_channels, max_steps=eval_steps, loop=eval_loop
+                env,
+                swap_channels=swap_channels,
+                max_steps=eval_steps,
+                loop=eval_loop,
             )
             for agent in pop
         ]
@@ -280,7 +288,7 @@ def train_bandits(
         if target is not None:
             if (
                 np.all(
-                    np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target)
+                    np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target),
                 )
                 and len(pop[0].steps) >= 100
             ):
@@ -328,7 +336,7 @@ def train_bandits(
                 f"10 score avgs:\t{avg_score}\n"
                 f"Agents:\t\t{agents}\n"
                 f"Steps:\t\t{num_steps}\n"
-                f"Mutations:\t\t{muts}"
+                f"Mutations:\t\t{muts}",
             )
 
         # Save model checkpoint

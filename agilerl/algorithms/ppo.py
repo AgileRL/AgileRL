@@ -1,12 +1,13 @@
 import copy
 import warnings
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import torch
-import torch.optim as optim
 from gymnasium import spaces
 from tensordict import TensorDict
+from torch import optim
 from torch.nn.utils import clip_grad_norm_
 
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
@@ -29,7 +30,11 @@ from agilerl.utils.algo_utils import (
 
 ActionReturnType = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
 RecurrentActionReturnType = tuple[
-    np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, ArrayOrTensor] | None
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    dict[str, ArrayOrTensor] | None,
 ]
 
 
@@ -156,31 +161,36 @@ class PPO(RLAlgorithm):
         assert isinstance(gae_lambda, (float, int)), "Lambda must be a float."
         assert gae_lambda >= 0, "Lambda must be greater than or equal to zero."
         assert isinstance(
-            action_std_init, (float, int)
+            action_std_init,
+            (float, int),
         ), "Action standard deviation must be a float."
         assert (
             action_std_init >= 0
         ), "Action standard deviation must be greater than or equal to zero."
         assert isinstance(
-            clip_coef, (float, int)
+            clip_coef,
+            (float, int),
         ), "Clipping coefficient must be a float."
         assert (
             clip_coef >= 0
         ), "Clipping coefficient must be greater than or equal to zero."
         assert isinstance(
-            ent_coef, (float, int)
+            ent_coef,
+            (float, int),
         ), "Entropy coefficient must be a float."
         assert (
             ent_coef >= 0
         ), "Entropy coefficient must be greater than or equal to zero."
         assert isinstance(
-            vf_coef, (float, int)
+            vf_coef,
+            (float, int),
         ), "Value function coefficient must be a float."
         assert (
             vf_coef >= 0
         ), "Value function coefficient must be greater than or equal to zero."
         assert isinstance(
-            max_grad_norm, (float, int)
+            max_grad_norm,
+            (float, int),
         ), "Maximum norm for gradient clipping must be a float."
         assert (
             max_grad_norm >= 0
@@ -193,24 +203,29 @@ class PPO(RLAlgorithm):
                 target_kl >= 0
             ), "Target KL divergence threshold must be greater than or equal to zero."
         assert isinstance(
-            update_epochs, int
+            update_epochs,
+            int,
         ), "Policy update epochs must be an integer."
         assert (
             update_epochs >= 1
         ), "Policy update epochs must be greater than or equal to one."
         assert isinstance(
-            wrap, bool
+            wrap,
+            bool,
         ), "Wrap models flag must be boolean value True or False."
 
         # New parameters for using RolloutBuffer
         assert isinstance(
-            use_rollout_buffer, bool
+            use_rollout_buffer,
+            bool,
         ), "Use rollout buffer flag must be boolean value True or False."
         assert isinstance(
-            recurrent, bool
+            recurrent,
+            bool,
         ), "Has hidden states flag must be boolean value True or False."
         assert isinstance(
-            bptt_sequence_type, BPTTSequenceType
+            bptt_sequence_type,
+            BPTTSequenceType,
         ), "bptt_sequence_type must be a BPTTSequenceType enum value."
 
         if not use_rollout_buffer:
@@ -254,15 +269,16 @@ class PPO(RLAlgorithm):
         if actor_network is not None and critic_network is not None:
             if not isinstance(actor_network, EvolvableModule):
                 raise TypeError(
-                    f"Passed actor network is of type {type(actor_network)}, but must be of type EvolvableModule."
+                    f"Passed actor network is of type {type(actor_network)}, but must be of type EvolvableModule.",
                 )
             if not isinstance(critic_network, EvolvableModule):
                 raise TypeError(
-                    f"Passed critic network is of type {type(critic_network)}, but must be of type EvolvableModule."
+                    f"Passed critic network is of type {type(critic_network)}, but must be of type EvolvableModule.",
                 )
 
             self.actor, self.critic = make_safe_deepcopies(
-                actor_network, critic_network
+                actor_network,
+                critic_network,
             )
         else:
             net_config_dict = {} if self.net_config is None else self.net_config
@@ -307,7 +323,9 @@ class PPO(RLAlgorithm):
             self.register_mutation_hook(self.share_encoder_parameters)
 
         self.optimizer = OptimizerWrapper(
-            optim.Adam, networks=[self.actor, self.critic], lr=self.lr
+            optim.Adam,
+            networks=[self.actor, self.critic],
+            lr=self.lr,
         )
 
         # Initialize rollout buffer if enabled
@@ -331,7 +349,7 @@ class PPO(RLAlgorithm):
             share_encoder_parameters(self.actor, self.critic)
         else:
             warnings.warn(
-                "Encoder sharing is disabled as actor or critic is not an EvolvableNetwork."
+                "Encoder sharing is disabled as actor or critic is not an EvolvableNetwork.",
             )
 
     def create_rollout_buffer(self) -> None:
@@ -355,7 +373,9 @@ class PPO(RLAlgorithm):
         )
 
     def _extract_hidden_state(
-        self, full_hidden_state: dict[str, ArrayOrTensor], encoder_name: str
+        self,
+        full_hidden_state: dict[str, ArrayOrTensor],
+        encoder_name: str,
     ) -> dict[str, ArrayOrTensor]:
         """Extract hidden state components for a specific network encoder.
 
@@ -388,8 +408,7 @@ class PPO(RLAlgorithm):
         torch.Tensor,
         dict[str, ArrayOrTensor] | None,
     ]:
-        """
-        Returns the next action to take in the environment and the values.
+        """Returns the next action to take in the environment and the values.
 
         :param obs: Environment observation, or multiple observations in a batch
         :type obs: ArrayOrTensor
@@ -406,33 +425,42 @@ class PPO(RLAlgorithm):
             if self.share_encoders:
                 # When sharing encoders, both networks use the same hidden state
                 latent_pi, next_hidden_actor = self.actor.extract_features(
-                    obs, hidden_state=hidden_state
+                    obs,
+                    hidden_state=hidden_state,
                 )
                 action, log_prob, entropy = self.actor.forward_head(
-                    latent_pi, action_mask=action_mask, sample=sample
+                    latent_pi,
+                    action_mask=action_mask,
+                    sample=sample,
                 )
                 values = self.critic.forward_head(latent_pi).squeeze(-1)
                 next_hidden_combined = next_hidden_actor
             else:
                 # When not sharing encoders, extract separate hidden states for actor and critic
                 actor_hidden_state = self._extract_hidden_state(
-                    hidden_state, "actor_encoder"
+                    hidden_state,
+                    "actor_encoder",
                 )
                 critic_hidden_state = self._extract_hidden_state(
-                    hidden_state, "critic_encoder"
+                    hidden_state,
+                    "critic_encoder",
                 )
 
                 # Forward pass through actor with its hidden state
                 latent_pi, next_hidden_actor = self.actor.extract_features(
-                    obs, hidden_state=actor_hidden_state
+                    obs,
+                    hidden_state=actor_hidden_state,
                 )
                 action, log_prob, entropy = self.actor.forward_head(
-                    latent_pi, action_mask=action_mask, sample=sample
+                    latent_pi,
+                    action_mask=action_mask,
+                    sample=sample,
                 )
 
                 # Forward pass through critic with its hidden state
                 values, next_hidden_critic = self.critic(
-                    obs, hidden_state=critic_hidden_state
+                    obs,
+                    hidden_state=critic_hidden_state,
                 )
                 values = values.squeeze(-1)
 
@@ -444,17 +472,18 @@ class PPO(RLAlgorithm):
                     next_hidden_combined.update(next_hidden_critic)
 
             return action, log_prob, entropy, values, next_hidden_combined
-        else:
-            latent_pi = self.actor.extract_features(obs)
-            action, log_prob, entropy = self.actor.forward_head(
-                latent_pi, action_mask=action_mask, sample=sample
-            )
-            values = (
-                self.critic.forward_head(latent_pi).squeeze(-1)
-                if self.share_encoders
-                else self.critic(obs).squeeze(-1)
-            )
-            return action, log_prob, entropy, values, None
+        latent_pi = self.actor.extract_features(obs)
+        action, log_prob, entropy = self.actor.forward_head(
+            latent_pi,
+            action_mask=action_mask,
+            sample=sample,
+        )
+        values = (
+            self.critic.forward_head(latent_pi).squeeze(-1)
+            if self.share_encoders
+            else self.critic(obs).squeeze(-1)
+        )
+        return action, log_prob, entropy, values, None
 
     def get_hidden_state_architecture(self) -> dict[str, tuple[int, ...]]:
         """Get the hidden state architecture for the environment.
@@ -512,7 +541,9 @@ class PPO(RLAlgorithm):
 
         # Get values from actor-critic
         _, _, entropy, values, _ = self._get_action_and_values(
-            obs, hidden_state=hidden_state, sample=False
+            obs,
+            hidden_state=hidden_state,
+            sample=False,
         )
 
         log_prob = self.actor.action_log_prob(actions)
@@ -565,7 +596,9 @@ class PPO(RLAlgorithm):
                 action_np = self.actor.scale_action(action_np)
             else:
                 action_np = np.clip(
-                    action_np, self.action_space.low, self.action_space.high
+                    action_np,
+                    self.action_space.low,
+                    self.action_space.high,
                 )
 
         log_prob_np = log_prob.cpu().data.numpy()
@@ -580,13 +613,12 @@ class PPO(RLAlgorithm):
                 values_np,
                 next_hidden if next_hidden is not None else None,
             )
-        else:
-            return (
-                action_np,
-                log_prob_np,
-                entropy_np,
-                values_np,
-            )
+        return (
+            action_np,
+            log_prob_np,
+            entropy_np,
+            values_np,
+        )
 
     def learn(self, experiences: ExperiencesType | None = None) -> float:
         """Updates agent network parameters to learn from experiences.
@@ -605,8 +637,7 @@ class PPO(RLAlgorithm):
                 # Learn from the internal rollout buffer
                 if self.recurrent:
                     return self._learn_from_rollout_buffer_bptt()
-                else:
-                    return self._learn_from_rollout_buffer_flat()
+                return self._learn_from_rollout_buffer_flat()
 
         return self._deprecated_learn_from_experiences(experiences)
 
@@ -625,7 +656,7 @@ class PPO(RLAlgorithm):
         """
         if not experiences:
             raise ValueError(
-                "Experiences must be provided when use_rollout_buffer is False"
+                "Experiences must be provided when use_rollout_buffer is False",
             )
 
         # Not self.use_rollout_buffer
@@ -703,7 +734,9 @@ class PPO(RLAlgorithm):
 
                 if len(minibatch_idxs) > 1:
                     log_prob, entropy, value = self.evaluate_actions(
-                        obs=batch_observations, actions=batch_actions, hidden_state=None
+                        obs=batch_observations,
+                        actions=batch_actions,
+                        hidden_state=None,
                     )
 
                     logratio = log_prob - batch_log_probs
@@ -720,7 +753,9 @@ class PPO(RLAlgorithm):
                     # Policy loss
                     pg_loss1 = -minibatch_advs * ratio
                     pg_loss2 = -minibatch_advs * torch.clamp(
-                        ratio, 1 - self.clip_coef, 1 + self.clip_coef
+                        ratio,
+                        1 - self.clip_coef,
+                        1 + self.clip_coef,
                     )
 
                     pg_loss = torch.max(pg_loss1, pg_loss2).mean()
@@ -729,7 +764,9 @@ class PPO(RLAlgorithm):
                     value = value.view(-1)
                     v_loss_unclipped = (value - batch_returns) ** 2
                     v_clipped = batch_values + torch.clamp(
-                        value - batch_values, -self.clip_coef, self.clip_coef
+                        value - batch_values,
+                        -self.clip_coef,
+                        self.clip_coef,
                     )
 
                     v_loss_clipped = (v_clipped - batch_returns) ** 2
@@ -764,7 +801,8 @@ class PPO(RLAlgorithm):
         return mean_loss
 
     def _learn_from_rollout_buffer_flat(
-        self, buffer_td_external: TensorDict | None = None
+        self,
+        buffer_td_external: TensorDict | None = None,
     ) -> float:
         """Learning procedure using flattened samples (no BPTT)."""
         if buffer_td_external is not None:
@@ -809,14 +847,18 @@ class PPO(RLAlgorithm):
                     mb_actions = mb_actions.squeeze(-1)
 
                 log_probs, entropy, values = self.evaluate_actions(
-                    obs=mb_obs, actions=mb_actions, hidden_state=None
+                    obs=mb_obs,
+                    actions=mb_actions,
+                    hidden_state=None,
                 )
 
                 # Policy loss
                 ratio = torch.exp(log_probs - mb_log_probs)
                 policy_loss1 = -mb_advantages * ratio
                 policy_loss2 = -mb_advantages * torch.clamp(
-                    ratio, 1 - self.clip_coef, 1 + self.clip_coef
+                    ratio,
+                    1 - self.clip_coef,
+                    1 + self.clip_coef,
                 )
                 policy_loss = torch.max(policy_loss1, policy_loss2).mean()
 
@@ -824,7 +866,9 @@ class PPO(RLAlgorithm):
                 value = values.view(-1)
                 v_loss_unclipped = (value - mb_returns) ** 2
                 v_clipped = mb_old_values + torch.clamp(
-                    value - mb_old_values, -self.clip_coef, self.clip_coef
+                    value - mb_old_values,
+                    -self.clip_coef,
+                    self.clip_coef,
                 )
 
                 v_loss_clipped = (v_clipped - mb_returns) ** 2
@@ -913,7 +957,8 @@ class PPO(RLAlgorithm):
                 mb_returns = minibatch_unpadded["returns"]
                 mb_initial_hidden_states_dict: dict[str, torch.Tensor] = (
                     minibatch_padded.get_non_tensor(
-                        "initial_hidden_states", default=None
+                        "initial_hidden_states",
+                        default=None,
                     )
                 )
 
@@ -956,14 +1001,18 @@ class PPO(RLAlgorithm):
                 ratio = torch.exp(new_log_probs - mb_old_log_probs)
                 policy_loss1 = -mb_advantages * ratio
                 policy_loss2 = -mb_advantages * torch.clamp(
-                    ratio, 1 - self.clip_coef, 1 + self.clip_coef
+                    ratio,
+                    1 - self.clip_coef,
+                    1 + self.clip_coef,
                 )
                 policy_loss = torch.max(policy_loss1, policy_loss2).mean()
 
                 # Value loss
                 v_loss_unclipped = (new_values - mb_returns) ** 2
                 v_clipped = mb_values + torch.clamp(
-                    new_values - mb_values, -self.clip_coef, self.clip_coef
+                    new_values - mb_values,
+                    -self.clip_coef,
+                    self.clip_coef,
                 )
 
                 v_loss_clipped = (v_clipped - mb_returns) ** 2
@@ -976,7 +1025,7 @@ class PPO(RLAlgorithm):
                 with torch.no_grad():
                     log_ratio = new_log_probs - mb_old_log_probs
                     approx_kl_divs_minibatch_timesteps.append(
-                        ((torch.exp(log_ratio) - 1) - log_ratio).mean().item()
+                        ((torch.exp(log_ratio) - 1) - log_ratio).mean().item(),
                     )
 
                 loss = (
@@ -1004,15 +1053,15 @@ class PPO(RLAlgorithm):
                 ):
                     # Average KL over all timesteps in this minibatch of sequences
                     kl_for_current_minibatch = np.mean(
-                        approx_kl_divs_minibatch_timesteps
+                        approx_kl_divs_minibatch_timesteps,
                     )
                     approx_kl_divs_epoch.append(
-                        kl_for_current_minibatch
+                        kl_for_current_minibatch,
                     )  # Store minibatch average KL
 
                     if kl_for_current_minibatch > self.target_kl:
                         warnings.warn(
-                            f"Epoch {epoch}, Minibatch: KL divergence {kl_for_current_minibatch:.4f} exceeded target {self.target_kl}. Stopping update for this epoch."
+                            f"Epoch {epoch}, Minibatch: KL divergence {kl_for_current_minibatch:.4f} exceeded target {self.target_kl}. Stopping update for this epoch.",
                         )
                         break  # Break from minibatch loop for this epoch
 
@@ -1028,7 +1077,7 @@ class PPO(RLAlgorithm):
                     )
                 ):
                     warnings.warn(
-                        f"Epoch {epoch}: Average KL divergence {avg_kl_this_epoch:.4f} exceeded target {self.target_kl} after completing epoch. Consider adjusting learning rate or target_kl."
+                        f"Epoch {epoch}: Average KL divergence {avg_kl_this_epoch:.4f} exceeded target {self.target_kl} after completing epoch. Consider adjusting learning rate or target_kl.",
                     )
                     # This break is for the epoch loop if KL was exceeded on average for the epoch
                     # but not necessarily in the last minibatch that would have broken the inner loop.
@@ -1119,21 +1168,22 @@ class PPO(RLAlgorithm):
                             # If only some environments returned masks, we probably can't use them reliably
                             elif any(m is not None for m in masks):
                                 warnings.warn(
-                                    "Action masks not provided for all vectorized environments. Skipping mask."
+                                    "Action masks not provided for all vectorized environments. Skipping mask.",
                                 )
                                 action_mask = None
                         # Handle case where info might be a single dict even if vectorized (e.g. VecNormalize)
                         elif isinstance(info, dict):
                             action_mask = info.get("action_mask", None)
 
-                    else:  # Not vectorized
-                        if isinstance(info, dict):
-                            action_mask = info.get("action_mask", None)
+                    elif isinstance(info, dict):
+                        action_mask = info.get("action_mask", None)
 
                     # Get action
                     if self.recurrent:
                         action, _, _, _, test_hidden_state = self.get_action(
-                            obs, action_mask=action_mask, hidden_state=test_hidden_state
+                            obs,
+                            action_mask=action_mask,
+                            hidden_state=test_hidden_state,
                         )
                     else:
                         action, _, _, _ = self.get_action(obs, action_mask=action_mask)
@@ -1163,16 +1213,20 @@ class PPO(RLAlgorithm):
                     # Reset hidden state for newly finished environments
                     if self.recurrent and np.any(newly_finished):
                         initial_hidden_states_for_reset = self.get_initial_hidden_state(
-                            num_envs
+                            num_envs,
                         )
                         if isinstance(test_hidden_state, dict):
                             for key in test_hidden_state:
                                 reset_states = initial_hidden_states_for_reset[key][
-                                    :, newly_finished, :
+                                    :,
+                                    newly_finished,
+                                    :,
                                 ]
                                 if reset_states.shape[1] > 0:
                                     test_hidden_state[key][
-                                        :, newly_finished, :
+                                        :,
+                                        newly_finished,
+                                        :,
                                     ] = reset_states
 
                     if np.any(newly_finished):
@@ -1196,9 +1250,8 @@ class PPO(RLAlgorithm):
                         )
                     elif isinstance(last_infos, dict):
                         final_info_for_callback = last_infos
-                else:  # Not vectorized
-                    if isinstance(last_infos, dict):
-                        final_info_for_callback = last_infos
+                elif isinstance(last_infos, dict):
+                    final_info_for_callback = last_infos
 
                 if callback is not None:
                     callback(loop_reward_sum, final_info_for_callback)

@@ -2,14 +2,15 @@ import copy
 import logging
 import warnings
 from collections import OrderedDict
+from collections.abc import Callable
 from functools import wraps
-from typing import Any, Callable, TypeVar
+from typing import Any, TypeVar
 
 import fastrand
 import numpy as np
 import torch
-import torch.nn as nn
 from accelerate import Accelerator
+from torch import nn
 
 from agilerl.algorithms import NeuralTS, NeuralUCB
 from agilerl.algorithms.core import (
@@ -95,7 +96,7 @@ def get_exp_layer(offspring: EvolvableModule) -> nn.Module:
         exp_layer = offspring.get_output_dense()
     else:
         raise ValueError(
-            f"Bandit algorithm architecture {type(offspring)} not supported."
+            f"Bandit algorithm architecture {type(offspring)} not supported.",
         )
 
     return exp_layer
@@ -134,7 +135,8 @@ def reinit_shared_networks(mutation_func=None):
                 if net_group.shared_networks is not None:
                     for shared_name in net_group.shared_networks:
                         eval_offspring: EvolvableNetworkType = getattr(
-                            individual, net_group.eval_network
+                            individual,
+                            net_group.eval_network,
                         )
                         # Reinitialize shared with frozen weights due to
                         # potential mutation in architecture
@@ -148,7 +150,8 @@ def reinit_shared_networks(mutation_func=None):
                         if compiled_model:
                             torch._dynamo.config.force_parameter_static_shapes = False
                             ind_shared = compile_model(
-                                ind_shared, individual.torch_compiler
+                                ind_shared,
+                                individual.torch_compiler,
                             )
 
                         setattr(individual, shared_name, ind_shared)
@@ -218,37 +221,43 @@ class Mutations:
         accelerator: Accelerator | None = None,
     ):
         assert isinstance(
-            no_mutation, (float, int)
+            no_mutation,
+            (float, int),
         ), "Probability of no mutation must be a float or integer."
         assert (
             no_mutation >= 0
         ), "Probability of no mutation must be greater than or equal to zero."
         assert isinstance(
-            architecture, (float, int)
+            architecture,
+            (float, int),
         ), "Probability of architecture mutation must be a float or integer."
         assert (
             architecture >= 0
         ), "Probability of architecture mutation must be greater than or equal to zero."
         assert isinstance(
-            new_layer_prob, (float, int)
+            new_layer_prob,
+            (float, int),
         ), "Probability of new layer architecture mutation must be a float or integer."
         assert (
             1 >= new_layer_prob >= 0
         ), "Probability of new layer architecture mutation must be between zero and one (inclusive)."
         assert isinstance(
-            parameters, (float, int)
+            parameters,
+            (float, int),
         ), "Probability of parameters mutation must be a float or integer."
         assert (
             parameters >= 0
         ), "Probability of parameters mutation must be greater than or equal to zero."
         assert isinstance(
-            activation, (float, int)
+            activation,
+            (float, int),
         ), "Probability of activation mutation must be a float or integer."
         assert (
             activation >= 0
         ), "Probability of activation mutation must be greater than or equal to zero."
         assert isinstance(
-            rl_hp, (float, int)
+            rl_hp,
+            (float, int),
         ), "Probability of reinforcement learning hyperparameter mutation must be a float or integer."
         assert (
             rl_hp >= 0
@@ -257,10 +266,12 @@ class Mutations:
             mutation_sd >= 0
         ), "Mutation strength must be greater than or equal to zero."
         assert isinstance(
-            mutation_sd, (float, int)
+            mutation_sd,
+            (float, int),
         ), "Mutation strength must be a float or integer."
         assert isinstance(
-            mutate_elite, bool
+            mutate_elite,
+            bool,
         ), "Mutate elite must be boolean value True or False."
         assert (
             isinstance(rand_seed, int) or rand_seed is None
@@ -293,7 +304,9 @@ class Mutations:
         self.mut_options, self.mut_proba = self._get_mutations_options()
 
     def mutation(
-        self, population: PopulationType, pre_training_mut: bool = False
+        self,
+        population: PopulationType,
+        pre_training_mut: bool = False,
     ) -> PopulationType:
         """Returns a mutated population of agents. See :ref:`evo_hyperparam_opt` for more details.
 
@@ -316,7 +329,9 @@ class Mutations:
         # Randomly choose mutation for each agent in population from options with
         # relative probabilities
         mutation_choice: list[MutationMethod] = self.rng.choice(
-            mutation_options, len(population), p=mutation_proba
+            mutation_options,
+            len(population),
+            p=mutation_proba,
         )
 
         # If not mutating elite member of population (first in list from tournament selection),
@@ -382,7 +397,7 @@ class Mutations:
         else:
             raise MutationError(
                 f"Architecture mutations are not supported for {individual.__class__.__name__}. "
-                "Please make sure your algorithm inherits from 'RLAlgorithm' or 'MultiAgentRLAlgorithm'."
+                "Please make sure your algorithm inherits from 'RLAlgorithm' or 'MultiAgentRLAlgorithm'.",
             )
 
         return individual
@@ -449,7 +464,7 @@ class Mutations:
         # on an algorithm basis
         if individual.algo in ["PPO", "DDPG", "TD3", "IPPO", "MADDPG", "MATD3", "GRPO"]:
             warnings.warn(
-                f"Activation mutations are not supported for {individual.algo}."
+                f"Activation mutations are not supported for {individual.algo}.",
             )
             individual.mut = "None"
             return individual
@@ -459,7 +474,8 @@ class Mutations:
         no_activation = False
         for network_group in registry.groups:
             eval_module: EvolvableNetworkType = getattr(
-                individual, network_group.eval_network
+                individual,
+                network_group.eval_network,
             )
 
             if eval_module.activation is None:
@@ -470,7 +486,7 @@ class Mutations:
             if no_activation:
                 warnings.warn(
                     "Found no activation mutation capabilities. We advise setting the probability to "
-                    "0.0 to disable activation mutations."
+                    "0.0 to disable activation mutations.",
                 )
                 break
 
@@ -501,7 +517,7 @@ class Mutations:
         """
         if isinstance(individual, LLMAlgorithm):
             warnings.warn(
-                "Parameter mutations are not supported for LLM algorithms. Skipping mutation."
+                "Parameter mutations are not supported for LLM algorithms. Skipping mutation.",
             )
             individual.mut = "None"
             return individual
@@ -512,7 +528,8 @@ class Mutations:
         # (i.e. the network used to select actions)
         policy_group = registry.policy(return_group=True)
         offspring_policy: EvolvableNetworkType = getattr(
-            individual, policy_group.eval_network
+            individual,
+            policy_group.eval_network,
         )
         if isinstance(offspring_policy, ModuleDict):
             for agent_id, module in offspring_policy.items():
@@ -521,7 +538,9 @@ class Mutations:
             offspring_policy = self._gaussian_parameter_mutation(offspring_policy)
 
         self._to_device_and_set_individual(
-            individual, policy_group.eval_network, offspring_policy
+            individual,
+            policy_group.eval_network,
+            offspring_policy,
         )
 
         # Load state dicts for shared networks
@@ -529,7 +548,8 @@ class Mutations:
             for shared in policy_group.shared_networks:
                 offspring_shared: EvolvableNetworkType = getattr(individual, shared)
                 offspring_shared.load_state_dict(
-                    offspring_policy.state_dict(), strict=False
+                    offspring_policy.state_dict(),
+                    strict=False,
                 )
                 self._to_device_and_set_individual(individual, shared, offspring_shared)
 
@@ -539,7 +559,8 @@ class Mutations:
         return individual
 
     def _get_mutations_options(
-        self, pretraining: bool = False
+        self,
+        pretraining: bool = False,
     ) -> tuple[list[Callable], list[float]]:
         """Get the mutation options and probabilities for the given mutation
         configuration.
@@ -574,7 +595,10 @@ class Mutations:
         return mutation_funcs, mutation_proba
 
     def _to_device_and_set_individual(
-        self, individual: IndividualType, name: str, networks: EvolvableNetworkType
+        self,
+        individual: IndividualType,
+        name: str,
+        networks: EvolvableNetworkType,
     ) -> None:
         """Moves networks to the device and assigns them back to the individual.
 
@@ -591,7 +615,9 @@ class Mutations:
         setattr(individual, name, networks)
 
     def _reinit_module(
-        self, module: EvolvableModule, init_dict: dict[str, Any]
+        self,
+        module: EvolvableModule,
+        init_dict: dict[str, Any],
     ) -> EvolvableModule:
         """Reinitialize the module with the given initialization dictionary.
 
@@ -611,7 +637,9 @@ class Mutations:
         return type(module_orig)(**init_dict)
 
     def _reinit_from_mutated(
-        self, offspring: EvolvableNetworkType, remove_prefix: bool = False
+        self,
+        offspring: EvolvableNetworkType,
+        remove_prefix: bool = False,
     ) -> EvolvableNetworkType:
         """Reinitialize the mutated offspring with their state dictionary.
 
@@ -628,7 +656,8 @@ class Mutations:
             for agent_id in offspring:
                 nested_offspring: EvolvableModule = offspring[agent_id]
                 reinit_modules[agent_id] = self._reinit_module(
-                    nested_offspring, nested_offspring.init_dict
+                    nested_offspring,
+                    nested_offspring.init_dict,
                 )
 
             state_dicts = {
@@ -691,8 +720,7 @@ class Mutations:
         return network
 
     def _gaussian_parameter_mutation(self, network: EvolvableModule) -> EvolvableModule:
-        """
-        Returns network with mutated weights using a Gaussian distribution.
+        """Returns network with mutated weights using a Gaussian distribution.
 
         :param network: Neural network to mutate.
         :type network: EvolvableModule
@@ -754,7 +782,8 @@ class Mutations:
             if mask_super.sum() > 0:
                 std_super = (super_mut_strength * current_vals[mask_super]).abs()
                 noise_super = torch.normal(
-                    mean=torch.zeros_like(std_super), std=std_super
+                    mean=torch.zeros_like(std_super),
+                    std=std_super,
                 )
                 new_vals[mask_super] = current_vals[mask_super] + noise_super
 
@@ -770,7 +799,8 @@ class Mutations:
             if mask_normal.sum() > 0:
                 std_normal = (mut_strength * current_vals[mask_normal]).abs()
                 noise_normal = torch.normal(
-                    mean=torch.zeros_like(std_normal), std=std_normal
+                    mean=torch.zeros_like(std_normal),
+                    std=std_normal,
                 )
                 new_vals[mask_normal] = current_vals[mask_normal] + noise_normal
 
@@ -786,8 +816,7 @@ class Mutations:
         return network
 
     def _architecture_mutate_single(self, individual: RLAlgorithm) -> RLAlgorithm:
-        """
-        Apply an architecture mutation to a single-agent RL algorithm. Since all of the
+        """Apply an architecture mutation to a single-agent RL algorithm. Since all of the
         networks in a single-agent algorithm share the same architecture (given there is
         only one observation space), we first sample a mutation method from the policy network
         and then apply the same mutation to the rest of the evaluation modules (e.g. critics).
@@ -810,18 +839,20 @@ class Mutations:
         if not policy_offspring.mutation_methods:
             warnings.warn(
                 "No mutation methods found for the policy network. Skipping architecture mutation. "
-                "We advise setting the probability of architecture mutations to zero when using non-evolvable networks."
+                "We advise setting the probability of architecture mutations to zero when using non-evolvable networks.",
             )
             individual.mut = "None"
             return individual
 
         # Sample mutation method from policy network
         mut_method = policy_offspring.sample_mutation_method(
-            self.new_layer_prob, self.rng
+            self.new_layer_prob,
+            self.rng,
         )
 
         applied_mutation, mut_dict = self._apply_arch_mutation(
-            policy_offspring, mut_method
+            policy_offspring,
+            mut_method,
         )
         self._to_device_and_set_individual(individual, policy_name, policy_offspring)
 
@@ -842,10 +873,10 @@ class Mutations:
         return individual
 
     def _architecture_mutate_multi(
-        self, individual: MultiAgentRLAlgorithm
+        self,
+        individual: MultiAgentRLAlgorithm,
     ) -> MultiAgentRLAlgorithm:
-        """
-        Apply an architecture mutation to a multi-agent RL algorithm. Since each agent has its own
+        """Apply an architecture mutation to a multi-agent RL algorithm. Since each agent has its own
         observation space, we can't generally apply the same architecture mutation to all sub-agents.
         Instead, we sample a sub-agent to perform the mutation on for the policy. We then iterate over
         the rest of the sub-agent policies and perform the same mutation if they share the same observation
@@ -873,19 +904,21 @@ class Mutations:
         if not policy_offspring.mutation_methods:
             warnings.warn(
                 "No mutation methods found for the policy network. Skipping architecture mutation. "
-                "We advise setting the probability of architecture mutations to zero when using non-evolvable networks."
+                "We advise setting the probability of architecture mutations to zero when using non-evolvable networks.",
             )
             individual.mut = "None"
             return individual
 
         # Sample mutation method from policy network
         mut_method = policy_offspring.sample_mutation_method(
-            self.new_layer_prob, self.rng
+            self.new_layer_prob,
+            self.rng,
         )
 
         # Apply the sampled method to the policy network (will only apply to one sub-agent)
         applied_mutation, mut_dict = self._apply_arch_mutation(
-            policy_offspring, mut_method
+            policy_offspring,
+            mut_method,
         )
 
         applied_mutations = []
@@ -907,7 +940,9 @@ class Mutations:
             applied_agent = None
             if sampled_mutation in policy.mutation_methods:
                 applied_agent, _ = self._apply_arch_mutation(
-                    policy, sampled_mutation, mut_dict
+                    policy,
+                    sampled_mutation,
+                    mut_dict,
                 )
 
             if applied_agent is not None:
@@ -933,18 +968,22 @@ class Mutations:
 
                     # Try to find an analogous mutation method
                     analogous_method = self._find_analogous_mutation(
-                        sampled_mutation, available_methods, mutated_agent
+                        sampled_mutation,
+                        available_methods,
+                        mutated_agent,
                     )
 
                     if analogous_method is not None:
                         self._apply_arch_mutation(
-                            agent_eval, analogous_method, mut_dict
+                            agent_eval,
+                            analogous_method,
+                            mut_dict,
                         )
                     else:
                         raise MutationError(
                             f"Mutation method '{sampled_mutation}' not found in '{agent_eval.__class__.__name__}'. "
                             f"No analogous method found for agent '{agent_id}'. "
-                            f"Available methods: {agent_eval.mutation_methods}."
+                            f"Available methods: {agent_eval.mutation_methods}.",
                         )
 
             self._to_device_and_set_individual(individual, name, offspring_eval)
@@ -976,7 +1015,7 @@ class Mutations:
         if not isinstance(network, EvolvableModule):
             raise MutationError(
                 f"Can't apply architecture mutation to {network.__class__.__name__} network."
-                "Please make sure your network inherits from 'EvolvableModule'."
+                "Please make sure your network inherits from 'EvolvableModule'.",
             )
 
         applied_mut_dict = applied_mut_dict or {}
@@ -989,7 +1028,7 @@ class Mutations:
             if mut_method not in network.mutation_methods:
                 raise MutationError(
                     f"Mutation method '{mut_method}' not found in '{network.__class__.__name__}'; "
-                    f"available methods: \n {network.mutation_methods}."
+                    f"available methods: \n {network.mutation_methods}.",
                 )
 
             mut_dict = getattr(network, mut_method)(**applied_mut_dict)
@@ -1019,14 +1058,14 @@ class Mutations:
             exp_layer = offspring_actor.get_output_dense()
         else:
             raise ValueError(
-                f"Bandit algorithm architecture {type(offspring_actor)} not supported."
+                f"Bandit algorithm architecture {type(offspring_actor)} not supported.",
             )
 
         individual.numel = sum(
             w.numel() for w in exp_layer.parameters() if w.requires_grad
         )
         individual.theta_0 = torch.cat(
-            [w.flatten() for w in exp_layer.parameters() if w.requires_grad]
+            [w.flatten() for w in exp_layer.parameters() if w.requires_grad],
         )
 
         # create matrix that is copy of sigma inv
@@ -1041,7 +1080,7 @@ class Mutations:
         for key, param in old_exp_layer.named_parameters():
             if param.requires_grad:
                 old_size = param.numel()
-                if key not in new_params.keys():
+                if key not in new_params:
                     to_remove += list(range(i, i + old_size))
                 else:
                     new_size = new_params[key].numel()
@@ -1054,7 +1093,7 @@ class Mutations:
         for key, param in exp_layer.named_parameters():
             if param.requires_grad:
                 new_size = param.numel()
-                if key in old_params.keys():
+                if key in old_params:
                     old_size = old_params[key].numel()
                     if new_size > old_size:
                         to_add += list(range(i + old_size, i + new_size))
@@ -1071,26 +1110,36 @@ class Mutations:
         # Remove elements corresponding to old params
         if len(to_remove) > 0:
             new_sigma_inv = np.delete(
-                np.delete(new_sigma_inv, to_remove, 0), to_remove, 1
+                np.delete(new_sigma_inv, to_remove, 0),
+                to_remove,
+                1,
             )
 
         # Add new zeros corresponding to new params, make lambda down identity diagonal
         if len(to_add) > 0:
             new_sigma_inv = np.insert(
-                np.insert(new_sigma_inv, to_add, 0, 0), to_add, 0, 1
+                np.insert(new_sigma_inv, to_add, 0, 0),
+                to_add,
+                0,
+                1,
             )
             for i in to_add:
                 new_sigma_inv[i, i] = individual.lamb
 
         individual.exp_layer = exp_layer
         individual.sigma_inv = torch.from_numpy(new_sigma_inv).to(
-            individual.device
-            if individual.accelerator is None
-            else individual.accelerator.device
+            (
+                individual.device
+                if individual.accelerator is None
+                else individual.accelerator.device
+            ),
         )
 
     def _find_analogous_mutation(
-        self, sampled_mutation: str, available_methods: list[str], policy_agent: str
+        self,
+        sampled_mutation: str,
+        available_methods: list[str],
+        policy_agent: str,
     ) -> str | None:
         """Find an analogous mutation method when exact match is not found.
 
@@ -1109,7 +1158,7 @@ class Mutations:
         if not sampled_mutation:
             return None
 
-        elif sampled_mutation in available_methods:
+        if sampled_mutation in available_methods:
             return sampled_mutation
 
         sampled_parts = sampled_mutation.split(".")
@@ -1131,5 +1180,3 @@ class Mutations:
 
 class MutationError(Exception):
     """Custom exception for mutation errors."""
-
-    pass

@@ -22,6 +22,7 @@ class PettingZooVecEnv:
     :type action_spaces: list[gymnasium.spaces.Space]
     :param possible_agents: List of possible agents
     :type possible_agents: list[str]
+
     """
 
     metadata: dict[str, Any] = {}
@@ -57,21 +58,20 @@ class PettingZooVecEnv:
         self.single_observation_space = self._get_single_observation_space
 
     def reset(
-        self, seed: int | None = None, options: dict[str, Any] | None = None
+        self,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """
-        Reset all the environments and return two dictionaries of batched observations and infos.
+        """Reset all the environments and return two dictionaries of batched observations and infos.
 
         :param seed: Random seed, defaults to None
         :type seed: None | int, optional
         :param options: Options dictionary
         :type options: dict[str, Any]
         """
-        pass
 
     def step_async(self, actions: list[dict[str, ActionType]]) -> None:
-        """
-        Tell all the environments to start taking a step
+        """Tell all the environments to start taking a step
         with the given actions.
         Call step_wait() to get the results of the step.
         You should not call this if a step_async run is
@@ -81,13 +81,9 @@ class PettingZooVecEnv:
         actions for each agent in a given environment
         :type actions: list[dict[str, int | float | np.ndarray]]
         """
-        pass
 
     def step_wait(self) -> PzStepReturn:
-        """
-        Wait for the step taken with step_async().
-        """
-        pass
+        """Wait for the step taken with step_async()."""
 
     def step(self, actions: dict[str, np.ndarray]) -> PzStepReturn:
         """Take an action for each parallel environment
@@ -124,13 +120,11 @@ class PettingZooVecEnv:
     def render(self) -> Any:
         """Returns the rendered frames from the parallel environments."""
         raise NotImplementedError(
-            f"{self.__str__()} render function is not implemented."
+            f"{self.__str__()} render function is not implemented.",
         )
 
     def close(self, **kwargs: Any) -> None:
-        """
-        Clean up the environments' resources.
-        """
+        """Clean up the environments' resources."""
         if self.closed:
             return
 
@@ -139,7 +133,6 @@ class PettingZooVecEnv:
 
     def close_extras(self, **kwargs: Any) -> None:
         """Clean up the extra resources e.g. beyond what's in this base class."""
-        pass
 
     @property
     def unwrapped(self) -> "PettingZooVecEnv":

@@ -1,7 +1,8 @@
 import inspect
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from numbers import Number
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 import numpy as np
 import torch
@@ -34,7 +35,7 @@ class NetworkConfig:
     def __post_init__(self):
         if self.eval_network and self.optimizer is None:
             raise ValueError(
-                "Evaluation network must have an optimizer associated with it."
+                "Evaluation network must have an optimizer associated with it.",
             )
 
 
@@ -151,24 +152,21 @@ class RLParameter:
                     self.value * self.shrink_factor,
                     self.min,
                 )
+            elif self.value * self.shrink_factor > self.min:
+                new_value = self.value * self.shrink_factor
             else:
-                if self.value * self.shrink_factor > self.min:
-                    new_value = self.value * self.shrink_factor
-                else:
-                    new_value = self.min
+                new_value = self.min
+        # Growing
+        elif isinstance(self.value, np.ndarray):
+            new_value = np.where(
+                self.value * self.grow_factor < self.max,
+                self.value * self.grow_factor,
+                self.max,
+            )
+        elif self.value * self.grow_factor < self.max:
+            new_value = self.value * self.grow_factor
         else:
-            # Growing
-            if isinstance(self.value, np.ndarray):
-                new_value = np.where(
-                    self.value * self.grow_factor < self.max,
-                    self.value * self.grow_factor,
-                    self.max,
-                )
-            else:
-                if self.value * self.grow_factor < self.max:
-                    new_value = self.value * self.grow_factor
-                else:
-                    new_value = self.max
+            new_value = self.max
 
         # Clip the new value to the min and max
         if isinstance(new_value, np.ndarray):
@@ -190,14 +188,15 @@ class RLParameter:
 class HyperparameterConfig:
     """Stores the RL hyperparameters that will be mutated during training. For each
     hyperparameter, we store the name of the attribute where the hyperparameter is
-    stored, and the range of values that the hyperparameter can take."""
+    stored, and the range of values that the hyperparameter can take.
+    """
 
     def __init__(self, **kwargs: dict[str, RLParameter]):
         self.config = kwargs
         for key, value in kwargs.items():
             if not isinstance(value, RLParameter):
                 raise ValueError(
-                    "Expected RLParameter object for hyperparameter configuration."
+                    "Expected RLParameter object for hyperparameter configuration.",
                 )
 
             setattr(self, key, value)
@@ -294,8 +293,7 @@ class NetworkGroup:
         return hash((self.eval_network, self.shared_networks, self.policy))
 
     def _infer_parent_container(self) -> EvolvableAlgorithmProtocol:
-        """
-        Infer the parent container dynamically using the stack frame.
+        """Infer the parent container dynamically using the stack frame.
 
         :return: The parent container object
         :rtype: EvolvableAlgorithm
@@ -307,10 +305,11 @@ class NetworkGroup:
         return current_frame.f_back.f_back.f_back.f_locals["self"]
 
     def _infer_attribute_names(
-        self, container: object, objects: object | list[object]
+        self,
+        container: object,
+        objects: object | list[object],
     ) -> list[str]:
-        """
-        Infer attribute names of the networks being optimized.
+        """Infer attribute names of the networks being optimized.
 
         :param container: The container object to inspect.
         :type container: object
@@ -324,8 +323,7 @@ class NetworkGroup:
         def _match_condition(attr_value: Any) -> bool:
             if isinstance(objects, list):
                 return any(id(attr_value) == id(obj) for obj in objects)
-            else:
-                return id(attr_value) == id(objects)
+            return id(attr_value) == id(objects)
 
         return [
             attr_name
@@ -355,7 +353,9 @@ def make_network_group(
     :rtype: NetworkGroup
     """
     return NetworkGroup(
-        eval_network=eval_network, shared_networks=shared_networks, policy=policy
+        eval_network=eval_network,
+        shared_networks=shared_networks,
+        policy=policy,
     )
 
 
@@ -389,13 +389,13 @@ class MutationRegistry:
             [
                 f"Eval: '{group.eval_network}', Shared: {group.shared_networks}"
                 for group in self.groups
-            ]
+            ],
         )
         optimizers_str = "\n".join(
             [
                 f"{opt.optimizer_cls}: '{opt.name}', Networks: {opt.networks}"
                 for opt in self.optimizers
-            ]
+            ],
         )
         return f"Network Groups:\n{groups_str}\n\nOptimizers:\n{optimizers_str}"
 
@@ -432,7 +432,7 @@ class MutationRegistry:
         for group in self.groups:
             if group.policy:
                 return group.eval_network if not return_group else group
-        return
+        return None
 
     def all_registered(self) -> list[str]:
         """Returns all of the members in the registry.

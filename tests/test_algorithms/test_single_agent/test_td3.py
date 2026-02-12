@@ -3,11 +3,10 @@ import copy
 import numpy as np
 import pytest
 import torch
-import torch.nn as nn
-import torch.optim as optim
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
+from torch import nn, optim
 
 from agilerl.algorithms.td3 import TD3
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
@@ -58,22 +57,32 @@ class SimpleCNN(nn.Module):
         super().__init__()
 
         self.conv1 = nn.Conv2d(
-            3, 16, kernel_size=3, stride=1, padding=1
+            3,
+            16,
+            kernel_size=3,
+            stride=1,
+            padding=1,
         )  # Input channels: 3 (for RGB images), Output channels: 16
         self.relu1 = nn.ReLU()
         self.mp1 = nn.MaxPool2d(kernel_size=2, stride=2)
         self.conv2 = nn.Conv2d(
-            16, 32, kernel_size=3, stride=1, padding=1
+            16,
+            32,
+            kernel_size=3,
+            stride=1,
+            padding=1,
         )  # Input channels: 16, Output channels: 32
         self.relu2 = nn.ReLU()
         self.mp2 = nn.MaxPool2d(kernel_size=2, stride=2)
         self.flat = nn.Flatten()  # Flatten the 2D feature map to a 1D vector
         self.linear1 = nn.Linear(
-            32 * 8 * 8, 128
+            32 * 8 * 8,
+            128,
         )  # Fully connected layer with 128 output features
         self.relu3 = nn.ReLU()
         self.linear2 = nn.Linear(
-            128, 128
+            128,
+            128,
         )  # Fully connected layer with 128 output features
 
     def forward(self, x, xc):
@@ -81,8 +90,7 @@ class SimpleCNN(nn.Module):
         x = self.mp2(self.relu2(self.conv2(x)))
         x = self.flat(x)
         x = self.relu3(self.linear1(x))
-        x = self.relu3(self.linear2(x))
-        return x
+        return self.relu3(self.linear2(x))
 
 
 # initialize td3 with valid parameters
@@ -97,7 +105,11 @@ class SimpleCNN(nn.Module):
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator()])
 def test_initialize_td3(
-    observation_space, vector_space, encoder_cls, accelerator, request
+    observation_space,
+    vector_space,
+    encoder_cls,
+    accelerator,
+    request,
 ):
     observation_space = request.getfixturevalue(observation_space)
 
@@ -271,7 +283,11 @@ def test_initialize_td3_with_actor_network_no_critics(
     ],
 )
 def test_initialize_td3_with_actor_network_cnn(
-    observation_space, vector_space, actor_network, input_tensor, request
+    observation_space,
+    vector_space,
+    actor_network,
+    input_tensor,
+    request,
 ):
     observation_space = request.getfixturevalue(observation_space)
     actor_network = request.getfixturevalue(actor_network)
@@ -319,7 +335,8 @@ def test_initialize_td3_with_actor_network_cnn(
 
 
 @pytest.mark.parametrize(
-    "observation_space", ["vector_space", "image_space", "dict_space"]
+    "observation_space",
+    ["vector_space", "image_space", "dict_space"],
 )
 def test_returns_expected_action_training(observation_space, request):
     observation_space = request.getfixturevalue(observation_space)
@@ -408,7 +425,8 @@ def test_returns_expected_action_float64(discrete_space):
 
 # learns from experiences and updates network parameters
 @pytest.mark.parametrize(
-    "observation_space", ["vector_space", "image_space", "dict_space"]
+    "observation_space",
+    ["vector_space", "image_space", "dict_space"],
 )
 @pytest.mark.parametrize(
     "min_action, max_action",
@@ -416,7 +434,11 @@ def test_returns_expected_action_float64(discrete_space):
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator()])
 def test_learns_from_experiences(
-    observation_space, min_action, max_action, accelerator, request
+    observation_space,
+    min_action,
+    max_action,
+    accelerator,
+    request,
 ):
     observation_space = request.getfixturevalue(observation_space)
     # Continuous action space
@@ -438,7 +460,10 @@ def test_learns_from_experiences(
     # Create a batch of experiences
     device = accelerator.device if accelerator else "cpu"
     experiences = get_experiences_batch(
-        observation_space, action_space, batch_size, device
+        observation_space,
+        action_space,
+        batch_size,
+        device,
     )
 
     # Copy state dict before learning - should be different to after updating weights
@@ -516,12 +541,14 @@ def test_soft_update(vector_space):
     target_params = list(td3.actor_target.parameters())
     expected_params = [
         td3.tau * eval_param + (1.0 - td3.tau) * target_param
-        for eval_param, target_param in zip(eval_params, target_params)
+        for eval_param, target_param in zip(eval_params, target_params, strict=False)
     ]
 
     assert all(
         torch.allclose(expected_param, target_param)
-        for expected_param, target_param in zip(expected_params, target_params)
+        for expected_param, target_param in zip(
+            expected_params, target_params, strict=False
+        )
     )
 
     td3.soft_update(td3.critic_1, td3.critic_target_1)
@@ -530,12 +557,14 @@ def test_soft_update(vector_space):
     target_params = list(td3.critic_target_1.parameters())
     expected_params = [
         td3.tau * eval_param + (1.0 - td3.tau) * target_param
-        for eval_param, target_param in zip(eval_params, target_params)
+        for eval_param, target_param in zip(eval_params, target_params, strict=False)
     ]
 
     assert all(
         torch.allclose(expected_param, target_param)
-        for expected_param, target_param in zip(expected_params, target_params)
+        for expected_param, target_param in zip(
+            expected_params, target_params, strict=False
+        )
     )
 
     td3.soft_update(td3.critic_2, td3.critic_target_2)
@@ -544,12 +573,14 @@ def test_soft_update(vector_space):
     target_params = list(td3.critic_target_2.parameters())
     expected_params = [
         td3.tau * eval_param + (1.0 - td3.tau) * target_param
-        for eval_param, target_param in zip(eval_params, target_params)
+        for eval_param, target_param in zip(eval_params, target_params, strict=False)
     ]
 
     assert all(
         torch.allclose(expected_param, target_param)
-        for expected_param, target_param in zip(expected_params, target_params)
+        for expected_param, target_param in zip(
+            expected_params, target_params, strict=False
+        )
     )
     td3.clean_up()
 
@@ -559,7 +590,11 @@ def test_soft_update(vector_space):
 @pytest.mark.parametrize("num_envs", [1, 3])
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_algorithm_test_loop(
-    observation_space, vector_space, num_envs, device, request
+    observation_space,
+    vector_space,
+    num_envs,
+    device,
+    request,
 ):
     observation_space = request.getfixturevalue(observation_space)
     vect = num_envs > 1
@@ -595,28 +630,36 @@ def test_clone_returns_identical_agent(observation_space, vector_space, request)
     assert clone_agent.accelerator == td3.accelerator
     assert_state_dicts_equal(clone_agent.actor.state_dict(), td3.actor.state_dict())
     assert_state_dicts_equal(
-        clone_agent.actor_target.state_dict(), td3.actor_target.state_dict()
+        clone_agent.actor_target.state_dict(),
+        td3.actor_target.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_1.state_dict(), td3.critic_1.state_dict()
+        clone_agent.critic_1.state_dict(),
+        td3.critic_1.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_target_1.state_dict(), td3.critic_target_1.state_dict()
+        clone_agent.critic_target_1.state_dict(),
+        td3.critic_target_1.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_2.state_dict(), td3.critic_2.state_dict()
+        clone_agent.critic_2.state_dict(),
+        td3.critic_2.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_target_2.state_dict(), td3.critic_target_2.state_dict()
+        clone_agent.critic_target_2.state_dict(),
+        td3.critic_target_2.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.actor_optimizer.state_dict(), td3.actor_optimizer.state_dict()
+        clone_agent.actor_optimizer.state_dict(),
+        td3.actor_optimizer.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_1_optimizer.state_dict(), td3.critic_1_optimizer.state_dict()
+        clone_agent.critic_1_optimizer.state_dict(),
+        td3.critic_1_optimizer.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_2_optimizer.state_dict(), td3.critic_2_optimizer.state_dict()
+        clone_agent.critic_2_optimizer.state_dict(),
+        td3.critic_2_optimizer.state_dict(),
     )
     assert clone_agent.fitness == td3.fitness
     assert clone_agent.steps == td3.steps
@@ -643,28 +686,36 @@ def test_clone_returns_identical_agent(observation_space, vector_space, request)
     assert clone_agent.accelerator == td3.accelerator
     assert_state_dicts_equal(clone_agent.actor.state_dict(), td3.actor.state_dict())
     assert_state_dicts_equal(
-        clone_agent.actor_target.state_dict(), td3.actor_target.state_dict()
+        clone_agent.actor_target.state_dict(),
+        td3.actor_target.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_1.state_dict(), td3.critic_1.state_dict()
+        clone_agent.critic_1.state_dict(),
+        td3.critic_1.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_target_1.state_dict(), td3.critic_target_1.state_dict()
+        clone_agent.critic_target_1.state_dict(),
+        td3.critic_target_1.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_2.state_dict(), td3.critic_2.state_dict()
+        clone_agent.critic_2.state_dict(),
+        td3.critic_2.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_target_2.state_dict(), td3.critic_target_2.state_dict()
+        clone_agent.critic_target_2.state_dict(),
+        td3.critic_target_2.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.actor_optimizer.state_dict(), td3.actor_optimizer.state_dict()
+        clone_agent.actor_optimizer.state_dict(),
+        td3.actor_optimizer.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_1_optimizer.state_dict(), td3.critic_1_optimizer.state_dict()
+        clone_agent.critic_1_optimizer.state_dict(),
+        td3.critic_1_optimizer.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_2_optimizer.state_dict(), td3.critic_2_optimizer.state_dict()
+        clone_agent.critic_2_optimizer.state_dict(),
+        td3.critic_2_optimizer.state_dict(),
     )
     assert clone_agent.fitness == td3.fitness
     assert clone_agent.steps == td3.steps
@@ -689,28 +740,36 @@ def test_clone_returns_identical_agent(observation_space, vector_space, request)
     assert clone_agent.accelerator == td3.accelerator
     assert_state_dicts_equal(clone_agent.actor.state_dict(), td3.actor.state_dict())
     assert_state_dicts_equal(
-        clone_agent.actor_target.state_dict(), td3.actor_target.state_dict()
+        clone_agent.actor_target.state_dict(),
+        td3.actor_target.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_1.state_dict(), td3.critic_1.state_dict()
+        clone_agent.critic_1.state_dict(),
+        td3.critic_1.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_target_1.state_dict(), td3.critic_target_1.state_dict()
+        clone_agent.critic_target_1.state_dict(),
+        td3.critic_target_1.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_2.state_dict(), td3.critic_2.state_dict()
+        clone_agent.critic_2.state_dict(),
+        td3.critic_2.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_target_2.state_dict(), td3.critic_target_2.state_dict()
+        clone_agent.critic_target_2.state_dict(),
+        td3.critic_target_2.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.actor_optimizer.state_dict(), td3.actor_optimizer.state_dict()
+        clone_agent.actor_optimizer.state_dict(),
+        td3.actor_optimizer.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_1_optimizer.state_dict(), td3.critic_1_optimizer.state_dict()
+        clone_agent.critic_1_optimizer.state_dict(),
+        td3.critic_1_optimizer.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_2_optimizer.state_dict(), td3.critic_2_optimizer.state_dict()
+        clone_agent.critic_2_optimizer.state_dict(),
+        td3.critic_2_optimizer.state_dict(),
     )
     assert clone_agent.fitness == td3.fitness
     assert clone_agent.steps == td3.steps
@@ -734,7 +793,10 @@ def test_clone_after_learning(vector_space):
 
     # Get experiences and learn
     experiences = get_experiences_batch(
-        vector_space, vector_space, batch_size, device=td3.device
+        vector_space,
+        vector_space,
+        batch_size,
+        device=td3.device,
     )
     td3.learn(experiences)
 
@@ -754,28 +816,36 @@ def test_clone_after_learning(vector_space):
     assert clone_agent.accelerator == td3.accelerator
     assert_state_dicts_equal(clone_agent.actor.state_dict(), td3.actor.state_dict())
     assert_state_dicts_equal(
-        clone_agent.actor_target.state_dict(), td3.actor_target.state_dict()
+        clone_agent.actor_target.state_dict(),
+        td3.actor_target.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_1.state_dict(), td3.critic_1.state_dict()
+        clone_agent.critic_1.state_dict(),
+        td3.critic_1.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_target_1.state_dict(), td3.critic_target_1.state_dict()
+        clone_agent.critic_target_1.state_dict(),
+        td3.critic_target_1.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_2.state_dict(), td3.critic_2.state_dict()
+        clone_agent.critic_2.state_dict(),
+        td3.critic_2.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_target_2.state_dict(), td3.critic_target_2.state_dict()
+        clone_agent.critic_target_2.state_dict(),
+        td3.critic_target_2.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.actor_optimizer.state_dict(), td3.actor_optimizer.state_dict()
+        clone_agent.actor_optimizer.state_dict(),
+        td3.actor_optimizer.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_1_optimizer.state_dict(), td3.critic_1_optimizer.state_dict()
+        clone_agent.critic_1_optimizer.state_dict(),
+        td3.critic_1_optimizer.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_2_optimizer.state_dict(), td3.critic_2_optimizer.state_dict()
+        clone_agent.critic_2_optimizer.state_dict(),
+        td3.critic_2_optimizer.state_dict(),
     )
     assert clone_agent.fitness == td3.fitness
     assert clone_agent.steps == td3.steps
@@ -786,7 +856,9 @@ def test_clone_after_learning(vector_space):
 
 @pytest.mark.parametrize("observation_space", ["vector_space"])
 def test_initialize_td3_with_actor_network_evo_net(
-    observation_space, vector_space, request
+    observation_space,
+    vector_space,
+    request,
 ):
     observation_space = request.getfixturevalue(observation_space)
 
@@ -870,7 +942,9 @@ def test_share_encoder_parameters_incompatible_architectures_raises_key_error(
 
 
 def test_share_encoder_parameters_non_evolvable_network_emits_warning(
-    vector_space, simple_mlp, simple_mlp_critic
+    vector_space,
+    simple_mlp,
+    simple_mlp_critic,
 ):
     """When share_encoder_parameters() is called with actor/critics that are not EvolvableNetwork, a warning is emitted."""
     action_space = copy.deepcopy(vector_space)

@@ -5,11 +5,11 @@ from datetime import datetime
 from typing import Any
 
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from pettingzoo import ParallelEnv
 from torch.utils.data import DataLoader
 
+import wandb
 from agilerl.algorithms import MADDPG, MATD3
 from agilerl.components.data import ReplayDataset
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
@@ -117,29 +117,32 @@ def train_multi_agent_off_policy(
     :type wandb_api_key: str, optional
     """
     assert isinstance(
-        algo, str
+        algo,
+        str,
     ), "'algo' must be the name of the algorithm as a string."
     assert isinstance(max_steps, int), "Number of steps must be an integer."
     assert isinstance(evo_steps, int), "Evolution frequency must be an integer."
     if target is not None:
         assert isinstance(
-            target, (float, int)
+            target,
+            (float, int),
         ), "Target score must be a float or an integer."
     if checkpoint is not None:
         assert isinstance(checkpoint, int), "Checkpoint must be an integer."
     assert isinstance(
-        wb, bool
+        wb,
+        bool,
     ), "'wb' must be a boolean flag, indicating whether to record run with W&B"
     assert isinstance(verbose, bool), "Verbose must be a boolean."
     if save_elite is False and elite_path is not None:
         warnings.warn(
             "'save_elite' set to False but 'elite_path' has been defined, elite will not\
-                      be saved unless 'save_elite' is set to True."
+                      be saved unless 'save_elite' is set to True.",
         )
     if checkpoint is None and checkpoint_path is not None:
         warnings.warn(
             "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
-                      be saved unless 'checkpoint' is defined."
+                      be saved unless 'checkpoint' is defined.",
         )
 
     start_time = time.time()
@@ -165,7 +168,9 @@ def train_multi_agent_off_policy(
         checkpoint_path.split(".pt")[0]
         if checkpoint_path is not None
         else "{}-EvoHPO-{}-{}".format(
-            env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
+            env_name,
+            algo,
+            datetime.now().strftime("%m%d%Y%H%M%S"),
         )
     )
 
@@ -321,10 +326,12 @@ def train_multi_agent_off_policy(
 
                     # Replace NaNs with True (indicate killed agent)
                     terminated = np.where(
-                        np.isnan(terminated), True, terminated
+                        np.isnan(terminated),
+                        True,
+                        terminated,
                     ).astype(bool)
                     truncated = np.where(np.isnan(truncated), False, truncated).astype(
-                        bool
+                        bool,
                     )
 
                     dones[agent_id] = terminated | truncated
@@ -350,7 +357,8 @@ def train_multi_agent_off_policy(
                                 expand_dims = not is_vectorised
                                 obs = {
                                     agent_id: obs_channels_to_first(
-                                        s, expand_dims=expand_dims
+                                        s,
+                                        expand_dims=expand_dims,
                                     )
                                     for agent_id, s in obs.items()
                                 }
@@ -372,10 +380,10 @@ def train_multi_agent_off_policy(
                         ]
                         if actor_losses:
                             pop_actor_loss[agent_idx][agent_id].append(
-                                np.mean(actor_losses)
+                                np.mean(actor_losses),
                             )
                         pop_critic_loss[agent_idx][agent_id].append(
-                            np.mean(critic_losses)
+                            np.mean(critic_losses),
                         )
 
         # Evaluate population
@@ -405,8 +413,8 @@ def train_multi_agent_off_policy(
                         mean_score
                         for mean_score in mean_scores
                         if not isinstance(mean_score, str)
-                    ]
-                )
+                    ],
+                ),
             }
             fitness_dict = {
                 "eval/mean_fitness": np.mean(fitnesses),
@@ -490,7 +498,7 @@ def train_multi_agent_off_policy(
                         f"learning_rate_critic_agent_{idx}": agent.lr_critic,
                         f"batch_size_agent_{idx}": agent.batch_size,
                         f"indi_fitness_agent_{idx}": agent.fitness[-1],
-                    }
+                    },
                 )
         # Update step counter
         for agent in pop:
@@ -500,7 +508,7 @@ def train_multi_agent_off_policy(
         if target is not None:
             if (
                 np.all(
-                    np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target)
+                    np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target),
                 )
                 and len(pop[0].steps) >= 100
             ):
@@ -537,10 +545,10 @@ def train_multi_agent_off_policy(
             else:
                 fitness_arr = np.array([fitness for fitness in fitnesses])
                 avg_fitness_arr = np.array(
-                    [np.mean(agent.fitness[-5:], axis=0) for agent in pop]
+                    [np.mean(agent.fitness[-5:], axis=0) for agent in pop],
                 )
                 avg_score_arr = np.array(
-                    [np.mean(agent.scores[-10:], axis=0) for agent in pop]
+                    [np.mean(agent.scores[-10:], axis=0) for agent in pop],
                 )
                 fitness = {
                     agent: fitness_arr[:, idx] for idx, agent in enumerate(agent_ids)
@@ -571,7 +579,7 @@ def train_multi_agent_off_policy(
                 f"10 score avgs:\t{avg_score}\n"
                 f"Agents:\t\t{agents}\n"
                 f"Steps:\t\t{num_steps}\n"
-                f"Mutations:\t{muts}"
+                f"Mutations:\t{muts}",
             )
 
         # Save model checkpoint

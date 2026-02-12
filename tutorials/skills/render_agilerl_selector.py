@@ -23,7 +23,11 @@ def resize_frames(frames, fraction):
 
 
 def add_text_to_image(
-    image_array, text, position, font_size=30, font_color=(153, 255, 255)
+    image_array,
+    text,
+    position,
+    font_size=30,
+    font_color=(153, 255, 255),
 ):
     """Add text to an image represented as a numpy array.
 
@@ -41,9 +45,7 @@ def add_text_to_image(
         font = ImageFont.load_default()
     draw = ImageDraw.Draw(image)
     draw.text(position, text, font=font, fill=font_color)
-    modified_image_array = np.array(image)
-
-    return modified_image_array
+    return np.array(image)
 
 
 if __name__ == "__main__":
@@ -83,7 +85,7 @@ if __name__ == "__main__":
         frames.append(env.render())
         score = 0
         steps = 0
-        for idx_step in range(max_steps):
+        for _idx_step in range(max_steps):
             # Get next action from agent
             action, log_prob, _, value = agent.get_action(state)
 
@@ -92,13 +94,13 @@ if __name__ == "__main__":
             skill_agent = trained_skills[action[0]]["agent"]
             skill_duration = trained_skills[action[0]]["skill_duration"]
             reward = 0
-            for skill_step in range(skill_duration):
+            for _skill_step in range(skill_duration):
                 if state[6] or state[7]:
                     next_state, skill_reward, termination, truncation, _ = env.step(0)
                 else:
                     skill_action, _, _, _ = skill_agent.get_action(state)
                     next_state, skill_reward, termination, truncation, _ = env.step(
-                        skill_action[0]
+                        skill_action[0],
                     )  # Act in environment
 
                 # Save the frame for this step and append to frames list

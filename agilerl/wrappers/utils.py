@@ -38,7 +38,10 @@ class RunningMeanStd:
         self.update_from_moments(batch_mean, batch_var, batch_count)
 
     def update_from_moments(
-        self, batch_mean: torch.Tensor, batch_var: torch.Tensor, batch_count: int
+        self,
+        batch_mean: torch.Tensor,
+        batch_var: torch.Tensor,
+        batch_count: int,
     ) -> None:
         """Updates mean and variance using batch moments.
 

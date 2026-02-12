@@ -40,7 +40,7 @@ def test_instantiation(num_inputs, num_outputs, hidden_size, device):
     [(0, 20, [16]), (20, 0, [16]), (10, 2, []), (10, 2, [0])],
 )
 def test_incorrect_instantiation(num_inputs, num_outputs, hidden_size, device):
-    with pytest.raises(Exception):
+    with pytest.raises(Exception):  # noqa: B017
         EvolvableMLP(
             num_inputs=num_inputs,
             num_outputs=num_outputs,
@@ -61,7 +61,9 @@ def test_incorrect_instantiation(num_inputs, num_outputs, hidden_size, device):
     ],
 )
 def test_instantiation_with_different_activations(
-    activation, output_activation, device
+    activation,
+    output_activation,
+    device,
 ):
     evolvable_mlp = EvolvableMLP(
         num_inputs=6,
@@ -99,7 +101,12 @@ def test_reset_noise(device):
     ],
 )
 def test_forward(
-    input_tensor, num_inputs, num_outputs, hidden_size, output_size, device
+    input_tensor,
+    num_inputs,
+    num_outputs,
+    hidden_size,
+    output_size,
+    device,
 ):
     evolvable_mlp = EvolvableMLP(
         num_inputs=num_inputs,
@@ -141,7 +148,7 @@ def test_add_layer(num_inputs, num_outputs, hidden_size, device):
     if initial_hidden_size < 10:
         assert len(evolvable_mlp.hidden_size) == initial_hidden_size + 1
         for key, param in new_net.named_parameters():
-            if key in initial_net_dict.keys():
+            if key in initial_net_dict:
                 torch.testing.assert_close(param, initial_net_dict[key])
     else:
         assert len(evolvable_mlp.hidden_size) == initial_hidden_size
@@ -170,10 +177,7 @@ def test_remove_layer(num_inputs, num_outputs, hidden_size, device):
     if initial_hidden_size > 1:
         assert len(evolvable_mlp.hidden_size) == initial_hidden_size - 1
         for key, param in new_net.named_parameters():
-            if (
-                key in initial_net_dict.keys()
-                and param.shape == initial_net_dict[key].shape
-            ):
+            if key in initial_net_dict and param.shape == initial_net_dict[key].shape:
                 torch.testing.assert_close(param, initial_net_dict[key]), evolvable_mlp
     else:
         assert len(evolvable_mlp.hidden_size) == initial_hidden_size
@@ -189,7 +193,12 @@ def test_remove_layer(num_inputs, num_outputs, hidden_size, device):
     ],
 )
 def test_add_nodes(
-    num_inputs, num_outputs, hidden_size, hidden_layer, numb_new_nodes, device
+    num_inputs,
+    num_outputs,
+    hidden_size,
+    hidden_layer,
+    numb_new_nodes,
+    device,
 ):
     mlp = EvolvableMLP(
         num_inputs=num_inputs,
@@ -217,7 +226,12 @@ def test_add_nodes(
     ],
 )
 def test_remove_nodes(
-    num_inputs, num_outputs, hidden_size, hidden_layer, numb_new_nodes, device
+    num_inputs,
+    num_outputs,
+    hidden_size,
+    hidden_layer,
+    numb_new_nodes,
+    device,
 ):
     mlp = EvolvableMLP(
         num_inputs=num_inputs,

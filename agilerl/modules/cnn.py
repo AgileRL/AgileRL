@@ -3,7 +3,7 @@ from typing import Any, Literal
 
 import numpy as np
 import torch
-import torch.nn as nn
+from torch import nn
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
 from agilerl.typing import ArrayOrTensor, KernelSizeType
@@ -13,7 +13,8 @@ BlockType = Literal["Conv1d", "Conv2d", "Conv3d"]
 
 
 def _assert_correct_kernel_sizes(
-    sizes: list[tuple[int, ...]], block_type: BlockType
+    sizes: list[tuple[int, ...]],
+    block_type: BlockType,
 ) -> None:
     """Check that kernel sizes correspond to either 2d or 3d convolutions. We enforce
     CNN kernels to have the same value for width and height.
@@ -38,7 +39,7 @@ def _assert_correct_kernel_sizes(
             )
             raise ValueError(
                 f"Found CNN kernel with length {len(k_size)}. These should "
-                f"have a length of {msg} for {block_type}."
+                f"have a length of {msg} for {block_type}.",
             )
 
         assert len(wh_unique) == 1, (
@@ -104,7 +105,10 @@ class MutableKernelSizes:
         self.sizes = self.sizes[:-1]
 
     def calc_max_kernel_sizes(
-        self, channel_size: list[int], stride_size: list[int], input_shape: list[int]
+        self,
+        channel_size: list[int],
+        stride_size: list[int],
+        input_shape: list[int],
     ) -> list[int]:
         """Calculate the maximum kernel sizes for each convolutional layer.
 
@@ -123,10 +127,10 @@ class MutableKernelSizes:
         height_in, width_in = input_shape[-2:]
         for idx, _ in enumerate(channel_size):
             height_out = 1 + np.floor(
-                (height_in + 2 * (0) - kernel_size[idx]) / (stride_size[idx])
+                (height_in + 2 * (0) - kernel_size[idx]) / (stride_size[idx]),
             )
             width_out = 1 + np.floor(
-                (width_in + 2 * (0) - kernel_size[idx]) / (stride_size[idx])
+                (width_in + 2 * (0) - kernel_size[idx]) / (stride_size[idx]),
             )
             max_kernel_size = min(height_out, width_out) * 0.25
             max_kernel_size = int(max_kernel_size)
@@ -178,7 +182,9 @@ class MutableKernelSizes:
             new_kernel_size = kernel_size
         else:
             max_kernels = self.calc_max_kernel_sizes(
-                channel_size, stride_size, input_shape
+                channel_size,
+                stride_size,
+                input_shape,
             )
 
             # Get current kernel size to avoid generating the same value
@@ -285,10 +291,10 @@ class EvolvableCNN(EvolvableModule):
         super().__init__(device, random_seed)
 
         assert len(kernel_size) == len(
-            channel_size
+            channel_size,
         ), "Length of kernel size list must be the same length as channel size list."
         assert len(stride_size) == len(
-            channel_size
+            channel_size,
         ), "Length of stride size list must be the same length as channel size list."
         # assert len(input_shape) >= 3, "Input shape must have at least 3 dimensions." # Adjusted below
         assert (
@@ -335,7 +341,7 @@ class EvolvableCNN(EvolvableModule):
             _sample_input = sample_input
         else:
             raise ValueError(
-                f"Invalid block type: {block_type}. Must be 'Conv1d', 'Conv2d' or 'Conv3d'."
+                f"Invalid block type: {block_type}. Must be 'Conv1d', 'Conv2d' or 'Conv3d'.",
             )
 
         self.input_shape = input_shape
@@ -417,7 +423,7 @@ class EvolvableCNN(EvolvableModule):
         old_net_dict = dict(old_net.named_parameters())
 
         for key, param in new_net.named_parameters():
-            if key in old_net_dict.keys():
+            if key in old_net_dict:
                 old_param = old_net_dict[key]
                 old_size = old_param.data.size()
                 new_size = param.data.size()
@@ -435,7 +441,8 @@ class EvolvableCNN(EvolvableModule):
                     else:
                         min_1 = min(old_size[1], new_size[1])
                         param.data[:min_0, :min_1] = old_net_dict[key].data[
-                            :min_0, :min_1
+                            :min_0,
+                            :min_1,
                         ]
 
         return new_net
@@ -480,8 +487,7 @@ class EvolvableCNN(EvolvableModule):
         stride_size: list[int],
         sample_input: torch.Tensor,
     ) -> nn.Sequential:
-        """
-        Creates and returns a convolutional neural network.
+        """Creates and returns a convolutional neural network.
 
         :param in_channels: The number of input channels.
         :type in_channels: int
@@ -523,10 +529,12 @@ class EvolvableCNN(EvolvableModule):
 
         flattened_size = cnn_output.shape[1]
         net_dict[f"{self.name}_linear_output"] = nn.Linear(
-            flattened_size, self.num_outputs, device=self.device
+            flattened_size,
+            self.num_outputs,
+            device=self.device,
         )
         net_dict[f"{self.name}_output_activation"] = get_activation(
-            self.output_activation
+            self.output_activation,
         )
         self.cnn_output_size = pre_flatten_output.shape
 
@@ -590,7 +598,9 @@ class EvolvableCNN(EvolvableModule):
             # Original logic for Conv2D/Conv3D
             # This relies on calc_max_kernel_sizes which might need review for 3D if issues arise.
             max_kernels_from_util = self.mut_kernel_size.calc_max_kernel_sizes(
-                self.channel_size, self.stride_size, self.input_shape
+                self.channel_size,
+                self.stride_size,
+                self.input_shape,
             )
             if max_kernels_from_util and max_kernels_from_util[-1] > 2:
                 condition_max_k_gt_2 = True
@@ -657,7 +667,9 @@ class EvolvableCNN(EvolvableModule):
 
     @mutation(MutationType.NODE)
     def change_kernel(
-        self, kernel_size: int | None = None, hidden_layer: int | None = None
+        self,
+        kernel_size: int | None = None,
+        hidden_layer: int | None = None,
     ) -> dict[str, int | None]:
         """Randomly alters convolution kernel of random CNN layer.
 
@@ -752,7 +764,6 @@ class EvolvableCNN(EvolvableModule):
         :param shrink_params: Flag indicating whether to shrink the parameters, defaults to False
         :type shrink_params: bool, optional
         """
-
         # Create model with new architecture
         model = self.create_cnn(
             in_channels=self.input_shape[0],

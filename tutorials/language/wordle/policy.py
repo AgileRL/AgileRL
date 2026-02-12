@@ -78,7 +78,7 @@ class StartWordPolicy(Policy):
 
     def act(self, obs: WordleObservation) -> str:
         filtered_start_words = list(
-            filter(lambda x: x in obs.game.vocab.filtered_vocab, self.start_words)
+            filter(lambda x: x in obs.game.vocab.filtered_vocab, self.start_words),
         )
         if len(filtered_start_words) == 0:
             filtered_start_words = obs.game.vocab.filtered_vocab
@@ -87,7 +87,9 @@ class StartWordPolicy(Policy):
 
 class OptimalPolicy(Policy):
     def __init__(
-        self, start_word_policy: Policy | None = None, progress_bar: bool = False
+        self,
+        start_word_policy: Policy | None = None,
+        progress_bar: bool = False,
     ):
         super().__init__()
         self.start_word_policy = start_word_policy
@@ -149,10 +151,7 @@ class RandomMixturePolicy(Policy):
         self.prob_smart = prob_smart
 
     def act(self, obs: WordleObservation) -> str:
-        if self.vocab is None:
-            v = obs.game.vocab
-        else:
-            v = self.vocab
+        v = obs.game.vocab if self.vocab is None else self.vocab
         if random.random() < self.prob_smart:
             if self.vocab is not None:
                 v = v.update_vocab(obs.game.state)
@@ -204,6 +203,6 @@ class MonteCarloPolicy(Policy):
                 curr_obs, r, _ = curr_obs.game.next(word_choice)
                 total_reward += r
             action_scores[curr_obs.action_history[len(obs.game.action_history)]].append(
-                total_reward
+                total_reward,
             )
         return max(action_scores.items(), key=lambda x: sum(x[1]) / len(x[1]))[0]

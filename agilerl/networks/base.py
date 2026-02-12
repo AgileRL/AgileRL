@@ -38,11 +38,10 @@ def assert_correct_mlp_net_config(net_config: dict[str, Any]) -> None:
     :param net_config: Configuration of the MLP network.
     :type net_config: dict[str, Any]
     """
-    assert (
-        "hidden_size" in net_config.keys()
-    ), "Net config must contain hidden_size: int."
+    assert "hidden_size" in net_config, "Net config must contain hidden_size: int."
     assert isinstance(
-        net_config["hidden_size"], list
+        net_config["hidden_size"],
+        list,
     ), "Net config hidden_size must be a list."
     assert (
         len(net_config["hidden_size"]) > 0
@@ -55,15 +54,15 @@ def assert_correct_simba_net_config(net_config: dict[str, Any]) -> None:
     :param net_config: Configuration of the MLP network.
     :type net_config: dict[str, Any]
     """
-    assert (
-        "hidden_size" in net_config.keys()
-    ), "Net config must contain hidden_size: int."
+    assert "hidden_size" in net_config, "Net config must contain hidden_size: int."
     assert isinstance(
-        net_config["hidden_size"], (int, np.int64)
+        net_config["hidden_size"],
+        (int, np.int64),
     ), "Net config hidden_size must be an integer."
-    assert "num_blocks" in net_config.keys(), "Net config must contain num_blocks: int."
+    assert "num_blocks" in net_config, "Net config must contain num_blocks: int."
     assert isinstance(
-        net_config["num_blocks"], int
+        net_config["num_blocks"],
+        int,
     ), "Net config num_blocks must be an integer."
 
 
@@ -78,7 +77,7 @@ def assert_correct_cnn_net_config(net_config: dict[str, Any]) -> None:
         "kernel_size",
         "stride_size",
     ]:
-        assert key in net_config.keys(), f"Net config must contain {key}: int."
+        assert key in net_config, f"Net config must contain {key}: int."
         assert isinstance(net_config[key], list), f"Net config {key} must be a list."
         assert (
             len(net_config[key]) > 0
@@ -86,7 +85,8 @@ def assert_correct_cnn_net_config(net_config: dict[str, Any]) -> None:
 
         if key == "kernel_size":
             assert isinstance(
-                net_config[key], (int, tuple, list)
+                net_config[key],
+                (int, tuple, list),
             ), "Kernel size must be of type int, list, or tuple."
 
 
@@ -97,7 +97,7 @@ def assert_correct_lstm_net_config(net_config: dict[str, Any]) -> None:
     :type net_config: dict[str, Any]
     """
     assert (
-        "hidden_state_size" in net_config.keys()
+        "hidden_state_size" in net_config
     ), "LSTM net config must contain hidden_state_size: int."
     assert isinstance(net_config["hidden_state_size"], (int, np.int64)), (
         "LSTM net config hidden_state_size must be an integer but is "
@@ -109,7 +109,8 @@ def assert_correct_lstm_net_config(net_config: dict[str, Any]) -> None:
 # TODO: Need to think of a way to do this check without the metaclass
 class NetworkMeta(ModuleMeta):
     """Metaclass for evolvable networks. Checks that the network has
-    an encoder and a head_net (named as such)."""
+    an encoder and a head_net (named as such).
+    """
 
     def __call__(cls, *args, **kwargs):
         instance: SelfEvolvableNetwork = super().__call__(*args, **kwargs)
@@ -122,15 +123,14 @@ class NetworkMeta(ModuleMeta):
                 if attr not in ["encoder", "head_net"]:
                     raise AttributeError(
                         "Mutation methods must reference only 'encoder' or 'head_net' "
-                        "so mutations apply consistently across networks (e.g. actor and critic)."
+                        "so mutations apply consistently across networks (e.g. actor and critic).",
                     )
 
         return instance
 
 
 class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
-    """
-    Base class for evolvable networks, i.e., evolvable modules that are configured in
+    """Base class for evolvable networks, i.e., evolvable modules that are configured in
     a specific way for a reinforcement learning algorithm, similar to how CNNs are used
     as building blocks in ResNet, VGG, etc. An evolvable network automatically inspects the passed
     observation space to determine the appropriate encoder to build through the AgileRL
@@ -203,7 +203,9 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
 
         if encoder_config is None:
             encoder_config = get_default_encoder_config(
-                observation_space, simba=simba, recurrent=recurrent
+                observation_space,
+                simba=simba,
+                recurrent=recurrent,
             )
 
         self.observation_space = observation_space
@@ -238,7 +240,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                 warnings.warn(
                     f"{self.encoder_cls.__name__} does not contain `num_outputs` as an "
                     "input argument. Disabling latent space mutations. Make sure to set the number of "
-                    "outputs to the latent dimension in the encoder configuration."
+                    "outputs to the latent dimension in the encoder configuration.",
                 )
                 self.filter_mutation_methods("latent")
             else:
@@ -251,7 +253,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                     "device": self.device,
                     "name": self.encoder_name,
                     **encoder_config,
-                }
+                },
             )
         else:
             self.encoder = self._build_encoder(encoder_config)
@@ -299,7 +301,9 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         return self.forward(*args, **kwargs)
 
     def extract_features(
-        self, x: torch.Tensor, hidden_state: dict[str, torch.Tensor] | None = None
+        self,
+        x: torch.Tensor,
+        hidden_state: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Extract features from the encoder part of the network.
 
@@ -313,8 +317,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         # For compatibility with both recurrent and non-recurrent networks
         if hidden_state is None:
             return self.encoder(x)
-        else:
-            return self.encoder(x, hidden_state=hidden_state)
+        return self.encoder(x, hidden_state=hidden_state)
 
     def forward_head(self, latent: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         """Forward pass of the network head using pre-computed latent encodings.
@@ -333,11 +336,15 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     def build_network_head(self, *args, **kwargs) -> None:
         """Build the head of the network."""
         raise NotImplementedError(
-            "Method build_network_head must be implemented in EvolvableNetwork objects."
+            "Method build_network_head must be implemented in EvolvableNetwork objects.",
         )
 
     def create_mlp(
-        self, num_inputs: int, num_outputs: int, name: str, net_config: dict[str, Any]
+        self,
+        num_inputs: int,
+        num_outputs: int,
+        name: str,
+        net_config: dict[str, Any],
     ) -> EvolvableMLP:
         """Builds the head of the network based on the passed configuration.
 
@@ -362,7 +369,9 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         )
 
     def init_weights_gaussian(
-        self, std_coeff: float = 4.0, output_coeff: float = 2.0
+        self,
+        std_coeff: float = 4.0,
+        output_coeff: float = 2.0,
     ) -> None:
         """Initialize the weights of the network with a Gaussian distribution.
 
@@ -379,7 +388,8 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         for attr, module in self.modules().items():
             if attr != "encoder":
                 module.init_weights_gaussian(
-                    std_coeff=std_coeff, output_coeff=output_coeff
+                    std_coeff=std_coeff,
+                    output_coeff=output_coeff,
                 )
 
     def initialize_hidden_state(self, batch_size: int = 1) -> dict[str, torch.Tensor]:
@@ -399,7 +409,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                 self.cached_hidden_state = {}
                 self.cached_hidden_state_batch_size = batch_size
                 for name, shape in get_hidden_states_shape_from_model(
-                    self.encoder
+                    self.encoder,
                 ).items():
                     # shape might have a batch dimension 'BatchPlaceholder', so we need to replace it
                     shape = tuple(
@@ -407,10 +417,9 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                     )
                     self.cached_hidden_state[name] = torch.zeros(shape).to(self.device)
             return deepcopy(self.cached_hidden_state)
-        else:
-            raise ValueError(
-                "Cannot initialize hidden state for non-recurrent networks."
-            )
+        raise ValueError(
+            "Cannot initialize hidden state for non-recurrent networks.",
+        )
 
     def change_activation(self, activation: str, output: bool = False) -> None:
         """Change the activation function for the network.
@@ -460,7 +469,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
 
         return {"numb_new_nodes": numb_new_nodes}
 
-    def recreate_encoder(self: SelfEvolvableNetwork) -> None:
+    def recreate_encoder(self) -> None:
         """Recreate the encoder of the network."""
         if self.encoder_cls is not None:
             # Need to change `num_outputs` to the latent dimension after a mutation

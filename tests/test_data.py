@@ -47,12 +47,10 @@ class WordleTokenizer(Tokenizer):
         if isinstance(str_, str):
             special_idxs = []
             for special_char in self.special_vocab:
-                special_idxs += list(
-                    map(
-                        lambda x: (x.start(), x.end(), self.token_to_id(special_char)),
-                        re.finditer(re.escape(special_char), str_),
-                    )
-                )
+                special_idxs += [
+                    (x.start(), x.end(), self.token_to_id(special_char))
+                    for x in re.finditer(re.escape(special_char), str_)
+                ]
             special_idxs.sort(key=lambda x: x[0])
             tokens = []
             curr = 0
@@ -62,25 +60,25 @@ class WordleTokenizer(Tokenizer):
                 curr = e
             tokens.extend([self.token_to_id(c) for c in str_[curr:]])
             return tokens, [int(t != self.pad_token_id) for t in tokens]
-        elif isinstance(str_, list):
-            tokens, pads = zip(*[self.encode(item) for item in str_])
+        if isinstance(str_, list):
+            tokens, pads = zip(*[self.encode(item) for item in str_], strict=False)
             max_len = max(map(len, tokens))
             return [
                 list(item) + ([self.pad_token_id] * (max_len - len(item)))
                 for item in tokens
             ], [list(item) + ([0] * (max_len - len(item))) for item in pads]
-        else:
-            raise ValueError("str_ must be a string or a list of strings")
+        msg = "str_ must be a string or a list of strings"
+        raise ValueError(msg)
 
     def decode(self, tokens, **kwargs):
         if len(tokens) == 0:
             return ""
         if not isinstance(tokens[0], list):
             return "".join([self.id_to_token(item) for item in tokens])
-        elif isinstance(tokens[0], list):
+        if isinstance(tokens[0], list):
             return [self.decode(item) for item in tokens]
-        else:
-            raise ValueError("tokens must be a list of ints or a list of lists of ints")
+        msg = "tokens must be a list of ints or a list of lists of ints"
+        raise ValueError(msg)
 
     def num_tokens(self):
         return len(self.vocab)

@@ -1,8 +1,8 @@
 """Shared utilities for AgileRL tutorials."""
 
 import re
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Generator
 
 
 def _format_install_message(package: str) -> str:
@@ -60,6 +60,7 @@ def require_package() -> Generator[None, None, None]:
     >>> with require_package():
     ...     from ucimlrepo import fetch_ucirepo
     ...     from scipy.ndimage import gaussian_filter1d
+
     """
     try:
         yield

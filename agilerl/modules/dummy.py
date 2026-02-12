@@ -1,7 +1,8 @@
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from agilerl.modules import EvolvableModule
 from agilerl.typing import DeviceType

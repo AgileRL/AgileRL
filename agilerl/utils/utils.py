@@ -1,20 +1,21 @@
 import logging
 import os
 import warnings
+from collections.abc import Callable
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any
 
 import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import tqdm
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl.algorithms import (
     CQN,
     DDPG,
@@ -97,7 +98,9 @@ def make_multi_agent_vect_envs(
 
 
 def make_skill_vect_envs(
-    env_name: str, skill: Any, num_envs: int = 1
+    env_name: str,
+    skill: Any,
+    num_envs: int = 1,
 ) -> gym.vector.AsyncVectorEnv:
     """Returns async-vectorized gym environments.
 
@@ -109,7 +112,7 @@ def make_skill_vect_envs(
     :type num_envs: int, optional
     """
     return gym.vector.AsyncVectorEnv(
-        [lambda: skill(gym.make(env_name)) for i in range(num_envs)]
+        [lambda: skill(gym.make(env_name)) for i in range(num_envs)],
     )
 
 
@@ -130,7 +133,7 @@ def observation_space_channels_to_first(
                 and len(observation_space[key].shape) == 3
             ):
                 observation_space[key] = observation_space_channels_to_first(
-                    observation_space[key]
+                    observation_space[key],
                 )
     elif isinstance(observation_space, spaces.Tuple):
         observation_space = spaces.Tuple(
@@ -141,13 +144,15 @@ def observation_space_channels_to_first(
                     else space
                 )
                 for space in observation_space.spaces
-            ]
+            ],
         )
     elif isinstance(observation_space, spaces.Box):
         low = observation_space.low.transpose(2, 0, 1)
         high = observation_space.high.transpose(2, 0, 1)
         observation_space = spaces.Box(
-            low=low, high=high, dtype=observation_space.dtype
+            low=low,
+            high=high,
+            dtype=observation_space.dtype,
         )
 
     return observation_space
@@ -260,7 +265,6 @@ def create_population(
     :param algo_kwargs: Additional keyword arguments for the algorithm
     :type algo_kwargs: dict, optional
     """
-
     population = []
     if algo == "DQN":
         for idx in range(population_size):
@@ -370,9 +374,10 @@ def create_population(
                 recurrent=INIT_HP.get("RECURRENT", False),
                 use_rollout_buffer=INIT_HP.get("USE_ROLLOUT_BUFFER", False),
                 bptt_sequence_type=INIT_HP.get(
-                    "BPTT_SEQUENCE_TYPE", BPTTSequenceType.CHUNKED
+                    "BPTT_SEQUENCE_TYPE",
+                    BPTTSequenceType.CHUNKED,
                 ),
-                max_seq_len=INIT_HP.get("MAX_SEQ_LEN", None),
+                max_seq_len=INIT_HP.get("MAX_SEQ_LEN"),
                 actor_network=actor_network,
                 critic_network=critic_network,
                 device=device,
@@ -517,7 +522,7 @@ def create_population(
                 update_epochs=INIT_HP.get("UPDATE_EPOCHS", 4),
                 actor_networks=actor_network,
                 critic_networks=critic_network,
-                action_batch_size=INIT_HP.get("ACTION_BATCH_SIZE", None),
+                action_batch_size=INIT_HP.get("ACTION_BATCH_SIZE"),
                 device=device,
                 accelerator=accelerator,
                 torch_compiler=torch_compiler,
@@ -599,16 +604,16 @@ def create_population(
                 temperature=INIT_HP.get("TEMPERATURE", 0.9),
                 calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
                 reduce_memory_peak=INIT_HP.get("REDUCE_MEMORY_PEAK", False),
-                max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS", None),
-                min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS", None),
+                max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS"),
+                min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS"),
                 cosine_lr_schedule_config=(
-                    CosineLRScheduleConfig(**INIT_HP.get("COSINE_lR_SCHEDULER", None))
-                    if INIT_HP.get("COSINE_lR_SCHEDULER", None) is not None
+                    CosineLRScheduleConfig(**INIT_HP.get("COSINE_lR_SCHEDULER"))
+                    if INIT_HP.get("COSINE_lR_SCHEDULER") is not None
                     else None
                 ),
                 accelerator=Accelerator() if accelerator else None,
                 device=device,
-                max_model_len=INIT_HP.get("MAX_MODEL_LEN", None),
+                max_model_len=INIT_HP.get("MAX_MODEL_LEN"),
                 **algo_kwargs,
             )
             population.append(agent)
@@ -832,7 +837,9 @@ def init_wandb(
         # set the wandb project where this run will be logged
         "project": project,
         "name": "{}-EvoHPO-{}-{}".format(
-            env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
+            env_name,
+            algo,
+            datetime.now().strftime("%m%d%Y%H%M%S"),
         ),
     }
 
@@ -854,8 +861,7 @@ def calculate_vectorized_scores(
     include_unterminated: bool = False,
     only_first_episode: bool = True,
 ) -> list[float]:
-    """
-    Calculate the vectorized scores for episodes based on rewards and terminations.
+    """Calculate the vectorized scores for episodes based on rewards and terminations.
 
     :param rewards: Array of rewards for each environment.
     :type rewards: np.ndarray
@@ -887,7 +893,7 @@ def calculate_vectorized_scores(
         for termination_index in termination_indices:
             # Sum the rewards for the current episode
             episode_reward = np.sum(
-                rewards[env_index, start_index : termination_index + 1]
+                rewards[env_index, start_index : termination_index + 1],
             )
 
             # Store the episode reward
@@ -920,11 +926,7 @@ def print_hyperparams(pop: PopulationType) -> None:
     """
     for agent in pop:
         print(
-            "Agent ID: {}    Mean 5 Fitness: {:.2f}    Attributes: {}".format(
-                agent.index,
-                np.mean(agent.fitness[-5:]),
-                EvolvableAlgorithm.inspect_attributes(agent),
-            )
+            f"Agent ID: {agent.index}    Mean 5 Fitness: {np.mean(agent.fitness[-5:]):.2f}    Attributes: {EvolvableAlgorithm.inspect_attributes(agent)}",
         )
 
 
@@ -951,13 +953,14 @@ def get_env_defined_actions(info, agents):
     }
 
     if all(eda is None for eda in env_defined_actions.values()):
-        return
+        return None
 
     return env_defined_actions
 
 
 def gather_tensor(
-    tensor: torch.Tensor | float, accelerator: Accelerator
+    tensor: torch.Tensor | float,
+    accelerator: Accelerator,
 ) -> torch.Tensor:
     """Gather tensors from gpus
 
@@ -976,7 +979,8 @@ def gather_tensor(
 
 
 def aggregate_metrics_across_gpus(
-    accelerator: Accelerator, metric_tensor: torch.Tensor | float
+    accelerator: Accelerator,
+    metric_tensor: torch.Tensor | float,
 ) -> float:
     """Aggregate gathered tensors
 
@@ -993,7 +997,9 @@ def aggregate_metrics_across_gpus(
 
 
 def save_llm_checkpoint(
-    agent: LLMAlgorithm, checkpoint_path: str | None, weights_only: bool = False
+    agent: LLMAlgorithm,
+    checkpoint_path: str | None,
+    weights_only: bool = False,
 ) -> None:
     """Checkpoint the LLM
 

@@ -41,7 +41,10 @@ def head_config():
     ],
 )
 def test_deterministic_actor_initialization(
-    observation_space, action_space, encoder_type, request
+    observation_space,
+    action_space,
+    encoder_type,
+    request,
 ):
     observation_space = request.getfixturevalue(observation_space)
     action_space = request.getfixturevalue(action_space)
@@ -88,16 +91,23 @@ def test_deterministic_actor_initialization_simba(vector_space):
 
 @pytest.mark.parametrize("action_space", ["vector_space"])
 @pytest.mark.parametrize(
-    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
+    "observation_space",
+    ["dict_space", "discrete_space", "vector_space", "image_space"],
 )
 def test_deterministic_actor_mutation_methods(
-    observation_space, action_space, head_config, dummy_rng, request
+    observation_space,
+    action_space,
+    head_config,
+    dummy_rng,
+    request,
 ):
     observation_space = request.getfixturevalue(observation_space)
     action_space = request.getfixturevalue(action_space)
 
     network = DeterministicActor(
-        observation_space, action_space, head_config=head_config
+        observation_space,
+        action_space,
+        head_config=head_config,
     )
     network.rng = dummy_rng
 
@@ -124,17 +134,21 @@ def test_deterministic_actor_mutation_methods(
             # Checks that parameters that are not mutated are the same
             check_equal_params_ind(network, new_network)
         else:
+            msg = f"Last mutation attribute is None. Expected {method} to be applied."
             raise ValueError(
-                f"Last mutation attribute is None. Expected {method} to be applied."
+                msg,
             )
 
 
 @pytest.mark.parametrize("action_space", ["vector_space"])
 @pytest.mark.parametrize(
-    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
+    "observation_space",
+    ["dict_space", "discrete_space", "vector_space", "image_space"],
 )
 def test_deterministic_actor_forward(
-    observation_space: spaces.Space, action_space: spaces.Space, request
+    observation_space: spaces.Space,
+    action_space: spaces.Space,
+    request,
 ):
     observation_space = request.getfixturevalue(observation_space)
     action_space = request.getfixturevalue(action_space)
@@ -172,10 +186,13 @@ def test_deterministic_actor_forward(
 
 @pytest.mark.parametrize("action_space", ["vector_space"])
 @pytest.mark.parametrize(
-    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
+    "observation_space",
+    ["dict_space", "discrete_space", "vector_space", "image_space"],
 )
 def test_deterministic_actor_clone(
-    observation_space: spaces.Space, action_space: spaces.Space, request
+    observation_space: spaces.Space,
+    action_space: spaces.Space,
+    request,
 ):
     observation_space = request.getfixturevalue(observation_space)
     action_space = request.getfixturevalue(action_space)
@@ -202,38 +219,52 @@ def test_deterministic_actor_rescale_action():
 
     # Test with Tanh activation (default for DeterministicActor)
     action = torch.tensor(
-        [[-0.5, 0.5]], dtype=torch.float32
+        [[-0.5, 0.5]],
+        dtype=torch.float32,
     )  # Action from network between -1 and 1
     rescaled = DeterministicActor.rescale_action(
-        action, action_low, action_high, "Tanh"
+        action,
+        action_low,
+        action_high,
+        "Tanh",
     )
 
     # Calculate expected value: low + (high - low) * (action - (-1)) / (1 - (-1))
     expected = torch.tensor(
-        [[-1.0, 2.0]], dtype=action_low.dtype
+        [[-1.0, 2.0]],
+        dtype=action_low.dtype,
     )  # Should be mapped to middle of range
     torch.testing.assert_close(rescaled, expected)
     assert rescaled.dtype == action_low.dtype
 
     # Test with Sigmoid activation
     action = torch.tensor(
-        [[0.25, 0.75]], dtype=torch.float32
+        [[0.25, 0.75]],
+        dtype=torch.float32,
     )  # Action from network between 0 and 1
     rescaled = DeterministicActor.rescale_action(
-        action, action_low, action_high, "Sigmoid"
+        action,
+        action_low,
+        action_high,
+        "Sigmoid",
     )
     expected = torch.tensor(
-        [[-1.0, 2.0]], dtype=action_low.dtype
+        [[-1.0, 2.0]],
+        dtype=action_low.dtype,
     )  # Should be mapped to quarter/three-quarters of range
     torch.testing.assert_close(rescaled, expected)
     assert rescaled.dtype == action_low.dtype
 
     # Test clipping behavior (out-of-bounds values)
     action = torch.tensor(
-        [[-2.0, 2.0]], dtype=torch.float32
+        [[-2.0, 2.0]],
+        dtype=torch.float32,
     )  # Actions outside of tanh range
     rescaled = DeterministicActor.rescale_action(
-        action, action_low, action_high, "Tanh"
+        action,
+        action_low,
+        action_high,
+        "Tanh",
     )
     # For actions outside the normal range, we still apply the same rescaling formula
     # For -2.0: low + (high - low) * (-2.0 - (-1)) / (1 - (-1)) = low + (high - low) * (-1.0/2.0)
@@ -245,7 +276,8 @@ def test_deterministic_actor_rescale_action():
         action[0, 1] - (-1.0)
     ) / (1.0 - (-1.0))
     expected = torch.tensor(
-        [[expected_first[0], expected_second[1]]], dtype=action_low.dtype
+        [[expected_first[0], expected_second[1]]],
+        dtype=action_low.dtype,
     )
     torch.testing.assert_close(rescaled, expected)
     assert rescaled.dtype == action_low.dtype
@@ -253,7 +285,9 @@ def test_deterministic_actor_rescale_action():
 
 @pytest.mark.parametrize("use_experimental_distribution", [False, True])
 def test_distribution_mutation_methods(
-    dummy_rng, head_config, use_experimental_distribution
+    dummy_rng,
+    head_config,
+    use_experimental_distribution,
 ):
     observation_space = spaces.Box(low=-1, high=1, shape=(2,))
     action_space = spaces.Box(low=-1, high=1, shape=(2,))
@@ -284,14 +318,16 @@ def test_distribution_mutation_methods(
         if new_dist.last_mutation_attr is not None:
             # Check that architecture has changed
             assert_not_equal_state_dict(
-                evolvable_dist.state_dict(), new_dist.state_dict()
+                evolvable_dist.state_dict(),
+                new_dist.state_dict(),
             )
 
             # Checks that parameters that are not mutated are the same
             check_equal_params_ind(evolvable_dist, new_dist)
         else:
+            msg = f"Last mutation attribute is None. Expected {method} to be applied."
             raise ValueError(
-                f"Last mutation attribute is None. Expected {method} to be applied."
+                msg,
             )
 
 
@@ -384,7 +420,8 @@ def test_stochastic_actor_initialization_simba(vector_space):
     ["vector_space", "discrete_space", "multidiscrete_space", "multibinary_space"],
 )
 @pytest.mark.parametrize(
-    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
+    "observation_space",
+    ["dict_space", "discrete_space", "vector_space", "image_space"],
 )
 @pytest.mark.parametrize("use_experimental_distribution", [False, True])
 def test_stochastic_actor_mutation_methods(
@@ -430,8 +467,9 @@ def test_stochastic_actor_mutation_methods(
             # Checks that parameters that are not mutated are the same
             check_equal_params_ind(network, new_network)
         else:
+            msg = f"Last mutation attribute is None. Expected {method} to be applied."
             raise ValueError(
-                f"Last mutation attribute is None. Expected {method} to be applied."
+                msg,
             )
 
 
@@ -440,7 +478,8 @@ def test_stochastic_actor_mutation_methods(
     ["vector_space", "discrete_space", "multidiscrete_space", "multibinary_space"],
 )
 @pytest.mark.parametrize(
-    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
+    "observation_space",
+    ["dict_space", "discrete_space", "vector_space", "image_space"],
 )
 @pytest.mark.parametrize("use_experimental_distribution", [False, True])
 def test_stochastic_actor_forward(
@@ -533,7 +572,8 @@ def test_stochastic_actor_forward(
     ["vector_space", "discrete_space", "multidiscrete_space", "multibinary_space"],
 )
 @pytest.mark.parametrize(
-    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
+    "observation_space",
+    ["dict_space", "discrete_space", "vector_space", "image_space"],
 )
 @pytest.mark.parametrize("use_experimental_distribution", [False, True])
 def test_stochastic_actor_clone(
@@ -607,7 +647,7 @@ def test_stochastic_actor_scaling():
             # For -0.5: low + (0.5 * (-0.5 + 1) * (high - low)) = low + 0.25 * (high - low)
             # For 0.5: low + (0.5 * (0.5 + 1) * (high - low)) = low + 0.75 * (high - low)
             expected = torch.tensor(
-                [[-1.0, 2.0]]
+                [[-1.0, 2.0]],
             )  # Should be between low and middle, middle and high
             torch.testing.assert_close(action, expected)
 
@@ -647,7 +687,9 @@ def test_stochastic_actor_scaling():
 )
 @pytest.mark.parametrize("use_experimental_distribution", [False, True])
 def test_stochastic_actor_distribution_methods(
-    action_space: spaces.Space, use_experimental_distribution: bool, request
+    action_space: spaces.Space,
+    use_experimental_distribution: bool,
+    request,
 ):
     """Test StochasticActor's distribution-related methods with different action spaces."""
     action_space = request.getfixturevalue(action_space)
@@ -682,7 +724,7 @@ def test_stochastic_actor_distribution_methods(
         # Entropy should be positive and at most log(n)
         assert torch.all(entropy > 0)
         assert torch.all(
-            entropy <= torch.log(torch.tensor(action_space.n, dtype=torch.float))
+            entropy <= torch.log(torch.tensor(action_space.n, dtype=torch.float)),
         )
 
     elif isinstance(action_space, spaces.MultiDiscrete):
@@ -789,8 +831,8 @@ def test_stochastic_actor_action_masking_multidiscrete():
                     True,
                     False,
                     True,
-                ]  # 3rd dimension (4 options)
-            ]
+                ],  # 3rd dimension (4 options)
+            ],
         )
 
         # Run forward pass with mask multiple times

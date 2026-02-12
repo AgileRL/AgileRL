@@ -4,11 +4,12 @@
 # The agent is shown a random symbol (one-hot) at the start, then receives blank observations for N steps, and is then asked to output the same symbol.
 # This is a minimal memory challenge for RL agents.
 
+from typing import TYPE_CHECKING
+
 import gymnasium as gym
 import numpy as np
 import torch
 
-from agilerl.algorithms import PPO
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -17,11 +18,13 @@ from agilerl.typing import BPTTSequenceType
 from agilerl.utils.utils import create_population, default_progress_bar
 from agilerl.wrappers.agent import RSNorm
 
+if TYPE_CHECKING:
+    from agilerl.algorithms import PPO
+
 
 # --- Define the Memory Game Environment ---
 class MemoryGameEnv(gym.Env):
-    """
-    Observation: one-hot vector of length n_symbols, or all zeros during delay.
+    """Observation: one-hot vector of length n_symbols, or all zeros during delay.
     Action: discrete, n_symbols.
     Reward: +1 if action matches the original symbol at the query step, else 0.
     Episode: Each episode is delay_steps+2 steps (show, delay, query).
@@ -34,7 +37,10 @@ class MemoryGameEnv(gym.Env):
         self.n_symbols = n_symbols
         self.delay_steps = delay_steps
         self.observation_space = gym.spaces.Box(
-            low=0.0, high=1.0, shape=(n_symbols,), dtype=np.float32
+            low=0.0,
+            high=1.0,
+            shape=(n_symbols,),
+            dtype=np.float32,
         )
         self.action_space = gym.spaces.Discrete(n_symbols)
         self.render_mode = render_mode
@@ -71,7 +77,8 @@ class MemoryGameEnv(gym.Env):
         elif self.current_step == self.delay_steps + 1:
             # Query step: Set a distinct observation
             obs = np.ones(
-                self.n_symbols, dtype=np.float32
+                self.n_symbols,
+                dtype=np.float32,
             )  # <-- Change observation here
             self.last_action = action
             if action == self.symbol:
@@ -92,7 +99,7 @@ class MemoryGameEnv(gym.Env):
             print(f"Delay step {self.current_step}")
         elif self.current_step == self.delay_steps + 1:
             print(
-                f"Query: Agent answered {self.last_action}, correct was {self.symbol}"
+                f"Query: Agent answered {self.last_action}, correct was {self.symbol}",
             )
 
     def close(self):
@@ -245,9 +252,11 @@ def run_demo():
                 completed_episodes += episode_scores
 
             pop_episode_scores.append(
-                round(np.mean(completed_episodes), 2)
-                if len(completed_episodes) > 0
-                else "0 completed episodes"
+                (
+                    round(np.mean(completed_episodes), 2)
+                    if len(completed_episodes) > 0
+                    else "0 completed episodes"
+                ),
             )
             pbar.update(steps // len(pop))
 
@@ -265,14 +274,14 @@ def run_demo():
             f"--- Global steps {total_steps} ---\n"
             f"Steps: {[agent.steps[-1] for agent in pop]}\n"
             f"Scores: {pop_episode_scores}\n"
-            f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
-            f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
-            f"Mutations: {[agent.mut for agent in pop]}\n"
+            f"Fitnesses: {[f'{fitness:.2f}' for fitness in fitnesses]}\n"
+            f"5 fitness avgs: {[f'{np.mean(agent.fitness[-5:]):.2f}' for agent in pop]}\n"
+            f"Mutations: {[agent.mut for agent in pop]}\n",
         )
 
         if any(score >= required_score for score in pop_episode_scores):
             print(
-                f"\nAgent achieved required score {required_score}. Stopping training."
+                f"\nAgent achieved required score {required_score}. Stopping training.",
             )
             elite, _ = tournament.select(pop)
             training_complete = True
@@ -317,7 +326,8 @@ def run_demo():
         while not done[0]:
             if recurrent:
                 action, _, _, _, hidden_state = elite.get_action(
-                    obs, hidden_state=hidden_state
+                    obs,
+                    hidden_state=hidden_state,
                 )
             else:
                 action, _, _, _, _ = elite.get_action(obs)
@@ -326,7 +336,7 @@ def run_demo():
             episode_reward += reward[0]
             episode_steps += 1
         print(
-            f"Episode {episode + 1}: Reward: {episode_reward}, Steps: {episode_steps}"
+            f"Episode {episode + 1}: Reward: {episode_reward}, Steps: {episode_steps}",
         )
         total_steps += episode_steps
         episode_rewards.append(episode_reward)

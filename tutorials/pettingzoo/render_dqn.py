@@ -103,7 +103,7 @@ if __name__ == "__main__":
             env.reset()  # Reset environment at start of episode
             frame = env.render()
             frames.append(
-                _label_with_episode_number(frame, episode_num=ep, frame_no=0, p=p)
+                _label_with_episode_number(frame, episode_num=ep, frame_no=0, p=p),
             )
             observation, reward, done, truncation, _ = env.last()
             player = -1  # Tracker for which player's turn it is
@@ -115,7 +115,9 @@ if __name__ == "__main__":
                     if opponent_first:
                         if opponent_difficulty == "self":
                             action = opponent.get_action(
-                                state, epsilon=0, action_mask=action_mask
+                                state,
+                                epsilon=0,
+                                action_mask=action_mask,
                             )[0]
                         elif opponent_difficulty == "random":
                             action = opponent.get_action(action_mask)
@@ -123,7 +125,9 @@ if __name__ == "__main__":
                             action = opponent.get_action(player=0)
                     else:
                         action = dqn.get_action(
-                            state, epsilon=0, action_mask=action_mask
+                            state,
+                            epsilon=0,
+                            action_mask=action_mask,
                         )[
                             0
                         ]  # Get next action from agent
@@ -132,7 +136,9 @@ if __name__ == "__main__":
                     if not opponent_first:
                         if opponent_difficulty == "self":
                             action = opponent.get_action(
-                                state, epsilon=0, action_mask=action_mask
+                                state,
+                                epsilon=0,
+                                action_mask=action_mask,
                             )[0]
                         elif opponent_difficulty == "random":
                             action = opponent.get_action(action_mask)
@@ -140,7 +146,9 @@ if __name__ == "__main__":
                             action = opponent.get_action(player=1)
                     else:
                         action = dqn.get_action(
-                            state, epsilon=0, action_mask=action_mask
+                            state,
+                            epsilon=0,
+                            action_mask=action_mask,
                         )[
                             0
                         ]  # Get next action from agent
@@ -150,8 +158,11 @@ if __name__ == "__main__":
                 frame = env.render()
                 frames.append(
                     _label_with_episode_number(
-                        frame, episode_num=ep, frame_no=idx_step, p=p
-                    )
+                        frame,
+                        episode_num=ep,
+                        frame_no=idx_step,
+                        p=p,
+                    ),
                 )
 
                 if (player > 0 and opponent_first) or (

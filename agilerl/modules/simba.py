@@ -122,7 +122,9 @@ class EvolvableSimBa(EvolvableModule):
         return getattr(self.model, f"{self.name}_linear_layer_output")
 
     def init_weights_gaussian(
-        self, std_coeff: float = 4, output_coeff: float = 4
+        self,
+        std_coeff: float = 4,
+        output_coeff: float = 4,
     ) -> None:
         """Initialise weights of neural network using Gaussian distribution."""
         EvolvableModule.init_weights_gaussian(self.model, std_coeff=std_coeff)
@@ -144,7 +146,8 @@ class EvolvableSimBa(EvolvableModule):
     @mutation(MutationType.LAYER)
     def add_block(self) -> None:
         """Adds a hidden layer to neural network. Falls back on add_node if
-        max hidden layers reached."""
+        max hidden layers reached.
+        """
         # add layer to hyper params
         if self.num_blocks < self.max_blocks:  # HARD LIMIT
             self.num_blocks += 1
@@ -154,7 +157,8 @@ class EvolvableSimBa(EvolvableModule):
     @mutation(MutationType.LAYER)
     def remove_block(self) -> None:
         """Removes a hidden layer from neural network. Falls back on remove_node if
-        min hidden layers reached."""
+        min hidden layers reached.
+        """
         if self.num_blocks > self.min_blocks:  # HARD LIMIT
             self.num_blocks -= 1
         else:
@@ -211,5 +215,6 @@ class EvolvableSimBa(EvolvableModule):
         )
 
         self.model = EvolvableModule.preserve_parameters(
-            old_net=self.model, new_net=model
+            old_net=self.model,
+            new_net=model,
         )

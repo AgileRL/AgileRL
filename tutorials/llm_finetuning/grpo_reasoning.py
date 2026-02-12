@@ -32,7 +32,7 @@ def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
 def format_reward_func(completions, target, **kwargs):
     rewards = []
 
-    for completion, gt in zip(completions, target):
+    for completion, _gt in zip(completions, target, strict=False):
 
         try:
             # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
@@ -43,7 +43,7 @@ def format_reward_func(completions, target, **kwargs):
                 rewards.append(0.0)
             else:
                 rewards.append(1.0)
-        except Exception:
+        except Exception:  # noqa: PERF203
             rewards.append(0.0)
     return rewards
 
@@ -51,7 +51,7 @@ def format_reward_func(completions, target, **kwargs):
 def equation_reward_func(completions, target, nums, **kwargs):
     rewards = []
 
-    for completion, gt, numbers in zip(completions, target, nums):
+    for completion, gt, numbers in zip(completions, target, nums, strict=False):
         try:
             # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
             completion = "<think>" + completion
@@ -93,7 +93,7 @@ def combined_rewards(completion, solution, prompt):
     if reward == 2.0:
         with open("countdown_completions.txt", "a") as text_file:
             text_file.write(
-                f"Prompt {prompt}" + "\n" + completion + "\n" + "=" * 50 + "\n"
+                f"Prompt {prompt}" + "\n" + completion + "\n" + "=" * 50 + "\n",
             )
 
     return reward

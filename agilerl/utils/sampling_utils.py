@@ -8,7 +8,8 @@ def select_batch_idxs(x, idxs):
         x,
         dim=0,
         index=idxs.repeat(*x.shape[1:], 1).permute(
-            len(x.shape) - 1, *list(range(len(x.shape) - 1))
+            len(x.shape) - 1,
+            *list(range(len(x.shape) - 1)),
         ),
     )
 
@@ -26,7 +27,8 @@ def pad_sequence(seq, to_len, val, device, dim):
         (
             seq,
             torch.full(
-                (*seq.shape[:dim], to_len - seq.shape[dim], *seq.shape[dim + 1 :]), val
+                (*seq.shape[:dim], to_len - seq.shape[dim], *seq.shape[dim + 1 :]),
+                val,
             ).to(device),
         ),
         dim=dim,
@@ -63,10 +65,13 @@ def top_p_logits(logits, p):
     # logits = (batch, time, dim)
     sorted_logits, _ = torch.sort(logits, dim=2, descending=True)
     num_to_take = torch.sum(
-        torch.cumsum(F.softmax(sorted_logits, dim=2), dim=2) <= p, dim=2
+        torch.cumsum(F.softmax(sorted_logits, dim=2), dim=2) <= p,
+        dim=2,
     ).unsqueeze(2)
     mask = logits < torch.gather(
-        sorted_logits, dim=2, index=torch.clamp(num_to_take, max=logits.shape[2] - 1)
+        sorted_logits,
+        dim=2,
+        index=torch.clamp(num_to_take, max=logits.shape[2] - 1),
     )
     return logits.masked_fill(mask, float("-inf"))
 

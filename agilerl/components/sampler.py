@@ -100,7 +100,7 @@ class Sampler:
             else:
                 if not isinstance(self.memory, (ReplayBuffer, MultiAgentReplayBuffer)):
                     warnings.warn(
-                        "Memory is not an agilerl ReplayBuffer or MultiAgentReplayBuffer."
+                        "Memory is not an agilerl ReplayBuffer or MultiAgentReplayBuffer.",
                     )
                 self.sample = self.sample_standard
 
@@ -139,7 +139,9 @@ class Sampler:
         return DataLoader(**params)
 
     def sample_standard(
-        self, batch_size: int, return_idx: bool = False
+        self,
+        batch_size: int,
+        return_idx: bool = False,
     ) -> ExperiencesType:
         """Sample a batch of experiences from the standard replay buffer.
 
@@ -153,7 +155,9 @@ class Sampler:
         return self.memory.sample(batch_size, return_idx)
 
     def sample_distributed(
-        self, batch_size: int, return_idx: bool | None = None
+        self,
+        batch_size: int,
+        return_idx: bool | None = None,
     ) -> TensorDict:
         """Sample a batch of experiences from the distributed dataset.
 
@@ -191,7 +195,10 @@ class Sampler:
 
     @classmethod
     def create_dataloader(
-        cls, dataset: ReplayDataset, batch_size: int | None = None, **kwargs
+        cls,
+        dataset: ReplayDataset,
+        batch_size: int | None = None,
+        **kwargs,
     ) -> DataLoader:
         """Helper method to create a DataLoader with the appropriate collate function.
 

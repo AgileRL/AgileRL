@@ -1,14 +1,15 @@
 import time
 import warnings
+from collections.abc import Callable
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any
 
 import gymnasium as gym
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from gymnasium import spaces
 
+import wandb
 from agilerl.algorithms import PPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -118,29 +119,32 @@ def train_on_policy(
     :rtype: list[RLAlgorithm], list[list[float]]
     """
     assert isinstance(
-        algo, str
+        algo,
+        str,
     ), "'algo' must be the name of the algorithm as a string."
     assert isinstance(max_steps, int), "Number of steps must be an integer."
     assert isinstance(evo_steps, int), "Evolution frequency must be an integer."
     if target is not None:
         assert isinstance(
-            target, (float, int)
+            target,
+            (float, int),
         ), "Target score must be a float or an integer."
     if checkpoint is not None:
         assert isinstance(checkpoint, int), "Checkpoint must be an integer."
     assert isinstance(
-        wb, bool
+        wb,
+        bool,
     ), "'wb' must be a boolean flag, indicating whether to record run with W&B"
     assert isinstance(verbose, bool), "Verbose must be a boolean."
     if save_elite is False and elite_path is not None:
         warnings.warn(
             "'save_elite' set to False but 'elite_path' has been defined, elite will not\
-                      be saved unless 'save_elite' is set to True."
+                      be saved unless 'save_elite' is set to True.",
         )
     if checkpoint is None and checkpoint_path is not None:
         warnings.warn(
             "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
-                      be saved unless 'checkpoint' is defined."
+                      be saved unless 'checkpoint' is defined.",
         )
 
     if wb:
@@ -169,7 +173,9 @@ def train_on_policy(
         checkpoint_path.split(".pt")[0]
         if checkpoint_path is not None
         else "{}-EvoHPO-{}-{}".format(
-            env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
+            env_name,
+            algo,
+            datetime.now().strftime("%m%d%Y%H%M%S"),
         )
     )
 
@@ -262,7 +268,8 @@ def train_on_policy(
 
                         action_mask = info.get("action_mask", None)
                         action, log_prob, entropy, value = agent.get_action(
-                            obs, action_mask=action_mask
+                            obs,
+                            action_mask=action_mask,
                         )
 
                         if not is_vectorised:
@@ -278,7 +285,8 @@ def train_on_policy(
                         # Clip action to action space
                         policy = getattr(agent, agent.registry.policy())
                         if isinstance(policy, StochasticActor) and isinstance(
-                            agent.action_space, spaces.Box
+                            agent.action_space,
+                            spaces.Box,
                         ):
                             if policy.squash_output:
                                 clipped_action = policy.scale_action(action)
@@ -383,7 +391,7 @@ def train_on_policy(
                         mean_score
                         for mean_score in mean_scores
                         if not isinstance(mean_score, str)
-                    ]
+                    ],
                 ),
                 "eval/mean_fitness": np.mean(fitnesses),
                 "eval/best_fitness": np.max(fitnesses),
@@ -428,7 +436,7 @@ def train_on_policy(
         if target is not None:
             if (
                 np.all(
-                    np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target)
+                    np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target),
                 )
                 and len(pop[0].steps) >= 100
             ):
@@ -475,7 +483,7 @@ def train_on_policy(
                 f"10 score avgs:\t{avg_score}\n"
                 f"Agents:\t\t{agents}\n"
                 f"Steps:\t\t{num_steps}\n"
-                f"Mutations:\t{muts}"
+                f"Mutations:\t{muts}",
             )
 
         # Save model checkpoint

@@ -1,8 +1,8 @@
+from collections.abc import Callable
 from enum import Enum
 from numbers import Number
 from typing import (
     Any,
-    Callable,
     ClassVar,
     Protocol,
     TypedDict,
@@ -106,7 +106,11 @@ ExperiencesType = dict[str, ObservationType] | tuple[ObservationType, ...]
 ActionReturnType = tuple[ActionType | Any, ...] | ActionType | Any
 GymStepReturn = tuple[NumpyObsType, ActionType, float, MaybeObsList, InfosDict]
 PzStepReturn = tuple[
-    dict[str, NumpyObsType], ArrayDict, ArrayDict, ArrayDict, dict[str, Any]
+    dict[str, NumpyObsType],
+    ArrayDict,
+    ArrayDict,
+    ArrayDict,
+    dict[str, Any],
 ]
 
 SingleAgentModule = (

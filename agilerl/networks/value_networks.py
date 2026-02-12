@@ -98,7 +98,9 @@ class ValueNetwork(EvolvableNetwork):
         )
 
     def forward(
-        self, x: TorchObsType, hidden_state: TorchObsType | None = None
+        self,
+        x: TorchObsType,
+        hidden_state: TorchObsType | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Forward pass of the network.
 
@@ -110,9 +112,8 @@ class ValueNetwork(EvolvableNetwork):
         if self.recurrent:
             latent, hidden_state = self.extract_features(x, hidden_state=hidden_state)
             return self.head_net(latent), hidden_state
-        else:
-            latent = self.extract_features(x)
-            return self.head_net(latent)
+        latent = self.extract_features(x)
+        return self.head_net(latent)
 
     def recreate_network(self) -> None:
         """Recreates the network."""

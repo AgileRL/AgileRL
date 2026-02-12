@@ -32,7 +32,11 @@ class term_env(ParallelEnv):
     def __init__(self, render_mode=None):
         self.possible_agents = ["player_" + str(r) for r in range(2)]
         self.agent_name_mapping = dict(
-            zip(self.possible_agents, list(range(len(self.possible_agents))))
+            zip(
+                self.possible_agents,
+                list(range(len(self.possible_agents))),
+                strict=False,
+            ),
         )
         self.render_mode = render_mode
         self.seed = self.dummy_seed
@@ -52,7 +56,7 @@ class term_env(ParallelEnv):
     def reset(self, seed=None, options=None):
         self.agents = self.possible_agents[:]
         self.num_moves = 0
-        observations = {agent: NONE for agent in self.agents}
+        observations = dict.fromkeys(self.agents, NONE)
         infos = {agent: {} for agent in self.agents}
         self.state = observations
         return observations, infos
@@ -63,10 +67,10 @@ class term_env(ParallelEnv):
             return {}, {}, {}, {}, {}
         rewards = {}
         rewards[self.agents[0]], rewards[self.agents[1]] = (0, 0)
-        terminations = {agent: True for agent in self.agents}
+        terminations = dict.fromkeys(self.agents, True)
         self.num_moves += 1
         env_truncation = self.num_moves >= NUM_ITERS
-        truncations = {agent: env_truncation for agent in self.agents}
+        truncations = dict.fromkeys(self.agents, env_truncation)
         observations = {
             self.agents[i]: actions[self.agents[1 - i]].astype(int)
             for i in range(len(self.agents))
@@ -102,7 +106,7 @@ def basic_step_func(self, action):
     """A step function that follows the basic step api that will pass the environment check using random actions from the observation space."""
 
     def pz_dict(transition, agents):
-        return {agent: transition for agent in self.possible_agents}
+        return dict.fromkeys(self.possible_agents, transition)
 
     return (
         {
@@ -120,7 +124,7 @@ def old_step_func(self, action):
     """A step function that follows the old step api that will pass the environment check using random actions from the observation space."""
 
     def pz_dict(transition, agents):
-        return {agent: transition for agent in self.possible_agents}
+        return dict.fromkeys(self.possible_agents, transition)
 
     return (
         {
@@ -136,7 +140,6 @@ def old_step_func(self, action):
 
 def basic_render_func(self):
     """Basic render fn that does nothing."""
-    pass
 
 
 class GenericTestEnv(ParallelEnv):
@@ -144,12 +147,12 @@ class GenericTestEnv(ParallelEnv):
 
     def __init__(
         self,
-        action_space: spaces.Space = spaces.Box(0, 1, (1,)),
-        observation_space: spaces.Space = spaces.Box(0, 1, (1,)),
+        action_space: spaces.Space | None = None,
+        observation_space: spaces.Space | None = None,
         reset_func: Callable = basic_reset_func,
         step_func: Callable = basic_step_func,
         render_func: Callable = basic_render_func,
-        metadata={"render_modes": []},
+        metadata=None,
         render_mode=None,
     ):
         """Generic testing environment constructor.
@@ -163,7 +166,14 @@ class GenericTestEnv(ParallelEnv):
             metadata: The environment metadata
             render_mode: The render mode of the environment
             spec: The environment spec
+
         """
+        if action_space is None:
+            action_space = spaces.Box(0, 1, (1,))
+        if observation_space is None:
+            observation_space = spaces.Box(0, 1, (1,))
+        if metadata is None:
+            metadata = {"render_modes": []}
         self.metadata = metadata
         self.render_mode = render_mode
         self.possible_agents = ["agent_0"]
@@ -196,19 +206,24 @@ class GenericTestEnv(ParallelEnv):
     ):
         """Resets the environment."""
         # If you need a default working reset function, use `basic_reset_fn` above
-        raise NotImplementedError("TestingEnv reset_fn is not set.")
+        msg = "TestingEnv reset_fn is not set."
+        raise NotImplementedError(msg)
 
     def step(self, action):
         """Steps through the environment."""
-        raise NotImplementedError("TestingEnv step_fn is not set.")
+        msg = "TestingEnv step_fn is not set."
+        raise NotImplementedError(msg)
 
     def render(self):
         """Renders the environment."""
-        raise NotImplementedError("testingEnv render_fn is not set.")
+        msg = "testingEnv render_fn is not set."
+        raise NotImplementedError(msg)
 
 
 class CustomSpace(gym.Space):
     """Minimal custom observation space."""
+
+    __hash__ = None  # mutable space, not hashable
 
     shape = (4,)
     _dtype = np.float16

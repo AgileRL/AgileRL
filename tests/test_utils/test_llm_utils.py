@@ -5,10 +5,10 @@ from unittest.mock import patch
 
 import pytest
 import torch
-import torch.nn as nn
 from accelerate import Accelerator
 from accelerate.state import AcceleratorState
 from datasets import Dataset as Datasets
+from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer
 from transformers.tokenization_utils_base import BatchEncoding
@@ -93,8 +93,7 @@ def dummy_reward_fn(*args, **kwargs):
 
 
 def dummy_chat_template_fn_custom(q, a, tokenizer):
-    """
-    Chat template function for test_reasoning_gym_reset_dataloaders, gives unique input_ids for each question so
+    """Chat template function for test_reasoning_gym_reset_dataloaders, gives unique input_ids for each question so
     we can test equality.
     """
     index = int(q.split(" ")[-1][0])
@@ -137,7 +136,10 @@ def preference_dataset(num_samples):
 @pytest.mark.parametrize("num_samples", [200])
 @pytest.mark.parametrize("use_accelerator", [True, False])
 def test_reasoning_gym_init(
-    reasoning_dataset, accelerator_factory, num_samples, use_accelerator
+    reasoning_dataset,
+    accelerator_factory,
+    num_samples,
+    use_accelerator,
 ):
     train_dataset, test_dataset = reasoning_dataset
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
@@ -172,7 +174,10 @@ def test_reasoning_gym_init(
 @pytest.mark.parametrize("eval_mode", [True, False])
 @pytest.mark.parametrize("return_raw_completions", [True, False])
 def test_reasoning_gym_step(
-    reasoning_dataset, num_samples, eval_mode, return_raw_completions
+    reasoning_dataset,
+    num_samples,
+    eval_mode,
+    return_raw_completions,
 ):
     train_dataset, test_dataset = reasoning_dataset
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
@@ -212,7 +217,10 @@ def test_reasoning_gym_step(
 @pytest.mark.parametrize("reset_dataloaders", [True, False])
 @pytest.mark.parametrize("return_raw_completions", [True, False])
 def test_reasoning_gym_reset(
-    reasoning_dataset, num_samples, reset_dataloaders, return_raw_completions
+    reasoning_dataset,
+    num_samples,
+    reset_dataloaders,
+    return_raw_completions,
 ):
     train_dataset, test_dataset = reasoning_dataset
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
@@ -247,7 +255,9 @@ def test_reasoning_gym_reset(
 @pytest.mark.parametrize("num_samples", [200])
 @pytest.mark.parametrize("reset_dataloaders", [True, False])
 def test_reasoning_gym_reset_dataloaders(
-    reasoning_dataset, num_samples, reset_dataloaders
+    reasoning_dataset,
+    num_samples,
+    reset_dataloaders,
 ):
     train_dataset, test_dataset = reasoning_dataset
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
@@ -261,17 +271,20 @@ def test_reasoning_gym_reset_dataloaders(
         data_batch_size_per_gpu=data_batch_size,
     )
     first_data_point = next(
-        env.test_dataloader_iter
+        env.test_dataloader_iter,
     )  # use test_dataloader_iter as it is not shuffled
     env._reset_dataloaders()
     first_data_point_reset = next(env.test_dataloader_iter)
-    for key1, key2 in zip(first_data_point.keys(), first_data_point_reset.keys()):
+    for key1, _key2 in zip(
+        first_data_point.keys(), first_data_point_reset.keys(), strict=False
+    ):
         if key1 == "tokenized_prompts":
             for item1, item2 in zip(
                 first_data_point["tokenized_prompts"],
                 first_data_point_reset["tokenized_prompts"],
+                strict=False,
             ):
-                for key3, key4 in zip(item1.keys(), item2.keys()):
+                for key3, key4 in zip(item1.keys(), item2.keys(), strict=False):
                     assert torch.equal(item1[key3], item2[key4])
         else:
             assert first_data_point[key1] == first_data_point_reset[key1]
@@ -368,7 +381,9 @@ def test_create_chat_collate_fn(reasoning_dataset, num_samples):
 @pytest.mark.parametrize("num_samples", [20])
 @pytest.mark.parametrize("data_batch_size", [8, 10])
 def test_reset_dataloaders_when_train_dataloader_exhausted(
-    reasoning_dataset, num_samples, data_batch_size
+    reasoning_dataset,
+    num_samples,
+    data_batch_size,
 ):
     train_dataset, test_dataset = reasoning_dataset
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
@@ -391,7 +406,9 @@ def test_reset_dataloaders_when_train_dataloader_exhausted(
 @pytest.mark.parametrize("num_samples", [20])
 @pytest.mark.parametrize("data_batch_size", [8, 10])
 def test_not_reset_dataloaders_when_test_dataloader_exhausted(
-    reasoning_dataset, num_samples, data_batch_size
+    reasoning_dataset,
+    num_samples,
+    data_batch_size,
 ):
     train_dataset, test_dataset = reasoning_dataset
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
@@ -494,17 +511,23 @@ def test_gather_if_zero3(zero_stage):
     def dummy_gather_parameters(*args, **kwargs):
         yield
 
-    with patch(
-        "deepspeed.zero.GatheredParameters", side_effect=dummy_gather_parameters
-    ) as mock_gathered_parameters:
-        with gather_if_zero3(zero_stage, params):
-            assert mock_gathered_parameters.call_count == (zero_stage == 3)
+    with (
+        patch(
+            "deepspeed.zero.GatheredParameters",
+            side_effect=dummy_gather_parameters,
+        ) as mock_gathered_parameters,
+        gather_if_zero3(zero_stage, params),
+    ):
+        assert mock_gathered_parameters.call_count == (zero_stage == 3)
 
 
 @pytest.mark.parametrize("use_accelerator", [True, False])
 @pytest.mark.parametrize("num_samples", [20])
 def test_preference_gym_init(
-    preference_dataset, accelerator_factory, use_accelerator, num_samples
+    preference_dataset,
+    accelerator_factory,
+    use_accelerator,
+    num_samples,
 ):
     train_dataset, test_dataset = preference_dataset
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
@@ -540,7 +563,10 @@ def test_preference_gym_init(
 @pytest.mark.parametrize("use_accelerator", [True, False])
 @pytest.mark.parametrize("num_samples", [20])
 def test_preference_gym_step(
-    preference_dataset, accelerator_factory, use_accelerator, num_samples
+    preference_dataset,
+    accelerator_factory,
+    use_accelerator,
+    num_samples,
 ):
     train_dataset, test_dataset = preference_dataset
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
@@ -588,7 +614,10 @@ def test_preference_gym_step(
 @pytest.mark.parametrize("use_accelerator", [True, False])
 @pytest.mark.parametrize("num_samples", [20])
 def test_preference_gym_reset(
-    preference_dataset, accelerator_factory, use_accelerator, num_samples
+    preference_dataset,
+    accelerator_factory,
+    use_accelerator,
+    num_samples,
 ):
     train_dataset, test_dataset = preference_dataset
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
@@ -636,7 +665,10 @@ def test_preference_gym_reset(
 @pytest.mark.parametrize("use_accelerator", [True, False])
 @pytest.mark.parametrize("num_samples", [20])
 def test_preference_gym_reset_reset_dataloaders_warning(
-    preference_dataset, accelerator_factory, use_accelerator, num_samples
+    preference_dataset,
+    accelerator_factory,
+    use_accelerator,
+    num_samples,
 ):
     train_dataset, test_dataset = preference_dataset
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
@@ -692,7 +724,10 @@ def test_preference_gym_reset_reset_dataloaders_warning(
 @pytest.mark.parametrize("use_accelerator", [True, False])
 @pytest.mark.parametrize("num_samples", [20])
 def test_preference_gym_reset_reset_called_warning(
-    preference_dataset, accelerator_factory, use_accelerator, num_samples
+    preference_dataset,
+    accelerator_factory,
+    use_accelerator,
+    num_samples,
 ):
     train_dataset, test_dataset = preference_dataset
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
@@ -746,7 +781,10 @@ def test_preference_gym_reset_reset_called_warning(
 @pytest.mark.parametrize("num_samples", [20])
 @pytest.mark.parametrize("use_accelerator", [True, False])
 def test_preference_gym_reset_num_epochs(
-    preference_dataset, num_samples, accelerator_factory, use_accelerator
+    preference_dataset,
+    num_samples,
+    accelerator_factory,
+    use_accelerator,
 ):
     train_dataset, test_dataset = preference_dataset
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
@@ -778,14 +816,14 @@ def test_preference_gym_max_context_length_error():
             "prompt": ["This is a prompt that is longer than the max context length."],
             "chosen": ["This is an answer."],
             "rejected": ["This is an answer."],
-        }
+        },
     )
     test_dataset = Datasets.from_dict(
         {
             "prompt": ["This is a normal length prompt"],
             "chosen": ["This is an answer."],
             "rejected": ["This is an answer."],
-        }
+        },
     )
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
     data_batch_size = 8
@@ -812,14 +850,14 @@ def test_preference_gym_max_context_length_warning():
             ],
             "chosen": ["This is an answer.", "This is an answer."],
             "rejected": ["This is an answer.", "This is an answer."],
-        }
+        },
     )
     test_dataset = Datasets.from_dict(
         {
             "prompt": ["This is a normal length prompt"],
             "chosen": ["This is an answer."],
             "rejected": ["This is an answer."],
-        }
+        },
     )
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
     data_batch_size = 8
@@ -847,13 +885,13 @@ def test_reasoning_gym_max_context_length_warning():
                 "This is a prompt that is shorter.",
             ],
             "answer": ["This is an answer.", "This is an answer."],
-        }
+        },
     )
     test_dataset = Datasets.from_dict(
         {
             "question": ["This is a normal length prompt"],
             "answer": ["This is an answer."],
-        }
+        },
     )
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
     data_batch_size = 8

@@ -1,16 +1,16 @@
 import copy
 import math
 from collections import defaultdict
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
-import wandb
+from torch import nn, optim
 from torch.nn import functional as F
 from tqdm import tqdm
 
+import wandb
 from agilerl.data.rl_data import DataPoint
 from agilerl.modules.gpt import EvolvableGPT
 from agilerl.modules.mlp import EvolvableMLP
@@ -244,7 +244,9 @@ class ILQL(nn.Module):
         )
 
         self.optimizer = optim.AdamW(
-            self.parameters(), lr=self.lr, weight_decay=self.weight_decay
+            self.parameters(),
+            lr=self.lr,
+            weight_decay=self.weight_decay,
         )
 
     def copy_model_to_actor_target(self):
@@ -291,7 +293,8 @@ class ILQL(nn.Module):
             policy_kwargs = {}
         if prefix_embs is None:
             prefix_embs = torch.empty(
-                (tokens.shape[0], 0, self.net_config["n_embd"]), device=self.device
+                (tokens.shape[0], 0, self.net_config["n_embd"]),
+                device=self.device,
             )
             prefix_t = prefix_embs.shape[1]
         else:
@@ -308,17 +311,19 @@ class ILQL(nn.Module):
 
         if remove_prefix_position_embs:
             prefix_embs -= self.model.transformer.wpe(
-                position_ids[:, : prefix_embs.shape[1]]
+                position_ids[:, : prefix_embs.shape[1]],
             )
             target_prefix_embs -= self.actor_target.transformer.wpe(
-                position_ids[:, : prefix_embs.shape[1]]
+                position_ids[:, : prefix_embs.shape[1]],
             )
 
         input_embeddings = torch.cat(
-            (prefix_embs, self.model.transformer.wte(tokens)), dim=1
+            (prefix_embs, self.model.transformer.wte(tokens)),
+            dim=1,
         )
         target_input_embeddings = torch.cat(
-            (target_prefix_embs, self.actor_target.transformer.wte(tokens)), dim=1
+            (target_prefix_embs, self.actor_target.transformer.wte(tokens)),
+            dim=1,
         )
 
         # Model forward passes
@@ -357,10 +362,11 @@ class ILQL(nn.Module):
         else:
             if remove_prefix_position_embs:
                 policy_prefix_embs -= self.actor.transformer.wpe(
-                    position_ids[:, : prefix_embs.shape[1]]
+                    position_ids[:, : prefix_embs.shape[1]],
                 )
             policy_input_embeddings = torch.cat(
-                (policy_prefix_embs, self.actor.transformer.wte(tokens)), dim=1
+                (policy_prefix_embs, self.actor.transformer.wte(tokens)),
+                dim=1,
             )
             if detach_full_policy:
                 with torch.no_grad():
@@ -416,14 +422,18 @@ class ILQL(nn.Module):
             index=action_idxs.unsqueeze(2).repeat(1, 1, self.net_config["n_embd"]),
         )
         vs = self.v(
-            state_hidden_states.detach() if self.detach_v else state_hidden_states
+            state_hidden_states.detach() if self.detach_v else state_hidden_states,
         ).squeeze(2)
         qs = self.q(
-            action_hidden_states.detach() if self.detach_q else action_hidden_states
+            action_hidden_states.detach() if self.detach_q else action_hidden_states,
         )
         if self.double_q:
             qs2 = self.q2(
-                action_hidden_states.detach() if self.detach_q else action_hidden_states
+                (
+                    action_hidden_states.detach()
+                    if self.detach_q
+                    else action_hidden_states
+                ),
             )
         with torch.no_grad():
             target_qs = self.target_q(action_target_hidden_states)
@@ -438,20 +448,23 @@ class ILQL(nn.Module):
                 ),
                 device=self.device,
             )
-        else:
-            if detach_full_policy:
-                with torch.no_grad():
-                    logits = self.pi(
+        elif detach_full_policy:
+            with torch.no_grad():
+                logits = self.pi(
+                    (
                         policy_hidden_states.detach()
                         if self.detach_pi
                         else policy_hidden_states
-                    )
-            else:
-                logits = self.pi(
+                    ),
+                )
+        else:
+            logits = self.pi(
+                (
                     policy_hidden_states.detach()
                     if self.detach_pi
                     else policy_hidden_states
-                )
+                ),
+            )
         return {
             "model_outputs": all_model_outputs,
             "hidden_states": all_hidden_states,
@@ -466,7 +479,7 @@ class ILQL(nn.Module):
                 else qs
             ),
             "target_qs": self.clip_values(
-                torch.minimum(target_qs, target_qs2) if self.double_q else target_qs
+                torch.minimum(target_qs, target_qs2) if self.double_q else target_qs,
             ),
             "logits": logits,
         }
@@ -503,7 +516,10 @@ class ILQL(nn.Module):
             n = torch.argmax(action_idxs, dim=1) + 1
         for i in range(tokens.shape[0]):
             weights[i] = torch.scatter(
-                weights[i], dim=0, index=action_idxs[i, : n[i]], src=w_values[i, : n[i]]
+                weights[i],
+                dim=0,
+                index=action_idxs[i, : n[i]],
+                src=w_values[i, : n[i]],
             )
         if self.clip_weight is not None:
             weights = torch.clip(weights, max=self.clip_weight)
@@ -663,7 +679,9 @@ class ILQL(nn.Module):
             qs = torch.gather(qs, dim=2, index=select_tokens.unsqueeze(2)).squeeze(2)
         dm_term = self.get_dm_loss(full_qs, qs, terminals, self.dm_margin)
         target_qs = torch.gather(
-            target_qs, dim=2, index=select_tokens.unsqueeze(2)
+            target_qs,
+            dim=2,
+            index=select_tokens.unsqueeze(2),
         ).squeeze(2)
         with torch.no_grad():
             weights = self.get_weights(tokens, vt, target_qs, s_idx, a_idx, terminals)
@@ -818,8 +836,8 @@ class ILQL(nn.Module):
                     + q_loss_weight * x["q_loss"]
                     + v_loss_weight * x["v_loss"]
                     + cql_loss_weight * x["cql_loss"]
-                    + dm_loss_weight * x["dm_loss"]
-                }
+                    + dm_loss_weight * x["dm_loss"],
+                },
             )
 
         def hist_f(x):
@@ -1016,37 +1034,42 @@ class ILQL(nn.Module):
     def soft_update(self):
         """Soft updates target networks."""
         for target_param, local_param in zip(
-            self.target_q.parameters(), self.q.parameters()
+            self.target_q.parameters(),
+            self.q.parameters(),
         ):
             target_param.data.copy_(
-                self.alpha * local_param.data + (1.0 - self.alpha) * target_param.data
+                self.alpha * local_param.data + (1.0 - self.alpha) * target_param.data,
             )
         if self.double_q:
             for target_param, local_param in zip(
-                self.target_q2.parameters(), self.q2.parameters()
+                self.target_q2.parameters(),
+                self.q2.parameters(),
             ):
                 target_param.data.copy_(
                     self.alpha * local_param.data
-                    + (1.0 - self.alpha) * target_param.data
+                    + (1.0 - self.alpha) * target_param.data,
                 )
         if self.actor_target is not None:
             for target_param, local_param in zip(
-                self.actor_target.parameters(), self.model.parameters()
+                self.actor_target.parameters(),
+                self.model.parameters(),
             ):
                 target_param.data.copy_(
                     self.alpha * local_param.data
-                    + (1.0 - self.alpha) * target_param.data
+                    + (1.0 - self.alpha) * target_param.data,
                 )
 
     def hardUpdate(self):
         """Hard updates target networks."""
         for target_param, local_param in zip(
-            self.target_q.parameters(), self.q.parameters()
+            self.target_q.parameters(),
+            self.q.parameters(),
         ):
             target_param.data.copy_(local_param.data)
         if self.double_q:
             for target_param, local_param in zip(
-                self.target_q2.parameters(), self.q2.parameters()
+                self.target_q2.parameters(),
+                self.q2.parameters(),
             ):
                 target_param.data.copy_(local_param.data)
         if self.actor_target is not None:
@@ -1101,7 +1124,9 @@ class ILQL(nn.Module):
         clone.actor = self.actor.clone().to(self.device)
         clone.actor_target = self.actor_target.clone().to(self.device)
         clone.optimizer = optim.Adam(
-            clone.actor.parameters(), lr=clone.lr, weight_decay=clone.weight_decay
+            clone.actor.parameters(),
+            lr=clone.lr,
+            weight_decay=clone.weight_decay,
         )
         clone.fitness = copy.deepcopy(self.fitness)
         clone.steps = copy.deepcopy(self.steps)
@@ -1360,21 +1385,22 @@ class ILQL_Policy:
             (
                 dialogue_lens.shape[0],
                 1,
-            )
+            ),
         ).long().to(device), torch.zeros(
             (
                 dialogue_lens.shape[0],
                 1,
-            )
+            ),
         ).long().to(
-            device
+            device,
         )
         t = torch.min(dialogue_lens).int()
         base_logits = torch.full((dialogue_lens.shape[0],), 0.0).to(device)
         while termination_mask.sum() > 0 and (t + prefix_t) < max_length:
             curr_token = tokens[:, t - 1].unsqueeze(1)
             curr_kvs = map_all_kvs(
-                lambda x: x[:, :, : (t + prefix_t) - 1, :], kvs["qv"]
+                lambda x: x[:, :, : (t + prefix_t) - 1, :],
+                kvs["qv"],
             )
             curr_target_kvs, curr_policy_kvs = curr_kvs, curr_kvs
             if "target" in kvs:
@@ -1394,7 +1420,9 @@ class ILQL_Policy:
             model_outputs, logits = iql_outputs["model_outputs"], iql_outputs["logits"]
 
             logits[:, 0, tokenizer.pad_token_id] = torch.where(
-                termination_mask == 1, float("-inf"), 1e7
+                termination_mask == 1,
+                float("-inf"),
+                1e7,
             )
             logits[
                 torch.arange(0, n).to(device),
@@ -1405,10 +1433,14 @@ class ILQL_Policy:
                 torch.full((n,), 0).to(device),
                 tokens[:, t],
             ].masked_fill_(
-                t < dialogue_lens, 1e7
+                t < dialogue_lens,
+                1e7,
             )
             edited_logits = process_logits(
-                logits.clone(), temp=temp, top_k=top_k, top_p=top_p
+                logits.clone(),
+                temp=temp,
+                top_k=top_k,
+                top_p=top_p,
             )
 
             vs, qs = iql_outputs["target_vs"], iql_outputs["target_qs"]
@@ -1421,7 +1453,9 @@ class ILQL_Policy:
             if adv_clip is not None:
                 adv_logits = torch.clip(adv_logits, max=adv_clip)
             adv_logits[:, 0, tokenizer.pad_token_id] = torch.where(
-                termination_mask == 1, float("-inf"), 1e7
+                termination_mask == 1,
+                float("-inf"),
+                1e7,
             )
             adv_logits[
                 torch.arange(0, n).to(device),
@@ -1432,7 +1466,8 @@ class ILQL_Policy:
                 torch.full((n,), 0).to(device),
                 tokens[:, t],
             ].masked_fill_(
-                t < dialogue_lens, 1e7
+                t < dialogue_lens,
+                1e7,
             )
 
             full_logits = (
@@ -1442,19 +1477,21 @@ class ILQL_Policy:
             )
 
             cat_dist = torch.distributions.categorical.Categorical(
-                logits=full_logits[:, 0]
+                logits=full_logits[:, 0],
             )
             original_cat_dist = torch.distributions.categorical.Categorical(
-                logits=logits[:, 0]
+                logits=logits[:, 0],
             )
 
             new_tokens = cat_dist.sample()
             log_probs += cat_dist.log_prob(new_tokens)
             kls += cat_dist.log_prob(new_tokens) - original_cat_dist.log_prob(
-                new_tokens
+                new_tokens,
             )
             qs_chosen = torch.gather(
-                qs.squeeze(1), dim=1, index=new_tokens.unsqueeze(1)
+                qs.squeeze(1),
+                dim=1,
+                index=new_tokens.unsqueeze(1),
             ).squeeze(1)
             advantages += qs_chosen - vs.squeeze(1)
             tokens[:, t] = new_tokens
@@ -1485,8 +1522,8 @@ class ILQL_Policy:
                             tokenizer.decode(
                                 tokens[idx, :].tolist(),
                                 clean_up_tokenization_spaces=False,
-                            )
-                        )
+                            ),
+                        ),
                     )
             t += 1
             termination_mask *= ((t - dialogue_lens) < max_generation_len).int()
@@ -1510,20 +1547,22 @@ class ILQL_Policy:
                 if tokenizer.id_to_token(tokenizer.pad_token_id) in processed_str:
                     processed_str = processed_str[
                         : processed_str.find(
-                            tokenizer.id_to_token(tokenizer.pad_token_id)
+                            tokenizer.id_to_token(tokenizer.pad_token_id),
                         )
                     ].strip()
                 if tokenizer.id_to_token(tokenizer.eoa_token_id) in processed_str:
                     processed_str = processed_str[
                         : processed_str.find(
-                            tokenizer.id_to_token(tokenizer.eoa_token_id)
+                            tokenizer.id_to_token(tokenizer.eoa_token_id),
                         )
                     ].strip()
                 temp_outputs.append(processed_str)
             processed_outputs.append(temp_outputs)
         scores = torch.gather(scores, dim=1, index=order)
         log_probs = torch.gather(
-            log_probs.reshape(-1, num_generations), dim=1, index=order
+            log_probs.reshape(-1, num_generations),
+            dim=1,
+            index=order,
         )
         kls = torch.gather(kls.reshape(-1, num_generations), dim=1, index=order)
         return (
@@ -1590,7 +1629,8 @@ class ILQL_Policy:
             kvs["policy"] = model_outputs["policy_model_outputs"]["past_key_values"]
         original_dialogue_lens = attn_mask.sum(dim=1)
         batch_indicator = torch.stack(
-            beam_width * [torch.arange(0, bsize).to(device)], dim=1
+            beam_width * [torch.arange(0, bsize).to(device)],
+            dim=1,
         )
 
         tokens = pad_sequence(
@@ -1601,7 +1641,9 @@ class ILQL_Policy:
             1,
         )
         dialogue_lens = torch.repeat_interleave(
-            original_dialogue_lens, beam_width, dim=0
+            original_dialogue_lens,
+            beam_width,
+            dim=0,
         )
         kvs["qv"] = map_all_kvs(
             lambda x: pad_sequence(
@@ -1642,21 +1684,22 @@ class ILQL_Policy:
             (
                 dialogue_lens.shape[0],
                 1,
-            )
+            ),
         ).long().to(device), torch.zeros(
             (
                 dialogue_lens.shape[0],
                 1,
-            )
+            ),
         ).long().to(
-            device
+            device,
         )
         t = torch.min(dialogue_lens).int()
         base_logits = torch.full((dialogue_lens.shape[0],), 0.0).to(device)
         while termination_mask.sum() > 0 and (t + prefix_t) < max_length:
             curr_token = tokens[:, t - 1].unsqueeze(1)
             curr_kvs = map_all_kvs(
-                lambda x: x[:, :, : (t + prefix_t) - 1, :], kvs["qv"]
+                lambda x: x[:, :, : (t + prefix_t) - 1, :],
+                kvs["qv"],
             )
             curr_target_kvs, curr_policy_kvs = curr_kvs, curr_kvs
             if "target" in kvs:
@@ -1676,7 +1719,9 @@ class ILQL_Policy:
             model_outputs, logits = iql_outputs["model_outputs"], iql_outputs["logits"]
 
             logits[:, 0, tokenizer.pad_token_id] = torch.where(
-                termination_mask == 1, float("-inf"), 1e7
+                termination_mask == 1,
+                float("-inf"),
+                1e7,
             )
             logits[
                 torch.arange(0, n).to(device),
@@ -1687,10 +1732,14 @@ class ILQL_Policy:
                 torch.full((n,), 0).to(device),
                 tokens[:, t],
             ].masked_fill_(
-                t < dialogue_lens, 1e7
+                t < dialogue_lens,
+                1e7,
             )
             edited_logits = process_logits(
-                logits.clone(), temp=temp, top_k=top_k, top_p=top_p
+                logits.clone(),
+                temp=temp,
+                top_k=top_k,
+                top_p=top_p,
             )
 
             vs, qs = iql_outputs["target_vs"], iql_outputs["target_qs"]
@@ -1703,7 +1752,9 @@ class ILQL_Policy:
             if adv_clip is not None:
                 adv_logits = torch.clip(adv_logits, max=adv_clip)
             adv_logits[:, 0, tokenizer.pad_token_id] = torch.where(
-                termination_mask == 1, float("-inf"), 1e7
+                termination_mask == 1,
+                float("-inf"),
+                1e7,
             )
             adv_logits[
                 torch.arange(0, n).to(device),
@@ -1714,7 +1765,8 @@ class ILQL_Policy:
                 torch.full((n,), 0).to(device),
                 tokens[:, t],
             ].masked_fill_(
-                t < dialogue_lens, 1e7
+                t < dialogue_lens,
+                1e7,
             )
 
             full_logits = (
@@ -1740,10 +1792,13 @@ class ILQL_Policy:
                 float("-inf"),
             )
             curr_scores, top_k_ = torch.topk(
-                scores[0, :, :], k=beam_width, dim=1
+                scores[0, :, :],
+                k=beam_width,
+                dim=1,
             )  # (batch, k), (batch, k)
             tokens = tokens[
-                (batch_indicator * beam_width + (top_k_ // vocab_size)).reshape(-1), :
+                (batch_indicator * beam_width + (top_k_ // vocab_size)).reshape(-1),
+                :,
             ]
             logits = logits[
                 (batch_indicator * beam_width + (top_k_ // vocab_size)).reshape(-1),
@@ -1785,7 +1840,10 @@ class ILQL_Policy:
                 kvs["qv"],
             )
             kvs["qv"] = update_kvs(
-                kvs["qv"], fixed_kvs, torch.arange(0, n).to(device), (t + prefix_t) - 1
+                kvs["qv"],
+                fixed_kvs,
+                torch.arange(0, n).to(device),
+                (t + prefix_t) - 1,
             )
             if "target" in kvs:
                 fixed_target_kvs = map_all_kvs(
@@ -1859,8 +1917,8 @@ class ILQL_Policy:
                             tokenizer.decode(
                                 tokens[idx, :].tolist(),
                                 clean_up_tokenization_spaces=False,
-                            )
-                        )
+                            ),
+                        ),
                     )
             t += 1
             termination_mask *= ((t - dialogue_lens) < max_generation_len).int()
@@ -1879,13 +1937,13 @@ class ILQL_Policy:
                 if tokenizer.id_to_token(tokenizer.pad_token_id) in processed_str:
                     processed_str = processed_str[
                         : processed_str.find(
-                            tokenizer.id_to_token(tokenizer.pad_token_id)
+                            tokenizer.id_to_token(tokenizer.pad_token_id),
                         )
                     ].strip()
                 if tokenizer.id_to_token(tokenizer.eoa_token_id) in processed_str:
                     processed_str = processed_str[
                         : processed_str.find(
-                            tokenizer.id_to_token(tokenizer.eoa_token_id)
+                            tokenizer.id_to_token(tokenizer.eoa_token_id),
                         )
                     ].strip()
                 temp_outputs.append(processed_str)
@@ -1893,7 +1951,10 @@ class ILQL_Policy:
         return list(zip(input_strs, processed_outputs)), curr_scores, -logit_scores
 
     def generate(
-        self, items, termination_condition: Callable[[np.ndarray], bool], **kwargs
+        self,
+        items,
+        termination_condition: Callable[[np.ndarray], bool],
+        **kwargs,
     ):
         prepared_inputs = self.iql_model.prepare_inputs(items)
         tokens, attn_mask = prepared_inputs["tokens"], prepared_inputs["attn_mask"]
@@ -1908,16 +1969,25 @@ class ILQL_Policy:
         else:
             raise NotImplementedError
         generations, info, kls = method(
-            tokens, attn_mask, state_idxs, action_idxs, termination_condition, **kwargs
+            tokens,
+            attn_mask,
+            state_idxs,
+            action_idxs,
+            termination_condition,
+            **kwargs,
         )
         return generations, info, kls
 
     def act(self, obs):
         item = DataPoint.from_obs(
-            obs, self.iql_model.dataset.tokenizer, self.iql_model.dataset.token_reward
+            obs,
+            self.iql_model.dataset.tokenizer,
+            self.iql_model.dataset.token_reward,
         )
         generations, logprobs, kls = self.generate(
-            [item], always_terminate, **self.generation_kwargs
+            [item],
+            always_terminate,
+            **self.generation_kwargs,
         )
         self.kls_all.append(kls[0, 0].item())
         self.logprobs_all.append(logprobs[0, 0].item())
@@ -1951,13 +2021,15 @@ class ILQL_Evaluator:
                 (
                     result,
                     sequence,
-                )
+                ),
             )
             env_reward = sum(map(lambda x: x[2], sequence))
             token_reward = sum(
                 DataPoint.get_token_reward(
-                    result, model.dataset.tokenizer, model.dataset.token_reward
-                )
+                    result,
+                    model.dataset.tokenizer,
+                    model.dataset.token_reward,
+                ),
             )
             total_env_reward += env_reward
             total_token_reward += token_reward
@@ -2017,20 +2089,21 @@ class TopAdvantageNGrams:
                         start_idx = x - self.n_gram
                     if x - start_idx < self.n_gram:
                         continue
-                elif select_tokens[x].item() != self.data.tokenizer.eoa_token_id:
+                elif token.item() != self.data.tokenizer.eoa_token_id:
                     continue
                 total_advantage = advantages[start_idx:x].sum().item()
                 utterance = self.data.tokenizer.decode(
                     tokens[
-                        0, (a_idx[0, start_idx].item() + 1) : (a_idx[0, x].item() + 1)
+                        0,
+                        (a_idx[0, start_idx].item() + 1) : (a_idx[0, x].item() + 1),
                     ]
                     .detach()
                     .cpu()
-                    .tolist()
+                    .tolist(),
                 )
                 top_actions[utterance] += total_advantage
                 total_actions[utterance] += 1
-                if select_tokens[x].item() == self.data.tokenizer.eoa_token_id:
+                if token.item() == self.data.tokenizer.eoa_token_id:
                     curr_idx = x + 1
             if i % self.print_every == 0:
                 ranked_actions = sorted(
@@ -2060,12 +2133,11 @@ def interact_environment(env, policy, obs):
 def map_pytree(f: Callable[[np.ndarray | torch.Tensor], Any], item: Any):
     if isinstance(item, dict):
         return {k: map_pytree(f, v) for k, v in item.items()}
-    elif isinstance(item, list) or isinstance(item, set) or isinstance(item, tuple):
+    if isinstance(item, list) or isinstance(item, set) or isinstance(item, tuple):
         return [map_pytree(f, v) for v in item]
-    elif isinstance(item, np.ndarray) or isinstance(item, torch.Tensor):
+    if isinstance(item, np.ndarray) or isinstance(item, torch.Tensor):
         return f(item)
-    else:
-        return item
+    return item
 
 
 def to(item: Any, device: torch.device):

@@ -51,13 +51,13 @@ from tests.helper_functions import (
 @pytest.fixture
 def action_space(network_cls: type[EvolvableNetworkProtocol]) -> gym.Space | None:
     if issubclass(
-        network_cls, (DeterministicActor, StochasticActor, ContinuousQNetwork)
+        network_cls,
+        (DeterministicActor, StochasticActor, ContinuousQNetwork),
     ):
         return generate_random_box_space(shape=(2,))
-    elif issubclass(network_cls, (RainbowQNetwork, QNetwork)):
+    if issubclass(network_cls, (RainbowQNetwork, QNetwork)):
         return generate_discrete_space(2)
-    else:
-        return None
+    return None
 
 
 class TestProtocols:
@@ -94,7 +94,10 @@ class TestProtocols:
         ],
     )
     def test_algorithm_instances_implement_evolvable_algorithm_protocol(
-        self, algorithm_cls, algo_action_space, observation_space
+        self,
+        algorithm_cls,
+        algo_action_space,
+        observation_space,
     ):
         """Test that algorithm instances implement the EvolvableAlgorithm protocol."""
         # Skip actual instantiation, just check the class definitions
@@ -131,7 +134,10 @@ class TestProtocols:
         ],
     )
     def test_network_instances_implement_evolvable_network_protocol(
-        self, network_cls, observation_space, action_space
+        self,
+        network_cls,
+        observation_space,
+        action_space,
     ):
         """Test that network instances implement the EvolvableNetwork protocol."""
         kwargs = {}
@@ -185,7 +191,8 @@ class TestProtocols:
         mutation_methods = instance.get_mutation_methods()
         for method_name, method in mutation_methods.items():
             assert isinstance(
-                method, MutationMethodProtocol
+                method,
+                MutationMethodProtocol,
             ), f"Mutation method {method_name} does not implement MutationMethod protocol"
 
     def test_pretrained_model_instances_implement_pretrained_model_protocol(self):

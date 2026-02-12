@@ -13,7 +13,8 @@ from agilerl.typing import ArrayOrTensor, DeviceType, NetConfigType
 
 
 def apply_action_mask_discrete(
-    logits: torch.Tensor, mask: torch.Tensor
+    logits: torch.Tensor,
+    mask: torch.Tensor,
 ) -> torch.Tensor:
     """Apply a mask to the logits.
 
@@ -28,8 +29,7 @@ def apply_action_mask_discrete(
 
 
 class TorchDistribution:
-    """
-    Lightweight distribution‑like helper.
+    """Lightweight distribution‑like helper.
     *   keeps only **raw tensors** (``logits`` or ``mu``/``log_std``)
     *   implements ``sample``, ``log_prob`` and ``entropy`` with pure tensor ops
         → no Python allocations per call, all kernels run on GPU.
@@ -97,7 +97,7 @@ class TorchDistribution:
         if isinstance(self.action_space, spaces.MultiBinary):
             probs = torch.sigmoid(self.logits)
             self._sampled_action = torch.bernoulli(
-                probs
+                probs,
             )  # Ensures float tensor, removed .to(torch.int64)
             return self._sampled_action
 
@@ -112,7 +112,7 @@ class TorchDistribution:
 
             if action_long.ndim == log_p_all.ndim - 1:  # action_long is (B,)
                 action_indices_for_gather = action_long.unsqueeze(
-                    -1
+                    -1,
                 )  # Converts to (B,1)
             elif action_long.ndim == log_p_all.ndim:  # action_long is (B, K)
                 if action_long.shape[-1] == 1:  # action_long is (B,1)
@@ -125,18 +125,20 @@ class TorchDistribution:
                     # Special handling for test case: action is (B, N_actions) for Discrete(N_actions)
                     # Use argmax to get the action index.
                     action_indices_for_gather = torch.argmax(
-                        action_long, dim=-1, keepdim=True
+                        action_long,
+                        dim=-1,
+                        keepdim=True,
                     )  # Converts (B, N_actions) to (B,1)
                 else:
                     raise ValueError(
                         f"Action shape {action.shape} is not compatible with Discrete space. "
                         f"Expected (batch_size,), (batch_size, 1), or (batch_size, num_actions) for argmax case. "
-                        f"Logits shape: {log_p_all.shape}. Action space: {self.action_space}"
+                        f"Logits shape: {log_p_all.shape}. Action space: {self.action_space}",
                     )
             else:
                 raise ValueError(
                     f"Action tensor ndim {action.ndim} is not compatible with Discrete space logits ndim {log_p_all.ndim}. "
-                    f"Expected action ndim to be {log_p_all.ndim-1} or {log_p_all.ndim}."
+                    f"Expected action ndim to be {log_p_all.ndim-1} or {log_p_all.ndim}.",
                 )
 
             return log_p_all.gather(-1, action_indices_for_gather).squeeze(-1)
@@ -184,7 +186,7 @@ class TorchDistribution:
 
         if isinstance(self.action_space, spaces.Box):
             return 0.5 * (1 + math.log(2 * math.pi)) * self.mu.size(
-                -1
+                -1,
             ) + self.log_std.sum(-1)
 
         # -------- MultiDiscrete --------
@@ -203,7 +205,7 @@ class TorchDistribution:
         if isinstance(self.action_space, spaces.MultiBinary):
             p = torch.sigmoid(self.logits)
             return -(p * torch.log(p + 1e-8) + (1 - p) * torch.log(1 - p + 1e-8)).sum(
-                -1
+                -1,
             )
 
         raise NotImplementedError
@@ -254,7 +256,7 @@ class EvolvableDistribution(EvolvableWrapper):
         if isinstance(action_space, spaces.Box):
             self.log_std = torch.nn.Parameter(
                 torch.ones(1, np.prod(action_space.shape), device=device)
-                * action_std_init
+                * action_std_init,
             )
 
     @property
@@ -286,35 +288,20 @@ class EvolvableDistribution(EvolvableWrapper):
             )
 
         # Categorical distribution for Discrete action spaces
-        elif isinstance(self.action_space, spaces.Discrete):
+        if (
+            isinstance(self.action_space, spaces.Discrete)
+            or isinstance(self.action_space, spaces.MultiDiscrete)
+            or isinstance(self.action_space, spaces.MultiBinary)
+        ):
             # Pass logits directly to TorchDistribution
             return TorchDistribution(
                 action_space=self.action_space,
                 logits=logits,
                 squash_output=self.squash_output,  # squash_output is ignored for discrete
             )
-
-        # List of categorical distributions for MultiDiscrete action spaces
-        elif isinstance(self.action_space, spaces.MultiDiscrete):
-            # Pass logits directly to TorchDistribution
-            return TorchDistribution(
-                action_space=self.action_space,
-                logits=logits,
-                squash_output=self.squash_output,  # squash_output is ignored for discrete
-            )
-
-        # Bernoulli distribution for MultiBinary action spaces
-        elif isinstance(self.action_space, spaces.MultiBinary):
-            # Pass logits directly to TorchDistribution
-            return TorchDistribution(
-                action_space=self.action_space,
-                logits=logits,
-                squash_output=self.squash_output,  # squash_output is ignored for discrete
-            )
-        else:
-            raise NotImplementedError(
-                f"Action space {self.action_space} not supported."
-            )
+        raise NotImplementedError(
+            f"Action space {self.action_space} not supported.",
+        )
 
     def log_prob(self, action: torch.Tensor) -> torch.Tensor:
         """Get the log probability of the action.
@@ -354,7 +341,7 @@ class EvolvableDistribution(EvolvableWrapper):
         """
         # Convert mask to tensor and reshape to match logits shape
         mask = torch.as_tensor(mask, dtype=torch.bool, device=self.device).view(
-            logits.shape
+            logits.shape,
         )
 
         if isinstance(self.action_space, spaces.Discrete):
@@ -364,7 +351,7 @@ class EvolvableDistribution(EvolvableWrapper):
                 list(self.action_space.nvec)
                 if isinstance(self.action_space, spaces.MultiDiscrete)
                 else [
-                    self.action_space.n
+                    self.action_space.n,
                 ]  # For MultiBinary, nvec is not present, use n
             )
             # Split mask and logits into separate distributions
@@ -374,10 +361,11 @@ class EvolvableDistribution(EvolvableWrapper):
             # Apply mask to each split
             masked_logits = []
             for split_logits_i, split_mask_i in zip(
-                split_logits, split_masks
+                split_logits,
+                split_masks,
             ):  # Renamed for clarity
                 masked_logits.append(
-                    apply_action_mask_discrete(split_logits_i, split_mask_i)
+                    apply_action_mask_discrete(split_logits_i, split_mask_i),
                 )
 
             masked_logits = torch.cat(masked_logits, dim=1)
@@ -385,7 +373,7 @@ class EvolvableDistribution(EvolvableWrapper):
             # This should ideally not be reached if get_distribution handles the space,
             # but keeping for safety.
             raise NotImplementedError(
-                f"Action space {self.action_space} not supported for masking."
+                f"Action space {self.action_space} not supported for masking.",
             )
 
         return masked_logits
@@ -429,7 +417,9 @@ class EvolvableDistribution(EvolvableWrapper):
             # Ensure action_mask is a tensor before applying.
             # The view in apply_mask expects a compatible shape or will error.
             action_mask = torch.as_tensor(
-                action_mask, device=self.device, dtype=torch.bool
+                action_mask,
+                device=self.device,
+                dtype=torch.bool,
             )
 
             logits = self.apply_mask(logits, action_mask)

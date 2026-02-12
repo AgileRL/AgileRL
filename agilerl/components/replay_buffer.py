@@ -1,5 +1,4 @@
 from collections import deque
-from typing import Deque
 
 import torch
 from tensordict import TensorDict, TensorDictBase, is_tensor_collection
@@ -89,9 +88,8 @@ class ReplayBuffer:
                 for k, v in value.items():
                     if v.ndim == 1:
                         value[k] = v.reshape(_n_transitions, 1)
-            else:
-                if value.ndim == 1:
-                    value = value.reshape(_n_transitions, 1)
+            elif value.ndim == 1:
+                value = value.reshape(_n_transitions, 1)
 
             data[key] = value
 
@@ -167,7 +165,7 @@ class MultiStepReplayBuffer(ReplayBuffer):
 
         self.n_step = n_step
         self.gamma = gamma
-        self.n_step_buffer: Deque[TensorDict] = deque(maxlen=n_step)
+        self.n_step_buffer: deque[TensorDict] = deque(maxlen=n_step)
         self.reward_key = "reward"
         self.done_key = None
         self.ns_key = "next_obs"
@@ -186,7 +184,7 @@ class MultiStepReplayBuffer(ReplayBuffer):
 
         # If buffer is not full yet, don't process n-step return
         if len(self.n_step_buffer) < self.n_step:
-            return
+            return None
 
         # Calculate n-step return
         n_step_data = self._get_n_step_info()
@@ -411,7 +409,9 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         return weights
 
     def update_priorities(
-        self, indices: torch.Tensor, priorities: torch.Tensor
+        self,
+        indices: torch.Tensor,
+        priorities: torch.Tensor,
     ) -> None:
         """Update priorities of the sampled transitions.
 

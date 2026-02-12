@@ -94,7 +94,9 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
             observation_space=observation_space,
             action_space=action_space,
             support=torch.linspace(
-                -INIT_HP["V_MAX"], INIT_HP["V_MAX"], INIT_HP["NUM_ATOMS"]
+                -INIT_HP["V_MAX"],
+                INIT_HP["V_MAX"],
+                INIT_HP["NUM_ATOMS"],
             ),
         )
     else:

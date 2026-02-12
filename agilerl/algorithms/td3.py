@@ -4,9 +4,8 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
 from gymnasium import spaces
+from torch import nn, optim
 
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
@@ -130,7 +129,8 @@ class TD3(RLAlgorithm):
         )
 
         assert isinstance(
-            action_space, spaces.Box
+            action_space,
+            spaces.Box,
         ), "TD3 only supports continuous action spaces."
         assert (isinstance(expl_noise, (float, int))) or (
             isinstance(expl_noise, np.ndarray)
@@ -162,10 +162,11 @@ class TD3(RLAlgorithm):
             critic_networks is not None
         ):  # XOR operation
             warnings.warn(
-                "Actor and critic networks must both be supplied to use custom networks. Defaulting to net config."
+                "Actor and critic networks must both be supplied to use custom networks. Defaulting to net config.",
             )
         assert isinstance(
-            wrap, bool
+            wrap,
+            bool,
         ), "Wrap models flag must be boolean value True or False."
 
         self.batch_size = batch_size
@@ -202,30 +203,35 @@ class TD3(RLAlgorithm):
 
         if actor_network is not None and critic_networks is not None:
             assert isinstance(
-                critic_networks, (list, tuple)
+                critic_networks,
+                (list, tuple),
             ), "Critic network must be a list or tuple"
 
             assert len(critic_networks) == 2, "TD3 requires exactly 2 critic networks."
 
             if not isinstance(actor_network, EvolvableModule):
                 raise TypeError(
-                    f"Passed actor network is of type {type(actor_network)}, but must be of type EvolvableModule."
+                    f"Passed actor network is of type {type(actor_network)}, but must be of type EvolvableModule.",
                 )
-            elif not isinstance(critic_networks[0], EvolvableModule):
+            if not isinstance(critic_networks[0], EvolvableModule):
                 raise TypeError(
-                    f"Passed critic network at index 0 is of type {type(critic_networks[0])}, but must be of type EvolvableModule."
+                    f"Passed critic network at index 0 is of type {type(critic_networks[0])}, but must be of type EvolvableModule.",
                 )
-            elif not isinstance(critic_networks[1], EvolvableModule):
+            if not isinstance(critic_networks[1], EvolvableModule):
                 raise TypeError(
-                    f"Passed critic network at index 1 is of type {type(critic_networks[1])}, but must be of type EvolvableModule."
+                    f"Passed critic network at index 1 is of type {type(critic_networks[1])}, but must be of type EvolvableModule.",
                 )
 
             self.actor, self.critic_1, self.critic_2 = make_safe_deepcopies(
-                actor_network, critic_networks[0], critic_networks[1]
+                actor_network,
+                critic_networks[0],
+                critic_networks[1],
             )
             self.actor_target, self.critic_target_1, self.critic_target_2 = (
                 make_safe_deepcopies(
-                    actor_network, critic_networks[0], critic_networks[1]
+                    actor_network,
+                    critic_networks[0],
+                    critic_networks[1],
                 )
             )
         else:
@@ -234,14 +240,15 @@ class TD3(RLAlgorithm):
             # NOTE: Set layer_norm=False for encoder config, since critic automatically
             # does this the actor should too to allow encoder sharing
             encoder_config: NetConfigType | None = net_config.get(
-                "encoder_config", None
+                "encoder_config",
+                None,
             )
             if encoder_config is not None:
                 if is_mlp_net_config(encoder_config):
                     if encoder_config.get("layer_norm", False):
                         warnings.warn(
                             "Layer normalization is not supported for the encoder of TD3 networks. Disabling it. "
-                            "See GitHub PR for more details: https://github.com/AgileRL/AgileRL/pull/469"
+                            "See GitHub PR for more details: https://github.com/AgileRL/AgileRL/pull/469",
                         )
                     encoder_config["layer_norm"] = False
             else:
@@ -307,15 +314,21 @@ class TD3(RLAlgorithm):
 
         # Optimizers
         self.actor_optimizer = OptimizerWrapper(
-            optim.Adam, networks=self.actor, lr=self.lr_actor
+            optim.Adam,
+            networks=self.actor,
+            lr=self.lr_actor,
         )
 
         self.critic_1_optimizer = OptimizerWrapper(
-            optim.Adam, networks=self.critic_1, lr=self.lr_critic
+            optim.Adam,
+            networks=self.critic_1,
+            lr=self.lr_critic,
         )
 
         self.critic_2_optimizer = OptimizerWrapper(
-            optim.Adam, networks=self.critic_2, lr=self.lr_critic
+            optim.Adam,
+            networks=self.critic_2,
+            lr=self.lr_critic,
         )
 
         if self.accelerator is not None and wrap:
@@ -329,24 +342,25 @@ class TD3(RLAlgorithm):
                 eval_network=self.actor,
                 shared_networks=self.actor_target,
                 policy=True,
-            )
+            ),
         )
         self.register_network_group(
             NetworkGroup(
                 eval_network=self.critic_1,
                 shared_networks=self.critic_target_1,
-            )
+            ),
         )
         self.register_network_group(
             NetworkGroup(
                 eval_network=self.critic_2,
                 shared_networks=self.critic_target_2,
-            )
+            ),
         )
 
     def share_encoder_parameters(self) -> None:
         """Shares the encoder parameters between the actor and critics.
-        Registered as a mutation hook when share_encoders=True."""
+        Registered as a mutation hook when share_encoders=True.
+        """
         if all(
             isinstance(net, EvolvableNetwork)
             for net in [self.actor, self.critic_1, self.critic_2]
@@ -361,11 +375,11 @@ class TD3(RLAlgorithm):
                 )
             except KeyError as e:
                 raise KeyError(
-                    f"Found incompatible encoder architectures: {e} not found in shared network."
+                    f"Found incompatible encoder architectures: {e} not found in shared network.",
                 ) from e
         else:
             warnings.warn(
-                "Encoder sharing is disabled as actor or critic is not an EvolvableNetwork."
+                "Encoder sharing is disabled as actor or critic is not an EvolvableNetwork.",
             )
 
     def get_action(self, obs: ObservationType, training: bool = True) -> np.ndarray:
@@ -469,7 +483,9 @@ class TD3(RLAlgorithm):
             noise = multi_dim_clamp(-noise_clip, noise_clip, noise.to(self.device))
             next_actions = next_actions + noise
             next_actions = multi_dim_clamp(
-                self.action_low, self.action_high, next_actions
+                self.action_low,
+                self.action_high,
+                next_actions,
             )
 
             # Compute the target, y_j, making use of twin critic networks
@@ -482,7 +498,8 @@ class TD3(RLAlgorithm):
 
         # Loss equation needs to be updated to account for two q_values from two critics
         critic_loss: torch.Tensor = self.criterion(q_value_1, y_j) + self.criterion(
-            q_value_2, y_j
+            q_value_2,
+            y_j,
         )
 
         # Critic loss backprop
@@ -519,8 +536,7 @@ class TD3(RLAlgorithm):
             self.soft_update(self.critic_2, self.critic_target_2)
 
             return actor_loss.item(), critic_loss.item()
-        else:
-            return None, critic_loss.item()
+        return None, critic_loss.item()
 
     def soft_update(self, net: EvolvableModule, target: EvolvableModule) -> None:
         """Soft updates target network parameters.
@@ -532,11 +548,15 @@ class TD3(RLAlgorithm):
         """
         for eval_param, target_param in zip(net.parameters(), target.parameters()):
             target_param.data.copy_(
-                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
+                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data,
             )
 
     def test(
-        self, env: GymEnvType, swap_channels=False, max_steps=None, loop=3
+        self,
+        env: GymEnvType,
+        swap_channels=False,
+        max_steps=None,
+        loop=3,
     ) -> float:
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 

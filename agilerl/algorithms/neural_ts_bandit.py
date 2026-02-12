@@ -2,9 +2,8 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
 from gymnasium import spaces
+from torch import nn, optim
 
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
@@ -90,11 +89,13 @@ class NeuralTS(RLAlgorithm):
         assert learn_step >= 1, "Learn step must be greater than or equal to one."
         assert isinstance(learn_step, int), "Learn step rate must be an integer."
         assert isinstance(
-            gamma, (float, int)
+            gamma,
+            (float, int),
         ), "Scaling factor must be a float or integer."
         assert gamma > 0, "Scaling factor must be positive."
         assert isinstance(
-            lamb, (float, int)
+            lamb,
+            (float, int),
         ), "Regularization parameter lambda must be a float or integer."
         assert lamb > 0, "Regularization parameter lambda must be greater than zero."
         assert isinstance(reg, float), "Loss regularization parameter must be a float."
@@ -104,7 +105,8 @@ class NeuralTS(RLAlgorithm):
         assert isinstance(lr, float), "Learning rate must be a float."
         assert lr > 0, "Learning rate must be greater than zero."
         assert isinstance(
-            wrap, bool
+            wrap,
+            bool,
         ), "Wrap models flag must be boolean value True or False."
 
         self.gamma = gamma
@@ -120,7 +122,7 @@ class NeuralTS(RLAlgorithm):
         if actor_network is not None:
             if not isinstance(actor_network, EvolvableModule):
                 raise TypeError(
-                    f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
+                    f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule.",
                 )
 
             # Need to make deepcopies for target and detached networks
@@ -135,7 +137,8 @@ class NeuralTS(RLAlgorithm):
             )
 
             if not simba and not isinstance(
-                observation_space, (spaces.Dict, spaces.Tuple)
+                observation_space,
+                (spaces.Dict, spaces.Tuple),
             ):
                 # Layer norm is not used in the original implementation
                 encoder_config["layer_norm"] = False
@@ -143,7 +146,9 @@ class NeuralTS(RLAlgorithm):
             net_config["encoder_config"] = encoder_config
 
             self.actor = ValueNetwork(
-                observation_space=observation_space, device=self.device, **net_config
+                observation_space=observation_space,
+                device=self.device,
+                **net_config,
             )
 
         self.optimizer = OptimizerWrapper(optim.Adam, networks=self.actor, lr=self.lr)
@@ -160,7 +165,7 @@ class NeuralTS(RLAlgorithm):
         # Register network groups for mutations
         self.register_mutation_hook(self.init_params)
         self.register_network_group(
-            NetworkGroup(eval_network=self.actor, shared_networks=None, policy=True)
+            NetworkGroup(eval_network=self.actor, shared_networks=None, policy=True),
         )
 
     def init_params(self) -> None:
@@ -172,11 +177,13 @@ class NeuralTS(RLAlgorithm):
         )
         self.sigma_inv = self.lamb * torch.eye(self.numel).to(self.device)
         self.theta_0 = torch.cat(
-            [w.flatten() for w in self.exp_layer.parameters() if w.requires_grad]
+            [w.flatten() for w in self.exp_layer.parameters() if w.requires_grad],
         )
 
     def get_action(
-        self, obs: ObservationType, action_mask: np.ndarray | None = None
+        self,
+        obs: ObservationType,
+        action_mask: np.ndarray | None = None,
     ) -> int:
         """Returns the next action to take in the environment.
 
@@ -199,7 +206,7 @@ class NeuralTS(RLAlgorithm):
                     w.grad.detach().flatten() / np.sqrt(self.exp_layer.weight.size(0))
                     for w in self.exp_layer.parameters()
                     if w.requires_grad
-                ]
+                ],
             )
 
         with torch.no_grad():
@@ -208,8 +215,9 @@ class NeuralTS(RLAlgorithm):
                 std=self.gamma
                 * torch.sqrt(
                     torch.matmul(
-                        torch.matmul(g[:, None, :], self.sigma_inv), g[:, :, None]
-                    )[:, 0, :]
+                        torch.matmul(g[:, None, :], self.sigma_inv),
+                        g[:, :, None],
+                    )[:, 0, :],
                 ),
             )
 
@@ -250,9 +258,9 @@ class NeuralTS(RLAlgorithm):
                         w.flatten()
                         for w in self.exp_layer.parameters()
                         if w.requires_grad
-                    ]
+                    ],
                 )
-                - self.theta_0
+                - self.theta_0,
             )
             ** 2
         )

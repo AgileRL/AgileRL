@@ -3,12 +3,11 @@ import copy
 import numpy as np
 import pytest
 import torch
-import torch.nn as nn
-import torch.optim as optim
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 from gymnasium.spaces import Discrete
+from torch import nn, optim
 from torch._dynamo import OptimizedModule
 
 from agilerl.algorithms.matd3 import MATD3
@@ -28,10 +27,16 @@ class MultiAgentCNNActor(nn.Module):
     def __init__(self):
         super().__init__()
         self.conv1 = nn.Conv3d(
-            in_channels=3, out_channels=16, kernel_size=(1, 3, 3), stride=4
+            in_channels=3,
+            out_channels=16,
+            kernel_size=(1, 3, 3),
+            stride=4,
         )
         self.conv2 = nn.Conv3d(
-            in_channels=16, out_channels=32, kernel_size=(1, 3, 3), stride=2
+            in_channels=16,
+            out_channels=32,
+            kernel_size=(1, 3, 3),
+            stride=2,
         )
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
         self.fc1 = nn.Linear(288, 256)
@@ -44,19 +49,23 @@ class MultiAgentCNNActor(nn.Module):
         x = self.relu(self.conv2(x))
         x = x.view(x.size(0), -1)
         x = self.relu(self.fc1(x))
-        x = self.output_activation(self.fc2(x))
-
-        return x
+        return self.output_activation(self.fc2(x))
 
 
 class MultiAgentCNNCritic(nn.Module):
     def __init__(self):
         super().__init__()
         self.conv1 = nn.Conv3d(
-            in_channels=3, out_channels=16, kernel_size=(2, 3, 3), stride=4
+            in_channels=3,
+            out_channels=16,
+            kernel_size=(2, 3, 3),
+            stride=4,
         )
         self.conv2 = nn.Conv3d(
-            in_channels=16, out_channels=32, kernel_size=(1, 3, 3), stride=2
+            in_channels=16,
+            out_channels=32,
+            kernel_size=(1, 3, 3),
+            stride=2,
         )
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
         self.fc1 = nn.Linear(290, 256)
@@ -69,9 +78,7 @@ class MultiAgentCNNCritic(nn.Module):
         x = x.view(x.size(0), -1)
         x = torch.cat([x, action_tensor], dim=1)
         x = self.relu(self.fc1(x))
-        x = self.fc2(x)
-
-        return x
+        return self.fc2(x)
 
 
 class DummyContinuousQNetwork(ContinuousQNetwork):
@@ -145,7 +152,11 @@ def cnn_critic():
 
 @pytest.fixture(scope="function")
 def accelerated_experiences(
-    batch_size, observation_spaces, action_spaces, agent_ids, request
+    batch_size,
+    observation_spaces,
+    action_spaces,
+    agent_ids,
+    request,
 ):
     observation_spaces = request.getfixturevalue(observation_spaces)
     action_spaces = request.getfixturevalue(action_spaces)
@@ -176,12 +187,17 @@ def accelerated_experiences(
             agent: torch.randn(batch_size, *state_size) for agent in agent_ids
         }
 
-    yield states, actions, rewards, next_states, dones
+    return states, actions, rewards, next_states, dones
 
 
 @pytest.fixture(scope="function")
 def experiences(
-    batch_size, observation_spaces, action_spaces, agent_ids, device, request
+    batch_size,
+    observation_spaces,
+    action_spaces,
+    agent_ids,
+    device,
+    request,
 ):
     observation_spaces = request.getfixturevalue(observation_spaces)
     action_spaces = request.getfixturevalue(action_spaces)
@@ -220,7 +236,7 @@ def experiences(
             for agent in agent_ids
         }
 
-    yield states, actions, rewards, next_states, dones
+    return states, actions, rewards, next_states, dones
 
 
 @pytest.mark.parametrize(
@@ -236,7 +252,12 @@ def experiences(
 @pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_initialize_matd3_with_net_config(
-    observation_spaces, ma_vector_space, accelerator_flag, device, compile_mode, request
+    observation_spaces,
+    ma_vector_space,
+    accelerator_flag,
+    device,
+    compile_mode,
+    request,
 ):
     observation_spaces = request.getfixturevalue(observation_spaces)
     net_config = {
@@ -326,7 +347,7 @@ def test_initialize_matd3_with_mlp_networks_gumbel_softmax(
             "max_mlp_nodes": 500,
             "output_activation": "GumbelSoftmax",
             "activation": "ReLU",
-        }
+        },
     }
     observation_spaces = request.getfixturevalue(observation_spaces)
     action_spaces = request.getfixturevalue(action_spaces)
@@ -368,31 +389,33 @@ def test_initialize_matd3_with_mlp_networks(
                 device=device,
             )
             for agent_id in agent_ids
-        }
+        },
     )
     evo_critics_1 = ModuleDict(
         {
             agent_id: MakeEvolvable(
                 network=mlp_critic,
                 input_tensor=torch.randn(
-                    1, observation_spaces[0].shape[0] + action_spaces[0].n
+                    1,
+                    observation_spaces[0].shape[0] + action_spaces[0].n,
                 ),
                 device=device,
             )
             for agent_id in agent_ids
-        }
+        },
     )
     evo_critics_2 = ModuleDict(
         {
             agent_id: MakeEvolvable(
                 network=mlp_critic,
                 input_tensor=torch.randn(
-                    1, observation_spaces[0].shape[0] + action_spaces[0].n
+                    1,
+                    observation_spaces[0].shape[0] + action_spaces[0].n,
                 ),
                 device=device,
             )
             for agent_id in agent_ids
-        }
+        },
     )
     evo_critics = [evo_critics_1, evo_critics_2]
     matd3 = MATD3(
@@ -464,7 +487,7 @@ def test_initialize_matd3_with_cnn_networks(
                 device=device,
             )
             for agent_id in agent_ids
-        }
+        },
     )
     evo_critics_1 = ModuleDict(
         {
@@ -475,7 +498,7 @@ def test_initialize_matd3_with_cnn_networks(
                 device=device,
             )
             for agent_id in agent_ids
-        }
+        },
     )
     evo_critics_2 = ModuleDict(
         {
@@ -486,7 +509,7 @@ def test_initialize_matd3_with_cnn_networks(
                 device=device,
             )
             for agent_id in agent_ids
-        }
+        },
     )
     evo_critics = [evo_critics_1, evo_critics_2]
     matd3 = MATD3(
@@ -556,16 +579,18 @@ def test_initialize_matd3_with_evo_networks(
     observation_spaces = request.getfixturevalue(observation_spaces)
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     observation_space = spaces.Dict(
-        {agent_id: observation_spaces[idx] for idx, agent_id in enumerate(agent_ids)}
+        {agent_id: observation_spaces[idx] for idx, agent_id in enumerate(agent_ids)},
     )
 
     evo_actors = ModuleDict(
         {
             agent_id: DeterministicActor(
-                observation_spaces[idx], ma_discrete_space[idx], device=device
+                observation_spaces[idx],
+                ma_discrete_space[idx],
+                device=device,
             )
             for idx, agent_id in enumerate(agent_ids)
-        }
+        },
     )
     evo_critics_1 = ModuleDict(
         {
@@ -575,7 +600,7 @@ def test_initialize_matd3_with_evo_networks(
                 device=device,
             )
             for agent_id in agent_ids
-        }
+        },
     )
     evo_critics_2 = ModuleDict(
         {
@@ -585,7 +610,7 @@ def test_initialize_matd3_with_evo_networks(
                 device=device,
             )
             for agent_id in agent_ids
-        }
+        },
     )
     evo_critics = [evo_critics_1, evo_critics_2]
     matd3 = MATD3(
@@ -643,7 +668,9 @@ def test_initialize_matd3_with_evo_networks(
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_initialize_matd3_with_incorrect_evo_networks(
-    compile_mode, ma_vector_space, ma_discrete_space
+    compile_mode,
+    ma_vector_space,
+    ma_discrete_space,
 ):
     evo_actors = []
     evo_critics = []
@@ -662,7 +689,12 @@ def test_initialize_matd3_with_incorrect_evo_networks(
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
 @pytest.mark.parametrize("action_spaces", ["ma_discrete_space"])
 def test_matd3_init_warning(
-    mlp_actor, device, compile_mode, observation_spaces, action_spaces, request
+    mlp_actor,
+    device,
+    compile_mode,
+    observation_spaces,
+    action_spaces,
+    request,
 ):
     warning_string = "Actor and critic network must both be supplied to use custom networks. Defaulting to net config."
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
@@ -676,7 +708,7 @@ def test_matd3_init_warning(
                 device=device,
             )
             for agent_id in agent_ids
-        }
+        },
     )
     with pytest.warns(UserWarning, match=warning_string):
         MATD3(
@@ -690,7 +722,8 @@ def test_matd3_init_warning(
 
 
 @pytest.mark.parametrize(
-    "mode", [None, 0, False, "default", "reduce-overhead", "max-autotune"]
+    "mode",
+    [None, 0, False, "default", "reduce-overhead", "max-autotune"],
 )
 def test_matd3_init_with_compile_no_error(mode, ma_vector_space, device):
     matd3 = MATD3(
@@ -733,13 +766,19 @@ def test_matd3_init_with_compile_error(mode, ma_vector_space, device):
 
 
 @pytest.mark.parametrize(
-    "observation_spaces", ["ma_vector_space", "ma_discrete_space", "ma_image_space"]
+    "observation_spaces",
+    ["ma_vector_space", "ma_discrete_space", "ma_image_space"],
 )
 @pytest.mark.parametrize("action_spaces", ["ma_vector_space", "ma_discrete_space"])
 @pytest.mark.parametrize("training", [0, 1])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_matd3_get_action(
-    training, observation_spaces, action_spaces, device, compile_mode, request
+    training,
+    observation_spaces,
+    action_spaces,
+    device,
+    compile_mode,
+    request,
 ):
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     observation_spaces = request.getfixturevalue(observation_spaces)
@@ -797,7 +836,11 @@ def test_matd3_get_action(
 @pytest.mark.parametrize("training", [0, 1])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_matd3_get_action_distributed(
-    training, observation_spaces, action_spaces, compile_mode, request
+    training,
+    observation_spaces,
+    action_spaces,
+    compile_mode,
+    request,
 ):
     accelerator = Accelerator()
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
@@ -824,7 +867,7 @@ def test_matd3_get_action_distributed(
                 device=actor.device,
             )
             for agent_id, actor in matd3.actors.items()
-        }
+        },
     )
     matd3.actors = new_actors
     matd3.set_training_mode(bool(training))
@@ -866,7 +909,12 @@ def test_matd3_get_action_distributed(
 @pytest.mark.parametrize("training", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_matd3_get_action_agent_masking(
-    training, observation_spaces, action_spaces, device, compile_mode, request
+    training,
+    observation_spaces,
+    action_spaces,
+    device,
+    compile_mode,
+    request,
 ):
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     observation_spaces = request.getfixturevalue(observation_spaces)
@@ -902,7 +950,8 @@ def test_matd3_get_action_agent_masking(
         assert np.array_equal(action["agent_0"], np.array([1])), action["agent_0"]
     else:
         assert np.array_equal(
-            action["agent_0"], np.array([[0, 1, 0, 1, 0, 1]])
+            action["agent_0"],
+            np.array([[0, 1, 0, 1, 0, 1]]),
         ), action["agent_0"]
 
 
@@ -911,7 +960,12 @@ def test_matd3_get_action_agent_masking(
 @pytest.mark.parametrize("training", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_matd3_get_action_vectorized_agent_masking(
-    training, observation_spaces, action_spaces, device, compile_mode, request
+    training,
+    observation_spaces,
+    action_spaces,
+    device,
+    compile_mode,
+    request,
 ):
     num_envs = 6
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
@@ -919,7 +973,7 @@ def test_matd3_get_action_vectorized_agent_masking(
     action_spaces = request.getfixturevalue(action_spaces)
     state = {
         agent: np.array(
-            [np.random.randn(*observation_spaces[0].shape) for _ in range(num_envs)]
+            [np.random.randn(*observation_spaces[0].shape) for _ in range(num_envs)],
         )
         for agent in agent_ids
     }
@@ -931,11 +985,11 @@ def test_matd3_get_action_vectorized_agent_masking(
             [
                 np.random.randint(0, observation_spaces[0].shape[0] + 1)
                 for _ in range(num_envs)
-            ]
+            ],
         )
     else:
         env_defined_action = np.array(
-            [np.random.randn(*observation_spaces[0].shape) for _ in range(num_envs)]
+            [np.random.randn(*observation_spaces[0].shape) for _ in range(num_envs)],
         )
     nan_array = np.zeros(env_defined_action.shape)
     nan_array[:] = np.nan
@@ -955,17 +1009,22 @@ def test_matd3_get_action_vectorized_agent_masking(
     action, _ = matd3.get_action(state, infos=info)
     if discrete_actions:
         assert np.array_equal(
-            action["agent_0"].squeeze(), info["agent_0"]["env_defined_actions"]
+            action["agent_0"].squeeze(),
+            info["agent_0"]["env_defined_actions"],
         ), action["agent_0"]
     else:
         assert np.isclose(
-            action["agent_0"], info["agent_0"]["env_defined_actions"]
+            action["agent_0"],
+            info["agent_0"]["env_defined_actions"],
         ).all(), action["agent_0"]
 
 
 @pytest.mark.parametrize("training", [False, True])
 def test_matd3_get_action_action_masking_exception(
-    training, ma_vector_space, ma_discrete_space, device
+    training,
+    ma_vector_space,
+    ma_discrete_space,
+    device,
 ):
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     state = {
@@ -988,7 +1047,10 @@ def test_matd3_get_action_action_masking_exception(
 
 @pytest.mark.parametrize("training", [False, True])
 def test_matd3_get_action_action_masking(
-    training, ma_vector_space, ma_discrete_space, device
+    training,
+    ma_vector_space,
+    ma_discrete_space,
+    device,
 ):
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     state = {
@@ -1013,7 +1075,8 @@ def test_matd3_get_action_action_masking(
 
 
 @pytest.mark.parametrize(
-    "observation_spaces", ["ma_discrete_space", "ma_vector_space", "ma_image_space"]
+    "observation_spaces",
+    ["ma_discrete_space", "ma_vector_space", "ma_image_space"],
 )
 @pytest.mark.parametrize("action_spaces", ["ma_discrete_space", "ma_vector_space"])
 @pytest.mark.parametrize("batch_size", [64])
@@ -1100,7 +1163,8 @@ def no_sync(self):
 
 
 @pytest.mark.parametrize(
-    "observation_spaces", ["ma_vector_space", "ma_discrete_space", "ma_image_space"]
+    "observation_spaces",
+    ["ma_vector_space", "ma_discrete_space", "ma_image_space"],
 )
 @pytest.mark.parametrize("action_spaces", ["ma_discrete_space", "ma_vector_space"])
 @pytest.mark.parametrize("batch_size", [64])
@@ -1216,35 +1280,47 @@ def test_matd3_soft_update(device, compile_mode, ma_vector_space, ma_discrete_sp
         target_params = list(actor_target.parameters())
         expected_params = [
             matd3.tau * eval_param + (1.0 - matd3.tau) * target_param
-            for eval_param, target_param in zip(eval_params, target_params)
+            for eval_param, target_param in zip(
+                eval_params, target_params, strict=False
+            )
         ]
         assert all(
             torch.allclose(expected_param, target_param)
-            for expected_param, target_param in zip(expected_params, target_params)
+            for expected_param, target_param in zip(
+                expected_params, target_params, strict=False
+            )
         )
         matd3.soft_update(critic_1, critic_target_1)
         eval_params = list(critic_1.parameters())
         target_params = list(critic_target_1.parameters())
         expected_params = [
             matd3.tau * eval_param + (1.0 - matd3.tau) * target_param
-            for eval_param, target_param in zip(eval_params, target_params)
+            for eval_param, target_param in zip(
+                eval_params, target_params, strict=False
+            )
         ]
 
         assert all(
             torch.allclose(expected_param, target_param)
-            for expected_param, target_param in zip(expected_params, target_params)
+            for expected_param, target_param in zip(
+                expected_params, target_params, strict=False
+            )
         )
         matd3.soft_update(critic_2, critic_target_2)
         eval_params = list(critic_2.parameters())
         target_params = list(critic_target_2.parameters())
         expected_params = [
             matd3.tau * eval_param + (1.0 - matd3.tau) * target_param
-            for eval_param, target_param in zip(eval_params, target_params)
+            for eval_param, target_param in zip(
+                eval_params, target_params, strict=False
+            )
         ]
 
         assert all(
             torch.allclose(expected_param, target_param)
-            for expected_param, target_param in zip(expected_params, target_params)
+            for expected_param, target_param in zip(
+                expected_params, target_params, strict=False
+            )
         )
 
 
@@ -1269,10 +1345,8 @@ def test_matd3_algorithm_test_loop(
         env = make_multi_agent_vect_envs(
             DummyMultiEnv,
             2,
-            **dict(
-                observation_spaces=observation_spaces[0],
-                action_spaces=ma_discrete_space,
-            ),
+            observation_spaces=observation_spaces[0],
+            action_spaces=ma_discrete_space,
         )
     else:
         env = DummyMultiEnv(observation_spaces[0], ma_discrete_space)
@@ -1298,7 +1372,12 @@ def test_matd3_algorithm_test_loop(
 @pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("wrap", [True, False])
 def test_matd3_clone_returns_identical_agent(
-    accelerator_flag, wrap, compile_mode, observation_spaces, ma_vector_space, request
+    accelerator_flag,
+    wrap,
+    compile_mode,
+    observation_spaces,
+    ma_vector_space,
+    request,
 ):
     # Clones the agent and returns an identical copy.
     observation_spaces = request.getfixturevalue(observation_spaces)
@@ -1367,7 +1446,8 @@ def test_matd3_clone_returns_identical_agent(
         clone_actor_target = clone_agent.actor_targets[agent_id]
         actor_target = matd3.actor_targets[agent_id]
         assert_state_dicts_equal(
-            clone_actor_target.state_dict(), actor_target.state_dict()
+            clone_actor_target.state_dict(),
+            actor_target.state_dict(),
         )
 
         clone_critic_1 = clone_agent.critics_1[agent_id]
@@ -1377,7 +1457,8 @@ def test_matd3_clone_returns_identical_agent(
         clone_critic_target_1 = clone_agent.critic_targets_1[agent_id]
         critic_target_1 = matd3.critic_targets_1[agent_id]
         assert_state_dicts_equal(
-            clone_critic_target_1.state_dict(), critic_target_1.state_dict()
+            clone_critic_target_1.state_dict(),
+            critic_target_1.state_dict(),
         )
 
         clone_critic_2 = clone_agent.critics_2[agent_id]
@@ -1387,7 +1468,8 @@ def test_matd3_clone_returns_identical_agent(
         clone_critic_target_2 = clone_agent.critic_targets_2[agent_id]
         critic_target_2 = matd3.critic_targets_2[agent_id]
         assert_state_dicts_equal(
-            clone_critic_target_2.state_dict(), critic_target_2.state_dict()
+            clone_critic_target_2.state_dict(),
+            critic_target_2.state_dict(),
         )
 
 
@@ -1464,7 +1546,8 @@ def test_clone_after_learning(compile_mode, ma_vector_space):
         clone_actor_target = clone_agent.actor_targets[agent_id]
         actor_target = matd3.actor_targets[agent_id]
         assert_state_dicts_equal(
-            clone_actor_target.state_dict(), actor_target.state_dict()
+            clone_actor_target.state_dict(),
+            actor_target.state_dict(),
         )
 
         clone_critic_1 = clone_agent.critics_1[agent_id]
@@ -1474,7 +1557,8 @@ def test_clone_after_learning(compile_mode, ma_vector_space):
         clone_critic_target_1 = clone_agent.critic_targets_1[agent_id]
         critic_target_1 = matd3.critic_targets_1[agent_id]
         assert_state_dicts_equal(
-            clone_critic_target_1.state_dict(), critic_target_1.state_dict()
+            clone_critic_target_1.state_dict(),
+            critic_target_1.state_dict(),
         )
 
         clone_critic_2 = clone_agent.critics_2[agent_id]
@@ -1484,5 +1568,6 @@ def test_clone_after_learning(compile_mode, ma_vector_space):
         clone_critic_target_2 = clone_agent.critic_targets_2[agent_id]
         critic_target_2 = matd3.critic_targets_2[agent_id]
         assert_state_dicts_equal(
-            clone_critic_target_2.state_dict(), critic_target_2.state_dict()
+            clone_critic_target_2.state_dict(),
+            critic_target_2.state_dict(),
         )

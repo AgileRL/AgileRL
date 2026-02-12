@@ -131,7 +131,8 @@ def test_network_initialization(observation_space, encoder_type, request):
 
 
 @pytest.mark.parametrize(
-    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
+    "observation_space",
+    ["dict_space", "discrete_space", "vector_space", "image_space"],
 )
 def test_network_mutation_methods(observation_space, dummy_rng, request):
     observation_space = request.getfixturevalue(observation_space)
@@ -162,13 +163,15 @@ def test_network_mutation_methods(observation_space, dummy_rng, request):
             # Checks that parameters that are not mutated are the same
             check_equal_params_ind(network, new_network)
         else:
+            msg = f"Last mutation attribute is None. Expected {method} to be applied."
             raise ValueError(
-                f"Last mutation attribute is None. Expected {method} to be applied."
+                msg,
             )
 
 
 @pytest.mark.parametrize(
-    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
+    "observation_space",
+    ["dict_space", "discrete_space", "vector_space", "image_space"],
 )
 def test_network_forward(observation_space: spaces.Space, request):
     observation_space = request.getfixturevalue(observation_space)
@@ -203,7 +206,8 @@ def test_network_forward(observation_space: spaces.Space, request):
 
 
 @pytest.mark.parametrize(
-    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
+    "observation_space",
+    ["dict_space", "discrete_space", "vector_space", "image_space"],
 )
 def test_network_clone(observation_space: spaces.Space, request):
     observation_space = request.getfixturevalue(observation_space)

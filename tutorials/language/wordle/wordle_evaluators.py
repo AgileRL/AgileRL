@@ -20,19 +20,19 @@ class Action_Ranking_Evaluator:
             if item.meta["kind"] == "expert":
                 for prefix in item.meta["prefixes"]:
                     self.expert_actions[self.hashable_state(prefix)].append(
-                        item.meta["self_actions"][len(prefix[1])]
+                        item.meta["self_actions"][len(prefix[1])],
                     )
             elif item.meta["kind"] == "branch_suboptimal":
                 start = item.meta["start"]
                 self.non_expert_actions[self.hashable_state(start)].append(
-                    item.meta["self_actions"][len(start[1])]
+                    item.meta["self_actions"][len(start[1])],
                 )
             else:
                 raise NotImplementedError
         self.states = list(
             set(self.expert_actions.keys()).intersection(
-                set(self.non_expert_actions.keys())
-            )
+                set(self.non_expert_actions.keys()),
+            ),
         )
         self.vocab = self.branching_data.get_item(0).meta["self"].game.vocab
 
@@ -58,10 +58,10 @@ class Action_Ranking_Evaluator:
                             (
                                 s,
                                 a,
-                            )
+                            ),
                         )
-                    ]
-                )
+                    ],
+                ),
             )
             non_expert_state, _, _ = obs.game.next(
                 random.choice(
@@ -70,10 +70,10 @@ class Action_Ranking_Evaluator:
                             (
                                 s,
                                 a,
-                            )
+                            ),
                         )
-                    ]
-                )
+                    ],
+                ),
             )
             expert_datapoint = DataPoint.from_obs(
                 WordleObservation(expert_state),
@@ -94,20 +94,20 @@ class Action_Ranking_Evaluator:
             for i in range(N_CHARS + 1):
                 total_correct[i] += int(
                     qs[0, (1 - terminals[0, :-1]).sum() - 1 - i]
-                    > qs[1, (1 - terminals[1, :-1]).sum() - 1 - i]
+                    > qs[1, (1 - terminals[1, :-1]).sum() - 1 - i],
                 )
                 total_correct_target[i] += int(
                     target_qs[0, (1 - terminals[0, :-1]).sum() - 1 - i]
-                    > target_qs[1, (1 - terminals[1, :-1]).sum() - 1 - i]
+                    > target_qs[1, (1 - terminals[1, :-1]).sum() - 1 - i],
                 )
             total += 1
         return {
             **{
-                ("q_rank_acc_-%d" % (i + 1)): (total_correct[i] / total, total)
+                (f"q_rank_acc_-{i + 1}"): (total_correct[i] / total, total)
                 for i in range(N_CHARS + 1)
             },
             **{
-                ("q_target_rank_acc_-%d" % (i + 1)): (
+                (f"q_target_rank_acc_-{i + 1}"): (
                     total_correct_target[i] / total,
                     total,
                 )
@@ -127,31 +127,31 @@ class Action_Ranking_Evaluator_Adversarial:
             assert item.meta is not None and "kind" in item.meta
             if item.meta["kind"] == "expert":
                 self.expert_actions[self.hashable_state(item.meta["s_0"])].append(
-                    item.meta["a_0"]
+                    item.meta["a_0"],
                 )
                 if "s_2" in item.meta:
                     self.expert_actions[self.hashable_state(item.meta["s_2"])].append(
-                        item.meta["a_2"]
+                        item.meta["a_2"],
                     )
             elif item.meta["kind"] == "adversarial":
                 self.adversarial_actions[self.hashable_state(item.meta["s_2"])].append(
-                    item.meta["a_2"]
+                    item.meta["a_2"],
                 )
             elif item.meta["kind"] == "suboptimal":
                 self.suboptimal_actions[self.hashable_state(item.meta["s_0"])].append(
-                    item.meta["a_0"]
+                    item.meta["a_0"],
                 )
             else:
                 raise NotImplementedError
         self.initial_states = list(
             set(self.expert_actions.keys()).intersection(
-                set(self.suboptimal_actions.keys())
-            )
+                set(self.suboptimal_actions.keys()),
+            ),
         )
         self.branch_states = list(
             set(self.expert_actions.keys()).intersection(
-                set(self.adversarial_actions.keys())
-            )
+                set(self.adversarial_actions.keys()),
+            ),
         )
         self.vocab = self.adversarial_data.get_item(0).meta["self"].game.vocab
 
@@ -175,8 +175,10 @@ class Action_Ranking_Evaluator_Adversarial:
             initial_s, initial_a = random.choice(self.initial_states)
             initial_obs = WordleObservation(
                 WordleGame(
-                    initial_s, self.vocab.update_vocab(initial_s), list(initial_a)
-                )
+                    initial_s,
+                    self.vocab.update_vocab(initial_s),
+                    list(initial_a),
+                ),
             )
             initial_expert_a = random.choice(
                 self.expert_actions[
@@ -184,9 +186,9 @@ class Action_Ranking_Evaluator_Adversarial:
                         (
                             initial_s,
                             initial_a,
-                        )
+                        ),
                     )
-                ]
+                ],
             )
             initial_suboptimal_a = random.choice(
                 self.suboptimal_actions[
@@ -194,9 +196,9 @@ class Action_Ranking_Evaluator_Adversarial:
                         (
                             initial_s,
                             initial_a,
-                        )
+                        ),
                     )
-                ]
+                ],
             )
             initial_expert_state, _, _ = initial_obs.game.next(initial_expert_a)
             initial_suboptimal_state, _, _ = initial_obs.game.next(initial_suboptimal_a)
@@ -211,7 +213,7 @@ class Action_Ranking_Evaluator_Adversarial:
                 self.adversarial_data.token_reward,
             )
             iql_outputs = model.get_qvs(
-                [initial_expert_datapoint, initial_suboptimal_datapoint]
+                [initial_expert_datapoint, initial_suboptimal_datapoint],
             )
             qs, target_qs, terminals = (
                 iql_outputs["qs"],
@@ -221,16 +223,16 @@ class Action_Ranking_Evaluator_Adversarial:
             for i in range(N_CHARS + 1):
                 initial_total_correct[i] += int(
                     qs[0, (1 - terminals[0, :-1]).sum() - 1 - i]
-                    > qs[1, (1 - terminals[1, :-1]).sum() - 1 - i]
+                    > qs[1, (1 - terminals[1, :-1]).sum() - 1 - i],
                 )
                 initial_total_correct_target[i] += int(
                     target_qs[0, (1 - terminals[0, :-1]).sum() - 1 - i]
-                    > target_qs[1, (1 - terminals[1, :-1]).sum() - 1 - i]
+                    > target_qs[1, (1 - terminals[1, :-1]).sum() - 1 - i],
                 )
 
             branch_s, branch_a = random.choice(self.branch_states)
             branch_obs = WordleObservation(
-                WordleGame(branch_s, self.vocab.update_vocab(branch_s), list(branch_a))
+                WordleGame(branch_s, self.vocab.update_vocab(branch_s), list(branch_a)),
             )
             branch_expert_a = random.choice(
                 self.expert_actions[
@@ -238,9 +240,9 @@ class Action_Ranking_Evaluator_Adversarial:
                         (
                             branch_s,
                             branch_a,
-                        )
+                        ),
                     )
-                ]
+                ],
             )
             branch_adversarial_a = random.choice(
                 self.adversarial_actions[
@@ -248,9 +250,9 @@ class Action_Ranking_Evaluator_Adversarial:
                         (
                             branch_s,
                             branch_a,
-                        )
+                        ),
                     )
-                ]
+                ],
             )
             branch_expert_state, _, _ = branch_obs.game.next(branch_expert_a)
             branch_adversarial_state, _, _ = branch_obs.game.next(branch_adversarial_a)
@@ -265,7 +267,7 @@ class Action_Ranking_Evaluator_Adversarial:
                 self.adversarial_data.token_reward,
             )
             iql_outputs = model.get_qvs(
-                [branch_expert_datapoint, branch_adversarial_datapoint]
+                [branch_expert_datapoint, branch_adversarial_datapoint],
             )
             qs, target_qs, terminals = (
                 iql_outputs["qs"],
@@ -275,37 +277,37 @@ class Action_Ranking_Evaluator_Adversarial:
             for i in range(N_CHARS + 1):
                 branch_total_correct[i] += int(
                     qs[0, (1 - terminals[0, :-1]).sum() - 1 - i]
-                    > qs[1, (1 - terminals[1, :-1]).sum() - 1 - i]
+                    > qs[1, (1 - terminals[1, :-1]).sum() - 1 - i],
                 )
                 branch_total_correct_target[i] += int(
                     target_qs[0, (1 - terminals[0, :-1]).sum() - 1 - i]
-                    > target_qs[1, (1 - terminals[1, :-1]).sum() - 1 - i]
+                    > target_qs[1, (1 - terminals[1, :-1]).sum() - 1 - i],
                 )
             total += 1
         return {
             **{
-                ("initial_q_rank_acc_-%d" % (i + 1)): (
+                (f"initial_q_rank_acc_-{i + 1}"): (
                     initial_total_correct[i] / total,
                     total,
                 )
                 for i in range(N_CHARS + 1)
             },
             **{
-                ("initial_q_target_rank_acc_-%d" % (i + 1)): (
+                (f"initial_q_target_rank_acc_-{i + 1}"): (
                     initial_total_correct_target[i] / total,
                     total,
                 )
                 for i in range(N_CHARS + 1)
             },
             **{
-                ("branch_q_rank_acc_-%d" % (i + 1)): (
+                (f"branch_q_rank_acc_-{i + 1}"): (
                     branch_total_correct[i] / total,
                     total,
                 )
                 for i in range(N_CHARS + 1)
             },
             **{
-                ("branch_q_target_rank_acc_-%d" % (i + 1)): (
+                (f"branch_q_target_rank_acc_-{i + 1}"): (
                     branch_total_correct_target[i] / total,
                     total,
                 )

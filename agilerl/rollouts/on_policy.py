@@ -50,7 +50,7 @@ def _collect_rollouts(
     """
     if not agent.use_rollout_buffer:
         raise RuntimeError(
-            "collect_rollouts can only be used when use_rollout_buffer=True"
+            "collect_rollouts can only be used when use_rollout_buffer=True",
         )
 
     if (
@@ -90,13 +90,15 @@ def _collect_rollouts(
             agent.hidden_state = next_hidden_for_actor
         else:
             action, log_prob, _, value = agent.get_action(
-                obs, action_mask=info.get("action_mask", None)
+                obs,
+                action_mask=info.get("action_mask", None),
             )
 
         # Clip action to action space
         policy = getattr(agent, agent.registry.policy())
         if isinstance(policy, StochasticActor) and isinstance(
-            agent.action_space, spaces.Box
+            agent.action_space,
+            spaces.Box,
         ):
             if policy.squash_output:
                 clipped_action = policy.scale_action(action)
@@ -143,16 +145,20 @@ def _collect_rollouts(
         if recurrent and np.any(is_terminal_np):
             finished_mask = is_terminal_np.astype(bool)
             initial_hidden_states_for_reset = agent.get_initial_hidden_state(
-                agent.num_envs
+                agent.num_envs,
             )
             if isinstance(agent.hidden_state, dict):
                 for key in agent.hidden_state:
                     reset_states_for_key = initial_hidden_states_for_reset[key][
-                        :, finished_mask, :
+                        :,
+                        finished_mask,
+                        :,
                     ]
                     if reset_states_for_key.shape[1] > 0:
                         agent.hidden_state[key][
-                            :, finished_mask, :
+                            :,
+                            finished_mask,
+                            :,
                         ] = reset_states_for_key
 
         if recurrent:
@@ -176,21 +182,25 @@ def _collect_rollouts(
             )
         else:
             _, _, _, last_value, _ = agent._get_action_and_values(
-                agent.preprocess_observation(obs)
+                agent.preprocess_observation(obs),
             )
 
         last_value = last_value.cpu().numpy()
         last_done = np.atleast_1d(term)
 
     agent.rollout_buffer.compute_returns_and_advantages(
-        last_value=last_value, last_done=last_done
+        last_value=last_value,
+        last_done=last_done,
     )
 
     return completed_episode_scores, obs, done, scores, info
 
 
 def collect_rollouts(
-    agent: SupportedOnPolicy, env: GymEnvType, n_steps: int | None = None, **kwargs
+    agent: SupportedOnPolicy,
+    env: GymEnvType,
+    n_steps: int | None = None,
+    **kwargs,
 ) -> list[float]:
     """Collect rollouts for non-recurrent on-policy algorithms.
 
@@ -204,12 +214,14 @@ def collect_rollouts(
     :return: The list of scores for the episodes completed in the rollouts
     :rtype: list[float]
     """
-
     return _collect_rollouts(agent, env, n_steps, recurrent=False, **kwargs)
 
 
 def collect_rollouts_recurrent(
-    agent: SupportedOnPolicy, env: GymEnvType, n_steps: int | None = None, **kwargs
+    agent: SupportedOnPolicy,
+    env: GymEnvType,
+    n_steps: int | None = None,
+    **kwargs,
 ) -> list[float]:
     """Collect rollouts for recurrent on-policy algorithms.
 
@@ -223,5 +235,4 @@ def collect_rollouts_recurrent(
     :return: The list of scores for the episodes completed in the rollouts
     :rtype: list[float]
     """
-
     return _collect_rollouts(agent, env, n_steps, recurrent=True, **kwargs)

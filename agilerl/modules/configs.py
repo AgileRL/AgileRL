@@ -79,9 +79,9 @@ class MlpNetConfig(NetConfig):
 
         assert all(
             [
-                self.min_mlp_nodes <= nodes and nodes <= self.max_mlp_nodes
+                self.min_mlp_nodes <= nodes <= self.max_mlp_nodes
                 for nodes in self.hidden_size
-            ]
+            ],
         ), "Nodes must be within min_nodes and max_nodes."
 
 
@@ -173,7 +173,8 @@ class MultiInputNetConfig(NetConfig):
         # Validate network configurations if provided
         if self.cnn_config is not None:
             assert isinstance(
-                self.cnn_config, (dict, CnnNetConfig)
+                self.cnn_config,
+                (dict, CnnNetConfig),
             ), "CNN config must be an instance of CnnNetConfig"
         else:
             self.cnn_config = CnnNetConfig(
@@ -185,7 +186,8 @@ class MultiInputNetConfig(NetConfig):
             )
         if self.mlp_config is not None:
             assert isinstance(
-                self.mlp_config, (dict, MlpNetConfig)
+                self.mlp_config,
+                (dict, MlpNetConfig),
             ), "MLP config must be an instance of MlpNetConfig"
         else:
             self.mlp_config = MlpNetConfig(
