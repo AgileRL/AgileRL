@@ -75,8 +75,17 @@ docs = [
 [tool.pytest.ini_options]
 # Deterministic ordering for tests; useful for pytest-xdist.
 env = ["PYTHONHASHSEED=0", "VLLM_ATTENTION_BACKEND=XFORMERS", "VLLM_USE_FLASHINFER_SAMPLER=0"]
+filterwarnings = [
+    # MakeEvolvable deprecation (use EvolvableModule/EvolvableNetwork instead)
+    "ignore::DeprecationWarning:agilerl.wrappers.make_evolvable",
+    # HPO: activation mutations not supported for some algorithms
+    "ignore:Activation mutations are not supported for .*:UserWarning:agilerl.hpo.mutation",
+    # Pygame warnings
+    "ignore:pkg_resources is deprecated",
+    "ignore:Deprecated call to `pkg_resources"
+]
 markers = [
-    "llm: LLM-related tests (DPO, GRPO, vLLM, train_llm, llm_utils; exclude with -m 'not llm')",
+    "llm: LLM-related tests (exclude with -m 'not llm')",
 ]
 
 [build-system]

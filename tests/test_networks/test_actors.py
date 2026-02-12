@@ -159,9 +159,9 @@ def test_deterministic_actor_forward(
     if isinstance(observation_space, spaces.Dict):
         x = {key: torch.tensor(value) for key, value in x_np.items()}
     elif isinstance(observation_space, spaces.Tuple):
-        x = tuple(torch.tensor(value) for value in x_np)
+        x = tuple(torch.from_numpy(value).clone().detach() for value in x_np)
     else:
-        x = torch.tensor(x_np)
+        x = torch.from_numpy(x_np).clone().detach()
 
     with torch.no_grad():
         out = network(x)
