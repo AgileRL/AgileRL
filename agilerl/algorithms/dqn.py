@@ -4,10 +4,9 @@ from typing import Any
 import numpy as np
 import torch
 import torch._dynamo
-import torch.nn as nn
-import torch.optim as optim
 from gymnasium import spaces
 from tensordict.nn import CudaGraphModule
+from torch import nn, optim
 
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
@@ -102,10 +101,12 @@ class DQN(RLAlgorithm):
         assert isinstance(tau, float), "Tau must be a float."
         assert tau > 0, "Tau must be greater than zero."
         assert isinstance(
-            double, bool
+            double,
+            bool,
         ), "Double Q-learning flag must be boolean value True or False."
         assert isinstance(
-            wrap, bool
+            wrap,
+            bool,
         ), "Wrap models flag must be boolean value True or False."
 
         self.batch_size = batch_size
@@ -122,12 +123,13 @@ class DQN(RLAlgorithm):
         if actor_network is not None:
             if not isinstance(actor_network, EvolvableModule):
                 raise TypeError(
-                    f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
+                    f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule.",
                 )
 
             # Need to make deepcopies for target and detached networks
             self.actor, self.actor_target = make_safe_deepcopies(
-                actor_network, actor_network
+                actor_network,
+                actor_network,
             )
         else:
             net_config = {} if net_config is None else net_config
@@ -162,11 +164,13 @@ class DQN(RLAlgorithm):
         # torch.compile and cuda graph optimizations
         if self.cudagraphs:
             warnings.warn(
-                "CUDA graphs for DQN are implemented experimentally and may not work as expected."
+                "CUDA graphs for DQN are implemented experimentally and may not work as expected.",
             )
             self.update = torch.compile(self.update, mode=None)
             self._get_action = torch.compile(
-                self._get_action, mode=None, fullgraph=True
+                self._get_action,
+                mode=None,
+                fullgraph=True,
             )
             self.update = CudaGraphModule(self.update)
             self._get_action = CudaGraphModule(self._get_action)
@@ -177,7 +181,7 @@ class DQN(RLAlgorithm):
                 eval_network=self.actor,
                 shared_networks=self.actor_target,
                 policy=True,
-            )
+            ),
         )
 
     def get_action(
@@ -223,7 +227,10 @@ class DQN(RLAlgorithm):
         return self._get_action(torch_obs, epsilon, action_mask).cpu().numpy()
 
     def _get_action(
-        self, obs: TorchObsType, epsilon: torch.Tensor, action_mask: torch.Tensor
+        self,
+        obs: TorchObsType,
+        epsilon: torch.Tensor,
+        action_mask: torch.Tensor,
     ) -> torch.Tensor:
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
@@ -341,10 +348,11 @@ class DQN(RLAlgorithm):
     def soft_update(self) -> None:
         """Soft updates target network."""
         for eval_param, target_param in zip(
-            self.actor.parameters(), self.actor_target.parameters()
+            self.actor.parameters(),
+            self.actor_target.parameters(),
         ):
             target_param.data.copy_(
-                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
+                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data,
             )
 
     def test(

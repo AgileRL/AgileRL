@@ -3,10 +3,10 @@ from typing import Any
 
 import numpy as np
 import torch.distributed as dist
-import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import DPO, GRPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -41,8 +41,7 @@ def finetune_llm_reasoning(
     max_steps: int | None = None,
     num_epochs: int | None = None,
 ):
-    """
-    Finetunes a population of GRPOs on a ReasoningGym environment.
+    """Finetunes a population of GRPOs on a ReasoningGym environment.
 
     :param pop: Population of GRPOs to finetune
     :type pop: list[GRPO]
@@ -77,20 +76,19 @@ def finetune_llm_reasoning(
     :param num_epochs: Number of epochs to run, if set, takes precedence over max_steps, defaults to None
     :type num_epochs: int, optional
     """
-
     if evo_steps is not None and (tournament is None or mutation is None):
         warnings.warn(
-            "'evo_steps' is set but at least one of 'tournament' or 'mutation' is set to None. Evolution will not take place."
+            "'evo_steps' is set but at least one of 'tournament' or 'mutation' is set to None. Evolution will not take place.",
         )
 
     if (tournament is not None and mutation is not None) and evo_steps is None:
         raise ValueError(
-            "'evo_steps' must be set if 'tournament' and 'mutation' are not None."
+            "'evo_steps' must be set if 'tournament' and 'mutation' are not None.",
         )
 
     if num_epochs is not None and max_steps is not None:
         warnings.warn(
-            "'num_epochs' is set but 'max_steps' is also set. 'num_epochs' will take precedence over 'max_steps'."
+            "'num_epochs' is set but 'max_steps' is also set. 'num_epochs' will take precedence over 'max_steps'.",
         )
 
     if mutation is not None:
@@ -110,7 +108,7 @@ def finetune_llm_reasoning(
     if not isinstance(pop[0], GRPO):
         raise ValueError(
             "The algorithm must be GRPO for reasoning-based reinforcement learning."
-            f"Got {type(pop[0])} instead."
+            f"Got {type(pop[0])} instead.",
         )
 
     if init_hp is None:
@@ -190,7 +188,7 @@ def finetune_llm_reasoning(
                 test_metrics = [test_reward]
                 if max_reward is not None:
                     test_accuracy = (test_reward == max_reward).sum() / len(
-                        test_reward.flatten()
+                        test_reward.flatten(),
                     )
                     test_metrics.append(test_accuracy)
                 agg_test_metrics = [
@@ -240,12 +238,11 @@ def finetune_llm_reasoning(
                 )
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
-        else:
-            if (i + 1) * effective_data_batch_size % max_steps == 0 or (
-                checkpoint_steps is not None
-                and (i + 1) * effective_data_batch_size % checkpoint_steps == 0
-            ):
-                save_llm_checkpoint(agent, elite_path)
+        elif (i + 1) * effective_data_batch_size % max_steps == 0 or (
+            checkpoint_steps is not None
+            and (i + 1) * effective_data_batch_size % checkpoint_steps == 0
+        ):
+            save_llm_checkpoint(agent, elite_path)
 
         if wb and (accelerator is None or accelerator.is_main_process):
             wandb_dict = {
@@ -255,7 +252,7 @@ def finetune_llm_reasoning(
                             "Train/Mean reward"
                         ]
                         for agent_idx, _ in enumerate(pop)
-                    ]
+                    ],
                 ),
                 "Train/Mean population reward": np.mean(
                     [
@@ -263,7 +260,7 @@ def finetune_llm_reasoning(
                             "Train/Mean reward"
                         ]
                         for agent_idx, _ in enumerate(pop)
-                    ]
+                    ],
                 ),
                 "Train/Mean population loss": np.mean(
                     [
@@ -271,7 +268,7 @@ def finetune_llm_reasoning(
                             "Train/Loss"
                         ]
                         for agent_idx, _ in enumerate(pop)
-                    ]
+                    ],
                 ),
                 "Train/Mean population KL divergence": np.mean(
                     [
@@ -279,7 +276,7 @@ def finetune_llm_reasoning(
                             "Train/KL-divergence"
                         ]
                         for agent_idx, _ in enumerate(pop)
-                    ]
+                    ],
                 ),
                 "Train/Mean population completion length": np.mean(
                     [
@@ -287,7 +284,7 @@ def finetune_llm_reasoning(
                             "Train/Average completion length"
                         ]
                         for agent_idx, _ in enumerate(pop)
-                    ]
+                    ],
                 ),
             }
             if max_reward is not None:
@@ -298,8 +295,8 @@ def finetune_llm_reasoning(
                                 "Train/Accuracy"
                             ]
                             for agent_idx, _ in enumerate(pop)
-                        ]
-                    )
+                        ],
+                    ),
                 }
                 wandb_dict |= {
                     "Train/Best accuracy": np.max(
@@ -308,8 +305,8 @@ def finetune_llm_reasoning(
                                 "Train/Accuracy"
                             ]
                             for agent_idx, _ in enumerate(pop)
-                        ]
-                    )
+                        ],
+                    ),
                 }
             if len(pop[0].registry.hp_config.config.keys()) > 0:
                 wandb_dict |= {
@@ -326,7 +323,7 @@ def finetune_llm_reasoning(
                                 "Eval/Mean reward"
                             ]
                             for agent_idx, _ in enumerate(pop)
-                        ]
+                        ],
                     ),
                     "Eval/Mean population reward": np.mean(
                         [
@@ -334,7 +331,7 @@ def finetune_llm_reasoning(
                                 "Eval/Mean reward"
                             ]
                             for agent_idx, _ in enumerate(pop)
-                        ]
+                        ],
                     ),
                 }
                 if max_reward is not None:
@@ -345,8 +342,8 @@ def finetune_llm_reasoning(
                                     "Eval/Accuracy"
                                 ]
                                 for agent_idx, _ in enumerate(pop)
-                            ]
-                        )
+                            ],
+                        ),
                     }
                     wandb_dict |= {
                         "Eval/Best accuracy": np.max(
@@ -355,8 +352,8 @@ def finetune_llm_reasoning(
                                     "Eval/Accuracy"
                                 ]
                                 for agent_idx, _ in enumerate(pop)
-                            ]
-                        )
+                            ],
+                        ),
                     }
                 wandb_dict |= test_dict
             wandb.log(wandb_dict)
@@ -399,7 +396,7 @@ def finetune_llm_reasoning(
             f"10 score avgs:\t{avg_score}\n"
             f"Agents:\t\t{agents}\n"
             f"Steps:\t\t{num_steps}\n"
-            f"Mutations:\t\t{muts}"
+            f"Mutations:\t\t{muts}",
         )
 
     if accelerator is not None:
@@ -430,16 +427,16 @@ def finetune_llm_preference(
 ):
     if evo_steps is not None and (tournament is None or mutation is None):
         warnings.warn(
-            "'evo_steps' is set but at least one of 'tournament' or 'mutation' is set to None. Evolution will not take place."
+            "'evo_steps' is set but at least one of 'tournament' or 'mutation' is set to None. Evolution will not take place.",
         )
 
     if (tournament is not None and mutation is not None) and evo_steps is None:
         raise ValueError(
-            "'evo_steps' must be set if 'tournament' and 'mutation' are not None."
+            "'evo_steps' must be set if 'tournament' and 'mutation' are not None.",
         )
     if num_epochs is not None and max_steps is not None:
         warnings.warn(
-            "'num_epochs' is set but 'max_steps' is also set. 'num_epochs' will take precedence over 'max_steps'."
+            "'num_epochs' is set but 'max_steps' is also set. 'num_epochs' will take precedence over 'max_steps'.",
         )
     if mutation is not None:
         assert (
@@ -458,7 +455,7 @@ def finetune_llm_preference(
     if not isinstance(pop[0], DPO):
         raise ValueError(
             "The algorithm must be DPO for preference-based reinforcement learning."
-            f"Got {type(pop[0])} instead."
+            f"Got {type(pop[0])} instead.",
         )
 
     if init_hp is None:
@@ -567,12 +564,11 @@ def finetune_llm_preference(
                 )
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
-        else:
-            if (i + 1) * effective_data_batch_size % max_steps == 0 or (
-                checkpoint_steps is not None
-                and (i + 1) * effective_data_batch_size % checkpoint_steps == 0
-            ):
-                save_llm_checkpoint(agent, elite_path)
+        elif (i + 1) * effective_data_batch_size % max_steps == 0 or (
+            checkpoint_steps is not None
+            and (i + 1) * effective_data_batch_size % checkpoint_steps == 0
+        ):
+            save_llm_checkpoint(agent, elite_path)
 
         if wb and (accelerator is None or accelerator.is_main_process):
             wandb_dict = {
@@ -582,7 +578,7 @@ def finetune_llm_preference(
                             "Train/Mean reward margin"
                         ]
                         for agent_idx, _ in enumerate(pop)
-                    ]
+                    ],
                 ),
                 "Train/Mean population reward margin": np.mean(
                     [
@@ -590,7 +586,7 @@ def finetune_llm_preference(
                             "Train/Mean reward margin"
                         ]
                         for agent_idx, _ in enumerate(pop)
-                    ]
+                    ],
                 ),
                 "Train/Mean population loss": np.mean(
                     [
@@ -598,7 +594,7 @@ def finetune_llm_preference(
                             "Train/Loss"
                         ]
                         for agent_idx, _ in enumerate(pop)
-                    ]
+                    ],
                 ),
                 "Train/Mean population chosen reward": np.mean(
                     [
@@ -606,7 +602,7 @@ def finetune_llm_preference(
                             "Train/Mean chosen reward"
                         ]
                         for agent_idx, _ in enumerate(pop)
-                    ]
+                    ],
                 ),
                 "Train/Mean population rejected reward": np.mean(
                     [
@@ -614,7 +610,7 @@ def finetune_llm_preference(
                             "Train/Mean rejected reward"
                         ]
                         for agent_idx, _ in enumerate(pop)
-                    ]
+                    ],
                 ),
             }
             if agg_test_metrics is not None:
@@ -625,7 +621,7 @@ def finetune_llm_preference(
                                 "Eval/Mean reward margin"
                             ]
                             for agent_idx, _ in enumerate(pop)
-                        ]
+                        ],
                     ),
                     "Eval/Mean population reward margin": np.mean(
                         [
@@ -633,7 +629,7 @@ def finetune_llm_preference(
                                 "Eval/Mean reward margin"
                             ]
                             for agent_idx, _ in enumerate(pop)
-                        ]
+                        ],
                     ),
                 }
                 wandb_dict |= test_dict
@@ -675,7 +671,7 @@ def finetune_llm_preference(
             f"10 score avgs:\t{avg_score}\n"
             f"Agents:\t\t{agents}\n"
             f"Steps:\t\t{num_steps}\n"
-            f"Mutations:\t\t{muts}"
+            f"Mutations:\t\t{muts}",
         )
 
     if accelerator is not None:

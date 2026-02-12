@@ -33,7 +33,10 @@ class WordleListDataset(List_RL_Dataset):
 
     def get_item(self, idx: int):
         return DataPoint.from_obs(
-            self.items[idx][0], self.tokenizer, self.token_reward, self.items[idx][1]
+            self.items[idx][0],
+            self.tokenizer,
+            self.token_reward,
+            self.items[idx][1],
         )
 
     def size(self):
@@ -56,8 +59,10 @@ class WordleListDataset(List_RL_Dataset):
         wordle_items = [
             WordleObservation(
                 WordleGame(
-                    item["state"], vocab.update_vocab(item["state"]), item["actions"]
-                )
+                    item["state"],
+                    vocab.update_vocab(item["state"]),
+                    item["actions"],
+                ),
             )
             for item in tqdm(d["state_actions"])
         ]
@@ -69,7 +74,9 @@ class WordleListDataset(List_RL_Dataset):
             )
             for i, item in enumerate(d["state_actions"])
         ]
-        return WordleListDataset(list(zip(wordle_items, meta)), max_len, token_reward)
+        return WordleListDataset(
+            list(zip(wordle_items, meta, strict=False)), max_len, token_reward
+        )
 
 
 class WordleIterableDataset(Iterable_RL_Dataset):
@@ -130,12 +137,11 @@ class WordleHumanDataset(Iterable_RL_Dataset):
                     ):
                         break
                     actions.append(
-                        random.choice(self.transitions[true_word][transition])
+                        random.choice(self.transitions[true_word][transition]),
                     )
                 if len(actions) == len(game):
                     break
-                else:
-                    true_word, game = random.choice(self.games)
+                true_word, game = random.choice(self.games)
         else:
             word_choices = list(self.transitions.keys())
             while True:
@@ -148,12 +154,11 @@ class WordleHumanDataset(Iterable_RL_Dataset):
                     ):
                         break
                     actions.append(
-                        random.choice(self.transitions[true_word][transition])
+                        random.choice(self.transitions[true_word][transition]),
                     )
                 if len(actions) == len(game):
                     break
-                else:
-                    true_word, game = random.choice(self.games)
+                true_word, game = random.choice(self.games)
         state = WordleState.initial_state()
         for action in actions:
             state = state.transition_state(action, true_word)

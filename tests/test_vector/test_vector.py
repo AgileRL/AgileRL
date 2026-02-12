@@ -9,9 +9,9 @@ from multiprocessing.sharedctypes import SynchronizedArray
 from unittest.mock import patch
 
 import gymnasium as gym
-import gymnasium.spaces as spaces
 import numpy as np
 import pytest
+from gymnasium import spaces
 from gymnasium.error import (
     AlreadyPendingCallError,
     ClosedEnvironmentError,
@@ -46,8 +46,7 @@ class DummyRecv:
         self.call_count += 1
         if self.call_count > 1:
             return "close", None
-        else:
-            return self.cmd, self.data
+        return self.cmd, self.data
 
 
 class DictSpaceTestEnv(ParallelEnv):
@@ -86,9 +85,9 @@ class DictSpaceTestEnv(ParallelEnv):
                 "velocity": np.array([0.04, 0.05], dtype=np.float32),
             },
         }
-        rewards = {agent: 1.0 for agent in self.agents}
-        terminations = {agent: False for agent in self.agents}
-        truncations = {agent: False for agent in self.agents}
+        rewards = dict.fromkeys(self.agents, 1.0)
+        terminations = dict.fromkeys(self.agents, False)
+        truncations = dict.fromkeys(self.agents, False)
         infos = {agent: {} for agent in self.agents}
         return observations, rewards, terminations, truncations, infos
 
@@ -97,7 +96,7 @@ class DictSpaceTestEnv(ParallelEnv):
             {
                 "position": Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
                 "velocity": Box(low=-0.1, high=0.1, shape=(2,), dtype=np.float32),
-            }
+            },
         )
 
     def action_space(self, agent):
@@ -148,9 +147,9 @@ class TupleSpaceTestEnv(ParallelEnv):
                 np.array([0.04, 0.05], dtype=np.float32),
             ),
         }
-        rewards = {agent: 1.0 for agent in self.agents}
-        terminations = {agent: False for agent in self.agents}
-        truncations = {agent: False for agent in self.agents}
+        rewards = dict.fromkeys(self.agents, 1.0)
+        terminations = dict.fromkeys(self.agents, False)
+        truncations = dict.fromkeys(self.agents, False)
         infos = {agent: {} for agent in self.agents}
         return observations, rewards, terminations, truncations, infos
 
@@ -159,7 +158,7 @@ class TupleSpaceTestEnv(ParallelEnv):
             (
                 Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
                 Box(low=-0.1, high=0.1, shape=(2,), dtype=np.float32),
-            )
+            ),
         )
 
     def action_space(self, agent):
@@ -217,9 +216,9 @@ class ComplexDictSpaceTestEnv(ParallelEnv):
                 "image": np.ones((16, 16, 3), dtype=np.uint8) * 250,
             },
         }
-        rewards = {agent: 1.0 for agent in self.agents}
-        terminations = {agent: False for agent in self.agents}
-        truncations = {agent: False for agent in self.agents}
+        rewards = dict.fromkeys(self.agents, 1.0)
+        terminations = dict.fromkeys(self.agents, False)
+        truncations = dict.fromkeys(self.agents, False)
         infos = {agent: {} for agent in self.agents}
         return observations, rewards, terminations, truncations, infos
 
@@ -229,7 +228,7 @@ class ComplexDictSpaceTestEnv(ParallelEnv):
                 "position": Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
                 "velocity": Box(low=-0.1, high=0.1, shape=(2,), dtype=np.float32),
                 "image": Box(low=0, high=255, shape=(16, 16, 3), dtype=np.uint8),
-            }
+            },
         )
 
     def action_space(self, agent):
@@ -287,9 +286,9 @@ class ComplexTupleSpaceTestEnv(ParallelEnv):
                 np.ones((16, 16, 3), dtype=np.uint8) * 250,
             ),
         }
-        rewards = {agent: 1.0 for agent in self.agents}
-        terminations = {agent: False for agent in self.agents}
-        truncations = {agent: False for agent in self.agents}
+        rewards = dict.fromkeys(self.agents, 1.0)
+        terminations = dict.fromkeys(self.agents, False)
+        truncations = dict.fromkeys(self.agents, False)
         infos = {agent: {} for agent in self.agents}
         return observations, rewards, terminations, truncations, infos
 
@@ -299,7 +298,7 @@ class ComplexTupleSpaceTestEnv(ParallelEnv):
                 Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
                 Box(low=-0.1, high=0.1, shape=(2,), dtype=np.float32),
                 Box(low=0, high=255, shape=(16, 16, 3), dtype=np.uint8),
-            )
+            ),
         )
 
     def action_space(self, agent):
@@ -317,7 +316,7 @@ class ComplexTupleSpaceTestEnv(ParallelEnv):
 def actions_to_list_helper(actions):
     passed_actions_list = [[] for _ in list(actions.values())[0]]
     for env_idx, _ in enumerate(list(actions.values())[0]):
-        for possible_agent in actions.keys():
+        for possible_agent in actions:
             passed_actions_list[env_idx].append(actions[possible_agent][env_idx])
 
     return passed_actions_list
@@ -340,7 +339,8 @@ def clean_process_fixture():
 
 
 @pytest.mark.parametrize(
-    "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(8)]]
+    "env_fns",
+    [[simple_speaker_listener_v4.parallel_env for _ in range(8)]],
 )
 def test_create_async_pz_vector_env(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -359,7 +359,8 @@ def test_create_async_pz_vector_env(env_fns):
 
 @pytest.mark.parametrize("seed", [1, None])
 @pytest.mark.parametrize(
-    "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(8)]]
+    "env_fns",
+    [[simple_speaker_listener_v4.parallel_env for _ in range(8)]],
 )
 def test_reset_async_pz_vector_env(seed, env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -401,7 +402,7 @@ def test_reset_async_pz_vector_env(seed, env_fns):
         [
             lambda: simple_speaker_listener_v4.parallel_env(render_mode="rgb_array")
             for _ in range(8)
-        ]
+        ],
     ],
 )
 def test_render_async_pz_vector_env(env_fns):
@@ -423,7 +424,7 @@ def test_render_async_pz_vector_env(env_fns):
         [
             lambda: simple_speaker_listener_v4.parallel_env(continuous_actions=False)
             for _ in range(8)
-        ]
+        ],
     ],
 )
 def test_step_async_pz_vector_env(use_single_action_space, env_fns):
@@ -477,10 +478,11 @@ def test_step_async_pz_vector_env(use_single_action_space, env_fns):
     [
         [
             lambda: simple_speaker_listener_v4.parallel_env(
-                render_mode="rgb_array", continuous_actions=False
+                render_mode="rgb_array",
+                continuous_actions=False,
             )
             for _ in range(4)
-        ]
+        ],
     ],
 )
 def test_call_async_pz_vector_env(env_fns):
@@ -510,7 +512,7 @@ def test_call_async_pz_vector_env(env_fns):
         [
             lambda: simple_speaker_listener_v4.parallel_env(continuous_actions=False)
             for _ in range(2)
-        ]
+        ],
     ],
 )
 def test_get_attr_async_pz_vector_env(env_fns):
@@ -527,7 +529,7 @@ def test_get_attr_async_pz_vector_env(env_fns):
         [
             lambda: simple_speaker_listener_v4.parallel_env(continuous_actions=False)
             for _ in range(1)
-        ]
+        ],
     ],
 )
 def test_set_attr_make_values_list(env_fns):
@@ -564,7 +566,8 @@ def test_env_order_preserved():
 
 def raise_error_reset(self, seed=None, options=None):
     if seed == 1:
-        raise ValueError("Error in reset")
+        msg = "Error in reset"
+        raise ValueError(msg)
     return {
         agent: self.observation_space(agent).sample() for agent in self.possible_agents
     }, {agent: {} for agent in self.possible_agents}
@@ -572,10 +575,11 @@ def raise_error_reset(self, seed=None, options=None):
 
 def raise_error_step(self, action):
     if list(action.values())[0] >= 1:
-        raise ValueError(f"Error in step with {action}")
+        msg = f"Error in step with {action}"
+        raise ValueError(msg)
 
     def pz_dict(transition, agents):
-        return {agent: transition for agent in self.possible_agents}
+        return dict.fromkeys(self.possible_agents, transition)
 
     return (
         {
@@ -591,7 +595,9 @@ def raise_error_step(self, action):
 
 def test_async_vector_subenv_error():
     env_list = [
-        lambda: GenericTestEnv(reset_func=raise_error_reset, step_func=raise_error_step)
+        lambda: GenericTestEnv(
+            reset_func=raise_error_reset, step_func=raise_error_step
+        ),
     ]
     envs = AsyncPettingZooVecEnv(env_list * 2)
 
@@ -600,7 +606,9 @@ def test_async_vector_subenv_error():
 
     envs.close()
     env_list = [
-        lambda: GenericTestEnv(reset_func=raise_error_reset, step_func=raise_error_step)
+        lambda: GenericTestEnv(
+            reset_func=raise_error_reset, step_func=raise_error_step
+        ),
     ]
     envs = AsyncPettingZooVecEnv(env_list * 3)
 
@@ -612,7 +620,8 @@ def test_async_vector_subenv_error():
 
 
 @pytest.mark.parametrize(
-    "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
+    "env_fns",
+    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
 )
 def test_reset_async_exception(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -623,7 +632,8 @@ def test_reset_async_exception(env_fns):
 
 
 @pytest.mark.parametrize(
-    "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
+    "env_fns",
+    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
 )
 def test_reset_wait_exception(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -635,7 +645,8 @@ def test_reset_wait_exception(env_fns):
 
 
 @pytest.mark.parametrize(
-    "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
+    "env_fns",
+    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
 )
 def test_step_async_exception(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -646,7 +657,8 @@ def test_step_async_exception(env_fns):
 
 
 @pytest.mark.parametrize(
-    "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
+    "env_fns",
+    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
 )
 def test_step_wait_exception(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -657,7 +669,8 @@ def test_step_wait_exception(env_fns):
 
 
 @pytest.mark.parametrize(
-    "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
+    "env_fns",
+    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
 )
 def test_call_async_exception(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -668,7 +681,8 @@ def test_call_async_exception(env_fns):
 
 
 @pytest.mark.parametrize(
-    "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
+    "env_fns",
+    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
 )
 def test_call_wait_exception(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -679,7 +693,8 @@ def test_call_wait_exception(env_fns):
 
 
 @pytest.mark.parametrize(
-    "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
+    "env_fns",
+    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
 )
 def test_call_exception_worker(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -689,7 +704,8 @@ def test_call_exception_worker(env_fns):
 
 
 @pytest.mark.parametrize(
-    "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
+    "env_fns",
+    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
 )
 def test_set_attr_val_error(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -699,7 +715,8 @@ def test_set_attr_val_error(env_fns):
 
 
 @pytest.mark.parametrize(
-    "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
+    "env_fns",
+    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
 )
 def test_set_attr_exception(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -710,7 +727,8 @@ def test_set_attr_exception(env_fns):
 
 
 @pytest.mark.parametrize(
-    "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
+    "env_fns",
+    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
 )
 def test_close_extras_warning(env_fns):
     env = AsyncPettingZooVecEnv(
@@ -720,12 +738,13 @@ def test_close_extras_warning(env_fns):
     env._state = AsyncState.WAITING_RESET
     with patch.object(gym.logger, "warn") as mock_logger_warn:
         env.close_extras(timeout=None)
-        mock_logger_warn.assert_called_once
+        mock_logger_warn.assert_called_once()
     env.close()
 
 
 @pytest.mark.parametrize(
-    "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
+    "env_fns",
+    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
 )
 def test_close_extras_terminate(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -738,7 +757,8 @@ def test_close_extras_terminate(env_fns):
 
 
 @pytest.mark.parametrize(
-    "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
+    "env_fns",
+    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
 )
 def test_poll_pipe_envs(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -749,7 +769,8 @@ def test_poll_pipe_envs(env_fns):
 
 
 @pytest.mark.parametrize(
-    "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
+    "env_fns",
+    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
 )
 def test_assert_is_running(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -760,7 +781,8 @@ def test_assert_is_running(env_fns):
 
 
 @pytest.mark.parametrize(
-    "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
+    "env_fns",
+    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
 )
 def test_step_wait_timeout_async_pz_vector_env(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -773,7 +795,8 @@ def test_step_wait_timeout_async_pz_vector_env(env_fns):
 
 
 @pytest.mark.parametrize(
-    "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
+    "env_fns",
+    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
 )
 def test_call_wait_timeout_async_pz_vector_env(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -786,10 +809,11 @@ def test_call_wait_timeout_async_pz_vector_env(env_fns):
 
 
 @pytest.mark.parametrize(
-    "transition_name", ["reward", "truncated", "terminated", "info", "observation"]
+    "transition_name",
+    ["reward", "truncated", "terminated", "info", "observation"],
 )
 def test_get_placeholder_value(transition_name):
-    env_fns = [lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]
+    env_fns = [simple_speaker_listener_v4.parallel_env for _ in range(2)]
     env = AsyncPettingZooVecEnv(env_fns)
     if transition_name != "observation":
         val = get_placeholder_value("agent", transition_name)
@@ -830,7 +854,7 @@ def test_add_info_dictionaries():
         },
         {"agent_0": {}, "other_agent_0": {}},
     ]
-    env_fns = [lambda: simple_speaker_listener_v4.parallel_env() for _ in range(3)]
+    env_fns = [simple_speaker_listener_v4.parallel_env for _ in range(3)]
     env = AsyncPettingZooVecEnv(env_fns)
     vector_infos = {}
     for i, info in enumerate(info_list):
@@ -838,18 +862,18 @@ def test_add_info_dictionaries():
 
     assert np.all(
         vector_infos["agent_0"]["env_defined_actions"]
-        == np.array([[1, 2, 3], [0, 0, 0], [0, 0, 0]])
+        == np.array([[1, 2, 3], [0, 0, 0], [0, 0, 0]]),
     )
     assert np.all(
-        vector_infos["agent_0"]["action_mask"] == np.array([[1, 0], [0, 0], [0, 0]])
+        vector_infos["agent_0"]["action_mask"] == np.array([[1, 0], [0, 0], [0, 0]]),
     )
     assert np.all(
         vector_infos["other_agent_0"]["env_defined_actions"]
-        == np.array([[0, 0, 0], [5, 6, 7], [0, 0, 0]])
+        == np.array([[0, 0, 0], [5, 6, 7], [0, 0, 0]]),
     )
     assert np.all(
         vector_infos["other_agent_0"]["action_mask"]
-        == np.array([[0, 0], [0, 1], [0, 0]])
+        == np.array([[0, 0], [0, 1], [0, 0]]),
     )
     env.close()
 
@@ -859,7 +883,7 @@ def test_add_info_int():
         {"agent_0": 1.0},
         {"other_agent_0": 1},
     ]
-    env_fns = [lambda: GenericTestEnv() for _ in range(3)]
+    env_fns = [GenericTestEnv for _ in range(3)]
     env = AsyncPettingZooVecEnv(env_fns)
     vector_infos = {"agent_0": {}}
     for i, info in enumerate(info_list):
@@ -874,7 +898,7 @@ def test_add_info_unknown_objects():
         {"other_agent_0": "string"},
         {"agent_2": None},
     ]
-    env_fns = [lambda: GenericTestEnv() for _ in range(3)]
+    env_fns = [GenericTestEnv for _ in range(3)]
     env = AsyncPettingZooVecEnv(env_fns)
     vector_infos = {"agent_0": {}}
     for i, info in enumerate(info_list):
@@ -883,7 +907,7 @@ def test_add_info_unknown_objects():
 
 
 def test_worker_reset():
-    env_fns = [lambda: simple_speaker_listener_v4.parallel_env() for _ in range(1)]
+    env_fns = [simple_speaker_listener_v4.parallel_env for _ in range(1)]
     env_fn = env_fns[0]
     env = env_fn()
     env.reset()
@@ -908,7 +932,7 @@ def test_worker_reset():
     results, success = parent_pipe.recv()
     assert success
     assert len(results) == 2
-    assert list(sorted(results.keys())) == sorted(env.aec_env.agents)
+    assert sorted(results.keys()) == sorted(env.aec_env.agents)
     parent_pipe.close()
     p.terminate()
     p.join()
@@ -953,7 +977,7 @@ def test_worker_step_simple():
     results, success = parent_pipe.recv()
     assert success
     for dic in results:
-        assert list(sorted(dic.keys())) == sorted(vec_env.agents)
+        assert sorted(dic.keys()) == sorted(vec_env.agents)
 
     rewards, term, trunc, _ = results
 
@@ -982,7 +1006,7 @@ def test_worker_step_simple():
 
 def test_worker_step_autoreset():
     num_envs = 1
-    env_fns = [lambda: term_env() for _ in range(num_envs)]
+    env_fns = [term_env for _ in range(num_envs)]
     vec_env = AsyncPettingZooVecEnv(env_fns)
     vec_env.reset()
     actions = {
@@ -1014,7 +1038,7 @@ def test_worker_step_autoreset():
     results, success = parent_pipe.recv()
     assert success
     for dic in results:
-        assert list(sorted(dic.keys())) == sorted(vec_env.agents)
+        assert sorted(dic.keys()) == sorted(vec_env.agents)
 
     # Send step again and autoreset should be True
     parent_pipe.send(("step", actions))
@@ -1026,9 +1050,7 @@ def test_worker_step_autoreset():
 
 def test_worker_runtime_error():
     num_envs = 1
-    env_fns = [
-        lambda: simple_speaker_listener_v4.parallel_env() for _ in range(num_envs)
-    ]
+    env_fns = [simple_speaker_listener_v4.parallel_env for _ in range(num_envs)]
     vec_env = AsyncPettingZooVecEnv(env_fns)
     env_fn = env_fns[0]
     env = env_fn()
@@ -1077,9 +1099,7 @@ def test_worker_runtime_error():
 def test_observations_vector():
     num_envs = 1
     agents = ["speaker_0", "listener_0"]
-    env_fns = [
-        lambda: simple_speaker_listener_v4.parallel_env() for _ in range(num_envs)
-    ]
+    env_fns = [simple_speaker_listener_v4.parallel_env for _ in range(num_envs)]
     vec_env = AsyncPettingZooVecEnv(env_fns)
     assert (
         vec_env.observations.__str__()
@@ -1088,7 +1108,10 @@ def test_observations_vector():
     ), vec_env.observations.__str__()
     ob = {"speaker_0": np.ones((1, 3)), "listener_0": np.ones((1, 11))}
     write_to_shared_memory(
-        0, ob, vec_env._obs_buffer, vec_env._single_observation_spaces
+        0,
+        ob,
+        vec_env._obs_buffer,
+        vec_env._single_observation_spaces,
     )
     assert "speaker_0" in vec_env.observations
     assert len(vec_env.observations) == 2
@@ -1102,10 +1125,10 @@ def test_observations_vector():
     assert list(vec_env.observations.keys()) == agents
     assert np.all(
         np.concatenate(list(vec_env.observations.values()), axis=1)
-        == np.ones((1, 14), dtype=np.float32)
+        == np.ones((1, 14), dtype=np.float32),
     )
     assert np.all(
-        vec_env.observations.get("speaker_0") == np.ones((1, 3), dtype=np.float32)
+        vec_env.observations.get("speaker_0") == np.ones((1, 3), dtype=np.float32),
     )
     assert vec_env.observations.get("agent") is None
     assert (
@@ -1117,7 +1140,7 @@ def test_observations_vector():
 
 def test_observations_image():
     num_envs = 1
-    env_fns = [lambda: pursuit_v4.parallel_env() for _ in range(num_envs)]
+    env_fns = [pursuit_v4.parallel_env for _ in range(num_envs)]
     vec_env = AsyncPettingZooVecEnv(env_fns)
 
     # Reset the environment to initialize observations
@@ -1130,7 +1153,10 @@ def test_observations_image():
 
     # Write the test observation to shared memory
     write_to_shared_memory(
-        0, test_obs, vec_env._obs_buffer, vec_env._single_observation_spaces
+        0,
+        test_obs,
+        vec_env._obs_buffer,
+        vec_env._single_observation_spaces,
     )
 
     # Check if the values were correctly written to shared memory
@@ -1144,7 +1170,7 @@ def test_observations_image():
 
 def test_write_to_shared_memory_dict_image():
     """Test writing dictionary observations with images to shared memory"""
-    env_fns = [lambda: ComplexDictSpaceTestEnv() for _ in range(1)]
+    env_fns = [ComplexDictSpaceTestEnv for _ in range(1)]
     env = AsyncPettingZooVecEnv(env_fns)
 
     # Create test observation
@@ -1167,10 +1193,12 @@ def test_write_to_shared_memory_dict_image():
     # Check if values were correctly written
     for agent in env.agents:
         assert np.allclose(
-            env.observations[agent]["position"][0], test_obs[agent]["position"]
+            env.observations[agent]["position"][0],
+            test_obs[agent]["position"],
         )
         assert np.allclose(
-            env.observations[agent]["velocity"][0], test_obs[agent]["velocity"]
+            env.observations[agent]["velocity"][0],
+            test_obs[agent]["velocity"],
         )
         assert np.all(env.observations[agent]["image"][0] == test_obs[agent]["image"])
 
@@ -1179,7 +1207,7 @@ def test_write_to_shared_memory_dict_image():
 
 def test_write_to_shared_memory_tuple_image():
     """Test writing tuple observations with images to shared memory"""
-    env_fns = [lambda: ComplexTupleSpaceTestEnv() for _ in range(1)]
+    env_fns = [ComplexTupleSpaceTestEnv for _ in range(1)]
     env = AsyncPettingZooVecEnv(env_fns)
 
     # Create test observation
@@ -1215,14 +1243,20 @@ dummy_observation_spaces = {"agent_0": gym.spaces.Box(0, 1, (4,))}
 # Test for pz_vec_env.py
 def test_vec_env_reset():
     vec_env = PettingZooVecEnv(
-        3, dummy_observation_spaces, dummy_action_spaces, ["agent_0"]
+        3,
+        dummy_observation_spaces,
+        dummy_action_spaces,
+        ["agent_0"],
     )
     vec_env.reset()
 
 
 def test_vec_env_step():
     vec_env = PettingZooVecEnv(
-        3, dummy_observation_spaces, dummy_action_spaces, ["agent_0"]
+        3,
+        dummy_observation_spaces,
+        dummy_action_spaces,
+        ["agent_0"],
     )
     vec_env.step_async([])
     vec_env.step_wait()
@@ -1230,7 +1264,10 @@ def test_vec_env_step():
 
 def test_vec_env_render():
     vec_env = PettingZooVecEnv(
-        3, dummy_observation_spaces, dummy_action_spaces, ["agent_0"]
+        3,
+        dummy_observation_spaces,
+        dummy_action_spaces,
+        ["agent_0"],
     )
     with pytest.raises(NotImplementedError):
         vec_env.render()
@@ -1238,7 +1275,10 @@ def test_vec_env_render():
 
 def test_vec_env_closed():
     vec_env = PettingZooVecEnv(
-        3, dummy_observation_spaces, dummy_action_spaces, ["agent_0"]
+        3,
+        dummy_observation_spaces,
+        dummy_action_spaces,
+        ["agent_0"],
     )
     vec_env.closed = True
     vec_env.close()
@@ -1246,16 +1286,22 @@ def test_vec_env_closed():
 
 def test_vec_env_close_extras():
     vec_env = PettingZooVecEnv(
-        3, dummy_observation_spaces, dummy_action_spaces, ["agent_0"]
+        3,
+        dummy_observation_spaces,
+        dummy_action_spaces,
+        ["agent_0"],
     )
     vec_env.close_extras()
 
 
 def test_vec_env_unwrapped():
     vec_env = PettingZooVecEnv(
-        3, dummy_observation_spaces, dummy_action_spaces, ["agent_0"]
+        3,
+        dummy_observation_spaces,
+        dummy_action_spaces,
+        ["agent_0"],
     )
-    vec_env.unwrapped
+    _ = vec_env.unwrapped
 
 
 def test_delete_async_pz_vec_env():
@@ -1275,17 +1321,19 @@ def test_delete_async_pz_vec_env():
 
 def test_dict_space_env():
     """Test environment with dictionary observation spaces"""
-    env_fns = [lambda: DictSpaceTestEnv() for _ in range(3)]
+    env_fns = [DictSpaceTestEnv for _ in range(3)]
     env = AsyncPettingZooVecEnv(env_fns)
 
     # Check spaces
     for agent in env.agents:
         assert isinstance(env.single_observation_space(agent), spaces.Dict)
         assert isinstance(
-            env.single_observation_space(agent).spaces["position"], spaces.Box
+            env.single_observation_space(agent).spaces["position"],
+            spaces.Box,
         )
         assert isinstance(
-            env.single_observation_space(agent).spaces["velocity"], spaces.Box
+            env.single_observation_space(agent).spaces["velocity"],
+            spaces.Box,
         )
 
     # Test reset
@@ -1313,7 +1361,7 @@ def test_dict_space_env():
 
 def test_tuple_space_env():
     """Test environment with tuple observation spaces"""
-    env_fns = [lambda: TupleSpaceTestEnv() for _ in range(3)]
+    env_fns = [TupleSpaceTestEnv for _ in range(3)]
     env = AsyncPettingZooVecEnv(env_fns)
 
     # Check spaces
@@ -1345,20 +1393,23 @@ def test_tuple_space_env():
 
 def test_complex_dict_space_env():
     """Test environment with complex dictionary observation spaces (containing images)"""
-    env_fns = [lambda: ComplexDictSpaceTestEnv() for _ in range(3)]
+    env_fns = [ComplexDictSpaceTestEnv for _ in range(3)]
     env = AsyncPettingZooVecEnv(env_fns)
 
     # Check spaces
     for agent in env.agents:
         assert isinstance(env.single_observation_space(agent), spaces.Dict)
         assert isinstance(
-            env.single_observation_space(agent).spaces["position"], spaces.Box
+            env.single_observation_space(agent).spaces["position"],
+            spaces.Box,
         )
         assert isinstance(
-            env.single_observation_space(agent).spaces["velocity"], spaces.Box
+            env.single_observation_space(agent).spaces["velocity"],
+            spaces.Box,
         )
         assert isinstance(
-            env.single_observation_space(agent).spaces["image"], spaces.Box
+            env.single_observation_space(agent).spaces["image"],
+            spaces.Box,
         )
 
     # Test reset
@@ -1390,7 +1441,7 @@ def test_complex_dict_space_env():
 
 def test_complex_tuple_space_env():
     """Test environment with complex tuple observation spaces (containing images)"""
-    env_fns = [lambda: ComplexTupleSpaceTestEnv() for _ in range(3)]
+    env_fns = [ComplexTupleSpaceTestEnv for _ in range(3)]
     env = AsyncPettingZooVecEnv(env_fns)
 
     # Check spaces
@@ -1425,7 +1476,7 @@ def test_complex_tuple_space_env():
 
 def test_write_to_shared_memory_dict():
     """Test writing dictionary observations to shared memory"""
-    env_fns = [lambda: DictSpaceTestEnv() for _ in range(1)]
+    env_fns = [DictSpaceTestEnv for _ in range(1)]
     env = AsyncPettingZooVecEnv(env_fns)
 
     # Create test observation
@@ -1446,10 +1497,12 @@ def test_write_to_shared_memory_dict():
     # Check if values were correctly written
     for agent in env.agents:
         assert np.allclose(
-            env.observations[agent]["position"][0], test_obs[agent]["position"]
+            env.observations[agent]["position"][0],
+            test_obs[agent]["position"],
         )
         assert np.allclose(
-            env.observations[agent]["velocity"][0], test_obs[agent]["velocity"]
+            env.observations[agent]["velocity"][0],
+            test_obs[agent]["velocity"],
         )
 
     env.close()
@@ -1457,7 +1510,7 @@ def test_write_to_shared_memory_dict():
 
 def test_write_to_shared_memory_tuple():
     """Test writing tuple observations to shared memory"""
-    env_fns = [lambda: TupleSpaceTestEnv() for _ in range(1)]
+    env_fns = [TupleSpaceTestEnv for _ in range(1)]
     env = AsyncPettingZooVecEnv(env_fns)
 
     # Create test observation
@@ -1485,7 +1538,7 @@ def test_write_to_shared_memory_tuple():
 
 def test_placeholder_dict_space():
     """Test placeholder values for dictionary observation spaces"""
-    env_fns = [lambda: DictSpaceTestEnv() for _ in range(1)]
+    env_fns = [DictSpaceTestEnv for _ in range(1)]
     env = AsyncPettingZooVecEnv(env_fns)
 
     placeholder = get_placeholder_value(
@@ -1505,7 +1558,7 @@ def test_placeholder_dict_space():
 
 def test_placeholder_tuple_space():
     """Test placeholder values for tuple observation spaces"""
-    env_fns = [lambda: TupleSpaceTestEnv() for _ in range(1)]
+    env_fns = [TupleSpaceTestEnv for _ in range(1)]
     env = AsyncPettingZooVecEnv(env_fns)
 
     placeholder = get_placeholder_value(
@@ -1541,7 +1594,7 @@ def create_replay_buffer_with_transitions(env, memory_size=10):
 
 @pytest.mark.parametrize("env_cls", [DictSpaceTestEnv, TupleSpaceTestEnv])
 def test_replay_buffer_with_various_spaces(env_cls):
-    env_fns = [lambda: env_cls() for _ in range(3)]  # 3 parallel environments
+    env_fns = [env_cls for _ in range(3)]  # 3 parallel environments
     env = AsyncPettingZooVecEnv(env_fns)
 
     buffer = create_replay_buffer_with_transitions(env)
@@ -1549,7 +1602,7 @@ def test_replay_buffer_with_various_spaces(env_cls):
     sampled_transitions = buffer.sample(batch_size)
 
     # Check that the sampled transitions have the correct structure
-    for field, agent_data in zip(buffer.field_names, sampled_transitions):
+    for field, agent_data in zip(buffer.field_names, sampled_transitions, strict=False):
         for agent_id, data in agent_data.items():
             assert agent_id in env.possible_agents
             if field == "state":
@@ -1560,7 +1613,7 @@ def test_replay_buffer_with_various_spaces(env_cls):
                         assert data[key].shape[0] == batch_size
                 elif isinstance(obs_space, spaces.Tuple):
                     assert len(data) == len(obs_space.spaces)
-                    for i, sub_data in enumerate(data):
+                    for _i, sub_data in enumerate(data):
                         assert sub_data.shape[0] == batch_size
                 else:
                     assert data.shape[0] == batch_size

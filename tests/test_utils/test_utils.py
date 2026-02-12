@@ -125,7 +125,7 @@ def test_create_initial_population_single_agent():
         "CQN": CQN,
     }
 
-    for algo in algo_classes.keys():
+    for algo, algo_cls in algo_classes.items():
         if algo in ["TD3", "DDPG"]:
             action_space = continuous_action_space
         else:
@@ -143,7 +143,7 @@ def test_create_initial_population_single_agent():
         )
         assert len(population) == population_size
         for agent in population:
-            assert isinstance(agent, algo_classes[algo])
+            assert isinstance(agent, algo_cls)
             assert agent.observation_space == observation_space
             assert agent.action_space == action_space
             assert agent.device == "cpu"
@@ -165,7 +165,7 @@ def test_create_initial_population_multi_agent():
         "IPPO": IPPO,
     }
 
-    for algo in algo_classes.keys():
+    for algo, algo_cls in algo_classes.items():
         population = create_population(
             algo=algo,
             observation_space=observation_space,
@@ -178,7 +178,7 @@ def test_create_initial_population_multi_agent():
         )
         assert len(population) == population_size
         for agent in population:
-            assert isinstance(agent, algo_classes[algo])
+            assert isinstance(agent, algo_cls)
             assert agent.observation_spaces == observation_space
             assert agent.action_spaces == action_space
             assert agent.device == "cpu"
@@ -192,7 +192,10 @@ def test_returns_list_of_episode_rewards():
     expected_rewards = [6, 9]
 
     result = calculate_vectorized_scores(
-        rewards, terminations, include_unterminated=False, only_first_episode=True
+        rewards,
+        terminations,
+        include_unterminated=False,
+        only_first_episode=True,
     )
 
     assert result == expected_rewards
@@ -205,7 +208,10 @@ def test_returns_list_of_episode_rewards_including_unterminated():
     expected_rewards = [6, 9, 6]
 
     result = calculate_vectorized_scores(
-        rewards, terminations, include_unterminated=True, only_first_episode=False
+        rewards,
+        terminations,
+        include_unterminated=True,
+        only_first_episode=False,
     )
 
     assert result == expected_rewards
@@ -218,7 +224,10 @@ def test_returns_list_of_episode_rewards_all_terminated_episodes():
     expected_rewards = [6, 9, 9]
 
     result = calculate_vectorized_scores(
-        rewards, terminations, include_unterminated=False, only_first_episode=False
+        rewards,
+        terminations,
+        include_unterminated=False,
+        only_first_episode=False,
     )
 
     assert result == expected_rewards
@@ -231,7 +240,10 @@ def test_returns_list_of_episode_rewards_including_all_terminated_episodes():
     expected_rewards = [6, 9, 9]
 
     result = calculate_vectorized_scores(
-        rewards, terminations, include_unterminated=False, only_first_episode=False
+        rewards,
+        terminations,
+        include_unterminated=False,
+        only_first_episode=False,
     )
 
     assert result == expected_rewards
@@ -244,7 +256,10 @@ def test_returns_list_of_episode_rewards_with_no_terminations():
     expected_rewards = [15, 30]
 
     result = calculate_vectorized_scores(
-        rewards, terminations, include_unterminated=True, only_first_episode=False
+        rewards,
+        terminations,
+        include_unterminated=True,
+        only_first_episode=False,
     )
 
     assert result == expected_rewards
@@ -277,11 +292,7 @@ def test_prints_hyperparams():
     pop[0].lr = 0.01
     pop[0].batch_size = 32
 
-    expected_output = "Agent ID: {}    Mean 5 Fitness: {:.2f}    Attributes: {}".format(
-        pop[0].index,
-        np.mean(pop[0].fitness[-5:]),
-        EvolvableAlgorithm.inspect_attributes(pop[0]),
-    )
+    expected_output = f"Agent ID: {pop[0].index}    Mean 5 Fitness: {np.mean(pop[0].fitness[-5:]):.2f}    Attributes: {EvolvableAlgorithm.inspect_attributes(pop[0])}"
 
     with patch("builtins.print") as mock_print:
         print_hyperparams(pop)
@@ -319,7 +330,8 @@ def test_save_with_accelerator():
     agent.algo = "grpo"
     save_llm_checkpoint(agent, None)
     agent.save_checkpoint.assert_called_once_with(
-        "./saved_checkpoints/grpo", weights_only=False
+        "./saved_checkpoints/grpo",
+        weights_only=False,
     )
     agent.accelerator.wait_for_everyone.assert_called()
     os.rmdir("saved_checkpoints/grpo")
@@ -333,14 +345,14 @@ def test_save_without_accelerator():
     agent.accelerator = None
     save_llm_checkpoint(agent, None)
     agent.save_checkpoint.assert_called_once_with(
-        "./saved_checkpoints/grpo", weights_only=False
+        "./saved_checkpoints/grpo",
+        weights_only=False,
     )
     os.rmdir("saved_checkpoints/grpo")
 
 
 def test_gather_tensor_with_tensor_input():
     """Test gather_tensor with tensor input"""
-
     accelerator = Accelerator()
 
     input_tensor = torch.tensor([1, 2, 3], device=accelerator.device)
@@ -379,7 +391,6 @@ def test_gather_tensor_device():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_gather_tensor_distributed():
     """Test gather_tensor in distributed setting"""
-
     accelerator = Accelerator()
 
     rank = accelerator.process_index
@@ -389,7 +400,8 @@ def test_gather_tensor_distributed():
 
     assert len(gathered) == accelerator.num_processes
     assert torch.equal(
-        gathered, torch.arange(accelerator.num_processes, device=accelerator.device)
+        gathered,
+        torch.arange(accelerator.num_processes, device=accelerator.device),
     )
 
 
@@ -515,7 +527,7 @@ def test_tournament_selection_and_mutation_language_model():
     with (
         patch("agilerl.utils.utils.save_llm_checkpoint") as mock_save_llm_checkpoint,
         patch(
-            "agilerl.utils.utils.consolidate_mutations"
+            "agilerl.utils.utils.consolidate_mutations",
         ) as mock_consolidate_mutations,
     ):
         output_pop = tournament_selection_and_mutation(

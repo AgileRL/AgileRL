@@ -21,7 +21,9 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv):
             pass
 
     def reset(
-        self, seed: int | None = None, options: dict | None = None
+        self,
+        seed: int | None = None,
+        options: dict | None = None,
     ) -> tuple[dict[AgentID, ObsType], dict[AgentID, dict]]:
         self.np_random, _ = seeding.np_random(seed)
 

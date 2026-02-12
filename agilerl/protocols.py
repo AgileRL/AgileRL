@@ -15,13 +15,11 @@ The key protocols include:
 Type aliases are provided for common types used throughout the framework.
 """
 
+from collections.abc import Callable, Generator, Iterable
 from enum import Enum
 from typing import (
     Any,
-    Callable,
-    Generator,
     Generic,
-    Iterable,
     Protocol,
     TypeVar,
     runtime_checkable,
@@ -31,6 +29,7 @@ import numpy as np
 import torch
 from accelerate import Accelerator
 from torch.optim.optimizer import Optimizer
+from typing_extensions import Self
 
 NumpyObsType = np.ndarray | dict[str, np.ndarray] | tuple[np.ndarray, ...]
 TorchObsType = torch.Tensor | dict[str, torch.Tensor] | tuple[torch.Tensor, ...]
@@ -108,11 +107,15 @@ class EvolvableModuleProtocol(Protocol):
     def get_mutation_methods(self) -> dict[str, MutationMethodProtocol]: ...
     def get_mutation_probs(self, new_layer_prob: float) -> list[float]: ...
     def sample_mutation_method(
-        self, new_layer_prob: float, rng: Generator | None
+        self,
+        new_layer_prob: float,
+        rng: Generator | None,
     ) -> str: ...
     def clone(self) -> "EvolvableModuleProtocol": ...
     def load_state_dict(
-        self, state_dict: dict[str, Any], strict: bool = True
+        self,
+        state_dict: dict[str, Any],
+        strict: bool = True,
     ) -> None: ...
 
 
@@ -130,14 +133,18 @@ class EvolvableNetworkProtocol(EvolvableModuleProtocol, Protocol):
     def build_network_head(self, *args, **kwargs) -> None: ...
     def add_latent_node(self, numb_new_nodes: int | None = None) -> dict[str, Any]: ...
     def remove_latent_node(
-        self, numb_new_nodes: int | None = None
+        self,
+        numb_new_nodes: int | None = None,
     ) -> dict[str, Any]: ...
     def recreate_encoder(self) -> None: ...
     def initialize_hidden_state(
-        self, batch_size: int = 1
+        self,
+        batch_size: int = 1,
     ) -> dict[str, torch.Tensor]: ...
     def init_weights_gaussian(
-        self, std_coeff: float = 4.0, output_coeff: float = 2.0
+        self,
+        std_coeff: float = 4.0,
+        output_coeff: float = 2.0,
     ) -> None: ...
     def _build_encoder(self, *args, **kwargs) -> None: ...
 
@@ -239,7 +246,8 @@ class MutationRegistryProtocol(Protocol):
 
 
 SelfEvolvableAlgorithm = TypeVar(
-    "SelfEvolvableAlgorithm", bound="EvolvableAlgorithmProtocol"
+    "SelfEvolvableAlgorithm",
+    bound="EvolvableAlgorithmProtocol",
 )
 
 
@@ -265,26 +273,36 @@ class EvolvableAlgorithmProtocol(Protocol):
     def unwrap_models(self) -> None: ...
     def wrap_models(self) -> None: ...
     def load(
-        cls: type[SelfEvolvableAlgorithm], path: str
+        cls: type[SelfEvolvableAlgorithm],
+        path: str,
     ) -> SelfEvolvableAlgorithm: ...
     def load_checkpoint(
-        self, path: str, device: str, accelerator: Accelerator | None
+        self,
+        path: str,
+        device: str,
+        accelerator: Accelerator | None,
     ) -> None: ...
     def save_checkpoint(self, path: str) -> None: ...
     def learn(
-        self, experiences: tuple[Iterable[ObservationType], ...], **kwargs
+        self,
+        experiences: tuple[Iterable[ObservationType], ...],
+        **kwargs,
     ) -> None: ...
     def get_action(self, obs: ObservationType, **kwargs) -> Any: ...
     def test(self, *args, **kwargs) -> np.ndarray: ...
     def evolvable_attributes(
-        self, networks_only: bool = False
+        self,
+        networks_only: bool = False,
     ) -> EvolvableAttributeDict: ...
     def inspect_attributes(
-        agent: SelfEvolvableAlgorithm, input_args_only: bool = False
+        agent,
+        input_args_only: bool = False,
     ) -> dict[str, Any]: ...
     def clone(
-        self: SelfEvolvableAlgorithm, index: int | None, wrap: bool
-    ) -> SelfEvolvableAlgorithm: ...
+        self,
+        index: int | None,
+        wrap: bool,
+    ) -> Self: ...
     def recompile(self) -> None: ...
     def mutation_hook(self) -> None: ...
 
@@ -305,14 +323,15 @@ class AgentWrapperProtocol(Protocol, Generic[T_EvolvableAlgorithm]):
 
     def get_action(self, obs: ObservationType, **kwargs) -> Any: ...
     def learn(
-        self, experiences: tuple[Iterable[ObservationType], ...], **kwargs
+        self,
+        experiences: tuple[Iterable[ObservationType], ...],
+        **kwargs,
     ) -> None: ...
 
 
 @runtime_checkable
 class LoraConfigProtocol(Protocol):
-    """
-    "Protocol for LoRA configuration.
+    """ "Protocol for LoRA configuration.
 
     LoRA configuration is used to configure the LoRA module.
     """
@@ -344,12 +363,16 @@ class PretrainedConfigProtocol(Protocol):
 
     @classmethod
     def from_pretrained(
-        cls, pretrained_model_name_or_path: str, **kwargs: Any
+        cls,
+        pretrained_model_name_or_path: str,
+        **kwargs: Any,
     ) -> "PretrainedConfigProtocol": ...
 
     @classmethod
     def from_dict(
-        cls, config_dict: dict[str, Any], **kwargs: Any
+        cls,
+        config_dict: dict[str, Any],
+        **kwargs: Any,
     ) -> "PretrainedConfigProtocol": ...
 
     @classmethod
@@ -399,7 +422,9 @@ class PreTrainedModelProtocol(Protocol):
     def parameters(self) -> Generator: ...
     def state_dict(self) -> dict[str, Any]: ...
     def load_state_dict(
-        self, state_dict: dict[str, Any], strict: bool = True
+        self,
+        state_dict: dict[str, Any],
+        strict: bool = True,
     ) -> None: ...
     def to(self, device: DeviceType) -> "PreTrainedModelProtocol": ...
 
@@ -427,11 +452,16 @@ class PeftModelProtocol(Protocol):
     def parameters(self) -> Generator: ...
     def state_dict(self) -> dict[str, Any]: ...
     def load_state_dict(
-        self, state_dict: dict[str, Any], strict: bool = True
+        self,
+        state_dict: dict[str, Any],
+        strict: bool = True,
     ) -> None: ...
     def to(self, device: DeviceType) -> "PeftModelProtocol": ...
 
     @classmethod
     def from_pretrained(
-        cls, base_model: PreTrainedModelProtocol, adapter_path: str, **kwargs: Any
+        cls,
+        base_model: PreTrainedModelProtocol,
+        adapter_path: str,
+        **kwargs: Any,
     ) -> "PeftModelProtocol": ...

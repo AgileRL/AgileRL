@@ -55,17 +55,15 @@ class CharState:
         return CharState(new_mask)
 
     def word_satisfies(self, c, word):
-        if all([k == CharKnowledge.POSSIBLE for k in self.position_knowledge]):
+        if all(k == CharKnowledge.POSSIBLE for k in self.position_knowledge):
             return True
-        if all([k == CharKnowledge.NOT_HERE for k in self.position_knowledge]):
+        if all(k == CharKnowledge.NOT_HERE for k in self.position_knowledge):
             return c not in word
         for i in range(N_CHARS):
-            if self.position_knowledge[i] == CharKnowledge.HERE:
-                if c != word[i]:
-                    return False
-            if self.position_knowledge[i] == CharKnowledge.NOT_HERE:
-                if c == word[i]:
-                    return False
+            if self.position_knowledge[i] == CharKnowledge.HERE and c != word[i]:
+                return False
+            if self.position_knowledge[i] == CharKnowledge.NOT_HERE and c == word[i]:
+                return False
         return c in word
 
 
@@ -106,17 +104,13 @@ class WordleState:
         str_items = defaultdict(list)
         for i in range(len(self.state)):
             if all(
-                [
-                    item == CharKnowledge.POSSIBLE
-                    for item in self.state[i].position_knowledge
-                ]
+                item == CharKnowledge.POSSIBLE
+                for item in self.state[i].position_knowledge
             ):
                 continue
             if all(
-                [
-                    item == CharKnowledge.NOT_HERE
-                    for item in self.state[i].position_knowledge
-                ]
+                item == CharKnowledge.NOT_HERE
+                for item in self.state[i].position_knowledge
             ):
                 str_items["none"].append(IDX2CHAR[i])
                 continue
@@ -134,7 +128,7 @@ class WordleState:
                 "\n".join(str_items[k])
                 for k in ["known", "wrong_pos", "none"]
                 if len(str_items[k]) > 0
-            ]
+            ],
         )
 
 
@@ -157,7 +151,7 @@ class Vocabulary:
                 self.filtered_vocab = self.cache[wordle_state]
             else:
                 self.filtered_vocab = list(
-                    filter(lambda x: wordle_state.word_in_state(x), self.all_vocab)
+                    filter(wordle_state.word_in_state, self.all_vocab),
                 )
                 if self.fill_cache:
                     self.cache[wordle_state] = self.filtered_vocab
@@ -167,10 +161,11 @@ class Vocabulary:
     @classmethod
     def from_file(cls, vocab_file: str, fill_cache: bool = True):
         vocab = []
-        for item in open(vocab_file):
-            item = item.strip()
-            if len(item) == N_CHARS:
-                vocab.append(item)
+        with open(vocab_file) as f:
+            for item in f:
+                item = item.strip()
+                if len(item) == N_CHARS:
+                    vocab.append(item)
         return cls(vocab, None, None, fill_cache)
 
     def filtered_vocab_size(self):
@@ -187,7 +182,10 @@ class Vocabulary:
 
     def update_vocab(self, wordle_state: WordleState):
         return Vocabulary(
-            self.all_vocab, wordle_state, cache=self.cache, fill_cache=self.fill_cache
+            self.all_vocab,
+            wordle_state,
+            cache=self.cache,
+            fill_cache=self.fill_cache,
         )
 
     def __str__(self) -> str:
@@ -196,7 +194,10 @@ class Vocabulary:
 
 class WordleGame:
     def __init__(
-        self, state: WordleState, vocab: Vocabulary, action_history: list[str]
+        self,
+        state: WordleState,
+        vocab: Vocabulary,
+        action_history: list[str],
     ):
         self.state = state
         self.vocab = vocab
@@ -208,9 +209,11 @@ class WordleGame:
         return cls(init_wordle, vocab.update_vocab(init_wordle), action_history=[])
 
     def next(self, action: str):
-        if len(action) != N_CHARS or (not all([c in CHAR2IDX for c in action])):
+        if len(action) != N_CHARS or (not all(c in CHAR2IDX for c in action)):
             new_mdp = WordleGame(
-                self.state, self.vocab, action_history=self.action_history + [action]
+                self.state,
+                self.vocab,
+                action_history=self.action_history + [action],
             )
             return new_mdp, new_mdp.reward(), new_mdp.is_terminal()
         if self.is_terminal():
@@ -225,7 +228,7 @@ class WordleGame:
         return new_mdp, new_mdp.reward(), new_mdp.is_terminal()
 
     def all_next(self, action: str):
-        if len(action) != N_CHARS or (not all([c in CHAR2IDX for c in action])):
+        if len(action) != N_CHARS or (not all(c in CHAR2IDX for c in action)):
             return [
                 (
                     WordleGame(
@@ -234,7 +237,7 @@ class WordleGame:
                         action_history=self.action_history + [action],
                     ),
                     1,
-                )
+                ),
             ]
         if self.is_terminal():
             return []
@@ -256,7 +259,7 @@ class WordleGame:
     def __str__(self):
         all_action_strs = []
         for action in self.action_history:
-            if len(action) != N_CHARS or (not all([c in CHAR2IDX for c in action])):
+            if len(action) != N_CHARS or (not all(c in CHAR2IDX for c in action)):
                 all_action_strs.append(action)
                 continue
             action_str = ""
@@ -267,10 +270,8 @@ class WordleGame:
                 ):
                     action_str += colored(c, "green")
                 elif all(
-                    [
-                        k == CharKnowledge.NOT_HERE
-                        for k in self.state.state[CHAR2IDX[c]].position_knowledge
-                    ]
+                    k == CharKnowledge.NOT_HERE
+                    for k in self.state.state[CHAR2IDX[c]].position_knowledge
                 ):
                     action_str += c
                 elif (
@@ -284,7 +285,7 @@ class WordleGame:
     def __repr__(self) -> str:
         all_action_strs = []
         for action in self.action_history:
-            if len(action) != N_CHARS or (not all([c in CHAR2IDX for c in action])):
+            if len(action) != N_CHARS or (not all(c in CHAR2IDX for c in action)):
                 all_action_strs.append(action + "</a>")
                 continue
             action_str = action + "</a>"
@@ -295,10 +296,8 @@ class WordleGame:
                 ):
                     action_str += "<g>"
                 elif all(
-                    [
-                        k == CharKnowledge.NOT_HERE
-                        for k in self.state.state[CHAR2IDX[c]].position_knowledge
-                    ]
+                    k == CharKnowledge.NOT_HERE
+                    for k in self.state.state[CHAR2IDX[c]].position_knowledge
                 ):
                     action_str += "<b>"
                 elif (
@@ -316,11 +315,11 @@ class WordleGame:
     def transition_sequence(self):
         transition_strs = []
         for x, action in enumerate(self.action_history):
-            if len(action) != N_CHARS or (not all([c in CHAR2IDX for c in action])):
+            if len(action) != N_CHARS or (not all(c in CHAR2IDX for c in action)):
                 transition_strs.append((action, -1.0))
                 continue
             transition_strs.append(
-                (action, -1.0 if x < (len(self.action_history) - 1) else self.reward())
+                (action, -1.0 if x < (len(self.action_history) - 1) else self.reward()),
             )
             state_str = ""
             for i, c in enumerate(action):
@@ -330,10 +329,8 @@ class WordleGame:
                 ):
                     state_str += "<g>"
                 elif all(
-                    [
-                        k == CharKnowledge.NOT_HERE
-                        for k in self.state.state[CHAR2IDX[c]].position_knowledge
-                    ]
+                    k == CharKnowledge.NOT_HERE
+                    for k in self.state.state[CHAR2IDX[c]].position_knowledge
                 ):
                     state_str += "<b>"
                 elif (
@@ -350,7 +347,7 @@ class WordleGame:
         return (
             int(
                 self.vocab.filtered_vocab_size() == 1
-                and self.vocab.filtered_vocab[0] in self.action_history
+                and self.vocab.filtered_vocab[0] in self.action_history,
             )
             - 1
         )

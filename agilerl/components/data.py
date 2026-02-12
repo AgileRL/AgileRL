@@ -1,7 +1,7 @@
 import warnings
 from collections import OrderedDict
+from collections.abc import Iterator
 from numbers import Number
-from typing import Iterator
 
 import numpy as np
 import torch
@@ -13,7 +13,8 @@ from agilerl.typing import ArrayOrTensor, ObservationType
 
 
 def to_tensordict(
-    data: ObservationType, dtype: torch.dtype = torch.float32
+    data: ObservationType,
+    dtype: torch.dtype = torch.float32,
 ) -> TensorDict:
     """Converts a tuple or dict of torch.Tensor or np.ndarray to a TensorDict.
 
@@ -55,11 +56,10 @@ def to_torch_tensor(data: ArrayOrTensor, dtype=torch.float32) -> torch.Tensor:
     """
     if isinstance(data, (np.ndarray, Number, bool)):
         return torch.tensor(data, dtype=dtype)
-    elif isinstance(data, torch.Tensor):
+    if isinstance(data, torch.Tensor):
         return data.to(dtype=dtype)
-    else:
-        # Handle any other types by attempting to convert to tensor
-        return torch.tensor(data, dtype=dtype)
+    # Handle any other types by attempting to convert to tensor
+    return torch.tensor(data, dtype=dtype)
 
 
 @tensorclass
@@ -91,8 +91,7 @@ class Transition:
 
 
 class ReplayDataset(IterableDataset):
-    """
-    Iterable Dataset containing the ReplayBuffer which will be updated with new
+    """Iterable Dataset containing the ReplayBuffer which will be updated with new
     experiences during training
 
     :param buffer: Experience replay buffer

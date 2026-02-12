@@ -1,7 +1,7 @@
 from typing import Any
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
 from agilerl.typing import ArrayOrTensor, BatchDimension
@@ -121,10 +121,12 @@ class EvolvableLSTM(EvolvableModule):
 
         # Add activation if specified
         model_dict[f"{self.name}_lstm_output"] = nn.Linear(
-            features_dim, self.num_outputs, device=self.device
+            features_dim,
+            self.num_outputs,
+            device=self.device,
         )
         model_dict[f"{self.name}_output_activation"] = get_activation(
-            self.output_activation
+            self.output_activation,
         )
 
         return model_dict
@@ -147,7 +149,6 @@ class EvolvableLSTM(EvolvableModule):
     @activation.setter
     def activation(self, activation: str) -> None:
         """Set activation function."""
-        pass
 
     @mutation(MutationType.ACTIVATION)
     def change_activation(self, activation: str, output: bool = False) -> None:
@@ -185,7 +186,7 @@ class EvolvableLSTM(EvolvableModule):
         elif x.dim() != 3:
             raise ValueError(
                 f"Expected 2D (batch_size, features) or 3D "
-                f"(batch_size, seq_len, features) input, but got {x.dim()}D"
+                f"(batch_size, seq_len, features) input, but got {x.dim()}D",
             )
 
         # Use provided hidden state if available
@@ -206,7 +207,8 @@ class EvolvableLSTM(EvolvableModule):
             if sequence_input:
                 out_shape = lstm_output.shape
                 lstm_output = lstm_output.reshape(
-                    out_shape[0] * out_shape[1], out_shape[2]
+                    out_shape[0] * out_shape[1],
+                    out_shape[2],
                 )
             else:
                 lstm_output = lstm_output.squeeze(1)
@@ -232,7 +234,8 @@ class EvolvableLSTM(EvolvableModule):
     @mutation(MutationType.LAYER)
     def add_layer(self) -> None:
         """Adds an LSTM layer to the network. Falls back on `add_node()` if
-        max layers reached."""
+        max layers reached.
+        """
         if self.num_layers < self.max_layers:  # HARD LIMIT
             self.num_layers += 1
         else:
@@ -241,7 +244,8 @@ class EvolvableLSTM(EvolvableModule):
     @mutation(MutationType.LAYER)
     def remove_layer(self) -> None:
         """Removes an LSTM layer from the network. Falls back on `add_node()` if
-        min layers reached."""
+        min layers reached.
+        """
         if self.num_layers > self.min_layers:  # HARD LIMIT
             self.num_layers -= 1
         else:
@@ -291,5 +295,6 @@ class EvolvableLSTM(EvolvableModule):
 
         # Preserve parameters where possible
         self.model = EvolvableModule.preserve_parameters(
-            old_net=self.model, new_net=model
+            old_net=self.model,
+            new_net=model,
         )

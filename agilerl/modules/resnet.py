@@ -1,7 +1,7 @@
 from typing import Any
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from agilerl.modules import EvolvableCNN
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
@@ -126,8 +126,7 @@ class EvolvableResNet(EvolvableModule):
         num_blocks: int,
         scale_factor: int,
     ) -> nn.Sequential:
-        """
-        Creates and returns a convolutional neural network.
+        """Creates and returns a convolutional neural network.
 
         :param in_channels: The number of input channels.
         :type in_channels: int
@@ -166,10 +165,12 @@ class EvolvableResNet(EvolvableModule):
             flattened_size = cnn_output.shape[1]
 
         net_dict[f"{self.name}_linear_output"] = nn.Linear(
-            flattened_size, self.num_outputs, device=self.device
+            flattened_size,
+            self.num_outputs,
+            device=self.device,
         )
         net_dict[f"{self.name}_output_activation"] = get_activation(
-            self.output_activation
+            self.output_activation,
         )
 
         self.cnn_output_size = pre_flatten_output.shape
@@ -195,7 +196,8 @@ class EvolvableResNet(EvolvableModule):
     @mutation(MutationType.LAYER)
     def add_block(self) -> None:
         """Adds a hidden layer to neural network. Falls back on ``add_channel()`` if
-        max hidden layers reached."""
+        max hidden layers reached.
+        """
         # add layer to hyper params
         if self.num_blocks < self.max_blocks:  # HARD LIMIT
             self.num_blocks += 1
@@ -205,7 +207,8 @@ class EvolvableResNet(EvolvableModule):
     @mutation(MutationType.LAYER, shrink_params=True)
     def remove_block(self) -> None:
         """Removes a hidden layer from neural network. Falls back on ``add_channel()`` if
-        min hidden layers reached."""
+        min hidden layers reached.
+        """
         if self.num_blocks > self.min_blocks:  # HARD LIMIT
             self.num_blocks -= 1
         else:

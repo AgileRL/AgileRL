@@ -22,12 +22,11 @@ def get_output_bounds(output_activation: str) -> tuple[float, float]:
     """
     if output_activation in ["Tanh", "Softsign"]:
         return -1.0, 1.0
-    elif output_activation in ["Sigmoid", "Softmax", "GumbelSoftmax"]:
+    if output_activation in ["Sigmoid", "Softmax", "GumbelSoftmax"]:
         return 0.0, 1.0
-    else:
-        raise ValueError(
-            f"Received invalid output activation function: {output_activation}. "
-        )
+    raise ValueError(
+        f"Received invalid output activation function: {output_activation}. ",
+    )
 
 
 class DeterministicActor(EvolvableNetwork):
@@ -124,7 +123,7 @@ class DeterministicActor(EvolvableNetwork):
                 if user_output_activation not in self._allowed_output_activations:
                     warnings.warn(
                         f"Output activation must be one of the following: {', '.join(self._allowed_output_activations)}. "
-                        f"Got {user_output_activation} instead. Using default output activation."
+                        f"Got {user_output_activation} instead. Using default output activation.",
                     )
                 else:
                     output_activation = user_output_activation
@@ -133,7 +132,8 @@ class DeterministicActor(EvolvableNetwork):
 
         if head_config is None:
             head_config = MlpNetConfig(
-                hidden_size=[32], output_activation=output_activation
+                hidden_size=[32],
+                output_activation=output_activation,
             )
         else:
             head_config["output_activation"] = output_activation
@@ -318,10 +318,14 @@ class StochasticActor(EvolvableNetwork):
 
         if isinstance(self.action_space, spaces.Box):
             self.action_low = torch.as_tensor(
-                self.action_space.low, device=self.device, dtype=torch.float32
+                self.action_space.low,
+                device=self.device,
+                dtype=torch.float32,
             )
             self.action_high = torch.as_tensor(
-                self.action_space.high, device=self.device, dtype=torch.float32
+                self.action_space.high,
+                device=self.device,
+                dtype=torch.float32,
             )
         else:
             self.action_low, self.action_high = None, None
@@ -368,7 +372,9 @@ class StochasticActor(EvolvableNetwork):
         )
 
     def forward(
-        self, obs: TorchObsType, action_mask: ArrayOrTensor | None = None
+        self,
+        obs: TorchObsType,
+        action_mask: ArrayOrTensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Forward pass of the network.
 

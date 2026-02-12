@@ -2,8 +2,8 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch.optim as optim
 from gymnasium import spaces
+from torch import optim
 from torch.nn.utils import clip_grad_norm_
 
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
@@ -124,16 +124,19 @@ class RainbowDQN(RLAlgorithm):
         assert isinstance(tau, float), "Tau must be a float."
         assert tau > 0, "Tau must be greater than zero."
         assert isinstance(
-            prior_eps, float
+            prior_eps,
+            float,
         ), "Minimum priority for sampling must be a float."
         assert prior_eps > 0, "Minimum priority for sampling must be greater than zero."
         assert isinstance(num_atoms, int), "Number of atoms must be an integer."
         assert num_atoms >= 1, "Number of atoms must be greater than or equal to one."
         assert isinstance(
-            v_min, (float, int)
+            v_min,
+            (float, int),
         ), "Minimum value of support must be a float."
         assert isinstance(
-            v_max, (float, int)
+            v_max,
+            (float, int),
         ), "Maximum value of support must be a float."
         assert (
             v_max >= v_min
@@ -141,7 +144,8 @@ class RainbowDQN(RLAlgorithm):
         assert isinstance(n_step, int), "Step number must be an integer."
         assert n_step >= 1, "Step number must be greater than or equal to one."
         assert isinstance(
-            wrap, bool
+            wrap,
+            bool,
         ), "Wrap models flag must be boolean value True or False."
 
         self.batch_size = batch_size
@@ -161,7 +165,10 @@ class RainbowDQN(RLAlgorithm):
         self.noise_std = noise_std
 
         self.support = torch.linspace(
-            self.v_min, self.v_max, self.num_atoms, device=self.device
+            self.v_min,
+            self.v_max,
+            self.num_atoms,
+            device=self.device,
         )
         self.delta_z = (self.v_max - self.v_min) / (self.num_atoms - 1)
 
@@ -175,11 +182,12 @@ class RainbowDQN(RLAlgorithm):
                 actor_network.load_state_dict(actor_network.state_dict())
             elif not isinstance(actor_network, EvolvableModule):
                 raise TypeError(
-                    f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
+                    f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule.",
                 )
 
             self.actor, self.actor_target = make_safe_deepcopies(
-                actor_network, actor_network
+                actor_network,
+                actor_network,
             )
         else:
             net_config = {} if net_config is None else net_config
@@ -227,7 +235,7 @@ class RainbowDQN(RLAlgorithm):
                 eval_network=self.actor,
                 shared_networks=self.actor_target,
                 policy=True,
-            )
+            ),
         )
 
     def get_action(
@@ -264,7 +272,8 @@ class RainbowDQN(RLAlgorithm):
             )
             inv_mask = 1 - action_mask
             masked_action_values = np.ma.array(
-                action_values.cpu().data.numpy(), mask=inv_mask
+                action_values.cpu().data.numpy(),
+                mask=inv_mask,
             )
             action = np.argmax(masked_action_values, axis=-1)
 
@@ -324,8 +333,8 @@ class RainbowDQN(RLAlgorithm):
 
             # Shape of projected q distribution is (batch_size, num_atoms) as we have argmaxed over actions
             # Fix disappearing probability mass
-            L[(u > 0) * (L == u)] -= 1
-            u[(L < (self.num_atoms - 1)) * (L == u)] += 1
+            L[(u > 0) * (u == L)] -= 1
+            u[((self.num_atoms - 1) > L) * (u == L)] += 1
             offset = (
                 torch.linspace(
                     0,
@@ -340,10 +349,14 @@ class RainbowDQN(RLAlgorithm):
             proj_dist = torch.zeros(target_q_dist.size(), device=self.device)
 
             proj_dist.view(-1).index_add_(
-                0, (L + offset).view(-1), (target_q_dist * (u.float() - b)).view(-1)
+                0,
+                (L + offset).view(-1),
+                (target_q_dist * (u.float() - b)).view(-1),
             )
             proj_dist.view(-1).index_add_(
-                0, (u + offset).view(-1), (target_q_dist * (b - L.float())).view(-1)
+                0,
+                (u + offset).view(-1),
+                (target_q_dist * (b - L.float())).view(-1),
             )
 
         # Calculate the current obs
@@ -390,12 +403,22 @@ class RainbowDQN(RLAlgorithm):
 
             if self.combined_reward or not n_step:
                 elementwise_loss = self._dqn_loss(
-                    obs, actions, rewards, next_obs, dones, self.gamma
+                    obs,
+                    actions,
+                    rewards,
+                    next_obs,
+                    dones,
+                    self.gamma,
                 )
             if n_step:
                 n_gamma = self.gamma**self.n_step
                 n_step_elementwise_loss = self._dqn_loss(
-                    n_obs, n_actions, n_rewards, n_next_obs, n_dones, n_gamma
+                    n_obs,
+                    n_actions,
+                    n_rewards,
+                    n_next_obs,
+                    n_dones,
+                    n_gamma,
                 )
                 if self.combined_reward:
                     elementwise_loss += n_step_elementwise_loss
@@ -418,13 +441,23 @@ class RainbowDQN(RLAlgorithm):
             new_priorities = None
             if self.combined_reward or not n_step:
                 elementwise_loss = self._dqn_loss(
-                    obs, actions, rewards, next_obs, dones, self.gamma
+                    obs,
+                    actions,
+                    rewards,
+                    next_obs,
+                    dones,
+                    self.gamma,
                 )
 
             if n_step:
                 n_gamma = self.gamma**self.n_step
                 n_step_elementwise_loss = self._dqn_loss(
-                    n_obs, n_actions, n_rewards, n_next_obs, n_dones, n_gamma
+                    n_obs,
+                    n_actions,
+                    n_rewards,
+                    n_next_obs,
+                    n_dones,
+                    n_gamma,
                 )
                 if self.combined_reward:
                     elementwise_loss += n_step_elementwise_loss
@@ -455,10 +488,11 @@ class RainbowDQN(RLAlgorithm):
     def soft_update(self) -> None:
         """Soft updates target network."""
         for eval_param, target_param in zip(
-            self.actor.parameters(), self.actor_target.parameters()
+            self.actor.parameters(),
+            self.actor_target.parameters(),
         ):
             target_param.data.copy_(
-                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
+                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data,
             )
 
     def test(
@@ -495,7 +529,9 @@ class RainbowDQN(RLAlgorithm):
 
                     action_mask = info.get("action_mask", None)
                     action = self.get_action(
-                        obs, training=False, action_mask=action_mask
+                        obs,
+                        training=False,
+                        action_mask=action_mask,
                     )
                     obs, reward, done, trunc, info = env.step(action)
                     step += 1

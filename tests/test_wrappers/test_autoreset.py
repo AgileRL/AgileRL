@@ -30,8 +30,7 @@ class parallel_env(ParallelEnv):
     metadata = {"render_modes": ["human"], "name": "rps_v2"}
 
     def __init__(self, render_mode=None):
-        """
-        The init method takes in environment arguments and should define the following attributes:
+        """The init method takes in environment arguments and should define the following attributes:
         - possible_agents
         - render_mode
 
@@ -45,54 +44,52 @@ class parallel_env(ParallelEnv):
 
         # optional: a mapping between agent name and ID
         self.agent_name_mapping = dict(
-            zip(self.possible_agents, list(range(len(self.possible_agents))))
+            zip(
+                self.possible_agents,
+                list(range(len(self.possible_agents))),
+                strict=False,
+            ),
         )
         self.render_mode = render_mode
 
     # Observation space should be defined here.
     # lru_cache allows observation and action spaces to be memoized, reducing clock cycles required to get each agent's space.
     # If your spaces change over time, remove this line (disable caching).
-    @functools.lru_cache(maxsize=None)
+    @functools.cache  # noqa: B019
     def observation_space(self, agent):
         # gymnasium spaces are defined and documented here: https://gymnasium.farama.org/api/spaces/
         return Discrete(4)
 
     # Action space should be defined here.
     # If your spaces change over time, remove this line (disable caching).
-    @functools.lru_cache(maxsize=None)
+    @functools.cache  # noqa: B019
     def action_space(self, agent):
         return Discrete(3)
 
     def render(self):
-        """
-        Renders the environment. In human mode, it can print to terminal, open
+        """Renders the environment. In human mode, it can print to terminal, open
         up a graphical window, or open up some other display that a human can see and understand.
         """
         if self.render_mode is None:
             gymnasium.logger.warn(
-                "You are calling render method without specifying any render mode."
+                "You are calling render method without specifying any render mode.",
             )
             return
 
         if len(self.agents) == 2:
-            string = "Current state: Agent1: {} , Agent2: {}".format(
-                MOVES[self.state[self.agents[0]]], MOVES[self.state[self.agents[1]]]
-            )
+            string = f"Current state: Agent1: {MOVES[self.state[self.agents[0]]]} , Agent2: {MOVES[self.state[self.agents[1]]]}"
         else:
             string = "Game over"
         print(string)
 
     def close(self):
-        """
-        Close should release any graphical displays, subprocesses, network connections
+        """Close should release any graphical displays, subprocesses, network connections
         or any other environment data which should not be kept around after the
         user is no longer using the environment.
         """
-        pass
 
     def reset(self, seed=None, options=None):
-        """
-        Reset needs to initialize the `agents` attribute and must set up the
+        """Reset needs to initialize the `agents` attribute and must set up the
         environment so that render(), and step() can be called without issues.
         Here it initializes the `num_moves` variable which counts the number of
         hands that are played.
@@ -100,15 +97,14 @@ class parallel_env(ParallelEnv):
         """
         self.agents = self.possible_agents[:]
         self.num_moves = 0
-        observations = {agent: NONE for agent in self.agents}
-        infos = {agent: self.num_moves for agent in self.agents}
+        observations = dict.fromkeys(self.agents, NONE)
+        infos = dict.fromkeys(self.agents, self.num_moves)
         self.state = observations
 
         return observations, infos
 
     def step(self, actions):
-        """
-        step(action) takes in an action for each agent and should return the
+        """step(action) takes in an action for each agent and should return the
         - observations
         - rewards
         - terminations
@@ -127,12 +123,12 @@ class parallel_env(ParallelEnv):
             (actions[self.agents[0]], actions[self.agents[1]])
         ]
 
-        terminations = {agent: False for agent in self.agents}
+        terminations = dict.fromkeys(self.agents, False)
 
         self.num_moves += 1
         env_truncation = self.num_moves >= NUM_ITERS
-        truncations = {agent: env_truncation for agent in self.agents}
-        terminations = {agent: env_truncation for agent in self.agents}
+        truncations = dict.fromkeys(self.agents, env_truncation)
+        terminations = dict.fromkeys(self.agents, env_truncation)
         # current observation is just the other player's most recent action
         observations = {
             self.agents[i]: int(actions[self.agents[1 - i]])
@@ -142,7 +138,7 @@ class parallel_env(ParallelEnv):
 
         # typically there won't be any information in the infos, but there must
         # still be an entry for each agent
-        infos = {agent: self.num_moves for agent in self.agents}
+        infos = dict.fromkeys(self.agents, self.num_moves)
 
         if env_truncation:
             self.agents = []
@@ -158,7 +154,8 @@ def test_autoreset_wrapper_autoreset():
     env = PettingZooAutoResetParallelWrapper(env)
     observations, infos = env.reset()
     with patch(
-        f"{__name__}.parallel_env.reset", wraps=env.env.reset
+        f"{__name__}.parallel_env.reset",
+        wraps=env.env.reset,
     ) as autoreset_patch:
         # Environment truncates after 100 steps, so we expect 1 reset.
         for _ in range(100):

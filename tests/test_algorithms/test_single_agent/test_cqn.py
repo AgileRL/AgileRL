@@ -3,11 +3,10 @@ import copy
 import numpy as np
 import pytest
 import torch
-import torch.nn as nn
-import torch.optim as optim
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
+from torch import nn, optim
 
 from agilerl.algorithms.cqn import CQN
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
@@ -48,7 +47,7 @@ class DummyEnv:
 
 @pytest.fixture(scope="module")
 def simple_mlp():
-    network = nn.Sequential(
+    return nn.Sequential(
         nn.Linear(4, 20),
         nn.ReLU(),
         nn.Linear(20, 10),
@@ -56,19 +55,26 @@ def simple_mlp():
         nn.Linear(10, 1),
         nn.Tanh(),
     )
-    return network
 
 
 @pytest.fixture(scope="module")
 def simple_cnn():
-    network = nn.Sequential(
+    return nn.Sequential(
         nn.Conv2d(
-            3, 16, kernel_size=3, stride=1, padding=1
+            3,
+            16,
+            kernel_size=3,
+            stride=1,
+            padding=1,
         ),  # Input channels: 3 (for RGB images), Output channels: 16
         nn.ReLU(),
         nn.MaxPool2d(kernel_size=2, stride=2),
         nn.Conv2d(
-            16, 32, kernel_size=3, stride=1, padding=1
+            16,
+            32,
+            kernel_size=3,
+            stride=1,
+            padding=1,
         ),  # Input channels: 16, Output channels: 32
         nn.ReLU(),
         nn.MaxPool2d(kernel_size=2, stride=2),
@@ -77,7 +83,6 @@ def simple_cnn():
         nn.ReLU(),
         nn.Linear(128, 1),  # Output layer with num_classes output features
     )
-    return network
 
 
 # initialize CQN with valid parameters
@@ -133,7 +138,10 @@ def test_initialize_cqn(observation_space, encoder_cls, accelerator, request):
     ],
 )
 def test_initialize_cqn_with_make_evo(
-    observation_space, actor_network, input_tensor, request
+    observation_space,
+    actor_network,
+    input_tensor,
+    request,
 ):
     action_space = spaces.Discrete(2)
     observation_space = request.getfixturevalue(observation_space)
@@ -169,7 +177,9 @@ def test_initialize_cqn_with_make_evo(
     ],
 )
 def test_initialize_cqn_with_actor_network_evo_net(
-    observation_space, net_type, request
+    observation_space,
+    net_type,
+    request,
 ):
     action_space = spaces.Discrete(2)
     observation_space = request.getfixturevalue(observation_space)
@@ -301,7 +311,8 @@ def test_learns_from_experiences(vector_space):
     assert actor_target == cqn.actor_target
     assert_not_equal_state_dict(actor_pre_learn_sd, cqn.actor.state_dict())
     assert_not_equal_state_dict(
-        actor_target_pre_learn_sd, cqn.actor_target.state_dict()
+        actor_target_pre_learn_sd,
+        cqn.actor_target.state_dict(),
     )
     cqn.clean_up()
 
@@ -344,7 +355,8 @@ def test_handles_double_q_learning(discrete_space):
     assert actor_target == cqn.actor_target
     assert_not_equal_state_dict(actor_pre_learn_sd, cqn.actor.state_dict())
     assert_not_equal_state_dict(
-        actor_target_pre_learn_sd, cqn.actor_target.state_dict()
+        actor_target_pre_learn_sd,
+        cqn.actor_target.state_dict(),
     )
     cqn.clean_up()
 
@@ -388,12 +400,14 @@ def test_soft_update(vector_space):
     target_params = list(cqn.actor_target.parameters())
     expected_params = [
         cqn.tau * eval_param + (1.0 - cqn.tau) * target_param
-        for eval_param, target_param in zip(eval_params, target_params)
+        for eval_param, target_param in zip(eval_params, target_params, strict=False)
     ]
 
     assert all(
         torch.allclose(expected_param, target_param)
-        for expected_param, target_param in zip(expected_params, target_params)
+        for expected_param, target_param in zip(
+            expected_params, target_params, strict=False
+        )
     )
     cqn.clean_up()
 
@@ -435,10 +449,12 @@ def test_clone_returns_identical_agent(observation_space, request):
     assert clone_agent.accelerator == cqn.accelerator
     assert_state_dicts_equal(clone_agent.actor.state_dict(), cqn.actor.state_dict())
     assert_state_dicts_equal(
-        clone_agent.actor_target.state_dict(), cqn.actor_target.state_dict()
+        clone_agent.actor_target.state_dict(),
+        cqn.actor_target.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.optimizer.state_dict(), cqn.optimizer.state_dict()
+        clone_agent.optimizer.state_dict(),
+        cqn.optimizer.state_dict(),
     )
     assert clone_agent.fitness == cqn.fitness
     assert clone_agent.steps == cqn.steps
@@ -465,10 +481,12 @@ def test_clone_returns_identical_agent(observation_space, request):
     assert clone_agent.accelerator == cqn.accelerator
     assert_state_dicts_equal(clone_agent.actor.state_dict(), cqn.actor.state_dict())
     assert_state_dicts_equal(
-        clone_agent.actor_target.state_dict(), cqn.actor_target.state_dict()
+        clone_agent.actor_target.state_dict(),
+        cqn.actor_target.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.optimizer.state_dict(), cqn.optimizer.state_dict()
+        clone_agent.optimizer.state_dict(),
+        cqn.optimizer.state_dict(),
     )
     assert clone_agent.fitness == cqn.fitness
     assert clone_agent.steps == cqn.steps
@@ -493,10 +511,12 @@ def test_clone_returns_identical_agent(observation_space, request):
     assert clone_agent.accelerator == cqn.accelerator
     assert_state_dicts_equal(clone_agent.actor.state_dict(), cqn.actor.state_dict())
     assert_state_dicts_equal(
-        clone_agent.actor_target.state_dict(), cqn.actor_target.state_dict()
+        clone_agent.actor_target.state_dict(),
+        cqn.actor_target.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.optimizer.state_dict(), cqn.optimizer.state_dict()
+        clone_agent.optimizer.state_dict(),
+        cqn.optimizer.state_dict(),
     )
     assert clone_agent.fitness == cqn.fitness
     assert clone_agent.steps == cqn.steps

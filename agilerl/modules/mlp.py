@@ -168,7 +168,9 @@ class EvolvableMLP(EvolvableModule):
         self._activation = activation
 
     def init_weights_gaussian(
-        self, std_coeff: float = 4, output_coeff: float = 4
+        self,
+        std_coeff: float = 4,
+        output_coeff: float = 4,
     ) -> None:
         """Initialise weights of neural network using Gaussian distribution.
 
@@ -249,7 +251,9 @@ class EvolvableMLP(EvolvableModule):
 
     @mutation(MutationType.NODE)
     def add_node(
-        self, hidden_layer: int | None = None, numb_new_nodes: int | None = None
+        self,
+        hidden_layer: int | None = None,
+        numb_new_nodes: int | None = None,
     ) -> dict[str, int]:
         """Adds nodes to hidden layer of neural network.
 
@@ -277,7 +281,9 @@ class EvolvableMLP(EvolvableModule):
 
     @mutation(MutationType.NODE)
     def remove_node(
-        self, hidden_layer: int | None = None, numb_new_nodes: int | None = None
+        self,
+        hidden_layer: int | None = None,
+        numb_new_nodes: int | None = None,
     ) -> dict[str, int]:
         """Removes nodes from hidden layer of neural network.
 
@@ -323,5 +329,6 @@ class EvolvableMLP(EvolvableModule):
         )
 
         self.model = EvolvableModule.preserve_parameters(
-            old_net=self.model, new_net=model
+            old_net=self.model,
+            new_net=model,
         )

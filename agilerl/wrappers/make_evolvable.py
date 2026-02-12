@@ -4,9 +4,9 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from accelerate import Accelerator
+from torch import nn
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
 from agilerl.modules.cnn import EvolvableCNN
@@ -116,7 +116,8 @@ class MakeEvolvable(EvolvableModule):
         ), "'min_channel_size' must be less than 'max_channel_size'."
         if not kwargs:
             assert isinstance(
-                network, nn.Module
+                network,
+                nn.Module,
             ), f"'network' must be of type 'nn.Module'.{type(network)}"
 
         self.init_layers = init_layers
@@ -165,7 +166,9 @@ class MakeEvolvable(EvolvableModule):
         # If first instance, network used to instantiate, upon cloning, init_dict used instead
         if not kwargs:
             self.detect_architecture(
-                network.to(self.device), self.input_tensor, self.secondary_input_tensor
+                network.to(self.device),
+                self.input_tensor,
+                self.secondary_input_tensor,
             )
         else:
             for key, value in kwargs.items():
@@ -274,15 +277,16 @@ class MakeEvolvable(EvolvableModule):
 
                 x = value + advantage - advantage.mean(1, keepdim=True)
                 x = F.softmax(x.view(-1, self.num_atoms), dim=-1).view(
-                    -1, self.num_outputs, self.num_atoms
+                    -1,
+                    self.num_outputs,
+                    self.num_atoms,
                 )
             x = x.clamp(min=1e-3)
 
             if q:
                 x = torch.sum(x * self.support, dim=2)
-        else:
-            if self.cnn_layer_info:
-                x = value
+        elif self.cnn_layer_info:
+            x = value
 
         return x
 
@@ -315,16 +319,18 @@ class MakeEvolvable(EvolvableModule):
 
         def register_hooks(module):
             def forward_hook(
-                module: nn.Module, input: torch.Tensor, output: torch.Tensor
+                module: nn.Module,
+                input: torch.Tensor,
+                output: torch.Tensor,
             ):
                 # Convolutional layer detection
                 if isinstance(module, nn.modules.conv._ConvNd):
                     self.has_conv_layers = True
                     self.conv_counter += 1
 
-                    if "conv_layer_type" not in cnn_layer_info.keys():
+                    if "conv_layer_type" not in cnn_layer_info:
                         cnn_layer_info["conv_layer_type"] = str(
-                            module.__class__.__name__
+                            module.__class__.__name__,
                         )
 
                     in_channel_list.append(module.in_channels)
@@ -351,29 +357,30 @@ class MakeEvolvable(EvolvableModule):
                     ),
                 ):
                     if len(output.shape) <= 2:
-                        if "norm_layers" not in mlp_layer_info.keys():
+                        if "norm_layers" not in mlp_layer_info:
                             mlp_layer_info["norm_layers"] = dict()
 
                         mlp_layer_info["norm_layers"][self.lin_counter] = str(
-                            module.__class__.__name__
+                            module.__class__.__name__,
                         )
                     else:
-                        if "norm_layers" not in cnn_layer_info.keys():
+                        if "norm_layers" not in cnn_layer_info:
                             cnn_layer_info["norm_layers"] = dict()
 
                         cnn_layer_info["norm_layers"][self.conv_counter] = str(
-                            module.__class__.__name__
+                            module.__class__.__name__,
                         )
 
                 # Pooling layer detection
                 elif isinstance(
-                    module, (nn.MaxPool2d, nn.MaxPool3d, nn.AvgPool2d, nn.AvgPool3d)
+                    module,
+                    (nn.MaxPool2d, nn.MaxPool3d, nn.AvgPool2d, nn.AvgPool3d),
                 ):
-                    if "pooling_layers" not in cnn_layer_info.keys():
+                    if "pooling_layers" not in cnn_layer_info:
                         cnn_layer_info["pooling_layers"] = dict()
                     cnn_layer_info["pooling_layers"][self.conv_counter] = dict()
                     cnn_layer_info["pooling_layers"][self.conv_counter]["name"] = str(
-                        module.__class__.__name__
+                        module.__class__.__name__,
                     )
                     cnn_layer_info["pooling_layers"][self.conv_counter][
                         "kernel"
@@ -409,20 +416,20 @@ class MakeEvolvable(EvolvableModule):
                     ),
                 ):
                     if len(output.shape) <= 2:
-                        if "activation_layers" not in mlp_layer_info.keys():
+                        if "activation_layers" not in mlp_layer_info:
                             mlp_layer_info["activation_layers"] = dict()
                         mlp_layer_info["activation_layers"][self.lin_counter] = str(
-                            module.__class__.__name__
+                            module.__class__.__name__,
                         )
                     else:
-                        if "activation_layers" not in cnn_layer_info.keys():
+                        if "activation_layers" not in cnn_layer_info:
                             cnn_layer_info["activation_layers"] = dict()
                         cnn_layer_info["activation_layers"][self.conv_counter] = str(
-                            module.__class__.__name__
+                            module.__class__.__name__,
                         )
                 else:
                     raise Exception(
-                        f"{module} not currently supported, use an alternative layer."
+                        f"{module} not currently supported, use an alternative layer.",
                     )
 
             if (
@@ -467,10 +474,9 @@ class MakeEvolvable(EvolvableModule):
 
         if len(activation_function_set) > 1:
             raise TypeError(
-                "All activation functions other than the output layer activation must be the same."
+                "All activation functions other than the output layer activation must be the same.",
             )
-        else:
-            self.mlp_activation = list(mlp_layer_info["activation_layers"].values())[0]
+        self.mlp_activation = list(mlp_layer_info["activation_layers"].values())[0]
 
         self.cnn_layer_info = cnn_layer_info
         if self.has_conv_layers is True:
@@ -517,7 +523,6 @@ class MakeEvolvable(EvolvableModule):
         :param rainbow_feature_net: Whether this is a Rainbow DQN feature network
         :type rainbow_feature_net: bool
         """
-
         net_dict = OrderedDict()
         if noisy:
             net_dict[f"{name}_linear_layer_0"] = NoisyLinear(input_size, hidden_size[0])
@@ -526,50 +531,58 @@ class MakeEvolvable(EvolvableModule):
 
         if self.init_layers:
             net_dict[f"{name}_linear_layer_0"] = layer_init(
-                net_dict[f"{name}_linear_layer_0"]
+                net_dict[f"{name}_linear_layer_0"],
             )
 
         if ("norm_layers" in self.mlp_layer_info.keys()) and (
             0 in self.mlp_layer_info["norm_layers"].keys()
         ):
             net_dict[f"{name}_layer_norm_0"] = get_normalization(
-                self.mlp_layer_info["norm_layers"][0], hidden_size[0]
+                self.mlp_layer_info["norm_layers"][0],
+                hidden_size[0],
             )
 
         if ("activation_layers" in self.mlp_layer_info.keys()) and (
             0 in self.mlp_layer_info["activation_layers"].keys()
         ):
             net_dict[f"{name}_activation_0"] = get_activation(
-                mlp_output_activation
-                if (len(hidden_size) == 1 and rainbow_feature_net)
-                else mlp_activation
+                (
+                    mlp_output_activation
+                    if (len(hidden_size) == 1 and rainbow_feature_net)
+                    else mlp_activation
+                ),
             )
 
         if len(hidden_size) > 1:
             for l_no in range(1, len(hidden_size)):
                 if noisy:
-                    net_dict[f"{name}_linear_layer_{str(l_no)}"] = NoisyLinear(
-                        hidden_size[l_no - 1], hidden_size[l_no]
+                    net_dict[f"{name}_linear_layer_{l_no!s}"] = NoisyLinear(
+                        hidden_size[l_no - 1],
+                        hidden_size[l_no],
                     )
                 else:
-                    net_dict[f"{name}_linear_layer_{str(l_no)}"] = nn.Linear(
-                        hidden_size[l_no - 1], hidden_size[l_no]
+                    net_dict[f"{name}_linear_layer_{l_no!s}"] = nn.Linear(
+                        hidden_size[l_no - 1],
+                        hidden_size[l_no],
                     )
                 if self.init_layers:
-                    net_dict[f"{name}_linear_layer_{str(l_no)}"] = layer_init(
-                        net_dict[f"{name}_linear_layer_{str(l_no)}"]
+                    net_dict[f"{name}_linear_layer_{l_no!s}"] = layer_init(
+                        net_dict[f"{name}_linear_layer_{l_no!s}"],
                     )
                 if ("norm_layers" in self.mlp_layer_info.keys()) and (
                     l_no in self.mlp_layer_info["norm_layers"].keys()
                 ):
-                    net_dict[f"{name}_layer_norm_{str(l_no)}"] = get_normalization(
-                        self.mlp_layer_info["norm_layers"][l_no], hidden_size[l_no]
+                    net_dict[f"{name}_layer_norm_{l_no!s}"] = get_normalization(
+                        self.mlp_layer_info["norm_layers"][l_no],
+                        hidden_size[l_no],
                     )
                 if l_no in self.mlp_layer_info["activation_layers"].keys():
-                    net_dict[f"{name}_activation_{str(l_no)}"] = get_activation(
-                        mlp_activation
-                        if not rainbow_feature_net
-                        else mlp_output_activation
+                    net_dict[f"{name}_activation_{l_no!s}"] = get_activation(
+                        (
+                            mlp_activation
+                            if not rainbow_feature_net
+                            else mlp_output_activation
+                        ),
                     )
         if not rainbow_feature_net:
             if noisy:
@@ -586,7 +599,7 @@ class MakeEvolvable(EvolvableModule):
             net_dict[f"{name}_linear_layer_output"] = output_layer
             if mlp_output_activation is not None:
                 net_dict[f"{name}_activation_output"] = get_activation(
-                    mlp_output_activation
+                    mlp_output_activation,
                 )
 
         return nn.Sequential(net_dict)
@@ -615,7 +628,6 @@ class MakeEvolvable(EvolvableModule):
         :param name: Layer name
         :type name: str
         """
-
         net_dict = OrderedDict()
         # if self.cnn_layer_info["conv_layer_type"] == "Conv3d":
         #     k_size = [
@@ -636,14 +648,15 @@ class MakeEvolvable(EvolvableModule):
             0 in self.cnn_layer_info["norm_layers"].keys()
         ):
             net_dict[f"{name}_layer_norm_0"] = get_normalization(
-                self.cnn_layer_info["norm_layers"][0], channel_size[0]
+                self.cnn_layer_info["norm_layers"][0],
+                channel_size[0],
             )
 
         if ("activation_layers" in self.cnn_layer_info.keys()) and (
             0 in self.cnn_layer_info["activation_layers"].keys()
         ):
             net_dict[f"{name}_activation_0"] = get_activation(
-                self.cnn_layer_info["activation_layers"][0]
+                self.cnn_layer_info["activation_layers"][0],
             )
 
         if ("pooling_layers" in self.cnn_layer_info.keys()) and (
@@ -658,7 +671,7 @@ class MakeEvolvable(EvolvableModule):
 
         if len(channel_size) > 1:
             for l_no in range(1, len(channel_size)):
-                net_dict[f"{name}_conv_layer_{str(l_no)}"] = get_conv_layer(
+                net_dict[f"{name}_conv_layer_{l_no!s}"] = get_conv_layer(
                     self.cnn_layer_info["conv_layer_type"],
                     in_channels=channel_size[l_no - 1],
                     out_channels=channel_size[l_no],
@@ -669,21 +682,22 @@ class MakeEvolvable(EvolvableModule):
                 if ("norm_layers" in self.cnn_layer_info.keys()) and (
                     l_no in self.cnn_layer_info["norm_layers"].keys()
                 ):
-                    net_dict[f"{name}_layer_norm_{str(l_no)}"] = get_normalization(
-                        self.cnn_layer_info["norm_layers"][l_no], channel_size[l_no]
+                    net_dict[f"{name}_layer_norm_{l_no!s}"] = get_normalization(
+                        self.cnn_layer_info["norm_layers"][l_no],
+                        channel_size[l_no],
                     )
 
                 if ("activation_layers" in self.cnn_layer_info.keys()) and (
                     l_no in self.cnn_layer_info["activation_layers"].keys()
                 ):
-                    net_dict[f"{name}_activation_{str(l_no)}"] = get_activation(
-                        self.cnn_layer_info["activation_layers"][l_no]
+                    net_dict[f"{name}_activation_{l_no!s}"] = get_activation(
+                        self.cnn_layer_info["activation_layers"][l_no],
                     )
 
                 if ("pooling_layers" in self.cnn_layer_info.keys()) and (
                     l_no in self.cnn_layer_info["pooling_layers"].keys()
                 ):
-                    net_dict[f"{name}_pooling_{str(l_no)}"] = get_pooling(
+                    net_dict[f"{name}_pooling_{l_no!s}"] = get_pooling(
                         self.cnn_layer_info["pooling_layers"][l_no]["name"],
                         self.cnn_layer_info["pooling_layers"][l_no]["kernel"],
                         self.cnn_layer_info["pooling_layers"][l_no]["stride"],
@@ -694,7 +708,6 @@ class MakeEvolvable(EvolvableModule):
 
     def build_networks(self) -> tuple[nn.Module, nn.Module, nn.Module | None]:
         """Creates and returns the feature and value net."""
-
         # Check if any CNN layers otherwise return just a mlp
         if self.cnn_layer_info:
             feature_net = self.create_cnn(
@@ -706,7 +719,7 @@ class MakeEvolvable(EvolvableModule):
                 name="feature",
             )
             cnn_output: torch.Tensor = feature_net(
-                torch.zeros(*self.input_tensor.shape)
+                torch.zeros(*self.input_tensor.shape),
             )
             self.cnn_output_size = cnn_output.shape
             input_size = (cnn_output).to(self.device).view(1, -1).size(1)
@@ -872,19 +885,18 @@ class MakeEvolvable(EvolvableModule):
                     self.mlp_layer_info["activation_layers"].pop(len(self.hidden_size))
                 else:
                     self.mlp_layer_info["activation_layers"].pop(
-                        len(self.hidden_size) + 1
+                        len(self.hidden_size) + 1,
                     )
                     self.mlp_layer_info["activation_layers"][
                         len(self.hidden_size)
                     ] = self.mlp_output_activation
-            else:
-                if self.mlp_output_activation is not None:
-                    self.mlp_layer_info["activation_layers"].pop(
-                        len(self.hidden_size) + 1
-                    )
-                    self.mlp_layer_info["activation_layers"][
-                        len(self.hidden_size)
-                    ] = self.mlp_output_activation
+            elif self.mlp_output_activation is not None:
+                self.mlp_layer_info["activation_layers"].pop(
+                    len(self.hidden_size) + 1,
+                )
+                self.mlp_layer_info["activation_layers"][
+                    len(self.hidden_size)
+                ] = self.mlp_output_activation
 
             if (
                 "norm_layers" in self.mlp_layer_info.keys()
@@ -897,7 +909,9 @@ class MakeEvolvable(EvolvableModule):
 
     @mutation(MutationType.NODE)
     def add_mlp_node(
-        self, hidden_layer: int | None = None, numb_new_nodes: int | None = None
+        self,
+        hidden_layer: int | None = None,
+        numb_new_nodes: int | None = None,
     ) -> dict[str, int]:
         """Adds nodes to hidden layer of value network.
 
@@ -922,7 +936,9 @@ class MakeEvolvable(EvolvableModule):
 
     @mutation(MutationType.NODE)
     def remove_mlp_node(
-        self, hidden_layer: int | None = None, numb_new_nodes: int | None = None
+        self,
+        hidden_layer: int | None = None,
+        numb_new_nodes: int | None = None,
     ) -> dict[str, int]:
         """Removes nodes from hidden layer of neural network.
 
@@ -966,7 +982,7 @@ class MakeEvolvable(EvolvableModule):
                 for tup in stride_size_ranges
             ]
             self.stride_size = stride_size_list + [
-                tuple(1 for _ in self.stride_size[-1])
+                tuple(1 for _ in self.stride_size[-1]),
             ]
             if "activation_layers" not in self.cnn_layer_info.keys():
                 self.cnn_layer_info["activation_layers"] = dict()
@@ -1094,7 +1110,7 @@ class MakeEvolvable(EvolvableModule):
         return {"hidden_layer": hidden_layer, "numb_new_channels": numb_new_channels}
 
     def calc_max_kernel_sizes(self) -> list[tuple[int, int]]:
-        "Calculates the max kernel size for each convolutional layer of the feature net."
+        """Calculates the max kernel size for each convolutional layer of the feature net."""
         max_kernel_list = []
         if self.cnn_layer_info["conv_layer_type"] != "Conv3d":
             height_in, width_in = self.input_tensor.shape[-2:]
@@ -1139,7 +1155,7 @@ class MakeEvolvable(EvolvableModule):
                     - 1
                 ) / (self.stride_size[idx][2])
                 max_kernel_sizes = np.array(
-                    [depth_out, height_out * 0.2, width_out * 0.2]
+                    [depth_out, height_out * 0.2, width_out * 0.2],
                 )
                 max_kernel_sizes = np.where(max_kernel_sizes < 0, 0, max_kernel_sizes)
                 max_kernel_sizes = np.where(max_kernel_sizes > 10, 10, max_kernel_sizes)
@@ -1151,7 +1167,7 @@ class MakeEvolvable(EvolvableModule):
         return max_kernel_list
 
     def calc_stride_size_ranges(self) -> list[tuple[int, int]]:
-        "Calculates a range of stride sizes for each convolutional layer of the feature net."
+        """Calculates a range of stride sizes for each convolutional layer of the feature net."""
         stride_range_list = []
         if self.cnn_layer_info["conv_layer_type"] != "Conv3d":
             height_in, width_in = self.input_tensor.shape[-2:]
@@ -1198,10 +1214,14 @@ class MakeEvolvable(EvolvableModule):
                 ) / (self.stride_size[idx][2])
 
                 min_stride = min(
-                    -(-height_out // 100), -(-width_out // 100), -(-depth_out // 100)
+                    -(-height_out // 100),
+                    -(-width_out // 100),
+                    -(-depth_out // 100),
                 )
                 max_stride = min(
-                    -(-height_out // 40), -(-width_out // 40), -(-depth_out // 40)
+                    -(-height_out // 40),
+                    -(-width_out // 40),
+                    -(-depth_out // 40),
                 )
 
                 stride_range_list.append((int(min_stride), int(max_stride)))
@@ -1227,14 +1247,17 @@ class MakeEvolvable(EvolvableModule):
 
         if self.value_net is not None:
             new_value_net = preserve_params_fn(
-                old_net=self.value_net, new_net=new_value_net
+                old_net=self.value_net,
+                new_net=new_value_net,
             )
         if self.advantage_net is not None:
             new_advantage_net = preserve_params_fn(
-                old_net=self.advantage_net, new_net=new_advantage_net
+                old_net=self.advantage_net,
+                new_net=new_advantage_net,
             )
         new_feature_net = preserve_params_fn(
-            old_net=self.feature_net, new_net=new_feature_net
+            old_net=self.feature_net,
+            new_net=new_feature_net,
         )
 
         self.feature_net, self.value_net, self.advantage_net = (

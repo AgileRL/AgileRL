@@ -17,7 +17,7 @@ torch.serialization.add_safe_globals(
         DataPoint,
         GeneralDataset,
         Language_Observation,
-    ]
+    ],
 )
 
 
@@ -93,7 +93,11 @@ def test_forward():
     double_q = True
 
     algo = ILQL(
-        rl_ds, net_config=net_config, double_q=double_q, value_min=0, value_max=1
+        rl_ds,
+        net_config=net_config,
+        double_q=double_q,
+        value_min=0,
+        value_max=1,
     )
 
     tokens = torch.tensor([[0, 1, 2, 3, 4]])
@@ -111,7 +115,7 @@ def test_forward():
     assert outputs["logits"].shape == (1, 5, 35)
 
     prefix_embs = torch.empty((tokens.shape[0], 0, algo.net_config["n_embd"])).to(
-        algo.device
+        algo.device,
     )
 
     prefix_attn_mask = torch.tensor([[1, 1, 1]]).bool()
@@ -183,7 +187,11 @@ def test_get_loss():
     assert isinstance(loss[0].item(), float)
 
     algo = ILQL(
-        rl_ds, net_config=net_config, double_q=False, exp_weights=False, clip_weight=0.1
+        rl_ds,
+        net_config=net_config,
+        double_q=False,
+        exp_weights=False,
+        clip_weight=0.1,
     )
 
     inputs = {
@@ -210,8 +218,8 @@ def test_get_loss():
     _ = loss[2][0](loss_dict)
     _ = loss[2][1](loss_dict)
 
-    assert "loss" in loss_dict.keys()
-    assert "advantage_hist" in loss_dict.keys()
+    assert "loss" in loss_dict
+    assert "advantage_hist" in loss_dict
     algo.clean_up()
 
 
@@ -272,9 +280,9 @@ def test_prepare_inputs():
 
     items = algo.prepare_inputs(dps)
     assert isinstance(items, dict)
-    assert "tokens" in items.keys()
-    assert "state_idxs" in items.keys()
-    assert "action_idxs" in items.keys()
+    assert "tokens" in items
+    assert "state_idxs" in items
+    assert "action_idxs" in items
     algo.clean_up()
 
 
@@ -327,7 +335,10 @@ def test_get_scores():
 
     items = algo.prepare_inputs(inputs)
     score = algo.get_scores(
-        items, exp_weights=True, clip_weight=0.1, include_logits=True
+        items,
+        exp_weights=True,
+        clip_weight=0.1,
+        include_logits=True,
     )
     assert isinstance(score, torch.Tensor)
 
@@ -367,36 +378,42 @@ def test_soft_update():
     target_params = list(algo.target_q.parameters())
     expected_params = [
         algo.alpha * eval_param + (1.0 - algo.alpha) * target_param
-        for eval_param, target_param in zip(eval_params, target_params)
+        for eval_param, target_param in zip(eval_params, target_params, strict=False)
     ]
 
     assert all(
         torch.allclose(expected_param, target_param)
-        for expected_param, target_param in zip(expected_params, target_params)
+        for expected_param, target_param in zip(
+            expected_params, target_params, strict=False
+        )
     )
 
     eval_params = list(algo.q2.parameters())
     target_params = list(algo.target_q2.parameters())
     expected_params = [
         algo.alpha * eval_param + (1.0 - algo.alpha) * target_param
-        for eval_param, target_param in zip(eval_params, target_params)
+        for eval_param, target_param in zip(eval_params, target_params, strict=False)
     ]
 
     assert all(
         torch.allclose(expected_param, target_param)
-        for expected_param, target_param in zip(expected_params, target_params)
+        for expected_param, target_param in zip(
+            expected_params, target_params, strict=False
+        )
     )
 
     eval_params = list(algo.actor_target.parameters())
     target_params = list(algo.model.parameters())
     expected_params = [
         algo.alpha * eval_param + (1.0 - algo.alpha) * target_param
-        for eval_param, target_param in zip(eval_params, target_params)
+        for eval_param, target_param in zip(eval_params, target_params, strict=False)
     ]
 
     assert all(
         torch.allclose(expected_param, target_param)
-        for expected_param, target_param in zip(expected_params, target_params)
+        for expected_param, target_param in zip(
+            expected_params, target_params, strict=False
+        )
     )
     algo.clean_up()
 
@@ -490,7 +507,8 @@ def test_clone():
     assert_state_dicts_equal(algo.target_q2.state_dict(), clone.target_q2.state_dict())
     assert_state_dicts_equal(algo.actor.state_dict(), clone.actor.state_dict())
     assert_state_dicts_equal(
-        algo.actor_target.state_dict(), clone.actor_target.state_dict()
+        algo.actor_target.state_dict(),
+        clone.actor_target.state_dict(),
     )
     assert_state_dicts_equal(algo.model.state_dict(), clone.model.state_dict())
     algo.clean_up()

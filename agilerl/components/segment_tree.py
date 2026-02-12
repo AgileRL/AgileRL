@@ -1,5 +1,5 @@
 import operator
-from typing import Callable
+from collections.abc import Callable
 
 
 class SegmentTree:
@@ -25,7 +25,12 @@ class SegmentTree:
         self.operation = operation
 
     def _operate_helper(
-        self, start: int, end: int, node: int, node_start: int, node_end: int
+        self,
+        start: int,
+        end: int,
+        node: int,
+        node_start: int,
+        node_end: int,
     ) -> float:
         """Returns result of operation in segment.
 
@@ -48,14 +53,12 @@ class SegmentTree:
         mid = (node_start + node_end) // 2
         if end <= mid:
             return self._operate_helper(start, end, 2 * node, node_start, mid)
-        else:
-            if mid + 1 <= start:
-                return self._operate_helper(start, end, 2 * node + 1, mid + 1, node_end)
-            else:
-                return self.operation(
-                    self._operate_helper(start, mid, 2 * node, node_start, mid),
-                    self._operate_helper(mid + 1, end, 2 * node + 1, mid + 1, node_end),
-                )
+        if mid + 1 <= start:
+            return self._operate_helper(start, end, 2 * node + 1, mid + 1, node_end)
+        return self.operation(
+            self._operate_helper(start, mid, 2 * node, node_start, mid),
+            self._operate_helper(mid + 1, end, 2 * node + 1, mid + 1, node_end),
+        )
 
     def operate(self, start: int = 0, end: int = 0) -> float:
         """Returns result of applying `self.operation`.

@@ -25,7 +25,8 @@ def sum_independent_tensor(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def apply_action_mask_discrete(
-    logits: torch.Tensor, mask: torch.Tensor
+    logits: torch.Tensor,
+    mask: torch.Tensor,
 ) -> torch.Tensor:
     """Apply a mask to the logits.
 
@@ -47,7 +48,9 @@ class DistributionHandler(Protocol):
         ...
 
     def log_prob(
-        self, distribution: DistributionType, action: torch.Tensor
+        self,
+        distribution: DistributionType,
+        action: torch.Tensor,
     ) -> torch.Tensor:
         """Get the log probability of the action."""
         ...
@@ -173,7 +176,9 @@ class MultiCategoricalHandler:
         return torch.stack([dist.sample() for dist in distribution], dim=1)
 
     def log_prob(
-        self, distribution: list[Categorical], action: torch.Tensor
+        self,
+        distribution: list[Categorical],
+        action: torch.Tensor,
     ) -> torch.Tensor:
         """Get the log probability of the action.
 
@@ -341,7 +346,7 @@ class EvolvableDistribution(EvolvableWrapper):
         if isinstance(action_space, spaces.Box):
             self.log_std = torch.nn.Parameter(
                 torch.ones(1, np.prod(action_space.shape), device=device)
-                * action_std_init
+                * action_std_init,
             )
 
     @property
@@ -383,7 +388,7 @@ class EvolvableDistribution(EvolvableWrapper):
             dist = Bernoulli(logits=logits)
         else:
             raise NotImplementedError(
-                f"Action space {self.action_space} not supported."
+                f"Action space {self.action_space} not supported.",
             )
 
         return TorchDistribution(dist, self.squash_output)
@@ -424,7 +429,7 @@ class EvolvableDistribution(EvolvableWrapper):
         """
         # Convert mask to tensor and reshape to match logits shape
         mask = torch.as_tensor(mask, dtype=torch.bool, device=self.device).view(
-            logits.shape
+            logits.shape,
         )
 
         if isinstance(self.action_space, spaces.Discrete):
@@ -443,13 +448,13 @@ class EvolvableDistribution(EvolvableWrapper):
             masked_logits = []
             for split_logits, split_mask in zip(split_logits, split_masks):
                 masked_logits.append(
-                    apply_action_mask_discrete(split_logits, split_mask)
+                    apply_action_mask_discrete(split_logits, split_mask),
                 )
 
             masked_logits = torch.cat(masked_logits, dim=1)
         else:
             raise NotImplementedError(
-                f"Action space {self.action_space} not supported."
+                f"Action space {self.action_space} not supported.",
             )
 
         return masked_logits

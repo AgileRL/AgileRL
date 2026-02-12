@@ -87,12 +87,7 @@ def test_incorrect_instantiation(
     explicit_block_type,  # New parameter
     device,
 ):
-    if explicit_block_type:
-        block_type = explicit_block_type
-    else:
-        # Default inference for cases not needing explicit type for the error
-        # This branch might not be strictly necessary if all cases provide explicit_block_type or are fine with Conv2d default for 3-dim input_shape
-        block_type = "Conv1d" if len(input_shape) < 3 else "Conv2d"
+    block_type = explicit_block_type or ("Conv1d" if len(input_shape) < 3 else "Conv2d")
 
     with pytest.raises(AssertionError):
         EvolvableCNN(
@@ -277,7 +272,7 @@ def test_add_cnn_layer_simple(
     if initial_channel_num < 6:
         assert len(evolvable_cnn.channel_size) == initial_channel_num + 1
         for key, param in new_net.named_parameters():
-            if key in initial_net_dict.keys() and "linear_output" not in key:
+            if key in initial_net_dict and "linear_output" not in key:
                 torch.testing.assert_close(param, initial_net_dict[key])
     else:
         assert len(evolvable_cnn.channel_size) == initial_channel_num
@@ -353,7 +348,7 @@ def test_add_and_remove_multiple_cnn_layers(
         sample_data = torch.ones(1, input_shape[0], input_shape[1]).to(device)
     else:  # Conv2d/Conv3d (original was (1,3,84,84) - assuming input_shape[0] is num_channels)
         sample_data = torch.ones(1, input_shape[0], input_shape[1], input_shape[2]).to(
-            device
+            device,
         )
 
     output = evolvable_cnn(sample_data)
@@ -440,10 +435,7 @@ def test_remove_cnn_layer(
     if initial_channel_num > 1:
         assert len(evolvable_cnn.channel_size) == initial_channel_num - 1
         for key, param in new_net.named_parameters():
-            if (
-                key in initial_net_dict.keys()
-                and param.shape == initial_net_dict[key].shape
-            ):
+            if key in initial_net_dict and param.shape == initial_net_dict[key].shape:
                 torch.testing.assert_close(param, initial_net_dict[key])
     else:
         assert len(evolvable_cnn.channel_size) == initial_channel_num
@@ -520,7 +512,8 @@ def test_remove_channels(
     )
     original_channel_size = copy.deepcopy(evolvable_cnn.channel_size)
     result = evolvable_cnn.remove_channel(
-        numb_new_channels=numb_new_channels, hidden_layer=layer_index
+        numb_new_channels=numb_new_channels,
+        hidden_layer=layer_index,
     )
     hidden_layer = result["hidden_layer"]
     numb_new_channels = result["numb_new_channels"]

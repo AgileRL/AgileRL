@@ -177,7 +177,7 @@ def test_finetune_llm_reasoning_evolvable_training_loop(use_accelerator):
         patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
         patch(
-            "agilerl.training.train_llm.tournament_selection_and_mutation"
+            "agilerl.training.train_llm.tournament_selection_and_mutation",
         ) as mock_tournament_selection_and_mutation,
     ):
 
@@ -207,14 +207,17 @@ def test_finetune_llm_reasoning_evolvable_training_loop(use_accelerator):
 
 
 @pytest.mark.parametrize(
-    "finetune_fn", [finetune_llm_reasoning, finetune_llm_preference]
+    "finetune_fn",
+    [finetune_llm_reasoning, finetune_llm_preference],
 )
 def test_finetune_llm_reasoning_evo_steps_not_set(finetune_fn):
     """Test that finetune_llm_reasoning raises a ValueError if evo_steps is not set."""
     with pytest.raises(ValueError) as evo_steps_not_set_error:
         finetune_fn(
             pop=[
-                MagicMock(spec=(GRPO if finetune_fn == finetune_llm_reasoning else DPO))
+                MagicMock(
+                    spec=(GRPO if finetune_fn == finetune_llm_reasoning else DPO)
+                ),
             ],
             env=MagicMock(),
             evo_steps=None,
@@ -229,15 +232,17 @@ def test_finetune_llm_reasoning_evo_steps_not_set(finetune_fn):
 
 
 @pytest.mark.parametrize(
-    "finetune_fn", [finetune_llm_reasoning, finetune_llm_preference]
+    "finetune_fn",
+    [finetune_llm_reasoning, finetune_llm_preference],
 )
 def test_finetune_llm_reasoning_value_error_if_evo_steps_not_set(finetune_fn):
     """Test that finetune_llm_reasoning raises a warning if evo_steps is not set."""
-
     with pytest.raises(ValueError) as evo_steps_not_set_error:
         finetune_llm_reasoning(
             pop=[
-                MagicMock(spec=(GRPO if finetune_fn == finetune_llm_reasoning else DPO))
+                MagicMock(
+                    spec=(GRPO if finetune_fn == finetune_llm_reasoning else DPO)
+                ),
             ],
             env=MagicMock(),
             evo_steps=None,
@@ -282,7 +287,7 @@ def test_finetune_llm_reasoning_warning_num_epochs_and_max_steps():
         patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
         patch(
-            "agilerl.training.train_llm.tournament_selection_and_mutation"
+            "agilerl.training.train_llm.tournament_selection_and_mutation",
         ) as mock_tournament_selection_and_mutation,
     ):
 
@@ -476,7 +481,6 @@ def test_finetune_llm_preference_basic_training_loop(use_accelerator):
 )
 def test_finetune_llm_preference_with_wandb_and_checkpoints(use_accelerator):
     """Test finetune_llm with wandb logging and checkpointing enabled."""
-
     # Create mock agent
     mock_agent = MagicMock(spec=DPO)
     mock_agent.algo = "DPO"
@@ -593,7 +597,7 @@ def test_finetune_llm_preference_evolvable_training_loop(use_accelerator):
         patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
         patch(
-            "agilerl.training.train_llm.tournament_selection_and_mutation"
+            "agilerl.training.train_llm.tournament_selection_and_mutation",
         ) as mock_tournament_selection_and_mutation,
     ):
 
@@ -659,7 +663,7 @@ def test_finetune_llm_preference_warning_num_epochs_and_max_steps():
         patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
         patch(
-            "agilerl.training.train_llm.tournament_selection_and_mutation"
+            "agilerl.training.train_llm.tournament_selection_and_mutation",
         ) as mock_tournament_selection_and_mutation,
     ):
 

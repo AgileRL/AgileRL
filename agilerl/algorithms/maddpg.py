@@ -6,9 +6,8 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
 from gymnasium import spaces
+from torch import nn, optim
 
 from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
@@ -158,11 +157,12 @@ class MADDPG(MultiAgentRLAlgorithm):
         assert isinstance(tau, float), "Tau must be a float."
         assert tau > 0, "Tau must be greater than zero."
         assert isinstance(
-            wrap, bool
+            wrap,
+            bool,
         ), "Wrap models flag must be boolean value True or False."
         if (actor_networks is not None) != (critic_networks is not None):
             warnings.warn(
-                "Actor and critic network must both be supplied to use custom networks. Defaulting to net config."
+                "Actor and critic network must both be supplied to use custom networks. Defaulting to net config.",
             )
 
         self.batch_size = batch_size
@@ -211,24 +211,24 @@ class MADDPG(MultiAgentRLAlgorithm):
         if actor_networks is not None and critic_networks is not None:
             if isinstance(actor_networks, list):
                 assert len(actor_networks) == len(
-                    self.agent_ids
+                    self.agent_ids,
                 ), "actor_networks must be a list of the same length as the number of agents"
                 actor_networks = ModuleDict(
                     {
                         self.agent_ids[i]: actor_networks[i]
                         for i in range(len(self.agent_ids))
-                    }
+                    },
                 )
             if isinstance(critic_networks, list):
                 assert len(critic_networks) == len(
-                    self.agent_ids
+                    self.agent_ids,
                 ), "critic_networks must be a list of the same length as the number of agents"
 
                 critic_networks = ModuleDict(
                     {
                         self.agent_ids[i]: critic_networks[i]
                         for i in range(len(self.agent_ids))
-                    }
+                    },
                 )
 
             actors_list = list(actor_networks.values())
@@ -243,21 +243,24 @@ class MADDPG(MultiAgentRLAlgorithm):
 
             if not all(isinstance(net, EvolvableModule) for net in actors_list):
                 raise TypeError(
-                    "All actor networks must be instances of EvolvableModule"
+                    "All actor networks must be instances of EvolvableModule",
                 )
             if not all(isinstance(net, EvolvableModule) for net in critics_list):
                 raise TypeError(
-                    "All critic networks must be instances of EvolvableModule"
+                    "All critic networks must be instances of EvolvableModule",
                 )
             self.actors, self.critics = make_safe_deepcopies(
-                actor_networks, critic_networks
+                actor_networks,
+                critic_networks,
             )
             self.actor_targets, self.critic_targets = make_safe_deepcopies(
-                actor_networks, critic_networks
+                actor_networks,
+                critic_networks,
             )
         else:
             agent_configs, encoder_configs = self.build_net_config(
-                net_config, return_encoders=True
+                net_config,
+                return_encoders=True,
             )
 
             # Iterate over actor configs and modify accordingly
@@ -278,19 +281,19 @@ class MADDPG(MultiAgentRLAlgorithm):
                 [
                     agent_configs[agent_id].get("latent_dim", 32)
                     for agent_id in self.agent_ids
-                ]
+                ],
             )
             min_latent_dim = min(
                 [
                     agent_configs[agent_id].get("min_latent_dim", 8)
                     for agent_id in self.agent_ids
-                ]
+                ],
             )
             max_latent_dim = max(
                 [
                     agent_configs[agent_id].get("max_latent_dim", 128)
                     for agent_id in self.agent_ids
-                ]
+                ],
             )
             critic_encoder_config = format_shared_critic_encoder(encoder_configs)
             critic_head_config = get_deepest_head_config(agent_configs, self.agent_ids)
@@ -319,40 +322,44 @@ class MADDPG(MultiAgentRLAlgorithm):
                 return ContinuousQNetwork(
                     observation_space=self.possible_observation_spaces,
                     action_space=concatenate_spaces(
-                        list(self.possible_action_spaces.values())
+                        list(self.possible_action_spaces.values()),
                     ),
                     device=self.device,
                     **copy.deepcopy(critic_net_config),
                 )
 
             self.actors = ModuleDict(
-                {agent_id: create_actor(agent_id) for agent_id in self.agent_ids}
+                {agent_id: create_actor(agent_id) for agent_id in self.agent_ids},
             )
             self.critics = ModuleDict(
-                {agent_id: create_critic() for agent_id in self.agent_ids}
+                {agent_id: create_critic() for agent_id in self.agent_ids},
             )
             self.actor_targets = ModuleDict(
-                {agent_id: create_actor(agent_id) for agent_id in self.agent_ids}
+                {agent_id: create_actor(agent_id) for agent_id in self.agent_ids},
             )
             self.critic_targets = ModuleDict(
-                {agent_id: create_critic() for agent_id in self.agent_ids}
+                {agent_id: create_critic() for agent_id in self.agent_ids},
             )
 
         # Initialise target network parameters
         for agent_id in self.agent_ids:
             self.actor_targets[agent_id].load_state_dict(
-                self.actors[agent_id].state_dict()
+                self.actors[agent_id].state_dict(),
             )
             self.critic_targets[agent_id].load_state_dict(
-                self.critics[agent_id].state_dict()
+                self.critics[agent_id].state_dict(),
             )
 
         # Optimizers
         self.actor_optimizers = OptimizerWrapper(
-            optim.Adam, networks=self.actors, lr=self.lr_actor
+            optim.Adam,
+            networks=self.actors,
+            lr=self.lr_actor,
         )
         self.critic_optimizers = OptimizerWrapper(
-            optim.Adam, networks=self.critics, lr=self.lr_critic
+            optim.Adam,
+            networks=self.critics,
+            lr=self.lr_critic,
         )
 
         if self.accelerator is not None and wrap:
@@ -367,7 +374,7 @@ class MADDPG(MultiAgentRLAlgorithm):
             ):
                 warnings.warn(
                     f"{self.torch_compiler} compile mode is not compatible with GumbelSoftmax "
-                    "activation, changing to 'default' mode."
+                    "activation, changing to 'default' mode.",
                 )
                 self.torch_compiler = "default"
 
@@ -382,20 +389,20 @@ class MADDPG(MultiAgentRLAlgorithm):
                 eval_network=self.actors,
                 shared_networks=self.actor_targets,
                 policy=True,
-            )
+            ),
         )
         self.register_network_group(
             NetworkGroup(
                 eval_network=self.critics,
                 shared_networks=self.critic_targets,
-            )
+            ),
         )
 
     def process_infos(
-        self, infos: InfosDict | None
+        self,
+        infos: InfosDict | None,
     ) -> tuple[ArrayDict, ArrayDict, ArrayDict]:
-        """
-        Process the information, extract env_defined_actions, action_masks and agent_masks
+        """Process the information, extract env_defined_actions, action_masks and agent_masks
 
         :param infos: Info dict
         :type infos: dict[str, dict[...]]
@@ -410,7 +417,9 @@ class MADDPG(MultiAgentRLAlgorithm):
         return action_masks, env_defined_actions, agent_masks
 
     def get_action(
-        self, obs: dict[str, ObservationType], infos: InfosDict | None = None
+        self,
+        obs: dict[str, ObservationType],
+        infos: InfosDict | None = None,
     ) -> tuple[ArrayDict, ArrayDict]:
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
@@ -424,7 +433,8 @@ class MADDPG(MultiAgentRLAlgorithm):
         :rtype: tuple[dict[str, np.ndarray], dict[str, np.ndarray]]
         """
         assert not key_in_nested_dict(
-            obs, "action_mask"
+            obs,
+            "action_mask",
         ), "AgileRL requires action masks to be defined in the information dictionary."
 
         action_masks, env_defined_actions, agent_masks = self.process_infos(infos)
@@ -611,8 +621,7 @@ class MADDPG(MultiAgentRLAlgorithm):
         rewards: StandardTensorDict,
         dones: StandardTensorDict,
     ) -> tuple[float, float]:
-        """
-        Inner call to each agent for the learning/algo training steps, up until the soft updates.
+        """Inner call to each agent for the learning/algo training steps, up until the soft updates.
         Applies all forward/backward props.
 
         :param agent_id: ID of the agent
@@ -650,7 +659,8 @@ class MADDPG(MultiAgentRLAlgorithm):
             if self.accelerator is not None:
                 with critic_target.no_sync():
                     q_value_next_state = critic_target(
-                        next_states, stacked_next_actions
+                        next_states,
+                        stacked_next_actions,
                     )
             else:
                 q_value_next_state = critic_target(next_states, stacked_next_actions)
@@ -721,7 +731,7 @@ class MADDPG(MultiAgentRLAlgorithm):
         """
         for eval_param, target_param in zip(net.parameters(), target.parameters()):
             target_param.data.copy_(
-                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
+                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data,
             )
 
     def test(
@@ -811,10 +821,14 @@ class MADDPG(MultiAgentRLAlgorithm):
 
                         # Replace NaNs with True (indicate killed agent)
                         terminated = np.where(
-                            np.isnan(terminated), True, terminated
+                            np.isnan(terminated),
+                            True,
+                            terminated,
                         ).astype(bool)
                         truncated = np.where(
-                            np.isnan(truncated), False, truncated
+                            np.isnan(truncated),
+                            False,
+                            truncated,
                         ).astype(bool)
 
                         dones[agent_id] = terminated | truncated

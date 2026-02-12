@@ -3,9 +3,8 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
 from gymnasium import spaces
+from torch import nn, optim
 from torch.nn.utils import clip_grad_norm_
 
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
@@ -99,10 +98,12 @@ class CQN(RLAlgorithm):
         assert isinstance(tau, float), "Tau must be a float."
         assert tau > 0, "Tau must be greater than zero."
         assert isinstance(
-            double, bool
+            double,
+            bool,
         ), "Double Q-learning flag must be boolean value True or False."
         assert isinstance(
-            wrap, bool
+            wrap,
+            bool,
         ), "Wrap models flag must be boolean value True or False."
 
         self.batch_size = batch_size
@@ -117,12 +118,13 @@ class CQN(RLAlgorithm):
         if actor_network is not None:
             if not isinstance(actor_network, EvolvableModule):
                 raise TypeError(
-                    f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
+                    f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule.",
                 )
 
             # Need to make deepcopies for target and detached networks
             self.actor, self.actor_target = make_safe_deepcopies(
-                actor_network, actor_network
+                actor_network,
+                actor_network,
             )
         else:
             net_config = {} if net_config is None else net_config
@@ -158,7 +160,7 @@ class CQN(RLAlgorithm):
                 eval_network=self.actor,
                 shared_networks=self.actor_target,
                 policy=True,
-            )
+            ),
         )
 
     def get_action(
@@ -264,10 +266,11 @@ class CQN(RLAlgorithm):
     def soft_update(self) -> None:
         """Soft updates target network."""
         for eval_param, target_param in zip(
-            self.actor.parameters(), self.actor_target.parameters()
+            self.actor.parameters(),
+            self.actor_target.parameters(),
         ):
             target_param.data.copy_(
-                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
+                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data,
             )
 
     def test(

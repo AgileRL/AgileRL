@@ -1,13 +1,14 @@
 import copy
 import warnings
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
-from typing import Any, Callable, Generator
+from typing import Any
 
 import gymnasium as gym
 import torch
-import torch.nn as nn
 from accelerate import Accelerator
+from torch import nn
 from torch.utils.data import DataLoader
 
 from agilerl import HAS_LLM_DEPENDENCIES
@@ -34,8 +35,7 @@ def apply_chat_template(
     answer: str,
     tokenizer: AutoTokenizer,
 ) -> BatchEncoding:
-    """
-    Create and tokenize a chat template for a reaosning task.
+    """Create and tokenize a chat template for a reaosning task.
 
     :param conversation_template: The conversation template to be tokenized.
     :type conversation_template: list[dict[str, str]]
@@ -56,7 +56,9 @@ def apply_chat_template(
         for msg in conversation_template
     ]
     updated_prompt = tokenizer.apply_chat_template(
-        formatted_conversation, tokenize=False, continue_final_message=True
+        formatted_conversation,
+        tokenize=False,
+        continue_final_message=True,
     )
     tokenized_prompt = tokenizer(
         [updated_prompt],
@@ -119,10 +121,12 @@ class HuggingFaceGym(gym.Env, ABC):
         custom_collate_fn = self.create_collate_fn(tokenizer)
         dataloader_kwargs = {"collate_fn": custom_collate_fn}
         train_dataset = self._filter_dataset_by_max_context_length(
-            train_dataset, "train dataset"
+            train_dataset,
+            "train dataset",
         )
         test_dataset = self._filter_dataset_by_max_context_length(
-            test_dataset, "test dataset"
+            test_dataset,
+            "test dataset",
         )
         self.train_dataloader = DataLoader(
             train_dataset,
@@ -158,7 +162,6 @@ class HuggingFaceGym(gym.Env, ABC):
         reset_dataloaders: bool = False,
     ) -> tuple[list[ReasoningPrompts], dict[str, Any]]:
         """Reset the environment and get the next batch of tokenized prompts."""
-        pass
 
     @abstractmethod
     def step(
@@ -168,7 +171,6 @@ class HuggingFaceGym(gym.Env, ABC):
         """Take a step in a HuggingFaceGym environment, calculate rewards from completions generated from previous prompt and provide new batch
         of prompts.
         """
-        pass
 
     @contextmanager
     def eval_mode(self) -> Generator[None, None, None]:
@@ -193,7 +195,6 @@ class HuggingFaceGym(gym.Env, ABC):
         **kwargs,
     ) -> Callable[[list[dict[str, Any]]], dict[str, Any]]:
         """Create a collate function that applies the chat template to the batch of questions and answers."""
-        pass
 
     def __len__(self):
         """Return the length of the dataset."""
@@ -224,8 +225,7 @@ class HuggingFaceGym(gym.Env, ABC):
         dataset: Dataset,
         dataset_type: str | None = None,
     ) -> Dataset:
-        """
-        Filter the dataset by the max context length.
+        """Filter the dataset by the max context length.
 
         :param dataset: Dataset to be filtered.
         :type dataset: Dataset
@@ -235,20 +235,21 @@ class HuggingFaceGym(gym.Env, ABC):
         dataset_type = "dataset" if dataset_type is None else dataset_type
         filter_keyword = "prompt" if "prompt" in dataset.features.keys() else "question"
         if self.max_context_length is None or not isinstance(
-            dataset[0][filter_keyword], str
+            dataset[0][filter_keyword],
+            str,
         ):
             return dataset
         filtered_dataset = dataset.filter(
             lambda x: len(self.tokenizer.encode(x[filter_keyword]))
-            <= self.max_context_length - self.min_completion_length
+            <= self.max_context_length - self.min_completion_length,
         )
         if len(filtered_dataset) == 0:
             raise ValueError(
-                f"No samples left in the {dataset_type} after filtering by the max context length constraint, use a larger max context length."
+                f"No samples left in the {dataset_type} after filtering by the max context length constraint, use a larger max context length.",
             )
         if (dataset_difference := len(dataset) - len(filtered_dataset)) > 0:
             warnings.warn(
-                f"{dataset_difference} samples were filtered out of the {dataset_type} due to the max context length constraint."
+                f"{dataset_difference} samples were filtered out of the {dataset_type} due to the max context length constraint.",
             )
         return filtered_dataset
 
@@ -292,10 +293,10 @@ class ReasoningGym(HuggingFaceGym):
         seed: int = 42,
     ) -> None:
         assert {"question", "answer"}.issubset(
-            set(train_dataset.features.keys())
+            set(train_dataset.features.keys()),
         ), "Train dataset must contain 'question' and 'answer' features."
         assert {"question", "answer"}.issubset(
-            set(test_dataset.features.keys())
+            set(test_dataset.features.keys()),
         ), "Train dataset must contain 'question' and 'answer' features."
 
         super().__init__(
@@ -313,7 +314,8 @@ class ReasoningGym(HuggingFaceGym):
         self.return_raw_completions = return_raw_completions
 
     def step(
-        self, completions: torch.Tensor
+        self,
+        completions: torch.Tensor,
     ) -> tuple[list[ReasoningPrompts], torch.Tensor]:
         """Take a step in the ReasoningGym environment, calculate rewards from completions generated from previous prompt and provide new batch
         of prompts.
@@ -330,7 +332,8 @@ class ReasoningGym(HuggingFaceGym):
         return new_tokenized_prompts, rewards
 
     def reset(
-        self, reset_dataloaders: bool = False
+        self,
+        reset_dataloaders: bool = False,
     ) -> tuple[list[ReasoningPrompts], dict[str, Any]]:
         """Reset the environment and get the next batch of tokenized prompts.
 
@@ -342,11 +345,11 @@ class ReasoningGym(HuggingFaceGym):
         if reset_dataloaders:
             self._reset_dataloaders()
             warnings.warn(
-                "env.reset() called with reset_dataloaders=True, this will reset the dataloaders to the beginning of the dataset, proceed with caution."
+                "env.reset() called with reset_dataloaders=True, this will reset the dataloaders to the beginning of the dataset, proceed with caution.",
             )
         if self.reset_called:
             warnings.warn(
-                "env.reset() called more than once sequentially, it should typically follow with env.step()."
+                "env.reset() called more than once sequentially, it should typically follow with env.step().",
             )
         self.reset_called = True
         new_tokenized_prompts = self._get_next_batch()
@@ -364,10 +367,11 @@ class ReasoningGym(HuggingFaceGym):
         # This is for a batch of completions (prompt_batch x group_size), List of tensors of length batch size, each tensor is a group of answers
         total_rewards = []
         for idx, (group_completion, answer, question) in enumerate(
-            zip(completions, self.answers, self.questions)
+            zip(completions, self.answers, self.questions),
         ):
             completion_to_decode = group_completion[
-                :, self.last_tokenized_prompts[idx]["input_ids"].shape[1] :
+                :,
+                self.last_tokenized_prompts[idx]["input_ids"].shape[1] :,
             ]
 
             # Vectorize this in the future
@@ -420,8 +424,7 @@ class ReasoningGym(HuggingFaceGym):
         self,
         tokenizer: AutoTokenizer,
     ) -> Callable[[list[dict[str, Any]]], dict[str, Any]]:
-        """
-        Create a collate function that applies the chat template to the batch of questions and answers.
+        """Create a collate function that applies the chat template to the batch of questions and answers.
 
         :param tokenizer: Tokenizer to be used for encoding and decoding the prompts.
         :type tokenizer: AutoTokenizer
@@ -492,10 +495,10 @@ class PreferenceGym(HuggingFaceGym):
             seed=seed,
         )
         assert {"prompt", "chosen", "rejected"}.issubset(
-            set(train_dataset.features.keys())
+            set(train_dataset.features.keys()),
         ), "Train dataset must contain 'prompt', 'chosen', and 'rejected' features."
         assert {"prompt", "chosen", "rejected"}.issubset(
-            set(test_dataset.features.keys())
+            set(test_dataset.features.keys()),
         ), "Train dataset must contain 'prompt', 'chosen', and 'rejected' features."
 
     def reset(self, reset_dataloaders: bool = False) -> PreferencePrompts:
@@ -503,11 +506,11 @@ class PreferenceGym(HuggingFaceGym):
         if reset_dataloaders:
             self._reset_dataloaders()
             warnings.warn(
-                "env.reset() called with reset_dataloaders=True, this will reset the dataloaders to the beginning of the dataset, proceed with caution."
+                "env.reset() called with reset_dataloaders=True, this will reset the dataloaders to the beginning of the dataset, proceed with caution.",
             )
         if self.reset_called:
             warnings.warn(
-                "env.reset() called more than once sequentially, it should typically follow with env.step()."
+                "env.reset() called more than once sequentially, it should typically follow with env.step().",
             )
         self.reset_called = True
         return self._get_next_batch()
@@ -537,8 +540,7 @@ class PreferenceGym(HuggingFaceGym):
         tokenizer: AutoTokenizer,
         max_context_length: int | None = None,
     ) -> Callable[[list[dict[str, Any]]], dict[str, Any]]:
-        """
-        Create a collate function that applies the chat template to the batch of questions and answers.
+        """Create a collate function that applies the chat template to the batch of questions and answers.
 
         :param tokenizer: Tokenizer to be used for encoding and decoding the prompts.
         :type tokenizer: AutoTokenizer
@@ -555,7 +557,10 @@ class PreferenceGym(HuggingFaceGym):
 
             # Tokenize prompts separately to get their lengths
             prompt_encodings = tokenizer(
-                prompts, truncation=True, padding=False, add_special_tokens=True
+                prompts,
+                truncation=True,
+                padding=False,
+                add_special_tokens=True,
             )
             prompt_lengths = [len(ids) for ids in prompt_encodings["input_ids"]]
 
@@ -623,10 +628,11 @@ class PreferenceGym(HuggingFaceGym):
 
 @contextmanager
 def gather_if_zero3(
-    zero_stage: int, params: list[torch.Tensor], modifier_rank: int | None = None
+    zero_stage: int,
+    params: list[torch.Tensor],
+    modifier_rank: int | None = None,
 ):
-    """
-    Conditional context manager for setting the zero stage for the model.
+    """Conditional context manager for setting the zero stage for the model.
 
     :param zero_stage: The zero stage
     :type zero_stage: int
@@ -646,24 +652,22 @@ def gather_if_zero3(
 
 
 def get_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
-    """
-    Get the state dict of the model for zero3.
+    """Get the state dict of the model for zero3.
 
     :param model: The model to get the state dict of.
     :type model: nn.Module
     :return: The state dict of the model.
     :rtype: dict[str, torch.Tensor]
     """
-
     with gather_if_zero3(3, list(model.parameters()), modifier_rank=0):
         return model.state_dict()
 
 
 def create_model_from_name_or_path(
-    model_name_or_path: str, model_config: dict[str, Any] | None = None
+    model_name_or_path: str,
+    model_config: dict[str, Any] | None = None,
 ) -> PreTrainedModel:
-    """
-    Create a model from a name or path.
+    """Create a model from a name or path.
 
     :param model_name_or_path: The name or path of the model to create.
     :type model_name_or_path: str
@@ -678,6 +682,7 @@ def create_model_from_name_or_path(
             "attn_implementation": "sdpa",
         }
     model = AutoModelForCausalLM.from_pretrained(
-        pretrained_model_name_or_path=model_name_or_path, **model_config
+        pretrained_model_name_or_path=model_name_or_path,
+        **model_config,
     )
     return model

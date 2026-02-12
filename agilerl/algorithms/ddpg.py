@@ -4,9 +4,8 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
 from gymnasium import spaces
+from torch import nn, optim
 
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
@@ -138,7 +137,8 @@ class DDPG(RLAlgorithm):
         assert learn_step >= 1, "Learn step must be greater than or equal to one."
         assert isinstance(learn_step, int), "Learn step rate must be an integer."
         assert isinstance(
-            action_space, spaces.Box
+            action_space,
+            spaces.Box,
         ), "DDPG only supports continuous action spaces."
         assert (isinstance(expl_noise, (float, int))) or (
             isinstance(expl_noise, np.ndarray)
@@ -166,10 +166,11 @@ class DDPG(RLAlgorithm):
 
         if (actor_network is not None) != (critic_network is not None):  # XOR operation
             warnings.warn(
-                "Actor and critic networks must both be supplied to use custom networks. Defaulting to net config."
+                "Actor and critic networks must both be supplied to use custom networks. Defaulting to net config.",
             )
         assert isinstance(
-            wrap, bool
+            wrap,
+            bool,
         ), "Wrap models flag must be boolean value True or False."
 
         self.batch_size = batch_size
@@ -205,18 +206,20 @@ class DDPG(RLAlgorithm):
         if actor_network is not None and critic_network is not None:
             if not isinstance(actor_network, EvolvableModule):
                 raise TypeError(
-                    f"'actor_network' is of type {type(actor_network)}, but must be of type EvolvableModule."
+                    f"'actor_network' is of type {type(actor_network)}, but must be of type EvolvableModule.",
                 )
             if not isinstance(critic_network, EvolvableModule):
                 raise TypeError(
-                    f"'critic_network' is of type {type(critic_network)}, but must be of type EvolvableModule."
+                    f"'critic_network' is of type {type(critic_network)}, but must be of type EvolvableModule.",
                 )
 
             self.actor, self.critic = make_safe_deepcopies(
-                actor_network, critic_network
+                actor_network,
+                critic_network,
             )
             self.actor_target, self.critic_target = make_safe_deepcopies(
-                actor_network, critic_network
+                actor_network,
+                critic_network,
             )
         else:
             net_config = {} if net_config is None else net_config
@@ -224,14 +227,15 @@ class DDPG(RLAlgorithm):
             # NOTE: Set layer_norm=False for encoder config, since critic automatically
             # does this the actor should too to allow encoder sharing
             encoder_config: NetConfigType | None = net_config.get(
-                "encoder_config", None
+                "encoder_config",
+                None,
             )
             if encoder_config is not None:
                 if is_mlp_net_config(encoder_config):
                     if encoder_config.get("layer_norm", False):
                         warnings.warn(
                             "Layer normalization is not supported for the encoder of DDPG networks. Disabling it. "
-                            "See GitHub PR for more details: https://github.com/AgileRL/AgileRL/pull/469"
+                            "See GitHub PR for more details: https://github.com/AgileRL/AgileRL/pull/469",
                         )
                     encoder_config["layer_norm"] = False
             else:
@@ -293,10 +297,14 @@ class DDPG(RLAlgorithm):
 
         # Optimizers
         self.actor_optimizer = OptimizerWrapper(
-            optim.Adam, networks=self.actor, lr=lr_actor
+            optim.Adam,
+            networks=self.actor,
+            lr=lr_actor,
         )
         self.critic_optimizer = OptimizerWrapper(
-            optim.Adam, networks=self.critic, lr=lr_critic
+            optim.Adam,
+            networks=self.critic,
+            lr=lr_critic,
         )
 
         if self.accelerator is not None and wrap:
@@ -310,29 +318,30 @@ class DDPG(RLAlgorithm):
                 eval_network=self.actor,
                 shared_networks=self.actor_target,
                 policy=True,
-            )
+            ),
         )
         self.register_network_group(
             NetworkGroup(
                 eval_network=self.critic,
                 shared_networks=self.critic_target,
                 policy=False,
-            )
+            ),
         )
 
     def share_encoder_parameters(self) -> None:
         """Shares the encoder parameters between the actor and critic. Registered as a mutation hook
-        when share_encoders=True."""
+        when share_encoders=True.
+        """
         if all(isinstance(net, EvolvableNetwork) for net in [self.actor, self.critic]):
             try:
                 share_encoder_parameters(self.actor, self.critic, self.critic_target)
             except KeyError as e:
                 raise KeyError(
-                    f"Found incompatible encoder architectures: {e} not found in shared network."
+                    f"Found incompatible encoder architectures: {e} not found in shared network.",
                 ) from e
         else:
             warnings.warn(
-                "Encoder sharing is disabled as actor or critic is not an EvolvableNetwork."
+                "Encoder sharing is disabled as actor or critic is not an EvolvableNetwork.",
             )
 
     def get_action(self, obs: ObservationType, training: bool = True) -> np.ndarray:
@@ -430,7 +439,9 @@ class DDPG(RLAlgorithm):
             noise = multi_dim_clamp(-noise_clip, noise_clip, noise)
             next_actions = next_actions + noise
             next_actions = multi_dim_clamp(
-                self.action_low, self.action_high, next_actions
+                self.action_low,
+                self.action_high,
+                next_actions,
             )
             q_value_next_state = self.critic_target(next_obs, next_actions)
 
@@ -485,7 +496,7 @@ class DDPG(RLAlgorithm):
         """
         for eval_param, target_param in zip(net.parameters(), target.parameters()):
             target_param.data.copy_(
-                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
+                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data,
             )
 
     def test(

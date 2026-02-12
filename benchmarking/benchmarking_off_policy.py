@@ -62,12 +62,12 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
     action_dim = get_output_size_from_space(action_space)
     if use_net:
         # Currently set up for DQN
-        actor_kwargs = dict(
-            num_inputs=state_dim[0],
-            num_outputs=action_dim,
-            hidden_size=[64, 64],
-            activation="ReLU",
-        )
+        actor_kwargs = {
+            "num_inputs": state_dim[0],
+            "num_outputs": action_dim,
+            "hidden_size": [64, 64],
+            "activation": "ReLU",
+        }
         actor = EvolvableMLP(**actor_kwargs, device=device)
         critic = None
     else:
@@ -77,10 +77,12 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
     if INIT_HP["ALGO"] in ["DDPG", "TD3"]:
         hp_config = HyperparameterConfig(
             lr_actor=RLParameter(
-                min=MUTATION_PARAMS["MIN_LR"], max=MUTATION_PARAMS["MAX_LR"]
+                min=MUTATION_PARAMS["MIN_LR"],
+                max=MUTATION_PARAMS["MAX_LR"],
             ),
             lr_critic=RLParameter(
-                min=MUTATION_PARAMS["MIN_LR"], max=MUTATION_PARAMS["MAX_LR"]
+                min=MUTATION_PARAMS["MIN_LR"],
+                max=MUTATION_PARAMS["MAX_LR"],
             ),
             batch_size=RLParameter(
                 min=MUTATION_PARAMS["MIN_BATCH_SIZE"],
@@ -97,7 +99,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
     else:
         hp_config = HyperparameterConfig(
             lr=RLParameter(
-                min=MUTATION_PARAMS["MIN_LR"], max=MUTATION_PARAMS["MAX_LR"]
+                min=MUTATION_PARAMS["MIN_LR"],
+                max=MUTATION_PARAMS["MAX_LR"],
             ),
             batch_size=RLParameter(
                 min=MUTATION_PARAMS["MIN_BATCH_SIZE"],
@@ -146,9 +149,9 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
         eval_steps=INIT_HP["EVAL_STEPS"],
         eval_loop=INIT_HP["EVAL_LOOP"],
         learning_delay=INIT_HP["LEARNING_DELAY"],
-        eps_start=INIT_HP["EPS_START"] if "EPS_START" in INIT_HP else 1.0,
-        eps_end=INIT_HP["EPS_END"] if "EPS_END" in INIT_HP else 0.01,
-        eps_decay=INIT_HP["EPS_DECAY"] if "EPS_DECAY" in INIT_HP else 0.999,
+        eps_start=INIT_HP.get("EPS_START", 1.0),
+        eps_end=INIT_HP.get("EPS_END", 0.01),
+        eps_decay=INIT_HP.get("EPS_DECAY", 0.999),
         target=INIT_HP["TARGET_SCORE"],
         tournament=tournament,
         mutation=mutations,

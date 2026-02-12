@@ -17,12 +17,11 @@ def _label_with_episode_number(frame, episode_num):
 
     drawer = ImageDraw.Draw(im)
 
-    if np.mean(frame) < 128:
-        text_color = (255, 255, 255)
-    else:
-        text_color = (0, 0, 0)
+    text_color = (255, 255, 255) if np.mean(frame) < 128 else (0, 0, 0)
     drawer.text(
-        (im.size[0] / 20, im.size[1] / 18), f"Episode: {episode_num+1}", fill=text_color
+        (im.size[0] / 20, im.size[1] / 18),
+        f"Episode: {episode_num+1}",
+        fill=text_color,
     )
 
     return im
@@ -65,7 +64,7 @@ if __name__ == "__main__":
     # Test loop for inference
     for ep in range(episodes):
         obs, info = env.reset()
-        agent_reward = {agent_id: 0 for agent_id in agent_ids}
+        agent_reward = dict.fromkeys(agent_ids, 0)
         score = 0
         for _ in range(max_steps):
             if channels_last:
@@ -82,7 +81,7 @@ if __name__ == "__main__":
 
             # Take action in environment
             obs, reward, termination, truncation, info = env.step(
-                {agent: a.squeeze() for agent, a in action.items()}
+                {agent: a.squeeze() for agent, a in action.items()},
             )
 
             # Save agent's reward for this step in this episode
@@ -112,5 +111,7 @@ if __name__ == "__main__":
     gif_path = "./videos/"
     os.makedirs(gif_path, exist_ok=True)
     imageio.mimwrite(
-        os.path.join("./videos/", "space_invaders.gif"), frames, duration=10
+        os.path.join("./videos/", "space_invaders.gif"),
+        frames,
+        duration=10,
     )

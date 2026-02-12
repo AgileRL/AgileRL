@@ -186,16 +186,19 @@ class RainbowQNetwork(EvolvableNetwork):
     ):
 
         if isinstance(observation_space, spaces.Box) and not is_image_space(
-            observation_space
+            observation_space,
         ):
             if encoder_config is None:
                 encoder_config = get_default_encoder_config(
-                    observation_space, simba=False, recurrent=False
+                    observation_space,
+                    simba=False,
+                    recurrent=False,
                 )
 
             encoder_config["noise_std"] = noise_std
             encoder_config["output_activation"] = encoder_config.get(
-                "activation", "ReLU"
+                "activation",
+                "ReLU",
             )
             encoder_config["output_vanish"] = False
             encoder_config["init_layers"] = False
@@ -218,8 +221,10 @@ class RainbowQNetwork(EvolvableNetwork):
         if head_config is None:
             head_config = asdict(
                 MlpNetConfig(
-                    hidden_size=[16], output_activation=None, noise_std=noise_std
-                )
+                    hidden_size=[16],
+                    output_activation=None,
+                    noise_std=noise_std,
+                ),
             )
         elif isinstance(head_config, NetConfig):
             head_config = asdict(head_config)
@@ -256,7 +261,10 @@ class RainbowQNetwork(EvolvableNetwork):
         )
 
     def forward(
-        self, obs: TorchObsType, q: bool = True, log: bool = False
+        self,
+        obs: TorchObsType,
+        q: bool = True,
+        log: bool = False,
     ) -> torch.Tensor:
         """Forward pass of the Rainbow Q network.
 
@@ -356,7 +364,7 @@ class ContinuousQNetwork(EvolvableNetwork):
             if encoder_config.get("layer_norm", False):
                 warnings.warn(
                     "Layer normalization is not supported for the encoder of DDPG networks. Disabling it. "
-                    "See GitHub PR for more details: https://github.com/AgileRL/AgileRL/pull/469"
+                    "See GitHub PR for more details: https://github.com/AgileRL/AgileRL/pull/469",
                 )
 
             encoder_config["layer_norm"] = False

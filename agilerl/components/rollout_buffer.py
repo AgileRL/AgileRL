@@ -1,6 +1,7 @@
 import warnings
 from collections import OrderedDict
-from typing import Any, Generator
+from collections.abc import Generator
+from typing import Any
 
 import numpy as np
 import torch
@@ -23,8 +24,7 @@ from agilerl.utils.algo_utils import (
 
 
 class RolloutBuffer:
-    """
-    Rollout buffer for collecting experiences and computing advantages for RL algorithms.
+    """Rollout buffer for collecting experiences and computing advantages for RL algorithms.
     This buffer is designed to handle vectorized environments efficiently.
 
     :param capacity: Maximum number of timesteps to store in the buffer (per environment).
@@ -98,8 +98,7 @@ class RolloutBuffer:
         self._initialize_buffers()
 
     def size(self) -> int:
-        """
-        Get current number of transitions stored in the buffer.
+        """Get current number of transitions stored in the buffer.
 
         :return: Current number of transitions.
         :rtype: int
@@ -117,7 +116,9 @@ class RolloutBuffer:
         self.unpadded_data = None
 
     def _maybe_reshape_obs(
-        self, obs: TorchObsType, space: spaces.Space
+        self,
+        obs: TorchObsType,
+        space: spaces.Space,
     ) -> TorchObsType:
         """Reshape observation to the correct shape.
 
@@ -143,12 +144,14 @@ class RolloutBuffer:
         # The tensors will be on the CPU by default, can be moved to device later if needed.
         source_dict = OrderedDict()
         if isinstance(
-            self.observation_space, spaces.Dict
+            self.observation_space,
+            spaces.Dict,
         ):  # Nested structure for Dict spaces
             obs_dict = OrderedDict()
             for key, shape in obs_shape.items():
                 obs_dict[key] = torch.zeros(
-                    (self.capacity, self.num_envs, *shape), dtype=torch.float32
+                    (self.capacity, self.num_envs, *shape),
+                    dtype=torch.float32,
                 )
 
             source_dict["observations"] = obs_dict
@@ -158,41 +161,49 @@ class RolloutBuffer:
         else:
             # For non-Dict spaces, use regular tensor allocation
             source_dict["observations"] = torch.zeros(
-                (self.capacity, self.num_envs, *obs_shape), dtype=torch.float32
+                (self.capacity, self.num_envs, *obs_shape),
+                dtype=torch.float32,
             )
             source_dict["next_observations"] = torch.zeros(
-                (self.capacity, self.num_envs, *obs_shape), dtype=torch.float32
+                (self.capacity, self.num_envs, *obs_shape),
+                dtype=torch.float32,
             )
 
         # Add other standard fields
         source_dict.update(
             {
                 "actions": torch.zeros(
-                    (self.capacity, self.num_envs, num_actions), dtype=torch.float32
+                    (self.capacity, self.num_envs, num_actions),
+                    dtype=torch.float32,
                 ),
                 "rewards": torch.zeros(
-                    (self.capacity, self.num_envs), dtype=torch.float32
+                    (self.capacity, self.num_envs),
+                    dtype=torch.float32,
                 ),
                 "dones": torch.zeros((self.capacity, self.num_envs), dtype=torch.bool),
                 "values": torch.zeros(
-                    (self.capacity, self.num_envs), dtype=torch.float32
+                    (self.capacity, self.num_envs),
+                    dtype=torch.float32,
                 ),
                 "log_probs": torch.zeros(
-                    (self.capacity, self.num_envs), dtype=torch.float32
+                    (self.capacity, self.num_envs),
+                    dtype=torch.float32,
                 ),
                 "advantages": torch.zeros(
-                    (self.capacity, self.num_envs), dtype=torch.float32
+                    (self.capacity, self.num_envs),
+                    dtype=torch.float32,
                 ),
                 "returns": torch.zeros(
-                    (self.capacity, self.num_envs), dtype=torch.float32
+                    (self.capacity, self.num_envs),
+                    dtype=torch.float32,
                 ),
-            }
+            },
         )
 
         if self.recurrent:
             if self.hidden_state_architecture is None:
                 raise ValueError(
-                    "hidden_state_architecture must be provided if recurrent=True"
+                    "hidden_state_architecture must be provided if recurrent=True",
                 )
             # self.hidden_state_architecture is dict[str, tuple[num_layers, num_envs_at_ppo_init, hidden_size]]
             # For buffer storage, each hidden state key should map to a tensor of shape:
@@ -235,8 +246,7 @@ class RolloutBuffer:
         ) = None,  # Not used if only initial hidden states are stored
         episode_start: bool | np.ndarray | None = None,
     ) -> None:
-        """
-        Add a new batch of observations and associated data from vectorized environments to the buffer.
+        """Add a new batch of observations and associated data from vectorized environments to the buffer.
 
         :param obs: Current observation batch (shape: (num_envs, *obs_shape))
         :type obs: ObservationType
@@ -265,7 +275,7 @@ class RolloutBuffer:
             else:
                 raise ValueError(
                     f"Buffer has reached capacity ({self.capacity} transitions) but received more transitions. "
-                    "Either increase buffer capacity or set wrap_at_capacity=True."
+                    "Either increase buffer capacity or set wrap_at_capacity=True.",
                 )
 
         # Prepare data as a dictionary of tensors for the current time step
@@ -284,7 +294,8 @@ class RolloutBuffer:
         else:
             obs_tensor = torch.as_tensor(obs, device="cpu")
             current_step_data["observations"] = self._maybe_reshape_obs(
-                obs_tensor, self.observation_space
+                obs_tensor,
+                self.observation_space,
             )
 
         # Actions
@@ -315,27 +326,33 @@ class RolloutBuffer:
                     sub_space = self.observation_space.spaces[key]
                     next_obs_tensor = torch.as_tensor(item, device="cpu")
                     next_obs_dict[key] = self._maybe_reshape_obs(
-                        next_obs_tensor, sub_space
+                        next_obs_tensor,
+                        sub_space,
                     )
 
                 current_step_data["next_observations"] = next_obs_dict
             else:
                 next_obs_tensor = torch.as_tensor(next_obs, device="cpu")
                 current_step_data["next_observations"] = self._maybe_reshape_obs(
-                    next_obs_tensor, self.observation_space
+                    next_obs_tensor,
+                    self.observation_space,
                 )
 
         # Episode Starts
         if episode_start is not None:
             episode_start_tensor = torch.as_tensor(
-                episode_start, dtype=torch.bool, device="cpu"
+                episode_start,
+                dtype=torch.bool,
+                device="cpu",
             )
             current_step_data["episode_starts"] = episode_start_tensor.reshape(
-                self.num_envs
+                self.num_envs,
             )
         else:
             current_step_data["episode_starts"] = torch.zeros(
-                self.num_envs, dtype=torch.bool, device="cpu"
+                self.num_envs,
+                dtype=torch.bool,
+                device="cpu",
             )
 
         # Hidden States (assuming they are dictionaries of tensors)
@@ -346,13 +363,17 @@ class RolloutBuffer:
             current_step_data["hidden_states"] = {}
             for key, ppo_tensor_val in hidden_state.items():
                 current_step_data["hidden_states"][key] = ppo_tensor_val.permute(
-                    1, 0, 2
+                    1,
+                    0,
+                    2,
                 )  # Shape: (num_envs, layers, size)
 
         # Create a TensorDict for the current step's data
         # This will have batch_size [num_envs]
         current_td_slice = TensorDict(
-            current_step_data, batch_size=[self.num_envs], device="cpu"
+            current_step_data,
+            batch_size=[self.num_envs],
+            device="cpu",
         )
 
         # Assign this slice to the buffer at the current position
@@ -367,10 +388,11 @@ class RolloutBuffer:
             self.full = True
 
     def compute_returns_and_advantages(
-        self, last_value: ArrayOrTensor, last_done: ArrayOrTensor
+        self,
+        last_value: ArrayOrTensor,
+        last_done: ArrayOrTensor,
     ) -> None:
-        """
-        Compute returns and advantages for the stored experiences using GAE or Monte Carlo.
+        """Compute returns and advantages for the stored experiences using GAE or Monte Carlo.
 
         :param last_value: Value estimate for the last observation in each environment (shape: (num_envs,))
         :type last_value: ArrayOrTensor
@@ -436,10 +458,10 @@ class RolloutBuffer:
         self.buffer["returns"][:buffer_size] = torch.from_numpy(returns_np)
 
     def get(
-        self, batch_size: int | None = None
+        self,
+        batch_size: int | None = None,
     ) -> dict[str, np.ndarray | dict[str, np.ndarray]]:
-        """
-        Get data from the buffer, flattened and optionally sampled into minibatches.
+        """Get data from the buffer, flattened and optionally sampled into minibatches.
 
         :param batch_size: Size of the minibatch to sample. If None, returns all data. Defaults to None.
         :type batch_size: int | None
@@ -464,7 +486,7 @@ class RolloutBuffer:
         if batch_size is not None:
             if batch_size > total_samples:
                 warnings.warn(
-                    f"Batch size {batch_size} is larger than buffer size {total_samples}. Returning all data."
+                    f"Batch size {batch_size} is larger than buffer size {total_samples}. Returning all data.",
                 )
                 # Convert the flattened TensorDict to the old dictionary format
                 # For hidden_states, we need to handle the nested TensorDict structure
@@ -474,14 +496,14 @@ class RolloutBuffer:
             sampled_td = flattened_td[indices]
             # Convert the sampled TensorDict to the old dictionary format
             return self._convert_td_to_np_dict(sampled_td)
-        else:
-            return self._convert_td_to_np_dict(flattened_td)
+        return self._convert_td_to_np_dict(flattened_td)
 
     def get_tensor_batch(
-        self, batch_size: int | None = None, device: str | None = None
+        self,
+        batch_size: int | None = None,
+        device: str | None = None,
     ) -> dict[str, torch.Tensor | dict[str, torch.Tensor]]:
-        """
-        Get data from the buffer as PyTorch tensors, flattened and optionally sampled.
+        """Get data from the buffer as PyTorch tensors, flattened and optionally sampled.
         The output is a TensorDict.
 
         :param batch_size: Size of batch to sample, if None returns all data, defaults to None.
@@ -515,7 +537,7 @@ class RolloutBuffer:
             if batch_size > total_samples:
                 warnings.warn(
                     f"Batch size {batch_size} is larger than buffer_size {total_samples}. "
-                    "Returning all data."
+                    "Returning all data.",
                 )
                 # Move the whole flattened_td to the target device
                 return flattened_td.to(target_device)
@@ -526,19 +548,18 @@ class RolloutBuffer:
             sampled_td: TensorDict = flattened_td[indices]
 
             return sampled_td.to(target_device)
-        else:
-            # Return all flattened data, moved to the target device
-            return flattened_td.to(target_device)
+        # Return all flattened data, moved to the target device
+        return flattened_td.to(target_device)
 
     # ------------------------------------------------------------------
     # New helper functions for truncated Backpropagation Through Time (BPTT)
     # ------------------------------------------------------------------
 
     def _convert_td_to_np_dict(
-        self, td: TensorDict
+        self,
+        td: TensorDict,
     ) -> dict[str, np.ndarray | dict[str, np.ndarray]]:
-        """
-        Convert a TensorDict to a dictionary of numpy arrays.
+        """Convert a TensorDict to a dictionary of numpy arrays.
 
         :param td: TensorDict to convert.
         :type td: TensorDict
@@ -559,14 +580,16 @@ class RolloutBuffer:
                     k_hid: v_hid.cpu().numpy() for k_hid, v_hid in value.items()
                 }
             elif key in ["observations", "next_observations"] and isinstance(
-                value, dict
+                value,
+                dict,
             ):
                 # Handle Dict observation spaces
                 np_dict[key] = {
                     k_obs: v_obs.cpu().numpy() for k_obs, v_obs in value.items()
                 }
             elif isinstance(
-                value, TensorDict
+                value,
+                TensorDict,
             ):  # For nested like observations if it's a Dict space
                 np_dict[key] = {
                     k_sub: v_sub.cpu().numpy() for k_sub, v_sub in value.items()
@@ -601,8 +624,8 @@ class RolloutBuffer:
             return TensorDict(
                 {
                     key: RolloutBuffer._pad_sequences(sequences_T[key], target_length)
-                    for key in sequences_T.keys()
-                }
+                    for key in sequences_T
+                },
             )
 
         # If target_length is provided, pad the sequences to the target length
@@ -613,14 +636,16 @@ class RolloutBuffer:
                 pad_amount = target_length - current_length
                 pad_spec = [0, 0] * (seq.dim() - 1) + [0, pad_amount]
                 padded_sequences.append(
-                    torch.nn.functional.pad(seq, pad_spec, mode="constant", value=0)
+                    torch.nn.functional.pad(seq, pad_spec, mode="constant", value=0),
                 )
 
             return torch.stack(padded_sequences)
 
         # Otherwise, pad the sequences to the length of the longest sequence
         return torch.nn.utils.rnn.pad_sequence(
-            sequences, batch_first=True, padding_value=0
+            sequences,
+            batch_first=True,
+            padding_value=0,
         )
 
     def _get_complete_sequences(
@@ -664,7 +689,7 @@ class RolloutBuffer:
                 else:
                     sequences.append(episode)
 
-                max_length = len(episode) if len(episode) > max_length else max_length
+                max_length = max(max_length, len(episode))
                 start_index = done_index + 1
 
         return sequences, max_length
@@ -681,7 +706,7 @@ class RolloutBuffer:
         """
         if not self.recurrent:
             raise ValueError(
-                "prepare_sequence_tensors() is only supported when recurrent=True."
+                "prepare_sequence_tensors() is only supported when recurrent=True.",
             )
 
         if self.size() == 0:
@@ -712,20 +737,25 @@ class RolloutBuffer:
 
         # Get the indices of unpadded sequences
         flat_timesteps = torch.arange(buffer_size * self.num_envs).reshape(
-            buffer_size, self.num_envs
+            buffer_size,
+            self.num_envs,
         )
         unpadded_slices, _ = self._get_complete_sequences(
-            flat_timesteps, episode_done_indices
+            flat_timesteps,
+            episode_done_indices,
         )
 
         self.unpadded_slices = unpadded_slices
 
         valid_data_to_pad: TensorDictBase = valid_buffer_data_view.select(
-            "observations", "actions", "hidden_states"
+            "observations",
+            "actions",
+            "hidden_states",
         ).clone()
 
         valid_data_to_pad["pad_mask"] = torch.ones(
-            valid_data_to_pad.batch_size, dtype=torch.bool
+            valid_data_to_pad.batch_size,
+            dtype=torch.bool,
         )
 
         # Create a TensorDict with all of the possible sequences, padded to the same length
@@ -733,7 +763,8 @@ class RolloutBuffer:
         for key, value in valid_data_to_pad.items():
             # Split data into episodes or sequences
             sequences, max_sequence_length = self._get_complete_sequences(
-                value, episode_done_indices
+                value,
+                episode_done_indices,
             )
 
             # Apply zero-padding to ensure that each episode has the same length
@@ -741,7 +772,8 @@ class RolloutBuffer:
             # are padded to the maximum episode length, whereas these should be padded to the
             # specified max_sequence_length for truncated BPTT to see its benefits.
             padded_data_source[key] = RolloutBuffer._pad_sequences(
-                sequences, target_length=None
+                sequences,
+                target_length=None,
             )
 
         self.max_sequence_length = (
@@ -772,7 +804,10 @@ class RolloutBuffer:
 
         # Select unpadded data for training
         unpadded_data_source: TensorDict = valid_buffer_data_view.select(
-            "log_probs", "advantages", "values", "returns"
+            "log_probs",
+            "advantages",
+            "values",
+            "returns",
         )
 
         # Flatten the TensorDict's and move to the target device
@@ -793,14 +828,14 @@ class RolloutBuffer:
         if self.unpadded_slices is None:
             raise ValueError(
                 "Attempting to fetch minibatches before preparing sequences. "
-                "Call prepare_sequence_tensors() first."
+                "Call prepare_sequence_tensors() first.",
             )
 
         # Determine the number of sequences per mini batch
         if batch_size > self.num_sequences:
             warnings.warn(
                 f"Batch size {batch_size} is larger than the number of sequences "
-                f"({self.num_sequences}), using batch_size = {self.num_sequences}."
+                f"({self.num_sequences}), using batch_size = {self.num_sequences}.",
             )
             batch_size = self.num_sequences
 
@@ -840,7 +875,7 @@ class RolloutBuffer:
             if self.recurrent and padded.get("initial_hidden_states", None) is not None:
                 batch_hidden_states = {}
                 initial_hidden_states: TensorDict = padded.get_non_tensor(
-                    "initial_hidden_states"
+                    "initial_hidden_states",
                 )
                 for key, value in initial_hidden_states.items():
                     batch_hidden_states[key] = value[sequences_samples].clone()
@@ -871,13 +906,14 @@ class RolloutBuffer:
         # We should verify its integrity or re-initialize if it's somehow corrupted/not present.
         if not hasattr(self, "buffer") or not isinstance(self.buffer, TensorDict):
             warnings.warn(
-                "TensorDict buffer not found or invalid during unpickling. Re-initializing."
+                "TensorDict buffer not found or invalid during unpickling. Re-initializing.",
             )
             if not hasattr(self, "observation_space") or not hasattr(
-                self, "action_space"
+                self,
+                "action_space",
             ):
                 warnings.warn(
-                    "Observation or action space missing during RolloutBuffer unpickling. Buffer might be invalid."
+                    "Observation or action space missing during RolloutBuffer unpickling. Buffer might be invalid.",
                 )
                 return
 
@@ -888,7 +924,7 @@ class RolloutBuffer:
             expected_batch_size = torch.Size([self.capacity, self.num_envs])
             if self.buffer.batch_size != expected_batch_size:
                 warnings.warn(
-                    f"Loaded TensorDict has batch_size {self.buffer.batch_size}, expected {expected_batch_size}. Re-initializing."
+                    f"Loaded TensorDict has batch_size {self.buffer.batch_size}, expected {expected_batch_size}. Re-initializing.",
                 )
                 self._initialize_buffers()
 

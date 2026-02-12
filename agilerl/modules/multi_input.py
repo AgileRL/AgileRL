@@ -4,8 +4,8 @@ from dataclasses import asdict
 from typing import Any, TypeVar
 
 import torch
-import torch.nn as nn
 from gymnasium import spaces
+from torch import nn
 
 from agilerl.modules import EvolvableCNN, EvolvableLSTM, EvolvableMLP
 from agilerl.modules.base import EvolvableModule, ModuleDict, MutationType, mutation
@@ -129,7 +129,8 @@ class EvolvableMultiInput(EvolvableModule):
         assert num_outputs > 0, "Number of outputs must be greater than 0."
         assert latent_dim > 0, "Latent dimension must be greater than 0."
         assert isinstance(
-            observation_space, (spaces.Dict, spaces.Tuple)
+            observation_space,
+            (spaces.Dict, spaces.Tuple),
         ), "Observation space must be a Dict or Tuple space."
         assert (
             latent_dim <= max_latent_dim
@@ -175,7 +176,7 @@ class EvolvableMultiInput(EvolvableModule):
                 key: space
                 for key, space in observation_space.spaces.items()
                 if vector_space_check(space)
-            }
+            },
         )
         self.total_vector_dims = get_total_flatdim(self.vector_spaces)
 
@@ -280,7 +281,9 @@ class EvolvableMultiInput(EvolvableModule):
         self.mlp_config["output_activation"] = self.mlp_config.get("activation", "ReLU")
 
     def init_weights_gaussian(
-        self, std_coeff: float = 4, output_coeff: float = 4
+        self,
+        std_coeff: float = 4,
+        output_coeff: float = 4,
     ) -> None:
         """Initialise weights of linear layers using Gaussian distribution."""
         for module in self.feature_net.modules().values():
@@ -301,7 +304,7 @@ class EvolvableMultiInput(EvolvableModule):
                 self.latent_dim
                 for name in self.feature_net.keys()
                 if name not in self.vector_spaces.keys()
-            ]
+            ],
         )
 
     def get_inner_init_dict(self, key: str, default: ModuleType) -> NetConfigType:
@@ -329,19 +332,18 @@ class EvolvableMultiInput(EvolvableModule):
 
         if init_dict is None:
             raise ValueError(
-                "Invalid default value provided, must be 'cnn' or 'mlp' or 'multi_input'."
+                "Invalid default value provided, must be 'cnn' or 'mlp' or 'multi_input'.",
             )
-        else:
-            # Check if we are extracting a nested dict
-            nested_dict = init_dict.get(key)
-            init_dict = (
-                copy.deepcopy(nested_dict)
-                if nested_dict is not None
-                else copy.deepcopy(init_dict)
-            )
+        # Check if we are extracting a nested dict
+        nested_dict = init_dict.get(key)
+        init_dict = (
+            copy.deepcopy(nested_dict)
+            if nested_dict is not None
+            else copy.deepcopy(init_dict)
+        )
 
-            if isinstance(init_dict, NetConfig):
-                init_dict = asdict(init_dict)
+        if isinstance(init_dict, NetConfig):
+            init_dict = asdict(init_dict)
 
         init_dict["num_outputs"] = self.latent_dim
         init_dict["device"] = self.device
@@ -362,7 +364,8 @@ class EvolvableMultiInput(EvolvableModule):
             # EvolvableMultiInput for nested multi-input spaces
             if isinstance(space, (spaces.Dict, spaces.Tuple)):
                 init_dict = self.get_inner_init_dict(
-                    key, default=ModuleType.MULTI_INPUT
+                    key,
+                    default=ModuleType.MULTI_INPUT,
                 )
                 feature_extractor = EvolvableMultiInput(
                     observation_space=space,
@@ -389,7 +392,9 @@ class EvolvableMultiInput(EvolvableModule):
 
             self.mlp_name = init_dict.pop("name", "vector_mlp")
             vector_mlp = EvolvableMLP(
-                num_inputs=self.total_vector_dims, name=self.mlp_name, **init_dict
+                num_inputs=self.total_vector_dims,
+                name=self.mlp_name,
+                **init_dict,
             )
             feature_net[self.mlp_name] = vector_mlp
 
@@ -517,7 +522,8 @@ class EvolvableMultiInput(EvolvableModule):
         """Recreates the network with the new latent dimension."""
         feature_net = self.build_feature_extractor()
         self.feature_net = EvolvableModule.preserve_parameters(
-            old_net=self.feature_net, new_net=feature_net
+            old_net=self.feature_net,
+            new_net=feature_net,
         )
 
         # Calculate total extracted features dimension
@@ -527,5 +533,6 @@ class EvolvableMultiInput(EvolvableModule):
         )
         final_dense = nn.Linear(features_dim, self.num_outputs, device=self.device)
         self.final_dense = EvolvableModule.preserve_parameters(
-            old_net=self.final_dense, new_net=final_dense
+            old_net=self.final_dense,
+            new_net=final_dense,
         )

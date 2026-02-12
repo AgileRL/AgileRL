@@ -1,7 +1,7 @@
 import random
 from collections import deque, namedtuple
 from numbers import Number
-from typing import Any, Deque, NamedTuple
+from typing import Any, NamedTuple
 
 import numpy as np
 import torch
@@ -39,18 +39,18 @@ class MultiAgentReplayBuffer:
         assert len(agent_ids) > 0, "Agent ids must contain at least one agent id."
 
         self.memory_size: int = memory_size
-        self.memory: Deque = deque(maxlen=memory_size)
+        self.memory: deque = deque(maxlen=memory_size)
         self.field_names: list[str] = field_names
         self.experience: NamedTuple = namedtuple(
-            "Experience", field_names=self.field_names
+            "Experience",
+            field_names=self.field_names,
         )
         self.counter: int = 0
         self.device: str | None = device
         self.agent_ids: list[str] = agent_ids
 
     def __len__(self) -> int:
-        """
-        Returns the current size of internal memory.
+        """Returns the current size of internal memory.
 
         :return: Length of the memory
         :rtype: int
@@ -102,8 +102,7 @@ class MultiAgentReplayBuffer:
         return ts
 
     def _add(self, *args: dict[str, NumpyObsType]) -> None:
-        """
-        Adds experience to memory.
+        """Adds experience to memory.
 
         :param args: Variable length argument list for experience fields
         :type args: Any
@@ -112,10 +111,11 @@ class MultiAgentReplayBuffer:
         self.memory.append(e)
 
     def _process_transition(
-        self, experiences: list[NamedTuple], np_array: bool = False
+        self,
+        experiences: list[NamedTuple],
+        np_array: bool = False,
     ) -> dict[str, dict[str, Any]]:
-        """
-        Returns transition dictionary from experiences.
+        """Returns transition dictionary from experiences.
 
         :param experiences: List of experiences
         :type experiences: list[NamedTuple]
@@ -154,8 +154,7 @@ class MultiAgentReplayBuffer:
         return transition
 
     def sample(self, batch_size: int, *args: Any) -> tuple:
-        """
-        Returns sample of experiences from memory.
+        """Returns sample of experiences from memory.
 
         :param batch_size: Number of samples to return
         :type batch_size: int
@@ -169,8 +168,7 @@ class MultiAgentReplayBuffer:
         return tuple(transition.values())
 
     def save_to_memory_single_env(self, *args: dict[str, NumpyObsType]) -> None:
-        """
-        Saves experience to memory.
+        """Saves experience to memory.
 
         :param args: Variable length argument list. Contains transition elements in consistent order,
             e.g. state, action, reward, next_state, done
@@ -180,10 +178,10 @@ class MultiAgentReplayBuffer:
         self.counter += 1
 
     def _reorganize_dicts(
-        self, *args: dict[str, NumpyObsType]
+        self,
+        *args: dict[str, NumpyObsType],
     ) -> tuple[list[dict[str, NumpyObsType]], ...]:
-        """
-        Reorganizes dictionaries from vectorized to unvectorized experiences.
+        """Reorganizes dictionaries from vectorized to unvectorized experiences.
 
         :param args: Variable length argument list of dictionaries
         :type args: dict[str, np.ndarray]
@@ -214,8 +212,7 @@ class MultiAgentReplayBuffer:
         return tuple(results)
 
     def save_to_memory_vect_envs(self, *args: dict[str, NumpyObsType]) -> None:
-        """
-        Saves multiple experiences to memory.
+        """Saves multiple experiences to memory.
 
         :param args: Variable length argument list. Contains batched transition elements in consistent order,
             e.g. states, actions, rewards, next_states, dones
@@ -227,10 +224,11 @@ class MultiAgentReplayBuffer:
             self.counter += 1
 
     def save_to_memory(
-        self, *args: dict[str, NumpyObsType], is_vectorised: bool = False
+        self,
+        *args: dict[str, NumpyObsType],
+        is_vectorised: bool = False,
     ) -> None:
-        """
-        Applies appropriate save_to_memory function depending on whether
+        """Applies appropriate save_to_memory function depending on whether
         the environment is vectorized or not.
 
         :param args: Variable length argument list. Contains batched or unbatched transition elements in consistent order,

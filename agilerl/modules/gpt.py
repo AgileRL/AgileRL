@@ -4,7 +4,7 @@ from collections import OrderedDict
 
 import numpy as np
 import torch
-import torch.nn as nn
+from torch import nn
 from torch.nn import functional as F
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
@@ -75,7 +75,8 @@ class EvolvableGPT(EvolvableModule):
             n_head >= 1
         ), "Number of attention heads must be greater than or equal to one."
         assert isinstance(
-            dim_feedfwd, int
+            dim_feedfwd,
+            int,
         ), "Feed forward dimension must be an integer."
         assert (
             dim_feedfwd >= 1
@@ -87,13 +88,15 @@ class EvolvableGPT(EvolvableModule):
         assert isinstance(layer_norm_eps, float), "Layer norm epsilon must be a float."
         assert layer_norm_eps > 0, "Layer norm epsilon must be greater than zero."
         assert isinstance(
-            min_layers, int
+            min_layers,
+            int,
         ), "Minimum number of layers must be an integer."
         assert (
             min_layers >= 1
         ), "Minimum number of layers must be greater than or equal to one."
         assert isinstance(
-            max_layers, int
+            max_layers,
+            int,
         ), "Maximum number of layers must be an integer."
         assert (
             max_layers >= 1
@@ -120,7 +123,10 @@ class EvolvableGPT(EvolvableModule):
         self.transformer_keys = list(self.transformer.keys())
 
         self.lm_head = nn.Linear(
-            self.n_embd, self.vocab_size, bias=False, device=self.device
+            self.n_embd,
+            self.vocab_size,
+            bias=False,
+            device=self.device,
         )
 
         self.transformer.wte.weight = self.lm_head.weight
@@ -131,7 +137,9 @@ class EvolvableGPT(EvolvableModule):
         for pn, p in self.named_parameters():
             if pn.endswith("c_proj.weight"):
                 torch.nn.init.normal_(
-                    p, mean=0.0, std=0.02 / math.sqrt(2 * self.n_layer)
+                    p,
+                    mean=0.0,
+                    std=0.02 / math.sqrt(2 * self.n_layer),
                 )
 
         # report number of parameters
@@ -197,7 +205,7 @@ class EvolvableGPT(EvolvableModule):
                     device=self.device,
                 )
                 for _ in range(self.n_layer)
-            ]
+            ],
         )
         net_dict["ln_f"] = LayerNorm(self.n_embd, bias=self.bias, device=self.device)
         return nn.ModuleDict(net_dict)
@@ -212,7 +220,10 @@ class EvolvableGPT(EvolvableModule):
         pos: torch.Tensor | None = None,
         is_causal: bool = True,
     ) -> tuple[
-        torch.Tensor, tuple[torch.Tensor], tuple[torch.Tensor], torch.Tensor | None
+        torch.Tensor,
+        tuple[torch.Tensor],
+        tuple[torch.Tensor],
+        torch.Tensor | None,
     ]:
         """Forward pass through evolvable GPT model.
 
@@ -256,9 +267,12 @@ class EvolvableGPT(EvolvableModule):
             pos = pos.view(-1, t)
         else:
             pos = torch.arange(
-                past_length, t + past_length, dtype=torch.long, device=device
+                past_length,
+                t + past_length,
+                dtype=torch.long,
+                device=device,
             ).unsqueeze(
-                0
+                0,
             )  # shape (1, t)
 
         # forward the GPT model itself
@@ -300,8 +314,7 @@ class EvolvableGPT(EvolvableModule):
         return logits, all_hidden_states, presents, loss
 
     def crop_block_size(self, block_size: int) -> None:
-        """
-        Adjust the block size of the model.
+        """Adjust the block size of the model.
 
         This method performs model surgery to decrease the block size if necessary.
         For example, we may load the GPT2 pretrained model checkpoint (block size 1024)
@@ -314,12 +327,15 @@ class EvolvableGPT(EvolvableModule):
         assert block_size <= self.block_size
         self.block_size = block_size
         self.transformer.wpe.weight = nn.Parameter(
-            self.transformer.wpe.weight[:block_size]
+            self.transformer.wpe.weight[:block_size],
         )
         for block in self.transformer.h:
             if hasattr(block.attn, "attention_bias"):
                 block.attn.attention_bias = block.attn.attention_bias[
-                    :, :, :block_size, :block_size
+                    :,
+                    :,
+                    :block_size,
+                    :block_size,
                 ]
 
     @classmethod
@@ -329,8 +345,7 @@ class EvolvableGPT(EvolvableModule):
         override_args: dict | None = None,
         custom_sd: str | None = None,
     ) -> "EvolvableGPT":
-        """
-        Load a pretrained GPT model with the option to override certain configuration parameters or use a custom state dictionary.
+        """Load a pretrained GPT model with the option to override certain configuration parameters or use a custom state dictionary.
 
         :param model_type: The type of GPT model to load. Must be one of {"gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl"}.
         :type model_type: str
@@ -400,7 +415,7 @@ class EvolvableGPT(EvolvableModule):
         # basically the openai checkpoints use a "Conv1D" module, but we only want to use a vanilla Linear
         # this means that we have to transpose these weights when we import them
         assert len(sd_keys_hf) == len(
-            sd_keys
+            sd_keys,
         ), f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}"
         for khf, k in zip(sd_keys_hf, sd_keys):
             if any(khf.endswith(w) for w in transposed):
@@ -416,10 +431,13 @@ class EvolvableGPT(EvolvableModule):
         return model
 
     def configure_optimizers(
-        self, weight_decay: float, learning_rate: float, betas: tuple, device_type: str
+        self,
+        weight_decay: float,
+        learning_rate: float,
+        betas: tuple,
+        device_type: str,
     ) -> torch.optim.Optimizer:
-        """
-        Configures the optimizer for the model by separating parameters into those that will and won't experience weight decay.
+        """Configures the optimizer for the model by separating parameters into those that will and won't experience weight decay.
 
         This function separates all parameters of the model into two buckets: those that will experience weight decay for
         regularization and those that won't (biases, and layernorm/embedding weights). It then returns the PyTorch optimizer object.
@@ -473,14 +491,10 @@ class EvolvableGPT(EvolvableModule):
         union_params = decay | no_decay
         assert (
             len(inter_params) == 0
-        ), "parameters {} made it into both decay/no_decay sets!".format(
-            str(inter_params)
-        )
+        ), f"parameters {inter_params!s} made it into both decay/no_decay sets!"
         assert (
             len(param_dict.keys() - union_params) == 0
-        ), "parameters {} were not separated into either decay/no_decay set!".format(
-            str(param_dict.keys() - union_params),
-        )
+        ), f"parameters {param_dict.keys() - union_params!s} were not separated into either decay/no_decay set!"
 
         # create the pytorch optimizer object
         optim_groups = [
@@ -505,8 +519,7 @@ class EvolvableGPT(EvolvableModule):
         return optimizer
 
     def estimate_mfu(self, fwdbwd_per_iter: int, dt: float) -> float:
-        """
-        Estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS.
+        """Estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS.
 
         :param fwdbwd_per_iter: Number of forward-backward passes per iteration.
         :type fwdbwd_per_iter: int
@@ -541,8 +554,7 @@ class EvolvableGPT(EvolvableModule):
         temperature: float = 1.0,
         top_k: int | None = None,
     ) -> torch.Tensor:
-        """
-        Generate a sequence of tokens.
+        """Generate a sequence of tokens.
 
         This method takes a conditioning sequence of indices `idx` (LongTensor of shape (b, t))
         and completes the sequence `max_new_tokens` times, feeding the predictions back into the
@@ -630,13 +642,13 @@ class EvolvableGPT(EvolvableModule):
         new_transformer = self.build_networks()
 
         self.transformer = EvolvableModule.preserve_parameters(
-            old_net=self.transformer, new_net=new_transformer
+            old_net=self.transformer,
+            new_net=new_transformer,
         )
 
 
 class LayerNorm(nn.Module):
-    """
-    LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False.
+    """LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False.
 
     :param int ndim: The number of dimensions in the input tensor.
     :param bool bias: If True, adds a learnable bias to the normalization.
@@ -666,13 +678,16 @@ class LayerNorm(nn.Module):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return F.layer_norm(
-            input, self.weight.shape, self.weight, self.bias, self.layer_norm_eps
+            input,
+            self.weight.shape,
+            self.weight,
+            self.bias,
+            self.layer_norm_eps,
         )
 
 
 class CausalSelfAttention(nn.Module):
-    """
-    Causal Self-Attention module for transformer models.
+    """Causal Self-Attention module for transformer models.
 
     This module implements a causal self-attention mechanism, ensuring that each position in the sequence
     can only attend to previous positions.
@@ -718,14 +733,17 @@ class CausalSelfAttention(nn.Module):
         self.flash = hasattr(torch.nn.functional, "scaled_dot_product_attention")
         if not self.flash:
             print(
-                "WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0"
+                "WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0",
             )
             # causal mask to ensure that attention is only applied to the left in the
             # input sequence
             self.register_buffer(
                 "attention_bias",
                 torch.tril(torch.ones(block_size, block_size, device=device)).view(
-                    1, 1, block_size, block_size
+                    1,
+                    1,
+                    block_size,
+                    block_size,
                 ),
             )
 
@@ -736,8 +754,7 @@ class CausalSelfAttention(nn.Module):
         layer_past: tuple[torch.Tensor] | None = None,
         is_causal: bool = True,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor]]:
-        """
-        Forward pass through the CausalSelfAttention module.
+        """Forward pass through the CausalSelfAttention module.
 
         :param x: Input tensor of shape (batch_size, sequence_length, embedding_dim).
         :type x: torch.Tensor
@@ -758,13 +775,16 @@ class CausalSelfAttention(nn.Module):
         # forward to be the batch dim
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(
-            1, 2
+            1,
+            2,
         )  # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(
-            1, 2
+            1,
+            2,
         )  # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(
-            1, 2
+            1,
+            2,
         )  # (B, nh, T, hs)
 
         if layer_past is not None:
@@ -805,8 +825,7 @@ class CausalSelfAttention(nn.Module):
 
 
 class Block(nn.Module):
-    """
-    Transformer block consisting of layer normalization, causal self-attention, and MLP.
+    """Transformer block consisting of layer normalization, causal self-attention, and MLP.
 
     :param n_embd: The embedding dimensionality.
     :type n_embd: int
@@ -841,13 +860,24 @@ class Block(nn.Module):
         super().__init__()
         self.device = device
         self.ln_1 = LayerNorm(
-            n_embd, bias=bias, layer_norm_eps=layer_norm_eps, device=device
+            n_embd,
+            bias=bias,
+            layer_norm_eps=layer_norm_eps,
+            device=device,
         )
         self.attn = CausalSelfAttention(
-            n_embd, n_head, bias, dropout, block_size, device=device
+            n_embd,
+            n_head,
+            bias,
+            dropout,
+            block_size,
+            device=device,
         )
         self.ln_2 = LayerNorm(
-            n_embd, bias=bias, layer_norm_eps=layer_norm_eps, device=device
+            n_embd,
+            bias=bias,
+            layer_norm_eps=layer_norm_eps,
+            device=device,
         )
         self.mlp = MLP(n_embd, dropout, hidden_size, activation, device=device)
 
@@ -858,8 +888,7 @@ class Block(nn.Module):
         layer_past: tuple[torch.Tensor] | None = None,
         is_causal: bool = True,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor]]:
-        """
-        Forward pass through the transformer block.
+        """Forward pass through the transformer block.
 
         :param x: Input tensor of shape (batch_size, sequence_length, embedding_dim).
         :type x: torch.Tensor

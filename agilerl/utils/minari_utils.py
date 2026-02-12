@@ -13,7 +13,9 @@ from agilerl.components.replay_buffer import ReplayBuffer
 
 
 def load_minari_dataset(
-    dataset_id: str, accelerator: Accelerator | None = None, remote: bool = False
+    dataset_id: str,
+    accelerator: Accelerator | None = None,
+    remote: bool = False,
 ) -> minari.MinariDataset:
     """Load a Minari dataset either from local storage or remote repository.
 
@@ -29,7 +31,7 @@ def load_minari_dataset(
     if remote:
         if dataset_id not in list(minari.list_remote_datasets().keys()):
             raise KeyError(
-                "Enter a valid remote Minari Dataset ID. check https://minari.farama.org/ for more details."
+                "Enter a valid remote Minari Dataset ID. check https://minari.farama.org/ for more details.",
             )
 
     file_path = get_dataset_path(dataset_id)
@@ -48,7 +50,7 @@ def load_minari_dataset(
         else:
             raise FileNotFoundError(
                 f"No local Dataset found for dataset id {dataset_id}. check https://minari.farama.org/ for "
-                "more details on remote dataset. For loading a remote dataset assign remote=True"
+                "more details on remote dataset. For loading a remote dataset assign remote=True",
             )
 
     minari_dataset = load_dataset(dataset_id)
@@ -72,7 +74,7 @@ def minari_to_agile_buffer(
     """
     minari_dataset = load_minari_dataset(dataset_id, accelerator, remote)
     for episode in minari_dataset.iterate_episodes():
-        for num_steps in range(0, len(episode.rewards)):
+        for num_steps in range(len(episode.rewards)):
             observation = episode.observations[num_steps]
             next_observation = episode.observations[num_steps + 1]
             action = episode.actions[num_steps]

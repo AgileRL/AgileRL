@@ -58,7 +58,7 @@ class ConstantRewardImageEnv(gym.Env):
 class ConstantRewardDictEnv(gym.Env):
     def __init__(self):
         self.observation_space = spaces.Dict(
-            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 0.0, (1, 3, 3))}
+            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 0.0, (1, 3, 3))},
         )
         self.action_space = spaces.Discrete(1)
         self.sample_obs = [{"discrete": np.array([[0]]), "box": np.zeros((1, 1, 3, 3))}]
@@ -131,7 +131,7 @@ class ConstantRewardContActionsImageEnv(gym.Env):
 class ConstantRewardContActionsDictEnv(gym.Env):
     def __init__(self):
         self.observation_space = spaces.Dict(
-            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 0.0, (1, 3, 3))}
+            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 0.0, (1, 3, 3))},
         )
         self.action_space = spaces.Box(0.0, 1.0, (1,))
         self.sample_obs = [{"discrete": np.array([[0]]), "box": np.zeros((1, 1, 3, 3))}]
@@ -205,7 +205,7 @@ class ObsDependentRewardImageEnv(gym.Env):
 class ObsDependentRewardDictEnv(gym.Env):
     def __init__(self):
         self.observation_space = spaces.Dict(
-            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))}
+            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))},
         )
         self.action_space = spaces.Discrete(1)
         self.last_obs = {"discrete": 1, "box": np.ones((1, 3, 3))}
@@ -213,7 +213,7 @@ class ObsDependentRewardDictEnv(gym.Env):
             {
                 "discrete": [np.array([[0]]), np.array([[1]])],
                 "box": [np.zeros((1, 1, 3, 3)), np.ones((1, 1, 3, 3))],
-            }
+            },
         ]
         self.q_values = [[-1.0], [1.0]]  # Correct Q values to learn, s x a table
         self.v_values = [[-1.0], [1.0]]  # Correct V values to learn, s table
@@ -295,7 +295,7 @@ class ObsDependentRewardContActionsImageEnv(gym.Env):
 class ObsDependentRewardContActionsDictEnv(gym.Env):
     def __init__(self):
         self.observation_space = spaces.Dict(
-            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))}
+            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))},
         )
         self.action_space = spaces.Box(0.0, 1.0, (1,))
         self.last_obs = {"discrete": 1, "box": np.ones((1, 3, 3))}
@@ -303,7 +303,7 @@ class ObsDependentRewardContActionsDictEnv(gym.Env):
             {
                 "discrete": [np.array([[0]]), np.array([[1]])],
                 "box": [np.zeros((1, 1, 3, 3)), np.ones((1, 1, 3, 3))],
-            }
+            },
         ]
         self.sample_actions = [[[1.0]], [[1.0]]]
         self.q_values = [[-1.0], [1.0]]  # Correct Q values to learn, s x a table
@@ -383,7 +383,7 @@ class DiscountedRewardImageEnv(gym.Env):
 class DiscountedRewardDictEnv(gym.Env):
     def __init__(self):
         self.observation_space = spaces.Dict(
-            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))}
+            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))},
         )
         self.action_space = spaces.Discrete(1)
         self.last_obs = {"discrete": 0, "box": np.zeros((1, 3, 3))}
@@ -391,7 +391,7 @@ class DiscountedRewardDictEnv(gym.Env):
             {
                 "discrete": [np.array([[0]]), np.array([[1]])],
                 "box": [np.zeros((1, 1, 3, 3)), np.ones((1, 1, 3, 3))],
-            }
+            },
         ]
         self.q_values = [[0.99], [1.0]]  # Correct Q values to learn, s x a table
         self.v_values = [[0.99], [1.0]]  # Correct V values to learn, s table
@@ -468,7 +468,7 @@ class DiscountedRewardContActionsImageEnv(gym.Env):
 class DiscountedRewardContActionsDictEnv(gym.Env):
     def __init__(self):
         self.observation_space = spaces.Dict(
-            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))}
+            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))},
         )
         self.action_space = spaces.Box(0.0, 1.0, (1,))
         self.last_obs = {"discrete": 0, "box": np.zeros((1, 3, 3))}
@@ -551,7 +551,7 @@ class FixedObsPolicyImageEnv(gym.Env):
 class FixedObsPolicyDictEnv(gym.Env):
     def __init__(self):
         self.observation_space = spaces.Dict(
-            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 0.0, (1, 3, 3))}
+            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 0.0, (1, 3, 3))},
         )
         self.action_space = spaces.Discrete(2)
         self.sample_obs = [{"discrete": np.array([[0]]), "box": np.zeros((1, 1, 3, 3))}]
@@ -626,7 +626,7 @@ class FixedObsPolicyContActionsImageEnv(gym.Env):
 class FixedObsPolicyContActionsDictEnv(gym.Env):
     def __init__(self):
         self.observation_space = spaces.Dict(
-            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))}
+            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))},
         )
         self.action_space = spaces.Box(0.0, 1.0, (1,))
         self.sample_obs = [{"discrete": np.array([[0]]), "box": np.zeros((1, 1, 3, 3))}]
@@ -708,7 +708,7 @@ class PolicyImageEnv(gym.Env):
 class PolicyDictEnv(gym.Env):
     def __init__(self):
         self.observation_space = spaces.Dict(
-            {"discrete": spaces.Discrete(2), "box": spaces.Box(0.0, 1.0, (1, 3, 3))}
+            {"discrete": spaces.Discrete(2), "box": spaces.Box(0.0, 1.0, (1, 3, 3))},
         )
         self.action_space = spaces.Discrete(2)
         self.last_obs = {"discrete": 1, "box": np.ones((1, 3, 3))}
@@ -855,7 +855,7 @@ class PolicyContActionsImageEnv(gym.Env):
 class PolicyContActionsDictEnv(gym.Env):
     def __init__(self):
         self.observation_space = spaces.Dict(
-            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))}
+            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))},
         )
         self.action_space = spaces.Box(0.0, 1.0, (2,))
         self.last_obs = {"discrete": 0, "box": np.zeros((1, 3, 3))}
@@ -874,7 +874,7 @@ class PolicyContActionsDictEnv(gym.Env):
             "box": self.last_obs["box"],
         }
         if self.last_obs["discrete"] and int(
-            np.mean(self.last_obs["box"])
+            np.mean(self.last_obs["box"]),
         ):  # last obs = 1, policy should be [0, 1]
             reward = -((0 - action[0]) ** 2) - (1 - action[1]) ** 2
         else:  # last obs = 0, policy should be [1, 0]
@@ -894,7 +894,12 @@ class PolicyContActionsDictEnv(gym.Env):
 
 
 def check_q_learning_with_probe_env(
-    env, algo_class, algo_args, memory, learn_steps=10000, device="cpu"
+    env,
+    algo_class,
+    algo_args,
+    memory,
+    learn_steps=10000,
+    device="cpu",
 ):
     print(f"Probe environment: {type(env).__name__}")
 
@@ -909,7 +914,11 @@ def check_q_learning_with_probe_env(
         action = agent.get_action(state, epsilon=1)
         next_state, reward, done, _, _ = env.step(action)
         transition = Transition(
-            obs=state, action=action, reward=reward, next_obs=next_state, done=done
+            obs=state,
+            action=action,
+            reward=reward,
+            next_obs=next_state,
+            done=done,
         ).to_tensordict()
         transition = transition.unsqueeze(0)
         transition.batch_size = [1]
@@ -936,7 +945,12 @@ def check_q_learning_with_probe_env(
 
 
 def check_policy_q_learning_with_probe_env(
-    env, algo_class, algo_args, memory, learn_steps=10000, device="cpu"
+    env,
+    algo_class,
+    algo_args,
+    memory,
+    learn_steps=10000,
+    device="cpu",
 ):
     print(f"Probe environment: {type(env).__name__}")
 
@@ -951,7 +965,11 @@ def check_policy_q_learning_with_probe_env(
         action = action[0]
         next_state, reward, done, _, _ = env.step(action)
         transition = Transition(
-            obs=state, action=action, reward=reward, next_obs=next_state, done=done
+            obs=state,
+            action=action,
+            reward=reward,
+            next_obs=next_state,
+            done=done,
         ).to_tensordict()
         transition = transition.unsqueeze(0)
         transition.batch_size = [1]
@@ -969,7 +987,10 @@ def check_policy_q_learning_with_probe_env(
             print("Loss = ", loss)
 
     for sample_obs, sample_action, q_values, policy_values in zip(
-        env.sample_obs, env.sample_actions, env.q_values, env.policy_values
+        env.sample_obs,
+        env.sample_actions,
+        env.q_values,
+        env.policy_values,
     ):
         if isinstance(sample_obs, dict):
             state = {
@@ -1061,7 +1082,9 @@ def check_policy_on_policy_with_probe_env(
             print("Loss = ", loss)
 
     for sample_obs, v_values, policy_values in zip(
-        env.sample_obs, env.v_values, env.policy_values
+        env.sample_obs,
+        env.v_values,
+        env.policy_values,
     ):
         if isinstance(sample_obs, dict):
             state = {

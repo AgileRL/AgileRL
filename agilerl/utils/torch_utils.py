@@ -1,9 +1,10 @@
 import math
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import torch
-import torch.nn as nn
+from torch import nn
 
 
 def map_pytree(f: Callable[[np.ndarray | torch.Tensor], Any], item: Any):
@@ -21,12 +22,11 @@ def map_pytree(f: Callable[[np.ndarray | torch.Tensor], Any], item: Any):
     """
     if isinstance(item, dict):
         return {k: map_pytree(f, v) for k, v in item.items()}
-    elif isinstance(item, list) or isinstance(item, set) or isinstance(item, tuple):
+    if isinstance(item, list) or isinstance(item, set) or isinstance(item, tuple):
         return [map_pytree(f, v) for v in item]
-    elif isinstance(item, np.ndarray) or isinstance(item, torch.Tensor):
+    if isinstance(item, np.ndarray) or isinstance(item, torch.Tensor):
         return f(item)
-    else:
-        return item
+    return item
 
 
 def to(item: Any, device: torch.device):
@@ -74,7 +74,9 @@ def parameter_norm(model: nn.Module):
 
 
 def get_transformer_logs(
-    attentions: list[torch.Tensor], model: nn.Module, attn_mask: torch.Tensor
+    attentions: list[torch.Tensor],
+    model: nn.Module,
+    attn_mask: torch.Tensor,
 ):
     """Extract logging information from transformer attention weights.
 
@@ -98,7 +100,7 @@ def get_transformer_logs(
             .sum()
             .item(),
             attentions,
-        )
+        ),
     ) / (len(attentions) * n)
     model_parameter_norm = parameter_norm(model)
     logs["attention_entropy"] = (model_attention_entropy, n * len(attentions))

@@ -56,13 +56,19 @@ if __name__ == "__main__":
         lr=RLParameter(min=6.25e-5, max=1e-2),
         batch_size=RLParameter(min=8, max=512, dtype=int),
         learn_step=RLParameter(
-            min=1, max=10, dtype=int, grow_factor=1.5, shrink_factor=0.75
+            min=1,
+            max=10,
+            dtype=int,
+            grow_factor=1.5,
+            shrink_factor=0.75,
         ),
     )
 
     # Define observation and action spaces from dataset
     observation_space = spaces.Box(
-        low=features.values.min(), high=features.values.max(), shape=context_dim
+        low=features.values.min(),
+        high=features.values.max(),
+        shape=context_dim,
     )
     action_space = spaces.Discrete(action_dim)
 
@@ -121,7 +127,7 @@ if __name__ == "__main__":
         for i, agent in enumerate(pop):  # Loop through population
             losses = []
             context = env.reset()  # Reset environment at start of episode
-            for idx_step in range(episode_steps):
+            for _idx_step in range(episode_steps):
                 # Get next action from agent
                 action = agent.get_action(context)
                 next_context, reward = env.step(action)  # Act in environment
@@ -169,8 +175,8 @@ if __name__ == "__main__":
             f"--- Global steps {total_steps} ---\n"
             f"Steps {[agent.steps[-1] for agent in pop]}\n"
             f"Regret: {[regret[i][-1] for i in range(len(pop))]}\n"
-            f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}'
-            f"Mutations: {[agent.mut for agent in pop]}"
+            f'Fitnesses: {[f"{fitness:.2f}" for fitness in fitnesses]}'
+            f"Mutations: {[agent.mut for agent in pop]}",
         )
 
         if pop[0].steps[-1] // evo_steps > evo_count:

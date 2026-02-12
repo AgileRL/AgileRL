@@ -5,9 +5,8 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
 from gymnasium import spaces
+from torch import nn, optim
 from torch.nn.utils import clip_grad_norm_
 
 from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper
@@ -159,31 +158,36 @@ class IPPO(MultiAgentRLAlgorithm):
         assert isinstance(gae_lambda, (float, int)), "Lambda must be a float."
         assert gae_lambda >= 0, "Lambda must be greater than or equal to zero."
         assert isinstance(
-            action_std_init, (float, int)
+            action_std_init,
+            (float, int),
         ), "Action standard deviation must be a float."
         assert (
             action_std_init >= 0
         ), "Action standard deviation must be greater than or equal to zero."
         assert isinstance(
-            clip_coef, (float, int)
+            clip_coef,
+            (float, int),
         ), "Clipping coefficient must be a float."
         assert (
             clip_coef >= 0
         ), "Clipping coefficient must be greater than or equal to zero."
         assert isinstance(
-            ent_coef, (float, int)
+            ent_coef,
+            (float, int),
         ), "Entropy coefficient must be a float."
         assert (
             ent_coef >= 0
         ), "Entropy coefficient must be greater than or equal to zero."
         assert isinstance(
-            vf_coef, (float, int)
+            vf_coef,
+            (float, int),
         ), "Value function coefficient must be a float."
         assert (
             vf_coef >= 0
         ), "Value function coefficient must be greater than or equal to zero."
         assert isinstance(
-            max_grad_norm, (float, int)
+            max_grad_norm,
+            (float, int),
         ), "Maximum norm for gradient clipping must be a float."
         assert (
             max_grad_norm >= 0
@@ -196,17 +200,19 @@ class IPPO(MultiAgentRLAlgorithm):
                 target_kl >= 0
             ), "Target KL divergence threshold must be greater than or equal to zero."
         assert isinstance(
-            update_epochs, int
+            update_epochs,
+            int,
         ), "Policy update epochs must be an integer."
         assert (
             update_epochs >= 1
         ), "Policy update epochs must be greater than or equal to one."
         assert isinstance(
-            wrap, bool
+            wrap,
+            bool,
         ), "Wrap models flag must be boolean value True or False."
         if (actor_networks is not None) != (critic_networks is not None):
             warnings.warn(
-                "Actor and critic network lists must both be supplied to use custom networks. Defaulting to net config."
+                "Actor and critic network lists must both be supplied to use custom networks. Defaulting to net config.",
             )
 
         self.batch_size = batch_size
@@ -228,35 +234,35 @@ class IPPO(MultiAgentRLAlgorithm):
         if actor_networks is not None and critic_networks is not None:
             if isinstance(actor_networks, list):
                 assert len(actor_networks) == len(
-                    self.observation_space
+                    self.observation_space,
                 ), "actor_networks must be a list of the same length as the number of homogeneous agents"
                 actor_networks = ModuleDict(
                     {
                         agent_id: actor_networks[idx]
                         for idx, agent_id in enumerate(self.observation_space)
-                    }
+                    },
                 )
             if isinstance(critic_networks, list):
                 assert len(critic_networks) == len(
-                    self.observation_space
+                    self.observation_space,
                 ), "critic_networks must be a list of the same length as the number of homogeneous agents"
 
                 critic_networks = ModuleDict(
                     {
                         agent_id: critic_networks[idx]
                         for idx, agent_id in enumerate(self.observation_space)
-                    }
+                    },
                 )
 
             actors_list = list(actor_networks.values())
             critics_list = list(critic_networks.values())
             if not all(isinstance(net, EvolvableModule) for net in actors_list):
                 raise TypeError(
-                    "All actor networks must be instances of EvolvableModule"
+                    "All actor networks must be instances of EvolvableModule",
                 )
             if not all(isinstance(net, EvolvableModule) for net in critics_list):
                 raise TypeError(
-                    "All critic networks must be instances of EvolvableModule"
+                    "All critic networks must be instances of EvolvableModule",
                 )
 
             assert len(actor_networks) == self.n_unique_agents, (
@@ -269,7 +275,8 @@ class IPPO(MultiAgentRLAlgorithm):
             )
 
             self.actors, self.critics = make_safe_deepcopies(
-                actor_networks, critic_networks
+                actor_networks,
+                critic_networks,
             )
         else:
             net_config: NetConfigType = self.build_net_config(net_config, flatten=False)
@@ -312,10 +319,14 @@ class IPPO(MultiAgentRLAlgorithm):
 
         # Optimizers
         self.actor_optimizers = OptimizerWrapper(
-            optim.Adam, networks=self.actors, lr=self.lr
+            optim.Adam,
+            networks=self.actors,
+            lr=self.lr,
         )
         self.critic_optimizers = OptimizerWrapper(
-            optim.Adam, networks=self.critics, lr=self.lr
+            optim.Adam,
+            networks=self.critics,
+            lr=self.lr,
         )
 
         if self.accelerator is not None and wrap:
@@ -329,7 +340,7 @@ class IPPO(MultiAgentRLAlgorithm):
                 and self.torch_compiler != "default"
             ):
                 warnings.warn(
-                    f"{self.torch_compiler} compile mode is not compatible with GumbelSoftmax activation, changing to 'default' mode."
+                    f"{self.torch_compiler} compile mode is not compatible with GumbelSoftmax activation, changing to 'default' mode.",
                 )
                 self.torch_compiler = "default"
 
@@ -343,19 +354,19 @@ class IPPO(MultiAgentRLAlgorithm):
             NetworkGroup(
                 eval_network=self.actors,
                 policy=True,
-            )
+            ),
         )
         self.register_network_group(
             NetworkGroup(
                 eval_network=self.critics,
-            )
+            ),
         )
 
     def process_infos(
-        self, infos: InfosDict | None
+        self,
+        infos: InfosDict | None,
     ) -> tuple[ArrayDict, ArrayDict, ArrayDict]:
-        """
-        Process the information, extract env_defined_actions, action_masks and agent_masks
+        """Process the information, extract env_defined_actions, action_masks and agent_masks
 
         :param infos: Info dict
         :type infos: dict[str, dict[...]]
@@ -364,7 +375,7 @@ class IPPO(MultiAgentRLAlgorithm):
         """
         if infos is None:
             infos = {agent: {} for agent in self.agent_ids}
-            action_masks = {agent: None for agent in self.observation_space}
+            action_masks = dict.fromkeys(self.observation_space)
         else:
             action_masks = self.extract_action_masks(infos)
 
@@ -391,7 +402,7 @@ class IPPO(MultiAgentRLAlgorithm):
                     else agent_id
                 )
                 action_masks[agent_id].append(
-                    info.get("action_mask", None) if isinstance(info, dict) else None
+                    info.get("action_mask", None) if isinstance(info, dict) else None,
                 )
 
         # Check and stack masks
@@ -410,7 +421,9 @@ class IPPO(MultiAgentRLAlgorithm):
         return action_masks
 
     def preprocess_observation(
-        self, observation: ObservationType, group_ids: list[str]
+        self,
+        observation: ObservationType,
+        group_ids: list[str],
     ) -> dict[str, TorchObsType]:
         """Preprocesses observations for forward pass through neural network.
 
@@ -433,7 +446,7 @@ class IPPO(MultiAgentRLAlgorithm):
                     observation=agent_obs,
                     device=self.device,
                     normalize_images=self.normalize_images,
-                )
+                ),
             )
 
         # Need to concatenate / stack observations for each group of homogeneous agents
@@ -487,7 +500,8 @@ class IPPO(MultiAgentRLAlgorithm):
                     batch_mask = action_mask[minibatch_indices]
 
                 batch_action, batch_log_prob, batch_entropy = actor(
-                    batch_obs, action_mask=batch_mask
+                    batch_obs,
+                    action_mask=batch_mask,
                 )
                 batch_state_values = critic(batch_obs).squeeze(-1)
 
@@ -523,7 +537,8 @@ class IPPO(MultiAgentRLAlgorithm):
         :rtype: tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict[str, np.ndarray], dict[str, np.ndarray]]
         """
         assert not key_in_nested_dict(
-            obs, "action_mask"
+            obs,
+            "action_mask",
         ), "AgileRL requires action masks to be defined in the information dictionary."
 
         action_masks, env_defined_actions, agent_masks = self.process_infos(infos)
@@ -574,7 +589,9 @@ class IPPO(MultiAgentRLAlgorithm):
             state_values_dict[agent_id] = values.cpu().data.numpy()
 
         action_dict = self.disassemble_grouped_outputs(
-            action_dict, vect_dim, grouped_agents
+            action_dict,
+            vect_dim,
+            grouped_agents,
         )
 
         # If using env_defined_actions replace actions
@@ -587,13 +604,19 @@ class IPPO(MultiAgentRLAlgorithm):
         return (
             action_dict,
             self.disassemble_grouped_outputs(
-                action_logprob_dict, vect_dim, grouped_agents
+                action_logprob_dict,
+                vect_dim,
+                grouped_agents,
             ),
             self.disassemble_grouped_outputs(
-                dist_entropy_dict, vect_dim, grouped_agents
+                dist_entropy_dict,
+                vect_dim,
+                grouped_agents,
             ),
             self.disassemble_grouped_outputs(
-                state_values_dict, vect_dim, grouped_agents
+                state_values_dict,
+                vect_dim,
+                grouped_agents,
             ),
         )
 
@@ -676,7 +699,8 @@ class IPPO(MultiAgentRLAlgorithm):
         )
 
         log_probs, rewards, dones, values = map(
-            vectorize_experiences_by_agent, (log_probs, rewards, dones, values)
+            vectorize_experiences_by_agent,
+            (log_probs, rewards, dones, values),
         )
         log_probs = log_probs.squeeze()
         rewards = rewards.squeeze()
@@ -693,7 +717,10 @@ class IPPO(MultiAgentRLAlgorithm):
             next_done = next_done.reshape(1, -1)
 
             next_state = preprocess_observation(
-                obs_space, next_state, self.device, self.normalize_images
+                obs_space,
+                next_state,
+                self.device,
+                self.normalize_images,
             )
             next_value = critic(next_state).reshape(1, -1).cpu()
             advantages = torch.zeros_like(rewards).float()
@@ -723,7 +750,9 @@ class IPPO(MultiAgentRLAlgorithm):
 
         states = concatenate_experiences_into_batches(states, obs_space)
         actions = concatenate_experiences_into_batches(
-            actions, action_space, actions=True
+            actions,
+            action_space,
+            actions=True,
         )
         log_probs = log_probs.reshape((-1,))
         experiences = (states, actions, log_probs, advantages, returns, values)
@@ -755,7 +784,10 @@ class IPPO(MultiAgentRLAlgorithm):
 
                 if len(minibatch_idxs) > 1:
                     batch_states = preprocess_observation(
-                        obs_space, batch_states, self.device, self.normalize_images
+                        obs_space,
+                        batch_states,
+                        self.device,
+                        self.normalize_images,
                     )
                     _, _, entropy = actor(batch_states)
                     value = critic(batch_states).squeeze(-1)
@@ -781,7 +813,9 @@ class IPPO(MultiAgentRLAlgorithm):
                     # Policy loss
                     pg_loss1 = -minibatch_advs * ratio
                     pg_loss2 = -minibatch_advs * torch.clamp(
-                        ratio, 1 - self.clip_coef, 1 + self.clip_coef
+                        ratio,
+                        1 - self.clip_coef,
+                        1 + self.clip_coef,
                     )
                     pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
@@ -789,7 +823,9 @@ class IPPO(MultiAgentRLAlgorithm):
                     value = value.view(-1)
                     v_loss_unclipped = (value - batch_returns) ** 2
                     v_clipped = batch_values + torch.clamp(
-                        value - batch_values, -self.clip_coef, self.clip_coef
+                        value - batch_values,
+                        -self.clip_coef,
+                        self.clip_coef,
                     )
 
                     v_loss_clipped = (v_clipped - batch_returns) ** 2
@@ -913,10 +949,14 @@ class IPPO(MultiAgentRLAlgorithm):
 
                         # Replace NaNs with True (indicate killed agent)
                         terminated = np.where(
-                            np.isnan(terminated), True, terminated
+                            np.isnan(terminated),
+                            True,
+                            terminated,
                         ).astype(bool)
                         truncated = np.where(
-                            np.isnan(truncated), False, truncated
+                            np.isnan(truncated),
+                            False,
+                            truncated,
                         ).astype(bool)
 
                         dones[agent_id] = terminated | truncated

@@ -1,11 +1,11 @@
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 import numpy as np
 import torch
-import wandb
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms.ppo import PPO
 from agilerl.training.train_on_policy import train_on_policy
 from agilerl.utils.utils import (
@@ -170,9 +170,11 @@ if __name__ == "__main__":
         "landing": LandingSkill,
     }
 
-    for skill in skills.keys():
+    for skill, skill_cfg in skills.items():
         env = make_skill_vect_envs(
-            INIT_HP["ENV_NAME"], skills[skill], num_envs=1
+            INIT_HP["ENV_NAME"],
+            skill_cfg,
+            num_envs=1,
         )  # Create environment
 
         observation_space = env.single_observation_space
@@ -229,7 +231,7 @@ if __name__ == "__main__":
     action_space = env.single_action_space
 
     action_dim = len(
-        trained_skills
+        trained_skills,
     )  # Selector will be trained to choose which trained skill to use
 
     if INIT_HP["CHANNELS_LAST"]:
@@ -252,7 +254,7 @@ if __name__ == "__main__":
             name="{}-EvoHPO-{}-{}".format(
                 INIT_HP["ENV_NAME"],
                 INIT_HP["ALGO"],
-                datetime.now().strftime("%m%d%Y%H%M%S"),
+                datetime.now(tz=timezone.utc).strftime("%m%d%Y%H%M%S"),
             ),
             # track hyperparameters and run metadata
             config={
@@ -282,7 +284,7 @@ if __name__ == "__main__":
 
             done = np.zeros(1)
 
-            for idx_step in range(500):
+            for _idx_step in range(500):
                 # Get next action from agent
                 action, log_prob, _, value = agent.get_action(state)
 
@@ -290,16 +292,16 @@ if __name__ == "__main__":
                 skill_agent = trained_skills[action[0]]["agent"]
                 skill_duration = trained_skills[action[0]]["skill_duration"]
                 reward = 0
-                for skill_step in range(skill_duration):
+                for _skill_step in range(skill_duration):
                     # If landed, do nothing
                     if state[0][6] or state[0][7]:
                         next_state, skill_reward, termination, truncation, _ = env.step(
-                            [0]
+                            [0],
                         )
                     else:
                         skill_action, _, _, _ = skill_agent.get_action(state)
                         next_state, skill_reward, termination, truncation, _ = env.step(
-                            skill_action
+                            skill_action,
                         )  # Act in environment
                     next_done = np.logical_or(termination, truncation).astype(np.int8)
                     reward += skill_reward
@@ -329,11 +331,11 @@ if __name__ == "__main__":
                     values,
                     next_state,
                     next_done,
-                )
+                ),
             )
 
-            agent.steps[-1] += idx_step + 1
-            total_steps += idx_step + 1
+            agent.steps[-1] += _idx_step + 1
+            total_steps += _idx_step + 1
 
         if (agent.steps[-1]) % INIT_HP["EVO_STEPS"] == 0:
             mean_scores = np.mean([agent.scores[-20:] for agent in pop], axis=1)
@@ -342,7 +344,7 @@ if __name__ == "__main__":
                     {
                         "global_step": total_steps,
                         "train/mean_score": np.mean(mean_scores),
-                    }
+                    },
                 )
             print(
                 f"""

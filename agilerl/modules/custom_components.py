@@ -1,8 +1,8 @@
 import math
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 
 from agilerl.typing import DeviceType
 
@@ -12,7 +12,9 @@ class GumbelSoftmax(nn.Module):
 
     @staticmethod
     def gumbel_softmax(
-        logits: torch.Tensor, tau: float = 1.0, eps: float = 1e-20
+        logits: torch.Tensor,
+        tau: float = 1.0,
+        eps: float = 1e-20,
     ) -> torch.Tensor:
         """Implementation of the gumbel softmax activation function
 
@@ -64,13 +66,14 @@ class NoisyLinear(nn.Module):
         self.device = device
 
         self.weight_mu = nn.Parameter(
-            torch.empty(out_features, in_features, device=device)
+            torch.empty(out_features, in_features, device=device),
         )
         self.weight_sigma = nn.Parameter(
-            torch.empty(out_features, in_features, device=device)
+            torch.empty(out_features, in_features, device=device),
         )
         self.register_buffer(
-            "weight_epsilon", torch.empty(out_features, in_features, device=device)
+            "weight_epsilon",
+            torch.empty(out_features, in_features, device=device),
         )
 
         self.bias_mu = nn.Parameter(torch.empty(out_features, device=device))
@@ -129,8 +132,7 @@ class NoisyLinear(nn.Module):
 
 
 class NewGELU(nn.Module):
-    """
-    Implementation of the GELU activation function currently in Google BERT repo (identical to OpenAI GPT).
+    """Implementation of the GELU activation function currently in Google BERT repo (identical to OpenAI GPT).
     Reference: Gaussian Error Linear Units (GELU) paper: https://arxiv.org/abs/1606.08415
     """
 
@@ -141,7 +143,7 @@ class NewGELU(nn.Module):
             * (
                 1.0
                 + torch.tanh(
-                    math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0))
+                    math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0)),
                 )
             )
         )
@@ -205,12 +207,14 @@ class ResidualBlock(nn.Module):
         res = x
 
         x = self.asymmetric_padding(
-            x, kernel_size=self.conv1.kernel_size[0]
+            x,
+            kernel_size=self.conv1.kernel_size[0],
         )  # Apply manual padding
         x = F.relu(self.bn1(self.conv1(x)))
 
         x = self.asymmetric_padding(
-            x, kernel_size=self.conv2.kernel_size[0]
+            x,
+            kernel_size=self.conv2.kernel_size[0],
         )  # Apply manual padding
         x = self.bn2(self.conv2(x))
 
@@ -232,7 +236,10 @@ class SimbaResidualBlock(nn.Module):
     """
 
     def __init__(
-        self, hidden_size: int, scale_factor: float = 4, device: DeviceType = "cpu"
+        self,
+        hidden_size: int,
+        scale_factor: float = 4,
+        device: DeviceType = "cpu",
     ) -> None:
         super().__init__()
 

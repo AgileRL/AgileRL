@@ -4,8 +4,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pytest
 import torch
-import torch.nn as nn
-import torch.optim as optim
+from torch import nn, optim
 
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
@@ -73,7 +72,11 @@ class TestRLParameter:
     def test_rlparameter_init_custom(self):
         """Test RLParameter initialization with custom values."""
         param = RLParameter(
-            min=1, max=10, shrink_factor=0.9, grow_factor=1.1, dtype=int
+            min=1,
+            max=10,
+            shrink_factor=0.9,
+            grow_factor=1.1,
+            dtype=int,
         )
 
         assert param.min == 1
@@ -171,7 +174,11 @@ class TestRLParameter:
     def test_rlparameter_boundary_conditions(self):
         """Test mutation at boundary conditions."""
         param = RLParameter(
-            min=0.0, max=1.0, shrink_factor=0.5, grow_factor=2.0, dtype=np.ndarray
+            min=0.0,
+            max=1.0,
+            shrink_factor=0.5,
+            grow_factor=2.0,
+            dtype=np.ndarray,
         )
 
         # Test at minimum
@@ -297,7 +304,8 @@ class TestNetworkConfig:
     def test_network_config_eval_without_optimizer_raises_error(self):
         """Test that evaluation network without optimizer raises ValueError."""
         with pytest.raises(
-            ValueError, match="Evaluation network must have an optimizer"
+            ValueError,
+            match="Evaluation network must have an optimizer",
         ):
             NetworkConfig(name="actor", eval_network=True, optimizer=None)
 
@@ -408,7 +416,6 @@ class TestNetworkGroup:
         """Test NetworkGroup initialization with evaluation network only."""
         # NetworkGroup uses frame inspection which doesn't work in test context
         # We'll test the make_network_group function instead which bypasses this
-        pass
 
     def test_make_network_group_function(self):
         """Test the make_network_group helper function."""
@@ -424,7 +431,9 @@ class TestNetworkGroup:
 
         # Test the basic structure
         group = SimpleNetworkGroup(
-            eval_network="actor", shared_networks="target_actor", policy=True
+            eval_network="actor",
+            shared_networks="target_actor",
+            policy=True,
         )
 
         assert group.eval_network == "actor"
@@ -462,7 +471,9 @@ class TestNetworkGroup:
             policy: bool = field(default=False)
 
         group = SimpleNetworkGroup(
-            eval_network="policy", shared_networks=None, policy=True
+            eval_network="policy",
+            shared_networks=None,
+            policy=True,
         )
 
         assert group.eval_network == "policy"
@@ -478,7 +489,8 @@ class TestMutationRegistry:
         self.lr_param = RLParameter(min=1e-5, max=1e-2, dtype=float)
         self.batch_param = RLParameter(min=16, max=256, dtype=int)
         self.hp_config = HyperparameterConfig(
-            learning_rate=self.lr_param, batch_size=self.batch_param
+            learning_rate=self.lr_param,
+            batch_size=self.batch_param,
         )
 
     def test_mutation_registry_init_empty(self):
@@ -567,7 +579,9 @@ class TestMutationRegistry:
         # Register groups
         group1 = MockNetworkGroup("actor", "target_actor", policy=True)
         group2 = MockNetworkGroup(
-            "critic", ["target_critic1", "target_critic2"], policy=False
+            "critic",
+            ["target_critic1", "target_critic2"],
+            policy=False,
         )
         registry.register_group(group1)
         registry.register_group(group2)
@@ -801,7 +815,8 @@ class TestIntegration:
         dropout_rates_param.value = np.array([0.1, 0.2, 0.3])
 
         hp_config = HyperparameterConfig(
-            layer_sizes=layer_sizes_param, dropout_rates=dropout_rates_param
+            layer_sizes=layer_sizes_param,
+            dropout_rates=dropout_rates_param,
         )
 
         # Test that we can sample and mutate numpy array hyperparameters

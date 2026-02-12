@@ -1,12 +1,12 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 import numpy as np
 import torch
-import wandb
 from gymnasium import spaces
 from tensordict import TensorDict
 from ucimlrepo import fetch_ucirepo
 
+import wandb
 from agilerl.algorithms import NeuralUCB
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
@@ -28,8 +28,8 @@ if __name__ == "__main__":
 
     NET_CONFIG = {
         "encoder_config": {
-            "encoder_config": {"hidden_size": [128]}  # Actor hidden size
-        }
+            "encoder_config": {"hidden_size": [128]},  # Actor hidden size
+        },
     }
 
     INIT_HP = {
@@ -52,7 +52,8 @@ if __name__ == "__main__":
     action_dim = env.arms
 
     observation_space = spaces.Box(
-        low=features.values.min(), high=features.values.max()
+        low=features.values.min(),
+        high=features.values.max(),
     )
     action_space = spaces.Discrete(env.arms)
     pop: list[NeuralUCB] = create_population(
@@ -98,7 +99,9 @@ if __name__ == "__main__":
     wandb.init(
         # set the wandb project where this run will be logged
         project="AgileRL-Bandits",
-        name="NeuralUCB-{}".format(datetime.now().strftime("%m%d%Y%H%M%S")),
+        name="NeuralUCB-{}".format(
+            datetime.now(tz=timezone.utc).strftime("%m%d%Y%H%M%S")
+        ),
         # track hyperparameters and run metadata
         config=INIT_HP,
     )
@@ -111,11 +114,11 @@ if __name__ == "__main__":
     pbar = default_progress_bar(max_steps)
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         pop_episode_scores = []
-        for agent_idx, agent in enumerate(pop):  # Loop through population
+        for _agent_idx, agent in enumerate(pop):  # Loop through population
             score = 0
             losses = []
             context = env.reset()  # Reset environment at start of episode
-            for idx_step in range(episode_steps):
+            for _idx_step in range(episode_steps):
                 # Get next action from agent
                 action = agent.get_action(context)
                 next_context, reward = env.step(action)  # Act in environment
@@ -171,8 +174,8 @@ if __name__ == "__main__":
             f"--- Global steps {total_steps} ---\n"
             f"Steps: {[agent.steps[-1] for agent in pop]}\n"
             f"Regret: {[agent.regret[-1] for agent in pop]}\n"
-            f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
-            f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
+            f"Fitnesses: {[f'{fitness:.2f}' for fitness in fitnesses]}\n"
+            f"5 fitness avgs: {[f'{np.mean(agent.fitness[-5:]):.2f}' for agent in pop]}\n",
         )
 
         if pop[0].steps[-1] // evo_steps > evo_count:

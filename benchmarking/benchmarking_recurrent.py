@@ -24,8 +24,7 @@ from agilerl.wrappers.agent import RSNorm
 
 
 class MaskVelocityWrapper(gym.ObservationWrapper):
-    """
-    Gym environment observation wrapper used to mask velocity terms in
+    """Gym environment observation wrapper used to mask velocity terms in
     observations. The intention is the make the MDP partially observable.
     Adapted from https://github.com/LiuWenlin595/FinalProject.
 
@@ -56,8 +55,9 @@ class MaskVelocityWrapper(gym.ObservationWrapper):
             # Mask velocity
             self.mask[self.velocity_indices[env_id]] = 0.0
         except KeyError as e:
+            msg = f"Velocity masking not implemented for {env_id}"
             raise NotImplementedError(
-                f"Velocity masking not implemented for {env_id}"
+                msg,
             ) from e
 
     def observation(self, observation: np.ndarray) -> np.ndarray:
