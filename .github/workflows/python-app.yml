@@ -1,5 +1,5 @@
 ---
-name: Python application
+name: Tests
 
 on:
     push:
@@ -46,21 +46,10 @@ jobs:
                   uv cache clean
                   rm -rf /tmp/uv-cache
 
-            - name: Run black
-              run: |
-                  uv run black .
-            - name: Spellcheck with codespell
-              run: |
-                  uv run codespell --skip=*.css,*.js,*.map,*.scss,*.svg --ignore-words-list=magent,pres,roate
-            - name: Lint with ruff
-              run: |
-                  uv run ruff check .
-            - name: Run pyupgrade
-              run: |
-                  uv run pyupgrade --py38-plus
             - name: Test with pytest
               run: |
                   uv run pytest --exitfirst --cov=agilerl --cov-report=xml
+
             - name: Upload coverage reports to Codecov
               uses: codecov/codecov-action@v3
               env:
